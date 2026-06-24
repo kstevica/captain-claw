@@ -21,7 +21,7 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +71,8 @@ class ConversationTopicsManager:
 
     def _ensure_db(self) -> None:
         with self._lock:
+            cols = {r[1] for r in self._c().execute("PRAGMA table_info(topic_messages)").fetchall()} \
+                if self._c().execute("SELECT name FROM sqlite_master WHERE type='table' AND name='topic_messages'").fetchone() else set()
             self._c().executescript(
                 """
                 CREATE TABLE IF NOT EXISTS topics (
@@ -88,13 +90,17 @@ class ConversationTopicsManager:
                     role      TEXT NOT NULL DEFAULT '',   -- user | agent | narration
                     channel   TEXT NOT NULL DEFAULT '',
                     excerpt   TEXT NOT NULL DEFAULT '',
+                    msg_id    TEXT NOT NULL DEFAULT '',   -- session message_id (dedup/backfill)
                     ts        TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_tm_topic ON topic_messages(topic_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_tm_msgid ON topic_messages(msg_id);
                 CREATE VIRTUAL TABLE IF NOT EXISTS topics_fts
                     USING fts5(id UNINDEXED, label, summary, keywords);
                 """
             )
+            if cols and "msg_id" not in cols:  # migrate a pre-existing table
+                self._c().execute("ALTER TABLE topic_messages ADD COLUMN msg_id TEXT NOT NULL DEFAULT ''")
             self._c().commit()
 
     # ── reads (used by the tool) ────────────────────────────────────────
@@ -193,10 +199,11 @@ class ConversationTopicsManager:
         with self._lock:
             conn = self._c()
             conn.executemany(
-                "INSERT INTO topic_messages (topic_id, role, channel, excerpt, ts)"
-                " VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO topic_messages (topic_id, role, channel, excerpt, msg_id, ts)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 [(topic_id, str(m.get("role") or ""), str(m.get("channel") or ""),
-                  str(m.get("excerpt") or "")[:600], str(m.get("ts") or now)) for m in messages],
+                  str(m.get("excerpt") or "")[:600], str(m.get("msg_id") or ""),
+                  str(m.get("ts") or now)) for m in messages],
             )
             conn.execute(
                 "UPDATE topics SET msg_count = msg_count + ?, last_seen = ? WHERE id = ?",
@@ -209,6 +216,14 @@ class ConversationTopicsManager:
                 (topic_id, topic_id, max(1, cap)),
             )
             conn.commit()
+
+    def classified_msg_ids(self) -> set[str]:
+        """Session message_ids already assigned to a topic (so backfill skips them)."""
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT DISTINCT msg_id FROM topic_messages WHERE msg_id != ''"
+            ).fetchall()
+        return {r[0] for r in rows}
 
     def prune_topics(self, max_topics: int) -> int:
         """Drop the least-recently-seen topics beyond ``max_topics``."""
@@ -303,6 +318,7 @@ def _collect_new_messages(agent: Any, last_idx: int, cap: int) -> tuple[list[dic
             "role": "user" if role == "user" else "agent",
             "channel": str((m.get("metadata") or {}).get("channel") or "") if isinstance(m.get("metadata"), dict) else "",
             "excerpt": content[:600],
+            "msg_id": str(m.get("message_id") or ""),
             "ts": str(m.get("timestamp") or _utcnow()),
         })
     # Narration buffered this window (cleared after).
@@ -353,7 +369,6 @@ async def maybe_classify_topics(agent: Any) -> int | None:
 
 async def classify_topics(agent: Any) -> int | None:
     from captain_claw.config import get_config
-    from captain_claw.llm import Message
 
     tc = get_config().conversation_topics
     last_idx = getattr(agent, _ATTR_LAST_MSG_IDX, 0)
@@ -361,18 +376,24 @@ async def classify_topics(agent: Any) -> int | None:
     if not items:
         setattr(agent, _ATTR_LAST_MSG_IDX, new_idx)
         return 0
+    touched = await _classify_and_store(agent, items)
+    setattr(agent, _ATTR_LAST_MSG_IDX, new_idx)
+    log.info("conversation topics: %d topic(s) touched from %d message(s)", touched, len(items))
+    return touched
 
+
+async def _classify_and_store(agent: Any, items: list[dict[str, Any]]) -> int:
+    """One LLM classification call over ``items`` → upsert topics + store excerpts.
+    Shared by the live pass and the backfill. Returns topics touched."""
+    from captain_claw.config import get_config
+    from captain_claw.llm import Message
+
+    tc = get_config().conversation_topics
     mgr = get_topics_manager()
     existing = mgr.list_topics(limit=60)
-    existing_block = "\n".join(
-        f"- {t['label']}: {t['summary'][:160]}" for t in existing
-    ) or "(none yet)"
-    batch_block = "\n".join(
-        f"[{i}] ({it['role']}) {it['excerpt'][:300]}" for i, it in enumerate(items)
-    )
-    user_prompt = (
-        f"EXISTING topics:\n{existing_block}\n\nNEW messages:\n{batch_block}"
-    )
+    existing_block = "\n".join(f"- {t['label']}: {t['summary'][:160]}" for t in existing) or "(none yet)"
+    batch_block = "\n".join(f"[{i}] ({it['role']}) {it['excerpt'][:300]}" for i, it in enumerate(items))
+    user_prompt = f"EXISTING topics:\n{existing_block}\n\nNEW messages:\n{batch_block}"
 
     response = await agent._complete_with_guards(
         messages=[
@@ -398,11 +419,61 @@ async def classify_topics(agent: Any) -> int | None:
         )
         mgr.add_messages(tid, [items[i] for i in idxs], cap=tc.excerpts_per_topic)
         touched += 1
-
     mgr.prune_topics(tc.max_topics)
-    setattr(agent, _ATTR_LAST_MSG_IDX, new_idx)
-    log.info("conversation topics: %d topic(s) touched from %d message(s)", touched, len(items))
     return touched
+
+
+async def backfill_topics(agent: Any, hours: int = 0) -> dict[str, Any]:
+    """Classify past comms messages that don't yet belong to a topic. ``hours``
+    limits the window (0 = all history). Skips already-classified messages and
+    runs in batches of ``max_messages_per_pass``. Returns a summary dict."""
+    from captain_claw.config import get_config
+    tc = get_config().conversation_topics
+    if not agent.session or not agent.session.messages:
+        return {"ok": True, "classified": 0, "topics_touched": 0, "remaining": 0}
+
+    cutoff = None
+    if hours and hours > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    mgr = get_topics_manager()
+    done_ids = mgr.classified_msg_ids()
+
+    pending: list[dict[str, Any]] = []
+    for m in agent.session.messages:
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        content = str(m.get("content") or "").strip()
+        mid = str(m.get("message_id") or "")
+        if not content or (mid and mid in done_ids):
+            continue
+        ts_raw = str(m.get("timestamp") or "")
+        if cutoff is not None:
+            try:
+                if datetime.fromisoformat(ts_raw) < cutoff:
+                    continue
+            except (ValueError, TypeError):
+                pass
+        pending.append({
+            "role": "user" if m.get("role") == "user" else "agent",
+            "channel": "", "excerpt": content[:600], "msg_id": mid, "ts": ts_raw or _utcnow(),
+        })
+
+    if not pending:
+        return {"ok": True, "classified": 0, "topics_touched": 0, "remaining": 0}
+
+    batch = max(5, int(tc.max_messages_per_pass))
+    classified = touched = 0
+    for start in range(0, len(pending), batch):
+        chunk = pending[start:start + batch]
+        try:
+            touched += await _classify_and_store(agent, chunk)
+            classified += len(chunk)
+        except Exception as exc:
+            log.warning("topic backfill chunk failed: %s", exc)
+            break
+    log.info("topic backfill: classified %d message(s) into %d topic touch(es)", classified, touched)
+    return {"ok": True, "classified": classified, "topics_touched": touched,
+            "remaining": max(0, len(pending) - classified)}
 
 
 def _parse_groups(text: str) -> list[dict[str, Any]]:

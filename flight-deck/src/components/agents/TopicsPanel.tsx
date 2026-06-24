@@ -1,0 +1,241 @@
+import { useState, useEffect, useCallback } from 'react'
+import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search } from 'lucide-react'
+import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
+
+interface TopicMsg { role: string; channel?: string; excerpt: string; ts: string }
+interface Topic {
+  id: string
+  label: string
+  summary: string
+  keywords?: string
+  msg_count?: number
+  last_seen?: string
+  messages?: TopicMsg[]
+}
+
+async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const { token, authEnabled } = useAuthStore.getState()
+  const headers: Record<string, string> = { ...(init?.headers as Record<string, string> | undefined) }
+  if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+  let res = await fetch(`/fd${path}`, { ...init, headers, credentials: 'include' })
+  if (res.status === 401 && authEnabled) {
+    const ok = await refreshAccessToken()
+    if (ok) {
+      const t2 = useAuthStore.getState().token
+      const h2: Record<string, string> = { ...(init?.headers as Record<string, string> | undefined) }
+      if (t2) h2['Authorization'] = `Bearer ${t2}`
+      res = await fetch(`/fd${path}`, { ...init, headers: h2, credentials: 'include' })
+    }
+  }
+  if (!res.ok) {
+    const b = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(b.error || b.detail || `${res.status}`)
+  }
+  return res.json()
+}
+
+interface TopicsPanelProps {
+  host: string
+  port: number
+  auth?: string
+  agentName: string
+  onClose: () => void
+}
+
+const BACKFILL_WINDOWS: { label: string; hours: number }[] = [
+  { label: 'Last 24h', hours: 24 },
+  { label: 'Last 7 days', hours: 168 },
+  { label: 'Last 30 days', hours: 720 },
+  { label: 'All history', hours: 0 },
+]
+
+function relTime(iso?: string): string {
+  if (!iso) return ''
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return ''
+  const s = Math.floor((Date.now() - t) / 1000)
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
+}
+
+export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPanelProps) {
+  const [topics, setTopics] = useState<Topic[]>([])
+  const [selected, setSelected] = useState<Topic | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [loadingTopic, setLoadingTopic] = useState(false)
+  const [error, setError] = useState('')
+  const [query, setQuery] = useState('')
+  const [hours, setHours] = useState(168)
+  const [backfilling, setBackfilling] = useState(false)
+  const [note, setNote] = useState('')
+
+  const tokenQs = auth ? `?token=${encodeURIComponent(auth)}` : ''
+
+  const refresh = useCallback(async () => {
+    setLoading(true); setError('')
+    try {
+      const qp = new URLSearchParams()
+      if (auth) qp.set('token', auth)
+      if (query.trim()) qp.set('q', query.trim())
+      const data = await fdFetch<{ topics: Topic[] }>(`/agent-topics/${host}/${port}?${qp.toString()}`)
+      setTopics(data.topics || [])
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [host, port, auth, query])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const openTopic = async (t: Topic) => {
+    setSelected(t); setLoadingTopic(true)
+    try {
+      const data = await fdFetch<{ topic: Topic }>(`/agent-topic/${host}/${port}/${encodeURIComponent(t.id)}${tokenQs}`)
+      setSelected(data.topic)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoadingTopic(false)
+    }
+  }
+
+  const runBackfill = async () => {
+    setBackfilling(true); setNote('')
+    try {
+      const qp = new URLSearchParams()
+      if (auth) qp.set('token', auth)
+      qp.set('hours', String(hours))
+      const r = await fdFetch<{ classified: number; topics_touched: number; remaining: number }>(
+        `/agent-topics-backfill/${host}/${port}?${qp.toString()}`, { method: 'POST' },
+      )
+      setNote(`Classified ${r.classified} message(s) into ${r.topics_touched} topic update(s)` +
+        (r.remaining ? ` · ${r.remaining} left (run again)` : ''))
+      await refresh()
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBackfilling(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="flex flex-col rounded-xl border border-zinc-700/50 bg-zinc-900 shadow-2xl"
+        style={{ width: '80vw', maxWidth: '1000px', height: '78vh' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-3.5 shrink-0">
+          <div className="flex items-center gap-2">
+            <Tags className="h-4 w-4 text-sky-400" />
+            <span className="text-sm font-semibold text-zinc-100">Topics</span>
+            <span className="text-xs text-zinc-500">· {agentName}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={refresh} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" title="Refresh">
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+            <button onClick={onClose} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Backfill bar */}
+        <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-5 py-2.5 shrink-0">
+          <Sparkles className="h-3.5 w-3.5 text-zinc-500" />
+          <span className="text-[11px] text-zinc-500">Generate topics for untagged messages:</span>
+          <select value={hours} onChange={(e) => setHours(Number(e.target.value))}
+            className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200">
+            {BACKFILL_WINDOWS.map((w) => <option key={w.hours} value={w.hours}>{w.label}</option>)}
+          </select>
+          <button onClick={runBackfill} disabled={backfilling}
+            className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40">
+            {backfilling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+            Generate
+          </button>
+          {note && <span className="text-[11px] text-zinc-400">{note}</span>}
+        </div>
+
+        {error && (
+          <div className="flex items-center gap-2 border-b border-rose-900/40 bg-rose-950/20 px-5 py-2 text-xs text-rose-400">
+            <AlertTriangle className="h-3.5 w-3.5" /> {error}
+          </div>
+        )}
+
+        {/* Body: topic list | messages */}
+        <div className="flex min-h-0 flex-1">
+          {/* List */}
+          <div className="flex w-2/5 flex-col border-r border-zinc-800">
+            <div className="flex items-center gap-1.5 border-b border-zinc-800 px-3 py-2">
+              <Search className="h-3.5 w-3.5 text-zinc-600" />
+              <input
+                value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search topics…"
+                className="w-full bg-transparent text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none"
+              />
+            </div>
+            <div className="flex-1 overflow-auto">
+              {loading ? (
+                <div className="p-4 text-center text-xs text-zinc-500"><Loader2 className="mx-auto h-4 w-4 animate-spin" /></div>
+              ) : topics.length === 0 ? (
+                <div className="p-4 text-center text-xs text-zinc-600">No topics yet. Chat a while, or run Generate above.</div>
+              ) : (
+                topics.map((t) => (
+                  <button key={t.id} onClick={() => openTopic(t)}
+                    className={`block w-full border-b border-zinc-800/50 px-3 py-2 text-left hover:bg-zinc-800/50 ${selected?.id === t.id ? 'bg-zinc-800/70' : ''}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-xs font-medium text-zinc-100">{t.label}</span>
+                      <span className="shrink-0 text-[10px] text-zinc-600">{relTime(t.last_seen)}</span>
+                    </div>
+                    <div className="truncate text-[11px] text-zinc-500">{t.summary}</div>
+                    {!!t.msg_count && <div className="text-[10px] text-zinc-600">{t.msg_count} msgs</div>}
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Messages */}
+          <div className="flex w-3/5 flex-col overflow-auto">
+            {!selected ? (
+              <div className="flex h-full items-center justify-center text-xs text-zinc-600">Select a topic to see its messages.</div>
+            ) : (
+              <div className="flex flex-col gap-2 p-4">
+                <div className="text-sm font-semibold text-zinc-100">{selected.label}</div>
+                {selected.summary && <div className="text-xs text-zinc-400">{selected.summary}</div>}
+                {selected.keywords && (
+                  <div className="flex flex-wrap gap-1">
+                    {selected.keywords.split(',').filter(Boolean).map((k) => (
+                      <span key={k} className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">{k}</span>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-1 border-t border-zinc-800 pt-2">
+                  {loadingTopic ? (
+                    <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />
+                  ) : (selected.messages || []).length === 0 ? (
+                    <div className="text-xs text-zinc-600">No messages stored.</div>
+                  ) : (
+                    (selected.messages || []).map((m, i) => (
+                      <div key={i} className="border-b border-zinc-800/40 py-1.5 last:border-0">
+                        <div className="flex items-center gap-2 text-[10px] text-zinc-600">
+                          <span className={m.role === 'user' ? 'text-sky-400' : m.role === 'narration' ? 'text-zinc-500' : 'text-emerald-400'}>{m.role}</span>
+                          <span>{relTime(m.ts)}</span>
+                        </div>
+                        <div className="text-xs text-zinc-300">{m.excerpt}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

@@ -3783,6 +3783,39 @@ async def agent_cron_delete(
     )
 
 
+# ── Conversation topics (agent owns the store; FD is a thin client) ──────
+
+@app.get("/fd/agent-topics/{host}/{port}")
+async def agent_topics(
+    host: str, port: int, token: str = "", q: str = "", limit: int = 60,
+    user: dict | None = _required_user_dep,
+):
+    query: dict = {"limit": limit}
+    if q:
+        query["q"] = q
+    return await _proxy_agent_intentions("GET", host, port, token, "/api/topics", query=query)
+
+
+@app.get("/fd/agent-topic/{host}/{port}/{topic_id}")
+async def agent_topic_get(
+    host: str, port: int, topic_id: str, token: str = "", limit: int = 60,
+    user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "GET", host, port, token, f"/api/topics/{topic_id}", query={"limit": limit}
+    )
+
+
+@app.post("/fd/agent-topics-backfill/{host}/{port}")
+async def agent_topics_backfill(
+    host: str, port: int, token: str = "", hours: int = 0,
+    user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, "/api/topics/backfill", body={"hours": hours}
+    )
+
+
 class TransferRequest(BaseModel):
     src_host: str
     src_port: int

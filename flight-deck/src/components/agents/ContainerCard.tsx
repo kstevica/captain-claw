@@ -14,6 +14,8 @@ import { AgentConfigEditor } from './AgentConfigEditor'
 import { DatastoreBrowser } from './DatastoreBrowser'
 import { IntentionsPanel } from './IntentionsPanel'
 import { CronPanel } from './CronPanel'
+import { TopicsPanel } from './TopicsPanel'
+import { Tags } from 'lucide-react'
 import { OpenDropdown } from '../common/OpenDropdown'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { ModelSelector } from '../common/ModelSelector'
@@ -128,6 +130,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const [showDatastore, setShowDatastore] = useState(false)
   const [showIntentions, setShowIntentions] = useState(false)
   const [showCron, setShowCron] = useState(false)
+  const [showTopics, setShowTopics] = useState(false)
   const [showMergeReflection, setShowMergeReflection] = useState(false)
   const [showPendingInsights, setShowPendingInsights] = useState(false)
   const cognitiveMode = getCognitiveMode(container.id)
@@ -254,6 +257,10 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     <CronPanel host="localhost" port={container.web_port} auth={container.web_auth} agentName={agentName} onClose={() => setShowCron(false)} />,
     document.body
   )
+  const topicsModal = showTopics && isRunning && container.web_port && createPortal(
+    <TopicsPanel host="localhost" port={container.web_port} auth={container.web_auth} agentName={agentName} onClose={() => setShowTopics(false)} />,
+    document.body
+  )
 
   const mergeReflectionModal = showMergeReflection && isRunning && container.web_port && createPortal(
     <ReflectionMergeModal
@@ -310,7 +317,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{topicsModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -440,6 +447,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
                 <Clock className="h-3.5 w-3.5" /> Cron
               </button>
             )}
+            {isRunning && container.web_port && (
+              <button onClick={() => setShowTopics(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <Tags className="h-3.5 w-3.5" /> Topics
+              </button>
+            )}
           </div>
         </div>
 
@@ -497,7 +509,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
           className="hidden"
           onChange={memory.handleFileSelected}
         />
-      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{topicsModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -845,6 +857,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
               <Clock className="h-3.5 w-3.5" /> Cron
             </button>
           )}
+          {isRunning && container.web_port && (
+            <button onClick={() => setShowTopics(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <Tags className="h-3.5 w-3.5" /> Topics
+            </button>
+          )}
           {isRunning && !container.web_port && (
             <button
               onClick={() => setShowConnect(!showConnect)}
@@ -933,6 +950,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
       {datastoreModal}
       {intentionsModal}
       {cronModal}
+      {topicsModal}
       {mergeReflectionModal}
       {pendingInsightsModal}
     </div>

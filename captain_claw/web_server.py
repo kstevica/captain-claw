@@ -1218,6 +1218,18 @@ class WebServer:
         from captain_claw.web.rest_intentions import set_intention_status
         return await set_intention_status(self, request)
 
+    async def _topics_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import list_topics
+        return await list_topics(self, request)
+
+    async def _topics_get(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import get_topic
+        return await get_topic(self, request)
+
+    async def _topics_backfill(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import backfill
+        return await backfill(self, request)
+
     async def _inbound_queue_consumer(self) -> None:
         """Drain inbound peer messages one-at-a-time, only when the agent is free.
 
@@ -2480,6 +2492,9 @@ class WebServer:
         app.router.add_post(
             "/api/intentions/{intention_id}/status", self._intentions_set_status
         )
+        app.router.add_get("/api/topics", self._topics_list)
+        app.router.add_post("/api/topics/backfill", self._topics_backfill)
+        app.router.add_get("/api/topics/{topic_id}", self._topics_get)
         app.router.add_post("/api/file/upload", self._file_upload)
         app.router.add_post("/api/tool", self._api_tool)  # Flow engine: deterministic single-tool RPC
         app.router.add_post("/api/vision", self._api_vision)  # Flow engine: lean image-describe (raw model call)

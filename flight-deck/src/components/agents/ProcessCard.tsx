@@ -14,6 +14,8 @@ import { AgentConfigEditor } from './AgentConfigEditor'
 import { DatastoreBrowser } from './DatastoreBrowser'
 import { IntentionsPanel } from './IntentionsPanel'
 import { CronPanel } from './CronPanel'
+import { TopicsPanel } from './TopicsPanel'
+import { Tags } from 'lucide-react'
 import { OpenDropdown } from '../common/OpenDropdown'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { ModelSelector } from '../common/ModelSelector'
@@ -118,6 +120,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [showDatastore, setShowDatastore] = useState(false)
   const [showIntentions, setShowIntentions] = useState(false)
   const [showCron, setShowCron] = useState(false)
+  const [showTopics, setShowTopics] = useState(false)
   const [showMergeReflection, setShowMergeReflection] = useState(false)
   const [showPendingInsights, setShowPendingInsights] = useState(false)
   const cognitiveMode = getCognitiveMode(proc.slug)
@@ -241,6 +244,10 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     <CronPanel host="localhost" port={proc.web_port} auth={proc.web_auth} agentName={agentName} onClose={() => setShowCron(false)} />,
     document.body
   )
+  const topicsModal = showTopics && isRunning && createPortal(
+    <TopicsPanel host="localhost" port={proc.web_port} auth={proc.web_auth} agentName={agentName} onClose={() => setShowTopics(false)} />,
+    document.body
+  )
 
   const mergeReflectionModal = showMergeReflection && isRunning && createPortal(
     <ReflectionMergeModal
@@ -297,7 +304,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{topicsModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -400,6 +407,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                 <Clock className="h-3.5 w-3.5" /> Cron
               </button>
             )}
+            {isRunning && (
+              <button onClick={() => setShowTopics(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <Tags className="h-3.5 w-3.5" /> Topics
+              </button>
+            )}
           </div>
         </div>
         {showLogs && (
@@ -426,7 +438,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
           className="hidden"
           onChange={memory.handleFileSelected}
         />
-      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{topicsModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -728,6 +740,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
               <Clock className="h-3.5 w-3.5" /> Cron
             </button>
           )}
+          {isRunning && (
+            <button onClick={() => setShowTopics(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <Tags className="h-3.5 w-3.5" /> Topics
+            </button>
+          )}
         </div>
       </div>
 
@@ -764,6 +781,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
       {datastoreModal}
       {intentionsModal}
       {cronModal}
+      {topicsModal}
       {mergeReflectionModal}
       {pendingInsightsModal}
     </div>
