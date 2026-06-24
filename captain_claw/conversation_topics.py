@@ -367,20 +367,46 @@ class ConversationTopicsManager:
             ).fetchall()
         return {r[0] for r in rows}
 
-    def reset_all(self) -> dict[str, int]:
+    def reset_all(self, preserve_ids: list[str] | None = None) -> dict[str, int]:
         """Wipe all topics, their messages, and the backfill-progress markers — a
-        clean slate so a fresh backfill reconsiders every message. (The earlier
-        broken runs marked messages 'seen' without ever classifying them; this
-        clears that.)"""
+        clean slate so a fresh backfill reconsiders every message. When
+        ``preserve_ids`` is given, those topics (with their messages and the
+        seen-markers for their messages) are kept intact; everything else is
+        wiped. The seen-markers for preserved topics stay so the next Generate
+        pass doesn't try to reclassify already-categorised content."""
+        preserve = {str(i).strip() for i in (preserve_ids or []) if str(i).strip()}
         with self._lock:
             conn = self._c()
-            n = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
-            conn.executescript(
-                "DELETE FROM topics; DELETE FROM topic_messages;"
-                " DELETE FROM topics_fts; DELETE FROM backfill_seen;"
-            )
+            if not preserve:
+                n = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+                conn.executescript(
+                    "DELETE FROM topics; DELETE FROM topic_messages;"
+                    " DELETE FROM topics_fts; DELETE FROM backfill_seen;"
+                )
+                conn.commit()
+                return {"cleared_topics": int(n), "preserved": 0}
+            placeholders = ",".join("?" * len(preserve))
+            preserve_t = tuple(preserve)
+            n = conn.execute(
+                f"SELECT COUNT(*) FROM topics WHERE id NOT IN ({placeholders})",
+                preserve_t,
+            ).fetchone()[0]
+            keep_seen = {r[0] for r in conn.execute(
+                f"SELECT DISTINCT msg_id FROM topic_messages"
+                f" WHERE topic_id IN ({placeholders}) AND msg_id != ''",
+                preserve_t,
+            ).fetchall()}
+            conn.execute(f"DELETE FROM topic_messages WHERE topic_id NOT IN ({placeholders})", preserve_t)
+            conn.execute(f"DELETE FROM topics WHERE id NOT IN ({placeholders})", preserve_t)
+            conn.execute(f"DELETE FROM topics_fts WHERE id NOT IN ({placeholders})", preserve_t)
+            conn.execute("DELETE FROM backfill_seen")
+            if keep_seen:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO backfill_seen (msg_id) VALUES (?)",
+                    [(m,) for m in keep_seen],
+                )
             conn.commit()
-        return {"cleared_topics": int(n)}
+            return {"cleared_topics": int(n), "preserved": len(preserve)}
 
     def seen_msg_ids(self) -> set[str]:
         """Message ids the backfill has already attempted (stored or skipped)."""

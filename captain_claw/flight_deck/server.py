@@ -3899,9 +3899,16 @@ async def agent_topic_refresh(
 
 @app.post("/fd/agent-topics-reset/{host}/{port}")
 async def agent_topics_reset(
-    host: str, port: int, token: str = "", user: dict | None = _required_user_dep,
+    host: str, port: int, request: Request, token: str = "",
+    user: dict | None = _required_user_dep,
 ):
-    return await _proxy_agent_intentions("POST", host, port, token, "/api/topics/reset")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, "/api/topics/reset", body=body
+    )
 
 
 @app.post("/fd/agent-topics-combine/{host}/{port}")

@@ -178,8 +178,16 @@ async def star(server: "WebServer", request: web.Request) -> web.Response:
 
 
 async def reset(server: "WebServer", request: web.Request) -> web.Response:
-    """POST /api/topics/reset — wipe all topics + backfill progress (clean slate)."""
-    return web.json_response({"ok": True, **get_topics_manager().reset_all()})
+    """POST /api/topics/reset — wipe topics + backfill progress. Body
+    ``{preserve_ids: [...]}`` (optional) keeps those topics untouched."""
+    body: dict = {}
+    try:
+        if request.body_exists:
+            body = await request.json()
+    except Exception:
+        body = {}
+    preserve_ids = [str(x) for x in ((body or {}).get("preserve_ids") or [])]
+    return web.json_response({"ok": True, **get_topics_manager().reset_all(preserve_ids)})
 
 
 async def combine(server: "WebServer", request: web.Request) -> web.Response:

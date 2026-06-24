@@ -206,16 +206,29 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
   }
 
   const runReset = async () => {
-    if (!window.confirm('Clear ALL topics and their messages and start fresh? Backfill progress is reset too, so Generate will reconsider every message.')) return
+    const preserveIds = Array.from(sel)
+    const confirmMsg = preserveIds.length
+      ? `Clear all topics EXCEPT the ${preserveIds.length} selected? The selected topics (and their messages) stay intact; everything else is wiped.`
+      : 'Clear ALL topics and their messages and start fresh? Backfill progress is reset too, so Generate will reconsider every message.'
+    if (!window.confirm(confirmMsg)) return
     setBackfilling(true); setNote('')
     try {
       const qp = new URLSearchParams()
       if (auth) qp.set('token', auth)
-      const r = await fdFetch<{ cleared_topics: number }>(
-        `/agent-topics-reset/${host}/${port}?${qp.toString()}`, { method: 'POST' },
+      const r = await fdFetch<{ cleared_topics: number; preserved?: number }>(
+        `/agent-topics-reset/${host}/${port}?${qp.toString()}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ preserve_ids: preserveIds }),
+        },
       )
-      setSelected(null); setSel(new Set())
-      setNote(`Reset — cleared ${r.cleared_topics} topic(s). Click Generate to rebuild.`)
+      // Keep the open topic if it was preserved; otherwise close the detail pane.
+      if (selected && !preserveIds.includes(selected.id)) setSelected(null)
+      setSel(new Set())
+      setNote(r.preserved
+        ? `Reset — cleared ${r.cleared_topics} topic(s), kept ${r.preserved}. Click Generate to rebuild.`
+        : `Reset — cleared ${r.cleared_topics} topic(s). Click Generate to rebuild.`)
       await refresh()
     } catch (e) {
       setNote(e instanceof Error ? e.message : String(e))
