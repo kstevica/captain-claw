@@ -113,6 +113,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     // Each call classifies one batch and reports `remaining`; keep going until
     // the backlog is drained (capped so a bug can't loop forever).
     let total = 0
+    let topicsTotal = 0
     try {
       for (let i = 0; i < 100; i++) {
         const qp = new URLSearchParams()
@@ -123,9 +124,11 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
         )
         if (r.error) { setNote(r.error); break }
         total += r.classified
+        topicsTotal += r.topics_touched || 0
         setNote(r.remaining
-          ? `Classifying… ${total} done, ${r.remaining} left`
-          : `Done — classified ${total} message(s) into topics`)
+          ? `Classifying… ${total} done · ${topicsTotal} topic update(s) · ${r.remaining} left`
+          : `Done — ${total} message(s), ${topicsTotal} topic update(s)` +
+            (topicsTotal === 0 ? ' (model returned no usable topics — check agent logs)' : ''))
         await refresh()
         if (!r.remaining || r.classified === 0) break
       }

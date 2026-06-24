@@ -100,6 +100,10 @@ class ConversationTopicsManager:
                 CREATE INDEX IF NOT EXISTS idx_tm_msgid ON topic_messages(msg_id);
                 CREATE VIRTUAL TABLE IF NOT EXISTS topics_fts
                     USING fts5(id UNINDEXED, label, summary, keywords);
+                -- Backfill progress: every message the backfill has ATTEMPTED, so it
+                -- moves on even when the classifier puts a message in no topic
+                -- (otherwise those loop forever).
+                CREATE TABLE IF NOT EXISTS backfill_seen (msg_id TEXT PRIMARY KEY);
                 """
             )
             if cols and "msg_id" not in cols:  # migrate a pre-existing table
@@ -227,6 +231,21 @@ class ConversationTopicsManager:
                 "SELECT DISTINCT msg_id FROM topic_messages WHERE msg_id != ''"
             ).fetchall()
         return {r[0] for r in rows}
+
+    def seen_msg_ids(self) -> set[str]:
+        """Message ids the backfill has already attempted (stored or skipped)."""
+        with self._lock:
+            rows = self._c().execute("SELECT msg_id FROM backfill_seen").fetchall()
+        return {r[0] for r in rows}
+
+    def mark_seen(self, msg_ids: list[str]) -> None:
+        ids = [m for m in msg_ids if m]
+        if not ids:
+            return
+        with self._lock:
+            conn = self._c()
+            conn.executemany("INSERT OR IGNORE INTO backfill_seen (msg_id) VALUES (?)", [(m,) for m in ids])
+            conn.commit()
 
     def refresh_excerpts(self, topic_id: str, session_map: dict[str, str]) -> int:
         """Re-sync a topic's stored excerpts to the full session text, by msg_id.
@@ -491,13 +510,25 @@ async def _classify_and_store(agent: Any, items: list[dict[str, Any]]) -> int:
         interaction_label="conversation_topics",
         max_tokens=min(2000, int(get_config().model.max_tokens)),
     )
-    groups = _parse_groups((response.content or "").strip())
+    raw = (response.content or "").strip()
+    groups = _parse_groups(raw)
+    if not groups:
+        log.warning("topic classify: no groups parsed from reply (len=%d): %s", len(raw), raw[:300])
     touched = 0
     for g in groups:
         label = str(g.get("label") or "").strip()
         if not label:
             continue
-        idxs = [i for i in g.get("messages", []) if isinstance(i, int) and 0 <= i < len(items)]
+        # Tolerate string indices ("0"), floats, and out-of-range values — small
+        # models often emit indices as strings, which silently dropped every group.
+        idxs: list[int] = []
+        for i in g.get("messages", []):
+            try:
+                n = int(i)
+            except (ValueError, TypeError):
+                continue
+            if 0 <= n < len(items):
+                idxs.append(n)
         if not idxs:
             continue
         tid = mgr.upsert_topic(
@@ -539,7 +570,9 @@ async def backfill_topics(agent: Any, hours: int = 0) -> dict[str, Any]:
     if hours and hours > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     mgr = get_topics_manager()
-    done_ids = mgr.classified_msg_ids()
+    # Skip messages already in a topic OR already attempted (so a message the
+    # classifier puts in no topic still counts as processed and isn't reprocessed).
+    done_ids = mgr.classified_msg_ids() | mgr.seen_msg_ids()
 
     pending: list[dict[str, Any]] = []
     for m in agent.session.messages:
@@ -576,6 +609,8 @@ async def backfill_topics(agent: Any, hours: int = 0) -> dict[str, Any]:
         log.warning("topic backfill classify failed: %s", exc)
         return {"ok": False, "error": f"classification failed: {exc}"[:300],
                 "classified": 0, "topics_touched": 0, "remaining": len(pending)}
+    # Mark the whole chunk attempted so it's never reprocessed (guarantees progress).
+    mgr.mark_seen([str(it.get("msg_id") or "") for it in chunk])
     remaining = max(0, len(pending) - len(chunk))
     log.info("topic backfill: classified %d message(s) into %d topic touch(es), %d remaining",
              len(chunk), touched, remaining)
