@@ -434,73 +434,79 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
           {/* Draggable divider */}
           <div onMouseDown={startDrag} title="Drag to resize"
             className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-sky-600/60" />
-          {/* Messages */}
-          <div className="flex flex-1 flex-col overflow-auto">
+          {/* Messages pane: scrollable middle + chat pinned at the bottom */}
+          <div className="flex min-h-0 flex-1 flex-col">
             {!selected ? (
               <div className="flex h-full items-center justify-center text-xs text-zinc-600">Select a topic to see its messages.</div>
             ) : (
-              <div className="flex flex-col gap-2 p-4">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="text-sm font-semibold text-zinc-100">{selected.label}</div>
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    <button onClick={runRefresh} disabled={refreshing} title="Re-pull full message text from the live session"
-                      className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
-                      {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Refresh
-                    </button>
-                    <button onClick={exportMd} title="Export this conversation as Markdown"
-                      className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">
-                      <Download className="h-3.5 w-3.5" /> .md
-                    </button>
-                  </div>
-                </div>
-                {selected.summary && (
-                  <div className="fd-markdown text-xs text-zinc-400">
-                    <Markdown remarkPlugins={[remarkGfm]}>{selected.summary}</Markdown>
-                  </div>
-                )}
-                {selected.keywords && (
-                  <div className="flex flex-wrap gap-1">
-                    {selected.keywords.split(',').filter(Boolean).map((k) => (
-                      <span key={k} className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">{k}</span>
-                    ))}
-                  </div>
-                )}
-                {/* Group assignment — click to add/remove this topic from a group */}
-                <div className="flex flex-wrap items-center gap-1">
-                  <span className="text-[10px] text-zinc-500">Groups:</span>
-                  {groups.length === 0 && <span className="text-[10px] text-zinc-600">none yet</span>}
-                  {groups.map((g) => {
-                    const on = (selected.groups || []).some((x) => x.id === g.id)
-                    return (
-                      <button key={g.id} onClick={() => toggleTopicGroup(g.id)}
-                        className={`rounded-full px-2 py-0.5 text-[10px] ${on ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}>
-                        {on ? '✓ ' : ''}{g.name}
+              <>
+                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="text-sm font-semibold text-zinc-100">{selected.label}</div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button onClick={runRefresh} disabled={refreshing} title="Re-pull full message text from the live session"
+                        className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
+                        {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Refresh
                       </button>
-                    )
-                  })}
-                  <button onClick={createGroup} className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300">+ group</button>
-                </div>
-                <div className="mt-1 border-t border-zinc-800 pt-2">
-                  {loadingTopic ? (
-                    <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />
-                  ) : (selected.messages || []).length === 0 ? (
-                    <div className="text-xs text-zinc-600">No messages stored.</div>
-                  ) : (
-                    (selected.messages || []).map((m, i) => (
-                      <div key={i} className="border-b border-zinc-800/40 py-1.5 last:border-0">
-                        <div className="flex items-center gap-2 text-[10px] text-zinc-600">
-                          <span className={m.role === 'user' ? 'text-sky-400' : m.role === 'narration' ? 'text-zinc-500' : 'text-emerald-400'}>{m.role}</span>
-                          <span>{relTime(m.ts)}</span>
-                        </div>
-                        <div className="fd-markdown text-xs text-zinc-300">
-                          <Markdown remarkPlugins={[remarkGfm]}>{m.excerpt}</Markdown>
-                        </div>
-                      </div>
-                    ))
+                      <button onClick={exportMd} title="Export this conversation as Markdown"
+                        className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">
+                        <Download className="h-3.5 w-3.5" /> .md
+                      </button>
+                    </div>
+                  </div>
+                  {selected.summary && (
+                    <div className="fd-markdown text-xs text-zinc-400">
+                      <Markdown remarkPlugins={[remarkGfm]}>{selected.summary}</Markdown>
+                    </div>
                   )}
+                  {selected.keywords && (
+                    <div className="flex flex-wrap gap-1">
+                      {selected.keywords.split(',').filter(Boolean).map((k) => (
+                        <button key={k} onClick={() => setQuery(k.trim())} title={`Filter topics by “${k.trim()}”`}
+                          className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-sky-900/60 hover:text-sky-200">{k}</button>
+                      ))}
+                    </div>
+                  )}
+                  {/* Group assignment — click to add/remove this topic from a group */}
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className="text-[10px] text-zinc-500">Groups:</span>
+                    {groups.length === 0 && <span className="text-[10px] text-zinc-600">none yet</span>}
+                    {groups.map((g) => {
+                      const on = (selected.groups || []).some((x) => x.id === g.id)
+                      return (
+                        <button key={g.id} onClick={() => toggleTopicGroup(g.id)}
+                          className={`rounded-full px-2 py-0.5 text-[10px] ${on ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}>
+                          {on ? '✓ ' : ''}{g.name}
+                        </button>
+                      )
+                    })}
+                    <button onClick={createGroup} className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300">+ group</button>
+                  </div>
+                  <div className="mt-1 border-t border-zinc-800 pt-2">
+                    {loadingTopic ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />
+                    ) : (selected.messages || []).length === 0 ? (
+                      <div className="text-xs text-zinc-600">No messages stored.</div>
+                    ) : (
+                      (selected.messages || []).map((m, i) => (
+                        <div key={i} className="border-b border-zinc-800/40 py-1.5 last:border-0">
+                          <div className="flex items-center gap-2 text-[10px] text-zinc-600">
+                            <span className={m.role === 'user' ? 'text-sky-400' : m.role === 'narration' ? 'text-zinc-500' : 'text-emerald-400'}>{m.role}</span>
+                            <span>{relTime(m.ts)}</span>
+                          </div>
+                          <div className="fd-markdown text-xs text-zinc-300">
+                            <Markdown remarkPlugins={[remarkGfm]}>{m.excerpt}</Markdown>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
-                <TopicChat host={host} port={port} auth={auth} topicId={selected.id} onPersisted={refresh} />
-              </div>
+                {/* Chat pinned at the bottom (not part of the scrolling area) */}
+                <div className="shrink-0 border-t border-zinc-800 px-4 pb-3">
+                  <TopicChat host={host} port={port} auth={auth} topicId={selected.id} onPersisted={refresh} />
+                </div>
+              </>
             )}
           </div>
         </div>
