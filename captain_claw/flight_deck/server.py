@@ -3788,13 +3788,15 @@ async def agent_cron_delete(
 @app.get("/fd/agent-topics/{host}/{port}")
 async def agent_topics(
     host: str, port: int, token: str = "", q: str = "", limit: int = 300, order: str = "recent",
-    group: str = "", user: dict | None = _required_user_dep,
+    group: str = "", tags: str = "", user: dict | None = _required_user_dep,
 ):
     query: dict = {"limit": limit, "order": order}
     if q:
         query["q"] = q
     if group:
         query["group"] = group
+    if tags:
+        query["tags"] = tags
     return await _proxy_agent_intentions("GET", host, port, token, "/api/topics", query=query)
 
 

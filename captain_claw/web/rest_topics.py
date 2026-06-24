@@ -28,14 +28,15 @@ async def list_topics(server: "WebServer", request: web.Request) -> web.Response
     q = (request.query.get("q") or "").strip()
     order = (request.query.get("order") or "recent").strip()
     group = (request.query.get("group") or "").strip()
+    tags = [t for t in (request.query.get("tags") or "").split(",") if t.strip()]
     try:
         limit = int(request.query.get("limit") or 300)
     except (ValueError, TypeError):
         limit = 300
     if q:
-        topics = mgr.search_topics(q, limit=limit, order=order)
+        topics = mgr.search_topics(q, limit=limit, order=order, group=group, tags=tags)
     else:
-        topics = mgr.list_topics(limit=limit, order=order, group=group)
+        topics = mgr.list_topics(limit=limit, order=order, group=group, tags=tags)
     return web.json_response({"topics": topics, "total": len(topics)})
 
 

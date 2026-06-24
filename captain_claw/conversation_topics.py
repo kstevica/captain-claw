@@ -133,23 +133,37 @@ class ConversationTopicsManager:
 
     # ── reads (used by the tool) ────────────────────────────────────────
 
-    def list_topics(self, limit: int = 40, order: str = "recent", group: str = "") -> list[dict[str, Any]]:
+    def list_topics(self, limit: int = 40, order: str = "recent", group: str = "",
+                    tags: list[str] | None = None) -> list[dict[str, Any]]:
         # Starred topics always float to the top; within each group, by recency
-        # (newest message) or alphabetically. Optional `group` filters by membership.
+        # (newest message) or alphabetically. ``group`` and ``tags`` AND together
+        # — a topic must be in the group AND carry EVERY active tag (substring
+        # match against its keywords column).
         secondary = "label COLLATE NOCASE ASC" if order == "alpha" else "last_seen DESC"
         cols = "t.id, t.label, t.summary, t.keywords, t.msg_count, t.starred, t.first_seen, t.last_seen"
+        tag_terms = [t.strip().lower() for t in (tags or []) if str(t).strip()]
+        tag_where = " AND ".join(["LOWER(t.keywords) LIKE ?"] * len(tag_terms))
+        tag_params = [f"%{t}%" for t in tag_terms]
         with self._lock:
             if group:
-                rows = self._c().execute(
+                sql = (
                     f"SELECT {cols} FROM topics t"
                     " JOIN topic_group_members m ON m.topic_id = t.id"
-                    f" WHERE m.group_id = ? ORDER BY t.starred DESC, {secondary} LIMIT ?",
-                    (_slug(group), max(1, min(300, limit))),
+                    " WHERE m.group_id = ?"
+                    + (f" AND {tag_where}" if tag_where else "")
+                    + f" ORDER BY t.starred DESC, {secondary} LIMIT ?"
+                )
+                rows = self._c().execute(
+                    sql, (_slug(group), *tag_params, max(1, min(300, limit))),
                 ).fetchall()
             else:
+                sql = (
+                    f"SELECT {cols} FROM topics t"
+                    + (f" WHERE {tag_where}" if tag_where else "")
+                    + f" ORDER BY t.starred DESC, {secondary} LIMIT ?"
+                )
                 rows = self._c().execute(
-                    f"SELECT {cols} FROM topics t ORDER BY t.starred DESC, {secondary} LIMIT ?",
-                    (max(1, min(300, limit)),),
+                    sql, (*tag_params, max(1, min(300, limit))),
                 ).fetchall()
         return [dict(r) for r in rows]
 
@@ -171,21 +185,43 @@ class ConversationTopicsManager:
         d["groups"] = self.groups_for_topic(d["id"])
         return d
 
-    def search_topics(self, query: str, limit: int = 10, order: str = "recent") -> list[dict[str, Any]]:
+    def search_topics(self, query: str, limit: int = 10, order: str = "recent",
+                      group: str = "", tags: list[str] | None = None) -> list[dict[str, Any]]:
         q = (query or "").strip()
         if not q:
-            return self.list_topics(limit=limit, order=order)
+            return self.list_topics(limit=limit, order=order, group=group, tags=tags)
         # Substring (LIKE) match over label/summary/keywords — reliable partial
-        # matching ("Bise" → "Biserka…"), unlike FTS exact-token matching.
+        # matching ("Bise" → "Biserka…"). Combined with group + tag filters
+        # (AND): a topic must match the text AND be in the group AND carry
+        # every active tag.
         like = f"%{q}%"
         secondary = "label COLLATE NOCASE ASC" if order == "alpha" else "last_seen DESC"
+        tag_terms = [t.strip().lower() for t in (tags or []) if str(t).strip()]
+        tag_where = " AND ".join(["LOWER(t.keywords) LIKE ?"] * len(tag_terms))
+        tag_params = [f"%{t}%" for t in tag_terms]
+        cols = "t.id, t.label, t.summary, t.keywords, t.msg_count, t.starred, t.last_seen"
+        text_where = "(t.label LIKE ? OR t.summary LIKE ? OR t.keywords LIKE ?)"
         with self._lock:
-            rows = self._c().execute(
-                "SELECT id, label, summary, keywords, msg_count, starred, last_seen FROM topics"
-                " WHERE label LIKE ? OR summary LIKE ? OR keywords LIKE ?"
-                f" ORDER BY starred DESC, {secondary} LIMIT ?",
-                (like, like, like, max(1, min(300, limit))),
-            ).fetchall()
+            if group:
+                sql = (
+                    f"SELECT {cols} FROM topics t"
+                    " JOIN topic_group_members m ON m.topic_id = t.id"
+                    f" WHERE m.group_id = ? AND {text_where}"
+                    + (f" AND {tag_where}" if tag_where else "")
+                    + f" ORDER BY t.starred DESC, {secondary} LIMIT ?"
+                )
+                rows = self._c().execute(
+                    sql, (_slug(group), like, like, like, *tag_params, max(1, min(300, limit))),
+                ).fetchall()
+            else:
+                sql = (
+                    f"SELECT {cols} FROM topics t WHERE {text_where}"
+                    + (f" AND {tag_where}" if tag_where else "")
+                    + f" ORDER BY t.starred DESC, {secondary} LIMIT ?"
+                )
+                rows = self._c().execute(
+                    sql, (like, like, like, *tag_params, max(1, min(300, limit))),
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def set_star(self, topic_id: str, starred: bool) -> bool:

@@ -76,6 +76,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
   const [order, setOrder] = useState<'recent' | 'alpha'>('recent')
   const [groups, setGroups] = useState<Group[]>([])
   const [groupFilter, setGroupFilter] = useState('')
+  const [activeTags, setActiveTags] = useState<string[]>([])
   const [hours, setHours] = useState(168)
   const [backfilling, setBackfilling] = useState(false)
   const [note, setNote] = useState('')
@@ -115,6 +116,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
       if (query.trim()) qp.set('q', query.trim())
       qp.set('order', order)
       if (groupFilter) qp.set('group', groupFilter)
+      if (activeTags.length) qp.set('tags', activeTags.join(','))
       const data = await fdFetch<{ topics: Topic[] }>(`/agent-topics/${host}/${port}?${qp.toString()}`)
       setTopics(data.topics || [])
     } catch (e) {
@@ -122,7 +124,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     } finally {
       setLoading(false)
     }
-  }, [host, port, auth, query, order, groupFilter])
+  }, [host, port, auth, query, order, groupFilter, activeTags])
 
   useEffect(() => { refresh() }, [refresh])
 
@@ -235,6 +237,12 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
       setError(e instanceof Error ? e.message : String(e))
       await refresh()
     }
+  }
+
+  const toggleTag = (tag: string) => {
+    const t = tag.trim()
+    if (!t) return
+    setActiveTags((prev) => prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t])
   }
 
   const toggleSel = (id: string) => setSel((prev) => {
@@ -383,6 +391,18 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
               <button onClick={createGroup} title="New group"
                 className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300">+ group</button>
             </div>
+            {activeTags.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1 border-b border-zinc-800 bg-sky-950/10 px-3 py-1.5">
+                <span className="text-[10px] uppercase tracking-wider text-zinc-500">Tags:</span>
+                {activeTags.map((t) => (
+                  <button key={t} onClick={() => toggleTag(t)} title="Remove tag filter"
+                    className="flex items-center gap-1 rounded-full bg-sky-600 px-2 py-0.5 text-[10px] text-white hover:bg-sky-500">
+                    {t} <X className="h-3 w-3" />
+                  </button>
+                ))}
+                <button onClick={() => setActiveTags([])} className="ml-auto text-[10px] text-zinc-500 hover:text-zinc-300">clear</button>
+              </div>
+            )}
             <div className="flex items-center gap-1.5 border-b border-zinc-800 px-3 py-2">
               <Search className="h-3.5 w-3.5 text-zinc-600" />
               <input
@@ -461,10 +481,19 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                   )}
                   {selected.keywords && (
                     <div className="flex flex-wrap gap-1">
-                      {selected.keywords.split(',').filter(Boolean).map((k) => (
-                        <button key={k} onClick={() => setQuery(k.trim())} title={`Filter topics by “${k.trim()}”`}
-                          className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-sky-900/60 hover:text-sky-200">{k}</button>
-                      ))}
+                      {selected.keywords.split(',').filter(Boolean).map((k) => {
+                        const tag = k.trim()
+                        const on = activeTags.includes(tag)
+                        return (
+                          <button key={k} onClick={() => toggleTag(tag)}
+                            title={on ? `Remove “${tag}” from filters` : `Filter topics by “${tag}”`}
+                            className={`rounded-full px-2 py-0.5 text-[10px] ${on
+                              ? 'bg-sky-600 text-white'
+                              : 'bg-zinc-800 text-zinc-400 hover:bg-sky-900/60 hover:text-sky-200'}`}>
+                            {on ? '✓ ' : ''}{k}
+                          </button>
+                        )
+                      })}
                     </div>
                   )}
                   {/* Group assignment — click to add/remove this topic from a group */}
