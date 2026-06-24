@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2 } from 'lucide-react'
+import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2, Star } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
@@ -11,6 +11,7 @@ interface Topic {
   summary: string
   keywords?: string
   msg_count?: number
+  starred?: number
   last_seen?: string
   messages?: TopicMsg[]
 }
@@ -69,6 +70,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
   const [loadingTopic, setLoadingTopic] = useState(false)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
+  const [order, setOrder] = useState<'recent' | 'alpha'>('recent')
   const [hours, setHours] = useState(168)
   const [backfilling, setBackfilling] = useState(false)
   const [note, setNote] = useState('')
@@ -85,6 +87,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
       const qp = new URLSearchParams()
       if (auth) qp.set('token', auth)
       if (query.trim()) qp.set('q', query.trim())
+      qp.set('order', order)
       const data = await fdFetch<{ topics: Topic[] }>(`/agent-topics/${host}/${port}?${qp.toString()}`)
       setTopics(data.topics || [])
     } catch (e) {
@@ -92,7 +95,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     } finally {
       setLoading(false)
     }
-  }, [host, port, auth, query])
+  }, [host, port, auth, query, order])
 
   useEffect(() => { refresh() }, [refresh])
 
@@ -155,6 +158,21 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
       setNote(e instanceof Error ? e.message : String(e))
     } finally {
       setBackfilling(false)
+    }
+  }
+
+  const toggleStar = async (t: Topic) => {
+    const next = !t.starred
+    setTopics((prev) => prev.map((x) => x.id === t.id ? { ...x, starred: next ? 1 : 0 } : x))  // optimistic
+    try {
+      await fdFetch(`/agent-topic-star/${host}/${port}/${encodeURIComponent(t.id)}${tokenQs}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ starred: next }),
+      })
+      await refresh()  // re-sort (starred float to top)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      await refresh()
     }
   }
 
@@ -283,6 +301,14 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
         <div className="flex min-h-0 flex-1">
           {/* List */}
           <div className="flex w-2/5 flex-col border-r border-zinc-800">
+            <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-1.5">
+              <span className="text-[11px] font-medium text-zinc-400">{topics.length} topic{topics.length === 1 ? '' : 's'}</span>
+              <select value={order} onChange={(e) => setOrder(e.target.value as 'recent' | 'alpha')}
+                className="ml-auto rounded-md border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                <option value="recent">Recent</option>
+                <option value="alpha">A–Z</option>
+              </select>
+            </div>
             <div className="flex items-center gap-1.5 border-b border-zinc-800 px-3 py-2">
               <Search className="h-3.5 w-3.5 text-zinc-600" />
               <input
@@ -313,6 +339,10 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                     <input type="checkbox" checked={sel.has(t.id)} onChange={() => toggleSel(t.id)}
                       title="select to combine"
                       className="ml-2 shrink-0 rounded border-zinc-700 bg-zinc-950 accent-sky-600" />
+                    <button onClick={() => toggleStar(t)} title={t.starred ? 'Unpin' : 'Pin to top'}
+                      className="shrink-0 p-0.5">
+                      <Star className={`h-3.5 w-3.5 ${t.starred ? 'fill-amber-400 text-amber-400' : 'text-zinc-600 hover:text-zinc-400'}`} />
+                    </button>
                     <button onClick={() => openTopic(t)} className="min-w-0 flex-1 px-2 py-2 text-left">
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate text-xs font-medium text-zinc-100">{t.label}</span>

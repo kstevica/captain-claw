@@ -3787,13 +3787,27 @@ async def agent_cron_delete(
 
 @app.get("/fd/agent-topics/{host}/{port}")
 async def agent_topics(
-    host: str, port: int, token: str = "", q: str = "", limit: int = 60,
+    host: str, port: int, token: str = "", q: str = "", limit: int = 300, order: str = "recent",
     user: dict | None = _required_user_dep,
 ):
-    query: dict = {"limit": limit}
+    query: dict = {"limit": limit, "order": order}
     if q:
         query["q"] = q
     return await _proxy_agent_intentions("GET", host, port, token, "/api/topics", query=query)
+
+
+@app.post("/fd/agent-topic-star/{host}/{port}/{topic_id}")
+async def agent_topic_star(
+    host: str, port: int, topic_id: str, request: Request, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, f"/api/topics/{topic_id}/star", body=body
+    )
 
 
 @app.get("/fd/agent-topic/{host}/{port}/{topic_id}")

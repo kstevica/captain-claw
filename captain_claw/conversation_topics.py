@@ -74,8 +74,13 @@ class ConversationTopicsManager:
 
     def _ensure_db(self) -> None:
         with self._lock:
-            cols = {r[1] for r in self._c().execute("PRAGMA table_info(topic_messages)").fetchall()} \
-                if self._c().execute("SELECT name FROM sqlite_master WHERE type='table' AND name='topic_messages'").fetchone() else set()
+            def _cols(tbl: str) -> set[str]:
+                if not self._c().execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tbl,)).fetchone():
+                    return set()
+                return {r[1] for r in self._c().execute(f"PRAGMA table_info({tbl})").fetchall()}
+            tm_cols = _cols("topic_messages")
+            t_cols = _cols("topics")
             self._c().executescript(
                 """
                 CREATE TABLE IF NOT EXISTS topics (
@@ -84,6 +89,7 @@ class ConversationTopicsManager:
                     summary     TEXT NOT NULL DEFAULT '',
                     keywords    TEXT NOT NULL DEFAULT '',  -- comma-separated
                     msg_count   INTEGER NOT NULL DEFAULT 0,
+                    starred     INTEGER NOT NULL DEFAULT 0, -- pinned to the top
                     first_seen  TEXT NOT NULL,
                     last_seen   TEXT NOT NULL
                 );
@@ -106,18 +112,23 @@ class ConversationTopicsManager:
                 CREATE TABLE IF NOT EXISTS backfill_seen (msg_id TEXT PRIMARY KEY);
                 """
             )
-            if cols and "msg_id" not in cols:  # migrate a pre-existing table
+            if tm_cols and "msg_id" not in tm_cols:  # migrate pre-existing tables
                 self._c().execute("ALTER TABLE topic_messages ADD COLUMN msg_id TEXT NOT NULL DEFAULT ''")
+            if t_cols and "starred" not in t_cols:
+                self._c().execute("ALTER TABLE topics ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
             self._c().commit()
 
     # ── reads (used by the tool) ────────────────────────────────────────
 
-    def list_topics(self, limit: int = 40) -> list[dict[str, Any]]:
+    def list_topics(self, limit: int = 40, order: str = "recent") -> list[dict[str, Any]]:
+        # Starred topics always float to the top; within each group, by recency
+        # (newest message) or alphabetically.
+        secondary = "label COLLATE NOCASE ASC" if order == "alpha" else "last_seen DESC"
         with self._lock:
             rows = self._c().execute(
-                "SELECT id, label, summary, keywords, msg_count, first_seen, last_seen"
-                " FROM topics ORDER BY last_seen DESC LIMIT ?",
-                (max(1, min(200, limit)),),
+                "SELECT id, label, summary, keywords, msg_count, starred, first_seen, last_seen"
+                f" FROM topics ORDER BY starred DESC, {secondary} LIMIT ?",
+                (max(1, min(300, limit)),),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -138,27 +149,33 @@ class ConversationTopicsManager:
         d["messages"] = [dict(m) for m in reversed(msgs)]  # oldest→newest
         return d
 
-    def search_topics(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+    def search_topics(self, query: str, limit: int = 10, order: str = "recent") -> list[dict[str, Any]]:
         q = (query or "").strip()
         if not q:
-            return self.list_topics(limit=limit)
+            return self.list_topics(limit=limit, order=order)
+        # Substring (LIKE) match over label/summary/keywords — reliable partial
+        # matching ("Bise" → "Biserka…"), unlike FTS exact-token matching.
+        like = f"%{q}%"
+        secondary = "label COLLATE NOCASE ASC" if order == "alpha" else "last_seen DESC"
         with self._lock:
-            try:
-                rows = self._c().execute(
-                    "SELECT t.id, t.label, t.summary, t.keywords, t.msg_count, t.last_seen"
-                    " FROM topics_fts f JOIN topics t ON t.id = f.id"
-                    " WHERE topics_fts MATCH ? ORDER BY rank LIMIT ?",
-                    (_fts_query(q), max(1, min(50, limit))),
-                ).fetchall()
-            except sqlite3.OperationalError:
-                like = f"%{q}%"
-                rows = self._c().execute(
-                    "SELECT id, label, summary, keywords, msg_count, last_seen FROM topics"
-                    " WHERE label LIKE ? OR summary LIKE ? OR keywords LIKE ?"
-                    " ORDER BY last_seen DESC LIMIT ?",
-                    (like, like, like, max(1, min(50, limit))),
-                ).fetchall()
+            rows = self._c().execute(
+                "SELECT id, label, summary, keywords, msg_count, starred, last_seen FROM topics"
+                " WHERE label LIKE ? OR summary LIKE ? OR keywords LIKE ?"
+                f" ORDER BY starred DESC, {secondary} LIMIT ?",
+                (like, like, like, max(1, min(300, limit))),
+            ).fetchall()
         return [dict(r) for r in rows]
+
+    def set_star(self, topic_id: str, starred: bool) -> bool:
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute("UPDATE topics SET starred = ? WHERE id = ?",
+                               (1 if starred else 0, topic_id))
+            if cur.rowcount == 0:
+                cur = conn.execute("UPDATE topics SET starred = ? WHERE id = ?",
+                                   (1 if starred else 0, _slug(topic_id)))
+            conn.commit()
+        return cur.rowcount > 0
 
     # ── writes (used by the classifier) ─────────────────────────────────
 
@@ -513,7 +530,7 @@ async def _classify_and_store(agent: Any, items: list[dict[str, Any]]) -> int:
     # Show the classifier ALL current topics (most-recent first) so it reuses an
     # existing one instead of minting a near-duplicate. The prompt instructs it to
     # copy a matching label verbatim; upsert_topic then dedups by slug.
-    existing = mgr.list_topics(limit=200)
+    existing = mgr.list_topics(limit=300)
     existing_block = "\n".join(f"- {t['label']}: {t['summary'][:160]}" for t in existing) or "(none yet)"
     batch_block = "\n".join(f"[{i}] ({it['role']}) {it['excerpt'][:300]}" for i, it in enumerate(items))
     user_prompt = f"EXISTING topics:\n{existing_block}\n\nNEW messages:\n{batch_block}"

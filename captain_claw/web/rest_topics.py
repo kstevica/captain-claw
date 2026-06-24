@@ -23,15 +23,16 @@ log = get_logger(__name__)
 
 
 async def list_topics(server: "WebServer", request: web.Request) -> web.Response:
-    """GET /api/topics — recent topics (optionally ?q= to search, ?limit=)."""
+    """GET /api/topics — topics (optionally ?q= to search, ?limit=, ?order=recent|alpha)."""
     mgr = get_topics_manager()
     q = (request.query.get("q") or "").strip()
+    order = (request.query.get("order") or "recent").strip()
     try:
-        limit = int(request.query.get("limit") or 60)
+        limit = int(request.query.get("limit") or 300)
     except (ValueError, TypeError):
-        limit = 60
-    topics = mgr.search_topics(q, limit=limit) if q else mgr.list_topics(limit=limit)
-    return web.json_response({"topics": topics})
+        limit = 300
+    topics = mgr.search_topics(q, limit=limit, order=order) if q else mgr.list_topics(limit=limit, order=order)
+    return web.json_response({"topics": topics, "total": len(topics)})
 
 
 async def get_topic(server: "WebServer", request: web.Request) -> web.Response:
@@ -73,6 +74,18 @@ async def refresh(server: "WebServer", request: web.Request) -> web.Response:
         return web.json_response({"error": "no active session"}, status=503)
     topic_id = request.match_info.get("topic_id", "")
     return web.json_response(refresh_topic(server.agent, topic_id))
+
+
+async def star(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/{topic_id}/star — pin/unpin a topic. Body: {starred: bool}."""
+    topic_id = request.match_info.get("topic_id", "")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    starred = bool((body or {}).get("starred", True))
+    ok = get_topics_manager().set_star(topic_id, starred)
+    return web.json_response({"ok": ok, "starred": starred})
 
 
 async def reset(server: "WebServer", request: web.Request) -> web.Response:
