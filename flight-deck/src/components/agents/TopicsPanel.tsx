@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 import { TopicChat } from './TopicChat'
 
-interface TopicMsg { role: string; channel?: string; excerpt: string; ts: string }
+interface TopicMsg { id?: number; role: string; channel?: string; excerpt: string; ts: string; msg_id?: string }
 interface Group { id: string; name: string; count?: number }
 interface Topic {
   id: string
@@ -82,6 +82,8 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
   const [note, setNote] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
   const [actionsOpen, setActionsOpen] = useState(false)
+  const [draggingMsgId, setDraggingMsgId] = useState<number | null>(null)
+  const [dropTarget, setDropTarget] = useState<string>('')  // topic id under the cursor during drag
   const [listWidth, setListWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem('fd:topics-list-width'))
     return v >= 15 && v <= 85 ? v : 40
@@ -279,6 +281,33 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       await refresh()
+    }
+  }
+
+  // Move one message (by row id) to another topic. Called by the drop handler;
+  // refreshes the list and re-opens the source topic so the user sees its
+  // updated msg_count and the message gone.
+  const moveMessage = async (messageRowId: number, targetTopicId: string) => {
+    if (!selected) return
+    if (targetTopicId === selected.id) return  // dropping back on self: no-op
+    const sourceId = selected.id
+    try {
+      const r = await fdFetch<{ ok: boolean; moved?: boolean; error?: string }>(
+        `/agent-topic-message-move/${host}/${port}/${messageRowId}${tokenQs}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_topic_id: targetTopicId }) },
+      )
+      if (!r.ok) { setError(r.error || 'move failed'); return }
+      const tgt = topics.find((t) => t.id === targetTopicId)
+      setNote(`Moved 1 message → "${tgt?.label || targetTopicId}"`)
+      // Re-open the source topic so the user sees the updated content,
+      // and refresh the list so msg_counts on both topics update.
+      const refreshed = await fdFetch<{ topic: Topic }>(
+        `/agent-topic/${host}/${port}/${encodeURIComponent(sourceId)}${tokenQs}`)
+      setSelected(refreshed.topic)
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -487,9 +516,25 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
               ) : topics.length === 0 ? (
                 <div className="p-4 text-center text-xs text-zinc-600">No topics yet. Chat a while, or run Generate above.</div>
               ) : (
-                topics.map((t) => (
+                topics.map((t) => {
+                  const isDropTarget = !!draggingMsgId && dropTarget === t.id && selected?.id !== t.id
+                  const isDragOrigin = !!draggingMsgId && selected?.id === t.id
+                  return (
                   <div key={t.id}
-                    className={`flex items-center gap-1.5 border-b border-zinc-800/50 hover:bg-zinc-800/50 ${selected?.id === t.id ? 'bg-zinc-800/70' : ''}`}>
+                    onDragOver={(e) => {
+                      if (!draggingMsgId || selected?.id === t.id) return
+                      e.preventDefault(); e.dataTransfer.dropEffect = 'move'
+                      if (dropTarget !== t.id) setDropTarget(t.id)
+                    }}
+                    onDragLeave={() => { if (dropTarget === t.id) setDropTarget('') }}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      const idStr = e.dataTransfer.getData('text/x-topic-message')
+                      const mid = Number(idStr)
+                      setDropTarget(''); setDraggingMsgId(null)
+                      if (mid && selected?.id !== t.id) moveMessage(mid, t.id)
+                    }}
+                    className={`flex items-center gap-1.5 border-b border-zinc-800/50 hover:bg-zinc-800/50 ${selected?.id === t.id ? 'bg-zinc-800/70' : ''} ${isDropTarget ? 'ring-2 ring-inset ring-sky-500 bg-sky-950/30' : ''} ${isDragOrigin ? 'opacity-50' : ''}`}>
                     <input type="checkbox" checked={sel.has(t.id)} onChange={() => toggleSel(t.id)}
                       title="select to combine"
                       className="ml-2 shrink-0 rounded border-zinc-700 bg-zinc-950 accent-sky-600" />
@@ -506,7 +551,8 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                       {!!t.msg_count && <div className="text-[10px] text-zinc-600">{t.msg_count} msgs</div>}
                     </button>
                   </div>
-                ))
+                  )
+                })
               )}
             </div>
           </div>
@@ -582,17 +628,31 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                     ) : (selected.messages || []).length === 0 ? (
                       <div className="text-xs text-zinc-600">No messages stored.</div>
                     ) : (
-                      (selected.messages || []).map((m, i) => (
-                        <div key={i} className="border-b border-zinc-800/40 py-1.5 last:border-0">
-                          <div className="flex items-center gap-2 text-[10px] text-zinc-600">
-                            <span className={m.role === 'user' ? 'text-sky-400' : m.role === 'narration' ? 'text-zinc-500' : 'text-emerald-400'}>{m.role}</span>
-                            <span>{relTime(m.ts)}</span>
+                      (selected.messages || []).map((m, i) => {
+                        const canDrag = typeof m.id === 'number'
+                        const dragging = canDrag && draggingMsgId === m.id
+                        return (
+                          <div key={m.id ?? i}
+                            draggable={canDrag}
+                            onDragStart={(e) => {
+                              if (!canDrag) return
+                              e.dataTransfer.setData('text/x-topic-message', String(m.id))
+                              e.dataTransfer.effectAllowed = 'move'
+                              setDraggingMsgId(m.id as number)
+                            }}
+                            onDragEnd={() => { setDraggingMsgId(null); setDropTarget('') }}
+                            title={canDrag ? 'Drag to another topic to move' : undefined}
+                            className={`border-b border-zinc-800/40 py-1.5 last:border-0 ${canDrag ? 'cursor-grab active:cursor-grabbing' : ''} ${dragging ? 'opacity-40' : ''}`}>
+                            <div className="flex items-center gap-2 text-[10px] text-zinc-600">
+                              <span className={m.role === 'user' ? 'text-sky-400' : m.role === 'narration' ? 'text-zinc-500' : 'text-emerald-400'}>{m.role}</span>
+                              <span>{relTime(m.ts)}</span>
+                            </div>
+                            <div className="fd-markdown text-xs text-zinc-300">
+                              <Markdown remarkPlugins={[remarkGfm]}>{m.excerpt}</Markdown>
+                            </div>
                           </div>
-                          <div className="fd-markdown text-xs text-zinc-300">
-                            <Markdown remarkPlugins={[remarkGfm]}>{m.excerpt}</Markdown>
-                          </div>
-                        </div>
-                      ))
+                        )
+                      })
                     )}
                   </div>
                 </div>

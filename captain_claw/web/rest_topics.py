@@ -165,6 +165,20 @@ async def append_turn(server: "WebServer", request: web.Request) -> web.Response
     return web.json_response({"ok": True, "added": len(items), "topic": mgr.get_topic(topic_id, max_excerpts=200)})
 
 
+async def move_message(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topic-message/{message_id}/move — move one message to another
+    topic. Body: {target_topic_id}."""
+    msg_id = request.match_info.get("message_id", "")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    target = str((body or {}).get("target_topic_id") or "").strip()
+    if not target:
+        return web.json_response({"ok": False, "error": "target_topic_id required"}, status=400)
+    return web.json_response(get_topics_manager().move_message(msg_id, target))
+
+
 async def unclassify(server: "WebServer", request: web.Request) -> web.Response:
     """POST /api/topics/{topic_id}/unclassify — drop the topic and free its
     messages so the next backfill/classifier pass can redistribute them."""

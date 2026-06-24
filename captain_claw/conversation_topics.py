@@ -176,8 +176,8 @@ class ConversationTopicsManager:
             if not r:
                 return None
             msgs = self._c().execute(
-                "SELECT role, channel, excerpt, ts FROM topic_messages WHERE topic_id = ?"
-                " ORDER BY id DESC LIMIT ?",
+                "SELECT id, role, channel, excerpt, msg_id, ts FROM topic_messages"
+                " WHERE topic_id = ? ORDER BY id DESC LIMIT ?",
                 (r["id"], max(1, min(200, max_excerpts))),
             ).fetchall()
         d = dict(r)
@@ -441,6 +441,40 @@ class ConversationTopicsManager:
             conn.execute("DELETE FROM topic_group_members WHERE topic_id = ?", (tid,))
             conn.commit()
         return {"ok": True, "freed": int(n_msgs), "freed_ids": len(msg_ids)}
+
+    def move_message(self, message_row_id: int | str, target_topic_id: str) -> dict[str, Any]:
+        """Move a single ``topic_messages`` row to a different topic and keep both
+        topics' msg_count + last_seen in sync. Accepts the target as a stored id
+        or a label slug. Idempotent: moving to the same topic is a no-op."""
+        try:
+            rid = int(message_row_id)
+        except (ValueError, TypeError):
+            return {"ok": False, "error": "invalid message id"}
+        tgt = str(target_topic_id or "")
+        with self._lock:
+            conn = self._c()
+            row = conn.execute(
+                "SELECT topic_id FROM topic_messages WHERE id = ?", (rid,),
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": "message not found"}
+            src_id = row["topic_id"]
+            if not conn.execute("SELECT 1 FROM topics WHERE id = ?", (tgt,)).fetchone():
+                tgt = _slug(target_topic_id)
+            if not conn.execute("SELECT 1 FROM topics WHERE id = ?", (tgt,)).fetchone():
+                return {"ok": False, "error": "target topic not found"}
+            if src_id == tgt:
+                return {"ok": True, "moved": False, "src": src_id, "target": tgt}
+            conn.execute("UPDATE topic_messages SET topic_id = ? WHERE id = ?", (tgt, rid))
+            now = _utcnow()
+            for tid in (src_id, tgt):
+                cnt = conn.execute(
+                    "SELECT COUNT(*) FROM topic_messages WHERE topic_id = ?", (tid,),
+                ).fetchone()[0]
+                conn.execute("UPDATE topics SET msg_count = ? WHERE id = ?", (cnt, tid))
+            conn.execute("UPDATE topics SET last_seen = ? WHERE id = ?", (now, tgt))
+            conn.commit()
+        return {"ok": True, "moved": True, "src": src_id, "target": tgt}
 
     def seen_msg_ids(self) -> set[str]:
         """Message ids the backfill has already attempted (stored or skipped)."""
