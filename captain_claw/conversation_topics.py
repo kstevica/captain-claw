@@ -34,6 +34,9 @@ _ATTR_LAST_MSG_IDX = "_topics_last_msg_idx"
 _ATTR_NARRATION = "_topics_narration_buffer"
 
 _MAX_NARRATION_BUFFER = 40   # cap buffered narration blurbs between passes
+# Stored message text is kept (near-)whole so the panel shows full messages, not
+# a 600-char stub. Only a short slice is fed to the classifier (token control).
+_MAX_EXCERPT_CHARS = 16000
 
 
 def _utcnow() -> str:
@@ -202,7 +205,7 @@ class ConversationTopicsManager:
                 "INSERT INTO topic_messages (topic_id, role, channel, excerpt, msg_id, ts)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 [(topic_id, str(m.get("role") or ""), str(m.get("channel") or ""),
-                  str(m.get("excerpt") or "")[:600], str(m.get("msg_id") or ""),
+                  str(m.get("excerpt") or "")[:_MAX_EXCERPT_CHARS], str(m.get("msg_id") or ""),
                   str(m.get("ts") or now)) for m in messages],
             )
             conn.execute(
@@ -274,7 +277,7 @@ def record_narration(agent: Any, text: str) -> None:
     if buf is None:
         buf = []
         setattr(agent, _ATTR_NARRATION, buf)
-    buf.append(t[:600])
+    buf.append(t[:_MAX_EXCERPT_CHARS])
     if len(buf) > _MAX_NARRATION_BUFFER:
         del buf[: len(buf) - _MAX_NARRATION_BUFFER]
 
@@ -317,7 +320,7 @@ def _collect_new_messages(agent: Any, last_idx: int, cap: int) -> tuple[list[dic
         items.append({
             "role": "user" if role == "user" else "agent",
             "channel": str((m.get("metadata") or {}).get("channel") or "") if isinstance(m.get("metadata"), dict) else "",
-            "excerpt": content[:600],
+            "excerpt": content[:_MAX_EXCERPT_CHARS],
             "msg_id": str(m.get("message_id") or ""),
             "ts": str(m.get("timestamp") or _utcnow()),
         })
@@ -326,7 +329,7 @@ def _collect_new_messages(agent: Any, last_idx: int, cap: int) -> tuple[list[dic
     if get_config().conversation_topics.include_narration:
         buf = getattr(agent, _ATTR_NARRATION, None) or []
         for t in buf:
-            items.append({"role": "narration", "channel": "", "excerpt": t[:600], "ts": _utcnow()})
+            items.append({"role": "narration", "channel": "", "excerpt": t[:_MAX_EXCERPT_CHARS], "ts": _utcnow()})
         setattr(agent, _ATTR_NARRATION, [])
     if len(items) > cap:
         items = items[-cap:]
@@ -390,7 +393,10 @@ async def _classify_and_store(agent: Any, items: list[dict[str, Any]]) -> int:
 
     tc = get_config().conversation_topics
     mgr = get_topics_manager()
-    existing = mgr.list_topics(limit=60)
+    # Show the classifier ALL current topics (most-recent first) so it reuses an
+    # existing one instead of minting a near-duplicate. The prompt instructs it to
+    # copy a matching label verbatim; upsert_topic then dedups by slug.
+    existing = mgr.list_topics(limit=200)
     existing_block = "\n".join(f"- {t['label']}: {t['summary'][:160]}" for t in existing) or "(none yet)"
     batch_block = "\n".join(f"[{i}] ({it['role']}) {it['excerpt'][:300]}" for i, it in enumerate(items))
     user_prompt = f"EXISTING topics:\n{existing_block}\n\nNEW messages:\n{batch_block}"
@@ -455,7 +461,7 @@ async def backfill_topics(agent: Any, hours: int = 0) -> dict[str, Any]:
                 pass
         pending.append({
             "role": "user" if m.get("role") == "user" else "agent",
-            "channel": "", "excerpt": content[:600], "msg_id": mid, "ts": ts_raw or _utcnow(),
+            "channel": "", "excerpt": content[:_MAX_EXCERPT_CHARS], "msg_id": mid, "ts": ts_raw or _utcnow(),
         })
 
     if not pending:
