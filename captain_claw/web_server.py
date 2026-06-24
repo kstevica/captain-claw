@@ -1246,6 +1246,10 @@ class WebServer:
         from captain_claw.web.rest_topics import star
         return await star(self, request)
 
+    async def _topics_unclassify(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import unclassify
+        return await unclassify(self, request)
+
     async def _topics_groups_list(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_topics import list_groups
         return await list_groups(self, request)
@@ -2537,6 +2541,7 @@ class WebServer:
         app.router.add_post("/api/topics/reset", self._topics_reset)
         app.router.add_post("/api/topics/{topic_id}/refresh", self._topics_refresh)
         app.router.add_post("/api/topics/{topic_id}/star", self._topics_star)
+        app.router.add_post("/api/topics/{topic_id}/unclassify", self._topics_unclassify)
         app.router.add_post("/api/topics/{topic_id}/groups", self._topics_set_groups)
         app.router.add_post("/api/topics/{topic_id}/append", self._topics_append)
         app.router.add_get("/api/topics/{topic_id}", self._topics_get)

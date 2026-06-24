@@ -165,6 +165,13 @@ async def append_turn(server: "WebServer", request: web.Request) -> web.Response
     return web.json_response({"ok": True, "added": len(items), "topic": mgr.get_topic(topic_id, max_excerpts=200)})
 
 
+async def unclassify(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/{topic_id}/unclassify — drop the topic and free its
+    messages so the next backfill/classifier pass can redistribute them."""
+    topic_id = request.match_info.get("topic_id", "")
+    return web.json_response(get_topics_manager().unclassify_topic(topic_id))
+
+
 async def star(server: "WebServer", request: web.Request) -> web.Response:
     """POST /api/topics/{topic_id}/star — pin/unpin a topic. Body: {starred: bool}."""
     topic_id = request.match_info.get("topic_id", "")

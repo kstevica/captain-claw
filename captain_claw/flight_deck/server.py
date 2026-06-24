@@ -3853,6 +3853,16 @@ async def agent_topic_append(
     )
 
 
+@app.post("/fd/agent-topic-unclassify/{host}/{port}/{topic_id}")
+async def agent_topic_unclassify(
+    host: str, port: int, topic_id: str, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, f"/api/topics/{topic_id}/unclassify"
+    )
+
+
 @app.post("/fd/agent-topic-star/{host}/{port}/{topic_id}")
 async def agent_topic_star(
     host: str, port: int, topic_id: str, request: Request, token: str = "",

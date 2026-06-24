@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2, Star, Settings } from 'lucide-react'
+import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2, Star, Settings, RotateCcw } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
@@ -175,7 +175,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     }
   }
 
-  const runBackfill = async () => {
+  const runBackfillFor = async (hoursParam: number) => {
     setBackfilling(true); setNote('')
     // Each call classifies one batch and reports `remaining`; keep going until
     // the backlog is drained (capped so a bug can't loop forever).
@@ -185,7 +185,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
       for (let i = 0; i < 100; i++) {
         const qp = new URLSearchParams()
         if (auth) qp.set('token', auth)
-        qp.set('hours', String(hours))
+        qp.set('hours', String(hoursParam))
         const r = await fdFetch<{ ok?: boolean; error?: string; classified: number; topics_touched: number; remaining: number }>(
           `/agent-topics-backfill/${host}/${port}?${qp.toString()}`, { method: 'POST' },
         )
@@ -202,6 +202,35 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     } catch (e) {
       setNote(e instanceof Error ? e.message : String(e))
     } finally {
+      setBackfilling(false)
+    }
+  }
+  const runBackfill = () => runBackfillFor(hours)
+
+  const runReclassify = async () => {
+    if (!selected) return
+    const label = selected.label
+    const count = selected.msg_count || 0
+    if (!window.confirm(
+      `Reset topic "${label}"? Its ${count} message(s) will be freed and the classifier ` +
+      `will re-assign them to other existing topics (or a new one). Useful when unrelated ` +
+      `content got lumped together.`,
+    )) return
+    setBackfilling(true); setNote(`Reclassifying "${label}"…`)
+    try {
+      const r = await fdFetch<{ ok: boolean; freed: number; error?: string }>(
+        `/agent-topic-unclassify/${host}/${port}/${encodeURIComponent(selected.id)}${tokenQs}`,
+        { method: 'POST' },
+      )
+      if (!r.ok) { setNote(r.error || 'reset failed'); setBackfilling(false); return }
+      setSelected(null)
+      setNote(`Freed ${r.freed} message(s) from "${label}" — re-assigning…`)
+      await refresh()
+      // Auto-trigger Generate over ALL history so the freed messages are
+      // re-classified now (independent of the user's current "window" pick).
+      await runBackfillFor(0)
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e))
       setBackfilling(false)
     }
   }
@@ -502,6 +531,11 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                       <button onClick={exportMd} title="Export this conversation as Markdown"
                         className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">
                         <Download className="h-3.5 w-3.5" /> .md
+                      </button>
+                      <button onClick={runReclassify} disabled={backfilling}
+                        title="Reset this topic — free its messages and re-classify (into other existing topics or a new one)"
+                        className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-amber-950/40 hover:text-amber-300 disabled:opacity-40">
+                        <RotateCcw className="h-3.5 w-3.5" /> Reclassify
                       </button>
                     </div>
                   </div>

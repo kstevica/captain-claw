@@ -408,6 +408,40 @@ class ConversationTopicsManager:
             conn.commit()
             return {"cleared_topics": int(n), "preserved": len(preserve)}
 
+    def unclassify_topic(self, topic_id: str) -> dict[str, Any]:
+        """Drop a topic and free its messages so the next classifier pass can
+        redistribute them (to other existing topics, or a new one). Removes the
+        msg_ids from backfill_seen too — otherwise they'd stay 'seen' and the
+        backfill loop would silently skip them. Useful when unrelated content
+        got lumped into one topic and the user wants to redo it."""
+        tid = str(topic_id or "")
+        with self._lock:
+            conn = self._c()
+            # Accept stored id OR a label slug.
+            if not conn.execute("SELECT 1 FROM topics WHERE id = ?", (tid,)).fetchone():
+                tid = _slug(topic_id)
+            if not conn.execute("SELECT 1 FROM topics WHERE id = ?", (tid,)).fetchone():
+                return {"ok": False, "error": "topic not found", "freed": 0, "freed_ids": 0}
+            msg_ids = [r[0] for r in conn.execute(
+                "SELECT DISTINCT msg_id FROM topic_messages WHERE topic_id = ? AND msg_id != ''",
+                (tid,),
+            ).fetchall()]
+            n_msgs = conn.execute(
+                "SELECT COUNT(*) FROM topic_messages WHERE topic_id = ?", (tid,),
+            ).fetchone()[0]
+            if msg_ids:
+                placeholders = ",".join("?" * len(msg_ids))
+                conn.execute(
+                    f"DELETE FROM backfill_seen WHERE msg_id IN ({placeholders})",
+                    tuple(msg_ids),
+                )
+            conn.execute("DELETE FROM topic_messages WHERE topic_id = ?", (tid,))
+            conn.execute("DELETE FROM topics WHERE id = ?", (tid,))
+            conn.execute("DELETE FROM topics_fts WHERE id = ?", (tid,))
+            conn.execute("DELETE FROM topic_group_members WHERE topic_id = ?", (tid,))
+            conn.commit()
+        return {"ok": True, "freed": int(n_msgs), "freed_ids": len(msg_ids)}
+
     def seen_msg_ids(self) -> set[str]:
         """Message ids the backfill has already attempted (stored or skipped)."""
         with self._lock:
