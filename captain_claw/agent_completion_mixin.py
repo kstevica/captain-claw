@@ -569,6 +569,58 @@ class AgentCompletionMixin:
                         self._coverage_gate_streak = 0
                         self._coverage_gate_prev_missing = -1
 
+        # ── Scale-loop reply coverage gate ───────────────────────────
+        # When the scale_micro_loop processed N items, the user-facing reply
+        # MUST acknowledge each one. Caught a real swallow: glasses-mode agent
+        # processed 2 chassis options but emitted only 1 to honour brevity. We
+        # check coverage on the final text and, if it's missing items, feed the
+        # existing scale completion_feedback back so the next iteration enumerates
+        # them all. Bypasses past the iteration cap (same safety valve as the
+        # other gates).
+        try:
+            _missing_scale = self._scale_reply_missing_items(_sp, final_response)
+        except Exception:
+            _missing_scale = []
+        if _missing_scale and iteration < (hard_turn_iterations - 1):
+            _scale_streak_attr = "_scale_reply_gate_streak"
+            _scale_prev_attr = "_scale_reply_gate_prev_missing"
+            _streak: int = getattr(self, _scale_streak_attr, 0)
+            _prev: int = getattr(self, _scale_prev_attr, -1)
+            _cur = len(_missing_scale)
+            if _cur == _prev:
+                _streak += 1
+            else:
+                _streak = 1
+            setattr(self, _scale_streak_attr, _streak)
+            setattr(self, _scale_prev_attr, _cur)
+            if _streak > 3:
+                log.warning(
+                    "Scale-reply gate stuck — same missing count for %d consecutive blocks; allowing finalization",
+                    _streak, missing=_cur,
+                )
+                setattr(self, _scale_streak_attr, 0)
+                setattr(self, _scale_prev_attr, -1)
+            else:
+                _show = ", ".join(f"'{m}'" for m in _missing_scale[:5])
+                completion_feedback = (
+                    f"[Reply incomplete] The scale loop processed "
+                    f"{len(_sp.get('items') or [])} item(s) this turn but your "
+                    f"reply did not mention: {_show}.\n\nRewrite your reply so it "
+                    "enumerates ALL processed items as short bullets — never drop a "
+                    "result to stay under a length target. A complete short list "
+                    "beats an incomplete shorter one. Keep each bullet tight, but "
+                    "include every item."
+                )
+                log.info(
+                    "Finalize BLOCKED by scale_reply_coverage gate",
+                    iteration=iteration, missing=_cur, streak=_streak,
+                )
+                return False, "", finish_success, completion_feedback, python_worker_attempted
+        else:
+            if hasattr(self, "_scale_reply_gate_streak"):
+                self._scale_reply_gate_streak = 0
+                self._scale_reply_gate_prev_missing = -1
+
         # ── Contract completion validation ───────────────────────────
         if completion_requirements and task_contract is not None:
             critique = await self._evaluate_contract_completion(
@@ -702,6 +754,51 @@ class AgentCompletionMixin:
         "💡 *If this worked well or could be improved, say "
         "\"rate good\" or \"rate bad\" to save this pattern for future tasks.*"
     )
+
+    def _scale_reply_missing_items(self, sp: dict | None, reply: str) -> list[str]:
+        """Items the scale loop processed this turn that the reply doesn't mention.
+
+        Only fires when the loop fully completed (done_items == items) and there
+        were ≥2 items — single-item tasks don't need an explicit enumeration. The
+        match is forgiving: a meaningful token from each item label must appear
+        somewhere in the reply (case-insensitive, ignoring punctuation). This
+        catches the "two chassis → one mentioned" swallow without false-positives
+        when the agent legitimately rephrases each item."""
+        if not isinstance(sp, dict):
+            return []
+        items = sp.get("items") or []
+        if not items or len(items) < 2:
+            return []
+        done = sp.get("done_items") or set()
+        if len(done) < len(items):
+            return []  # loop hasn't finished — other gates handle that
+        text = (reply or "").lower()
+        if not text:
+            return list(items)
+        import re as _re
+
+        _stop = {"with", "from", "that", "this", "your", "yours", "have", "into",
+                 "about", "their", "these", "those", "where", "which", "when",
+                 "than", "what", "want", "need", "more", "less", "some", "many",
+                 "item", "items", "task", "tasks", "list", "step", "steps"}
+
+        def _tokens(label: str) -> list[str]:
+            return [w for w in _re.findall(r"[a-z0-9]{4,}", str(label).lower()) if w not in _stop]
+
+        # Drop tokens that appear in EVERY item — they don't fingerprint a
+        # specific item (e.g. "chassis" in both "wheel chassis" and "bipedal
+        # chassis" would otherwise let "wheel chassis: PiCar" cover both).
+        all_token_sets = [set(_tokens(it)) for it in items]
+        common = set.intersection(*all_token_sets) if all_token_sets else set()
+        missing: list[str] = []
+        for raw, toks_set in zip(items, all_token_sets):
+            distinct = [t for t in toks_set if t not in common][:5]
+            if not distinct:
+                # Nothing distinctive to match — give the benefit of the doubt.
+                continue
+            if not any(t in text for t in distinct):
+                missing.append(str(raw)[:80])
+        return missing
 
     def _maybe_append_playbook_hint(
         self,
