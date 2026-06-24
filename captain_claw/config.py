@@ -497,7 +497,7 @@ class ToolsConfig(BaseModel):
         "read", "write", "edit", "personality", "botport", "playbooks",
         "browser", "datastore", "direct_api", "cron",
         "google_drive", "google_calendar", "google_mail",
-        "whatsapp_send_file", "intentions", "video_vision",
+        "whatsapp_send_file", "intentions", "video_vision", "topics",
     })
 
     @model_validator(mode="after")
@@ -763,6 +763,24 @@ class SisterSessionConfig(BaseModel):
     max_briefings_in_context: int = 2
     allow_public: bool = False
     db_path: str = "~/.captain-claw/sister_sessions.db"
+
+
+class ConversationTopicsConfig(BaseModel):
+    """Automatic topic/tagging memory over comms-channel conversation.
+
+    A periodic pass clusters recent comms messages (user + agent + narration)
+    into persistent, cross-session topics the agent can recall via the `topics`
+    tool. Mirrors the dreaming/insight passes."""
+
+    enabled: bool = True
+    interval_messages: int = 15          # classify every N new comms messages
+    cooldown_seconds: int = 120          # min gap between classification passes
+    max_messages_per_pass: int = 40      # cap the window fed to the classifier
+    max_topics: int = 300                # prune oldest beyond this
+    excerpts_per_topic: int = 40         # message excerpts kept per topic
+    include_narration: bool = True
+    allow_public: bool = False
+    db_path: str = "~/.captain-claw/conversation_topics.db"
 
 
 class NervousSystemConfig(BaseModel):
@@ -1204,6 +1222,7 @@ class Config(BaseSettings):
     insights: InsightsConfig = Field(default_factory=InsightsConfig)
     intentions: IntentionsConfig = Field(default_factory=IntentionsConfig)
     nervous_system: NervousSystemConfig = Field(default_factory=NervousSystemConfig)
+    conversation_topics: ConversationTopicsConfig = Field(default_factory=ConversationTopicsConfig)
     sister_session: SisterSessionConfig = Field(default_factory=SisterSessionConfig)
     autonomous_work: AutonomousWorkConfig = Field(default_factory=AutonomousWorkConfig)
     events: EventsConfig = Field(default_factory=EventsConfig)

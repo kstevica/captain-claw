@@ -2215,6 +2215,7 @@ class AgentContextMixin:
             WhatsAppSendFileTool,
             IntentionsTool,
             VideoVisionTool,
+            TopicsTool,
         )
 
         config = get_config()
@@ -2267,6 +2268,8 @@ class AgentContextMixin:
                 self.tools.register(WhatsAppSendFileTool())
             elif tool_name == "intentions":
                 self.tools.register(IntentionsTool())
+            elif tool_name == "topics":
+                self.tools.register(TopicsTool())
             elif tool_name == "video_vision":
                 self.tools.register(VideoVisionTool())
             elif tool_name == "gws":

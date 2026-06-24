@@ -350,6 +350,12 @@ class Agent(
 
         Returns True when a callback is wired, so the caller can skip folding
         the same text into the final combined answer (avoids showing it twice)."""
+        # Buffer narration for the conversation-topics classifier (comms output).
+        try:
+            from captain_claw.conversation_topics import record_narration
+            record_narration(self, text)
+        except Exception:
+            pass
         cb = getattr(self, "narration_callback", None)
         if not cb:
             return False

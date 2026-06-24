@@ -699,6 +699,15 @@ async def _run_agent(
         except Exception:
             pass
 
+        # Conversation topic classification (background; clusters comms traffic
+        # into persistent topics the agent can recall via the `topics` tool).
+        try:
+            import asyncio as _asyncio_tc
+            from captain_claw.conversation_topics import maybe_classify_topics
+            _asyncio_tc.create_task(maybe_classify_topics(agent))
+        except Exception:
+            pass
+
         # Proactive intentions generator (admin only; opt-in via config).
         if not is_public:
             try:
