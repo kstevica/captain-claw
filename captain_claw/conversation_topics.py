@@ -110,6 +110,19 @@ class ConversationTopicsManager:
                 -- moves on even when the classifier puts a message in no topic
                 -- (otherwise those loop forever).
                 CREATE TABLE IF NOT EXISTS backfill_seen (msg_id TEXT PRIMARY KEY);
+
+                -- User-defined groups (private, work, …) — many-to-many with topics.
+                CREATE TABLE IF NOT EXISTS topic_groups (
+                    id          TEXT PRIMARY KEY,   -- slug
+                    name        TEXT NOT NULL,
+                    created_at  TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS topic_group_members (
+                    group_id  TEXT NOT NULL,
+                    topic_id  TEXT NOT NULL,
+                    PRIMARY KEY (group_id, topic_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_tgm_topic ON topic_group_members(topic_id);
                 """
             )
             if tm_cols and "msg_id" not in tm_cols:  # migrate pre-existing tables
@@ -120,16 +133,24 @@ class ConversationTopicsManager:
 
     # ── reads (used by the tool) ────────────────────────────────────────
 
-    def list_topics(self, limit: int = 40, order: str = "recent") -> list[dict[str, Any]]:
+    def list_topics(self, limit: int = 40, order: str = "recent", group: str = "") -> list[dict[str, Any]]:
         # Starred topics always float to the top; within each group, by recency
-        # (newest message) or alphabetically.
+        # (newest message) or alphabetically. Optional `group` filters by membership.
         secondary = "label COLLATE NOCASE ASC" if order == "alpha" else "last_seen DESC"
+        cols = "t.id, t.label, t.summary, t.keywords, t.msg_count, t.starred, t.first_seen, t.last_seen"
         with self._lock:
-            rows = self._c().execute(
-                "SELECT id, label, summary, keywords, msg_count, starred, first_seen, last_seen"
-                f" FROM topics ORDER BY starred DESC, {secondary} LIMIT ?",
-                (max(1, min(300, limit)),),
-            ).fetchall()
+            if group:
+                rows = self._c().execute(
+                    f"SELECT {cols} FROM topics t"
+                    " JOIN topic_group_members m ON m.topic_id = t.id"
+                    f" WHERE m.group_id = ? ORDER BY t.starred DESC, {secondary} LIMIT ?",
+                    (_slug(group), max(1, min(300, limit))),
+                ).fetchall()
+            else:
+                rows = self._c().execute(
+                    f"SELECT {cols} FROM topics t ORDER BY t.starred DESC, {secondary} LIMIT ?",
+                    (max(1, min(300, limit)),),
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def get_topic(self, topic_id: str, *, max_excerpts: int = 40) -> dict[str, Any] | None:
@@ -147,6 +168,7 @@ class ConversationTopicsManager:
             ).fetchall()
         d = dict(r)
         d["messages"] = [dict(m) for m in reversed(msgs)]  # oldest→newest
+        d["groups"] = self.groups_for_topic(d["id"])
         return d
 
     def search_topics(self, query: str, limit: int = 10, order: str = "recent") -> list[dict[str, Any]]:
@@ -176,6 +198,66 @@ class ConversationTopicsManager:
                                    (1 if starred else 0, _slug(topic_id)))
             conn.commit()
         return cur.rowcount > 0
+
+    # ── groups (many-to-many) ───────────────────────────────────────────
+
+    def list_groups(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT g.id, g.name, COUNT(m.topic_id) AS count"
+                " FROM topic_groups g LEFT JOIN topic_group_members m ON m.group_id = g.id"
+                " GROUP BY g.id, g.name ORDER BY g.name COLLATE NOCASE ASC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_group(self, name: str) -> dict[str, Any] | None:
+        name = (name or "").strip()
+        if not name:
+            return None
+        gid = _slug(name)
+        with self._lock:
+            conn = self._c()
+            conn.execute(
+                "INSERT OR IGNORE INTO topic_groups (id, name, created_at) VALUES (?, ?, ?)",
+                (gid, name[:60], _utcnow()),
+            )
+            conn.commit()
+        return {"id": gid, "name": name[:60]}
+
+    def delete_group(self, group_id: str) -> bool:
+        gid = _slug(group_id)
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute("DELETE FROM topic_groups WHERE id = ?", (gid,))
+            conn.execute("DELETE FROM topic_group_members WHERE group_id = ?", (gid,))
+            conn.commit()
+        return cur.rowcount > 0
+
+    def groups_for_topic(self, topic_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT g.id, g.name FROM topic_group_members m"
+                " JOIN topic_groups g ON g.id = m.group_id WHERE m.topic_id = ?"
+                " ORDER BY g.name COLLATE NOCASE ASC",
+                (topic_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_topic_groups(self, topic_id: str, group_ids: list[str]) -> list[dict[str, Any]]:
+        """Replace a topic's group memberships with ``group_ids`` (slugs).
+        ``topic_id`` is the stored slug (as the UI passes it)."""
+        gids = [_slug(g) for g in group_ids if str(g).strip()]
+        with self._lock:
+            conn = self._c()
+            conn.execute("DELETE FROM topic_group_members WHERE topic_id = ?", (topic_id,))
+            # Only attach to groups that exist.
+            existing = {r[0] for r in conn.execute("SELECT id FROM topic_groups").fetchall()}
+            conn.executemany(
+                "INSERT OR IGNORE INTO topic_group_members (group_id, topic_id) VALUES (?, ?)",
+                [(g, topic_id) for g in gids if g in existing],
+            )
+            conn.commit()
+        return self.groups_for_topic(topic_id)
 
     # ── writes (used by the classifier) ─────────────────────────────────
 

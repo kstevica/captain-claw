@@ -1246,6 +1246,22 @@ class WebServer:
         from captain_claw.web.rest_topics import star
         return await star(self, request)
 
+    async def _topics_groups_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import list_groups
+        return await list_groups(self, request)
+
+    async def _topics_group_create(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import create_group
+        return await create_group(self, request)
+
+    async def _topics_group_delete(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import delete_group
+        return await delete_group(self, request)
+
+    async def _topics_set_groups(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import set_topic_groups
+        return await set_topic_groups(self, request)
+
     async def _inbound_queue_consumer(self) -> None:
         """Drain inbound peer messages one-at-a-time, only when the agent is free.
 
@@ -2509,11 +2525,15 @@ class WebServer:
             "/api/intentions/{intention_id}/status", self._intentions_set_status
         )
         app.router.add_get("/api/topics", self._topics_list)
+        app.router.add_get("/api/topics/groups", self._topics_groups_list)
+        app.router.add_post("/api/topics/groups", self._topics_group_create)
+        app.router.add_post("/api/topics/groups/{group_id}/delete", self._topics_group_delete)
         app.router.add_post("/api/topics/backfill", self._topics_backfill)
         app.router.add_post("/api/topics/combine", self._topics_combine)
         app.router.add_post("/api/topics/reset", self._topics_reset)
         app.router.add_post("/api/topics/{topic_id}/refresh", self._topics_refresh)
         app.router.add_post("/api/topics/{topic_id}/star", self._topics_star)
+        app.router.add_post("/api/topics/{topic_id}/groups", self._topics_set_groups)
         app.router.add_get("/api/topics/{topic_id}", self._topics_get)
         app.router.add_post("/api/file/upload", self._file_upload)
         app.router.add_post("/api/tool", self._api_tool)  # Flow engine: deterministic single-tool RPC

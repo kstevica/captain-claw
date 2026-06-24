@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2, Star } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 
 interface TopicMsg { role: string; channel?: string; excerpt: string; ts: string }
+interface Group { id: string; name: string; count?: number }
 interface Topic {
   id: string
   label: string
@@ -14,6 +15,7 @@ interface Topic {
   starred?: number
   last_seen?: string
   messages?: TopicMsg[]
+  groups?: Group[]
 }
 
 async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -71,10 +73,33 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [order, setOrder] = useState<'recent' | 'alpha'>('recent')
+  const [groups, setGroups] = useState<Group[]>([])
+  const [groupFilter, setGroupFilter] = useState('')
   const [hours, setHours] = useState(168)
   const [backfilling, setBackfilling] = useState(false)
   const [note, setNote] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
+  const [listWidth, setListWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem('fd:topics-list-width'))
+    return v >= 15 && v <= 85 ? v : 40
+  })
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const startDrag = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const onMove = (ev: MouseEvent) => {
+      const r = bodyRef.current?.getBoundingClientRect()
+      if (!r || r.width === 0) return
+      const pct = Math.min(85, Math.max(15, ((ev.clientX - r.left) / r.width) * 100))
+      setListWidth(pct)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      setListWidth((w) => { localStorage.setItem('fd:topics-list-width', String(Math.round(w))); return w })
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
   const [sel, setSel] = useState<Set<string>>(new Set())
   const [combining, setCombining] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -88,6 +113,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
       if (auth) qp.set('token', auth)
       if (query.trim()) qp.set('q', query.trim())
       qp.set('order', order)
+      if (groupFilter) qp.set('group', groupFilter)
       const data = await fdFetch<{ topics: Topic[] }>(`/agent-topics/${host}/${port}?${qp.toString()}`)
       setTopics(data.topics || [])
     } catch (e) {
@@ -95,9 +121,43 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     } finally {
       setLoading(false)
     }
-  }, [host, port, auth, query, order])
+  }, [host, port, auth, query, order, groupFilter])
 
   useEffect(() => { refresh() }, [refresh])
+
+  const fetchGroups = useCallback(async () => {
+    try {
+      const d = await fdFetch<{ groups: Group[] }>(`/agent-topic-groups/${host}/${port}${tokenQs}`)
+      setGroups(d.groups || [])
+    } catch { /* non-fatal */ }
+  }, [host, port, tokenQs])
+  useEffect(() => { fetchGroups() }, [fetchGroups])
+
+  const createGroup = async () => {
+    const name = window.prompt('New group name (e.g. Work, Private):')?.trim()
+    if (!name) return
+    try {
+      await fdFetch(`/agent-topic-groups/${host}/${port}${tokenQs}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }),
+      })
+      await fetchGroups()
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+  }
+
+  // Toggle the selected topic's membership in a group, then re-sync.
+  const toggleTopicGroup = async (gid: string) => {
+    if (!selected) return
+    const current = (selected.groups || []).map((g) => g.id)
+    const next = current.includes(gid) ? current.filter((x) => x !== gid) : [...current, gid]
+    try {
+      const r = await fdFetch<{ groups: Group[] }>(
+        `/agent-topic-set-groups/${host}/${port}/${encodeURIComponent(selected.id)}${tokenQs}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ group_ids: next }) },
+      )
+      setSelected({ ...selected, groups: r.groups })
+      await Promise.all([fetchGroups(), refresh()])
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+  }
 
   const openTopic = async (t: Topic) => {
     setSelected(t); setLoadingTopic(true)
@@ -298,9 +358,9 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
         )}
 
         {/* Body: topic list | messages */}
-        <div className="flex min-h-0 flex-1">
+        <div ref={bodyRef} className="flex min-h-0 flex-1">
           {/* List */}
-          <div className="flex w-2/5 flex-col border-r border-zinc-800">
+          <div className="flex flex-col" style={{ width: `${listWidth}%` }}>
             <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-1.5">
               <span className="text-[11px] font-medium text-zinc-400">{topics.length} topic{topics.length === 1 ? '' : 's'}</span>
               <select value={order} onChange={(e) => setOrder(e.target.value as 'recent' | 'alpha')}
@@ -308,6 +368,19 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                 <option value="recent">Recent</option>
                 <option value="alpha">A–Z</option>
               </select>
+            </div>
+            {/* Group filter */}
+            <div className="flex flex-wrap items-center gap-1 border-b border-zinc-800 px-3 py-1.5">
+              <button onClick={() => setGroupFilter('')}
+                className={`rounded-full px-2 py-0.5 text-[10px] ${groupFilter === '' ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}>All</button>
+              {groups.map((g) => (
+                <button key={g.id} onClick={() => setGroupFilter(groupFilter === g.id ? '' : g.id)}
+                  className={`rounded-full px-2 py-0.5 text-[10px] ${groupFilter === g.id ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}>
+                  {g.name}{g.count ? ` ${g.count}` : ''}
+                </button>
+              ))}
+              <button onClick={createGroup} title="New group"
+                className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300">+ group</button>
             </div>
             <div className="flex items-center gap-1.5 border-b border-zinc-800 px-3 py-2">
               <Search className="h-3.5 w-3.5 text-zinc-600" />
@@ -357,8 +430,11 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
             </div>
           </div>
 
+          {/* Draggable divider */}
+          <div onMouseDown={startDrag} title="Drag to resize"
+            className="w-1 shrink-0 cursor-col-resize bg-zinc-800 hover:bg-sky-600/60" />
           {/* Messages */}
-          <div className="flex w-3/5 flex-col overflow-auto">
+          <div className="flex flex-1 flex-col overflow-auto">
             {!selected ? (
               <div className="flex h-full items-center justify-center text-xs text-zinc-600">Select a topic to see its messages.</div>
             ) : (
@@ -388,6 +464,21 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                     ))}
                   </div>
                 )}
+                {/* Group assignment — click to add/remove this topic from a group */}
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-zinc-500">Groups:</span>
+                  {groups.length === 0 && <span className="text-[10px] text-zinc-600">none yet</span>}
+                  {groups.map((g) => {
+                    const on = (selected.groups || []).some((x) => x.id === g.id)
+                    return (
+                      <button key={g.id} onClick={() => toggleTopicGroup(g.id)}
+                        className={`rounded-full px-2 py-0.5 text-[10px] ${on ? 'bg-sky-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}>
+                        {on ? '✓ ' : ''}{g.name}
+                      </button>
+                    )
+                  })}
+                  <button onClick={createGroup} className="rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300">+ group</button>
+                </div>
                 <div className="mt-1 border-t border-zinc-800 pt-2">
                   {loadingTopic ? (
                     <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />

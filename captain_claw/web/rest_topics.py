@@ -27,12 +27,51 @@ async def list_topics(server: "WebServer", request: web.Request) -> web.Response
     mgr = get_topics_manager()
     q = (request.query.get("q") or "").strip()
     order = (request.query.get("order") or "recent").strip()
+    group = (request.query.get("group") or "").strip()
     try:
         limit = int(request.query.get("limit") or 300)
     except (ValueError, TypeError):
         limit = 300
-    topics = mgr.search_topics(q, limit=limit, order=order) if q else mgr.list_topics(limit=limit, order=order)
+    if q:
+        topics = mgr.search_topics(q, limit=limit, order=order)
+    else:
+        topics = mgr.list_topics(limit=limit, order=order, group=group)
     return web.json_response({"topics": topics, "total": len(topics)})
+
+
+async def list_groups(server: "WebServer", request: web.Request) -> web.Response:
+    """GET /api/topics/groups — all groups with member counts."""
+    return web.json_response({"groups": get_topics_manager().list_groups()})
+
+
+async def create_group(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/groups — create a group. Body: {name}."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    g = get_topics_manager().create_group(str((body or {}).get("name") or ""))
+    if not g:
+        return web.json_response({"error": "name required"}, status=400)
+    return web.json_response({"ok": True, "group": g})
+
+
+async def delete_group(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/groups/{group_id}/delete — remove a group (not its topics)."""
+    ok = get_topics_manager().delete_group(request.match_info.get("group_id", ""))
+    return web.json_response({"ok": ok})
+
+
+async def set_topic_groups(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/{topic_id}/groups — set a topic's groups. Body: {group_ids}."""
+    topic_id = request.match_info.get("topic_id", "")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    gids = [str(g) for g in ((body or {}).get("group_ids") or [])]
+    groups = get_topics_manager().set_topic_groups(topic_id, gids)
+    return web.json_response({"ok": True, "groups": groups})
 
 
 async def get_topic(server: "WebServer", request: web.Request) -> web.Response:

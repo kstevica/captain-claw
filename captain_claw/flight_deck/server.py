@@ -3788,12 +3788,53 @@ async def agent_cron_delete(
 @app.get("/fd/agent-topics/{host}/{port}")
 async def agent_topics(
     host: str, port: int, token: str = "", q: str = "", limit: int = 300, order: str = "recent",
-    user: dict | None = _required_user_dep,
+    group: str = "", user: dict | None = _required_user_dep,
 ):
     query: dict = {"limit": limit, "order": order}
     if q:
         query["q"] = q
+    if group:
+        query["group"] = group
     return await _proxy_agent_intentions("GET", host, port, token, "/api/topics", query=query)
+
+
+@app.get("/fd/agent-topic-groups/{host}/{port}")
+async def agent_topic_groups(host: str, port: int, token: str = "", user: dict | None = _required_user_dep):
+    return await _proxy_agent_intentions("GET", host, port, token, "/api/topics/groups")
+
+
+@app.post("/fd/agent-topic-groups/{host}/{port}")
+async def agent_topic_group_create(
+    host: str, port: int, request: Request, token: str = "", user: dict | None = _required_user_dep,
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _proxy_agent_intentions("POST", host, port, token, "/api/topics/groups", body=body)
+
+
+@app.post("/fd/agent-topic-group-delete/{host}/{port}/{group_id}")
+async def agent_topic_group_delete(
+    host: str, port: int, group_id: str, token: str = "", user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, f"/api/topics/groups/{group_id}/delete"
+    )
+
+
+@app.post("/fd/agent-topic-set-groups/{host}/{port}/{topic_id}")
+async def agent_topic_set_groups(
+    host: str, port: int, topic_id: str, request: Request, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, f"/api/topics/{topic_id}/groups", body=body
+    )
 
 
 @app.post("/fd/agent-topic-star/{host}/{port}/{topic_id}")
