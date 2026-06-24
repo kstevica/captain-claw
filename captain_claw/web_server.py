@@ -1238,6 +1238,10 @@ class WebServer:
         from captain_claw.web.rest_topics import combine
         return await combine(self, request)
 
+    async def _topics_reset(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import reset
+        return await reset(self, request)
+
     async def _inbound_queue_consumer(self) -> None:
         """Drain inbound peer messages one-at-a-time, only when the agent is free.
 
@@ -2503,6 +2507,7 @@ class WebServer:
         app.router.add_get("/api/topics", self._topics_list)
         app.router.add_post("/api/topics/backfill", self._topics_backfill)
         app.router.add_post("/api/topics/combine", self._topics_combine)
+        app.router.add_post("/api/topics/reset", self._topics_reset)
         app.router.add_post("/api/topics/{topic_id}/refresh", self._topics_refresh)
         app.router.add_get("/api/topics/{topic_id}", self._topics_get)
         app.router.add_post("/api/file/upload", self._file_upload)

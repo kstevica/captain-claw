@@ -232,6 +232,21 @@ class ConversationTopicsManager:
             ).fetchall()
         return {r[0] for r in rows}
 
+    def reset_all(self) -> dict[str, int]:
+        """Wipe all topics, their messages, and the backfill-progress markers — a
+        clean slate so a fresh backfill reconsiders every message. (The earlier
+        broken runs marked messages 'seen' without ever classifying them; this
+        clears that.)"""
+        with self._lock:
+            conn = self._c()
+            n = conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+            conn.executescript(
+                "DELETE FROM topics; DELETE FROM topic_messages;"
+                " DELETE FROM topics_fts; DELETE FROM backfill_seen;"
+            )
+            conn.commit()
+        return {"cleared_topics": int(n)}
+
     def seen_msg_ids(self) -> set[str]:
         """Message ids the backfill has already attempted (stored or skipped)."""
         with self._lock:

@@ -75,6 +75,11 @@ async def refresh(server: "WebServer", request: web.Request) -> web.Response:
     return web.json_response(refresh_topic(server.agent, topic_id))
 
 
+async def reset(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/reset — wipe all topics + backfill progress (clean slate)."""
+    return web.json_response({"ok": True, **get_topics_manager().reset_all()})
+
+
 async def combine(server: "WebServer", request: web.Request) -> web.Response:
     """POST /api/topics/combine — merge sources into a target. Body:
     {target_id, source_ids: [...]}."""

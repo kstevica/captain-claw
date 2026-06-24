@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine } from 'lucide-react'
+import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
@@ -139,6 +139,25 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     }
   }
 
+  const runReset = async () => {
+    if (!window.confirm('Clear ALL topics and their messages and start fresh? Backfill progress is reset too, so Generate will reconsider every message.')) return
+    setBackfilling(true); setNote('')
+    try {
+      const qp = new URLSearchParams()
+      if (auth) qp.set('token', auth)
+      const r = await fdFetch<{ cleared_topics: number }>(
+        `/agent-topics-reset/${host}/${port}?${qp.toString()}`, { method: 'POST' },
+      )
+      setSelected(null); setSel(new Set())
+      setNote(`Reset — cleared ${r.cleared_topics} topic(s). Click Generate to rebuild.`)
+      await refresh()
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBackfilling(false)
+    }
+  }
+
   const toggleSel = (id: string) => setSel((prev) => {
     const next = new Set(prev)
     if (next.has(id)) next.delete(id); else next.add(id)
@@ -246,6 +265,10 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
             className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40">
             {backfilling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
             Generate
+          </button>
+          <button onClick={runReset} disabled={backfilling} title="Clear all topics and backfill progress, then rebuild"
+            className="flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-rose-950/40 hover:text-rose-300 disabled:opacity-40">
+            <Trash2 className="h-3.5 w-3.5" /> Reset
           </button>
           {note && <span className="text-[11px] text-zinc-400">{note}</span>}
         </div>

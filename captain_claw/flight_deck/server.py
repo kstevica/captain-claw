@@ -3826,6 +3826,13 @@ async def agent_topic_refresh(
     )
 
 
+@app.post("/fd/agent-topics-reset/{host}/{port}")
+async def agent_topics_reset(
+    host: str, port: int, token: str = "", user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions("POST", host, port, token, "/api/topics/reset")
+
+
 @app.post("/fd/agent-topics-combine/{host}/{port}")
 async def agent_topics_combine(
     host: str, port: int, request: Request, token: str = "",
