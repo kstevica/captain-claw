@@ -400,7 +400,9 @@ _SYSTEM_PROMPT = (
     'existing summary if given), "keywords": [up to 6 lowercase tags], '
     '"messages": [the integer indices from the NEW batch that belong here]}\n\n'
     "Keep topics broad enough to be reusable (aim for a handful, not one per "
-    "message). Output ONLY the JSON array — start with '[' and end with ']'."
+    "message). Keep any internal thinking MINIMAL — do not deliberate message by "
+    "message; decide quickly and spend your output on the JSON, not on reasoning. "
+    "Output ONLY the JSON array as your final answer — start with '[' and end with ']'."
 )
 
 
@@ -508,7 +510,7 @@ async def _classify_and_store(agent: Any, items: list[dict[str, Any]]) -> int:
         ],
         tools=None,
         interaction_label="conversation_topics",
-        max_tokens=min(2000, int(get_config().model.max_tokens)),
+        max_tokens=min(int(tc.classify_max_tokens), int(get_config().model.max_tokens)),
     )
     raw = (response.content or "").strip()
     groups = _parse_groups(raw)

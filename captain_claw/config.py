@@ -775,7 +775,9 @@ class ConversationTopicsConfig(BaseModel):
     enabled: bool = True
     interval_messages: int = 15          # classify every N new comms messages
     cooldown_seconds: int = 120          # min gap between classification passes
-    max_messages_per_pass: int = 40      # cap the window fed to the classifier
+    max_messages_per_pass: int = 15      # messages per classify call (small: reasoning
+                                         # models burn budget on long batches → no JSON)
+    classify_max_tokens: int = 8000      # output budget; must cover reasoning + the JSON
     max_topics: int = 300                # prune oldest beyond this
     excerpts_per_topic: int = 40         # message excerpts kept per topic
     include_narration: bool = True
