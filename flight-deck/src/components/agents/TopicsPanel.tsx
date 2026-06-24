@@ -110,16 +110,25 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
 
   const runBackfill = async () => {
     setBackfilling(true); setNote('')
+    // Each call classifies one batch and reports `remaining`; keep going until
+    // the backlog is drained (capped so a bug can't loop forever).
+    let total = 0
     try {
-      const qp = new URLSearchParams()
-      if (auth) qp.set('token', auth)
-      qp.set('hours', String(hours))
-      const r = await fdFetch<{ classified: number; topics_touched: number; remaining: number }>(
-        `/agent-topics-backfill/${host}/${port}?${qp.toString()}`, { method: 'POST' },
-      )
-      setNote(`Classified ${r.classified} message(s) into ${r.topics_touched} topic update(s)` +
-        (r.remaining ? ` · ${r.remaining} left (run again)` : ''))
-      await refresh()
+      for (let i = 0; i < 100; i++) {
+        const qp = new URLSearchParams()
+        if (auth) qp.set('token', auth)
+        qp.set('hours', String(hours))
+        const r = await fdFetch<{ ok?: boolean; error?: string; classified: number; topics_touched: number; remaining: number }>(
+          `/agent-topics-backfill/${host}/${port}?${qp.toString()}`, { method: 'POST' },
+        )
+        if (r.error) { setNote(r.error); break }
+        total += r.classified
+        setNote(r.remaining
+          ? `Classifying… ${total} done, ${r.remaining} left`
+          : `Done — classified ${total} message(s) into topics`)
+        await refresh()
+        if (!r.remaining || r.classified === 0) break
+      }
     } catch (e) {
       setNote(e instanceof Error ? e.message : String(e))
     } finally {

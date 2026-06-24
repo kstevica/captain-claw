@@ -489,7 +489,7 @@ async def _classify_and_store(agent: Any, items: list[dict[str, Any]]) -> int:
         ],
         tools=None,
         interaction_label="conversation_topics",
-        max_tokens=min(1200, int(get_config().model.max_tokens)),
+        max_tokens=min(2000, int(get_config().model.max_tokens)),
     )
     groups = _parse_groups((response.content or "").strip())
     touched = 0
@@ -564,19 +564,22 @@ async def backfill_topics(agent: Any, hours: int = 0) -> dict[str, Any]:
     if not pending:
         return {"ok": True, "classified": 0, "topics_touched": 0, "remaining": 0}
 
+    # Process ONE batch per call and report how many are left. One LLM call per
+    # request keeps each round well under the FD→agent proxy timeout; the UI
+    # auto-continues until remaining hits 0. (Looping all batches server-side
+    # blew past the 15s proxy timeout on "All history".)
     batch = max(5, int(tc.max_messages_per_pass))
-    classified = touched = 0
-    for start in range(0, len(pending), batch):
-        chunk = pending[start:start + batch]
-        try:
-            touched += await _classify_and_store(agent, chunk)
-            classified += len(chunk)
-        except Exception as exc:
-            log.warning("topic backfill chunk failed: %s", exc)
-            break
-    log.info("topic backfill: classified %d message(s) into %d topic touch(es)", classified, touched)
-    return {"ok": True, "classified": classified, "topics_touched": touched,
-            "remaining": max(0, len(pending) - classified)}
+    chunk = pending[:batch]
+    try:
+        touched = await _classify_and_store(agent, chunk)
+    except Exception as exc:
+        log.warning("topic backfill classify failed: %s", exc)
+        return {"ok": False, "error": f"classification failed: {exc}"[:300],
+                "classified": 0, "topics_touched": 0, "remaining": len(pending)}
+    remaining = max(0, len(pending) - len(chunk))
+    log.info("topic backfill: classified %d message(s) into %d topic touch(es), %d remaining",
+             len(chunk), touched, remaining)
+    return {"ok": True, "classified": len(chunk), "topics_touched": touched, "remaining": remaining}
 
 
 def _parse_groups(text: str) -> list[dict[str, Any]]:

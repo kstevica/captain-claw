@@ -3642,7 +3642,7 @@ async def agent_files(host: str, port: int, token: str = "", since: str = "", re
 
 async def _proxy_agent_intentions(
     method: str, host: str, port: int, token: str, path: str,
-    *, query: dict | None = None, body: dict | None = None,
+    *, query: dict | None = None, body: dict | None = None, timeout: float = 15.0,
 ):
     """Forward an intentions request to an agent, preserving its status code."""
     import httpx
@@ -3654,7 +3654,7 @@ async def _proxy_agent_intentions(
         params["token"] = auth
     url = f"http://{host}:{port}{path}"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.request(method, url, params=params, json=body)
     except httpx.ConnectError:
         raise HTTPException(502, "Cannot connect to agent")
@@ -3812,7 +3812,7 @@ async def agent_topics_backfill(
     user: dict | None = _required_user_dep,
 ):
     return await _proxy_agent_intentions(
-        "POST", host, port, token, "/api/topics/backfill", body={"hours": hours}
+        "POST", host, port, token, "/api/topics/backfill", body={"hours": hours}, timeout=120.0
     )
 
 
@@ -3822,7 +3822,7 @@ async def agent_topic_refresh(
     user: dict | None = _required_user_dep,
 ):
     return await _proxy_agent_intentions(
-        "POST", host, port, token, f"/api/topics/{topic_id}/refresh"
+        "POST", host, port, token, f"/api/topics/{topic_id}/refresh", timeout=60.0
     )
 
 
