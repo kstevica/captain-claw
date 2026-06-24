@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2, Star } from 'lucide-react'
+import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2, Star, Settings } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
@@ -81,6 +81,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
   const [backfilling, setBackfilling] = useState(false)
   const [note, setNote] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
+  const [actionsOpen, setActionsOpen] = useState(false)
   const [listWidth, setListWidth] = useState<number>(() => {
     const v = Number(localStorage.getItem('fd:topics-list-width'))
     return v >= 15 && v <= 85 ? v : 40
@@ -333,14 +334,25 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
           : { width: '80vw', maxWidth: '1000px', height: '78vh', borderRadius: '0.75rem' }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-3.5 shrink-0">
-          <div className="flex items-center gap-2">
-            <Tags className="h-4 w-4 text-sky-400" />
-            <span className="text-sm font-semibold text-zinc-100">Topics</span>
-            <span className="text-xs text-zinc-500">· {agentName}</span>
+        {/* Header — actions moved behind the gear; status surfaces here */}
+        <div className="relative flex items-center justify-between border-b border-zinc-800 px-5 py-3.5 shrink-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <Tags className="h-4 w-4 shrink-0 text-sky-400" />
+            <span className="shrink-0 text-sm font-semibold text-zinc-100">Topics</span>
+            <span className="shrink-0 text-xs text-zinc-500">· {agentName}</span>
+            {(backfilling || note) && (
+              <span className="flex min-w-0 items-center gap-1.5 truncate text-[11px] text-zinc-400">
+                <span className="text-zinc-600">·</span>
+                {backfilling && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-sky-400" />}
+                <span className="truncate">{note || 'Working…'}</span>
+              </span>
+            )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
+            <button onClick={() => setActionsOpen((v) => !v)} title="Generate / Reset"
+              className={`rounded-md p-1 hover:bg-zinc-800 hover:text-zinc-200 ${actionsOpen ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400'}`}>
+              <Settings className="h-4 w-4" />
+            </button>
             <button onClick={refresh} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" title="Refresh">
               <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
@@ -351,26 +363,32 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
               <X className="h-4 w-4" />
             </button>
           </div>
-        </div>
-
-        {/* Backfill bar */}
-        <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-5 py-2.5 shrink-0">
-          <Sparkles className="h-3.5 w-3.5 text-zinc-500" />
-          <span className="text-[11px] text-zinc-500">Generate topics for untagged messages:</span>
-          <select value={hours} onChange={(e) => setHours(Number(e.target.value))}
-            className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200">
-            {BACKFILL_WINDOWS.map((w) => <option key={w.hours} value={w.hours}>{w.label}</option>)}
-          </select>
-          <button onClick={runBackfill} disabled={backfilling}
-            className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40">
-            {backfilling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-            Generate
-          </button>
-          <button onClick={runReset} disabled={backfilling} title="Clear all topics and backfill progress, then rebuild"
-            className="flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-rose-950/40 hover:text-rose-300 disabled:opacity-40">
-            <Trash2 className="h-3.5 w-3.5" /> Reset
-          </button>
-          {note && <span className="text-[11px] text-zinc-400">{note}</span>}
+          {/* Actions popover — anchored under the gear */}
+          {actionsOpen && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setActionsOpen(false)} />
+              <div className="absolute right-5 top-full z-20 mt-1 w-72 rounded-lg border border-zinc-700 bg-zinc-900 p-3 shadow-2xl">
+                <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                  <Sparkles className="h-3 w-3" /> Generate / Reset
+                </div>
+                <label className="mb-1 block text-[11px] text-zinc-400">Window for untagged messages</label>
+                <select value={hours} onChange={(e) => setHours(Number(e.target.value))}
+                  className="mb-2 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200">
+                  {BACKFILL_WINDOWS.map((w) => <option key={w.hours} value={w.hours}>{w.label}</option>)}
+                </select>
+                <button onClick={() => { setActionsOpen(false); runBackfill() }} disabled={backfilling}
+                  className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40">
+                  {backfilling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                  Generate
+                </button>
+                <button onClick={() => { setActionsOpen(false); runReset() }} disabled={backfilling}
+                  title={sel.size ? `Clear all EXCEPT the ${sel.size} selected topic(s)` : 'Clear all topics + backfill progress'}
+                  className="flex w-full items-center justify-center gap-1 rounded-lg border border-zinc-700 px-3 py-1.5 text-[11px] text-zinc-300 hover:bg-rose-950/40 hover:text-rose-300 disabled:opacity-40">
+                  <Trash2 className="h-3.5 w-3.5" /> Reset{sel.size ? ` (keep ${sel.size})` : ''}
+                </button>
+              </div>
+            </>
+          )}
         </div>
 
         {error && (
