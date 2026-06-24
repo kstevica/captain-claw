@@ -118,7 +118,11 @@ async def refresh(server: "WebServer", request: web.Request) -> web.Response:
 
 async def append_turn(server: "WebServer", request: web.Request) -> web.Response:
     """POST /api/topics/{topic_id}/append — persist a chat turn (user + agent
-    messages) into a topic. Body: {messages: [{role, content}]}."""
+    messages) into a topic. Body: {messages: [{role, content}]}.
+
+    Uses the REAL agent session msg_ids for this turn whenever we can match
+    them, so the periodic classifier later dedups against these entries instead
+    of duplicating the same content under a fresh msg_id."""
     import time as _time
     from captain_claw.conversation_topics import _utcnow
     topic_id = request.match_info.get("topic_id", "")
@@ -126,6 +130,22 @@ async def append_turn(server: "WebServer", request: web.Request) -> web.Response
         body = await request.json()
     except Exception:
         body = {}
+    # Find the just-finished turn's real session msg_ids (latest user + latest
+    # assistant). We're called from finishTurn() immediately after the agent
+    # commits its reply, so the tail of the session IS this turn.
+    sess_msgs = []
+    if server.agent and server.agent.session:
+        sess_msgs = server.agent.session.messages or []
+    real_user_id = ""
+    real_agent_id = ""
+    for m in reversed(sess_msgs):
+        if not real_agent_id and m.get("role") == "assistant" and str(m.get("content") or "").strip():
+            real_agent_id = str(m.get("message_id") or "")
+        elif not real_user_id and m.get("role") == "user":
+            real_user_id = str(m.get("message_id") or "")
+        if real_user_id and real_agent_id:
+            break
+
     base = int(_time.time() * 1000)
     items = []
     for i, m in enumerate((body or {}).get("messages") or []):
@@ -133,8 +153,11 @@ async def append_turn(server: "WebServer", request: web.Request) -> web.Response
         if not content:
             continue
         role = "user" if (m or {}).get("role") == "user" else "agent"
+        # Prefer the real session msg_id (dedups with the periodic classifier);
+        # fall back to a synthetic id only when the session doesn't have it yet.
+        mid = (real_user_id if role == "user" else real_agent_id) or f"chat-{base}-{i}"
         items.append({"role": role, "channel": "chat", "excerpt": content,
-                      "msg_id": f"chat-{base}-{i}", "ts": _utcnow()})
+                      "msg_id": mid, "ts": _utcnow()})
     if not items:
         return web.json_response({"ok": True, "added": 0})
     mgr = get_topics_manager()

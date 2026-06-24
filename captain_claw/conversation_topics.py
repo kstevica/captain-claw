@@ -558,10 +558,17 @@ _SYSTEM_PROMPT = (
 
 def _collect_new_messages(agent: Any, last_idx: int, cap: int) -> tuple[list[dict[str, Any]], int]:
     """Comms messages (user + assistant) since ``last_idx`` + buffered narration.
-    Returns (items, new_last_idx)."""
+    Returns (items, new_last_idx). Skips messages already classified into a topic
+    (mirrors the backfill behaviour) so an agent restart — which resets last_idx
+    to 0 in memory — doesn't re-classify the whole session and duplicate topics."""
     items: list[dict[str, Any]] = []
     msgs = agent.session.messages if agent.session else []
     new_idx = len(msgs)
+    try:
+        _mgr = get_topics_manager()
+        done_ids = _mgr.classified_msg_ids() | _mgr.seen_msg_ids()
+    except Exception:
+        done_ids = set()
     for m in msgs[last_idx:]:
         role = m.get("role")
         if role not in ("user", "assistant"):
@@ -569,11 +576,14 @@ def _collect_new_messages(agent: Any, last_idx: int, cap: int) -> tuple[list[dic
         content = str(m.get("content") or "").strip()
         if not content:
             continue
+        mid = str(m.get("message_id") or "")
+        if mid and mid in done_ids:
+            continue  # already classified into a topic — don't duplicate
         items.append({
             "role": "user" if role == "user" else "agent",
             "channel": str((m.get("metadata") or {}).get("channel") or "") if isinstance(m.get("metadata"), dict) else "",
             "excerpt": content[:_MAX_EXCERPT_CHARS],
-            "msg_id": str(m.get("message_id") or ""),
+            "msg_id": mid,
             "ts": str(m.get("timestamp") or _utcnow()),
         })
     # Narration buffered this window (cleared after).
