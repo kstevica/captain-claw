@@ -9,7 +9,11 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
-from captain_claw.conversation_topics import backfill_topics, get_topics_manager
+from captain_claw.conversation_topics import (
+    backfill_topics,
+    get_topics_manager,
+    refresh_topic,
+)
 from captain_claw.logging import get_logger
 
 if TYPE_CHECKING:
@@ -60,3 +64,29 @@ async def backfill(server: "WebServer", request: web.Request) -> web.Response:
         hours = 0
     result = await backfill_topics(server.agent, hours=hours)
     return web.json_response(result)
+
+
+async def refresh(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/{topic_id}/refresh — re-pull full message text from the
+    live session into this topic's stored excerpts."""
+    if not server.agent or not server.agent.session:
+        return web.json_response({"error": "no active session"}, status=503)
+    topic_id = request.match_info.get("topic_id", "")
+    return web.json_response(refresh_topic(server.agent, topic_id))
+
+
+async def combine(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/combine — merge sources into a target. Body:
+    {target_id, source_ids: [...]}."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    target_id = str((body or {}).get("target_id") or "").strip()
+    source_ids = [str(s).strip() for s in ((body or {}).get("source_ids") or []) if str(s).strip()]
+    if not target_id or not source_ids:
+        return web.json_response({"error": "target_id and source_ids are required"}, status=400)
+    merged = get_topics_manager().combine_topics(target_id, source_ids)
+    if not merged:
+        return web.json_response({"error": "target topic not found"}, status=404)
+    return web.json_response({"ok": True, "topic": merged})

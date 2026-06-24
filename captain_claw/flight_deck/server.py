@@ -3816,6 +3816,30 @@ async def agent_topics_backfill(
     )
 
 
+@app.post("/fd/agent-topic-refresh/{host}/{port}/{topic_id}")
+async def agent_topic_refresh(
+    host: str, port: int, topic_id: str, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, f"/api/topics/{topic_id}/refresh"
+    )
+
+
+@app.post("/fd/agent-topics-combine/{host}/{port}")
+async def agent_topics_combine(
+    host: str, port: int, request: Request, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, "/api/topics/combine", body=body
+    )
+
+
 class TransferRequest(BaseModel):
     src_host: str
     src_port: int

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download } from 'lucide-react'
+import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
@@ -73,6 +73,9 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
   const [backfilling, setBackfilling] = useState(false)
   const [note, setNote] = useState('')
   const [fullscreen, setFullscreen] = useState(false)
+  const [sel, setSel] = useState<Set<string>>(new Set())
+  const [combining, setCombining] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
 
   const tokenQs = auth ? `?token=${encodeURIComponent(auth)}` : ''
 
@@ -121,6 +124,52 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
       setNote(e instanceof Error ? e.message : String(e))
     } finally {
       setBackfilling(false)
+    }
+  }
+
+  const toggleSel = (id: string) => setSel((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+
+  const runRefresh = async () => {
+    if (!selected) return
+    setRefreshing(true)
+    try {
+      await fdFetch(`/agent-topic-refresh/${host}/${port}/${encodeURIComponent(selected.id)}${tokenQs}`, { method: 'POST' })
+      const data = await fdFetch<{ topic: Topic }>(`/agent-topic/${host}/${port}/${encodeURIComponent(selected.id)}${tokenQs}`)
+      setSelected(data.topic)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  // Merge selected topics into the first (most-recent) one.
+  const combineTargets = topics.filter((t) => sel.has(t.id))
+  const runCombine = async () => {
+    if (combineTargets.length < 2) return
+    const target = combineTargets[0]
+    const sources = combineTargets.slice(1).map((t) => t.id)
+    setCombining(true); setNote('')
+    try {
+      const qp = new URLSearchParams()
+      if (auth) qp.set('token', auth)
+      await fdFetch(`/agent-topics-combine/${host}/${port}?${qp.toString()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: target.id, source_ids: sources }),
+      })
+      setNote(`Combined ${sources.length + 1} topics into "${target.label}"`)
+      setSel(new Set())
+      if (selected && sources.includes(selected.id)) setSelected(null)
+      await refresh()
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCombining(false)
     }
   }
 
@@ -206,6 +255,17 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                 className="w-full bg-transparent text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none"
               />
             </div>
+            {combineTargets.length >= 2 && (
+              <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-800/40 px-3 py-1.5">
+                <span className="text-[11px] text-zinc-400">{combineTargets.length} selected</span>
+                <button onClick={runCombine} disabled={combining}
+                  className="flex items-center gap-1 rounded-md bg-sky-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-sky-500 disabled:opacity-40">
+                  {combining ? <Loader2 className="h-3 w-3 animate-spin" /> : <Combine className="h-3 w-3" />}
+                  Combine → “{combineTargets[0].label}”
+                </button>
+                <button onClick={() => setSel(new Set())} className="ml-auto text-[10px] text-zinc-500 hover:text-zinc-300">clear</button>
+              </div>
+            )}
             <div className="flex-1 overflow-auto">
               {loading ? (
                 <div className="p-4 text-center text-xs text-zinc-500"><Loader2 className="mx-auto h-4 w-4 animate-spin" /></div>
@@ -213,15 +273,20 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                 <div className="p-4 text-center text-xs text-zinc-600">No topics yet. Chat a while, or run Generate above.</div>
               ) : (
                 topics.map((t) => (
-                  <button key={t.id} onClick={() => openTopic(t)}
-                    className={`block w-full border-b border-zinc-800/50 px-3 py-2 text-left hover:bg-zinc-800/50 ${selected?.id === t.id ? 'bg-zinc-800/70' : ''}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-xs font-medium text-zinc-100">{t.label}</span>
-                      <span className="shrink-0 text-[10px] text-zinc-600">{relTime(t.last_seen)}</span>
-                    </div>
-                    <div className="truncate text-[11px] text-zinc-500">{t.summary}</div>
-                    {!!t.msg_count && <div className="text-[10px] text-zinc-600">{t.msg_count} msgs</div>}
-                  </button>
+                  <div key={t.id}
+                    className={`flex items-center gap-1.5 border-b border-zinc-800/50 hover:bg-zinc-800/50 ${selected?.id === t.id ? 'bg-zinc-800/70' : ''}`}>
+                    <input type="checkbox" checked={sel.has(t.id)} onChange={() => toggleSel(t.id)}
+                      title="select to combine"
+                      className="ml-2 shrink-0 rounded border-zinc-700 bg-zinc-950 accent-sky-600" />
+                    <button onClick={() => openTopic(t)} className="min-w-0 flex-1 px-2 py-2 text-left">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-xs font-medium text-zinc-100">{t.label}</span>
+                        <span className="shrink-0 text-[10px] text-zinc-600">{relTime(t.last_seen)}</span>
+                      </div>
+                      <div className="truncate text-[11px] text-zinc-500">{t.summary}</div>
+                      {!!t.msg_count && <div className="text-[10px] text-zinc-600">{t.msg_count} msgs</div>}
+                    </button>
+                  </div>
                 ))
               )}
             </div>
@@ -235,10 +300,16 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
               <div className="flex flex-col gap-2 p-4">
                 <div className="flex items-start justify-between gap-2">
                   <div className="text-sm font-semibold text-zinc-100">{selected.label}</div>
-                  <button onClick={exportMd} title="Export this conversation as Markdown"
-                    className="flex shrink-0 items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">
-                    <Download className="h-3.5 w-3.5" /> .md
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <button onClick={runRefresh} disabled={refreshing} title="Re-pull full message text from the live session"
+                      className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
+                      {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Refresh
+                    </button>
+                    <button onClick={exportMd} title="Export this conversation as Markdown"
+                      className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">
+                      <Download className="h-3.5 w-3.5" /> .md
+                    </button>
+                  </div>
                 </div>
                 {selected.summary && (
                   <div className="fd-markdown text-xs text-zinc-400">

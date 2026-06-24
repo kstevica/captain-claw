@@ -228,6 +228,87 @@ class ConversationTopicsManager:
             ).fetchall()
         return {r[0] for r in rows}
 
+    def refresh_excerpts(self, topic_id: str, session_map: dict[str, str]) -> int:
+        """Re-sync a topic's stored excerpts to the full session text, by msg_id.
+        Fixes topics whose excerpts were captured under an older, smaller cap."""
+        updated = 0
+        with self._lock:
+            conn = self._c()
+            # accept either the stored id or a label (→ slug)
+            rows = conn.execute(
+                "SELECT id, msg_id FROM topic_messages WHERE topic_id = ?", (topic_id,)
+            ).fetchall()
+            if not rows:
+                rows = conn.execute(
+                    "SELECT id, msg_id FROM topic_messages WHERE topic_id = ?", (_slug(topic_id),)
+                ).fetchall()
+            for r in rows:
+                mid = r["msg_id"]
+                if mid and mid in session_map:
+                    conn.execute(
+                        "UPDATE topic_messages SET excerpt = ? WHERE id = ?",
+                        (session_map[mid][:_MAX_EXCERPT_CHARS], r["id"]),
+                    )
+                    updated += 1
+            conn.commit()
+        return updated
+
+    def combine_topics(self, target_id: str, source_ids: list[str]) -> dict[str, Any] | None:
+        """Merge ``source_ids`` into ``target_id``: re-point their messages (dedup
+        by msg_id), merge keywords + summaries, delete the sources. Returns the
+        merged topic (with messages)."""
+        target_id = _slug(target_id)
+        now = _utcnow()
+        with self._lock:
+            conn = self._c()
+            tgt = conn.execute("SELECT * FROM topics WHERE id = ?", (target_id,)).fetchone()
+            if not tgt:
+                return None
+            seen = {r["msg_id"] for r in conn.execute(
+                "SELECT msg_id FROM topic_messages WHERE topic_id = ? AND msg_id != ''", (target_id,)
+            ).fetchall()}
+            kw = [k for k in (tgt["keywords"] or "").split(",") if k]
+            summary = tgt["summary"] or ""
+            for raw_sid in source_ids:
+                sid = _slug(raw_sid)
+                if sid == target_id:
+                    continue
+                src = conn.execute("SELECT * FROM topics WHERE id = ?", (sid,)).fetchone()
+                if not src:
+                    continue
+                for sm in conn.execute(
+                    "SELECT id, msg_id FROM topic_messages WHERE topic_id = ?", (sid,)
+                ).fetchall():
+                    if sm["msg_id"] and sm["msg_id"] in seen:
+                        conn.execute("DELETE FROM topic_messages WHERE id = ?", (sm["id"],))  # dup
+                    else:
+                        conn.execute("UPDATE topic_messages SET topic_id = ? WHERE id = ?", (target_id, sm["id"]))
+                        if sm["msg_id"]:
+                            seen.add(sm["msg_id"])
+                for k in (src["keywords"] or "").split(","):
+                    if k and k not in kw:
+                        kw.append(k)
+                if src["summary"] and src["summary"] not in summary:
+                    summary = (summary + " " + src["summary"]).strip()
+                conn.execute("DELETE FROM topics WHERE id = ?", (sid,))
+                conn.execute("DELETE FROM topics_fts WHERE id = ?", (sid,))
+            cnt = conn.execute(
+                "SELECT COUNT(*) FROM topic_messages WHERE topic_id = ?", (target_id,)
+            ).fetchone()[0]
+            merged_kw = ",".join(kw[:12])
+            summary = summary[:1000]
+            conn.execute(
+                "UPDATE topics SET msg_count = ?, keywords = ?, summary = ?, last_seen = ? WHERE id = ?",
+                (cnt, merged_kw, summary, now, target_id),
+            )
+            conn.execute("DELETE FROM topics_fts WHERE id = ?", (target_id,))
+            conn.execute(
+                "INSERT INTO topics_fts (id, label, summary, keywords) VALUES (?, ?, ?, ?)",
+                (target_id, tgt["label"], summary, merged_kw),
+            )
+            conn.commit()
+        return self.get_topic(target_id, max_excerpts=200)
+
     def prune_topics(self, max_topics: int) -> int:
         """Drop the least-recently-seen topics beyond ``max_topics``."""
         with self._lock:
@@ -427,6 +508,22 @@ async def _classify_and_store(agent: Any, items: list[dict[str, Any]]) -> int:
         touched += 1
     mgr.prune_topics(tc.max_topics)
     return touched
+
+
+def refresh_topic(agent: Any, topic_id: str) -> dict[str, Any]:
+    """Re-pull the FULL text for a topic's messages from the live session (by
+    msg_id) and update the stored excerpts — fixes topics captured under an older
+    truncation cap. Messages no longer in the session keep their stored text."""
+    mgr = get_topics_manager()
+    session_map: dict[str, str] = {}
+    if agent.session and agent.session.messages:
+        for m in agent.session.messages:
+            mid = str(m.get("message_id") or "")
+            content = str(m.get("content") or "")
+            if mid and content:
+                session_map[mid] = content
+    updated = mgr.refresh_excerpts(topic_id, session_map)
+    return {"ok": True, "updated": updated}
 
 
 async def backfill_topics(agent: Any, hours: int = 0) -> dict[str, Any]:
