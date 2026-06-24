@@ -115,6 +115,32 @@ async def refresh(server: "WebServer", request: web.Request) -> web.Response:
     return web.json_response(refresh_topic(server.agent, topic_id))
 
 
+async def append_turn(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/{topic_id}/append — persist a chat turn (user + agent
+    messages) into a topic. Body: {messages: [{role, content}]}."""
+    import time as _time
+    from captain_claw.conversation_topics import _utcnow
+    topic_id = request.match_info.get("topic_id", "")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    base = int(_time.time() * 1000)
+    items = []
+    for i, m in enumerate((body or {}).get("messages") or []):
+        content = str((m or {}).get("content") or "").strip()
+        if not content:
+            continue
+        role = "user" if (m or {}).get("role") == "user" else "agent"
+        items.append({"role": role, "channel": "chat", "excerpt": content,
+                      "msg_id": f"chat-{base}-{i}", "ts": _utcnow()})
+    if not items:
+        return web.json_response({"ok": True, "added": 0})
+    mgr = get_topics_manager()
+    mgr.add_messages(topic_id, items, cap=500)  # chat turns: keep a long tail
+    return web.json_response({"ok": True, "added": len(items), "topic": mgr.get_topic(topic_id, max_excerpts=200)})
+
+
 async def star(server: "WebServer", request: web.Request) -> web.Response:
     """POST /api/topics/{topic_id}/star — pin/unpin a topic. Body: {starred: bool}."""
     topic_id = request.match_info.get("topic_id", "")

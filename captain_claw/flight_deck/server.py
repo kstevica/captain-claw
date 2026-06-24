@@ -3837,6 +3837,20 @@ async def agent_topic_set_groups(
     )
 
 
+@app.post("/fd/agent-topic-append/{host}/{port}/{topic_id}")
+async def agent_topic_append(
+    host: str, port: int, topic_id: str, request: Request, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, f"/api/topics/{topic_id}/append", body=body
+    )
+
+
 @app.post("/fd/agent-topic-star/{host}/{port}/{topic_id}")
 async def agent_topic_star(
     host: str, port: int, topic_id: str, request: Request, token: str = "",

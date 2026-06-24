@@ -3,6 +3,7 @@ import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
+import { TopicChat } from './TopicChat'
 
 interface TopicMsg { role: string; channel?: string; excerpt: string; ts: string }
 interface Group { id: string; name: string; count?: number }
@@ -498,6 +499,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                     ))
                   )}
                 </div>
+                <TopicChat host={host} port={port} auth={auth} topicId={selected.id} onPersisted={refresh} />
               </div>
             )}
           </div>
