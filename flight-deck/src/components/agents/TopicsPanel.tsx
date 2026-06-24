@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search } from 'lucide-react'
+import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download } from 'lucide-react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 
 interface TopicMsg { role: string; channel?: string; excerpt: string; ts: string }
@@ -70,6 +72,7 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
   const [hours, setHours] = useState(168)
   const [backfilling, setBackfilling] = useState(false)
   const [note, setNote] = useState('')
+  const [fullscreen, setFullscreen] = useState(false)
 
   const tokenQs = auth ? `?token=${encodeURIComponent(auth)}` : ''
 
@@ -121,11 +124,33 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     }
   }
 
+  const exportMd = () => {
+    if (!selected) return
+    const lines: string[] = [`# ${selected.label}`, '']
+    if (selected.summary) lines.push(selected.summary, '')
+    if (selected.keywords) lines.push(`**Tags:** ${selected.keywords.split(',').filter(Boolean).join(', ')}`, '')
+    lines.push(`_${agentName} · ${(selected.messages || []).length} messages_`, '', '---', '')
+    for (const m of selected.messages || []) {
+      lines.push(`### ${m.role}${m.ts ? ` · ${m.ts}` : ''}`, '', m.excerpt, '')
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `topic-${selected.id || 'conversation'}.md`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
-        className="flex flex-col rounded-xl border border-zinc-700/50 bg-zinc-900 shadow-2xl"
-        style={{ width: '80vw', maxWidth: '1000px', height: '78vh' }}
+        className="flex flex-col border border-zinc-700/50 bg-zinc-900 shadow-2xl"
+        style={fullscreen
+          ? { width: '100vw', height: '100vh', borderRadius: 0 }
+          : { width: '80vw', maxWidth: '1000px', height: '78vh', borderRadius: '0.75rem' }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -138,6 +163,9 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
           <div className="flex items-center gap-2">
             <button onClick={refresh} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" title="Refresh">
               <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+            <button onClick={() => setFullscreen((v) => !v)} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+              {fullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </button>
             <button onClick={onClose} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
               <X className="h-4 w-4" />
@@ -205,8 +233,18 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
               <div className="flex h-full items-center justify-center text-xs text-zinc-600">Select a topic to see its messages.</div>
             ) : (
               <div className="flex flex-col gap-2 p-4">
-                <div className="text-sm font-semibold text-zinc-100">{selected.label}</div>
-                {selected.summary && <div className="text-xs text-zinc-400">{selected.summary}</div>}
+                <div className="flex items-start justify-between gap-2">
+                  <div className="text-sm font-semibold text-zinc-100">{selected.label}</div>
+                  <button onClick={exportMd} title="Export this conversation as Markdown"
+                    className="flex shrink-0 items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800">
+                    <Download className="h-3.5 w-3.5" /> .md
+                  </button>
+                </div>
+                {selected.summary && (
+                  <div className="fd-markdown text-xs text-zinc-400">
+                    <Markdown remarkPlugins={[remarkGfm]}>{selected.summary}</Markdown>
+                  </div>
+                )}
                 {selected.keywords && (
                   <div className="flex flex-wrap gap-1">
                     {selected.keywords.split(',').filter(Boolean).map((k) => (
@@ -226,7 +264,9 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                           <span className={m.role === 'user' ? 'text-sky-400' : m.role === 'narration' ? 'text-zinc-500' : 'text-emerald-400'}>{m.role}</span>
                           <span>{relTime(m.ts)}</span>
                         </div>
-                        <div className="text-xs text-zinc-300">{m.excerpt}</div>
+                        <div className="fd-markdown text-xs text-zinc-300">
+                          <Markdown remarkPlugins={[remarkGfm]}>{m.excerpt}</Markdown>
+                        </div>
                       </div>
                     ))
                   )}
