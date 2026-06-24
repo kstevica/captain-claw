@@ -4270,6 +4270,75 @@ Basna (sidebar: **Basna**) is a **network-source ensemble** — a one-shot, sele
 
 Endpoints under `/fd/basna`: `route`, `execute`, session CRUD, `sessions/{id}/runs`, `sessions/{id}/progress`, `sessions/{id}/files` (upload/download/delete), `runs/{id}/feedback`, and the agent-identity `agent/*` set. Tables: `basna_sessions` (now with `title`), `basna_runs`, `archetype_reliability` (migrate in place).
 
+**Deepen (NEW in 0.6.1)** — a follow-up run that resolves a finished Basna's blind spots. Click **Investigate blind spots** on a completed run; FD spawns a fresh ensemble seeded with the prior synthesis as context (inline up to 16k chars; larger goes as a workspace file the agents read). The new run appears in the run list with a **deepened from / deepened into** lineage link, and shows **live per-agent panels** server-side. **Hard-stop** primitive + run-rate breaker (6 runs / 300s per owner) prevent runaways; the arbiter can also propose `stop_run` for stuck Basna or Council deliberations. A `/basna <task>` slash command works on **web, WhatsApp, and Telegram** (help text on no-arg); Croatian verb stems (`pokrenuti`, `izvršiti`) also trigger the deterministic relay. A Basna **worker** can never start another Basna (recursion forbidden — the `basna` tool is stripped from spawned workers and double-checked via env marker).
+
+### Autonomous Work (NEW in 0.6.1)
+
+The closed-loop autonomy page (sidebar: **Autonomous Work**) where the assistant **notices → decides → acts → judges → learns** on the user's behalf. Per-user, configurable, and ships under a `propose` ceiling — every action waits for human approval until a specific tool action earns auto-fire via the trust ladder.
+
+**Control tab**
+
+- **Master switch + autonomy level.** `off` / `propose` (default ceiling) / `act_low_risk` / `act`. The level is clamped to `max_autonomy_level` server-side, so you can't grant the loop more authority than the deployment allows.
+- **Arbiter dials.** Heartbeat trigger, daily action cap, concurrent action cap, quiet hours (UTC), candidate lookback. `arbiter_min_score` controls what the ranker needs to land in the ledger.
+- **Judge & learn.** `judge_mode` (auto LLM | human | both), per-kind reliability seed, suppression threshold (proposals stop landing once a kind's weight falls below `suppress_below_weight`).
+- **Trust ladder.** A reversible, low-risk `tool_action` auto-promotes to auto-fire once its learned reliability ≥ `trust_threshold` (default 0.85) over ≥ `trust_min_runs` (default 3). Demotes automatically when the weight falls back. Manual grant overrides this and skips the earning.
+- **Event sources.** Per-user toggles for the FD-side Google **Calendar** and **Gmail** pollers; an automated-sender filter drops no-reply / notification mail before it ever becomes a candidate. Event reconsideration: an event stays `new` until a pass actually produces an action (so a single whiffed beat doesn't drop it forever), bounded by `event_max_surface_attempts`.
+- **Soft-reminder follow-ups.** Beyond *act-now* and *drop*, the arbiter has a third outcome — **`track`** — for soft asks / "waiting on you" items. They land in a per-user follow-up list with a due date; when due, the loop nudges with **escalation** (3d → 2d → 1d) and retires to `stale` after enough nudges (`followup_max_nudges`).
+- **Nudge delivery.** A delivered nudge counts as success (don't LLM-judge nudges — that would suppress good ones). Nudges also fan out to the user's WhatsApp (configured `WHATSAPP_ALLOWED_WAIDS`) via `nudge_to_whatsapp`. A 30s dedup guard at the outbound chokepoint prevents the same reply being sent twice across native + push.
+- **Grounded verification.** After a catalog action runs, the side effect is read back (note → `read(path)`, calendar event → `get_event(id)`). Absent → fail; couldn't read → kept but flagged `[unverified]`. Trust never builds on phantom successes.
+
+**Tools & Sources tab** — promote the agent's own tools into the autonomous catalog and event spine.
+
+- **Custom actions (hands).** Pick an agent tool from the live list of registered tools and turn it into a catalog action — set `risk`, `reversibility`, optional `reverse_tool` for one-tap undo, `grant`. Defaults to `human_only=true` (propose-only). Can only auto-fire after the trust ladder earns it. `shell`, `browser`, `playwright`, `selenium`, social/post tools, payment/stripe/checkout, transfer/wire, and `basna` are HARD-EXCLUDED — they cannot be added.
+- **Custom sources (senses).** Pick a read/list/search tool; the generic poller calls it on a cadence, parses rows from JSON output (auto-detected or via `items_path`), dedups by `id_field`, and stamps a **fetch contract** (`fetch_tool` + `id_field`) on every event. Per-tool **interval cap of 60s** and **20 sources max** per user prevent hammering an API.
+- **Table-driven grounding.** When the arbiter dispatches an action derived from an event, the agent is handed: *"this is a REAL item, open it BY ID with `<fetch_tool>`, never search, never claim it doesn't exist."* Built-in sources (Gmail thread, Calendar event) and custom sources share the same grounding line.
+- **Library of one-click presets.** Granola meetings, Gmail search, Drive recent files, Web watch (sources); Save to project memory, Save to datastore, Create Drive doc, Label Gmail thread, Suggest meeting time, Fetch a web page, Web research brief, Summarise files (actions). Names are best-guess for a typical Granola/Google stack — confirm each against the live agent-tool list before saving.
+
+**Activity tab**
+
+- **Action ledger** (per-user, audit trail) — every arbiter decision with its source (reflection / intuition / intention / event), kind, title, rationale, risk, domain, score, status, outcome, and outcome note.
+- **Waiting on you** — open follow-ups with due time, age, nudge count; Done / Dismiss buttons. Dismiss feeds reliability (negative signal); Done feeds it (positive).
+- **Plans (#4).** Give it a goal; it decomposes into catalog-validated steps. Manual or auto-advance; a failed step re-decomposes the remainder rather than failing the whole plan. Abandon a plan and reversible done steps roll back newest-first.
+- **Live log.** Every arbiter pass, skip reason, dispatch, judge verdict, and error — so nothing is swallowed.
+- **Learned reliability.** Per-kind / per-tool-action reliability weights (Bayesian; fails count double; seeded at `reliability_seed`).
+- **Recent events.** New / surfaced / acted / ignored — clickable, so you can see what the loop has seen.
+
+**Action catalog (built-in, #1).** Reversible auto-eligible: `note.write`, `calendar.hold`, `mail.draft`, `reminder.schedule`. Human-only (propose for approval, never auto-fire): `mail.send`, `calendar.invite`, `calendar.delete`, `message.send`, `drive.delete`. Plus any custom actions you promote.
+
+**Webhook push (#2).** A token-gated `POST /fd/events/webhook` accepts an external system pushing an event directly into the spine (sub-minute latency vs the 5-min poll cadence). Disabled unless `FD_EVENTS_WEBHOOK_TOKEN` is set; caller passes it via `X-Webhook-Token` and names the target `user_id` in the body.
+
+Stores: `autonomy.db` (config, ledger, reliability, follow-ups, plans, log), `events.db` (external events + per-source poll state). Endpoints under `/fd/autonomy/*`: `config`, `actions`, `actions/{id}/{approve|reject|undo}`, `reliability`, `nudge`, `log`, `catalog`, `run-action`, `plans`, `plans/{id}/{advance|abandon}`, `follow-ups`, `follow-ups/{id}/{done|dismiss}`, `agent-tools`. The loop **ships off** — opt in per user.
+
+### Topics — conversation topic memory (NEW in 0.6.1)
+
+A durable, cross-session **topic memory** built from comms traffic. Every ~15 messages a background classifier groups recent user + assistant turns and the turn's narration into topics; the agent can recall a whole thread at once via the always-on **`topics`** tool. There's a full Flight Deck panel on every agent card (button next to **Cron**, on both Process and Docker cards).
+
+**Reach the panel:** click **Topics** on an agent card → modal opens. Header row: gear (Generate / Reset), Refresh, Fullscreen, ×. Title shows the live status when a backfill is running ("Classifying… N done · M topic updates · K left").
+
+**Left pane — the list:**
+
+- Topic count, sort selector (**Recent** by last message / **A–Z**), starred-on-top.
+- Search box: substring (LIKE) match across **label / summary / keywords** — `Bise` finds "Biserka…".
+- **Groups** (user-defined, many-to-many): All / Work / Private / custom; create with **+ group**; click chips to filter. A topic can be in several groups; a group holds several topics. Filters compose with text and tags (AND).
+- **Tag filter chips:** click any keyword chip on the open topic and it becomes a removable filter at the top of the list; tag, text, and group filters all AND together.
+- Each row: **checkbox** (multi-select), **star** (pin to top), label, recency, summary, msg count.
+- **Drag a message** from the detail pane onto a topic row to move it (drop target highlights with a sky ring; the dragged message dims). Counts on source and target update; target's `last_seen` is bumped.
+- **Combine** — when ≥2 topics are checked, a bar offers to merge them into the first one (messages re-pointed, dedup by msg id, keywords + summaries merged; sources are deleted).
+- **Reset** — wipes all topics + backfill progress. If topics are checked, **Reset (keep N)** preserves them and wipes only the rest.
+
+**Right pane — the topic:**
+
+- Title, summary (markdown rendered, tables work), keyword chips (clickable to add to filters), group-assignment chips (click to toggle membership).
+- Header buttons: **Refresh** (re-pull full message text from the live session by msg id, fixing excerpts that were captured under an older 600-char cap), **.md** export, **Reclassify** (drop the topic and free its messages so the next pass redistributes them — auto-runs Generate over all history right after).
+- Message list (markdown). Each message is **draggable** — drop on another topic to move.
+- **Per-topic chat** pinned at the bottom of the pane: streaming reply, live narration, tool-usage rows, paste + file attachments, busy-gated send (Stop cancels). Renders only the turns you initiate here (ignores the agent's session replay so topics never mix). Each completed turn is persisted to the topic by its real session msg id.
+
+**Generate / Reset behind the gear.** Pick a window (Last 24h / 7 days / 30 days / All history) and Generate to backfill untagged messages. One LLM call per batch; the UI loops short requests until drained. Reset is selective (see above).
+
+**Periodic classifier.** Runs in-process on the agent (mirrors the dreaming / insight-extraction passes), every `conversation_topics.interval_messages` (default 15) with `cooldown_seconds` cooldown. Skips messages already in `classified_msg_ids | seen_msg_ids` — so an agent restart (which resets the in-memory `last_idx` to 0) doesn't re-classify the whole session and duplicate topics. The classifier uses ~8k output tokens and small batches (15 messages/call) so reasoning models finish the JSON.
+
+Stores: `conversation_topics.db` (topics + topic_messages + FTS + groups + many-to-many + backfill_seen). Endpoints under `/api/topics/*` (list, search, refresh, combine, reset, append, groups, star, message-move, `{id}/{refresh|unclassify|groups|star}`, `messages/{id}/move`), proxied through `/fd/agent-topic*`. Topics memory ships **on** — disable via `conversation_topics.enabled` in config.
+
 ### Agent Forge
 
 Agent Forge is a dedicated Flight Deck page that uses an LLM to decompose a business objective into a team of specialized AI agents.

@@ -15,6 +15,19 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 47 built-in tools.
 
+## What's New in 0.6.1
+
+**The closed loop & the topic memory — Captain Claw acts, remembers, and learns.** Fully additive.
+
+- **Autonomous Work closes the loop.** Notice → decide → act → judge → learn, end to end. The arbiter picks one action per heartbeat (nudge, run_prompt, basna, tool_action, track, stop_run); a Bayesian reliability weight learns from every outcome; the **trust ladder** auto-promotes a reversible tool action to auto-fire once it's earned its keep. Five "Jarvis" gaps closed on top: **action catalog** (curated reversible actions), **event spine** (Calendar + Gmail pollers), **trust ladder**, **plans** (decompose-execute-verify, with replan-on-failure), and **grounded verification** (read the side effect back).
+- **Conversation topic memory.** Comms turns and narration are auto-clustered into durable, cross-session topics every ~15 messages. New always-on **`topics`** tool (`list` / `search` / `get`). Full Flight Deck panel: fullscreen, markdown rendering with tables, **.md export**, **Refresh** (re-pull full text), **Combine** (merge selected, dedup by msg id), **Reset** (with checkbox-preserved subset), **Reclassify** a single topic, search (LIKE substring), sort Recent / A–Z, **starred-on-top**, user-defined **groups** (many-to-many) with combined filters (text + group + tags), **per-topic chat** (streaming, narration, tools, attachments), and **drag a message** to another topic for surgical fixes.
+- **Tools & Sources — open the platform.** The autonomous catalog and event sources are no longer hardcoded. Promote any agent tool into a "hand" (custom action) or a "sense" (polled source) from the Flight Deck UI; a generic tool-poller turns read/list tools into events, and the **fetch contract** lets the agent open the right item by id for any source. Shell/browser/social/payment tools stay hard-excluded centrally.
+- **WhatsApp delivery for nudges**, with a dedup guard so the same reply never lands twice across native + push fan-out.
+- **Agent honesty rules.** Don't deny what really happened — scan your own tool calls first; if unsure, say "let me check" and verify. Don't promise self-modification you can't perform — route a real correction to `insights` or `personality` once, then move on. Companion grounding for surfaced events: open by id, never claim it doesn't exist.
+- **Basna polish.** `/basna` slash command on web/WhatsApp/Telegram, Croatian verb-stem relay, **recursion forbidden** (a worker can't start a Basna), hard-stop primitive + run-rate breaker, and **Deepen** — a follow-up run that resolves a finished run's blind spots, with lineage and live per-agent panels.
+
+New SQLite stores auto-create on first run (`conversation_topics.db`, `events.db`, `autonomy.db`); existing tables migrate in place. The autonomous loop ships **off** under a `propose` ceiling; topics memory ships **on** with conservative defaults. See [RELEASE_NOTES_0.6.1.md](release-notes/RELEASE_NOTES_0.6.1.md). Backward compatible with 0.6.0.
+
 ## What's New in 0.6.0
 
 **Agentic Basna & per-tenant archetypes — agents that start their own ensembles, and a library you can extend.** Fully additive.
