@@ -30,7 +30,7 @@ router = APIRouter()
 
 # Forwarded ops the tool may invoke. ``health`` is allowed so a caller can
 # probe a worker without opening a session.
-_OPS = {"open", "input", "read", "resize", "close", "list", "health"}
+_OPS = {"open", "input", "read", "peek", "resize", "close", "list", "health"}
 
 # Generous ceiling: longer than any `read` wait the tool issues, so a slow
 # interactive program doesn't trip a false timeout.

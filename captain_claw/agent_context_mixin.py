@@ -2227,7 +2227,9 @@ class AgentContextMixin:
             if tool_name == "shell":
                 self.tools.register(ShellTool())
             elif tool_name == "terminal":
-                self.tools.register(TerminalTool())
+                tt = TerminalTool()
+                tt._agent = self  # the background terminal watcher needs it
+                self.tools.register(tt)
             elif tool_name == "read":
                 self.tools.register(ReadTool())
             elif tool_name == "write":

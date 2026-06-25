@@ -132,6 +132,14 @@ class TerminalTool(Tool):
     def __init__(self) -> None:
         self._base_url = (os.environ.get("CLAW_PTY_URL") or DEFAULT_URL).rstrip("/")
         self._token = os.environ.get("CLAW_PTY_TOKEN") or None
+        self._agent: Any = None  # set at registration; the watcher needs it
+        self._watcher: Any = None
+
+    def _ensure_watcher(self):
+        if self._watcher is None:
+            from captain_claw.terminal_watcher import TerminalWatcher
+            self._watcher = TerminalWatcher(self)
+        return self._watcher
 
     def _headers(self) -> dict[str, str]:
         return {TOKEN_HEADER: self._token} if self._token else {}
@@ -238,6 +246,12 @@ class TerminalTool(Tool):
                     payload["rows"] = int(kwargs["rows"])
                 data = await self._call("/open", payload)
                 sid = data["session_id"]
+                # Watch this session in the background so a program that parks
+                # at a prompt while the agent is idle gets noticed and handled.
+                try:
+                    self._ensure_watcher().track(sid)
+                except Exception:
+                    pass
                 # Surface the program's initial banner/prompt so the agent
                 # sees the state right after opening.
                 first = await self._call(
@@ -283,6 +297,8 @@ class TerminalTool(Tool):
 
             if action == "close":
                 sid = self._require_sid(kwargs)
+                if self._watcher is not None:
+                    self._watcher.untrack(sid)
                 await self._call("/close", {"session_id": sid})
                 return ToolResult(success=True, content=f"[closed {sid}]")
 

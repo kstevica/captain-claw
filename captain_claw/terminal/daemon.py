@@ -350,6 +350,8 @@ class Daemon:
             return await self._input(body)
         if op == "read":
             return await self._read(body)
+        if op == "peek":
+            return self._peek(body)
         if op == "resize":
             return await self._resize(body)
         if op == "close":
@@ -433,6 +435,20 @@ class Daemon:
             "prompt_like": bool(waiting and _looks_like_prompt(sess.tail)),
         }
 
+    def _peek(self, body: dict) -> dict:
+        """Non-advancing status snapshot for the background watcher: never
+        touches the read cursor, so it can't steal output from the agent."""
+        sess = self._get(str(body.get("session_id", "")))
+        idle_ms = sess.idle_ms
+        return {
+            "alive": sess.alive,
+            "exit_code": sess.exit_code,
+            "idle_ms": idle_ms,
+            "total": sess.total,
+            "prompt_like": bool(sess.alive and idle_ms >= 250 and _looks_like_prompt(sess.tail)),
+            "tail": sess.tail,
+        }
+
     async def _resize(self, body: dict) -> dict:
         sess = self._get(str(body.get("session_id", "")))
         sess.resize(int(body.get("cols") or sess.cols), int(body.get("rows") or sess.rows))
@@ -486,6 +502,7 @@ def build_app(token: str | None) -> web.Application:
         web.post("/open", _make("open")),
         web.post("/input", _make("input")),
         web.post("/read", _make("read")),
+        web.post("/peek", _make("peek")),
         web.post("/resize", _make("resize")),
         web.post("/close", _make("close")),
         web.post("/list", _make("list")),
