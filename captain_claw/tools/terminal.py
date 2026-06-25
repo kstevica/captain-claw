@@ -76,8 +76,10 @@ class TerminalTool(Tool):
                     "run: execute one command on the user's machine and return "
                     "its output (no session to manage). open: start a persistent "
                     "session. send: type text/keys and return the resulting "
-                    "output. read: get new output without typing. list: show "
-                    "sessions. close: end a session. resize: set size."
+                    "output. read: get new output without typing. list: report "
+                    "whether the user's machine is connected + show active "
+                    "sessions (use this to check connectivity). close: end a "
+                    "session. resize: set size."
                 ),
             },
             "session_id": {
@@ -244,16 +246,9 @@ class TerminalTool(Tool):
                 return ToolResult(success=True, content=self._fmt_output(out, raw))
 
             if action == "list":
-                data = await self._call("/list", {})
-                sessions = data.get("sessions", [])
-                if not sessions:
-                    return ToolResult(success=True, content="[no active sessions]")
-                lines = [
-                    f"{s['session_id']}  {'alive' if s['alive'] else 'dead'}  "
-                    f"{s['cmd']}  (idle {s['idle_seconds']}s)"
-                    for s in sessions
-                ]
-                return ToolResult(success=True, content="\n".join(lines))
+                # Doubles as a connection-status probe so the agent can tell
+                # "machine offline" apart from "tool not available".
+                return await self._list_status()
 
             if action == "close":
                 sid = self._require_sid(kwargs)
@@ -280,11 +275,67 @@ class TerminalTool(Tool):
                 ),
             )
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 503:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Your machine ({self._target_label()}) isn't connected. "
+                        "Start the terminal daemon on it: "
+                        "`python -m captain_claw.terminal.daemon`."
+                    ),
+                )
             detail = exc.response.text.strip() or str(exc)
             return ToolResult(success=False, error=f"terminal daemon: {detail}")
         except Exception as exc:  # pragma: no cover - defensive
             log.error("terminal tool failed", action=action, error=str(exc))
             return ToolResult(success=False, error=str(exc))
+
+    def _target_label(self) -> str:
+        """Human label for whatever this tool talks to (relay worker or local)."""
+        if "/fd/pty/" in self._base_url:
+            worker = self._base_url.rstrip("/").rsplit("/", 1)[-1]
+            return f"worker '{worker}'"
+        return "the local daemon"
+
+    async def _list_status(self) -> ToolResult:
+        """Report connection status + active sessions. Never raises — an
+        offline machine is reported as content, not a tool error, so the
+        agent relays it clearly instead of treating it as a failure."""
+        label = self._target_label()
+        try:
+            data = await self._call("/list", {})
+        except httpx.ConnectError:
+            return ToolResult(
+                success=True,
+                content=(
+                    f"✗ Terminal not reachable at {self._base_url} — the relay or "
+                    "daemon appears to be down."
+                ),
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 503:
+                return ToolResult(
+                    success=True,
+                    content=(
+                        f"✗ Not connected — {label} has no terminal daemon running. "
+                        "Start it on that machine: "
+                        "`python -m captain_claw.terminal.daemon`."
+                    ),
+                )
+            detail = exc.response.text.strip() or str(exc)
+            return ToolResult(success=True, content=f"✗ Terminal error ({label}): {detail}")
+
+        sessions = data.get("sessions", [])
+        head = f"✓ Connected — {label}."
+        if not sessions:
+            return ToolResult(success=True, content=f"{head} No active sessions.")
+        lines = [head, f"{len(sessions)} active session(s):"]
+        lines += [
+            f"  {s['session_id']}  {'alive' if s['alive'] else 'dead'}  "
+            f"{s['cmd']}  (idle {s['idle_seconds']}s)"
+            for s in sessions
+        ]
+        return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod
     def _require_sid(kwargs: dict[str, Any]) -> str:
