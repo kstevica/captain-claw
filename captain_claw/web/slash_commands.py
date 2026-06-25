@@ -126,6 +126,9 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
 
         elif cmd in ("/new",):
             name = args.strip() or None
+            # Freeze the outgoing session into history before switching, so the
+            # conversation stays verbatim-searchable (same as before compaction).
+            server.agent.archive_current_session_to_history()
             session = await server.agent.session_manager.create_session(
                 name=name or "web-session"
             )

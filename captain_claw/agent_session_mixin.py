@@ -254,6 +254,34 @@ class AgentSessionMixin:
 
         return self._fallback_session_description(session)
 
+    def archive_current_session_to_history(self) -> int:
+        """Freeze the active session's raw messages into append-only history
+        memory — the same verbatim preservation compaction does before dropping
+        messages, but for the WHOLE session when the user starts a new one. So a
+        conversation stays searchable (and topic-able) after it's left behind.
+
+        Idempotent (history_id is a content hash), so re-archiving the same
+        messages is a no-op and overlap with a prior compaction snapshot is
+        harmless. No-op when there's no session/memory or the session is empty.
+        Never raises. Returns the number of messages archived (0 if none).
+        """
+        session = getattr(self, "session", None)
+        memory = getattr(self, "memory", None)
+        if session is None or memory is None:
+            return 0
+        messages = list(getattr(session, "messages", None) or [])
+        if not messages:
+            return 0
+        try:
+            return memory.archive_session_history(
+                session_id=session.id,
+                session_name=getattr(session, "name", "") or session.id,
+                messages=messages,
+            )
+        except Exception as exc:
+            log.warning("Failed to archive session history on new session", error=str(exc))
+            return 0
+
     async def compact_session(
         self,
         force: bool = False,

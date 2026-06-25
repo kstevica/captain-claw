@@ -371,6 +371,9 @@ async def handle_remote_command(
         session_name = "default"
         if result.startswith("NEW:"):
             session_name = result.split(":", 1)[1].strip() or "default"
+        # Freeze the outgoing session into history before switching (same as
+        # before compaction) so the conversation stays verbatim-searchable.
+        agent.archive_current_session_to_history()
         agent.session = await agent.session_manager.create_session(name=session_name)
         agent.refresh_session_runtime_flags()
         if agent.session:
