@@ -42,6 +42,7 @@ from captain_claw.tools.direct_api import DirectApiTool
 from captain_claw.tools.typesense import TypesenseTool
 from captain_claw.tools.datastore import DatastoreTool
 from captain_claw.tools.basna import BasnaTool
+from captain_claw.tools.vatra import VatraTool
 from captain_claw.tools.termux import TermuxTool
 from captain_claw.tools.playbooks import PlaybooksTool
 from captain_claw.tools.botport import BotPortTool
@@ -103,6 +104,7 @@ __all__ = [
     "TypesenseTool",
     "DatastoreTool",
     "BasnaTool",
+    "VatraTool",
     "TermuxTool",
     "PlaybooksTool",
     "BotPortTool",

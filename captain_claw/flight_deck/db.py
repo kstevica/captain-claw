@@ -231,6 +231,26 @@ class FlightDeckDB:
                 PRIMARY KEY (user_id, archetype_id, domain)
             );
 
+            -- Vatra blackboard: cross-agent "asks" a specialist posts when it needs
+            -- something outside its slice. The coordinator routes each to a helper
+            -- and writes the answer back; the reporter folds answered asks in.
+            CREATE TABLE IF NOT EXISTS basna_asks (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id   TEXT NOT NULL REFERENCES basna_sessions(id) ON DELETE CASCADE,
+                from_owner   TEXT NOT NULL DEFAULT '',   -- asker archetype id
+                from_subtask TEXT NOT NULL DEFAULT '',
+                text         TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL DEFAULT 'open',  -- open|claimed|answered|dropped
+                answer       TEXT NOT NULL DEFAULT '',
+                answered_by  TEXT NOT NULL DEFAULT '',
+                depth        INTEGER NOT NULL DEFAULT 0,
+                note         TEXT NOT NULL DEFAULT '',      -- e.g. drop reason
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_basna_asks_session
+                ON basna_asks(session_id);
+
             CREATE TABLE IF NOT EXISTS prompts (
                 id         TEXT PRIMARY KEY,
                 user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -994,6 +1014,81 @@ class FlightDeckDB:
             " WHERE id = ? AND session_id IN"
             " (SELECT id FROM basna_sessions WHERE user_id = ?)",
             (1 if success else 0, run_id, user_id),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    # ── Vatra blackboard (cross-agent asks) ──────────────────────────
+
+    async def create_vatra_ask(
+        self, session_id: str, from_owner: str, from_subtask: str, text: str,
+        depth: int = 0,
+    ) -> dict:
+        assert self._db is not None
+        now = _utcnow()
+        cur = await self._db.execute(
+            "INSERT INTO basna_asks"
+            " (session_id, from_owner, from_subtask, text, status, depth, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, 'open', ?, ?, ?)",
+            (session_id, from_owner, from_subtask, text, depth, now, now),
+        )
+        await self._db.commit()
+        return {"id": cur.lastrowid, "session_id": session_id, "from_owner": from_owner,
+                "from_subtask": from_subtask, "text": text, "status": "open",
+                "answer": "", "answered_by": "", "depth": depth, "created_at": now}
+
+    async def list_vatra_asks(
+        self, session_id: str, status: str | None = None, from_owner: str | None = None,
+    ) -> list[dict]:
+        assert self._db is not None
+        query = "SELECT * FROM basna_asks WHERE session_id = ?"
+        params: list = [session_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if from_owner:
+            query += " AND from_owner = ?"
+            params.append(from_owner)
+        query += " ORDER BY id ASC"
+        async with self._db.execute(query, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def count_vatra_asks(self, session_id: str) -> int:
+        """Total asks ever created for this session — the budget counter."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT COUNT(*) AS n FROM basna_asks WHERE session_id = ?", (session_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row["n"]) if row else 0
+
+    async def claim_vatra_ask(self, ask_id: int) -> bool:
+        """Atomically move an ask open → claimed. Returns False if already taken."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "UPDATE basna_asks SET status = 'claimed', updated_at = ?"
+            " WHERE id = ? AND status = 'open'",
+            (_utcnow(), ask_id),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def answer_vatra_ask(self, ask_id: int, answer: str, answered_by: str) -> bool:
+        assert self._db is not None
+        cur = await self._db.execute(
+            "UPDATE basna_asks SET status = 'answered', answer = ?, answered_by = ?,"
+            " updated_at = ? WHERE id = ?",
+            (answer, answered_by, _utcnow(), ask_id),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def drop_vatra_ask(self, ask_id: int, note: str = "") -> bool:
+        assert self._db is not None
+        cur = await self._db.execute(
+            "UPDATE basna_asks SET status = 'dropped', note = ?, updated_at = ?"
+            " WHERE id = ? AND status IN ('open', 'claimed')",
+            (note, _utcnow(), ask_id),
         )
         await self._db.commit()
         return cur.rowcount > 0

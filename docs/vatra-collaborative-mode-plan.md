@@ -1,8 +1,9 @@
 # Vatra — Collaborative Flight Deck Mode — Implementation Plan
 
-> Status: **Phase 1 built** (Lead decompose → parallel subtasks → reporter assemble; not yet
-> prod-tested end-to-end). Name **Vatra** (a hearth — agents gather round one fire and build
-> together, rather than each flying a solo sortie).
+> Status: **Phases 1–2 built** (Phase 1: Lead decompose → parallel subtasks → reporter
+> assemble. Phase 2: blackboard ask protocol — non-blocking delegation routed by a concurrent
+> coordinator). Not yet prod-tested end-to-end. Name **Vatra** (a hearth — agents gather round
+> one fire and build together, rather than each flying a solo sortie).
 >
 > Phase 1 deviations from the plan below (deliberate, for a low-risk first cut):
 > - **`mode` rides in the session `config` JSON** (`config.mode="vatra"`), not a new column —
@@ -220,8 +221,16 @@ Heuristic for the prompt: choose collaborative when subtasks have **dependencies
   yet. Entry: `basna` tool `start` with `mode='vatra'` → `/fd/vatra/agent/start` (fire-and-forget
   + callback, reusing Basna's per-owner concurrency/run-rate guards). Budget = dispatch wall-clock.
   **Next: prod-test end-to-end**, then unify spawn into a shared helper.
-- **Phase 2 — Ask protocol.** `basna_asks` table, `vatra` agent tool (`ask`/`inbox`), Lead
-  routes asks to idle owners, non-blocking reintegration. Add `max_asks`/depth/cycle guards.
+- **Phase 2 — Ask protocol. ✅ Built.** `basna_asks` blackboard table (+6 db methods); `vatra`
+  agent tool (`ask`/`inbox`), registered unconditionally, context injected via
+  `CLAW_VATRA_SESSION/SUBTASK/OWNER/DEPTH` env. `/fd/vatra/agent/{ask,inbox}` endpoints
+  (port-identified, owner-scoped; inbox long-polls). A **concurrent coordinator** (`_coordinate_asks`)
+  runs alongside the owners: claims open asks, spawns a keyword-routed helper per ask
+  (`_fulfill_ask`), writes the answer back; the reporter folds answered asks into the deliverable.
+  Termination guards enforced at ask-creation: `_MAX_ASKS=12`, `_MAX_ASK_DEPTH=2`, dedup/cycle
+  guard (identical ask → reuse), `_MAX_HELPERS=3` concurrency. Recursion guard moved worker-side
+  into the `basna` tool (refuses `start` when CLAW_BASNA_WORKER **or** CLAW_VATRA_WORKER is set).
+  **Next: prod-test end-to-end** (esp. that owners actually use `ask` for genuine cross-slice needs).
 - **Phase 3 — Helper spawn + learning.** Lead spawns fresh helpers for unowned asks;
   per-slice + ask-answerer + `vatra-lead` scoring into `archetype_reliability`.
 - **Phase 4 — Frontend + auto-mode.** Ask ledger + delegation graph UI; optional router

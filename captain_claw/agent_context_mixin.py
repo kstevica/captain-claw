@@ -2360,6 +2360,10 @@ class AgentContextMixin:
         # (returns a clear error if FD_URL / owner is unavailable).
         from captain_claw.tools.basna import BasnaTool
         self.tools.register(BasnaTool())
+        # Vatra blackboard (ask/inbox) — always registered; returns a clear error
+        # outside a Vatra run, so registration cost is negligible.
+        from captain_claw.tools.vatra import VatraTool
+        self.tools.register(VatraTool())
         # Code-app authoring — always registered; calls return a clear error
         # if FD_URL isn't available, so registration cost is negligible.
         from captain_claw.tools.app_runner import AppRunnerTool

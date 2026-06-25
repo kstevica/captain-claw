@@ -37,6 +37,7 @@ from captain_claw.logging import get_logger
 from captain_claw.flight_deck.basna_routes import (
     AgentStartReq,
     ExecuteRequest,
+    _AgentReq,
     _AGENT_RUN_WINDOW_SECONDS,
     _MAX_AGENT_RUNS_PER_OWNER,
     _MAX_AGENT_RUNS_PER_WINDOW,
@@ -50,8 +51,10 @@ from captain_claw.flight_deck.basna_routes import (
     _dispatch_one,
     _guess_mime,
     _is_texty,
+    _keyword_match,
     _load_owner_tiers,
     _load_registry,
+    _norm_text,
     _notify_source_agent,
     _parse_files,
     _progress,
@@ -77,6 +80,36 @@ _DEFAULT_REPORTER = "editor-writer"
 _SLICES_INLINE_CHARS = 12_000
 _MAX_TEXT_FALLBACK_BYTES = 256 * 1024
 _DECOMPOSE_TIMEOUT = 120  # seconds for the Lead LLM call
+
+# ── Phase 2 delegation budget (the termination guarantees) ───────────
+_MAX_ASKS = 12          # total asks a single run may ever create (hard ceiling)
+_MAX_ASK_DEPTH = 2      # an answer that itself asks increments depth; caps cascades
+_MAX_HELPERS = 3        # concurrent helpers the coordinator may run at once
+_COORD_POLL_S = 1.5     # how often the coordinator polls the blackboard
+_INBOX_POLL_S = 1.0     # inbox long-poll granularity
+
+
+def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
+    """Run-context env injected into a worker so the `vatra` tool knows where it is."""
+    return [
+        {"key": "CLAW_VATRA_SESSION", "value": sid},
+        {"key": "CLAW_VATRA_SUBTASK", "value": subtask},
+        {"key": "CLAW_VATRA_OWNER", "value": owner},
+        {"key": "CLAW_VATRA_DEPTH", "value": str(depth)},
+    ]
+
+
+def _track_worker(sid: str, slug: str, *, add: bool) -> None:
+    """Best-effort registry of a run's live worker slugs (so an external stop can
+    kill them). Concurrency-safe enough for our single-process FD."""
+    lst = _run_workers.setdefault(sid, [])
+    if add:
+        lst.append(slug)
+    else:
+        try:
+            lst.remove(slug)
+        except ValueError:
+            pass
 
 
 # ── Lead: decompose the task into owned subtasks ─────────────────────
@@ -146,10 +179,13 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
 async def _spawn_worker(request: Request, user: dict, *, name: str, description: str,
                         cognitive_mode: str, tools: list[str], tier: str,
                         tiers: dict | None, api_key: str, env_vars: list[dict] | None,
+                        extra_env: list[dict] | None = None,
                         ) -> dict:
     """Spawn one ephemeral agent and resolve its web port. Returns
-    {ok, slug, port, auth, message}. Strips run-starting tools and stamps the
-    no-recursion marker so a Vatra worker can never launch another run."""
+    {ok, slug, port, auth, message}. Strips the run-starting `basna` tool and
+    stamps the no-recursion marker so a Vatra worker can never launch another run;
+    the `vatra` ask/inbox tool is registered unconditionally and stays available.
+    `extra_env` carries the run context (session/subtask/owner/depth)."""
     from captain_claw.flight_deck.server import (
         AgentConfig, spawn_process, _load_process_registry,
     )
@@ -160,11 +196,11 @@ async def _spawn_worker(request: Request, user: dict, *, name: str, description:
     base_url = lt.get("base_url") or ""
     max_tokens = int(lt.get("output_ctx") or 0) or 32768
     max_context = int(lt.get("input_ctx") or 0)
-    worker_tools = [t for t in (tools or AgentConfig().tools) if t not in ("basna", "vatra")]
+    worker_tools = [t for t in (tools or AgentConfig().tools) if t != "basna"]
     base = dict(
         name=name, description=description,
         cognitive_mode=cognitive_mode or "neutra", tools=worker_tools,
-        env_vars=(env_vars or []) + [{"key": _WORKER_MARKER, "value": "1"}],
+        env_vars=(env_vars or []) + (extra_env or []) + [{"key": _WORKER_MARKER, "value": "1"}],
         web_enabled=True, web_port=0,
     )
     if model:
@@ -337,6 +373,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 cognitive_mode=arch.get("cognitive_mode", "neutra"),
                 tools=arch.get("tools") or [], tier=tier, tiers=tiers,
                 api_key=body.api_key, env_vars=body.env_vars,
+                extra_env=_vatra_env(sid, st["id"], arch["id"], 0),
             )
             if not sp["ok"]:
                 _progress(sid, "spawn", f"{arch.get('role') or arch['id']}: unusable — {sp['message']}", ok=False)
@@ -363,6 +400,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 spawned.append(item)
         _run_workers[sid] = [sp["slug"] for sp in spawned]
         _progress(sid, "spawn", f"Spawned {len(spawned)}/{len(subtasks)}; dispatching…")
+
+        # 2b) Start the delegation coordinator — it watches the blackboard and
+        # fulfils asks with helpers WHILE the owners work (non-blocking). It drains
+        # and exits once stop_event is set and no open asks / helpers remain.
+        stop_event = asyncio.Event()
+        coordinator = asyncio.create_task(_coordinate_asks(
+            request, user, sid, sid8, run_tag, intent, domain,
+            archetypes=archetypes, arch_by_id=arch_by_id, tiers=tiers,
+            api_key=body.api_key, env_vars=body.env_vars,
+            dispatch_timeout=body.dispatch_timeout, stop_event=stop_event))
 
         # 3) Dispatch each owner its self-contained brief, in parallel.
         async def _dispatch_owner(sp: dict) -> dict:
@@ -405,6 +452,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 "latency_ms": d["latency_ms"], "actions": d.get("actions", []),
             })
 
+        # 3b) Owners are done — tell the coordinator to drain remaining asks and stop.
+        stop_event.set()
+        try:
+            n_asks = await coordinator
+        except Exception as e:
+            log.warning("Vatra coordinator error", error=str(e))
+            n_asks = 0
+        if n_asks:
+            _progress(sid, "ask", f"Coordinator resolved {n_asks} ask(s)")
+
         # 4) Capture owner-generated files + backfill empty replies from artifacts.
         for i, sp in enumerate(spawned):
             role = sp["arch"].get("role") or sp["arch"]["id"]
@@ -424,12 +481,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _progress_done(sid)
         raise HTTPException(502, "Vatra: no subtask produced usable output")
 
-    # 5) Reporter assembles the slices into one deliverable.
+    # 5) Reporter assembles the slices (+ any answered asks) into one deliverable.
+    answered = await db.list_vatra_asks(sid, status="answered")
     truth, reporter_files = await _run_reporter(
         request, user, sid, sid8, run_tag, intent, usable, cfg, arch_by_id,
         tiers=body.tiers, api_key=body.api_key, env_vars=body.env_vars,
         dispatch_timeout=body.dispatch_timeout, input_names=input_names,
-        dest_dir=dest_dir, seen_gen=seen_gen,
+        dest_dir=dest_dir, seen_gen=seen_gen, answered_asks=answered,
     )
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
@@ -477,6 +535,14 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"assemble all parts into the final deliverable.\n\n"
         f"## Overall task (for context)\n{intent}\n\n"
         f"## Your part — {st['title']}\n{st['brief']}{files_block}\n\n"
+        f"## Working with your team\n"
+        f"If you need something OUTSIDE your part that another specialist should produce, "
+        f"do NOT wait or do it yourself half-heartedly: use the `vatra` tool (action='ask') "
+        f"to post a focused request and KEEP WORKING on your part. After you've made progress, "
+        f"call `vatra` (action='inbox') to collect any answers. Never block on an ask — if no "
+        f"answer arrives in time, finish your part as best you can; the reporter folds in "
+        f"whatever the team delivers. Use this only for genuine cross-slice needs, not for work "
+        f"that is your own.\n\n"
         f"Return only your finished part — no preamble, no meta-commentary about the team."
     )
 
@@ -484,14 +550,29 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
 async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_tag: str,
                         intent: str, usable: list[dict], cfg: dict, arch_by_id: dict, *,
                         tiers, api_key, env_vars, dispatch_timeout, input_names,
-                        dest_dir: Path, seen_gen: set[str]) -> tuple[str, list[dict]]:
-    """Spawn a dedicated reporter, feed it the slices, and capture the assembled
-    deliverable. Falls back to a labeled concatenation if the reporter fails."""
+                        dest_dir: Path, seen_gen: set[str],
+                        answered_asks: list[dict] | None = None) -> tuple[str, list[dict]]:
+    """Spawn a dedicated reporter, feed it the slices (plus any answered cross-agent
+    asks), and capture the assembled deliverable. Falls back to a labeled
+    concatenation if the reporter fails."""
     from captain_claw.flight_deck.server import DATA_DIR
 
     reporter_id = str(cfg.get("reporter_archetype") or _DEFAULT_REPORTER)
     arch = arch_by_id.get(reporter_id) or arch_by_id.get(_DEFAULT_REPORTER)
+    slices_full = "\n\n".join(
+        f"### Piece: {r['title']} — by {r['role']}\n{r['output'].strip()}" for r in usable)
+    # Answered asks are extra material the team surfaced via delegation — give the
+    # reporter the same view the asker had, so nothing the team produced is lost.
+    asks_block = ""
+    for a in (answered_asks or []):
+        ans = (a.get("answer") or "").strip()
+        if ans:
+            asks_block += f"\n\n### Resolved team request: {a.get('text', '')[:160]}\n{ans}"
+    if asks_block:
+        slices_full += "\n\n## Answers to cross-agent requests" + asks_block
     fallback = "\n\n".join(f"## {r['title']} ({r['role']})\n{r['output'].strip()}" for r in usable)
+    if asks_block:
+        fallback += "\n\n## Answers to cross-agent requests" + asks_block
     if not arch:
         _progress(sid, "report", "No reporter archetype available; using raw assembly", ok=False)
         return fallback, []
@@ -508,9 +589,7 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
     if not sp["ok"]:
         _progress(sid, "report", f"Reporter spawn failed — using raw assembly ({sp['message']})", ok=False)
         return fallback, []
-    _run_workers[sid] = [sp["slug"]]
-    slices_full = "\n\n".join(
-        f"### Piece: {r['title']} — by {r['role']}\n{r['output'].strip()}" for r in usable)
+    _track_worker(sid, sp["slug"], add=True)
     try:
         # Write the full slices into the reporter's workspace; inline a preview.
         ws = DATA_DIR / sp["slug"] / "data" / "workspace"
@@ -544,7 +623,184 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         return (out or fallback), files
     finally:
         _teardown([sp["slug"]])
-        _run_workers.pop(sid, None)
+        _track_worker(sid, sp["slug"], add=False)
+
+
+# ── Coordinator: route blackboard asks to helpers (non-blocking) ─────
+
+async def _coordinate_asks(request: Request, user: dict, sid: str, sid8: str,
+                           run_tag: str, intent: str, domain: str, *,
+                           archetypes: list[dict], arch_by_id: dict, tiers,
+                           api_key, env_vars, dispatch_timeout,
+                           stop_event: asyncio.Event) -> int:
+    """Watch the blackboard and fulfil open asks with fresh helpers, concurrently
+    with the owners' work. Runs until ``stop_event`` is set AND nothing is open or
+    in flight. Returns the number of asks answered. Budget/depth/cycle guards are
+    enforced at ask-creation time (see ``agent_ask``); this loop only routes.
+    """
+    db = get_db()
+    sem = asyncio.Semaphore(_MAX_HELPERS)
+    inflight: set = set()
+    answered = 0
+
+    async def _fulfill(ask: dict) -> None:
+        nonlocal answered
+        async with sem:
+            ok = await _fulfill_ask(
+                request, user, sid, sid8, run_tag, intent, ask,
+                archetypes=archetypes, arch_by_id=arch_by_id, tiers=tiers,
+                api_key=api_key, env_vars=env_vars, dispatch_timeout=dispatch_timeout)
+            if ok:
+                answered += 1
+
+    while True:
+        try:
+            open_asks = await db.list_vatra_asks(sid, status="open")
+        except Exception as e:
+            log.warning("Vatra coordinator poll failed", error=str(e))
+            open_asks = []
+        for ask in open_asks:
+            if await db.claim_vatra_ask(ask["id"]):
+                t = asyncio.create_task(_fulfill(ask))
+                inflight.add(t)
+                t.add_done_callback(inflight.discard)
+        if stop_event.is_set() and not open_asks and not inflight:
+            break
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=_COORD_POLL_S)
+        except asyncio.TimeoutError:
+            pass
+    if inflight:
+        await asyncio.gather(*inflight, return_exceptions=True)
+    return answered
+
+
+async def _fulfill_ask(request: Request, user: dict, sid: str, sid8: str, run_tag: str,
+                       intent: str, ask: dict, *, archetypes: list[dict],
+                       arch_by_id: dict, tiers, api_key, env_vars,
+                       dispatch_timeout) -> bool:
+    """Spawn one fresh helper to answer a single ask, write the answer back, tear
+    it down. Returns True if an answer was recorded."""
+    db = get_db()
+    text = (ask.get("text") or "").strip()
+    depth = int(ask.get("depth") or 0) + 1
+    # Route the ask to the best-matching specialist (deterministic keyword pick).
+    picks = _keyword_match(text, archetypes, 1)
+    arch = picks[0] if picks else (arch_by_id.get("concierge") or next(iter(arch_by_id.values())))
+    role = arch.get("role") or arch["id"]
+    _progress(sid, "ask", f"Helper ({role}) answering ask #{ask['id']}…", agent=role)
+    sp = await _spawn_worker(
+        request, user, name=f"vatra-{sid8}-{run_tag}-help{ask['id']}-{arch['id']}",
+        description=f"Vatra helper · {role}",
+        cognitive_mode=arch.get("cognitive_mode", "neutra"),
+        tools=arch.get("tools") or [], tier=arch.get("tier", "balanced"),
+        tiers=tiers, api_key=api_key, env_vars=env_vars,
+        extra_env=_vatra_env(sid, f"help:{ask['id']}", arch["id"], depth),
+    )
+    if not sp["ok"]:
+        await db.drop_vatra_ask(ask["id"], note=f"helper spawn failed: {sp['message']}")
+        _progress(sid, "ask", f"Ask #{ask['id']} dropped — helper spawn failed", ok=False)
+        return False
+    _track_worker(sid, sp["slug"], add=True)
+    try:
+        prompt = _build_helper_prompt(role, intent, text)
+        d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
+                                fleet_instructions=arch.get("fleet_instructions", ""),
+                                agent_name=role)
+        out = (d.get("output") or "").strip()
+        if out:
+            await db.answer_vatra_ask(ask["id"], out, arch["id"])
+            _progress(sid, "ask", f"Ask #{ask['id']} answered by {role}", agent=role)
+            return True
+        await db.drop_vatra_ask(ask["id"], note="helper produced no output")
+        _progress(sid, "ask", f"Ask #{ask['id']} dropped — no helper output", ok=False)
+        return False
+    except Exception as e:
+        await db.drop_vatra_ask(ask["id"], note=f"helper error: {e}")
+        log.warning("Vatra helper failed", ask_id=ask["id"], error=str(e))
+        return False
+    finally:
+        _teardown([sp["slug"]])
+        _track_worker(sid, sp["slug"], add=False)
+
+
+def _build_helper_prompt(role: str, intent: str, ask_text: str) -> str:
+    return (
+        f"You are the {role}, helping a teammate on a collaborating team. A specialist "
+        f"working on part of a larger task has asked you for something specific. Answer it "
+        f"directly, completely, and concisely — they will use your answer in their own work.\n\n"
+        f"## The overall task (for context)\n{intent}\n\n"
+        f"## What your teammate needs\n{ask_text}\n\n"
+        f"Return only the answer to their request — no preamble, no meta-commentary."
+    )
+
+
+# ── Agent-facing blackboard endpoints (port-identified, owner-scoped) ─
+
+class _VatraAskReq(_AgentReq):
+    subtask_id: str = ""
+    owner: str = ""
+    depth: int = 0
+    text: str = ""
+
+
+class _VatraInboxReq(_AgentReq):
+    owner: str = ""
+    wait: int = 0
+
+
+def _norm_ask(text: str) -> frozenset:
+    return frozenset(_norm_text(text))
+
+
+@router.post("/agent/ask")
+async def agent_ask(body: _VatraAskReq):
+    """A specialist posts a cross-slice request. Enforces the delegation budget
+    (max asks), the depth cap, and a cycle/dedup guard — all deterministic floors
+    under the termination guarantee. Returns immediately (non-blocking)."""
+    owner_id = _resolve_owner(body)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, owner_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if int(body.depth) >= _MAX_ASK_DEPTH:
+        return {"status": "rejected", "reason": f"max delegation depth ({_MAX_ASK_DEPTH}) reached"}
+    existing = await db.list_vatra_asks(body.session_id)
+    # Cycle/dedup guard: an essentially identical ask already exists → reuse it.
+    norm = _norm_ask(text)
+    for e in existing:
+        if _norm_ask(e.get("text", "")) == norm:
+            return {"status": "ok", "ask_id": e["id"], "dedup": True}
+    if len(existing) >= _MAX_ASKS:
+        return {"status": "rejected", "reason": f"delegation budget ({_MAX_ASKS} asks) reached"}
+    ask = await db.create_vatra_ask(
+        body.session_id, body.owner, body.subtask_id, text, depth=int(body.depth))
+    return {"status": "ok", "ask_id": ask["id"]}
+
+
+@router.post("/agent/inbox")
+async def agent_inbox(body: _VatraInboxReq):
+    """Collect a specialist's answered asks. Optionally long-polls up to `wait`
+    seconds so the asker can pick up an answer in the same turn."""
+    owner_id = _resolve_owner(body)
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, owner_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    wait = max(0, min(30, int(body.wait or 0)))
+    deadline = time.monotonic() + wait
+    while True:
+        mine = await db.list_vatra_asks(body.session_id, from_owner=body.owner)
+        answered = [a for a in mine if a.get("status") == "answered"]
+        pending = [a for a in mine if a.get("status") in ("open", "claimed")]
+        if answered or not pending or time.monotonic() >= deadline:
+            return {"answered": [{"text": a.get("text", ""), "answer": a.get("answer", ""),
+                                  "answered_by": a.get("answered_by", "")} for a in answered],
+                    "pending": len(pending)}
+        await asyncio.sleep(_INBOX_POLL_S)
 
 
 # ── Fire-and-forget entry (mirrors Basna's agent/start) ──────────────
@@ -591,10 +847,10 @@ async def agent_start(body: AgentStartReq):
 
     Reuses Basna's per-owner concurrency + run-rate guards (the shared dicts), then
     creates a session, runs the collaborative team in the background, and reports
-    completion back to the agent.
+    completion back to the agent. (Recursion is blocked worker-side in the basna
+    tool, which refuses `start` when a CLAW_*_WORKER marker is set — the markers
+    live in worker processes, not here in the FD process.)
     """
-    if str(__import__("os").environ.get(_WORKER_MARKER, "")).strip().lower() in ("1", "true", "yes"):
-        raise HTTPException(400, "Vatra runs cannot be started from inside a run")
     owner = _resolve_owner(body)
     task = (body.task or "").strip()
     if not task:
