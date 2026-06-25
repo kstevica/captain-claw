@@ -230,6 +230,7 @@ memory:
 tools:
   enabled:
   - shell
+  - terminal
   - read
   - write
   - glob

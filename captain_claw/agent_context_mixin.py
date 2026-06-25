@@ -2195,6 +2195,7 @@ class AgentContextMixin:
             ReadTool,
             SendMailTool,
             ShellTool,
+            TerminalTool,
             TodoTool,
             ContactsTool,
             ScriptsTool,
@@ -2225,6 +2226,8 @@ class AgentContextMixin:
         for tool_name in config.tools.enabled:
             if tool_name == "shell":
                 self.tools.register(ShellTool())
+            elif tool_name == "terminal":
+                self.tools.register(TerminalTool())
             elif tool_name == "read":
                 self.tools.register(ReadTool())
             elif tool_name == "write":

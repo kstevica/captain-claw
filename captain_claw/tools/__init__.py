@@ -59,6 +59,7 @@ from captain_claw.tools.twitter import TwitterTool
 from captain_claw.tools.mcp_connector import MCPProxyConnector, MCPProxyTool
 from captain_claw.tools.consult_peer import ConsultPeerTool
 from captain_claw.tools.project_memory import ProjectMemoryTool
+from captain_claw.tools.terminal import TerminalTool
 
 __all__ = [
     "Tool",
@@ -120,4 +121,5 @@ __all__ = [
     "MCPProxyTool",
     "ConsultPeerTool",
     "ProjectMemoryTool",
+    "TerminalTool",
 ]
