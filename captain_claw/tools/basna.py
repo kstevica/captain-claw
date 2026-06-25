@@ -75,6 +75,18 @@ class BasnaTool(Tool):
                 ),
             },
             "task": {"type": "string", "description": "The task to run for 'start' — a clear, self-contained statement of what to research/produce."},
+            "mode": {
+                "type": "string",
+                "enum": ["basna", "vatra"],
+                "description": (
+                    "Coordination mode for 'start' (default 'basna'). 'basna' = independent "
+                    "ensemble: agents answer the whole task blind, outputs merged — best for "
+                    "truth-finding (what's true, options, verification). 'vatra' = a collaborating "
+                    "team: a Lead splits the task into complementary parts, specialists each build "
+                    "one part, and a reporter assembles them into one deliverable — best for "
+                    "building a multi-part artifact whose pieces fit together."
+                ),
+            },
             "title": {"type": "string", "description": "Optional short title for the run ('start'); auto-generated if blank."},
             "max_agents": {"type": "integer", "description": "Optional cap on agents for 'start' (1-10, default 6)."},
             "session_id": {"type": "string", "description": "Target session id (all read actions except 'list')."},
@@ -215,12 +227,21 @@ class BasnaTool(Tool):
             "origin_address": origin_address,
             "source_host": "localhost",
         }
-        r = await self._post(fd_url, "/fd/basna/agent/start", payload)
+        mode = str(kwargs.get("mode") or "basna").strip().lower()
+        path = "/fd/vatra/agent/start" if mode == "vatra" else "/fd/basna/agent/start"
+        r = await self._post(fd_url, path, payload)
         if isinstance(r, dict) and r.get("_error"):
             return ToolResult(success=False, error=r["_error"])
         data = r.json()
         if data.get("status") == "rejected":
             return ToolResult(success=True, content=f"Not started — {data.get('reason', 'at concurrency limit')}.")
+        if mode == "vatra":
+            return ToolResult(success=True, content=(
+                f"Started Vatra run **{data.get('title') or task[:60]}** "
+                f"(collaborative team, session {data.get('session_id')}). "
+                f"A Lead is splitting the task into parts; I'll report the assembled "
+                f"result back here when it finishes."
+            ))
         return ToolResult(success=True, content=(
             f"Started Basna run **{data.get('title') or task[:60]}** "
             f"({data.get('n_agents', '?')} agent(s), session {data.get('session_id')}). "
