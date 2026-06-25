@@ -11,6 +11,7 @@ from aiohttp import web
 
 from captain_claw.conversation_topics import (
     backfill_topics,
+    backfill_topics_from_history,
     get_topics_manager,
     refresh_topic,
 )
@@ -104,6 +105,26 @@ async def backfill(server: "WebServer", request: web.Request) -> web.Response:
     except Exception:
         hours = 0
     result = await backfill_topics(server.agent, hours=hours)
+    return web.json_response(result)
+
+
+async def backfill_history(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/backfill-history — classify messages from the frozen
+    transcript archive (compacted-away conversations) into topics. Body/query:
+    {limit} (max snapshots to scan, default 200). One LLM batch per call; the
+    response ``remaining`` drives the UI to auto-continue until it hits 0."""
+    if not server.agent:
+        return web.json_response({"error": "no active session"}, status=503)
+    limit = 200
+    try:
+        if request.body_exists:
+            body = await request.json()
+            limit = int((body or {}).get("limit") or 200)
+        else:
+            limit = int(request.query.get("limit") or 200)
+    except Exception:
+        limit = 200
+    result = await backfill_topics_from_history(server.agent, limit=limit)
     return web.json_response(result)
 
 

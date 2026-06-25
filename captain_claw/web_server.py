@@ -1230,6 +1230,10 @@ class WebServer:
         from captain_claw.web.rest_topics import backfill
         return await backfill(self, request)
 
+    async def _topics_backfill_history(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import backfill_history
+        return await backfill_history(self, request)
+
     async def _topics_refresh(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_topics import refresh
         return await refresh(self, request)
@@ -2541,6 +2545,7 @@ class WebServer:
         app.router.add_post("/api/topics/groups", self._topics_group_create)
         app.router.add_post("/api/topics/groups/{group_id}/delete", self._topics_group_delete)
         app.router.add_post("/api/topics/backfill", self._topics_backfill)
+        app.router.add_post("/api/topics/backfill-history", self._topics_backfill_history)
         app.router.add_post("/api/topics/combine", self._topics_combine)
         app.router.add_post("/api/topics/reset", self._topics_reset)
         app.router.add_post("/api/topics/{topic_id}/refresh", self._topics_refresh)

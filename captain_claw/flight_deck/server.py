@@ -3913,6 +3913,17 @@ async def agent_topics_backfill(
     )
 
 
+@app.post("/fd/agent-topics-backfill-history/{host}/{port}")
+async def agent_topics_backfill_history(
+    host: str, port: int, token: str = "", limit: int = 200,
+    user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, "/api/topics/backfill-history",
+        body={"limit": limit}, timeout=120.0,
+    )
+
+
 @app.post("/fd/agent-topic-refresh/{host}/{port}/{topic_id}")
 async def agent_topic_refresh(
     host: str, port: int, topic_id: str, token: str = "",

@@ -83,7 +83,10 @@ class ContextConfig(BaseModel):
 class MemoryEmbeddingsConfig(BaseModel):
     """Embedding provider settings for semantic memory."""
 
-    provider: str = "auto"  # auto | litellm | ollama | none
+    # auto (default): fully local & semantic via in-process model2vec, no server
+    # or API key. Other modes: model2vec/local | litellm | ollama | none.
+    provider: str = "auto"
+    model2vec_model: str = "minishlab/potion-base-8M"
     litellm_model: str = "text-embedding-3-small"
     litellm_api_key: str = ""
     litellm_base_url: str = ""

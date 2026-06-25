@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2, Star, Settings, RotateCcw } from 'lucide-react'
+import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2, Minimize2, Download, Combine, Trash2, Star, Settings, RotateCcw, History } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
@@ -208,6 +208,37 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
     }
   }
   const runBackfill = () => runBackfillFor(hours)
+
+  // Classify messages from the frozen transcript archive (compacted-away
+  // conversations) into topics, so topics also cover history, not just the
+  // live session. One batch per call; loop until the archive is drained.
+  const runBackfillHistory = async () => {
+    setBackfilling(true); setNote('')
+    let total = 0
+    let topicsTotal = 0
+    try {
+      for (let i = 0; i < 200; i++) {
+        const qp = new URLSearchParams()
+        if (auth) qp.set('token', auth)
+        qp.set('limit', '200')
+        const r = await fdFetch<{ ok?: boolean; error?: string; classified: number; topics_touched: number; remaining: number }>(
+          `/agent-topics-backfill-history/${host}/${port}?${qp.toString()}`, { method: 'POST' },
+        )
+        if (r.error) { setNote(r.error); break }
+        total += r.classified
+        topicsTotal += r.topics_touched || 0
+        setNote(r.remaining
+          ? `Scanning history… ${total} done · ${topicsTotal} topic update(s)`
+          : `Done — ${total} archived message(s), ${topicsTotal} topic update(s)`)
+        await refresh()
+        if (!r.remaining || r.classified === 0) break
+      }
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBackfilling(false)
+    }
+  }
 
   const runReclassify = async () => {
     if (!selected) return
@@ -438,6 +469,12 @@ export function TopicsPanel({ host, port, auth, agentName, onClose }: TopicsPane
                   className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40">
                   {backfilling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
                   Generate
+                </button>
+                <button onClick={() => { setActionsOpen(false); runBackfillHistory() }} disabled={backfilling}
+                  title="Scan the frozen transcript archive (older, compacted-away conversations) and classify those messages into topics too"
+                  className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40">
+                  {backfilling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <History className="h-3.5 w-3.5" />}
+                  Generate from history
                 </button>
                 <button onClick={() => { setActionsOpen(false); runReset() }} disabled={backfilling}
                   title={sel.size ? `Clear all EXCEPT the ${sel.size} selected topic(s)` : 'Clear all topics + backfill progress'}

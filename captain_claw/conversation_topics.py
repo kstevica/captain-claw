@@ -873,6 +873,80 @@ async def backfill_topics(agent: Any, hours: int = 0) -> dict[str, Any]:
     return {"ok": True, "classified": len(chunk), "topics_touched": touched, "remaining": remaining}
 
 
+async def backfill_topics_from_history(agent: Any, limit: int = 200) -> dict[str, Any]:
+    """Classify messages from the frozen ``session_history`` transcript archive
+    into topics — so topics surface conversations that were compacted out of the
+    live session and no longer live in ``agent.session.messages``.
+
+    Mirrors :func:`backfill_topics`: one LLM batch per call, ``remaining`` drives
+    the UI to auto-continue until it hits 0. Each archived line gets a stable
+    synthetic ``msg_id`` (``{history_id}:{line}``) so re-runs dedup against
+    already-classified/seen ids and never duplicate a topic."""
+    from captain_claw.config import get_config
+
+    tc = get_config().conversation_topics
+    memory = getattr(agent, "memory", None)
+    if memory is None or getattr(memory, "semantic", None) is None:
+        return {"ok": True, "classified": 0, "topics_touched": 0, "remaining": 0,
+                "error": "history memory not available"}
+    snaps = memory.list_history(limit=max(1, int(limit)))
+    if not snaps:
+        return {"ok": True, "classified": 0, "topics_touched": 0, "remaining": 0}
+
+    mgr = get_topics_manager()
+    done_ids = mgr.classified_msg_ids() | mgr.seen_msg_ids()
+    batch = max(5, int(tc.max_messages_per_pass))
+
+    pending: list[dict[str, Any]] = []
+    for snap in snaps:
+        hid = str(snap.get("history_id") or "")
+        if not hid:
+            continue
+        full = memory.get_history(hid)
+        if not full:
+            continue
+        created = str(full.get("created_at") or _utcnow())
+        for n, raw_line in enumerate(str(full.get("text") or "").splitlines()):
+            m = re.match(r"^\[(\w+)\]\s*(.*)$", raw_line.strip())
+            if not m:
+                continue
+            role_raw, content = m.group(1).lower(), m.group(2).strip()
+            if role_raw not in ("user", "assistant") or not content:
+                continue
+            mid = f"{hid}:{n}"
+            if mid in done_ids:
+                continue
+            pending.append({
+                "role": "user" if role_raw == "user" else "agent",
+                "channel": "history",
+                "excerpt": content[:_MAX_EXCERPT_CHARS],
+                "msg_id": mid,
+                "ts": created,
+            })
+            if len(pending) >= batch:
+                break
+        if len(pending) >= batch:
+            break
+
+    if not pending:
+        return {"ok": True, "classified": 0, "topics_touched": 0, "remaining": 0}
+    chunk = pending[:batch]
+    try:
+        touched = await _classify_and_store(agent, chunk)
+    except Exception as exc:
+        log.warning("topic history-backfill classify failed: %s", exc)
+        return {"ok": False, "error": f"classification failed: {exc}"[:300],
+                "classified": 0, "topics_touched": 0, "remaining": len(pending)}
+    # Mark the whole chunk attempted so unclassified lines aren't reprocessed.
+    mgr.mark_seen([str(it.get("msg_id") or "") for it in chunk])
+    # A full batch means more archive likely remains — keep the UI auto-continuing
+    # (the next pass re-scans and skips now-seen ids); a short batch means done.
+    remaining = 1 if len(chunk) >= batch else 0
+    log.info("topic history-backfill: classified %d message(s) into %d topic touch(es)",
+             len(chunk), touched)
+    return {"ok": True, "classified": len(chunk), "topics_touched": touched, "remaining": remaining}
+
+
 def _parse_groups(text: str) -> list[dict[str, Any]]:
     txt = (text or "").strip()
     if txt.startswith("```"):

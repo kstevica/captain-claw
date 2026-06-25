@@ -201,6 +201,45 @@ class _LocalHashEmbeddingProvider:
         return embeddings
 
 
+class _Model2VecEmbeddingProvider:
+    """In-process static-embedding provider (no server, no API key).
+
+    Uses ``model2vec`` static embeddings — a small (~30MB) distilled model that
+    runs purely on CPU with NumPy. Gives genuine semantic similarity (unlike the
+    bag-of-words ``local_hash`` fallback) while staying fully local, so history
+    and memory search work without Ollama or any cloud embedding API.
+
+    The model is loaded lazily on first use so importing this module never pays
+    the load cost, and an unavailable/unimportable model raises so the embedding
+    chain can fall through to ``local_hash``.
+    """
+
+    provider_id = "model2vec"
+
+    def __init__(self, model: str = "minishlab/potion-base-8M"):
+        self.model = str(model).strip() or "minishlab/potion-base-8M"
+        self._encoder: Any = None
+        self._lock = threading.Lock()
+
+    def _ensure_encoder(self) -> Any:
+        if self._encoder is not None:
+            return self._encoder
+        with self._lock:
+            if self._encoder is None:
+                from model2vec import StaticModel
+
+                self._encoder = StaticModel.from_pretrained(self.model)
+        return self._encoder
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        encoder = self._ensure_encoder()
+        vectors = encoder.encode(list(texts))
+        out: list[list[float]] = []
+        for vector in vectors:
+            out.append(_normalize_embedding([float(v) for v in vector]))
+        return out
+
+
 class _OllamaEmbeddingProvider:
     provider_id = "ollama"
 
@@ -366,6 +405,7 @@ class SemanticMemoryIndex:
         self._db_lock = threading.RLock()
         self._sync_running = False
         self._dirty = False
+        self._reembed_checked = False
         self._last_sync_started: float = 0.0
         self._last_sync_completed: float = 0.0
         self._cache: dict[str, tuple[float, list[SemanticMemoryResult]]] = {}
@@ -1238,6 +1278,87 @@ class SemanticMemoryIndex:
             self._sync_documents("session", session_docs)
             self._sync_documents("session_history", history_docs)
             self._clear_cache()
+        # After documents are indexed, make sure every chunk's embedding belongs
+        # to the *active* provider. Switching providers (e.g. local_hash →
+        # model2vec) leaves old vectors stranded under a stale provider_key/dims,
+        # which vector search silently skips — so the layer would look
+        # keyword-only until each doc happened to change. Re-embed them once.
+        if not self._reembed_checked:
+            self._reembed_checked = True
+            try:
+                self._reembed_stale_chunks()
+            except Exception as exc:
+                log.warning("Re-embed pass failed", error=str(exc))
+
+    def _reembed_stale_chunks(self, batch_size: int = 128) -> int:
+        """Re-embed chunks whose stored vector is missing or under a provider/dims
+        other than the active embedding provider. Returns the number re-embedded.
+
+        Idempotent and cheap when nothing is stale (one probe embed + one indexed
+        count query). Lets a provider switch take effect over the whole existing
+        corpus — including the frozen ``session_history`` snapshots — instead of
+        only newly-indexed documents.
+        """
+        if self._closed or not self.embedding_chain.enabled:
+            return 0
+        try:
+            active_key, probe = self.embedding_chain.embed_batch(["probe"])
+        except Exception as exc:
+            log.debug("Re-embed skipped; embedding provider unavailable", error=str(exc))
+            return 0
+        active_dims = len(probe[0]) if probe else 0
+        if active_dims <= 0:
+            return 0
+        with self._db_lock:
+            rows = self._conn_or_raise().execute(
+                """
+                SELECT c.chunk_id, c.text
+                FROM memory_chunks c
+                LEFT JOIN memory_embeddings e ON e.chunk_id = c.chunk_id
+                WHERE e.chunk_id IS NULL OR e.provider_key != ? OR e.dims != ?
+                """,
+                (active_key, active_dims),
+            ).fetchall()
+        if not rows:
+            return 0
+        total = 0
+        now_iso = _utcnow_iso()
+        for offset in range(0, len(rows), batch_size):
+            batch = rows[offset : offset + batch_size]
+            texts = [str(r[1]) for r in batch]
+            try:
+                provider_key, vectors = self.embedding_chain.embed_batch(texts)
+            except Exception as exc:
+                log.warning("Re-embed batch failed; stopping pass", error=str(exc))
+                break
+            if len(vectors) != len(batch):
+                log.warning("Re-embed provider returned mismatched batch size")
+                break
+            payload = [
+                (str(r[0]), provider_key, len(v), json.dumps(v, ensure_ascii=True), now_iso)
+                for r, v in zip(batch, vectors, strict=False)
+            ]
+            with self._db_lock:
+                conn = self._conn_or_raise()
+                conn.executemany(
+                    """
+                    INSERT INTO memory_embeddings (chunk_id, provider_key, dims, embedding, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(chunk_id) DO UPDATE SET
+                        provider_key=excluded.provider_key,
+                        dims=excluded.dims,
+                        embedding=excluded.embedding,
+                        updated_at=excluded.updated_at
+                    """,
+                    payload,
+                )
+                conn.commit()
+            total += len(payload)
+        if total:
+            with self._db_lock:
+                self._clear_cache()
+            log.info("Re-embedded stale memory chunks", count=total, provider=active_key)
+        return total
 
     def _collect_workspace_documents(self) -> list[_Document]:
         if not self.workspace_path.exists() or not self.workspace_path.is_dir():
@@ -1892,7 +2013,9 @@ class SemanticMemoryIndex:
             params,
         ).fetchall()
         if not rows:
-            # Index may still be stale for the active provider.
+            # Index may still be stale for the active provider — re-embed existing
+            # chunks under the active provider on the next sync pass.
+            self._reembed_checked = False
             self.schedule_sync("vector_provider_mismatch")
             return []
         scored: list[dict[str, Any]] = []
@@ -2018,7 +2141,14 @@ def _build_embedding_chain(memory_cfg: Any) -> _EmbeddingProviderChain:
     litellm_base_url = str(getattr(cfg, "litellm_base_url", "")).strip()
     ollama_model = str(getattr(cfg, "ollama_model", "nomic-embed-text")).strip()
     ollama_base_url = str(getattr(cfg, "ollama_base_url", "http://127.0.0.1:11434")).strip()
+    model2vec_model = str(getattr(cfg, "model2vec_model", "minishlab/potion-base-8M")).strip()
     fallback_to_local_hash = bool(getattr(cfg, "fallback_to_local_hash", True))
+
+    def maybe_add_model2vec() -> None:
+        try:
+            providers.append(_Model2VecEmbeddingProvider(model=model2vec_model))
+        except Exception as exc:
+            log.debug("model2vec embedding provider unavailable", error=str(exc))
 
     def maybe_add_litellm() -> None:
         try:
@@ -2041,15 +2171,18 @@ def _build_embedding_chain(memory_cfg: Any) -> _EmbeddingProviderChain:
             )
         )
 
-    if provider_mode == "litellm":
+    if provider_mode in ("model2vec", "local"):
+        maybe_add_model2vec()
+    elif provider_mode == "litellm":
         maybe_add_litellm()
     elif provider_mode == "ollama":
         add_ollama()
     elif provider_mode == "none":
         providers = []
     else:
-        maybe_add_litellm()
-        add_ollama()
+        # ``auto`` (default): fully local & semantic — no Ollama, no cloud API.
+        # model2vec runs in-process; local_hash is the last-resort fallback.
+        maybe_add_model2vec()
 
     if fallback_to_local_hash or not providers:
         providers.append(_LocalHashEmbeddingProvider())

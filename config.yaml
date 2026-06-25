@@ -212,6 +212,7 @@ memory:
   - venv
   embeddings:
     provider: auto
+    model2vec_model: minishlab/potion-base-8M
     litellm_model: text-embedding-3-small
     litellm_api_key: ''
     litellm_base_url: ''
