@@ -55,6 +55,29 @@ export interface RouteSelected {
   extra?: string
 }
 
+// Vatra (collaborative mode): the Lead's decomposition into owner-assigned pieces.
+export interface VatraSubtask {
+  id: string
+  title: string
+  owner_archetype_id: string
+  brief?: string
+}
+
+// A cross-agent request on the Vatra blackboard.
+export interface VatraAsk {
+  id: number
+  from_owner: string
+  from_subtask: string
+  text: string
+  status: 'open' | 'claimed' | 'answered' | 'dropped'
+  answer: string
+  answered_by: string
+  depth: number
+  note?: string
+  created_at: string
+  updated_at: string
+}
+
 export interface RoutePlan {
   domain: string
   difficulty: string
@@ -64,6 +87,16 @@ export interface RoutePlan {
   source?: string
   elapsed_ms?: number
   session_id?: string
+  // Present on Vatra sessions: 'vatra' + the Lead's decomposition.
+  mode?: 'basna' | 'vatra'
+  subtasks?: VatraSubtask[]
+}
+
+export async function apiListVatraAsks(sessionId: string): Promise<VatraAsk[]> {
+  const res = await _authedFetch(`/fd/vatra/sessions/${encodeURIComponent(sessionId)}/asks`)
+  if (!res.ok) return []
+  const data = await res.json()
+  return (data.asks || []) as VatraAsk[]
 }
 
 export interface BasnaRun {

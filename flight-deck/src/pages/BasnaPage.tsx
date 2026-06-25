@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
   Loader2, Check, X, Wrench, Maximize2, Minimize2, Download, Paperclip, FileText, Image as ImageIcon,
-  SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw, Square, CornerDownRight,
+  SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw, Square, CornerDownRight, Users,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useBasnaStore, parseAnalysis, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis } from '../stores/basnaStore'
+import { VatraDelegation } from '../components/VatraDelegation'
 import { useTierConfig, TIER_ORDER, PROVIDERS } from '../services/tierConfig'
 
 const COGNITIVE_MODES = ['neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian']
@@ -95,6 +96,11 @@ function agentOrigin(config?: string): string | null {
   return null
 }
 
+function isVatra(config?: string): boolean {
+  if (!config) return false
+  try { return JSON.parse(config)?.mode === 'vatra' } catch { return false }
+}
+
 // Deepen runs carry {kind:'deepen', parent_session_id} in their config.
 function parentIdOf(config?: string): string | null {
   if (!config) return null
@@ -153,6 +159,11 @@ function SessionCard({ s, active, onOpen, onDelete, onCancel }: {
             className="flex shrink-0 items-center gap-1 rounded bg-violet-500/15 border border-violet-500/25 px-1.5 py-0.5 font-medium text-violet-700 dark:text-violet-300"
           >
             <Sparkles className="h-2.5 w-2.5" />agent{origin !== 'agent' ? `·${origin}` : ''}
+          </span>
+        )}
+        {isVatra(s.config) && (
+          <span title="Collaborative (Vatra) run" className="flex shrink-0 items-center gap-1 rounded border border-violet-500/25 bg-violet-500/15 px-1.5 py-0.5 font-medium text-violet-700 dark:text-violet-300">
+            <Users className="h-2.5 w-2.5" />vatra
           </span>
         )}
         {s.domain && <span className="truncate rounded bg-zinc-800/70 px-1.5 py-0.5 text-zinc-400">{s.domain}</span>}
@@ -744,12 +755,22 @@ export function BasnaPage() {
             {routePlan && (
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
                 <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Route plan</span>
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                    {routePlan.mode === 'vatra' ? 'Team plan' : 'Route plan'}
+                  </span>
                   <Badge className="text-zinc-300">{routePlan.domain}</Badge>
-                  <Badge className={DIFFICULTY_COLOR[routePlan.difficulty] || 'text-zinc-300'}>{routePlan.difficulty}</Badge>
-                  <Badge className="text-sky-700 dark:text-sky-300">{routePlan.merge_kind}</Badge>
+                  {routePlan.mode === 'vatra' ? (
+                    <Badge className="text-violet-600 dark:text-violet-300">collaborative</Badge>
+                  ) : (
+                    <>
+                      <Badge className={DIFFICULTY_COLOR[routePlan.difficulty] || 'text-zinc-300'}>{routePlan.difficulty}</Badge>
+                      <Badge className="text-sky-700 dark:text-sky-300">{routePlan.merge_kind}</Badge>
+                    </>
+                  )}
                   {routePlan.source && <Badge className="text-zinc-500">{routePlan.source}</Badge>}
-                  <span className="ml-auto text-[11px] text-zinc-600">{routePlan.selected.length} agent(s)</span>
+                  <span className="ml-auto text-[11px] text-zinc-600">
+                    {routePlan.selected.length} {routePlan.mode === 'vatra' ? 'owner(s)' : 'agent(s)'}
+                  </span>
                 </div>
                 {routePlan.rationale && <p className="mb-3 text-xs text-zinc-400">{routePlan.rationale}</p>}
                 <div className="space-y-2">
@@ -882,6 +903,15 @@ export function BasnaPage() {
                   })}
                 </div>
               </div>
+            )}
+
+            {/* Vatra (collaborative mode): the decomposition + delegation blackboard. */}
+            {routePlan?.mode === 'vatra' && activeSession && (
+              <VatraDelegation
+                sessionId={activeSession.id}
+                subtasks={routePlan.subtasks}
+                active={activeBusy || executing}
+              />
             )}
 
             {/* Live per-agent panels — actions + running LLM usage as they stream.

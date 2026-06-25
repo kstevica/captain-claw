@@ -1,10 +1,11 @@
 # Vatra — Collaborative Flight Deck Mode — Implementation Plan
 
-> Status: **Phases 1–3 built** (P1: Lead decompose → parallel subtasks → reporter assemble.
+> Status: **All 4 phases built** (P1: Lead decompose → parallel subtasks → reporter assemble.
 > P2: blackboard ask protocol — non-blocking delegation via a concurrent coordinator. P3:
-> learning loop — score owners/answerers/lead/reporter into per-archetype reliability). Not
-> yet prod-tested end-to-end. Only Phase 4 (UI: ask ledger + delegation graph) remains. Name
-> **Vatra** (a hearth — agents gather round one fire and build together, not solo sorties).
+> learning loop — score owners/answerers/lead/reporter into reliability. P4: Flight Deck UI —
+> Vatra badge, team-plan header, and the delegation blackboard view). Not yet prod-tested
+> end-to-end. Name **Vatra** (a hearth — agents gather round one fire and build together, not
+> solo sorties).
 >
 > Phase 1 deviations from the plan below (deliberate, for a low-risk first cut):
 > - **`mode` rides in the session `config` JSON** (`config.mode="vatra"`), not a new column —
@@ -198,10 +199,17 @@ The router already classifies `merge_kind: converge|diverge`. Add the orthogonal
 Heuristic for the prompt: choose collaborative when subtasks have **dependencies**
 (A's output feeds B); independent when subtasks are **parallel samples** of the same question.
 
-## Frontend (flight-deck)
-- New `VatraPage` (or a mode toggle on `BasnaPage`) reusing `basnaStore` shapes; add the
-  **ask ledger** view (open/claimed/answered) and a **delegation graph** (owner → ask → answerer).
-- `/basna start` slash + `basna` tool gain a `mode` param; `vatra` is `basna` with `mode='vatra'`.
+## Frontend (flight-deck) — ✅ Built (Phase 4)
+- Vatra sessions share the Basna list/detail (same `basna_sessions` table). The session row
+  shows a **`vatra` chip** (`isVatra(config)`); the detail header reads **"Team plan ·
+  collaborative · N owner(s)"** instead of difficulty/merge_kind.
+- New self-contained `components/VatraDelegation.tsx`: the **decomposition** (owner · piece
+  chips) + the **delegation blackboard** — each ask as `from_owner → answered_by` with status
+  icon, expandable to show the ask text and the answer; live-polls `/fd/vatra/sessions/{id}/asks`
+  (new user-scoped read endpoint) while the run is active. Summary counts (answered/pending/dropped).
+- `basnaStore` extended: `VatraSubtask`/`VatraAsk` types, `RoutePlan.mode`/`.subtasks`,
+  `apiListVatraAsks`. Built bundle committed (vite → `flight_deck/static`).
+- `basna` tool `start` gained a `mode` param (Phase 1); `vatra` is `basna` with `mode='vatra'`.
 
 ## Shared vs forked — at a glance
 | Concern | Basna | Vatra | Status |

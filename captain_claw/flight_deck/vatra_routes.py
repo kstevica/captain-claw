@@ -26,10 +26,10 @@ import types
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from captain_claw.flight_deck.archetypes import merged_archetypes
-from captain_claw.flight_deck.auth import get_db
+from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.logging import get_logger
 
 # Reuse Basna's standalone spine — these are pure/side-effect-isolated helpers and
@@ -918,6 +918,19 @@ async def agent_inbox(body: _VatraInboxReq):
                                   "answered_by": a.get("answered_by", "")} for a in answered],
                     "pending": len(pending)}
         await asyncio.sleep(_INBOX_POLL_S)
+
+
+# ── UI read endpoint: the blackboard for one session (user-scoped) ───
+
+@router.get("/sessions/{session_id}/asks")
+async def list_session_asks(session_id: str, user: dict = Depends(get_current_user)):
+    """The Vatra blackboard for a session — every ask with its status, answer, and
+    who answered it. Drives the ask-ledger + delegation-graph UI."""
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    return {"asks": await db.list_vatra_asks(session_id)}
 
 
 # ── Fire-and-forget entry (mirrors Basna's agent/start) ──────────────
