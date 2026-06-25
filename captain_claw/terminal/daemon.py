@@ -34,6 +34,7 @@ import os
 import pty
 import signal
 import struct
+import sys
 import time
 import uuid
 
@@ -76,6 +77,21 @@ KEYS: dict[str, bytes] = {
 # without bound.  Reads use absolute stream offsets, so trimming the front
 # of the buffer is transparent to a reader that keeps its cursor.
 _MAX_BUFFER = 512 * 1024
+
+# Live mirror: echo PTY output to the daemon's own console so the operator
+# watching the daemon window sees sessions as they happen. On by default;
+# set CLAW_PTY_MIRROR=0 to silence it.
+_MIRROR = os.environ.get("CLAW_PTY_MIRROR", "1").lower() not in ("0", "false", "no", "off")
+
+
+def _mirror(data: bytes) -> None:
+    if not _MIRROR:
+        return
+    try:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    except Exception:
+        pass
 
 
 class PtySession:
@@ -156,6 +172,7 @@ class PtySession:
             self._reap()
 
     def _append(self, chunk: bytes) -> None:
+        _mirror(chunk)
         self._buffer.extend(chunk)
         self._total += len(chunk)
         self._last_output = time.time()
@@ -219,6 +236,7 @@ class PtySession:
             except Exception:
                 pass
             self.master_fd = None
+        _mirror(f"\n\x1b[2m── session {self.id} ended (exit {self.exit_code}) ──\x1b[0m\n".encode())
 
     def kill(self) -> None:
         if self.pid is not None and self.alive:
@@ -268,6 +286,9 @@ class Daemon:
         # Per-session read cursor so the caller gets "what's new since last
         # read" without having to track offsets itself.
         self.cursors: dict[str, int] = {}
+        # Default working directory for new sessions: the folder the daemon
+        # was launched from (so terminals open where the operator is working).
+        self.base_cwd = os.getcwd()
 
     def _get(self, sid: str) -> PtySession:
         sess = self.sessions.get(sid)
@@ -307,7 +328,7 @@ class Daemon:
             cmd = [str(x) for x in cmd_raw]
         else:
             cmd = [os.environ.get("SHELL", "/bin/zsh"), "-i"]
-        cwd = str(body.get("cwd") or os.path.expanduser("~"))
+        cwd = str(body.get("cwd") or self.base_cwd)
         cols = int(body.get("cols") or 120)
         rows = int(body.get("rows") or 40)
         env = dict(os.environ)
@@ -315,11 +336,12 @@ class Daemon:
         for k, v in (body.get("env") or {}).items():
             env[str(k)] = str(v)
         sess = PtySession(cmd, cwd, env, cols, rows)
+        _mirror(f"\n\x1b[2m── session {sess.id} · {' '.join(cmd)} · {cwd} ──\x1b[0m\n".encode())
         sess.spawn(env)
         sess.attach(asyncio.get_running_loop())
         self.sessions[sess.id] = sess
         self.cursors[sess.id] = 0
-        log.info("opened session %s pid=%s cmd=%s", sess.id, sess.pid, " ".join(cmd))
+        log.info("opened session %s pid=%s cmd=%s cwd=%s", sess.id, sess.pid, " ".join(cmd), cwd)
         return {"session_id": sess.id, "pid": sess.pid}
 
     async def _input(self, body: dict) -> dict:
