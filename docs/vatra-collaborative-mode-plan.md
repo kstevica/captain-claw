@@ -1,9 +1,10 @@
 # Vatra — Collaborative Flight Deck Mode — Implementation Plan
 
-> Status: **Phases 1–2 built** (Phase 1: Lead decompose → parallel subtasks → reporter
-> assemble. Phase 2: blackboard ask protocol — non-blocking delegation routed by a concurrent
-> coordinator). Not yet prod-tested end-to-end. Name **Vatra** (a hearth — agents gather round
-> one fire and build together, rather than each flying a solo sortie).
+> Status: **Phases 1–3 built** (P1: Lead decompose → parallel subtasks → reporter assemble.
+> P2: blackboard ask protocol — non-blocking delegation via a concurrent coordinator. P3:
+> learning loop — score owners/answerers/lead/reporter into per-archetype reliability). Not
+> yet prod-tested end-to-end. Only Phase 4 (UI: ask ledger + delegation graph) remains. Name
+> **Vatra** (a hearth — agents gather round one fire and build together, not solo sorties).
 >
 > Phase 1 deviations from the plan below (deliberate, for a low-risk first cut):
 > - **`mode` rides in the session `config` JSON** (`config.mode="vatra"`), not a new column —
@@ -231,8 +232,15 @@ Heuristic for the prompt: choose collaborative when subtasks have **dependencies
   guard (identical ask → reuse), `_MAX_HELPERS=3` concurrency. Recursion guard moved worker-side
   into the `basna` tool (refuses `start` when CLAW_BASNA_WORKER **or** CLAW_VATRA_WORKER is set).
   **Next: prod-test end-to-end** (esp. that owners actually use `ask` for genuine cross-slice needs).
-- **Phase 3 — Helper spawn + learning.** Lead spawns fresh helpers for unowned asks;
-  per-slice + ask-answerer + `vatra-lead` scoring into `archetype_reliability`.
+- **Phase 3 — Helper spawn + learning. ✅ Built.** (Helper spawn landed in Phase 2.) `_learn`
+  scores four things into `archetype_reliability` via `record_archetype_outcome`: **owners**
+  (usable slices judged against the deliverable with Basna's `_llm_judge`; empty owners auto-fail
+  — also backfills `score_basna_run`), **ask-answerers** (each answer judged for soundness/use),
+  and **lead + reporter** holistically (`_llm_judge_holistic` → one reason-tier verdict on
+  decomposition quality and artifact coherence). Owners learn under their **real archetype id**
+  (key shared with Basna, so the loop closes — Vatra outcomes feed the next route's catalog
+  hints); **lead/reporter learn as separate pseudo-archetypes** (`vatra-lead`, `vatra-reporter`).
+  Resilient: any judge failure leaves the affected contributions unscored rather than guessed.
 - **Phase 4 — Frontend + auto-mode.** Ask ledger + delegation graph UI; optional router
   `auto_mode` so it picks independent vs collaborative itself, learned over time.
 

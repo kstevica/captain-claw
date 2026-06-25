@@ -52,6 +52,7 @@ from captain_claw.flight_deck.basna_routes import (
     _guess_mime,
     _is_texty,
     _keyword_match,
+    _llm_judge,
     _load_owner_tiers,
     _load_registry,
     _norm_text,
@@ -492,13 +493,28 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
 
-    # 6) Persist runs (success=None — scoring is Phase 3) so the UI/read-tool work.
-    await db.add_basna_runs(sid, user["id"], [{
+    # 6) Persist one run per owner (success backfilled by the learning step below).
+    run_ids = await db.add_basna_runs(sid, user["id"], [{
         "archetype_id": r["owner"], "role": r["role"], "tier": "",
         "weight_at_run": 0.0, "output": r["output"],
         "actions": json.dumps(r.get("actions", [])),
         "latency_ms": r["latency_ms"], "success": None,
     } for r in results])
+
+    # 7) Learn: score owners (slice used + sound), ask-answerers, and the Lead +
+    # reporter (holistic), folding outcomes into per-archetype reliability so the
+    # next route's prior_weight improves. Owners learn under their real archetype
+    # id (shared with Basna); Lead/reporter learn as separate pseudo-archetypes.
+    _progress(sid, "learn", "Scoring contributions…")
+    try:
+        learned = await _learn(
+            db, user, sid, domain, intent, subtasks, results, usable, answered, truth,
+            run_ids, seeds, judge_creds=_creds("fast"), holistic_creds=_creds("reason"))
+        _progress(sid, "learn", f"Scored {len(learned)} contribution(s)")
+    except Exception as e:
+        log.warning("Vatra learning failed", error=str(e))
+        learned = []
+        _progress(sid, "learn", "Scoring skipped (judge unavailable)", ok=False)
 
     files_by_name = {f["name"]: f for f in session_files}
     for g in generated_files:
@@ -517,7 +533,108 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             "truth": truth, "confidence": confidence,
             "subtasks": [{"id": r["id"], "owner": r["owner"], "role": r["role"],
                           "ok": r["ok"], "latency_ms": r["latency_ms"]} for r in results],
-            "spawned": len(spawned), "dispatched": len(results)}
+            "learned": learned, "spawned": len(spawned), "dispatched": len(results)}
+
+
+# ── Learning: score owners / answerers / lead / reporter ─────────────
+
+_LEAD_PSEUDO = "vatra-lead"
+_REPORTER_PSEUDO = "vatra-reporter"
+
+
+async def _llm_judge_holistic(intent: str, subtasks: list[dict], truth: str,
+                              creds: dict) -> dict | None:
+    """One reason-tier verdict on the two whole-run roles: was the Lead's
+    decomposition good (complementary, well-scoped, covers the task), and is the
+    reporter's assembled artifact coherent and complete? Returns
+    {"lead": bool, "reporter": bool} or None if unparseable."""
+    from captain_claw.llm import Message
+    plan = "\n".join(f"- {s.get('title', '')} (owner: {s.get('owner_archetype_id', '')})"
+                     for s in subtasks)
+    prov, mt = _provider_call(creds, temperature=0.0, default_max=512, cap=1024)
+    resp = await prov.complete(messages=[
+        Message(role="system", content=(
+            "You are grading a collaborative run. A Lead split a task into subtasks "
+            "(the plan), specialists each built a piece, and a reporter assembled them "
+            "into the final deliverable. Judge two things independently:\n"
+            "- lead: was the DECOMPOSITION good — complementary, well-scoped pieces that "
+            "together cover the task (not overlapping, not missing obvious parts)?\n"
+            "- reporter: is the FINAL DELIVERABLE coherent and complete for the task — one "
+            "integrated whole, not stapled fragments?\n"
+            'Reply ONLY with JSON: {"lead": true/false, "reporter": true/false}.')),
+        Message(role="user", content=(
+            f"TASK:\n{intent[:2000]}\n\nPLAN (subtasks):\n{plan}\n\n"
+            f"FINAL DELIVERABLE:\n{truth[:6000]}")),
+    ], temperature=0.0, max_tokens=mt)
+    content = resp.content.strip()
+    if content.startswith("```"):
+        content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
+    raw = json.loads(content)
+    if not isinstance(raw, dict):
+        return None
+    return {"lead": bool(raw.get("lead")), "reporter": bool(raw.get("reporter"))}
+
+
+async def _learn(db, user: dict, sid: str, domain: str, intent: str,
+                 subtasks: list[dict], results: list[dict], usable: list[dict],
+                 answered: list[dict], truth: str, run_ids: list, seeds: dict, *,
+                 judge_creds: dict, holistic_creds: dict) -> list[dict]:
+    """Score every contribution against the assembled deliverable and fold the
+    outcomes into per-archetype reliability. Resilient: a judge failure leaves the
+    affected contributions unscored rather than guessed."""
+    learned: list[dict] = []
+
+    async def _record(archetype_id: str, success: bool) -> None:
+        rel = await db.record_archetype_outcome(
+            user["id"], archetype_id, domain, success, seeds.get(archetype_id, 0.7))
+        learned.append({"archetype_id": archetype_id, "success": success,
+                        "weight": rel["weight"]})
+
+    # 1) Owners — usable slices judged against the deliverable; empty owners fail.
+    verdicts: list[bool] = []
+    if usable and truth:
+        try:
+            verdicts = await _llm_judge(usable, truth, judge_creds)
+        except Exception as e:
+            log.warning("Vatra owner judge failed; leaving owners unscored", error=str(e))
+            verdicts = []
+    usable_succ = {r["id"]: bool(v) for r, v in zip(usable, verdicts)}
+    for i, r in enumerate(results):
+        is_usable = bool((r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip())
+        if not is_usable:
+            succ = False
+        elif r["id"] in usable_succ:
+            succ = usable_succ[r["id"]]
+        else:
+            continue  # judge couldn't decide → don't guess
+        rid = run_ids[i] if i < len(run_ids) else None
+        if rid is not None:
+            await db.score_basna_run(rid, user["id"], succ)
+        await _record(r["owner"], succ)
+
+    # 2) Ask-answerers — was each answer sound/used in the deliverable?
+    ans_good = [{"output": a.get("answer", ""), "archetype_id": a.get("answered_by", "")}
+                for a in answered
+                if (a.get("answer") or "").strip() and a.get("answered_by")]
+    if ans_good and truth:
+        try:
+            av = await _llm_judge(ans_good, truth, judge_creds)
+            for g, v in zip(ans_good, av):
+                await _record(g["archetype_id"], bool(v))
+        except Exception as e:
+            log.warning("Vatra answerer judge failed; leaving answerers unscored", error=str(e))
+
+    # 3) Lead + reporter — holistic, as separate pseudo-archetypes.
+    if truth:
+        try:
+            h = await _llm_judge_holistic(intent, subtasks, truth, holistic_creds)
+            if h:
+                await _record(_LEAD_PSEUDO, h["lead"])
+                await _record(_REPORTER_PSEUDO, h["reporter"])
+        except Exception as e:
+            log.warning("Vatra holistic judge failed; lead/reporter unscored", error=str(e))
+
+    return learned
 
 
 def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str]) -> str:
