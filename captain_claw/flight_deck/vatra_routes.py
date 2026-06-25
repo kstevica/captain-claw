@@ -176,6 +176,36 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
     return plan
 
 
+def _resolve_creds(registry: dict, tiers: dict | None, api_key: str, tier: str) -> dict:
+    """Resolve LLM creds for a tier from the Library tiers, else the registry."""
+    lt = (tiers or {}).get(tier)
+    if lt and lt.get("model"):
+        return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
+                "base_url": lt.get("base_url") or None,
+                "api_key": lt.get("api_key") or api_key or None,
+                "output_ctx": int(lt.get("output_ctx") or 0)}
+    return _tier_creds(registry, tier, api_key or "")
+
+
+async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dict) -> dict:
+    """Run the Lead and shape the result into a persistable Vatra route:
+    {mode, domain, rationale, subtasks, selected}. `selected` mirrors Basna's
+    shape so the read-tool and list UI render the owners."""
+    archetypes = await merged_archetypes(db, user_id)
+    arch_by_id = {a["id"]: a for a in archetypes}
+    rel_rows = await db.get_archetype_reliability(user_id)
+    reliability: dict[str, list[dict]] = {}
+    for r in rel_rows:
+        reliability.setdefault(r["archetype_id"], []).append(r)
+    plan = await asyncio.wait_for(
+        _llm_decompose(intent, archetypes, reliability, creds, max_agents), _DECOMPOSE_TIMEOUT)
+    selected = [{"archetype_id": s["owner_archetype_id"],
+                 "role": arch_by_id[s["owner_archetype_id"]].get("role", ""),
+                 "why": s["title"]} for s in plan["subtasks"]]
+    return {"mode": "vatra", "domain": plan["domain"], "rationale": plan["rationale"],
+            "subtasks": plan["subtasks"], "selected": selected}
+
+
 # ── Spawn / teardown (mirrors Basna's; stamped CLAW_VATRA_WORKER) ─────
 
 async def _spawn_worker(request: Request, user: dict, *, name: str, description: str,
@@ -297,19 +327,9 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     arch_by_id = {a["id"]: a for a in archetypes}
     seeds = {a["id"]: float(a.get("reliability_seed", 0.7)) for a in archetypes}
     registry = _load_registry()
-    rel_rows = await db.get_archetype_reliability(user["id"])
-    reliability: dict[str, list[dict]] = {}
-    for r in rel_rows:
-        reliability.setdefault(r["archetype_id"], []).append(r)
 
     def _creds(tier: str) -> dict:
-        lt = (body.tiers or {}).get(tier)
-        if lt and lt.get("model"):
-            return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
-                    "base_url": lt.get("base_url") or None,
-                    "api_key": lt.get("api_key") or body.api_key or None,
-                    "output_ctx": int(lt.get("output_ctx") or 0)}
-        return _tier_creds(registry, tier, body.api_key)
+        return _resolve_creds(registry, body.tiers, body.api_key, tier)
 
     try:
         cfg = json.loads(sess.get("config") or "{}")
@@ -327,32 +347,34 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     _progress_start(sid)
     await db.update_basna_session(sid, user["id"], status="running")
 
-    # 1) Lead decomposes the task into owner-assigned subtasks.
-    _progress(sid, "route", "Lead decomposing the task…")
+    # 1) Plan. Reuse a route prepared by the UI's /route step if present; otherwise
+    # decompose now (the one-shot /start and agent paths). Splitting decompose from
+    # spawn is what gives the UI a Basna-style prepare → review → run flow.
     try:
-        plan = await asyncio.wait_for(
-            _llm_decompose(intent, archetypes, reliability, _creds("fast"), max_agents),
-            _DECOMPOSE_TIMEOUT)
-    except HTTPException:
-        raise
-    except Exception as e:
-        await db.update_basna_session(sid, user["id"], status="error")
-        _progress(sid, "route", f"Lead decomposition failed: {str(e)[:200]}", ok=False)
-        raise HTTPException(502, f"Vatra Lead failed: {e}")
-    domain = plan["domain"]
-    subtasks = plan["subtasks"]
-    # Persist the plan as the session route (mirrors Basna's `selected` so the
-    # existing UI / basna read-tool render owners).
-    selected = [{"archetype_id": s["owner_archetype_id"],
-                 "role": arch_by_id[s["owner_archetype_id"]].get("role", ""),
-                 "why": s["title"]} for s in subtasks]
-    route = {"mode": "vatra", "domain": domain, "rationale": plan["rationale"],
-             "subtasks": subtasks, "selected": selected}
-    await db.update_basna_session(
-        sid, user["id"], domain=domain, route=json.dumps(route),
-        config=json.dumps({**cfg, "mode": "vatra"}),
-    )
-    _progress(sid, "route", f"{len(subtasks)} subtask(s) · {domain}")
+        existing = json.loads(sess.get("route") or "{}")
+    except json.JSONDecodeError:
+        existing = {}
+    if existing.get("mode") == "vatra" and existing.get("subtasks"):
+        route = existing
+        _progress(sid, "route",
+                  f"Using prepared plan · {len(route['subtasks'])} piece(s) · {route.get('domain', '')}")
+    else:
+        _progress(sid, "route", "Lead decomposing the task…")
+        try:
+            route = await _build_plan(db, user["id"], intent, max_agents, _creds("fast"))
+        except HTTPException:
+            await db.update_basna_session(sid, user["id"], status="error")
+            raise
+        except Exception as e:
+            await db.update_basna_session(sid, user["id"], status="error")
+            _progress(sid, "route", f"Lead decomposition failed: {str(e)[:200]}", ok=False)
+            raise HTTPException(502, f"Vatra Lead failed: {e}")
+        await db.update_basna_session(
+            sid, user["id"], domain=route["domain"], route=json.dumps(route),
+            config=json.dumps({**cfg, "mode": "vatra"}))
+        _progress(sid, "route", f"{len(route['subtasks'])} subtask(s) · {route['domain']}")
+    domain = route["domain"]
+    subtasks = route["subtasks"]
 
     spawned: list[dict] = []   # {subtask, slug, port, auth}
     results: list[dict] = []   # {id, owner, role, output, ok, latency_ms, actions}
@@ -368,9 +390,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         async def _spawn_owner(st: dict) -> dict | None:
             arch = arch_by_id[st["owner_archetype_id"]]
             tier = arch.get("tier", "balanced")
+            # Name by SUBTASK id, not just archetype — two pieces can share an
+            # owner archetype (e.g. two researcher slices), and a per-archetype name
+            # would collide so only one agent spawns.
             sp = await _spawn_worker(
                 request, user,
-                name=f"vatra-{sid8}-{run_tag}-{arch['id']}",
+                name=f"vatra-{sid8}-{run_tag}-{st['id']}-{arch['id']}",
                 description=f"Vatra subtask · {arch.get('role', '')}",
                 cognitive_mode=arch.get("cognitive_mode", "neutra"),
                 tools=arch.get("tools") or [], tier=tier, tiers=tiers,
@@ -414,20 +439,29 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             dispatch_timeout=body.dispatch_timeout, stop_event=stop_event))
 
         # 3) Dispatch each owner its self-contained brief, in parallel.
+        # Count how many pieces each archetype owns so we can disambiguate the live
+        # panel label only when an archetype owns more than one piece.
+        owner_counts: dict[str, int] = {}
+        for sp in spawned:
+            owner_counts[sp["arch"]["id"]] = owner_counts.get(sp["arch"]["id"], 0) + 1
+
         async def _dispatch_owner(sp: dict) -> dict:
             arch, st = sp["arch"], sp["subtask"]
             role = arch.get("role") or arch["id"]
+            # Distinct live-panel label per piece when an archetype owns several, so
+            # two researcher slices show as two cards, not one merged card.
+            label = f"{role} · {st['title']}" if owner_counts.get(arch["id"], 1) > 1 else role
             fleet = arch.get("fleet_instructions", "")
 
             def _on_action(act: dict) -> None:
                 detail = act.get("detail", "")
                 if act["tool"] == "narration":
-                    _progress(sid, "narration", f"{role}: {detail}", agent=role,
+                    _progress(sid, "narration", f"{label}: {detail}", agent=label,
                               tool="narration", detail=detail)
                 else:
                     suffix = f": {detail}" if detail else ""
-                    _progress(sid, "action", f"{role} → {act['tool']}{suffix}",
-                              agent=role, tool=act["tool"], detail=detail)
+                    _progress(sid, "action", f"{label} → {act['tool']}{suffix}",
+                              agent=label, tool=act["tool"], detail=detail)
 
             from captain_claw.flight_deck.server import DATA_DIR
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
@@ -436,13 +470,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files])
             d = await _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
-                on_action=_on_action, fleet_instructions=fleet, agent_name=role,
+                on_action=_on_action, fleet_instructions=fleet, agent_name=label,
                 file_paths=doc, image_paths=img)
             mark = "✓" if d["ok"] else "✗"
             extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
             _progress(sid, "dispatch",
-                      f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}",
-                      ok=d["ok"], agent=role)
+                      f"{label} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}",
+                      ok=d["ok"], agent=label)
             return d
 
         dispatched = await asyncio.gather(*[_dispatch_owner(sp) for sp in spawned])
@@ -931,6 +965,62 @@ class VatraStartRequest(BaseModel):
     tiers: dict | None = None
     env_vars: list | None = None
     api_key: str = ""
+
+
+class VatraExecuteRequest(BaseModel):
+    session_id: str
+    tiers: dict | None = None
+    env_vars: list | None = None
+    api_key: str = ""
+
+
+@router.post("/route")
+async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_user)):
+    """Vatra 'prepare' step: the Lead decomposes the task and the plan is persisted,
+    but nothing is spawned. Mirrors Basna's Route → review → Run. Returns the plan;
+    the UI shows it, then calls /execute to spawn the team."""
+    intent = (body.intent or "").strip()
+    if not intent:
+        raise HTTPException(400, "intent is required")
+    db = get_db()
+    title = (body.title or intent[:60]).strip()
+    sess = await db.create_basna_session(
+        user["id"], intent, title=title,
+        config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents}))
+    sid = sess["id"]
+    registry = _load_registry()
+    creds = _resolve_creds(registry, body.tiers, body.api_key, "fast")
+    try:
+        route = await _build_plan(db, user["id"], intent, body.max_agents, creds)
+    except HTTPException:
+        await db.delete_basna_session(sid, user["id"])
+        raise
+    except Exception as e:
+        await db.delete_basna_session(sid, user["id"])
+        raise HTTPException(502, f"Vatra Lead failed: {e}")
+    await db.update_basna_session(
+        sid, user["id"], domain=route["domain"], route=json.dumps(route), status="routed")
+    return {"session_id": sid, "title": title, **route}
+
+
+@router.post("/execute")
+async def execute_vatra_ui(body: VatraExecuteRequest, request: Request,
+                           user: dict = Depends(get_current_user)):
+    """Spawn + run a prepared Vatra session in the background (its plan was made by
+    /route). Returns immediately; the UI polls progress. execute_vatra reuses the
+    persisted plan, so the Lead does not run again."""
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    exec_req = ExecuteRequest(
+        session_id=body.session_id, tiers=body.tiers or None,
+        env_vars=body.env_vars or None, api_key=body.api_key or "")
+    stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
+    t = asyncio.create_task(execute_vatra(exec_req, stub, user))
+    _basna_agent_tasks.add(t)
+    t.add_done_callback(_basna_agent_tasks.discard)
+    return {"session_id": body.session_id, "status": "running"}
 
 
 @router.post("/start")

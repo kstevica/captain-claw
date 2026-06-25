@@ -243,13 +243,24 @@ async function apiProgress(id: string): Promise<{ events: ProgressEvent[]; activ
   return res.json()
 }
 
-async function apiVatraStart(body: Record<string, unknown>): Promise<{ session_id: string; title: string }> {
-  const res = await _authedFetch('/fd/vatra/start', {
+async function apiVatraRoute(body: Record<string, unknown>): Promise<{ session_id: string; title: string }> {
+  const res = await _authedFetch('/fd/vatra/route', {
     method: 'POST', body: JSON.stringify(body),
   })
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}))
-    throw new Error((detail as { detail?: string }).detail || 'vatra start failed')
+    throw new Error((detail as { detail?: string }).detail || 'vatra plan failed')
+  }
+  return res.json()
+}
+
+async function apiVatraExecute(body: Record<string, unknown>): Promise<{ session_id: string }> {
+  const res = await _authedFetch('/fd/vatra/execute', {
+    method: 'POST', body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { detail?: string }).detail || 'vatra run failed')
   }
   return res.json()
 }
@@ -361,7 +372,8 @@ interface BasnaStore {
   newSession: () => void
   updateSelected: (index: number, patch: Partial<RouteSelected>) => void
   route: (intent: string, tiers: TierMap, title?: string) => Promise<void>
-  startVatra: (intent: string, tiers: TierMap, envVars: EnvVar[], title?: string) => Promise<void>
+  planVatra: (intent: string, tiers: TierMap, title?: string) => Promise<void>
+  runVatra: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   saveTitle: (title: string) => Promise<void>
   execute: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   recompile: (tiers: TierMap) => Promise<void>
@@ -511,24 +523,40 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     }
   },
 
-  // Manual Vatra start from the UI. Unlike Basna (route → run), Vatra decomposes
-  // inside the run, so this is one step: create + launch in the background, then
-  // hand off to pollRunning (which drives progress + loads the result on done).
-  startVatra: async (intent, tiers, envVars, title = '') => {
+  // Vatra prepare step (mirrors Basna's Route): the Lead decomposes the task into
+  // owned pieces, persisted as a routed session — nothing is spawned yet. The team
+  // plan then shows in the collaboration panel for review before Run.
+  planVatra: async (intent, tiers, title = '') => {
     if (!intent.trim()) return
     set({ routing: true, error: null })
     try {
-      const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
-      const { session_id } = await apiVatraStart({
-        intent: intent.trim(), max_agents: get().maxAgents, tiers, env_vars,
+      const { session_id } = await apiVatraRoute({
+        intent: intent.trim(), max_agents: get().maxAgents, tiers,
         ...(title.trim() ? { title: title.trim() } : {}),
       })
       await get().loadSessions()
       await get().selectSession(session_id)
     } catch (e) {
-      set({ error: e instanceof Error ? e.message : 'vatra start failed' })
+      set({ error: e instanceof Error ? e.message : 'vatra plan failed' })
     } finally {
       set({ routing: false })
+    }
+  },
+
+  // Vatra run step: spawn + run the prepared session in the background; pollRunning
+  // then drives progress and loads the result on done (no blocking request).
+  runVatra: async (tiers, envVars) => {
+    const sid = get().activeSession?.id
+    if (!sid) return
+    set({ error: null })
+    try {
+      const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
+      await apiVatraExecute({ session_id: sid, tiers, env_vars })
+      const s = await apiGetSession(sid)
+      if (s) set({ activeSession: s })
+      await get().loadSessions()
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'vatra run failed' })
     }
   },
 

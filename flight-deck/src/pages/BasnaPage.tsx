@@ -457,7 +457,7 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, startVatra, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
+    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
@@ -739,22 +739,33 @@ export function BasnaPage() {
                     Route
                   </button>
                   <button
-                    onClick={() => startVatra(intent, tiers, envVars, title)}
-                    disabled={!canRoute}
-                    title="Collaborative mode: a Lead splits the task into parts, specialists build them, a reporter assembles one deliverable. Best for multi-part build tasks."
-                    className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                    onClick={() => planVatra(intent, tiers, title)}
+                    disabled={!canRoute || vatraMode}
+                    title="Collaborative mode: a Lead splits the task into parts; review the plan, then Run team. Best for multi-part build tasks."
+                    className="flex items-center gap-1.5 rounded-lg border border-violet-700/70 px-3 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-800/30 disabled:opacity-40"
                   >
                     {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
-                    Run as Vatra
+                    Plan as Vatra
                   </button>
-                  <button
-                    onClick={() => execute(tiers, envVars)}
-                    disabled={!canRun || vatraMode}
-                    className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
-                  >
-                    {executing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                    Run ensemble
-                  </button>
+                  {vatraMode ? (
+                    <button
+                      onClick={() => runVatra(tiers, envVars)}
+                      disabled={!canRun}
+                      className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                    >
+                      {(executing || activeBusy) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                      Run team
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => execute(tiers, envVars)}
+                      disabled={!canRun}
+                      className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                    >
+                      {executing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                      Run ensemble
+                    </button>
+                  )}
                 </div>
               </div>
               {error && (
