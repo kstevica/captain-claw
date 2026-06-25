@@ -243,6 +243,17 @@ async function apiProgress(id: string): Promise<{ events: ProgressEvent[]; activ
   return res.json()
 }
 
+async function apiVatraStart(body: Record<string, unknown>): Promise<{ session_id: string; title: string }> {
+  const res = await _authedFetch('/fd/vatra/start', {
+    method: 'POST', body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { detail?: string }).detail || 'vatra start failed')
+  }
+  return res.json()
+}
+
 async function apiUploadFiles(sessionId: string, files: File[]): Promise<{ files: BasnaFile[] }> {
   const form = new FormData()
   for (const f of files) form.append('files', f)
@@ -350,6 +361,7 @@ interface BasnaStore {
   newSession: () => void
   updateSelected: (index: number, patch: Partial<RouteSelected>) => void
   route: (intent: string, tiers: TierMap, title?: string) => Promise<void>
+  startVatra: (intent: string, tiers: TierMap, envVars: EnvVar[], title?: string) => Promise<void>
   saveTitle: (title: string) => Promise<void>
   execute: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   recompile: (tiers: TierMap) => Promise<void>
@@ -494,6 +506,27 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       await get().loadSessions()
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'route failed' })
+    } finally {
+      set({ routing: false })
+    }
+  },
+
+  // Manual Vatra start from the UI. Unlike Basna (route → run), Vatra decomposes
+  // inside the run, so this is one step: create + launch in the background, then
+  // hand off to pollRunning (which drives progress + loads the result on done).
+  startVatra: async (intent, tiers, envVars, title = '') => {
+    if (!intent.trim()) return
+    set({ routing: true, error: null })
+    try {
+      const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
+      const { session_id } = await apiVatraStart({
+        intent: intent.trim(), max_agents: get().maxAgents, tiers, env_vars,
+        ...(title.trim() ? { title: title.trim() } : {}),
+      })
+      await get().loadSessions()
+      await get().selectSession(session_id)
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'vatra start failed' })
     } finally {
       set({ routing: false })
     }

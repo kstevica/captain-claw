@@ -457,7 +457,7 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
+    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, startVatra, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
@@ -733,6 +733,15 @@ export function BasnaPage() {
                   >
                     {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
                     Route
+                  </button>
+                  <button
+                    onClick={() => startVatra(intent, tiers, envVars, title)}
+                    disabled={!canRoute}
+                    title="Collaborative mode: a Lead splits the task into parts, specialists build them, a reporter assembles one deliverable. Best for multi-part build tasks."
+                    className="flex items-center gap-1.5 rounded-lg border border-violet-700/60 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-800/30 disabled:opacity-40"
+                  >
+                    {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
+                    Run as Vatra
                   </button>
                   <button
                     onClick={() => execute(tiers, envVars)}

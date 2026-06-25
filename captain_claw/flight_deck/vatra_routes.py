@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
@@ -918,6 +919,46 @@ async def agent_inbox(body: _VatraInboxReq):
                                   "answered_by": a.get("answered_by", "")} for a in answered],
                     "pending": len(pending)}
         await asyncio.sleep(_INBOX_POLL_S)
+
+
+# ── UI manual start (user-scoped, background) ────────────────────────
+
+class VatraStartRequest(BaseModel):
+    intent: str
+    title: str = ""
+    max_agents: int = Field(default=6, ge=1, le=10)
+    # Per-tier model config from the Library (same shape Basna's execute uses).
+    tiers: dict | None = None
+    env_vars: list | None = None
+    api_key: str = ""
+
+
+@router.post("/start")
+async def start_vatra(body: VatraStartRequest, request: Request,
+                      user: dict = Depends(get_current_user)):
+    """Launch a Vatra run from the UI. Creates a collaborative session and runs it
+    in the background (the Lead decomposes inside execute_vatra — there's no
+    separate route step). Returns immediately; the UI polls progress like any other
+    running session. The agent path (`/agent/start`) is the other entry."""
+    intent = (body.intent or "").strip()
+    if not intent:
+        raise HTTPException(400, "intent is required")
+    db = get_db()
+    title = (body.title or intent[:60]).strip()
+    sess = await db.create_basna_session(
+        user["id"], intent, title=title,
+        config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents}))
+    sid = sess["id"]
+    exec_req = ExecuteRequest(
+        session_id=sid, tiers=body.tiers or None,
+        env_vars=body.env_vars or None, api_key=body.api_key or "")
+    # Background task with a stub request carrying the owner (spawn_process reads
+    # request.state.user_id) — the real request object isn't safe to use post-response.
+    stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
+    t = asyncio.create_task(execute_vatra(exec_req, stub, user))
+    _basna_agent_tasks.add(t)
+    t.add_done_callback(_basna_agent_tasks.discard)
+    return {"session_id": sid, "title": title, "status": "running"}
 
 
 # ── UI read endpoint: the blackboard for one session (user-scoped) ───
