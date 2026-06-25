@@ -498,6 +498,7 @@ class ToolsConfig(BaseModel):
         "browser", "datastore", "direct_api", "cron",
         "google_drive", "google_calendar", "google_mail",
         "whatsapp_send_file", "intentions", "video_vision", "topics",
+        "history",
     })
 
     @model_validator(mode="after")

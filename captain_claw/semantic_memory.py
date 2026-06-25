@@ -1131,6 +1131,27 @@ class SemanticMemoryIndex:
                 )
                 """
             )
+            # Frozen, append-only raw transcript snapshots. Written before a
+            # session is compacted so the verbatim messages survive even after
+            # they are dropped from the live session. Indexed under the
+            # ``session_history`` source, which the retrieval scope filter
+            # always includes (never deleted, never re-embedded).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_history (
+                    history_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    session_name TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    message_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_history_session "
+                "ON memory_history(session_id, created_at)"
+            )
             # Migrate: add text_l1/text_l2 columns if missing (existing DBs).
             try:
                 cols = {
@@ -1211,9 +1232,11 @@ class SemanticMemoryIndex:
     def _sync_once(self) -> None:
         workspace_docs = self._collect_workspace_documents() if self.index_workspace else []
         session_docs = self._collect_session_documents() if self.index_sessions else []
+        history_docs = self._collect_history_documents() if self.index_sessions else []
         with self._db_lock:
             self._sync_documents("workspace", workspace_docs)
             self._sync_documents("session", session_docs)
+            self._sync_documents("session_history", history_docs)
             self._clear_cache()
 
     def _collect_workspace_documents(self) -> list[_Document]:
@@ -1305,6 +1328,180 @@ class SemanticMemoryIndex:
                 )
             )
         return documents
+
+    @staticmethod
+    def _format_messages_as_text(messages: list[dict[str, Any]]) -> str:
+        """Render a list of session messages as ``[role] content`` lines."""
+        lines: list[str] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role", "")).strip().lower() or "unknown"
+            content = re.sub(r"\s+", " ", str(msg.get("content", "")).strip())
+            if not content:
+                continue
+            lines.append(f"[{role}] {content}")
+        return "\n".join(lines)
+
+    def archive_session_history(
+        self,
+        *,
+        session_id: str,
+        session_name: str,
+        messages: list[dict[str, Any]],
+        created_at: str | None = None,
+    ) -> int:
+        """Freeze a window of raw messages before they are compacted away.
+
+        Stores the verbatim transcript in the append-only ``memory_history``
+        table and schedules a background sync that embeds it under the
+        ``session_history`` source.  Idempotent: re-archiving identical content
+        is a no-op (the ``history_id`` is a content hash).
+
+        Returns the number of messages archived (0 if nothing to store).
+        """
+        if self._closed:
+            return 0
+        text = self._format_messages_as_text(messages or [])
+        if not text.strip():
+            return 0
+        sid = str(session_id or "").strip() or "session"
+        name = str(session_name or "").strip() or sid
+        count = text.count("\n") + 1
+        history_id = _hash_text(f"{sid}:{text}")
+        now_iso = created_at or _utcnow_iso()
+        try:
+            with self._db_lock:
+                self._conn_or_raise().execute(
+                    """
+                    INSERT OR IGNORE INTO memory_history
+                        (history_id, session_id, session_name, text, message_count, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (history_id, sid, name, text, count, now_iso),
+                )
+                self._conn_or_raise().commit()
+        except Exception as exc:
+            log.warning("Failed to archive session history", error=str(exc))
+            return 0
+        self.schedule_sync("history")
+        return count
+
+    def _collect_history_documents(self) -> list[_Document]:
+        """Build virtual documents from the frozen history snapshots.
+
+        Signatures are stable (derived only from immutable row data) so a
+        snapshot is embedded exactly once and never re-embedded or deleted.
+        """
+        try:
+            with self._db_lock:
+                rows = self._conn_or_raise().execute(
+                    "SELECT history_id, session_id, session_name, text, message_count, created_at "
+                    "FROM memory_history ORDER BY created_at DESC"
+                ).fetchall()
+        except Exception as exc:
+            log.debug("Skipping history sync; cannot read history table", error=str(exc))
+            return []
+        documents: list[_Document] = []
+        for history_id, session_id, session_name, text, message_count, created_at in rows:
+            text = str(text or "")
+            if not text.strip():
+                continue
+            safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(session_name)).strip("-") or str(session_id)
+            documents.append(
+                _Document(
+                    source="session_history",
+                    reference=str(history_id),
+                    path=f"history/{safe_name}.txt",
+                    signature=f"{created_at}:{message_count}:{history_id}",
+                    text=text,
+                    updated_at=str(created_at) or _utcnow_iso(),
+                )
+            )
+        return documents
+
+    def search_history(
+        self,
+        query: str,
+        max_results: int | None = None,
+    ) -> list[SemanticMemoryResult]:
+        """Hybrid search restricted to the frozen ``session_history`` snapshots."""
+        cleaned = str(query or "").strip()
+        if not cleaned or self._closed:
+            return []
+        effective_max = max(1, int(max_results or self.max_results))
+        if self.auto_sync_on_search:
+            now = time.time()
+            if (now - self._last_sync_completed) >= self.stale_after_seconds or self._dirty:
+                self.schedule_sync("history_search")
+        keyword_hits = [
+            h for h in self._keyword_search(
+                cleaned, limit=self.candidate_limit,
+                active_session_reference=None, include_all_sessions=True,
+            )
+            if h.get("source") == "session_history"
+        ]
+        vector_hits = [
+            h for h in self._vector_search(
+                cleaned, limit=self.candidate_limit,
+                active_session_reference=None, include_all_sessions=True,
+            )
+            if h.get("source") == "session_history"
+        ]
+        return list(self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max))
+
+    def list_history(self, limit: int = 20) -> list[dict[str, Any]]:
+        """List recent frozen snapshots (newest first)."""
+        if self._closed:
+            return []
+        try:
+            with self._db_lock:
+                rows = self._conn_or_raise().execute(
+                    "SELECT history_id, session_id, session_name, text, message_count, created_at "
+                    "FROM memory_history ORDER BY created_at DESC LIMIT ?",
+                    (max(1, int(limit)),),
+                ).fetchall()
+        except Exception as exc:
+            log.debug("Cannot list history snapshots", error=str(exc))
+            return []
+        out: list[dict[str, Any]] = []
+        for history_id, session_id, session_name, text, message_count, created_at in rows:
+            preview = re.sub(r"\s+", " ", str(text or "")).strip()[:200]
+            out.append({
+                "history_id": str(history_id),
+                "session_id": str(session_id),
+                "session_name": str(session_name),
+                "message_count": int(message_count),
+                "created_at": str(created_at),
+                "preview": preview,
+            })
+        return out
+
+    def get_history(self, history_id: str) -> dict[str, Any] | None:
+        """Return one frozen snapshot's full verbatim text."""
+        ref = str(history_id or "").strip()
+        if not ref or self._closed:
+            return None
+        try:
+            with self._db_lock:
+                row = self._conn_or_raise().execute(
+                    "SELECT history_id, session_id, session_name, text, message_count, created_at "
+                    "FROM memory_history WHERE history_id = ?",
+                    (ref,),
+                ).fetchone()
+        except Exception as exc:
+            log.debug("Cannot fetch history snapshot", error=str(exc))
+            return None
+        if not row:
+            return None
+        return {
+            "history_id": str(row[0]),
+            "session_id": str(row[1]),
+            "session_name": str(row[2]),
+            "text": str(row[3] or ""),
+            "message_count": int(row[4]),
+            "created_at": str(row[5]),
+        }
 
     def _sync_documents(self, source: str, docs: list[_Document]) -> None:
         conn = self._conn_or_raise()

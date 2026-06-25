@@ -158,6 +158,40 @@ class LayeredMemory:
     def compact_working_memory(self, keep_recent_ratio: float = 0.4) -> None:
         self.working.compact(keep_recent_ratio=keep_recent_ratio)
 
+    def archive_session_history(
+        self,
+        *,
+        session_id: str,
+        session_name: str,
+        messages: list[dict[str, Any]],
+        created_at: str | None = None,
+    ) -> int:
+        """Freeze raw messages before compaction so they survive verbatim."""
+        if self.semantic is None:
+            return 0
+        return self.semantic.archive_session_history(
+            session_id=session_id,
+            session_name=session_name,
+            messages=messages,
+            created_at=created_at,
+        )
+
+    def search_history(self, query: str, max_results: int | None = None):
+        """Search the frozen, append-only transcript snapshots."""
+        if self.semantic is None:
+            return []
+        return self.semantic.search_history(query=query, max_results=max_results)
+
+    def list_history(self, limit: int = 20):
+        if self.semantic is None:
+            return []
+        return self.semantic.list_history(limit=limit)
+
+    def get_history(self, history_id: str):
+        if self.semantic is None:
+            return None
+        return self.semantic.get_history(history_id=history_id)
+
     def schedule_background_sync(self, reason: str = "manual") -> None:
         if self.semantic is not None:
             self.semantic.schedule_sync(reason)

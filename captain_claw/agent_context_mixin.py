@@ -2216,6 +2216,7 @@ class AgentContextMixin:
             IntentionsTool,
             VideoVisionTool,
             TopicsTool,
+            SessionHistoryTool,
         )
 
         config = get_config()
@@ -2270,6 +2271,10 @@ class AgentContextMixin:
                 self.tools.register(IntentionsTool())
             elif tool_name == "topics":
                 self.tools.register(TopicsTool())
+            elif tool_name == "history":
+                ht = SessionHistoryTool()
+                ht._agent = self
+                self.tools.register(ht)
             elif tool_name == "video_vision":
                 self.tools.register(VideoVisionTool())
             elif tool_name == "gws":

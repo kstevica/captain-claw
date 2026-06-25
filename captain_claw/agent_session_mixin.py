@@ -302,6 +302,21 @@ class AgentSessionMixin:
 
         old_messages = messages[:-keep_count]
         recent_messages = messages[-keep_count:]
+
+        # Freeze the raw messages we're about to drop into append-only history
+        # memory so they remain verbatim-searchable after compaction — the
+        # summary alone loses specifics (exact models, names, lists).
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            try:
+                memory.archive_session_history(
+                    session_id=self.session.id,
+                    session_name=getattr(self.session, "name", "") or self.session.id,
+                    messages=old_messages,
+                )
+            except Exception as exc:
+                log.warning("Failed to archive history before compaction", error=str(exc))
+
         summary_text = await self._summarize_for_compaction(old_messages)
         summary_content = (
             "Conversation summary of earlier messages (compacted memory):\n"
