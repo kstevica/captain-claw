@@ -49,29 +49,35 @@ class TerminalTool(Tool):
 
     name = "terminal"
     description = (
-        "Drive a real interactive terminal (PTY) on the local machine — for "
-        "programs that need a live tty: REPLs (python3, node), interactive "
-        "CLIs (claude, ssh, psql), or full-screen TUIs. Use this instead of "
-        "`shell` whenever a program expects keystrokes or stays running and "
-        "prompts for more input.\n"
-        "Workflow: `open` a session (returns session_id) → `send` text/keys "
-        "and read what the program prints back → `send` again → `close` when "
-        "done. Reuse the same session_id across turns; sessions persist. "
-        "Send control keys (ctrl-c, esc, up, enter, tab) via `key`. "
-        "A user message prefixed with `$ ` means: run it as a raw terminal "
-        "command in the active session."
+        "Run commands and drive a real terminal (PTY) on the USER'S OWN paired "
+        "machine — their Mac/laptop, reached over Flight Deck. This is NOT the "
+        "agent's host: `shell` runs here on the server, `terminal` runs on the "
+        "user's computer. Strongly prefer `terminal` whenever the user refers "
+        "to their own machine ('on my Mac', 'my laptop', 'my computer', 'at "
+        "home', 'on my machine') — even for a one-shot command.\n"
+        "For a single command, use action='run' (open→execute→capture→close in "
+        "one call) — as simple as `shell`, but on the user's machine.\n"
+        "For interactive programs that need a live tty — REPLs (python3, node), "
+        "CLIs that prompt (claude, ssh, psql), or full-screen TUIs — use the "
+        "session flow: `open` (returns session_id) → `send` text/keys and read "
+        "what it prints → `send` again → `close`. Sessions persist across "
+        "turns; reuse the session_id. Send control keys (ctrl-c, esc, up, "
+        "enter, tab) via `key`. A user message prefixed with `$ ` means run it "
+        "as a raw terminal command in the active session."
     )
-    timeout_seconds = 60.0
+    timeout_seconds = 150.0
     parameters = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "send", "read", "list", "close", "resize"],
+                "enum": ["run", "open", "send", "read", "list", "close", "resize"],
                 "description": (
-                    "open: start a session. send: type text/keys and return "
-                    "the resulting output. read: get new output without typing. "
-                    "list: show sessions. close: end a session. resize: set size."
+                    "run: execute one command on the user's machine and return "
+                    "its output (no session to manage). open: start a persistent "
+                    "session. send: type text/keys and return the resulting "
+                    "output. read: get new output without typing. list: show "
+                    "sessions. close: end a session. resize: set size."
                 ),
             },
             "session_id": {
@@ -80,7 +86,10 @@ class TerminalTool(Tool):
             },
             "command": {
                 "type": "string",
-                "description": "open only: program to run (default: interactive login shell).",
+                "description": (
+                    "run: the command to execute. open: program to run "
+                    "(default: interactive login shell)."
+                ),
             },
             "cwd": {
                 "type": "string",
@@ -150,6 +159,40 @@ class TerminalTool(Tool):
         raw = bool(kwargs.get("raw", False))
         wait = float(kwargs.get("wait", 2.0))
         try:
+            if action == "run":
+                command = kwargs.get("command")
+                if not command:
+                    return ToolResult(success=False, error="run requires `command`.")
+                # One-shot: run under a login shell (full user env/PATH) in a
+                # PTY, drain output until it exits, then clean up the session.
+                data = await self._call(
+                    "/open", {"cmd": ["/bin/bash", "-lc", str(command)], "cwd": kwargs.get("cwd")}
+                )
+                sid = data["session_id"]
+                collected: list[str] = []
+                exit_code: int | None = None
+                for _ in range(60):
+                    out = await self._call(
+                        "/read", {"session_id": sid, "wait": wait, "settle": 0.3}
+                    )
+                    collected.append(out.get("output", ""))
+                    exit_code = out.get("exit_code")
+                    if not out.get("alive", False):
+                        break
+                try:
+                    await self._call("/close", {"session_id": sid})
+                except Exception:
+                    pass
+                text = "".join(collected)
+                if not raw:
+                    text = _strip_ansi(text)
+                text = text.strip("\n")
+                suffix = "" if exit_code in (0, None) else f"\n[exit code {exit_code}]"
+                return ToolResult(
+                    success=exit_code in (0, None),
+                    content=(text or "[no output]") + suffix,
+                )
+
             if action == "open":
                 payload: dict[str, Any] = {}
                 if kwargs.get("command"):
