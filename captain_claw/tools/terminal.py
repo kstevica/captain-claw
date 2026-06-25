@@ -63,7 +63,10 @@ class TerminalTool(Tool):
         "what it prints → `send` again → `close`. Sessions persist across "
         "turns; reuse the session_id. Send control keys (ctrl-c, esc, up, "
         "enter, tab) via `key`. A user message prefixed with `$ ` means run it "
-        "as a raw terminal command in the active session."
+        "as a raw terminal command in the active session.\n"
+        "If output ends with a ⏳ waiting marker, the program is parked at a "
+        "prompt — answer it with `send`; do NOT assume it finished just because "
+        "output stopped."
     )
     timeout_seconds = 150.0
     parameters = {
@@ -146,15 +149,27 @@ class TerminalTool(Tool):
         if not raw:
             text = _strip_ansi(text)
         text = text.strip("\n")
-        lines = []
+        parts = []
+        if text:
+            parts.append(text)
         if not data.get("alive", True):
             code = data.get("exit_code")
-            lines.append(f"[session ended, exit code {code}]")
-        if not text:
-            lines.append("[no new output]")
-        else:
-            lines.append(text)
-        return "\n".join(lines)
+            parts.append(f"[session ended, exit code {code}]")
+        elif data.get("prompt_like"):
+            parts.append(
+                "[⏳ The program is waiting for your input — answer the prompt "
+                "above with action='send' (e.g. data='1' enter=true, or "
+                "key='enter'). Don't assume it finished.]"
+            )
+        elif data.get("waiting"):
+            idle_s = int(data.get("idle_ms", 0) / 1000)
+            parts.append(
+                f"[⏳ Running but quiet for ~{idle_s}s — it may be waiting for "
+                "input or still working. Send input, or 'read' again to wait.]"
+            )
+        if not parts:
+            parts.append("[no new output]")
+        return "\n".join(parts)
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         action = str(kwargs.get("action", "")).strip().lower()
@@ -173,6 +188,7 @@ class TerminalTool(Tool):
                 sid = data["session_id"]
                 collected: list[str] = []
                 exit_code: int | None = None
+                prompted = False
                 for _ in range(60):
                     out = await self._call(
                         "/read", {"session_id": sid, "wait": wait, "settle": 0.3}
@@ -180,6 +196,11 @@ class TerminalTool(Tool):
                     collected.append(out.get("output", ""))
                     exit_code = out.get("exit_code")
                     if not out.get("alive", False):
+                        break
+                    # A one-shot `run` shouldn't hang on an interactive prompt;
+                    # stop and tell the agent to drive it as a session instead.
+                    if out.get("prompt_like"):
+                        prompted = True
                         break
                 try:
                     await self._call("/close", {"session_id": sid})
@@ -189,6 +210,16 @@ class TerminalTool(Tool):
                 if not raw:
                     text = _strip_ansi(text)
                 text = text.strip("\n")
+                if prompted:
+                    return ToolResult(
+                        success=False,
+                        content=text,
+                        error=(
+                            "This command is waiting for interactive input, but `run` "
+                            "is one-shot. Use action='open' then 'send' to answer its "
+                            "prompts."
+                        ),
+                    )
                 suffix = "" if exit_code in (0, None) else f"\n[exit code {exit_code}]"
                 return ToolResult(
                     success=exit_code in (0, None),

@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import pty
+import re
 import signal
 import struct
 import sys
@@ -94,6 +95,34 @@ def _mirror(data: bytes) -> None:
         pass
 
 
+# Heuristics for "the program is sitting at a prompt waiting for me".
+_ANSI_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|\x1b\[[0-?]*[ -/]*[@-~]")
+_PROMPT_TAIL_RE = re.compile(
+    r"(?:[:?#$%>\]\)]"                       # ends in a prompt-ish char
+    r"|\(y/n\)|\[y/n\]|\[Y/n\]|\[y/N\]"      # yes/no
+    r"|password|passphrase"                  # secrets
+    r"|\b\d+[.)]\s*\w"                        # a numbered menu item (1. Yes)
+    r"|❯|›|»|\?\s*$)"                         # selector arrows / trailing ?
+    r"\s*$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_prompt(tail: str) -> bool:
+    """True if the recent terminal output looks like it's awaiting input."""
+    if not tail:
+        return False
+    text = _ANSI_RE.sub("", tail).replace("\r", "")
+    if not text.strip():
+        return False
+    # The strongest tell: the cursor is left on a line with no trailing newline
+    # (e.g. "Password: ", "❯ 1. Yes") — a finished line of output ends in \n.
+    if not text.endswith("\n"):
+        return True
+    last = next((l for l in reversed(text.splitlines()) if l.strip()), "")
+    return bool(_PROMPT_TAIL_RE.search(last.strip()))
+
+
 class PtySession:
     """One pseudo-terminal running a child process."""
 
@@ -114,6 +143,8 @@ class PtySession:
         self._base = 0
         self._total = 0
         self._last_output = time.time()
+        # Decoded tail of recent output, kept for prompt detection.
+        self._tail = ""
         self._loop: asyncio.AbstractEventLoop | None = None
 
     # ── lifecycle ────────────────────────────────────────────────────
@@ -176,6 +207,7 @@ class PtySession:
         self._buffer.extend(chunk)
         self._total += len(chunk)
         self._last_output = time.time()
+        self._tail = (self._tail + chunk.decode("utf-8", errors="replace"))[-1024:]
         if len(self._buffer) > _MAX_BUFFER:
             drop = len(self._buffer) - _MAX_BUFFER
             del self._buffer[:drop]
@@ -209,6 +241,15 @@ class PtySession:
     @property
     def total(self) -> int:
         return self._total
+
+    @property
+    def idle_ms(self) -> int:
+        """Milliseconds since the last byte of output."""
+        return int((time.time() - self._last_output) * 1000)
+
+    @property
+    def tail(self) -> str:
+        return self._tail
 
     def _reap(self) -> None:
         if not self.alive:
@@ -377,11 +418,19 @@ class Daemon:
         settle = float(body.get("settle", 0.25))
         output, new_cursor = await sess.read_new(int(cursor), wait, settle)
         self.cursors[sess.id] = new_cursor
+        idle_ms = sess.idle_ms
+        # "waiting": the process is alive and output has settled (it's not
+        # actively streaming) — i.e. it's parked, most likely at a prompt.
+        # `prompt_like` strengthens that into "definitely awaiting input".
+        waiting = bool(sess.alive and idle_ms >= 250)
         return {
             "output": output,
             "cursor": new_cursor,
             "alive": sess.alive,
             "exit_code": sess.exit_code,
+            "idle_ms": idle_ms,
+            "waiting": waiting,
+            "prompt_like": bool(waiting and _looks_like_prompt(sess.tail)),
         }
 
     async def _resize(self, body: dict) -> dict:

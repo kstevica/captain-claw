@@ -15,6 +15,7 @@ A new agent tool that drives a real PTY on the user's paired machine — explici
 
 - **One-shot or interactive.** `action="run"` executes a single command and returns its output (open → execute → capture → close in one call — as easy as `shell`, but on your machine). For anything that needs a live tty, the session flow: `open` (returns a `session_id`) → `send` text/keys and read what prints back → `send` again → `close`. Sessions persist across turns; reuse the id.
 - **Keystroke emulation.** `send` takes free text, a named `key` / chord (`enter`, `tab`, `esc`, arrows, `ctrl-c`, `ctrl-d`, `ctrl-l`, …), and an `enter` flag — so the agent can drive `claude`'s REPL, answer a prompt, or interrupt a runaway with Ctrl-C.
+- **Waiting-for-input detection.** When a program parks at a prompt — a menu, `(y/n)`, a `read -p` line, `claude`'s "Do you want to…?" confirm — the tool flags it (output ends with a ⏳ marker) so the agent answers it with `send` instead of assuming the program finished or stalling. A one-shot `run` that hits a prompt bails with guidance to switch to a session, rather than blocking.
 - **Readable output.** ANSI escape codes are stripped by default for text channels (WhatsApp / chat); pass `raw=true` to keep them.
 - **Connection status.** `action="list"` doubles as a probe — it reports whether your machine is connected (✓ + active sessions), has no daemon running (✗ worker offline), or is unreachable — so the agent can tell "your Mac is offline" apart from "I don't have this tool".
 
