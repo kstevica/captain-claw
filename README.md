@@ -13,7 +13,18 @@
 
 [![Glasses Bridge demo](https://img.youtube.com/vi/ZTepr5PP3WQ/maxresdefault.jpg)](https://www.youtube.com/shorts/ZTepr5PP3WQ)
 
-An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 47 built-in tools.
+An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 48 built-in tools.
+
+## What's New in 0.6.2
+
+**The remote terminal — text your own machine and watch it work.** Fully additive.
+
+- **New `terminal` tool — a live terminal on a machine you choose.** Unlike `shell` (one command in, output out, no tty), `terminal` drives a real pseudo-terminal on the user's *own* paired machine — Mac, laptop, or remote box — and is reachable from **both Flight Deck web chat and WhatsApp**. It runs REPLs, interactive CLIs (`claude`, `ssh`, `psql`), and full-screen TUIs by sending keystrokes — including control keys (`ctrl-c`, `esc`, arrows) — into a live pty and reading back what appears. `action="run"` does a one-shot command; `open` / `send` / `read` / `close` drive a persistent session. ANSI is stripped for text channels; `list` reports connection status so the agent can tell "your machine is offline" from "I don't have this tool".
+- **Standalone PTY daemon** (`python -m captain_claw.terminal.daemon`) holds the sessions on your machine, **survives agent restarts**, opens new sessions in its launch directory, and **mirrors live output to its own console** so you can watch what's happening (`CLAW_PTY_MIRROR`). Command strings run through a login shell, so `cd`, `&&`, pipes, your `PATH`, and interactive programs all work.
+- **Behind-NAT dial-out.** The machine running the terminal doesn't need an inbound port: the daemon opens a persistent **outbound WebSocket** to Flight Deck (`CLAW_PTY_RELAY`) and registers as a named worker; a new Flight Deck relay (`/fd/pty/*`) tunnels the agent's calls back down to it. Or, on a reachable network, the daemon binds a port and the agent points `CLAW_PTY_URL` at it directly.
+- **Token-gated.** One shared `CLAW_PTY_TOKEN` authenticates the daemon, the relay, and the tool; the daemon refuses a non-loopback bind without it. Run it over `wss://` / a private network — a PTY is remote code execution, so keep it paired to a machine and token you trust.
+
+Opt-in: add `terminal` to `tools.enabled` (on the home-config overlay too, if present) and run the daemon on the target machine. New env vars are documented in `.env.example`. See [RELEASE_NOTES_0.6.2.md](release-notes/RELEASE_NOTES_0.6.2.md). Backward compatible with 0.6.1.
 
 ## What's New in 0.6.1
 

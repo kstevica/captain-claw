@@ -4339,6 +4339,29 @@ A durable, cross-session **topic memory** built from comms traffic. Every ~15 me
 
 Stores: `conversation_topics.db` (topics + topic_messages + FTS + groups + many-to-many + backfill_seen). Endpoints under `/api/topics/*` (list, search, refresh, combine, reset, append, groups, star, message-move, `{id}/{refresh|unclassify|groups|star}`, `messages/{id}/move`), proxied through `/fd/agent-topic*`. Topics memory ships **on** — disable via `conversation_topics.enabled` in config.
 
+### Terminal — a live terminal on your own machine (NEW in 0.6.2)
+
+The **`terminal`** tool drives a real pseudo-terminal (PTY) on a machine **you** choose — your Mac, a laptop, a remote box — and is reachable from **both Flight Deck web chat and WhatsApp**. It's the interactive counterpart to `shell`: `shell` runs one command with no tty on the agent's host; `terminal` holds long-lived sessions on *your* machine and can run REPLs, prompt-driven CLIs (`claude`, `ssh`, `psql`), and full-screen TUIs by typing keystrokes into a live tty and reading back what appears. The tool's description steers the agent to prefer it whenever you refer to your own machine ("on my Mac", "my laptop", "at home").
+
+**Tool actions.**
+
+- **`run`** — one-shot: execute a command on your machine and return its output (open → execute → capture → close in a single call). Runs under a login shell, so `cd`, `&&`, pipes, your `PATH`, and exit codes all work. As easy as `shell`, but on your machine.
+- **`open`** — start a persistent session (returns a `session_id`); optional `command` (default: your interactive login shell) and `cwd`. A command **string** runs as `$SHELL -lc "<cmd>"` (shell syntax + interactive programs work); pass an explicit argv **list** for literal, no-shell exec.
+- **`send`** — type into a session: free `data` text, a named `key`/chord (`enter`, `tab`, `esc`, `up`/`down`/`left`/`right`, `ctrl-c`, `ctrl-d`, `ctrl-l`, …), and an `enter` flag — then returns what the program printed back. Reuse the `session_id` across turns.
+- **`read`** — pull new output without typing. **`close`** — end a session. **`resize`** — set cols/rows.
+- **`list`** — show active sessions **and report connection status**: `✓ Connected — worker 'mac'`, `✗ Not connected — worker 'mac' has no terminal daemon running`, or `✗ Terminal not reachable`. Lets the agent tell "your machine is offline" apart from "I don't have this tool". ANSI escape codes are stripped by default (text channels); pass `raw=true` to keep them.
+
+**The PTY daemon (your machine's side).** Run `python -m captain_claw.terminal.daemon` on the machine you want to drive. It owns the sessions, is decoupled from the agent (so sessions **survive agent restarts**), opens new sessions in the folder it was launched from, and **mirrors live output to its own console** — a dim `── session … · cmd · cwd ──` header, the real-time output, and an `── session … ended (exit N) ──` footer — so you can watch the agent work (`CLAW_PTY_MIRROR=0` to silence).
+
+**Two connection modes.** The tool ↔ daemon link is plain HTTP, so the daemon can live anywhere the agent can reach.
+
+- **Reachable network** (LAN / VPN / Tailscale / public box): start the daemon with `CLAW_PTY_HOST` / `CLAW_PTY_PORT` (default `127.0.0.1:23190`) and point the agent's `CLAW_PTY_URL` at it. The daemon **refuses a non-loopback bind without `CLAW_PTY_TOKEN`** unless `CLAW_PTY_INSECURE=1`.
+- **Behind NAT (dial-out)**: set `CLAW_PTY_RELAY=wss://<flight-deck>/fd/pty/connect` and `CLAW_PTY_WORKER=<name>`. The daemon opens a persistent **outbound** WebSocket to Flight Deck and registers; the **relay** (`/fd/pty/connect` for daemons, `/fd/pty/{worker}/{op}` for the agent) tunnels each tool call down the worker's socket. No inbound ports; sessions survive a dropped socket and reconnect with backoff. Point the agent's `CLAW_PTY_URL` at `http://<flight-deck>/fd/pty/<worker>`. The dial-out client uses the `websockets` library so it tolerates the duplicate `Server` handshake header reverse proxies (Cloudflare/nginx) add.
+
+**Security.** A PTY is arbitrary code execution on the target machine. One shared `CLAW_PTY_TOKEN` gates all three legs — the daemon's register frame, the relay's HTTP, and the tool's `X-Claw-Token` header. Set it on Flight Deck (its environment, inherited by spawned agents) and on the daemon's launch command, and run the dial-out over `wss://` / a private network. **Note:** the `terminal` tool does not yet pass through `shell`'s ask/allow/deny approval gate — for now the token + private transport are the fence; a sender allowlist / approval gate is a planned follow-up.
+
+**Enable it.** Add `terminal` to `tools.enabled`. On a deployment with a `~/.captain-claw/config.yaml` overlay (written by the Flight Deck settings UI), add it there too — that overlay's `tools.enabled` list **replaces** the project `config.yaml` list rather than merging — then restart the agent. Restart Flight Deck to pick up the relay router; run FD single-process (the relay's worker registry is in-process). All env vars are documented in `.env.example`. It's listed in the project `config.yaml` by default, but does nothing until the daemon is running on a target machine — until then it simply reports "not connected".
+
 ### Agent Forge
 
 Agent Forge is a dedicated Flight Deck page that uses an LLM to decompose a business objective into a team of specialized AI agents.

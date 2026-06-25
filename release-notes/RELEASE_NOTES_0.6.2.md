@@ -58,4 +58,4 @@ Additive — **backward compatible with 0.6.1**. Nothing changes unless you opt 
 - **Flight Deck** gains the relay router automatically (`/fd/pty/*`); restart FD to pick it up. The relay's worker registry is in-process — run Flight Deck single-process, or add sticky/shared state if you run multiple uvicorn workers.
 - No databases, no schema changes, no removed endpoints.
 
-See [release-notes/RELEASE_NOTES_0.6.1.md](release-notes/RELEASE_NOTES_0.6.1.md) for the previous release, or the [release-notes/](release-notes/) folder for the full history.
+See [RELEASE_NOTES_0.6.1.md](RELEASE_NOTES_0.6.1.md) for the previous release.
