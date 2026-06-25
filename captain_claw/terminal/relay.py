@@ -54,6 +54,14 @@ class _Worker:
 _workers: dict[str, _Worker] = {}
 
 
+async def _safe_close(ws: WebSocket, code: int) -> None:
+    """Close a websocket, swallowing errors if it's already gone."""
+    try:
+        await ws.close(code=code)
+    except Exception:
+        pass
+
+
 @router.websocket("/fd/pty/connect")
 async def pty_connect(ws: WebSocket) -> None:
     """A PTY daemon dials in here, registers, then answers forwarded requests."""
@@ -61,16 +69,17 @@ async def pty_connect(ws: WebSocket) -> None:
     try:
         reg = await ws.receive_json()
     except Exception:
-        await ws.close(code=4000)
+        # Client abandoned the handshake (e.g. its own client-side validation
+        # rejected the upgrade) — the socket is already gone; don't close.
         return
 
     if not isinstance(reg, dict) or reg.get("type") != "register":
-        await ws.close(code=4001)
+        await _safe_close(ws, 4001)
         return
     token = _token()
     if token and reg.get("token") != token:
         log.warning("pty worker rejected: bad token")
-        await ws.close(code=4003)
+        await _safe_close(ws, 4003)
         return
 
     worker = str(reg.get("worker") or "default")

@@ -28,6 +28,7 @@ API (all POST, JSON in/out)::
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import pty
@@ -434,47 +435,49 @@ async def run_relay(relay_url: str, worker: str, token: str | None) -> None:
     are elsewhere: instead of waiting for inbound connections, we open a
     persistent WebSocket to the relay, register as *worker*, and answer the
     ``request`` frames it forwards from the agent's terminal tool.
+
+    Uses the ``websockets`` client rather than aiohttp's: reverse proxies
+    (Cloudflare/nginx) in front of Flight Deck often add a second ``Server``
+    handshake header, which aiohttp rejects with a 400 but ``websockets``
+    tolerates.
     """
-    import aiohttp
+    from websockets.asyncio.client import connect
 
     daemon = Daemon(token=None)  # auth happens at connect time, not per-op
     backoff = 1.0
     while True:
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(relay_url, heartbeat=30) as ws:
-                    await ws.send_json({"type": "register", "worker": worker, "token": token})
-                    log.info("relay connected: %s as worker %r", relay_url, worker)
-                    backoff = 1.0
-                    send_lock = asyncio.Lock()
+            # max_size=None: PTY output frames can exceed the default 1 MiB cap.
+            async with connect(relay_url, max_size=None, open_timeout=20) as ws:
+                await ws.send(json.dumps({"type": "register", "worker": worker, "token": token}))
+                log.info("relay connected: %s as worker %r", relay_url, worker)
+                backoff = 1.0
+                send_lock = asyncio.Lock()
 
-                    async def serve(req: dict) -> None:
-                        rid = req.get("id")
-                        op = str(req.get("op", ""))
-                        try:
-                            body = await daemon.dispatch(op, req.get("payload") or {})
-                            resp = {"type": "response", "id": rid, "status": 200, "body": body}
-                        except OpError as exc:
-                            resp = {"type": "response", "id": rid, "status": exc.status,
-                                    "body": {"error": exc.message}}
-                        except Exception as exc:  # pragma: no cover - defensive
-                            resp = {"type": "response", "id": rid, "status": 500,
-                                    "body": {"error": str(exc)}}
-                        async with send_lock:
-                            await ws.send_json(resp)
+                async def serve(req: dict) -> None:
+                    rid = req.get("id")
+                    op = str(req.get("op", ""))
+                    try:
+                        body = await daemon.dispatch(op, req.get("payload") or {})
+                        resp = {"type": "response", "id": rid, "status": 200, "body": body}
+                    except OpError as exc:
+                        resp = {"type": "response", "id": rid, "status": exc.status,
+                                "body": {"error": exc.message}}
+                    except Exception as exc:  # pragma: no cover - defensive
+                        resp = {"type": "response", "id": rid, "status": 500,
+                                "body": {"error": str(exc)}}
+                    async with send_lock:
+                        await ws.send(json.dumps(resp))
 
-                    async for msg in ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            try:
-                                data = msg.json()
-                            except Exception:
-                                continue
-                            if data.get("type") == "request":
-                                # Per-request task so a slow `read` can't block
-                                # the socket's heartbeat or other requests.
-                                asyncio.create_task(serve(data))
-                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                            break
+                async for message in ws:
+                    try:
+                        data = json.loads(message)
+                    except Exception:
+                        continue
+                    if isinstance(data, dict) and data.get("type") == "request":
+                        # Per-request task so a slow `read` can't block other
+                        # requests or the keepalive ping.
+                        asyncio.create_task(serve(data))
             log.warning("relay connection closed; reconnecting")
         except Exception as exc:
             log.warning("relay connection failed: %s", exc)
