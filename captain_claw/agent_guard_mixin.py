@@ -21,6 +21,7 @@ _BACKGROUND_MAINTENANCE_LABELS = {
     "reflection_merge",
     "insight_extraction",
     "nervous_system_dream",
+    "conversation_topics",
 }
 
 
