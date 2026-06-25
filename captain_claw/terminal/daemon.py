@@ -322,8 +322,12 @@ class Daemon:
     async def _open(self, body: dict) -> dict:
         cmd_raw = body.get("cmd")
         if isinstance(cmd_raw, str) and cmd_raw.strip():
-            import shlex
-            cmd = shlex.split(cmd_raw)
+            # A string is a shell command line: run it through a login shell so
+            # shell syntax (cd, &&, pipes, env) and the user's PATH work, and
+            # interactive programs (claude, python3) still get the pty. Pass an
+            # explicit list instead if you want literal argv with no shell.
+            shell = os.environ.get("SHELL") or "/bin/bash"
+            cmd = [shell, "-lc", cmd_raw.strip()]
         elif isinstance(cmd_raw, list) and cmd_raw:
             cmd = [str(x) for x in cmd_raw]
         else:
