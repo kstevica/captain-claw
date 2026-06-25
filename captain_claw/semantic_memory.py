@@ -2114,7 +2114,14 @@ class SemanticMemoryIndex:
         self._cache.clear()
 
     def clear_all(self) -> int:
-        """Delete all documents, chunks, embeddings, FTS, and sync state. Returns count of deleted docs."""
+        """Delete all documents, chunks, embeddings, FTS, sync state, and the
+        frozen history snapshots. Returns count of deleted docs.
+
+        ``memory_history`` MUST be cleared here too: it's the append-only source
+        that ``_collect_history_documents`` re-indexes from on every sync, so
+        leaving it behind would (a) survive a full wipe (/nuke) and (b) resurrect
+        the session_history docs/chunks/embeddings on the next sync.
+        """
         conn = self._conn_or_raise()
         with self._db_lock:
             count = conn.execute("SELECT COUNT(*) FROM memory_documents").fetchone()[0]
@@ -2123,6 +2130,7 @@ class SemanticMemoryIndex:
             conn.execute("DELETE FROM memory_chunks")
             conn.execute("DELETE FROM memory_documents")
             conn.execute("DELETE FROM memory_sync_state")
+            conn.execute("DELETE FROM memory_history")
             conn.commit()
             self._clear_cache()
         return int(count)

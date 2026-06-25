@@ -498,7 +498,7 @@ async def _execute_nuke(server: WebServer) -> str:
                     ).fetchall()]
                     for tbl in ("memory_embeddings", "memory_chunks_fts",
                                 "memory_chunks", "memory_documents",
-                                "memory_sync_state"):
+                                "memory_sync_state", "memory_history"):
                         if tbl in tables:
                             conn.execute(f"DELETE FROM [{tbl}]")
                     conn.execute("VACUUM")
