@@ -504,6 +504,10 @@ export function BasnaPage() {
   // Live monitor: while any run (incl. agent-started) is mid-flight, poll the
   // list status + the open session's progress every few seconds; stop when idle.
   const anyRunning = sessions.some((s) => ['routing', 'routed', 'running'].includes(s.status))
+  // Vatra runs render the collaboration panel, not the Basna route-plan editor
+  // (their route's `selected` carries no tier/prior_weight). Read from config so
+  // it's correct even before the Lead has decomposed (route is still empty).
+  const vatraMode = !!activeSession && isVatra(activeSession.config)
   useEffect(() => {
     if (!anyRunning || executing) return
     const iv = setInterval(() => { pollRunning() }, 4000)
@@ -728,7 +732,7 @@ export function BasnaPage() {
                 <div className="ml-auto flex items-center gap-2">
                   <button
                     onClick={() => route(intent, tiers, title)}
-                    disabled={!canRoute}
+                    disabled={!canRoute || vatraMode}
                     className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
                   >
                     {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
@@ -738,14 +742,14 @@ export function BasnaPage() {
                     onClick={() => startVatra(intent, tiers, envVars, title)}
                     disabled={!canRoute}
                     title="Collaborative mode: a Lead splits the task into parts, specialists build them, a reporter assembles one deliverable. Best for multi-part build tasks."
-                    className="flex items-center gap-1.5 rounded-lg border border-violet-700/60 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-800/30 disabled:opacity-40"
+                    className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
                   >
                     {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
                     Run as Vatra
                   </button>
                   <button
                     onClick={() => execute(tiers, envVars)}
-                    disabled={!canRun}
+                    disabled={!canRun || vatraMode}
                     className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
                   >
                     {executing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
@@ -760,26 +764,16 @@ export function BasnaPage() {
               )}
             </div>
 
-            {/* Route plan */}
-            {routePlan && (
+            {/* Route plan (Basna only — Vatra uses the collaboration panel below) */}
+            {routePlan && !vatraMode && (
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
                 <div className="mb-2 flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
-                    {routePlan.mode === 'vatra' ? 'Team plan' : 'Route plan'}
-                  </span>
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Route plan</span>
                   <Badge className="text-zinc-300">{routePlan.domain}</Badge>
-                  {routePlan.mode === 'vatra' ? (
-                    <Badge className="text-violet-600 dark:text-violet-300">collaborative</Badge>
-                  ) : (
-                    <>
-                      <Badge className={DIFFICULTY_COLOR[routePlan.difficulty] || 'text-zinc-300'}>{routePlan.difficulty}</Badge>
-                      <Badge className="text-sky-700 dark:text-sky-300">{routePlan.merge_kind}</Badge>
-                    </>
-                  )}
+                  <Badge className={DIFFICULTY_COLOR[routePlan.difficulty] || 'text-zinc-300'}>{routePlan.difficulty}</Badge>
+                  <Badge className="text-sky-700 dark:text-sky-300">{routePlan.merge_kind}</Badge>
                   {routePlan.source && <Badge className="text-zinc-500">{routePlan.source}</Badge>}
-                  <span className="ml-auto text-[11px] text-zinc-600">
-                    {routePlan.selected.length} {routePlan.mode === 'vatra' ? 'owner(s)' : 'agent(s)'}
-                  </span>
+                  <span className="ml-auto text-[11px] text-zinc-600">{routePlan.selected.length} agent(s)</span>
                 </div>
                 {routePlan.rationale && <p className="mb-3 text-xs text-zinc-400">{routePlan.rationale}</p>}
                 <div className="space-y-2">
@@ -811,8 +805,8 @@ export function BasnaPage() {
                       </p>
                       {sel.why && <p className="mt-1 text-xs text-zinc-500">{sel.why}</p>}
                       <div className="mt-2 flex items-center gap-2">
-                        <span className="w-20 shrink-0 text-[11px] text-zinc-500">prior {sel.prior_weight.toFixed(2)}</span>
-                        <WeightBar value={sel.prior_weight} />
+                        <span className="w-20 shrink-0 text-[11px] text-zinc-500">prior {(sel.prior_weight ?? 0).toFixed(2)}</span>
+                        <WeightBar value={sel.prior_weight ?? 0} />
                       </div>
 
                       {isOpen && (
@@ -915,10 +909,10 @@ export function BasnaPage() {
             )}
 
             {/* Vatra (collaborative mode): the decomposition + delegation blackboard. */}
-            {routePlan?.mode === 'vatra' && activeSession && (
+            {vatraMode && activeSession && (
               <VatraDelegation
                 sessionId={activeSession.id}
-                subtasks={routePlan.subtasks}
+                subtasks={routePlan?.subtasks}
                 active={activeBusy || executing}
               />
             )}
