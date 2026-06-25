@@ -318,7 +318,9 @@ def _looks_like_stall(text: str) -> bool:
 # without actually calling flight_deck/consult_peer this turn. EN + HR.
 _DELEGATION_CLAIM_RE = _re.compile(
     r"(?i)("
-    r"poslao sam|poslala sam|šaljem|saljem|proslije|delegira|predao sam|"
+    # \b on šaljem/saljem so "Pošaljem na WhatsApp?" (an offer to send the
+    # report TO THE USER) isn't read as "I'm sending [to a peer]".
+    r"poslao sam|poslala sam|\bšaljem|\bsaljem|proslije|delegira|predao sam|"
     r"\bi\s+(sent|delegated|forwarded|passed|asked)\b|sent it to|"
     r"asked\s+\w+\s+(to|for)|čekam\s+(odgovor|opis)|cekam\s+(odgovor|opis)|"
     r"waiting\s+for\s+(the\s+)?(peer|agent|minimax|response|reply)"
@@ -326,9 +328,47 @@ _DELEGATION_CLAIM_RE = _re.compile(
 )
 
 
+# Cues that the reply is a RETRACTION / apology / correction ABOUT a false
+# action claim — NOT a fresh claim. Without this, a weak model's own apology
+# ("lažno sam tvrdio da sam delegirao, a nisam" — "I falsely claimed I delegated,
+# but I didn't") re-matches the claim regex above (it contains the stem
+# "delegira"), so the false-claim gate fires on the correction, injects another
+# accusation, and the model apologizes again — an endless self-sustaining loop.
+# A correction that DENIES the action must never count as the action being
+# claimed. EN + HR. Verb-tied negation only ("nisam delegirao"), so a genuine
+# partial claim ("Poslao sam, ali nisam dobio odgovor") is still caught.
+_ACTION_RETRACTION_RE = _re.compile(
+    r"(?i)("
+    r"la[žz]no|ispri[čc]|isprav|gre[šs]k|"  # falsely / apologize / correct / mistake
+    r"samo\s+sam\s+rekao|"                    # "I only said" (vs actually did)
+    r"nisam\s+(stvarno\s+|zapravo\s+|nijedan\s+|nikakav\s+)?"
+    r"(pozvao|pozvala|delegira\w*|poslao|poslala|kontaktirao|"
+    r"proslijedio|predao|koristio|napravio\s+delegaciju)|"
+    r"ne\s+(delegira\w*|[šs]aljem)|"
+    r"\bfalse(ly)?\s+(claim|stat|said)|that\s+claim\s+is\s+false|"
+    r"didn'?t\s+(actually\s+|really\s+)?(delegate|send|forward|hand|call|search|fetch)|"
+    r"did\s+not\s+(actually\s+|really\s+)?(delegate|send|forward|hand|call|search|fetch)|"
+    r"no\s+tool\s+(was\s+)?call|i\s+apolog|i\s+(was\s+)?(wrong|lied|lying)|"
+    r"i\s+(only|just)\s+said"
+    r")"
+)
+
+
+def _is_action_retraction(text: str) -> bool:
+    """True if the reply is an apology/correction DENYING an action — so it must
+    not be mistaken for a fresh claim of that action (prevents the apology loop)."""
+    return bool(text and _ACTION_RETRACTION_RE.search(str(text)))
+
+
 def _claims_delegation(text: str) -> bool:
-    """True if the reply claims a peer hand-off/send was done."""
-    return bool(text and _DELEGATION_CLAIM_RE.search(str(text)))
+    """True if the reply claims a peer hand-off/send was done.
+
+    A retraction/apology that denies delegating ("nisam delegirao", "lažno sam
+    tvrdio…", "that claim is false") is NOT a claim — see _ACTION_RETRACTION_RE.
+    """
+    if not text or _is_action_retraction(text):
+        return False
+    return bool(_DELEGATION_CLAIM_RE.search(str(text)))
 
 
 # Reply claims it searched/fetched the web (used to catch a model that
@@ -426,8 +466,14 @@ def _detect_basna_run(user_input: str) -> str | None:
 
 
 def _claims_web_research(text: str) -> bool:
-    """True if the reply claims it searched/fetched the web."""
-    return bool(text and _WEB_RESEARCH_CLAIM_RE.search(str(text)))
+    """True if the reply claims it searched/fetched the web.
+
+    A retraction/apology denying it searched ("I didn't actually search", "that
+    claim is false") is NOT a claim — same apology-loop guard as delegation.
+    """
+    if not text or _is_action_retraction(text):
+        return False
+    return bool(_WEB_RESEARCH_CLAIM_RE.search(str(text)))
 
 
 def _wants_fresh_data(text: str) -> bool:
@@ -2354,6 +2400,17 @@ class AgentOrchestrationMixin:
                     ):
                         _turn_produced_deliverable = True
                         break
+            # The CURRENT response is itself the deliverable when it is a
+            # substantial answer. The committed-history scan above misses this:
+            # the reply being evaluated isn't in the session yet, so a turn whose
+            # first substantive output IS the final synthesis (short/empty
+            # narrations while tools ran, then a long answer) would get nuked by
+            # the gate. This is exactly what killed a 2k-char Genesis findings
+            # report — an incidental regex hit ("📱 Pošaljem na WhatsApp?" → the
+            # delegation pattern) fired _false_claim on a real, complete answer.
+            # A long no-tool reply is completed work, never a stall or a lie.
+            if not _turn_produced_deliverable and len(_stall_resp_text.strip()) > 200:
+                _turn_produced_deliverable = True
             if not _turn_produced_deliverable and (
                 self._turn_has_successful_tool(turn_start_idx, "write")
                 or self._turn_has_successful_tool(turn_start_idx, "edit")

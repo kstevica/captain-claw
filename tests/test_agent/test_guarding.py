@@ -163,3 +163,102 @@ async def test_script_tool_guard_blocks_tool_execution(monkeypatch: pytest.Monke
         assert shell.commands == []
     finally:
         set_config(old_cfg)
+
+
+class TestFalseActionClaimRetractionGuard:
+    """The false-action-claim gate must not fire on the model's own apology.
+
+    Regression for the apology loop: a weak model's correction
+    ("lažno sam tvrdio da sam delegirao, a nisam" — I falsely claimed I
+    delegated, but I didn't) contains the stem "delegira", so the claim
+    regex re-matched it, the gate re-injected an accusation, and the model
+    apologized again — endlessly. A retraction that DENIES the action must
+    never count as a fresh claim of that action.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # the two exact apologies from the stuck deepseek-v4-flash session
+            "Shvaćam — i prihvaćam. U prvom odgovoru jesam lažno tvrdio da sam "
+            "delegirao, a nisam pozvao tool. To sam ispravio u trećoj poruci.",
+            "Shit, potpuno si u pravu — ispričavam se. U prošlom koraku nisam "
+            "pozvao nijedan tool za delegaciju, samo sam rekao da sam spojio.",
+            "U zadnjem odgovoru nisam tvrdio nikakvu delegaciju — samo sam sažeo "
+            "što report sadrži.",
+            "You're right — that claim is false, I didn't actually delegate it.",
+        ],
+    )
+    def test_delegation_apology_is_not_a_claim(self, text: str) -> None:
+        from captain_claw.agent_orchestration_mixin import _claims_delegation
+
+        assert _claims_delegation(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "I apologize, I did not actually search the web — I pulled that from memory.",
+            "That claim is false — I didn't fetch anything this turn.",
+        ],
+    )
+    def test_web_apology_is_not_a_claim(self, text: str) -> None:
+        from captain_claw.agent_orchestration_mixin import _claims_web_research
+
+        assert _claims_web_research(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Poslao sam zadatak peer-u, čekam odgovor.",
+            "I delegated it to the researcher and I'm waiting for the reply.",
+            "Proslijedio sam to MiniMax-u.",
+            # genuine claim with an UNRELATED negation must still be caught
+            "Poslao sam zadatak, ali nisam dobio odgovor još.",
+        ],
+    )
+    def test_genuine_delegation_claim_still_detected(self, text: str) -> None:
+        from captain_claw.agent_orchestration_mixin import _claims_delegation
+
+        assert _claims_delegation(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "I searched the web and found three sources.",
+            "Pretražio sam web i pronašao odgovor.",
+        ],
+    )
+    def test_genuine_web_claim_still_detected(self, text: str) -> None:
+        from captain_claw.agent_orchestration_mixin import _claims_web_research
+
+        assert _claims_web_research(text) is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # "Pošaljem na WhatsApp?" is an offer to send the report TO THE USER,
+            # not a peer hand-off — the substring "šaljem" inside "Pošaljem" must
+            # not trip the delegation pattern (regression: it killed a real
+            # 2k-char Genesis findings answer that ended with this offer).
+            "Što sad? 📱 Pošaljem na WhatsApp? 🔍 Istražimo dublje?",
+            "Mogu ti to poslati — Pošaljem na WhatsApp ili otvorim u browseru?",
+            "## Genesis Space Labs — Kompletan pregled\n\nOpis: startup iz Čakovca "
+            "(12 ljudi). Report ima 890 linija. **Što sad?** 📱 Pošaljem na WhatsApp?",
+        ],
+    )
+    def test_posaljem_offer_to_user_is_not_a_delegation_claim(self, text: str) -> None:
+        from captain_claw.agent_orchestration_mixin import _claims_delegation
+
+        assert _claims_delegation(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Šaljem zadatak peer-u, čekam odgovor.",
+            "Šaljemo to istraživaču odmah.",
+        ],
+    )
+    def test_genuine_saljem_claim_still_detected(self, text: str) -> None:
+        from captain_claw.agent_orchestration_mixin import _claims_delegation
+
+        assert _claims_delegation(text) is True
