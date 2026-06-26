@@ -3,9 +3,12 @@
 > Status: **All 4 phases built** (P1: Lead decompose → parallel subtasks → reporter assemble.
 > P2: blackboard ask protocol — non-blocking delegation via a concurrent coordinator. P3:
 > learning loop — score owners/answerers/lead/reporter into reliability. P4: Flight Deck UI —
-> Vatra badge, team-plan header, and the delegation blackboard view). Not yet prod-tested
-> end-to-end. Name **Vatra** (a hearth — agents gather round one fire and build together, not
-> solo sorties).
+> Vatra badge, team-plan header, and the delegation blackboard view). Prompt-tuned post-test so
+> delegation actually fires: the Lead now KEEPS interdependent pieces separate (records
+> `depends_on`) instead of folding them, never emits an integration/polish subtask (that's the
+> reporter), and owners get the full team roster + a proactive nudge to ask teammates for
+> cross-slice needs. Name **Vatra** (a hearth — agents gather round one fire and build together,
+> not solo sorties).
 >
 > Phase 1 deviations from the plan below (deliberate, for a low-risk first cut):
 > - **`mode` rides in the session `config` JSON** (`config.mode="vatra"`), not a new column —

@@ -133,12 +133,18 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
         while sid in seen_ids:
             sid = f"{sid}x"
         seen_ids.add(sid)
+        deps = s.get("depends_on") or []
         subtasks.append({
             "id": sid,
             "title": (str(s.get("title") or "").strip() or owner)[:80],
             "owner_archetype_id": owner,
             "brief": brief,
+            "depends_on": [str(d).strip() for d in deps if isinstance(d, (str, int))],
         })
+    # Keep only dependency refs that point at a real sibling (drop self + danglers).
+    valid_ids = {s["id"] for s in subtasks}
+    for s in subtasks:
+        s["depends_on"] = [d for d in s["depends_on"] if d in valid_ids and d != s["id"]]
     return {"domain": domain, "rationale": str(raw.get("rationale") or "").strip(),
             "subtasks": subtasks}
 
@@ -471,7 +477,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
-            prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files])
+            prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files], subtasks)
             d = await _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=_on_action, fleet_instructions=fleet, agent_name=label,
@@ -676,29 +682,46 @@ async def _learn(db, user: dict, sid: str, domain: str, intent: str,
     return learned
 
 
-def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str]) -> str:
-    """Frame one subtask for its owner. Phase 1: owners work in parallel and blind,
-    so the brief must be self-contained."""
+def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str],
+                          all_subtasks: list[dict]) -> str:
+    """Frame one subtask for its owner — with awareness of the whole team and an
+    explicit nudge to delegate cross-slice needs through the blackboard."""
     files_block = ""
     if file_names:
         listed = "\n".join(f"- {n}" for n in file_names)
         files_block = ("\n\n## Attached files (in your working directory)\n"
                        f"{listed}\nUse your read / extract tools to work with them.\n")
+    # The running team — who owns which piece, so this owner knows whom to ask.
+    by_id = {s["id"]: s for s in all_subtasks}
+    roster = "\n".join(
+        f"- {s['title']} — {s['owner_archetype_id']}" + ("  ← YOU" if s["id"] == st["id"] else "")
+        for s in all_subtasks)
+    deps = [by_id[d] for d in (st.get("depends_on") or []) if d in by_id]
+    deps_block = ""
+    if deps:
+        listed = "\n".join(f"- {d['title']} (owned by {d['owner_archetype_id']})" for d in deps)
+        deps_block = (
+            "\n\n## Your piece builds on these teammates' work\n"
+            f"{listed}\n"
+            "For anything you need from them — a fact, a figure, a decision — POST AN ASK NOW "
+            "(`vatra` action='ask'), naming exactly what you need, then keep working. Do not "
+            "guess these and do not reproduce their slice yourself.\n")
     return (
-        f"You are the {role}, one specialist on a collaborating team. You own ONE part "
-        f"of a larger deliverable; other specialists are producing the other parts in "
-        f"parallel. Produce only your part, in full — another author (the reporter) will "
-        f"assemble all parts into the final deliverable.\n\n"
+        f"You are the {role}, one specialist on a collaborating team building ONE deliverable "
+        f"together. You own ONE part; your teammates are producing the others in parallel. "
+        f"Produce only your part, in full — a reporter assembles all parts at the end.\n\n"
         f"## Overall task (for context)\n{intent}\n\n"
-        f"## Your part — {st['title']}\n{st['brief']}{files_block}\n\n"
-        f"## Working with your team\n"
-        f"If you need something OUTSIDE your part that another specialist should produce, "
-        f"do NOT wait or do it yourself half-heartedly: use the `vatra` tool (action='ask') "
-        f"to post a focused request and KEEP WORKING on your part. After you've made progress, "
-        f"call `vatra` (action='inbox') to collect any answers. Never block on an ask — if no "
-        f"answer arrives in time, finish your part as best you can; the reporter folds in "
-        f"whatever the team delivers. Use this only for genuine cross-slice needs, not for work "
-        f"that is your own.\n\n"
+        f"## The team and their pieces\n{roster}\n\n"
+        f"## Your part — {st['title']}\n{st['brief']}{files_block}{deps_block}\n\n"
+        f"## Collaborate — don't work in a silo\n"
+        f"Reach your teammates through the shared blackboard with the `vatra` tool:\n"
+        f"- `vatra` action='ask' — when your part needs something ANOTHER piece owns (see the "
+        f"team list above), post a focused request, say which piece it's for, and KEEP WORKING. "
+        f"Don't block, don't guess, don't redo their slice.\n"
+        f"- `vatra` action='inbox' — after you've made progress, collect answers to your asks "
+        f"and fold them in.\n"
+        f"Whenever your part touches another piece's territory, that's a signal to ask rather "
+        f"than invent. If an answer doesn't arrive in time, do your best — the reporter reconciles.\n\n"
         f"Return only your finished part — no preamble, no meta-commentary about the team."
     )
 
