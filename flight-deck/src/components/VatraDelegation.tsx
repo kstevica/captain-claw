@@ -15,7 +15,9 @@ function Chip({ children, className = '' }: { children: React.ReactNode; classNa
   )
 }
 
-const PANEL = 'rounded-lg border border-violet-800/40 bg-violet-950/10 p-4'
+// Theme-aware: violet is a non-zinc accent, so it needs explicit light defaults
+// plus dark: overrides (zinc would auto-invert, violet does not).
+const PANEL = 'rounded-lg border border-violet-300/70 bg-violet-50/60 p-4 dark:border-violet-800/40 dark:bg-violet-950/10'
 
 // ── Team plan: the decomposition (owner · piece), shown for review + while running ──
 
@@ -23,7 +25,7 @@ export function VatraTeamPlan({ subtasks }: { subtasks?: VatraSubtask[] }) {
   return (
     <div className={PANEL}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Users className="h-3.5 w-3.5 text-violet-400" />
+        <Users className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
         <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Team plan</span>
         <Chip className="text-violet-600 dark:text-violet-300">vatra · collaborative</Chip>
         {!!subtasks?.length && <Chip className="text-zinc-400">{subtasks.length} piece(s)</Chip>}
@@ -36,7 +38,7 @@ export function VatraTeamPlan({ subtasks }: { subtasks?: VatraSubtask[] }) {
               title={s.brief || ''}
               className="rounded-md border border-zinc-800 bg-zinc-900/50 px-2 py-1 text-[11px] text-zinc-300"
             >
-              <span className="text-violet-300/80">{s.owner_archetype_id}</span>
+              <span className="text-violet-700 dark:text-violet-300/80">{s.owner_archetype_id}</span>
               <span className="mx-1 text-zinc-700">·</span>
               {s.title}
             </span>
@@ -98,7 +100,7 @@ export function VatraBlackboard({
   return (
     <div className={PANEL}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Share2 className="h-3.5 w-3.5 text-violet-400" />
+        <Share2 className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
         <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Delegation blackboard</span>
         {asks.length > 0 && (
           <span className="ml-auto flex items-center gap-2 text-[11px] text-zinc-500">

@@ -733,8 +733,8 @@ export function BasnaPage() {
               {/* Mode selector — the two ways to run a team, clearly distinguished. */}
               <div className="mt-3 grid grid-cols-2 gap-2">
                 {([
-                  { id: 'basna', icon: Network, name: 'Basna', sub: 'Independent ensemble — agents answer blind, merged by reliability', on: 'border-sky-500/70 bg-sky-950/30', dot: 'text-sky-400' },
-                  { id: 'vatra', icon: Users, name: 'Vatra', sub: 'Collaborative team — a Lead splits the work, a reporter assembles it', on: 'border-violet-500/70 bg-violet-950/30', dot: 'text-violet-400' },
+                  { id: 'basna', icon: Network, name: 'Basna', sub: 'Independent ensemble — agents answer blind, merged by reliability', on: 'border-sky-400 bg-sky-50 dark:border-sky-500/70 dark:bg-sky-950/30', dot: 'text-sky-600 dark:text-sky-400' },
+                  { id: 'vatra', icon: Users, name: 'Vatra', sub: 'Collaborative team — a Lead splits the work, a reporter assembles it', on: 'border-violet-400 bg-violet-50 dark:border-violet-500/70 dark:bg-violet-950/30', dot: 'text-violet-600 dark:text-violet-400' },
                 ] as const).map((m) => {
                   const Icon = m.icon
                   const sel = effectiveMode === m.id
@@ -787,7 +787,7 @@ export function BasnaPage() {
                         onClick={() => planVatra(intent, tiers, title)}
                         disabled={!canRoute || vatraMode}
                         title="Decompose the task into owned pieces — review the team, then Run team."
-                        className="flex items-center gap-1.5 rounded-lg border border-violet-700/70 px-3 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-800/30 disabled:opacity-40"
+                        className="flex items-center gap-1.5 rounded-lg border border-violet-300 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-40 dark:border-violet-700/70 dark:text-violet-300 dark:hover:bg-violet-800/30"
                       >
                         {planning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
                         Plan team
