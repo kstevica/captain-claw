@@ -552,6 +552,8 @@ export function BasnaPage() {
   const canRun = !!routePlan && !!activeSession && !executing && !planning && !activeBusy
   // While a team is being summoned (routing/planning/running), lock team selection.
   const teamLocked = routing || planning || executing || activeBusy
+  // Collapse the team selector the moment a route/plan/run starts.
+  useEffect(() => { if (teamLocked) setTeamOpen(false) }, [teamLocked])
   const truth = lastExecute?.truth ?? activeSession?.truth ?? ''
   const confidence = lastExecute?.confidence ?? activeSession?.confidence ?? 0
   const analysis = lastExecute?.analysis ?? parseAnalysis(activeSession?.analysis)
