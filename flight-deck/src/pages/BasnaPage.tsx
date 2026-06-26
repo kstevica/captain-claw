@@ -564,9 +564,11 @@ export function BasnaPage() {
       if (!ev.agent) continue
       let a = byRole.get(ev.agent)
       if (!a) { a = { role: ev.agent, actions: [] }; byRole.set(ev.agent, a); order.push(ev.agent) }
-      if (ev.stage === 'usage') a.usage = ev
+      // Any fresh activity after a dispatch (e.g. the Vatra review round) flips the
+      // card back to "working" so the spinner returns; the next dispatch marks done.
+      if (ev.stage === 'usage') { a.usage = ev; a.done = false }
       else if (ev.stage === 'dispatch') { a.done = true; a.ok = ev.ok !== false }
-      else a.actions.push(ev)
+      else { a.actions.push(ev); a.done = false }
     }
     return order.map((r) => byRole.get(r) as LiveAgent)
   }, [progress])

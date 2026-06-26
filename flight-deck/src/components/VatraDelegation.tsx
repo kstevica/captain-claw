@@ -99,8 +99,9 @@ export function VatraBlackboard({
     return () => { cancelled = true; clearInterval(t) }
   }, [sessionId, active])
 
-  // Notes + outputs are the shared-memory entries worth showing; narration is noisy.
-  const boardShown = board.filter((e) => e.kind === 'note' || e.kind === 'output' || e.kind === 'file')
+  // Show everything the team streamed — notes/outputs/files plus live narration, so
+  // the board has content from the first moments of the run (outputs arrive later).
+  const boardShown = board
 
   const counts = asks.reduce(
     (acc, a) => { acc[a.status] = (acc[a.status] || 0) + 1; return acc },
@@ -135,7 +136,8 @@ export function VatraBlackboard({
             const isOpen = !!openBoard[e.id]
             const kindCls = e.kind === 'output'
               ? 'text-emerald-600 dark:text-emerald-300'
-              : e.kind === 'file' ? 'text-zinc-400' : 'text-sky-600 dark:text-sky-300'
+              : e.kind === 'note' ? 'text-sky-600 dark:text-sky-300'
+              : 'text-zinc-500'  // narration / file — live activity, subtler
             return (
               <div key={e.id} className="rounded-md border border-zinc-800 bg-zinc-900/40 p-2">
                 <button

@@ -72,8 +72,10 @@ class BasnaTool(Tool):
                     "'analysis' — cross-agent analysis for `session_id`. "
                     "'files' — files attached to `session_id`. "
                     "'get_file' — fetch `name` from `session_id`. "
-                    "'blackboard' — for a Vatra (collaborative) run, the delegation log: "
-                    "every cross-agent ask, who answered it, and the answer, for `session_id`."
+                    "'blackboard' — for a Vatra (collaborative) run, its shared memory: the "
+                    "team board (every note/output the specialists shared) plus the delegation "
+                    "log (cross-agent asks + answers), for `session_id`. Read this to see what a "
+                    "collaborative run actually produced and how the team worked together."
                 ),
             },
             "task": {"type": "string", "description": "The task to run for 'start' — a clear, self-contained statement of what to research/produce."},
@@ -443,23 +445,35 @@ class BasnaTool(Tool):
         r = await self._post(fd_url, "/fd/vatra/agent/blackboard", {"session_id": sid})
         if isinstance(r, dict) and r.get("_error"):
             return ToolResult(success=False, error=r["_error"])
-        asks = (r.json().get("asks") or [])
-        if not asks:
+        data = r.json()
+        asks = data.get("asks") or []
+        board = data.get("board") or []
+        if not asks and not board:
             return ToolResult(success=True, content=(
-                "No delegation recorded for this run — the specialists worked their slices "
-                "independently (or it isn't a Vatra run)."))
-        lines = [f"**{len(asks)} cross-agent ask(s):**"]
-        for a in asks:
-            head = f"- #{a.get('id')} **{a.get('from_owner','?')} → {a.get('answered_by') or '—'}** ({a.get('status','')})"
-            if a.get("depth"):
-                head += f" · depth {a['depth']}"
-            lines.append(head)
-            lines.append(f"  - asked: {(a.get('text') or '').strip()}")
-            ans = (a.get("answer") or "").strip()
-            if ans:
-                lines.append(f"  - answer: {ans[:600]}{'…' if len(ans) > 600 else ''}")
-            elif a.get("note"):
-                lines.append(f"  - note: {a['note']}")
+                "Nothing recorded for this run — the specialists shared nothing on the board "
+                "and made no cross-agent asks (or it isn't a Vatra run)."))
+        lines: list[str] = []
+        if board:
+            lines.append(f"**Shared board — {len(board)} entr(ies) the team produced:**")
+            for e in board:
+                title = f" · {e['title']}" if e.get("title") else ""
+                body = " ".join(str(e.get("content", "")).split())
+                lines.append(f"- [{e.get('kind','')}] **{e.get('from','?')}**{title}: "
+                             f"{body[:600]}{'…' if len(body) > 600 else ''}")
+            lines.append("")
+        if asks:
+            lines.append(f"**{len(asks)} cross-agent ask(s):**")
+            for a in asks:
+                head = f"- #{a.get('id')} **{a.get('from_owner','?')} → {a.get('answered_by') or '—'}** ({a.get('status','')})"
+                if a.get("depth"):
+                    head += f" · depth {a['depth']}"
+                lines.append(head)
+                lines.append(f"  - asked: {(a.get('text') or '').strip()}")
+                ans = (a.get("answer") or "").strip()
+                if ans:
+                    lines.append(f"  - answer: {ans[:600]}{'…' if len(ans) > 600 else ''}")
+                elif a.get("note"):
+                    lines.append(f"  - note: {a['note']}")
         return ToolResult(success=True, content="\n".join(lines))
 
     async def _get_file(self, fd_url: str, **kwargs: Any) -> ToolResult:

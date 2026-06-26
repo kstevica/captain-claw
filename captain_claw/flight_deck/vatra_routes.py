@@ -574,6 +574,22 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                         d = await _dispatch_one(
                             sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                             on_action=on_action, agent_name=label, on_usage=on_usage)
+                        # A dispatch event marks the card done again (the live panel
+                        # shows a spinner while it's working this round, then ✓).
+                        mark = "✓" if d["ok"] else "✗"
+                        _progress(sid, "dispatch",
+                                  f"{label} (review) {mark} · {len(d['actions'])} action(s) "
+                                  f"({d['latency_ms'] / 1000:.1f}s)", ok=d["ok"], agent=label)
+                        # Post the revised piece to the board too, so the final shared
+                        # memory reflects what each agent produced this round.
+                        out2 = (d.get("output") or "").strip()
+                        if d["ok"] and out2 and not _is_no_change(out2):
+                            try:
+                                await get_db().add_vatra_board(sid, arch["id"], st["id"], "output",
+                                                               f"{st['title']} (revised)",
+                                                               out2[:_BOARD_CONTENT_CAP])
+                            except Exception as e:
+                                log.debug("Vatra board review-output write failed", error=str(e))
                         return i, d
 
                     revisions = await asyncio.gather(*[_review_owner(i, sp) for i, sp in r1])
@@ -1500,7 +1516,9 @@ async def agent_blackboard(body: _AgentReq):
     if not sess:
         raise HTTPException(404, "session not found")
     asks = await db.list_vatra_asks(body.session_id)
-    return {"session_id": body.session_id, "count": len(asks), "asks": asks}
+    board = await db.list_vatra_board(body.session_id, limit=200)
+    return {"session_id": body.session_id, "count": len(asks), "asks": asks,
+            "board": [_board_entry(e) for e in board]}
 
 
 # ── Fire-and-forget entry (mirrors Basna's agent/start) ──────────────
