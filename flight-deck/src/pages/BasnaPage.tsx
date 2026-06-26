@@ -550,6 +550,8 @@ export function BasnaPage() {
   const activeBusy = !!activeSession && (activeSession.status === 'running' || activeSession.status === 'routing')
   const canRoute = intent.trim().length > 0 && !routing && !planning && !activeBusy
   const canRun = !!routePlan && !!activeSession && !executing && !planning && !activeBusy
+  // While a team is being summoned (routing/planning/running), lock team selection.
+  const teamLocked = routing || planning || executing || activeBusy
   const truth = lastExecute?.truth ?? activeSession?.truth ?? ''
   const confidence = lastExecute?.confidence ?? activeSession?.confidence ?? 0
   const analysis = lastExecute?.analysis ?? parseAnalysis(activeSession?.analysis)
@@ -791,11 +793,12 @@ export function BasnaPage() {
                 </label>
                 <button
                   onClick={() => setTeamOpen((o) => !o)}
-                  className={`flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${
+                  disabled={teamLocked}
+                  className={`flex items-center gap-1.5 rounded border px-2 py-1 text-xs disabled:opacity-40 ${
                     team.length > 0
                       ? 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300'
                       : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
-                  title="Pick exactly which archetypes the team must use (optional)"
+                  title={teamLocked ? 'Locked while the team is being summoned' : 'Pick exactly which archetypes the team must use (optional)'}
                 >
                   <Users className="h-3.5 w-3.5" />
                   {team.length > 0 ? `Team: ${team.length} selected` : 'Select team'}
@@ -854,16 +857,17 @@ export function BasnaPage() {
                       used and instructed for this task. Leave empty for automatic selection.
                     </span>
                     {team.length > 0 && (
-                      <button onClick={() => setTeam([])} className="ml-auto shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300">Clear</button>
+                      <button onClick={() => setTeam([])} disabled={teamLocked} className="ml-auto shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300 disabled:opacity-40">Clear</button>
                     )}
                   </div>
-                  <div className="grid max-h-64 grid-cols-1 gap-1 overflow-auto sm:grid-cols-2">
+                  <div className={`grid max-h-64 grid-cols-1 gap-1 overflow-auto sm:grid-cols-2 ${teamLocked ? 'pointer-events-none opacity-50' : ''}`}>
                     {(registry?.archetypes || []).map((a) => {
                       const on = team.includes(a.id)
                       return (
                         <button
                           key={a.id}
                           onClick={() => toggleTeam(a.id)}
+                          disabled={teamLocked}
                           className={`flex items-start gap-2 rounded border p-1.5 text-left text-xs transition-colors ${
                             on ? 'border-violet-500/50 bg-violet-500/10' : 'border-zinc-800 hover:bg-zinc-800/50'}`}
                         >
