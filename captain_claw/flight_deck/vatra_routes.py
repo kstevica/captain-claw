@@ -561,12 +561,27 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         learned = []
         _progress(sid, "learn", "Scoring skipped (judge unavailable)", ok=False)
 
+    # 8) Coverage gaps — the Vatra analog of Basna's blind spots: judge the assembled
+    # deliverable against what the task asked for and surface what's missing or thin.
+    analysis: dict = {}
+    _progress(sid, "learn", "Checking coverage…")
+    try:
+        cov = await asyncio.wait_for(
+            _llm_coverage_gaps(intent, subtasks, truth, _creds("reason")), 120)
+        if cov:
+            analysis = cov
+            _progress(sid, "learn", f"Coverage: {len(cov.get('gaps') or [])} gap(s)")
+    except Exception as e:
+        log.warning("Vatra coverage check failed", error=str(e))
+        _progress(sid, "learn", "Coverage check skipped", ok=False)
+
     files_by_name = {f["name"]: f for f in session_files}
     for g in generated_files:
         files_by_name[g["name"]] = g
     await db.update_basna_session(
         sid, user["id"], status="done", truth=truth, confidence=confidence,
         files=json.dumps(list(files_by_name.values())),
+        analysis=json.dumps(analysis),
     )
     _progress(sid, "done", f"Done · {len(usable)}/{len(results)} subtask(s) assembled")
     _progress_done(sid)
@@ -575,10 +590,51 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         progress=json.dumps((_PROGRESS.get(sid) or {}).get("events", [])),
     )
     return {"session_id": sid, "domain": domain, "mode": "vatra",
-            "truth": truth, "confidence": confidence,
+            "truth": truth, "confidence": confidence, "analysis": analysis,
             "subtasks": [{"id": r["id"], "owner": r["owner"], "role": r["role"],
                           "ok": r["ok"], "latency_ms": r["latency_ms"]} for r in results],
             "learned": learned, "spawned": len(spawned), "dispatched": len(results)}
+
+
+async def _llm_coverage_gaps(intent: str, subtasks: list[dict], truth: str,
+                             creds: dict) -> dict | None:
+    """Vatra's analog of Basna's blind spots: compare the ASSEMBLED deliverable
+    against what the task asked for and surface coverage gaps — things wanted but
+    missing, thin, or unsupported. Returns {"coverage_summary", "gaps":[{item,
+    severity,note}]} or None if unparseable. Style/quality is out of scope."""
+    from captain_claw.llm import Message
+    plan = "\n".join(f"- {s.get('title', '')}" for s in subtasks)
+    prov, mt = _provider_call(creds, temperature=0.2, default_max=1024, cap=2048)
+    resp = await prov.complete(messages=[
+        Message(role="system", content=(
+            "You are reviewing a finished deliverable a team produced. Compare it against what "
+            "the TASK asked for and surface COVERAGE GAPS — things the task wanted that are "
+            "missing, thin, or unsupported in the deliverable. Judge coverage only, NOT writing "
+            "style or polish. Reply ONLY with JSON:\n"
+            '{"coverage_summary": "one sentence on how completely the task was covered",\n'
+            ' "gaps": [{"item": "what is missing or thin", "severity": "major" | "minor", '
+            '"note": "what to add"}]}\n'
+            "If coverage is complete, return an empty gaps array. Be specific; at most 6 gaps, "
+            "most important first.")),
+        Message(role="user", content=(
+            f"TASK:\n{intent[:2000]}\n\nPLANNED PIECES:\n{plan}\n\nDELIVERABLE:\n{truth[:8000]}")),
+    ], temperature=0.2, max_tokens=mt)
+    content = resp.content.strip()
+    if content.startswith("```"):
+        content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
+    raw = json.loads(content)
+    if not isinstance(raw, dict):
+        return None
+    gaps: list[dict] = []
+    for g in (raw.get("gaps") or [])[:6]:
+        if isinstance(g, dict) and str(g.get("item") or "").strip():
+            sev = str(g.get("severity", "minor")).lower()
+            gaps.append({"item": str(g["item"]).strip(),
+                         "severity": "major" if sev == "major" else "minor",
+                         "note": str(g.get("note", "")).strip()})
+        elif isinstance(g, str) and g.strip():
+            gaps.append({"item": g.strip(), "severity": "minor", "note": ""})
+    return {"coverage_summary": str(raw.get("coverage_summary", "")).strip(), "gaps": gaps}
 
 
 # ── Learning: score owners / answerers / lead / reporter ─────────────

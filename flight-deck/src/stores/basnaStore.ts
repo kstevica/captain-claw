@@ -29,6 +29,10 @@ export interface BasnaAnalysis {
   differences?: { point: string; positions?: { by: string; stance: string }[] }[]
   unique?: { by: string; insight: string }[]
   blind_spots?: string[]
+  // Vatra runs store coverage gaps here instead (the Basna comparison is meaningless
+  // for complementary pieces).
+  coverage_summary?: string
+  gaps?: { item: string; severity: 'major' | 'minor'; note?: string }[]
 }
 
 export interface BasnaFile { name: string; mime: string; size: number; kind?: 'input' | 'generated'; agent?: string }

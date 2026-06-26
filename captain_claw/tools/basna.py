@@ -391,6 +391,21 @@ class BasnaTool(Tool):
         a = _safe_json(sess.get("analysis"), {})
         if not a:
             return ToolResult(success=True, content="No cross-agent analysis (single-agent or not yet run).")
+        # Vatra runs store coverage gaps here instead of the Basna comparison.
+        if a.get("coverage_summary") is not None or a.get("gaps") is not None:
+            lines = []
+            if a.get("coverage_summary"):
+                lines.append(f"**Coverage:** {a['coverage_summary']}")
+            gaps = a.get("gaps") or []
+            if gaps:
+                lines.append("\n**Gaps (what the task wanted that's missing or thin):**")
+                for g in gaps:
+                    sev = g.get("severity", "minor")
+                    note = f" — {g['note']}" if g.get("note") else ""
+                    lines.append(f"- [{sev}] {g.get('item', '')}{note}")
+            else:
+                lines.append("\nNo coverage gaps — the deliverable covers what the task asked.")
+            return ToolResult(success=True, content="\n".join(lines))
         parts = []
         if a.get("agreement"):
             parts.append("**Agreement:**\n" + "\n".join(f"- {x}" for x in a["agreement"]))

@@ -1132,27 +1132,60 @@ export function BasnaPage() {
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
                 <div className="mb-2 flex flex-wrap items-center gap-2">
                   <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
-                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Compiled truth</span>
-                  {lastExecute?.method && <Badge className="text-sky-700 dark:text-sky-300">{lastExecute.method}</Badge>}
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                    {vatraMode ? 'Final report' : 'Compiled truth'}
+                  </span>
+                  {!vatraMode && lastExecute?.method && <Badge className="text-sky-700 dark:text-sky-300">{lastExecute.method}</Badge>}
                   <span className="ml-auto flex items-center gap-2 text-[11px] text-zinc-500">
-                    confidence {(confidence * 100).toFixed(0)}%
+                    {vatraMode ? 'assembled' : 'confidence'} {(confidence * 100).toFixed(0)}%
                     <span className="h-1.5 w-20 overflow-hidden rounded-full bg-zinc-800">
                       <span className="block h-full rounded-full bg-emerald-500" style={{ width: `${Math.round(confidence * 100)}%` }} />
                     </span>
                   </span>
-                  <button
-                    onClick={() => recompile(tiers)}
-                    disabled={recompiling}
-                    title="Recompile the truth + analysis from the agent outputs"
-                    className="flex items-center gap-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
-                  >
-                    <RefreshCw className={`h-3.5 w-3.5 ${recompiling ? 'animate-spin' : ''}`} />
-                  </button>
-                  <OutputActions title={`${subject} — Compiled truth`} content={truth} onView={viewFull} />
+                  {!vatraMode && (
+                    <button
+                      onClick={() => recompile(tiers)}
+                      disabled={recompiling}
+                      title="Recompile the truth + analysis from the agent outputs"
+                      className="flex items-center gap-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${recompiling ? 'animate-spin' : ''}`} />
+                    </button>
+                  )}
+                  <OutputActions title={`${subject} — ${vatraMode ? 'Final report' : 'Compiled truth'}`} content={truth} onView={viewFull} />
                 </div>
                 <div className="fd-markdown text-sm text-zinc-200 leading-relaxed">
                   <Markdown remarkPlugins={[remarkGfm]}>{truth}</Markdown>
                 </div>
+              </div>
+            )}
+
+            {/* Vatra coverage gaps — what the task asked for that the deliverable missed. */}
+            {vatraMode && analysis && (analysis.coverage_summary || analysis.gaps?.length) && (
+              <div className="rounded-lg border border-amber-300/60 bg-amber-50/50 p-4 dark:border-amber-500/30 dark:bg-amber-950/10">
+                <div className="mb-2 flex items-center gap-2">
+                  <ScanSearch className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Coverage gaps</span>
+                  {!analysis.gaps?.length && <Badge className="text-emerald-700 dark:text-emerald-300">complete</Badge>}
+                </div>
+                {analysis.coverage_summary && (
+                  <p className="mb-2 text-xs text-zinc-400">{analysis.coverage_summary}</p>
+                )}
+                {!!analysis.gaps?.length && (
+                  <ul className="space-y-1.5">
+                    {analysis.gaps.map((g, i) => (
+                      <li key={i} className="flex items-start gap-2 text-xs text-zinc-300">
+                        <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          g.severity === 'major'
+                            ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                            : 'bg-amber-500/15 text-amber-700 dark:text-amber-300'}`}>
+                          {g.severity}
+                        </span>
+                        <span><span className="text-zinc-200">{g.item}</span>{g.note ? <span className="text-zinc-500"> — {g.note}</span> : null}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             )}
 
