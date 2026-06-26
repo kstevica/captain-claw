@@ -219,86 +219,105 @@ async def _agent_pump(ch: _ChannelState, host: str, port: int) -> None:
     """Persistent connection to a captain-claw agent's WebSocket.
 
     Forwards every ``chat_message`` (and useful status updates) onto the
-    channel bus. Exits cleanly when the channel rebinds to a different
-    target or the task is cancelled.
+    channel bus. RECONNECTS automatically (with backoff) when the link drops —
+    a heavy multi-agent run can stall the agent's event loop past the keepalive
+    deadline and the socket dies with "no close frame"; that's transient, so we
+    reconnect rather than going dead. Exits cleanly when the channel rebinds to a
+    different target or the task is cancelled.
     """
     import websockets
 
-    # Explicit override (set via bridge env vars) wins. Falls back to the
-    # registry-based lookup FD uses everywhere else. The override exists
-    # because not every agent is in FD's process/Docker registry — agents
-    # started manually with a known auth_token in their config.yaml need
-    # a way to plumb that through without a registry roundtrip.
-    auth = (ch.bound_auth or "").strip()
-    if not auth:
+    backoff = 2.0
+    reported_drop = False
+    # Loop until this channel is rebound elsewhere (or the task is cancelled).
+    while ch.bound_host == host and ch.bound_port == port:
+        # Explicit override (set via bridge env vars) wins; else the registry
+        # lookup FD uses everywhere. Re-resolved each attempt so a rotated token
+        # is picked up on reconnect.
+        auth = (ch.bound_auth or "").strip()
+        if not auth:
+            try:
+                from captain_claw.flight_deck.server import _resolve_agent_auth
+                auth = _resolve_agent_auth(port)
+            except Exception:
+                auth = ""
+        params = f"?token={auth}" if auth else ""
+        agent_url = f"ws://{host}:{port}/ws{params}"
         try:
-            from captain_claw.flight_deck.server import _resolve_agent_auth
-            auth = _resolve_agent_auth(port)
-        except Exception:
-            auth = ""
-    params = f"?token={auth}" if auth else ""
-    agent_url = f"ws://{host}:{port}/ws{params}"
+            async with websockets.connect(
+                agent_url,
+                max_size=4 * 1024 * 1024,
+                # Generous keepalive: a busy agent mid-run shouldn't be dropped
+                # for a slow pong (the old 10s timeout caused exactly that).
+                ping_interval=30,
+                ping_timeout=60,
+                close_timeout=5,
+            ) as agent_ws:
+                ch.agent_ws = agent_ws
+                backoff = 2.0
+                reported_drop = False
+                await _broadcast(ch, {
+                    "type": "status", "status": "agent_connected",
+                    "host": host, "port": port, "ts": _now_iso(),
+                })
+                async for raw in agent_ws:
+                    text = raw if isinstance(raw, str) else raw.decode("utf-8", "ignore")
+                    try:
+                        data = json.loads(text)
+                    except Exception:
+                        continue
+                    await _forward_agent_msg(ch, data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Transient — report once per drop episode, then quietly reconnect.
+            if not reported_drop:
+                reported_drop = True
+                await _broadcast(ch, {
+                    "type": "status", "status": "agent_reconnecting",
+                    "text": f"agent link dropped ({exc}); reconnecting…",
+                    "ts": _now_iso(),
+                })
+        finally:
+            ch.agent_ws = None
+        if ch.bound_host != host or ch.bound_port != port:
+            break
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, 30.0)
 
-    try:
-        async with websockets.connect(
-            agent_url,
-            max_size=4 * 1024 * 1024,
-            ping_interval=20,
-            ping_timeout=10,
-        ) as agent_ws:
-            ch.agent_ws = agent_ws
+
+async def _forward_agent_msg(ch: "_ChannelState", data: dict) -> None:
+    """Forward one agent WS message onto the channel bus (only what's useful)."""
+    mtype = data.get("type")
+    if mtype == "chat_message":
+        if data.get("role", "") == "assistant":
             await _broadcast(ch, {
-                "type": "status", "status": "agent_connected",
-                "host": host, "port": port, "ts": _now_iso(),
+                "type": "agent",
+                "text": str(data.get("content", "")),
+                "ts": data.get("timestamp") or _now_iso(),
             })
-            async for raw in agent_ws:
-                text = raw if isinstance(raw, str) else raw.decode("utf-8", "ignore")
-                try:
-                    data = json.loads(text)
-                except Exception:
-                    continue
-                mtype = data.get("type")
-                # Only surface what's useful for a tiny glasses display.
-                if mtype == "chat_message":
-                    role = data.get("role", "")
-                    if role == "assistant":
-                        await _broadcast(ch, {
-                            "type": "agent",
-                            "text": str(data.get("content", "")),
-                            "ts": data.get("timestamp") or _now_iso(),
-                        })
-                    # We don't echo "user" chat_messages back — mobile already
-                    # injected its own "user" event for instant local display.
-                elif mtype == "narration":
-                    # Live between-step progress blurbs — forward so the glasses
-                    # HUD and WhatsApp/Messenger see them during a long task.
-                    await _broadcast(ch, {
-                        "type": "narration",
-                        "text": str(data.get("text", "")),
-                        "ts": data.get("timestamp") or _now_iso(),
-                    })
-                elif mtype == "status":
-                    await _broadcast(ch, {
-                        "type": "status",
-                        "status": str(data.get("status", "")),
-                        "ts": _now_iso(),
-                    })
-                elif mtype == "error":
-                    await _broadcast(ch, {
-                        "type": "error",
-                        "text": str(data.get("message", "")),
-                        "ts": _now_iso(),
-                    })
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
+        # We don't echo "user" chat_messages back — mobile already injected its
+        # own "user" event for instant local display.
+    elif mtype == "narration":
+        # Live between-step progress blurbs — forward so the glasses HUD and
+        # WhatsApp/Messenger see them during a long task.
         await _broadcast(ch, {
-            "type": "error",
-            "text": f"agent connection lost: {exc}",
+            "type": "narration",
+            "text": str(data.get("text", "")),
+            "ts": data.get("timestamp") or _now_iso(),
+        })
+    elif mtype == "status":
+        await _broadcast(ch, {
+            "type": "status",
+            "status": str(data.get("status", "")),
             "ts": _now_iso(),
         })
-    finally:
-        ch.agent_ws = None
+    elif mtype == "error":
+        await _broadcast(ch, {
+            "type": "error",
+            "text": str(data.get("message", "")),
+            "ts": _now_iso(),
+        })
 
 
 async def _ensure_agent_binding(
