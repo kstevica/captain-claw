@@ -524,6 +524,59 @@ def _reattach_processes():
 
 # ── App ──
 
+def _upsert_dotenv_var(env_path: Path, key: str, value: str) -> bool:
+    """Idempotently set ``KEY=value`` in a .env file, preserving other lines.
+
+    Returns True when the file was changed. Creates the file if absent.
+    """
+    try:
+        lines = env_path.read_text().splitlines() if env_path.is_file() else []
+    except OSError:
+        return False
+    new_line = f"{key}={value}"
+    prefix = f"{key}="
+    out: list[str] = []
+    found = changed = False
+    for ln in lines:
+        if ln.strip().startswith(prefix):
+            found = True
+            if ln != new_line:
+                changed = True
+                out.append(new_line)
+            else:
+                out.append(ln)
+        else:
+            out.append(ln)
+    if not found:
+        out.append(new_line)
+        changed = True
+    if changed:
+        try:
+            env_path.write_text("\n".join(out) + "\n")
+        except OSError:
+            return False
+    return changed
+
+
+async def _resolve_primary_owner(db) -> str:
+    """The owning user id to bind the standalone main agent's VFS to.
+
+    Single-user deployments → that user. Multi-user → the oldest admin.
+    """
+    try:
+        users = await db.list_users(limit=100)
+        if not users:
+            return ""
+        if len(users) == 1:
+            return str(users[0].get("id", ""))
+        admins = [u for u in users if u.get("role") == "admin"]
+        pool = admins or users
+        # list_users is ordered created_at DESC → the last item is the oldest.
+        return str(pool[-1].get("id", ""))
+    except Exception:
+        return ""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -558,6 +611,18 @@ async def lifespan(app: FastAPI):
         await _fd_db.init()
         set_auth_db(_fd_db)
         app.state.fd_db = _fd_db
+        # Persist the owning user id into the project-local .env so the
+        # standalone main agent resolves the SAME VFS user as the dashboard
+        # (otherwise it falls back to "local" and its vfs:<project>/ files
+        # never show up in the panel, which reads under the logged-in UUID).
+        try:
+            _owner = await _resolve_primary_owner(_fd_db)
+            if _owner:
+                if _upsert_dotenv_var(Path(".env"), "CLAW_VFS_USER", _owner):
+                    print(f"Flight Deck: bound VFS to owner {_owner} (wrote CLAW_VFS_USER to .env)")
+                os.environ.setdefault("CLAW_VFS_USER", _owner)
+        except Exception as _vfs_exc:
+            print(f"Flight Deck: could not bind VFS owner: {_vfs_exc}")
         # Load admin-configured plan limits from DB
         plan_limits_raw = await _fd_db.get_system_setting("fd:plan-limits")
         load_plan_limits_from_db_sync(plan_limits_raw)
@@ -695,6 +760,7 @@ from captain_claw.flight_deck.admin_routes import router as admin_router
 from captain_claw.flight_deck.council_routes import router as council_router
 from captain_claw.flight_deck.basna_routes import router as basna_router
 from captain_claw.flight_deck.vatra_routes import router as vatra_router
+from captain_claw.flight_deck.vfs_routes import router as vfs_router
 from captain_claw.flight_deck.google_oauth_routes import router as google_oauth_router
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
 from captain_claw.flight_deck.games_routes import router as games_router
@@ -725,6 +791,7 @@ app.include_router(admin_router)
 app.include_router(council_router)
 app.include_router(basna_router)
 app.include_router(vatra_router)
+app.include_router(vfs_router)
 app.include_router(google_oauth_router)
 app.include_router(codex_oauth_router)
 app.include_router(games_router)

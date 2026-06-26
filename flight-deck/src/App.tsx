@@ -31,6 +31,7 @@ import { SchedulerPage } from './pages/SchedulerPage'
 import { FlowsPage } from './pages/FlowsPage'
 import { ObservatoryPage } from './pages/ObservatoryPage'
 import { AutonomousWorkPage } from './pages/AutonomousWorkPage'
+import { VFSPage } from './pages/VFSPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -311,6 +312,7 @@ function AppContent() {
       {view === 'admin' && <AdminPage />}
       {view === 'council' && <CouncilPage />}
       {view === 'basna' && <BasnaPage />}
+      {view === 'vfs' && <VFSPage />}
       {view === 'connections' && <ConnectionsPage />}
       {view === 'gpu-cloud' && <GPUCloudPage />}
       {view === 'scheduler' && <SchedulerPage />}

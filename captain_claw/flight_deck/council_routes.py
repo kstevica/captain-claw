@@ -358,7 +358,11 @@ async def assemble_council(
             cognitive_mode=arch.get("cognitive_mode", "neutra"),
             tools=arch.get("tools") or [],
             tier=sel["tier"], tiers=body.tiers,
-            api_key=body.api_key, env_vars=body.env_vars,
+            api_key=body.api_key,
+            # Auto-bind the panel to a shared VFS project (vfs:<project>/...).
+            env_vars=(body.env_vars or []) + [
+                {"key": "CLAW_VFS_PROJECT", "value": f"council-{run_tag}"},
+            ],
         )
         return sel, arch, res
 

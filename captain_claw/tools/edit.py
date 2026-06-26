@@ -11,6 +11,7 @@ from typing import Any
 
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
+from captain_claw.vfs import is_vfs_path, resolve_vfs_path
 
 log = get_logger(__name__)
 
@@ -61,7 +62,7 @@ class EditTool(Tool):
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Path to the file to edit (relative to workspace root or absolute)",
+                "description": "Path to the file to edit (relative to workspace root, absolute, or vfs:<project>/<path> for the shared cross-agent filesystem)",
             },
             "action": {
                 "type": "string",
@@ -223,6 +224,11 @@ class EditTool(Tool):
     @staticmethod
     def _resolve_path(path: str, kwargs: dict[str, Any]) -> Path | None:
         """Resolve file path using the same logic as ReadTool."""
+        # Shared VFS paths resolve into the cross-agent tree.
+        if is_vfs_path(path):
+            target = resolve_vfs_path(path)
+            return target if (target is not None and target.exists()) else None
+
         raw_path = Path(path).expanduser()
 
         if raw_path.is_absolute():

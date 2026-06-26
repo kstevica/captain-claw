@@ -23,6 +23,17 @@ if "HOME" not in os.environ:
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+# Load a project-local ``.env`` into ``os.environ`` early — before any
+# captain_claw submodule imports — so env-driven values placed in a
+# CWD-relative ``.env`` (e.g. CLAW_VFS_USER, FD_OWNER_ID) reach the agent
+# without the user having to export them. Mirrors flight_deck/server.py.
+# ``override=False`` (default) preserves real shell exports, which win.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 from captain_claw.agent import Agent
 from captain_claw.cli import get_ui
 from captain_claw.config import Config, get_config, set_config

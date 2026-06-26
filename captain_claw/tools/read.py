@@ -6,6 +6,7 @@ from typing import Any
 
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
+from captain_claw.vfs import is_vfs_path, resolve_vfs_path
 
 log = get_logger(__name__)
 
@@ -27,7 +28,10 @@ class ReadTool(Tool):
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Path to the file to read",
+                "description": (
+                    "Path to the file to read. A vfs:<project>/<path> path reads "
+                    "from the shared cross-agent filesystem (see the vfs tool)."
+                ),
             },
             "offset": {
                 "type": "number",
@@ -70,12 +74,20 @@ class ReadTool(Tool):
                     ),
                 )
 
+            # Shared VFS paths (vfs:<project>/...) resolve into the
+            # cross-agent tree; skip the workspace/cwd/registry fallbacks.
+            vfs_target = resolve_vfs_path(path) if is_vfs_path(path) else None
+            if is_vfs_path(path) and vfs_target is None:
+                return ToolResult(success=False, error=f"Invalid vfs path (escapes user root): {path}")
+
             raw_path = Path(path).expanduser()
 
             # Resolve relative paths against the workspace root (not the
             # process CWD) so that paths like "pdf-test/foo.pdf" resolve
             # consistently across all tools.
-            if raw_path.is_absolute():
+            if vfs_target is not None:
+                file_path = vfs_target
+            elif raw_path.is_absolute():
                 file_path = raw_path.resolve()
             else:
                 runtime_base = kwargs.get("_runtime_base_path")
@@ -84,7 +96,7 @@ class ReadTool(Tool):
                 else:
                     file_path = raw_path.resolve()
 
-            if not file_path.exists():
+            if not file_path.exists() and vfs_target is None:
                 # Some tools (gws drive_download, shell) write files
                 # relative to the process CWD which may differ from the
                 # workspace root.  Try CWD-based resolution.
@@ -107,7 +119,7 @@ class ReadTool(Tool):
                     except ValueError:
                         pass
 
-            if not file_path.exists():
+            if not file_path.exists() and vfs_target is None:
                 # Try workflow-run directory (orchestrated workflows write
                 # files here preserving relative directory structure).
                 workflow_run_dir = kwargs.get("_workflow_run_dir")
@@ -123,6 +135,9 @@ class ReadTool(Tool):
                         candidate = wrd / Path(path).name
                     if candidate.exists():
                         file_path = candidate
+
+            if not file_path.exists() and vfs_target is not None:
+                return ToolResult(success=False, error=f"File not found: {path}")
 
             if not file_path.exists():
                 # Attempt file registry resolution before giving up.

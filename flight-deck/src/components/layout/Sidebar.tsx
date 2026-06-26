@@ -23,6 +23,7 @@ import {
   Network,
   Library,
   Cpu,
+  FolderTree,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -42,6 +43,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'library', icon: Library, label: 'Library' },
   { id: 'council', icon: Users, label: 'Council' },
   { id: 'basna', icon: Network, label: 'Basna' },
+  { id: 'vfs', icon: FolderTree, label: 'VFS' },
   { id: 'flows', icon: Workflow, label: 'Flows' },
   { id: 'observatory', icon: Brain, label: 'Observatory' },
   { id: 'autonomous-work', icon: Cpu, label: 'Autonomous Work' },

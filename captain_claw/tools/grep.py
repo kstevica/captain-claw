@@ -11,6 +11,7 @@ from typing import Any
 
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
+from captain_claw.vfs import is_vfs_path, project_root, resolve_vfs_path, split_scheme
 
 log = get_logger(__name__)
 
@@ -53,7 +54,7 @@ class GrepTool(Tool):
             },
             "path": {
                 "type": "string",
-                "description": "File or directory to search (default: workspace root). Directories are scanned recursively.",
+                "description": "File or directory to search (default: workspace root; or vfs:<project>/<path> for the shared cross-agent filesystem). Directories are scanned recursively.",
             },
             "glob": {
                 "type": "string",
@@ -101,8 +102,16 @@ class GrepTool(Tool):
 
             # Resolve the search root against the workspace base (like read/glob).
             base = kwargs.get("_runtime_base_path")
+            _vfs_rel_base: Path | None = None
             raw = Path(path).expanduser() if path else None
-            if raw is None:
+            if path and is_vfs_path(path):
+                # Shared VFS search — root is a project subtree.
+                vfs_root = resolve_vfs_path(path)
+                if vfs_root is None:
+                    return ToolResult(success=False, error=f"Invalid vfs path (escapes user root): {path}")
+                root = vfs_root
+                _vfs_rel_base = project_root(split_scheme(path)[0])
+            elif raw is None:
                 root = Path(base).resolve() if base else Path.cwd()
             elif raw.is_absolute():
                 root = raw.resolve()
@@ -116,6 +125,8 @@ class GrepTool(Tool):
 
             # Make output paths relative to the workspace base when possible.
             rel_base = Path(base).resolve() if base else (root if root.is_dir() else root.parent)
+            if _vfs_rel_base is not None:
+                rel_base = _vfs_rel_base
 
             # Gather candidate files.
             files: list[Path] = []

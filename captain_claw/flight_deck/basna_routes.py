@@ -1689,7 +1689,11 @@ async def execute_route(
                 description=f"Basna ephemeral · {sel.get('role') or arch.get('role', '')}",
                 cognitive_mode=sel.get("cognitive_mode") or arch.get("cognitive_mode", "neutra"),
                 tools=_worker_tools,
-                env_vars=(body.env_vars or []) + [{"key": "CLAW_BASNA_WORKER", "value": "1"}],
+                env_vars=(body.env_vars or []) + [
+                    {"key": "CLAW_BASNA_WORKER", "value": "1"},
+                    # Shared VFS project for all workers in this Basna session.
+                    {"key": "CLAW_VFS_PROJECT", "value": f"basna-{sid8}"},
+                ],
                 web_enabled=True, web_port=0,
             )
             if model:

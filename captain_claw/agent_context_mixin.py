@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import json
 import hashlib
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -2218,6 +2219,7 @@ class AgentContextMixin:
             VideoVisionTool,
             TopicsTool,
             SessionHistoryTool,
+            VfsTool,
         )
 
         config = get_config()
@@ -2276,6 +2278,8 @@ class AgentContextMixin:
                 self.tools.register(IntentionsTool())
             elif tool_name == "topics":
                 self.tools.register(TopicsTool())
+            elif tool_name == "vfs":
+                self.tools.register(VfsTool())
             elif tool_name == "history":
                 ht = SessionHistoryTool()
                 ht._agent = self
@@ -2998,6 +3002,21 @@ class AgentContextMixin:
 
         # Collapse triple+ newlines left by absent conditional sections.
         base_prompt = re.sub(r"\n{3,}", "\n\n", base_prompt)
+
+        # Shared VFS project: when this agent was spawned into a multi-agent run
+        # (Council/Basna/Vatra), it is bound to ONE shared filesystem project.
+        # Surface it so every teammate writes to the same folder instead of each
+        # inventing its own (game-suite, the bare session id, …).
+        _vfs_project = os.environ.get("CLAW_VFS_PROJECT", "").strip()
+        if _vfs_project:
+            base_prompt = base_prompt.rstrip() + (
+                "\n\n## Shared filesystem (this run)\n"
+                f"You are part of a multi-agent run bound to ONE shared VFS project: `{_vfs_project}`. "
+                f"Write every file you produce to `vfs:{_vfs_project}/<filename>` (or the equivalent "
+                f"`vfs:/<filename>`, which resolves to the same place), and read teammates' files from "
+                f"there too. Do NOT invent a different project folder or derive one from the task or "
+                f"session id — files outside `vfs:{_vfs_project}/` won't be seen by your teammates."
+            )
 
         skills_section = ""
         build_skills = getattr(self, "_build_skills_system_prompt_section", None)

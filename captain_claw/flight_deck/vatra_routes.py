@@ -91,6 +91,36 @@ _COORD_POLL_S = 1.5     # how often the coordinator polls the blackboard
 _INBOX_POLL_S = 1.0     # inbox long-poll granularity
 
 
+def _vfs_project(sid: str) -> str:
+    """The single shared VFS project folder for this run.
+
+    Source of truth for both the injected CLAW_VFS_PROJECT default and the
+    folder pinned into every worker prompt, so all agents write to ONE place.
+    """
+    return f"vatra-{sid[:8]}"
+
+
+def _vfs_directive(project: str) -> str:
+    """Mandatory instruction pinning every worker to one shared VFS folder.
+
+    Without this, co-spawned agents each invent their own project name
+    (game-suite, the bare session id, …) and the pieces never co-locate.
+    """
+    if not project:
+        return ""
+    return (
+        "\n\n## Shared VFS project — MANDATORY\n"
+        "Write EVERY file you produce to the shared cross-agent filesystem under this "
+        "EXACT project folder:\n"
+        f"  vfs:{project}/<filename>\n"
+        f"Use `vfs:{project}/` verbatim. Do NOT invent a folder, do NOT derive one from the "
+        "task or the session id, and do NOT create a new project — if you do, your files "
+        "won't sit next to your teammates' and nothing will link up. Every teammate writes "
+        f"to the SAME vfs:{project}/ folder, and you read theirs from there too "
+        f"(e.g. read vfs:{project}/style.css)."
+    )
+
+
 def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
     """Run-context env injected into a worker so the `vatra` tool knows where it is."""
     return [
@@ -98,6 +128,9 @@ def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
         {"key": "CLAW_VATRA_SUBTASK", "value": subtask},
         {"key": "CLAW_VATRA_OWNER", "value": owner},
         {"key": "CLAW_VATRA_DEPTH", "value": str(depth)},
+        # Auto-bind every worker in this run to one shared VFS project so
+        # they keep a common file context (vfs:<project>/...).
+        {"key": "CLAW_VFS_PROJECT", "value": _vfs_project(sid)},
     ]
 
 
@@ -463,6 +496,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     domain = route["domain"]
     subtasks = route["subtasks"]
     shared_context = route.get("shared_context", "")
+    vfs_project = _vfs_project(sid)  # the one folder every worker must write to
 
     spawned: list[dict] = []   # {subtask, slug, port, auth}
     results: list[dict] = []   # {id, owner, role, output, ok, latency_ms, actions}
@@ -575,7 +609,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
             prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files],
-                                           subtasks, shared_context, team_prep=intro_digest)
+                                           subtasks, shared_context, team_prep=intro_digest,
+                                           vfs_project=vfs_project)
             d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
@@ -608,7 +643,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 role = arch.get("role") or arch["id"]
                 label = _owner_label(sp)
                 on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
-                prompt = _build_intro_prompt(role, st, shared_context)
+                prompt = _build_intro_prompt(role, st, shared_context, vfs_project=vfs_project)
                 d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
@@ -684,7 +719,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                         role = arch.get("role") or arch["id"]
                         label = _owner_label(sp)
                         on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
-                        prompt = _build_review_prompt(role, st, digest, shared_context)
+                        prompt = _build_review_prompt(role, st, digest, shared_context, vfs_project=vfs_project)
                         d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                             sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                             on_action=on_action, agent_name=label, on_usage=on_usage))
@@ -954,7 +989,7 @@ async def _learn(db, user: dict, sid: str, domain: str, intent: str,
     return learned
 
 
-def _build_intro_prompt(role: str, st: dict, shared_context: str = "") -> str:
+def _build_intro_prompt(role: str, st: dict, shared_context: str = "", vfs_project: str = "") -> str:
     """Round-0 preparation: groundwork the agent posts to the shared board before the
     team writes their actual pieces, so the main round starts collaborative."""
     contract = ""
@@ -967,7 +1002,7 @@ def _build_intro_prompt(role: str, st: dict, shared_context: str = "") -> str:
         f"- Gather the key facts, figures, sources, and decisions your part will need.\n"
         f"- Sketch a short outline of what your piece will cover.\n"
         f"- Note open questions or anything you'll need from a teammate.\n\n"
-        f"## Your part (for context)\n{st['brief']}{contract}\n"
+        f"## Your part (for context)\n{st['brief']}{contract}{_vfs_directive(vfs_project)}\n"
         f"POST your prep to the shared board so teammates can build on it: call "
         f"`vatra(action=\"post\", text=\"<your key findings + outline>\")`. Keep it CONCISE — this "
         f"is groundwork, NOT the final piece (you write that next round). Then reply with a short "
@@ -977,7 +1012,7 @@ def _build_intro_prompt(role: str, st: dict, shared_context: str = "") -> str:
 
 def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str],
                           all_subtasks: list[dict], shared_context: str = "",
-                          team_prep: str = "") -> str:
+                          team_prep: str = "", vfs_project: str = "") -> str:
     """Frame one subtask for its owner — with the team contract everyone must
     follow, awareness of the whole team, and a nudge to delegate cross-slice needs."""
     files_block = ""
@@ -1021,7 +1056,7 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"Produce only your part, in full — a reporter assembles all parts at the end.\n\n"
         f"## Overall task (for context)\n{intent}\n\n"
         f"## The team and their pieces\n{roster}{contract_block}{prep_block}\n\n"
-        f"## Your part — {st['title']}\n{st['brief']}{files_block}{deps_block}\n\n"
+        f"## Your part — {st['title']}\n{st['brief']}{files_block}{deps_block}{_vfs_directive(vfs_project)}\n\n"
         f"## Reaching your team — use the `vatra` tool (it is ALWAYS available)\n"
         f"Your teammates' notes and finished pieces stream onto a shared board. Reach it ONLY "
         f"through the `vatra` tool — call it directly. Do NOT run a `shell` command to 'check "
@@ -1065,12 +1100,14 @@ async def _llm_team_digest(intent: str, results: list[dict], creds: dict) -> str
     return resp.content.strip()
 
 
-def _build_review_prompt(role: str, st: dict, digest: str, shared_context: str = "") -> str:
+def _build_review_prompt(role: str, st: dict, digest: str, shared_context: str = "",
+                         vfs_project: str = "") -> str:
     """Round-2 message to a still-alive owner: it can now see the whole team's first
     pass and is asked to add, align, and fill gaps in its own piece."""
     contract = ""
     if shared_context.strip():
         contract = "\n## Shared conventions (still apply)\n" + shared_context.strip() + "\n"
+    contract += _vfs_directive(vfs_project)
     return (
         f"Round 2 — team review. You are the {role}. Everyone has finished a first pass on one "
         f"part of a shared deliverable, and the Lead has gathered a summary of every piece. THIS "
@@ -1140,6 +1177,9 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         cognitive_mode=arch.get("cognitive_mode", "neutra"),
         tools=arch.get("tools") or [], tier=arch.get("tier", "reason"),
         tiers=tiers, api_key=api_key, env_vars=env_vars,
+        # Bind the reporter to the same shared VFS project so it reads the
+        # team's files from (and writes the assembled deliverable to) one folder.
+        extra_env=_vatra_env(sid, "reporter", reporter_id, 0),
     )
     if not sp["ok"]:
         _progress(sid, "report", f"Reporter spawn failed — using raw assembly ({sp['message']})", ok=False)
@@ -1168,6 +1208,7 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                        "Keep the final deliverable fully consistent with these (the pieces should "
                        "already follow them; enforce it if any drifted):\n"
                        f"{shared_context.strip()}\n")
+        prompt += _vfs_directive(_vfs_project(sid))
 
         def _on_action(act: dict) -> None:
             detail = act.get("detail", "")

@@ -8,6 +8,7 @@ from typing import Any
 
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
+from captain_claw.vfs import is_vfs_path, resolve_vfs_path
 
 # Heuristic markers that indicate a "status confirmation" message rather
 # than substantive deliverable content. Used by the deliverable-protection
@@ -48,7 +49,11 @@ class WriteTool(Tool):
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Path to the file to write",
+                "description": (
+                    "Path to the file to write. A vfs:<project>/<path> path writes "
+                    "to the shared cross-agent filesystem — persistent and visible "
+                    "to other agents (see the vfs tool)."
+                ),
             },
             "content": {
                 "type": "string",
@@ -160,13 +165,22 @@ class WriteTool(Tool):
             ToolResult with status
         """
         try:
-            # Workflow-run override: bypass session scoping entirely.
-            # Preserve the relative directory structure (e.g.
-            # "backend/src/config/env.js") but strip absolute prefixes,
-            # "../" traversals, and any "saved/<category>/<session_id>"
-            # prefix the LLM may have injected.
+            # Shared VFS write (vfs:<project>/...) — real file in the
+            # cross-agent tree, bypassing per-session saved/ scoping.
+            if is_vfs_path(path):
+                file_path = resolve_vfs_path(path, create_parents=True)
+                if file_path is None:
+                    return ToolResult(
+                        success=False,
+                        error=f"Invalid vfs path (escapes user root): {path}",
+                    )
+
+            # Workflow-run override: bypass session scoping entirely,
+            # preserving relative structure but stripping prefixes/traversals.
             workflow_run_dir = kwargs.get("_workflow_run_dir")
-            if workflow_run_dir is not None:
+            if is_vfs_path(path):
+                pass  # file_path already resolved above
+            elif workflow_run_dir is not None:
                 requested = Path(path).expanduser()
                 # Strip absolute root so we keep only the relative parts.
                 if requested.is_absolute():

@@ -10,6 +10,7 @@ import glob
 
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
+from captain_claw.vfs import is_vfs_path, project_root, split_scheme, to_display
 
 log = get_logger(__name__)
 
@@ -46,7 +47,7 @@ class GlobTool(Tool):
         "properties": {
             "pattern": {
                 "type": "string",
-                "description": "Glob pattern (e.g., '**/*.py', 'src/**/*.ts')",
+                "description": "Glob pattern (e.g., '**/*.py', 'src/**/*.ts'). A vfs:<project>/<glob> pattern searches the shared cross-agent filesystem.",
             },
             "root": {
                 "type": "string",
@@ -91,6 +92,25 @@ class GlobTool(Tool):
             ToolResult with matching files
         """
         try:
+            # Shared VFS glob (vfs:<project>/<glob>) — search the cross-agent
+            # tree and return results as vfs: URIs.
+            if is_vfs_path(pattern):
+                project, rel = split_scheme(pattern)
+                base_dir = project_root(project)
+                full = str(Path(base_dir) / (rel or "**/*"))
+                loop = asyncio.get_event_loop()
+                vfs_matches = await loop.run_in_executor(
+                    None, lambda: glob.glob(full, recursive=True)
+                )
+                vfs_matches = sorted(m for m in vfs_matches if Path(m).is_file())[:limit]
+                if not vfs_matches:
+                    return ToolResult(success=True, content=f"No files found matching: {pattern}")
+                disp = [to_display(Path(m)) for m in vfs_matches]
+                return ToolResult(
+                    success=True,
+                    content=f"Found {len(disp)} file(s):\n" + "\n".join(f"  {d}" for d in disp),
+                )
+
             workflow_run_dir: str | None = kwargs.get("_workflow_run_dir")
             if isinstance(workflow_run_dir, Path):
                 workflow_run_dir = str(workflow_run_dir)
