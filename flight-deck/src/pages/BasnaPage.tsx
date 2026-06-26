@@ -581,7 +581,7 @@ export function BasnaPage() {
           <p className="text-[11px] text-zinc-500">Route → spawn the minimal team → merge by reliability</p>
         </div>
         <button
-          onClick={() => { newSession(); setIntent('') }}
+          onClick={() => { newSession(); setIntent(''); setTitle('') }}
           className="ml-auto flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500"
         >
           <Plus className="h-3.5 w-3.5" /> New
