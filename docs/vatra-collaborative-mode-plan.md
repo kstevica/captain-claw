@@ -7,8 +7,12 @@
 > delegation actually fires: the Lead now KEEPS interdependent pieces separate (records
 > `depends_on`) instead of folding them, never emits an integration/polish subtask (that's the
 > reporter), and owners get the full team roster + a proactive nudge to ask teammates for
-> cross-slice needs. Name **Vatra** (a hearth — agents gather round one fire and build together,
-> not solo sorties).
+> cross-slice needs. A **Lead-run review round** follows the first pass: the Lead gathers an
+> exec-summary digest of every piece and each owner (kept alive) revises its own piece against
+> the whole team's work before the reporter assembles (config `review_round`, default on) — this
+> is where real collaboration happens, since round-1 owners are blind to each other. The Lead is
+> an LLM **coordinator** (decompose → gather digest → orchestrate review), not a spawned worker
+> agent. Name **Vatra** (a hearth — agents gather round one fire and build together, not solo sorties).
 >
 > Phase 1 deviations from the plan below (deliberate, for a low-risk first cut):
 > - **`mode` rides in the session `config` JSON** (`config.mode="vatra"`), not a new column —

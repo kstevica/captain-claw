@@ -454,14 +454,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         for sp in spawned:
             owner_counts[sp["arch"]["id"]] = owner_counts.get(sp["arch"]["id"], 0) + 1
 
-        async def _dispatch_owner(sp: dict) -> dict:
-            arch, st = sp["arch"], sp["subtask"]
-            role = arch.get("role") or arch["id"]
+        from captain_claw.flight_deck.server import DATA_DIR
+
+        def _owner_label(sp: dict) -> str:
             # Distinct live-panel label per piece when an archetype owns several, so
             # two researcher slices show as two cards, not one merged card.
-            label = f"{role} · {st['title']}" if owner_counts.get(arch["id"], 1) > 1 else role
-            fleet = arch.get("fleet_instructions", "")
+            arch = sp["arch"]
+            role = arch.get("role") or arch["id"]
+            return f"{role} · {sp['subtask']['title']}" if owner_counts.get(arch["id"], 1) > 1 else role
 
+        def _owner_callbacks(label: str):
             def _on_action(act: dict) -> None:
                 detail = act.get("detail", "")
                 if act["tool"] == "narration":
@@ -475,16 +477,21 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             def _on_usage(pt: int, ct: int, tt: int) -> None:
                 _progress(sid, "usage", f"{label} · {pt:,}→{ct:,} tok",
                           agent=label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+            return _on_action, _on_usage
 
-            from captain_claw.flight_deck.server import DATA_DIR
+        async def _dispatch_owner(sp: dict) -> dict:
+            arch, st = sp["arch"], sp["subtask"]
+            role = arch.get("role") or arch["id"]
+            label = _owner_label(sp)
+            on_action, on_usage = _owner_callbacks(label)
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
             prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files], subtasks, shared_context)
             d = await _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
-                on_action=_on_action, fleet_instructions=fleet, agent_name=label,
-                file_paths=doc, image_paths=img, on_usage=_on_usage)
+                on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
+                agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage)
             mark = "✓" if d["ok"] else "✗"
             extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
             _progress(sid, "dispatch",
@@ -510,6 +517,51 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             n_asks = 0
         if n_asks:
             _progress(sid, "ask", f"Coordinator resolved {n_asks} ask(s)")
+
+        # 3c) Review round — the Lead gathers an exec-summary digest of everyone's
+        # first pass and sends it back to each still-alive owner, asking them to add,
+        # align, and fill gaps now that they can see the whole team's work. This is
+        # where the real collaboration happens: in round 1 owners are blind to each
+        # other; here each one revises against the full picture before assembly.
+        if bool(cfg.get("review_round", True)):
+            r1 = [(i, sp) for i, sp in enumerate(spawned)
+                  if (results[i].get("ok") or results[i].get("produced_file"))
+                  and (results[i].get("output") or "").strip()]
+            if len(r1) >= 2:
+                _progress(sid, "review", "Lead gathering each specialist's summary…")
+                try:
+                    digest = await asyncio.wait_for(
+                        _llm_team_digest(intent, [results[i] for i, _ in r1], _creds("reason")), 180)
+                except Exception as e:
+                    log.warning("Vatra team digest failed", error=str(e))
+                    digest = ""
+                if digest:
+                    _progress(sid, "review",
+                              f"Review round — {len(r1)} specialist(s) revising against the team's work…")
+
+                    async def _review_owner(i: int, sp: dict) -> tuple[int, dict]:
+                        arch, st = sp["arch"], sp["subtask"]
+                        role = arch.get("role") or arch["id"]
+                        label = _owner_label(sp)
+                        on_action, on_usage = _owner_callbacks(label)
+                        prompt = _build_review_prompt(role, st, digest, shared_context)
+                        d = await _dispatch_one(
+                            sp["port"], sp["auth"], prompt, body.dispatch_timeout,
+                            on_action=on_action, agent_name=label, on_usage=on_usage)
+                        return i, d
+
+                    revisions = await asyncio.gather(*[_review_owner(i, sp) for i, sp in r1])
+                    changed = 0
+                    for i, d in revisions:
+                        out = (d.get("output") or "").strip()
+                        if d["ok"] and out and not _is_no_change(out):
+                            results[i]["output"] = out
+                            results[i]["ok"] = True
+                            results[i].pop("produced_file", None)
+                            results[i]["actions"] = results[i].get("actions", []) + d.get("actions", [])
+                            changed += 1
+                    _progress(sid, "review",
+                              f"Review round done — {changed}/{len(r1)} piece(s) revised")
 
         # 4) Capture owner-generated files + backfill empty replies from artifacts.
         for i, sp in enumerate(spawned):
@@ -791,6 +843,56 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"than invent. If an answer doesn't arrive in time, do your best — the reporter reconciles.\n\n"
         f"Return only your finished part — no preamble, no meta-commentary about the team."
     )
+
+
+async def _llm_team_digest(intent: str, results: list[dict], creds: dict) -> str:
+    """The Lead's gather step: condense each first-pass piece into a short exec
+    summary, returned as one markdown digest shared back to every specialist so they
+    can see what the rest of the team produced before the review pass."""
+    from captain_claw.llm import Message
+    listing = "\n\n".join(
+        f"### {r['title']} (by {r['role']})\n{r['output'].strip()[:2500]}" for r in results)
+    prov, mt = _provider_call(creds, temperature=0.2, default_max=2048, cap=4096)
+    resp = await prov.complete(messages=[
+        Message(role="system", content=(
+            "A team each produced one piece of a shared deliverable. Write a concise digest that "
+            "summarizes EACH piece in 2-4 sentences — what it covers and its key points, decisions, "
+            "or figures. Keep each piece under its own '### <title>' heading, in the same order. "
+            "This digest is shared back to the whole team so each member can see what the others "
+            "produced. Be faithful; do not invent anything not in the pieces.")),
+        Message(role="user", content=f"TASK:\n{intent[:1500]}\n\nPIECES:\n{listing}"),
+    ], temperature=0.2, max_tokens=mt)
+    return resp.content.strip()
+
+
+def _build_review_prompt(role: str, st: dict, digest: str, shared_context: str = "") -> str:
+    """Round-2 message to a still-alive owner: it can now see the whole team's first
+    pass and is asked to add, align, and fill gaps in its own piece."""
+    contract = ""
+    if shared_context.strip():
+        contract = "\n## Shared conventions (still apply)\n" + shared_context.strip() + "\n"
+    return (
+        f"Round 2 — team review. You are the {role}. Everyone has finished a first pass on one "
+        f"part of a shared deliverable, and the Lead has gathered a summary of every piece:\n\n"
+        f"## What the whole team produced\n{digest}\n{contract}\n"
+        f"## Your part — {st['title']}\n"
+        f"You produced the '{st['title']}' piece. Now that you can see the whole picture, improve "
+        f"YOUR piece:\n"
+        f"- ADD anything important that's missing given what teammates covered — do real extra "
+        f"work (research, depth, examples), don't just restate what you had.\n"
+        f"- Remove overlap or contradictions with teammates' pieces; defer to the piece that owns "
+        f"a topic.\n"
+        f"- Make sure it's consistent with the rest of the team and the shared conventions.\n\n"
+        f"If, after genuinely reviewing, your piece is already complete and consistent, reply with "
+        f"exactly: NO CHANGES. Otherwise reply with your UPDATED piece IN FULL (the whole piece, "
+        f"not a diff and not only the additions) — no preamble, no meta-commentary."
+    )
+
+
+def _is_no_change(out: str) -> bool:
+    """True when an owner's review reply signals it has nothing to revise."""
+    low = out.strip().lower()
+    return len(low) <= 60 and ("no change" in low or "nothing to add" in low or "no update" in low)
 
 
 async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_tag: str,
