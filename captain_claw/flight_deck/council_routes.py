@@ -304,8 +304,11 @@ async def _route_panel(body: AssembleRequest, arch_by_id: dict,
             _add(a["id"], a.get("tier"), "")
 
     domain = str((raw.get("domain") if isinstance(raw, dict) else "") or "general").lower()
+    # A user-fixed panel is honored in full even if it exceeds max_agents (the
+    # slider is irrelevant when the user hand-picks specialists); otherwise clamp.
+    cap = max(max_agents, len(forced_ids)) if forced_ids else max_agents
     return {
-        "selected": selected[:max_agents],
+        "selected": selected[:cap],
         "domain": domain,
         "rationale": str((raw.get("rationale") if isinstance(raw, dict) else "") or ""),
         "title": str((raw.get("title") if isinstance(raw, dict) else "") or ""),

@@ -180,6 +180,9 @@ export interface CreateSessionConfig {
   maxAgents?: number
   tiers?: Record<string, unknown>
   envVars?: { key: string; value: string }[]
+  // Optional fixed panel — when non-empty the assembler uses exactly these
+  // archetype ids; when empty the router picks the panel automatically.
+  archetypeIds?: string[]
 }
 
 // ── Constants ───────────────────────────────────────────────────
@@ -1135,6 +1138,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
         max_agents: cfg.maxAgents || 4,
         tiers: cfg.tiers || {},
         env_vars: (cfg.envVars || []).filter(e => e.key.trim() && e.value.trim()),
+        ...(cfg.archetypeIds?.length ? { archetype_ids: cfg.archetypeIds } : {}),
       })
       const procStore = useProcessStore.getState()
       // Push each panelist's task-tailored persona into the process store so the
@@ -1501,12 +1505,28 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     set({ activeSession: updated })
     await apiUpdateSession(s.id, { status: 'active', current_round: 1 })
 
-    // Connect all agents
+    // Connect all agents, then wait until every (unmuted) one is actually
+    // connected before the first speaker runs. Freshly auto-spawned agents take a
+    // few seconds to accept the WS + finish the peer handshake; starting on a
+    // fixed 1s delay made the first speaker get skipped as "disconnected". Falls
+    // through after a generous timeout so an agent that never comes up can't hang
+    // the council.
     get().connectAllAgents()
-
-    // Wait for WS connections
     get()._log('', 'System', 'system', 'Connecting to agents...')
-    await new Promise(r => setTimeout(r, 1000))
+    {
+      const deadline = Date.now() + 30000
+      const pending = () => get().activeSession?.agents.filter(a => !a.muted && !a.ws?.connected) || []
+      while (Date.now() < deadline && pending().length > 0) {
+        await new Promise(r => setTimeout(r, 400))
+      }
+      const stragglers = pending()
+      if (stragglers.length > 0) {
+        get()._log('', 'System', 'system',
+          `Proceeding without ${stragglers.length} agent(s) still connecting: ${stragglers.map(a => a.name).join(', ')}`)
+      } else {
+        get()._log('', 'System', 'system', 'All agents connected')
+      }
+    }
 
     // Upload pending files to all agents in parallel
     const pendingFiles = get().pendingFiles

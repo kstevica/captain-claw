@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X, MessageCircleQuestion, Bug, ShieldAlert, MessagesSquare, Sparkles, MousePointerClick, Loader2 } from 'lucide-react'
+import { Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X, MessageCircleQuestion, Bug, ShieldAlert, MessagesSquare, Sparkles, MousePointerClick, Loader2, Check } from 'lucide-react'
 import { AgentPicker, isOldManName } from './AgentPicker'
 import { formatSize } from '../../services/fileTransfer'
 import { useTierConfig } from '../../services/tierConfig'
@@ -45,10 +45,15 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
   // already-running agents.
   const [autoAssemble, setAutoAssemble] = useState(true)
   const [maxAgents, setMaxAgents] = useState(4)
+  // Optional hand-picked panel. Empty => the router auto-picks the specialists.
+  const [selectedArchetypes, setSelectedArchetypes] = useState<string[]>([])
   const [submitting, setSubmitting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const { tiers, envVars } = useTierConfig()
+  const { tiers, envVars, registry } = useTierConfig()
+  const archetypes = registry?.archetypes || []
+  const toggleArchetype = (id: string) =>
+    setSelectedArchetypes(prev => prev.includes(id) ? prev.filter(a => a !== id) : [...prev, id])
 
   const oldMan = agents.find(a => isOldManName(a.name))
   const moderatorMode = oldMan ? 'moderator' : 'round-robin'
@@ -89,6 +94,7 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
         maxAgents,
         tiers: autoAssemble ? tiers : undefined,
         envVars: autoAssemble ? envVars : undefined,
+        archetypeIds: autoAssemble && selectedArchetypes.length ? selectedArchetypes : undefined,
       })
     } catch (e) {
       setSubmitting(false)
@@ -221,25 +227,84 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
         </div>
 
         {autoAssemble ? (
-          <div className="rounded-lg border border-zinc-700/30 bg-zinc-800/30 p-3">
-            <label className="mb-1 block text-xs font-medium text-zinc-400">
-              Panel size: <span className="text-violet-400">{maxAgents}</span> specialists
-            </label>
-            <input
-              type="range"
-              min={2}
-              max={6}
-              value={maxAgents}
-              onChange={e => setMaxAgents(parseInt(e.target.value))}
-              className="w-full accent-violet-500"
-            />
-            <div className="flex justify-between text-[10px] text-zinc-500">
-              <span>2</span><span>4</span><span>6</span>
-            </div>
-            <p className="mt-2 text-[11px] text-zinc-500">
-              A router picks complementary archetypes for this topic and spawns each as a
-              fresh agent. They're torn down when you delete the session.
-            </p>
+          <div className="space-y-3 rounded-lg border border-zinc-700/30 bg-zinc-800/30 p-3">
+            {selectedArchetypes.length === 0 ? (
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-400">
+                  Panel size: <span className="text-violet-400">{maxAgents}</span> specialists
+                </label>
+                <input
+                  type="range"
+                  min={2}
+                  max={6}
+                  value={maxAgents}
+                  onChange={e => setMaxAgents(parseInt(e.target.value))}
+                  className="w-full accent-violet-500"
+                />
+                <div className="flex justify-between text-[10px] text-zinc-500">
+                  <span>2</span><span>4</span><span>6</span>
+                </div>
+                <p className="mt-2 text-[11px] text-zinc-500">
+                  A router picks complementary archetypes for this topic and spawns each as a
+                  fresh agent. They're torn down when you delete the session.
+                </p>
+              </div>
+            ) : (
+              <p className="text-[11px] text-zinc-500">
+                Using <span className="text-violet-400">{selectedArchetypes.length}</span> hand-picked
+                specialist{selectedArchetypes.length !== 1 ? 's' : ''}. Each is spawned fresh and
+                briefed for this topic; torn down when you delete the session.
+              </p>
+            )}
+
+            {/* Optional: hand-pick the specialists instead of auto-routing. */}
+            {archetypes.length > 0 && (
+              <div>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <label className="text-xs font-medium text-zinc-400">
+                    Specialists {selectedArchetypes.length > 0
+                      ? <span className="text-zinc-500">({selectedArchetypes.length} selected)</span>
+                      : <span className="text-zinc-500">(optional — leave empty to auto-pick)</span>}
+                  </label>
+                  {selectedArchetypes.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedArchetypes([])}
+                      className="text-[10px] text-zinc-500 hover:text-zinc-300"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <div className="max-h-48 space-y-1 overflow-auto pr-1">
+                  {archetypes.map(a => {
+                    const on = selectedArchetypes.includes(a.id)
+                    return (
+                      <button
+                        key={a.id}
+                        type="button"
+                        onClick={() => toggleArchetype(a.id)}
+                        className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
+                          on
+                            ? 'border border-violet-500/40 bg-violet-500/15'
+                            : 'border border-zinc-700/30 bg-zinc-800/40 hover:bg-zinc-700/40'
+                        }`}
+                      >
+                        <div className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded ${
+                          on ? 'bg-violet-500 text-white' : 'border border-zinc-600'
+                        }`}>
+                          {on && <Check className="h-3 w-3" />}
+                        </div>
+                        <span className="min-w-0">
+                          <span className="block truncate text-xs font-medium text-zinc-200">{a.role}</span>
+                          <span className="block truncate text-[10px] text-zinc-500">{a.family}</span>
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           <>
