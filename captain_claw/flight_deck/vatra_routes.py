@@ -415,7 +415,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     else:
         _progress(sid, "route", "Lead decomposing the task…")
         try:
-            route = await _build_plan(db, user["id"], intent, max_agents, _creds("fast"))
+            route = await _build_plan(db, user["id"], intent, max_agents, _creds("reason"))
         except HTTPException:
             await db.update_basna_session(sid, user["id"], status="error")
             raise
@@ -1365,6 +1365,8 @@ class VatraStartRequest(BaseModel):
     api_key: str = ""
     # User-fixed team: when non-empty, the Lead must give each a subtask.
     archetype_ids: list[str] = []
+    # Which Library tier the Lead (decomposition) runs on — a reasoning task.
+    router_tier: str = "reason"
 
 
 class VatraExecuteRequest(BaseModel):
@@ -1389,7 +1391,9 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
         config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents}))
     sid = sess["id"]
     registry = _load_registry()
-    creds = _resolve_creds(registry, body.tiers, body.api_key, "fast")
+    # The Lead's decomposition is a reasoning task — run it on the user-selected
+    # tier (default reasoning), not the fast tier.
+    creds = _resolve_creds(registry, body.tiers, body.api_key, body.router_tier or "reason")
     try:
         route = await _build_plan(db, user["id"], intent, body.max_agents, creds,
                                   force_ids=body.archetype_ids or None)

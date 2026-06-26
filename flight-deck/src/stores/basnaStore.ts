@@ -559,6 +559,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     try {
       const { session_id } = await apiVatraRoute({
         intent: intent.trim(), max_agents: get().maxAgents, tiers,
+        router_tier: get().routerTier,
         ...(title.trim() ? { title: title.trim() } : {}),
         ...(archetypeIds.length ? { archetype_ids: archetypeIds } : {}),
       })
