@@ -1004,6 +1004,9 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"Search before you invent; post what you find. If the board is empty (teammates are "
         f"still working), just proceed with your part — the team runs a final review round where "
         f"you WILL see everyone's work and can revise. Don't stall waiting or checking.\n\n"
+        f"You are AUTONOMOUS: never ask the user a question, never refuse, and never stop to say "
+        f"you're missing teammate input — produce your best version of your part with what you "
+        f"have; the review round and reporter reconcile the rest.\n\n"
         f"Return only your finished part — no preamble, no meta-commentary about the team."
     )
 
@@ -1036,7 +1039,9 @@ def _build_review_prompt(role: str, st: dict, digest: str, shared_context: str =
         contract = "\n## Shared conventions (still apply)\n" + shared_context.strip() + "\n"
     return (
         f"Round 2 — team review. You are the {role}. Everyone has finished a first pass on one "
-        f"part of a shared deliverable, and the Lead has gathered a summary of every piece:\n\n"
+        f"part of a shared deliverable, and the Lead has gathered a summary of every piece. THIS "
+        f"summary IS your view of the team's work — it is right here in this message, so you "
+        f"already have what your teammates produced:\n\n"
         f"## What the whole team produced\n{digest}\n{contract}\n"
         f"## Your part — {st['title']}\n"
         f"You produced the '{st['title']}' piece. Now that you can see the whole picture, improve "
@@ -1046,11 +1051,13 @@ def _build_review_prompt(role: str, st: dict, digest: str, shared_context: str =
         f"- Remove overlap or contradictions with teammates' pieces; defer to the piece that owns "
         f"a topic.\n"
         f"- Make sure it's consistent with the rest of the team and the shared conventions.\n\n"
-        f"The summaries above are short — for a teammate's FULL text, call "
-        f"`vatra(action=\"search\", query=\"<topic>\")` (always available; don't shell-probe for it).\n\n"
+        f"You are AUTONOMOUS — never ask the user a question, never refuse, and never claim you "
+        f"can't see teammates' work: it is summarized ABOVE. The board (`vatra` action='search') "
+        f"is an OPTIONAL extra for a teammate's full text; if it returns nothing, ignore it and "
+        f"work from the summary above. Just produce the result.\n\n"
         f"If, after genuinely reviewing, your piece is already complete and consistent, reply with "
         f"exactly: NO CHANGES. Otherwise reply with your UPDATED piece IN FULL (the whole piece, "
-        f"not a diff and not only the additions) — no preamble, no meta-commentary."
+        f"not a diff and not only the additions) — no preamble, no meta-commentary, no questions."
     )
 
 
