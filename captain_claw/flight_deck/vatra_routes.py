@@ -151,11 +151,13 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
 
 
 async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
-                         creds: dict, max_agents: int) -> dict:
+                         creds: dict, max_agents: int,
+                         force_ids: list[str] | None = None) -> dict:
     """Ask the Lead to split the task into complementary, owner-assigned subtasks.
 
     Returns a normalized plan. On any LLM/parse failure raises — the caller turns
     that into a clean run failure (Phase 1 has no deterministic fallback planner).
+    `force_ids` fixes the team: the Lead must give each a subtask.
     """
     from captain_claw.llm import Message
     system_file = _INSTRUCTIONS_DIR / "vatra" / "lead.md"
@@ -168,6 +170,13 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
         f"max_agents: {max_agents}. Decompose into the smallest set of complementary, "
         f"owner-assigned subtasks that together cover this task."
     )
+    if force_ids:
+        forced_list = "\n".join(f"- {a}: {arch_by_id[a].get('role', '')}" for a in force_ids if a in arch_by_id)
+        user_prompt += (
+            "\n\nThe team is FIXED by the user — you MUST create at least one subtask owned by "
+            "EACH of these archetypes, and use only these as owners:\n" + forced_list +
+            "\nGive each a meaningful, complementary piece derived from the task; split the work "
+            "so every one of them has a real, non-overlapping part.")
     # The plan now carries shared_context + per-piece briefs + depends_on, so it can
     # be long — a tight cap truncates the JSON and the whole route fails. Give it room.
     prov, mt = _provider_call(creds, temperature=0.2, default_max=8192, cap=16384)
@@ -208,24 +217,47 @@ def _resolve_creds(registry: dict, tiers: dict | None, api_key: str, tier: str) 
     return _tier_creds(registry, tier, api_key or "")
 
 
-async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dict) -> dict:
+async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dict,
+                      force_ids: list[str] | None = None) -> dict:
     """Run the Lead and shape the result into a persistable Vatra route:
     {mode, domain, rationale, subtasks, selected}. `selected` mirrors Basna's
-    shape so the read-tool and list UI render the owners."""
+    shape so the read-tool and list UI render the owners. `force_ids` fixes the
+    team — every one of them is guaranteed a subtask."""
     archetypes = await merged_archetypes(db, user_id)
     arch_by_id = {a["id"]: a for a in archetypes}
     rel_rows = await db.get_archetype_reliability(user_id)
     reliability: dict[str, list[dict]] = {}
     for r in rel_rows:
         reliability.setdefault(r["archetype_id"], []).append(r)
+    forced = [a for a in (force_ids or []) if a in arch_by_id]
+    # A fixed team must all fit, even if larger than the requested max.
+    cap = max(max_agents, len(forced)) if forced else max_agents
     plan = await asyncio.wait_for(
-        _llm_decompose(intent, archetypes, reliability, creds, max_agents), _DECOMPOSE_TIMEOUT)
+        _llm_decompose(intent, archetypes, reliability, creds, cap, force_ids=forced or None),
+        _DECOMPOSE_TIMEOUT)
+    subtasks = plan["subtasks"]
+    # Guarantee every fixed-team archetype actually got a piece — if the Lead missed
+    # one, add a task-derived subtask for it so "all selected are used" holds.
+    if forced:
+        covered = {s["owner_archetype_id"] for s in subtasks}
+        n = len(subtasks)
+        for aid in forced:
+            if aid not in covered:
+                n += 1
+                role = arch_by_id[aid].get("role", aid)
+                subtasks.append({
+                    "id": f"s{n}", "title": f"{role} contribution",
+                    "owner_archetype_id": aid,
+                    "brief": (f"As the {role}, contribute your part to this task from your "
+                              f"specialty's perspective: {intent[:400]}"),
+                    "depends_on": [],
+                })
     selected = [{"archetype_id": s["owner_archetype_id"],
                  "role": arch_by_id[s["owner_archetype_id"]].get("role", ""),
-                 "why": s["title"]} for s in plan["subtasks"]]
+                 "why": s["title"]} for s in subtasks]
     return {"mode": "vatra", "domain": plan["domain"], "rationale": plan["rationale"],
             "shared_context": plan.get("shared_context", ""),
-            "subtasks": plan["subtasks"], "selected": selected}
+            "subtasks": subtasks, "selected": selected}
 
 
 # ── Spawn / teardown (mirrors Basna's; stamped CLAW_VATRA_WORKER) ─────
@@ -1331,6 +1363,8 @@ class VatraStartRequest(BaseModel):
     tiers: dict | None = None
     env_vars: list | None = None
     api_key: str = ""
+    # User-fixed team: when non-empty, the Lead must give each a subtask.
+    archetype_ids: list[str] = []
 
 
 class VatraExecuteRequest(BaseModel):
@@ -1357,7 +1391,8 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
     registry = _load_registry()
     creds = _resolve_creds(registry, body.tiers, body.api_key, "fast")
     try:
-        route = await _build_plan(db, user["id"], intent, body.max_agents, creds)
+        route = await _build_plan(db, user["id"], intent, body.max_agents, creds,
+                                  force_ids=body.archetype_ids or None)
     except HTTPException:
         await db.delete_basna_session(sid, user["id"])
         raise

@@ -246,6 +246,9 @@ class RouteRequest(BaseModel):
     max_agents: int = Field(default=6, ge=1, le=10)
     # Persist into an existing session; omit to create a fresh one.
     session_id: str = ""
+    # User-fixed team: when non-empty, the router MUST use exactly these archetypes
+    # (all of them, no others) instead of choosing the team itself.
+    archetype_ids: list[str] = []
 
 
 class CreateSessionRequest(BaseModel):
@@ -935,11 +938,23 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
     if not system_prompt_file.is_file():
         raise HTTPException(500, "Basna router prompt not found")
     system_prompt = system_prompt_file.read_text() + "\n\n" + _build_catalog(archetypes, reliability)
-    user_prompt = (
-        f"Task: {intent}\n\n"
-        f"max_agents: {body.max_agents}. Select the smallest archetype set that "
-        f"handles this task well, scaled to its difficulty."
-    )
+    forced_ids = [a for a in (body.archetype_ids or []) if a in archetypes_by_id]
+    if forced_ids:
+        forced_list = "\n".join(
+            f"- {a}: {archetypes_by_id[a].get('role', '')}" for a in forced_ids)
+        user_prompt = (
+            f"Task: {intent}\n\n"
+            f"The team is FIXED by the user — you MUST use EXACTLY these archetypes, ALL of "
+            f"them and NO others, in `selected`:\n{forced_list}\n\n"
+            f"For each, write a `why` that instructs it specifically for THIS task (how it should "
+            f"contribute). Still choose domain, difficulty, and merge_kind for the task."
+        )
+    else:
+        user_prompt = (
+            f"Task: {intent}\n\n"
+            f"max_agents: {body.max_agents}. Select the smallest archetype set that "
+            f"handles this task well, scaled to its difficulty."
+        )
 
     started = time.monotonic()
     raw: dict | None = None
@@ -986,6 +1001,20 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
             source = "fallback"
 
     route = _normalize_route(raw, archetypes_by_id, _difficulty_cap, body.max_agents)
+
+    # Force the user-fixed team: use exactly the chosen archetypes (all of them, no
+    # others), keeping the LLM's task-specific `why`/tier where it produced one.
+    if forced_ids:
+        by_sel = {s["archetype_id"]: s for s in route["selected"]}
+        route["selected"] = [
+            by_sel.get(aid) or {
+                "archetype_id": aid,
+                "role": archetypes_by_id[aid].get("role", ""),
+                "tier": archetypes_by_id[aid].get("tier", "balanced"),
+                "why": "",
+            }
+            for aid in forced_ids
+        ]
 
     # Attach the current learned weight (for the chosen domain) to each pick — the
     # prior the aggregator and learning loop will start from in later phases.

@@ -470,6 +470,11 @@ export function BasnaPage() {
     () => ((typeof localStorage !== 'undefined' && localStorage.getItem('basna.composeMode')) as 'basna' | 'vatra') || 'basna',
   )
   const [agentOnly, setAgentOnly] = useState(false)
+  // Optional user-fixed team: archetype ids the route/plan MUST use (empty = auto).
+  const [team, setTeam] = useState<string[]>([])
+  const [teamOpen, setTeamOpen] = useState(false)
+  const toggleTeam = (id: string) =>
+    setTeam((t) => (t.includes(id) ? t.filter((x) => x !== id) : [...t, id]))
   const [deepening, setDeepening] = useState(false)
   const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
   const viewFull = (title: string, content: string) => setModal({ title, content, mode: 'markdown' })
@@ -583,7 +588,7 @@ export function BasnaPage() {
           <p className="text-[11px] text-zinc-500">Route → spawn the minimal team → merge by reliability</p>
         </div>
         <button
-          onClick={() => { newSession(); setIntent(''); setTitle('') }}
+          onClick={() => { newSession(); setIntent(''); setTitle(''); setTeam([]) }}
           className="ml-auto flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500"
         >
           <Plus className="h-3.5 w-3.5" /> New
@@ -779,14 +784,27 @@ export function BasnaPage() {
                   <input
                     type="number" min={1} max={10} value={maxAgents}
                     onChange={(e) => setMaxAgents(Number(e.target.value))}
-                    className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
+                    disabled={team.length > 0}
+                    title={team.length > 0 ? 'Ignored — the team is fixed by your selection' : ''}
+                    className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none disabled:opacity-40"
                   />
                 </label>
+                <button
+                  onClick={() => setTeamOpen((o) => !o)}
+                  className={`flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${
+                    team.length > 0
+                      ? 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300'
+                      : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
+                  title="Pick exactly which archetypes the team must use (optional)"
+                >
+                  <Users className="h-3.5 w-3.5" />
+                  {team.length > 0 ? `Team: ${team.length} selected` : 'Select team'}
+                </button>
                 <div className="ml-auto flex items-center gap-2">
                   {effectiveMode === 'vatra' ? (
                     <>
                       <button
-                        onClick={() => planVatra(intent, tiers, title)}
+                        onClick={() => planVatra(intent, tiers, title, team)}
                         disabled={!canRoute || vatraMode}
                         title="Decompose the task into owned pieces — review the team, then Run team."
                         className="flex items-center gap-1.5 rounded-lg border border-violet-300 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-40 dark:border-violet-700/70 dark:text-violet-300 dark:hover:bg-violet-800/30"
@@ -806,7 +824,7 @@ export function BasnaPage() {
                   ) : (
                     <>
                       <button
-                        onClick={() => route(intent, tiers, title)}
+                        onClick={() => route(intent, tiers, title, team)}
                         disabled={!canRoute}
                         title="Select the minimal archetype team — review/edit it, then Run ensemble."
                         className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
@@ -826,6 +844,44 @@ export function BasnaPage() {
                   )}
                 </div>
               </div>
+
+              {/* Optional fixed team — pick archetypes the route/plan MUST use. */}
+              {teamOpen && (
+                <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                  <div className="mb-2 flex items-center gap-2">
+                    <span className="text-[11px] text-zinc-400">
+                      Pick the archetypes the {effectiveMode === 'vatra' ? 'Lead' : 'router'} must use — every one selected is
+                      used and instructed for this task. Leave empty for automatic selection.
+                    </span>
+                    {team.length > 0 && (
+                      <button onClick={() => setTeam([])} className="ml-auto shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300">Clear</button>
+                    )}
+                  </div>
+                  <div className="grid max-h-64 grid-cols-1 gap-1 overflow-auto sm:grid-cols-2">
+                    {(registry?.archetypes || []).map((a) => {
+                      const on = team.includes(a.id)
+                      return (
+                        <button
+                          key={a.id}
+                          onClick={() => toggleTeam(a.id)}
+                          className={`flex items-start gap-2 rounded border p-1.5 text-left text-xs transition-colors ${
+                            on ? 'border-violet-500/50 bg-violet-500/10' : 'border-zinc-800 hover:bg-zinc-800/50'}`}
+                        >
+                          <span className={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
+                            on ? 'border-violet-500 bg-violet-500 text-white' : 'border-zinc-600'}`}>
+                            {on && <Check className="h-2.5 w-2.5" />}
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block text-zinc-200">{a.role || a.id}</span>
+                            <span className="block text-[10px] text-zinc-500">{a.family || a.id}</span>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
               {error && (
                 <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-900/50 bg-rose-950/30 p-2.5 text-xs text-rose-300">
                   <X className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {error}
