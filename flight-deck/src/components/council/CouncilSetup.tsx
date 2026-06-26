@@ -1,7 +1,8 @@
 import { useState, useRef } from 'react'
-import { Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X, MessageCircleQuestion, Bug, ShieldAlert, MessagesSquare } from 'lucide-react'
+import { Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X, MessageCircleQuestion, Bug, ShieldAlert, MessagesSquare, Sparkles, MousePointerClick, Loader2 } from 'lucide-react'
 import { AgentPicker, isOldManName } from './AgentPicker'
 import { formatSize } from '../../services/fileTransfer'
+import { useTierConfig } from '../../services/tierConfig'
 import type {
   CouncilAgentDef, CreateSessionConfig, SessionType, Verbosity,
 } from '../../stores/councilStore'
@@ -26,7 +27,7 @@ const VERBOSITY_OPTIONS: { id: Verbosity; label: string; desc: string }[] = [
 ]
 
 interface CouncilSetupProps {
-  onStart: (cfg: CreateSessionConfig) => void
+  onStart: (cfg: CreateSessionConfig) => void | Promise<void>
   onCancel: () => void
 }
 
@@ -40,11 +41,18 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
   const [firstSpeaker, setFirstSpeaker] = useState('random')
   const [files, setFiles] = useState<File[]>([])
   const [dragOver, setDragOver] = useState(false)
+  // Auto-assemble: spawn a task-modeled archetype panel instead of picking
+  // already-running agents.
+  const [autoAssemble, setAutoAssemble] = useState(true)
+  const [maxAgents, setMaxAgents] = useState(4)
+  const [submitting, setSubmitting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const { tiers, envVars } = useTierConfig()
 
   const oldMan = agents.find(a => isOldManName(a.name))
   const moderatorMode = oldMan ? 'moderator' : 'round-robin'
-  const canStart = topic.trim() && agents.length >= 2
+  const canStart = !!topic.trim() && (autoAssemble || agents.length >= 2)
 
   const addFiles = (newFiles: FileList | File[]) => {
     const arr = Array.from(newFiles)
@@ -62,20 +70,32 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
     if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files)
   }
 
-  const handleStart = () => {
-    if (!canStart) return
-    onStart({
-      title: title.trim() || topic.slice(0, 60),
-      topic: topic.trim(),
-      sessionType,
-      verbosity,
-      maxRounds,
-      moderatorMode,
-      moderatorAgentId: oldMan?.id || '',
-      agents,
-      firstSpeaker,
-      files,
-    })
+  const handleStart = async () => {
+    if (!canStart || submitting) return
+    setSubmitting(true)
+    try {
+      await onStart({
+        title: title.trim() || topic.slice(0, 60),
+        topic: topic.trim(),
+        sessionType,
+        verbosity,
+        maxRounds,
+        moderatorMode: autoAssemble ? 'round-robin' : moderatorMode,
+        moderatorAgentId: autoAssemble ? '' : (oldMan?.id || ''),
+        agents: autoAssemble ? [] : agents,
+        firstSpeaker: autoAssemble ? 'random' : firstSpeaker,
+        files,
+        autoAssemble,
+        maxAgents,
+        tiers: autoAssemble ? tiers : undefined,
+        envVars: autoAssemble ? envVars : undefined,
+      })
+    } catch (e) {
+      setSubmitting(false)
+      // Surface the failure inline rather than silently swallowing it.
+      alert(e instanceof Error ? e.message : 'Failed to start council')
+    }
+    // On success the page navigates away; no need to clear submitting.
   }
 
   return (
@@ -164,14 +184,73 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
         </div>
       </div>
 
-      {/* Agent Picker */}
+      {/* Panel composition: auto-assemble vs. pick running agents */}
       <div>
-        <label className="mb-2 block text-xs font-medium text-zinc-400">
-          Select Agents ({agents.length} selected)
-          {oldMan && <span className="ml-2 text-amber-400">Moderator mode (Old Man detected)</span>}
-          {!oldMan && agents.length >= 2 && <span className="ml-2 text-zinc-500">Round-robin mode</span>}
-        </label>
-        <AgentPicker selected={agents} onChange={setAgents} />
+        <label className="mb-2 block text-xs font-medium text-zinc-400">Panel</label>
+        <div className="mb-3 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setAutoAssemble(true)}
+            className={`flex items-start gap-2 rounded-lg border p-3 text-left transition-colors ${
+              autoAssemble
+                ? 'border-violet-500/50 bg-violet-500/10 text-violet-200'
+                : 'border-zinc-700/50 bg-zinc-800/30 text-zinc-400 hover:bg-zinc-700/30'
+            }`}
+          >
+            <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              <span className="block text-xs font-medium">Auto-assemble</span>
+              <span className="block text-[10px] opacity-70">Spawn a panel of specialists modeled to the topic</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setAutoAssemble(false)}
+            className={`flex items-start gap-2 rounded-lg border p-3 text-left transition-colors ${
+              !autoAssemble
+                ? 'border-violet-500/50 bg-violet-500/10 text-violet-200'
+                : 'border-zinc-700/50 bg-zinc-800/30 text-zinc-400 hover:bg-zinc-700/30'
+            }`}
+          >
+            <MousePointerClick className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              <span className="block text-xs font-medium">Pick agents</span>
+              <span className="block text-[10px] opacity-70">Choose from your already-running agents</span>
+            </span>
+          </button>
+        </div>
+
+        {autoAssemble ? (
+          <div className="rounded-lg border border-zinc-700/30 bg-zinc-800/30 p-3">
+            <label className="mb-1 block text-xs font-medium text-zinc-400">
+              Panel size: <span className="text-violet-400">{maxAgents}</span> specialists
+            </label>
+            <input
+              type="range"
+              min={2}
+              max={6}
+              value={maxAgents}
+              onChange={e => setMaxAgents(parseInt(e.target.value))}
+              className="w-full accent-violet-500"
+            />
+            <div className="flex justify-between text-[10px] text-zinc-500">
+              <span>2</span><span>4</span><span>6</span>
+            </div>
+            <p className="mt-2 text-[11px] text-zinc-500">
+              A router picks complementary archetypes for this topic and spawns each as a
+              fresh agent. They're torn down when you delete the session.
+            </p>
+          </div>
+        ) : (
+          <>
+            <label className="mb-2 block text-xs font-medium text-zinc-400">
+              Select Agents ({agents.length} selected)
+              {oldMan && <span className="ml-2 text-amber-400">Moderator mode (Old Man detected)</span>}
+              {!oldMan && agents.length >= 2 && <span className="ml-2 text-zinc-500">Round-robin mode</span>}
+            </label>
+            <AgentPicker selected={agents} onChange={setAgents} />
+          </>
+        )}
       </div>
 
       {/* File Attachments */}
@@ -241,14 +320,17 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
       <div className="flex items-center gap-3 pt-2">
         <button
           onClick={handleStart}
-          disabled={!canStart}
+          disabled={!canStart || submitting}
           className="flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          <Play className="h-4 w-4" /> Start Council
+          {submitting
+            ? <><Loader2 className="h-4 w-4 animate-spin" /> {autoAssemble ? 'Assembling panel…' : 'Starting…'}</>
+            : <><Play className="h-4 w-4" /> Start Council</>}
         </button>
         <button
           onClick={onCancel}
-          className="rounded-lg border border-zinc-700/50 px-4 py-2 text-sm text-zinc-400 hover:bg-zinc-700/30"
+          disabled={submitting}
+          className="rounded-lg border border-zinc-700/50 px-4 py-2 text-sm text-zinc-400 hover:bg-zinc-700/30 disabled:opacity-40"
         >
           Cancel
         </button>

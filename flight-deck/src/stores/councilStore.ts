@@ -173,6 +173,13 @@ export interface CreateSessionConfig {
   agents: CouncilAgentDef[]
   firstSpeaker: string
   files: File[]
+  // Auto-assemble: spawn a task-modeled archetype panel instead of using
+  // pre-selected running agents. When true, `agents` is ignored and the panel is
+  // built server-side from `maxAgents`, scoped by the Library `tiers`/`envVars`.
+  autoAssemble?: boolean
+  maxAgents?: number
+  tiers?: Record<string, unknown>
+  envVars?: { key: string; value: string }[]
 }
 
 // ── Constants ───────────────────────────────────────────────────
@@ -358,6 +365,51 @@ async function apiUpdateSession(id: string, fields: Record<string, unknown>): Pr
 
 async function apiDeleteSession(id: string): Promise<void> {
   await _authedFetch(`/fd/council/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+// An archetype panelist spawned by /fd/council/assemble.
+interface AssembledAgent {
+  id: string
+  slug: string
+  name: string
+  host: string
+  port: number
+  auth: string
+  archetype_id: string
+  role: string
+  why: string
+  cognitive_mode: string
+  fleet_instructions: string
+  is_moderator: boolean
+}
+
+interface AssembleResult {
+  domain: string
+  rationale: string
+  title: string
+  source: string
+  agents: AssembledAgent[]
+}
+
+async function apiAssemble(body: Record<string, unknown>): Promise<AssembleResult> {
+  const res = await _authedFetch('/fd/council/assemble', {
+    method: 'POST', body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    let detail = 'Failed to assemble council'
+    try { detail = (await res.json()).detail || detail } catch { /* keep default */ }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
+async function apiTeardownAgents(slugs: string[]): Promise<void> {
+  if (!slugs.length) return
+  try {
+    await _authedFetch('/fd/council/teardown', {
+      method: 'POST', body: JSON.stringify({ slugs }),
+    })
+  } catch { /* best-effort cleanup */ }
 }
 
 async function apiGetMessages(id: string): Promise<CouncilMessage[]> {
@@ -1066,19 +1118,56 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   },
 
   createSession: async (cfg) => {
-    const agentDefs: CouncilAgentDef[] = cfg.agents.map(a => ({
-      id: a.id, name: a.name, host: a.host, port: a.port, auth: a.auth, muted: false,
-    }))
+    let agentDefs: CouncilAgentDef[]
+    let moderatorMode = cfg.moderatorMode
+    let moderatorAgentId = cfg.moderatorAgentId
+    let firstSpeaker = cfg.firstSpeaker
+    // Slugs of any ephemeral panelists we spawn — persisted so delete can tear
+    // them down (auto-assembled councils own their agents; manual ones don't).
+    let spawnedSlugs: string[] = []
+
+    if (cfg.autoAssemble) {
+      // Route a task-modeled archetype panel and spawn it server-side, then wire
+      // the returned panelists into the council exactly like picked agents.
+      const result = await apiAssemble({
+        topic: cfg.topic,
+        session_type: cfg.sessionType,
+        max_agents: cfg.maxAgents || 4,
+        tiers: cfg.tiers || {},
+        env_vars: (cfg.envVars || []).filter(e => e.key.trim() && e.value.trim()),
+      })
+      const procStore = useProcessStore.getState()
+      // Push each panelist's task-tailored persona into the process store so the
+      // council sends it as `self.fleet_instructions` on connect.
+      for (const a of result.agents) {
+        if (a.fleet_instructions) procStore.setFleetInstructions(a.slug, a.fleet_instructions)
+      }
+      // Refresh the process list so connectAllAgents resolves the fresh ports.
+      try { await procStore.fetchProcesses() } catch { /* defs carry port/auth too */ }
+      agentDefs = result.agents.map(a => ({
+        id: a.id, name: a.name, host: a.host, port: a.port, auth: a.auth, muted: false,
+      }))
+      spawnedSlugs = result.agents.map(a => a.slug)
+      const mod = result.agents.find(a => a.is_moderator)
+      moderatorMode = mod ? 'moderator' : 'round-robin'
+      moderatorAgentId = mod?.id || ''
+      firstSpeaker = 'random'
+    } else {
+      agentDefs = cfg.agents.map(a => ({
+        id: a.id, name: a.name, host: a.host, port: a.port, auth: a.auth, muted: false,
+      }))
+    }
+
     const data = await apiCreateSession({
       title: cfg.title,
       topic: cfg.topic,
       session_type: cfg.sessionType,
       verbosity: cfg.verbosity,
       max_rounds: cfg.maxRounds,
-      moderator_mode: cfg.moderatorMode,
-      moderator_agent: cfg.moderatorAgentId,
+      moderator_mode: moderatorMode,
+      moderator_agent: moderatorAgentId,
       agents: JSON.stringify(agentDefs),
-      config: JSON.stringify({ firstSpeaker: cfg.firstSpeaker, memoryRounds: 10, originalMaxRounds: cfg.maxRounds, extensions: [], allowPass: false, allowDelegation: false }),
+      config: JSON.stringify({ firstSpeaker, memoryRounds: 10, originalMaxRounds: cfg.maxRounds, extensions: [], allowPass: false, allowDelegation: false, spawnedSlugs }),
     })
     const id = data.id as string
     // Stash files for upload during startCouncil
@@ -1152,6 +1241,14 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   },
 
   deleteSession: async (id) => {
+    // Tear down any ephemeral panelists this (auto-assembled) session spawned,
+    // so they don't linger in the fleet after the council is gone.
+    try {
+      const raw = await apiGetSession(id)
+      const cfg = raw ? JSON.parse((raw.config as string) || '{}') : {}
+      const slugs = Array.isArray(cfg.spawnedSlugs) ? cfg.spawnedSlugs as string[] : []
+      if (slugs.length) await apiTeardownAgents(slugs)
+    } catch { /* best-effort — never block the delete on teardown */ }
     await apiDeleteSession(id)
     const { activeSession } = get()
     if (activeSession?.id === id) {
