@@ -154,6 +154,15 @@ export interface CouncilSession {
   createdAt: string           // ISO timestamp of session creation
   concludedAt: string         // ISO timestamp when session concluded (empty if still active)
   config: { firstSpeaker: string }
+  /**
+   * Slugs of ephemeral agents auto-spawned for this session (the "Auto-assemble"
+   * panel). Empty for councils built from already-running, user-picked agents.
+   * Persisted in config so the council knows these agents are temporary and can
+   * dispose them — and so delete can tear them down.
+   */
+  spawnedSlugs: string[]
+  /** True once the temporary panel has been disposed (torn down). */
+  agentsDisposed: boolean
 }
 
 export interface CouncilFileRef {
@@ -1015,6 +1024,8 @@ function _persistConfig(sessionId: string, patch: Record<string, unknown>) {
     fileRefs: s.fileRefs,
     allowPass: s.allowPass,
     allowDelegation: s.allowDelegation,
+    spawnedSlugs: s.spawnedSlugs,
+    agentsDisposed: s.agentsDisposed,
     ...patch,
   }
   apiUpdateSession(sessionId, { config: JSON.stringify(fullConfig) })
@@ -1045,6 +1056,7 @@ interface CouncilStore {
   // Connection management
   connectAllAgents: () => void
   disconnectAllAgents: () => void
+  disposeAgents: () => Promise<void>
   _ensureConnected: (timeoutMs?: number) => Promise<CouncilAgent[]>
 
   // Council orchestration
@@ -1171,7 +1183,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       moderator_mode: moderatorMode,
       moderator_agent: moderatorAgentId,
       agents: JSON.stringify(agentDefs),
-      config: JSON.stringify({ firstSpeaker, memoryRounds: 10, originalMaxRounds: cfg.maxRounds, extensions: [], allowPass: false, allowDelegation: false, spawnedSlugs }),
+      config: JSON.stringify({ firstSpeaker, memoryRounds: 10, originalMaxRounds: cfg.maxRounds, extensions: [], allowPass: false, allowDelegation: false, spawnedSlugs, agentsDisposed: false }),
     })
     const id = data.id as string
     // Stash files for upload during startCouncil
@@ -1236,6 +1248,8 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
         createdAt: raw.created_at as string || '',
         concludedAt: (config.concludedAt as string) || '',
         config: { firstSpeaker: config.firstSpeaker || '' },
+        spawnedSlugs: Array.isArray(config.spawnedSlugs) ? config.spawnedSlugs as string[] : [],
+        agentsDisposed: (config.agentsDisposed as boolean | undefined) ?? false,
       }
 
       set({ activeSession: session })
@@ -1277,6 +1291,8 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   connectAllAgents: () => {
     const s = get().activeSession
     if (!s) return
+    // Temporary panel already torn down — there's nothing to connect to.
+    if (s.agentsDisposed) return
 
     const agents = s.agents.map(a => {
       if (a.ws) {
@@ -1468,6 +1484,28 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     }
   },
 
+  // Tear down the ephemeral panel auto-spawned for this session. Disconnects the
+  // sockets, removes the agents from the fleet, and marks the session disposed so
+  // it never tries to reconnect them. A no-op for manual (picked-agent) councils
+  // or one that's already been disposed.
+  disposeAgents: async () => {
+    const s = get().activeSession
+    if (!s || !s.spawnedSlugs?.length || s.agentsDisposed) return
+    get().disconnectAllAgents()
+    await apiTeardownAgents(s.spawnedSlugs)
+    set(state => state.activeSession ? {
+      activeSession: {
+        ...state.activeSession,
+        agentsDisposed: true,
+        agents: state.activeSession.agents.map(a => ({
+          ...a, connected: false, busy: false, statusText: '', toolHistory: [],
+        })),
+      },
+    } : state)
+    _persistConfig(s.id, { agentsDisposed: true })
+    get()._log('', 'System', 'system', `Disposed ${s.spawnedSlugs.length} temporary agent(s)`)
+  },
+
   // Connect agents (if needed) and poll until at least one is connected, up to
   // timeoutMs. Returns the currently-connected, unmuted agents. Replaces fragile
   // fixed-delay waits: agents on a slow/concluded session may take a while, and
@@ -1570,6 +1608,8 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
             fileRefs,
             allowPass: currentSession.allowPass,
             allowDelegation: currentSession.allowDelegation,
+            spawnedSlugs: currentSession.spawnedSlugs,
+            agentsDisposed: currentSession.agentsDisposed,
           }),
         })
       }

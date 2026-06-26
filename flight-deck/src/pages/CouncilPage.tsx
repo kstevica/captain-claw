@@ -25,7 +25,7 @@ export function CouncilPage() {
     startCouncil, advanceRound, restartRound, requestSynthesis, concludeSession,
     cancelAutoAdvance,
     injectMessage, directAddress, muteAgent, pinMessage,
-    connectAllAgents,
+    connectAllAgents, disposeAgents,
     generateTldrs, generateActionPoints, sendActionPointToAgent, exportMinutesMd,
   } = useCouncilStore()
 
@@ -266,6 +266,7 @@ export function CouncilPage() {
                 onCancelAutoAdvance={cancelAutoAdvance}
                 onGenerateTldrs={generateTldrs}
                 onExportMd={exportMinutesMd}
+                onDisposeAgents={disposeAgents}
               />
             </div>
 

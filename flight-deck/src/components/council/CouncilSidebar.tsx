@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState } from 'react'
 import {
   Wifi, WifiOff, VolumeX, Volume2, Pin, Crown, Loader2, Wrench,
-  Activity, Leaf, Paperclip, Play, Plus, ChevronDown, ChevronRight, FolderOpen,
+  Activity, Leaf, Paperclip, Play, Plus, ChevronDown, ChevronRight, FolderOpen, Trash2,
 } from 'lucide-react'
 import { CouncilFileBrowser } from './CouncilFileBrowser'
 import { useContainerStore } from '../../stores/containerStore'
@@ -323,9 +323,36 @@ export function CouncilSidebar({
 
       {/* ─── Agents ─── */}
       <div className="shrink-0 border-b border-zinc-700/50 p-3 space-y-2 max-h-[40%] overflow-auto">
-        <h3 className="text-xs font-medium text-zinc-400 uppercase tracking-wider">
-          Agents ({session.agents.length})
-        </h3>
+        <div className="flex items-center gap-2">
+          <h3 className="text-xs font-medium text-zinc-400 uppercase tracking-wider">
+            Agents ({session.agents.length})
+          </h3>
+          {session.spawnedSlugs.length > 0 && (
+            <span
+              className={`rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide ${
+                session.agentsDisposed
+                  ? 'bg-zinc-700/40 text-zinc-500'
+                  : 'bg-amber-500/15 text-amber-400'
+              }`}
+              title="This panel was auto-assembled — these agents are temporary"
+            >
+              {session.agentsDisposed ? 'Disposed' : 'Temporary'}
+            </span>
+          )}
+          {session.spawnedSlugs.length > 0 && !session.agentsDisposed && (
+            <button
+              onClick={() => {
+                if (window.confirm(`Dispose ${session.spawnedSlugs.length} temporary agent(s)? They were spawned for this council and will be removed from the fleet. The transcript and synthesis are kept.`)) {
+                  store.getState().disposeAgents()
+                }
+              }}
+              className="ml-auto flex items-center gap-1 rounded border border-red-500/40 px-1.5 py-0.5 text-[10px] font-medium text-red-400 hover:bg-red-500/10"
+              title="Remove the temporary agents spawned for this council"
+            >
+              <Trash2 className="h-2.5 w-2.5" /> Dispose
+            </button>
+          )}
+        </div>
         <div className="space-y-1">
           {session.agents.map(agent => {
             const agentMsgs = session.messages.filter(
@@ -337,6 +364,7 @@ export function CouncilSidebar({
             const hasMsgs = agentMsgs.length > 0
             const isSpeaking = speaking === agent.id
             const isMod = agent.id === session.moderatorAgentId
+            const isTemp = session.spawnedSlugs.includes(agent.id)
 
             const { cogMode, ecoMode } = getAgentModes(agent.id)
             const modeInfo = COGNITIVE_MODE_COLORS[cogMode] || COGNITIVE_MODE_COLORS.neutra
@@ -358,6 +386,14 @@ export function CouncilSidebar({
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1">
                       <span className="truncate text-zinc-200">{agent.name}</span>
+                      {isTemp && (
+                        <span
+                          className="shrink-0 rounded bg-amber-500/15 px-1 text-[9px] font-medium uppercase text-amber-400/80"
+                          title="Temporary — spawned for this council"
+                        >
+                          temp
+                        </span>
+                      )}
                       {isMod && <Crown className="h-3 w-3 text-amber-400 shrink-0" />}
                       {isSpeaking && <Loader2 className="h-3 w-3 text-violet-400 animate-spin shrink-0" />}
                       {/* Cognitive mode dot */}

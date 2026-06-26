@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Send, SkipForward, FileText, CheckCircle, ChevronDown, Download, MessageSquareQuote, Pause, RotateCcw } from 'lucide-react'
+import { Send, SkipForward, FileText, CheckCircle, ChevronDown, Download, MessageSquareQuote, Pause, RotateCcw, Trash2 } from 'lucide-react'
 import type { CouncilSession } from '../../stores/councilStore'
 
 interface CouncilControlsProps {
@@ -17,13 +17,14 @@ interface CouncilControlsProps {
   onCancelAutoAdvance: () => void
   onGenerateTldrs: () => void
   onExportMd: () => void
+  onDisposeAgents: () => void
 }
 
 export function CouncilControls({
   session, speaking, roundRunning, generatingArtifact, autoAdvanceCountdown,
   onInject, onDirectAddress,
   onAdvanceRound, onRestartRound, onRequestSynthesis, onConclude, onCancelAutoAdvance,
-  onGenerateTldrs, onExportMd,
+  onGenerateTldrs, onExportMd, onDisposeAgents,
 }: CouncilControlsProps) {
   const [input, setInput] = useState('')
   const [directTo, setDirectTo] = useState('')
@@ -31,6 +32,13 @@ export function CouncilControls({
 
   const isActive = session.status === 'active'
   const isBusy = !!speaking
+  // This council's panel was auto-spawned (Auto-assemble) and is still live.
+  const hasTempAgents = session.spawnedSlugs.length > 0 && !session.agentsDisposed
+  const disposeAgents = () => {
+    if (window.confirm(
+      `Dispose ${session.spawnedSlugs.length} temporary agent(s)? They were spawned for this council and will be removed from the fleet. The transcript and synthesis are kept.`,
+    )) onDisposeAgents()
+  }
 
   // Check if any recent system message indicates the *current* round is complete.
   // We scan the last few system messages because an extension message
@@ -77,7 +85,9 @@ export function CouncilControls({
       <div className="border-t border-zinc-700/50 bg-zinc-900/50 px-4 py-3">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-zinc-500 mr-auto">Session concluded.</span>
-          <span className="text-[10px] text-zinc-600">Use sidebar to extend rounds.</span>
+          {session.agentsDisposed
+            ? <span className="text-[10px] text-zinc-600">Temporary agents disposed.</span>
+            : <span className="text-[10px] text-zinc-600">Use sidebar to extend rounds.</span>}
           <button
             onClick={onGenerateTldrs}
             disabled={!!generatingArtifact}
@@ -91,6 +101,15 @@ export function CouncilControls({
           >
             <Download className="h-3 w-3" /> Export .md
           </button>
+          {hasTempAgents && (
+            <button
+              onClick={disposeAgents}
+              className="flex items-center gap-1 rounded-lg border border-red-500/40 px-2.5 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10"
+              title="Remove the temporary agents spawned for this council"
+            >
+              <Trash2 className="h-3 w-3" /> Dispose agents
+            </button>
+          )}
         </div>
       </div>
     )
