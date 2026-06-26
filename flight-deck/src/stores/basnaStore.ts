@@ -122,6 +122,13 @@ export async function apiListVatraBoard(sessionId: string): Promise<VatraBoardEn
   return (data.entries || []) as VatraBoardEntry[]
 }
 
+// Ask a still-working Vatra agent (by its live-panel label) to skip its turn.
+export async function apiVatraSkipAgent(sessionId: string, agent: string): Promise<void> {
+  await _authedFetch(`/fd/vatra/sessions/${encodeURIComponent(sessionId)}/skip`, {
+    method: 'POST', body: JSON.stringify({ agent }),
+  })
+}
+
 export interface BasnaRun {
   id: number
   session_id: string

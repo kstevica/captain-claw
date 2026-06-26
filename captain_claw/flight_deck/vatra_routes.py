@@ -114,6 +114,39 @@ def _track_worker(sid: str, slug: str, *, add: bool) -> None:
             pass
 
 
+# Per-run set of agent labels the user has asked to skip (cancel their current turn
+# and move on). Keyed by session id; the label matches the live-panel card.
+_skip_agents: dict[str, set[str]] = {}
+
+
+def _is_skipped(sid: str, label: str) -> bool:
+    return label in _skip_agents.get(sid, ())
+
+
+async def _dispatch_skippable(sid: str, label: str, factory) -> dict:
+    """Run an agent dispatch; if the user marks this agent (label) to skip, cancel
+    its turn and return a skipped result instead of waiting for it. `factory` is a
+    no-arg callable returning the `_dispatch_one` coroutine."""
+    task = asyncio.create_task(factory())
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=1.0)
+            if task in done:
+                return task.result()
+            if _is_skipped(sid, label):
+                task.cancel()
+                try:
+                    await task
+                except BaseException:  # CancelledError + any teardown error
+                    pass
+                _skip_agents.get(sid, set()).discard(label)
+                _progress(sid, "dispatch", f"{label} — skipped by user", ok=False, agent=label)
+                return {"ok": False, "output": "", "actions": [], "latency_ms": 0, "skipped": True}
+    finally:
+        if sid in _skip_agents and not _skip_agents[sid]:
+            _skip_agents.pop(sid, None)
+
+
 # ── Lead: decompose the task into owned subtasks ─────────────────────
 
 def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
@@ -543,10 +576,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
             prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files],
                                            subtasks, shared_context, team_prep=intro_digest)
-            d = await _dispatch_one(
+            d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage)
+                agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
             mark = "✓" if d["ok"] else "✗"
             extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
             _progress(sid, "dispatch",
@@ -576,10 +609,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 label = _owner_label(sp)
                 on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
                 prompt = _build_intro_prompt(role, st, shared_context)
-                d = await _dispatch_one(
+                d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                    agent_name=label, on_usage=on_usage)
+                    agent_name=label, on_usage=on_usage))
                 mark = "✓" if d["ok"] else "✗"
                 _progress(sid, "dispatch",
                           f"{label} (intro) {mark} · {len(d['actions'])} action(s) "
@@ -652,9 +685,9 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                         label = _owner_label(sp)
                         on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
                         prompt = _build_review_prompt(role, st, digest, shared_context)
-                        d = await _dispatch_one(
+                        d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                             sp["port"], sp["auth"], prompt, body.dispatch_timeout,
-                            on_action=on_action, agent_name=label, on_usage=on_usage)
+                            on_action=on_action, agent_name=label, on_usage=on_usage))
                         # A dispatch event marks the card done again (the live panel
                         # shows a spinner while it's working this round, then ✓).
                         mark = "✓" if d["ok"] else "✗"
@@ -697,6 +730,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     finally:
         _teardown([sp["slug"] for sp in spawned])
         _run_workers.pop(sid, None)
+        _skip_agents.pop(sid, None)
 
     usable = [r for r in results if (r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip()]
     if not usable:
@@ -1634,6 +1668,25 @@ async def list_session_board(session_id: str, user: dict = Depends(get_current_u
     if not sess:
         raise HTTPException(404, "session not found")
     return {"entries": await db.list_vatra_board(session_id, limit=200)}
+
+
+class _VatraSkipReq(BaseModel):
+    agent: str = ""
+
+
+@router.post("/sessions/{session_id}/skip")
+async def skip_session_agent(session_id: str, body: _VatraSkipReq,
+                             user: dict = Depends(get_current_user)):
+    """Ask a still-working agent (by its live-panel label) to skip — the orchestrator
+    cancels its current turn and moves on, keeping whatever the rest of the team did."""
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    agent = (body.agent or "").strip()
+    if agent:
+        _skip_agents.setdefault(session_id, set()).add(agent)
+    return {"ok": True, "agent": agent}
 
 
 @router.post("/agent/blackboard")

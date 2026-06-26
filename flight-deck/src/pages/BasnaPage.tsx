@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useBasnaStore, parseAnalysis, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis } from '../stores/basnaStore'
+import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis } from '../stores/basnaStore'
 import { VatraTeamPlan, VatraBlackboard } from '../components/VatraDelegation'
 import { useTierConfig, TIER_ORDER, PROVIDERS } from '../services/tierConfig'
 
@@ -413,7 +413,7 @@ interface LiveAgent { role: string; actions: ProgressEvent[]; usage?: ProgressEv
 // Live per-agent panels built from the streaming progress events while the run
 // is in flight — each agent's tool calls and running LLM token usage, before the
 // final persisted runs (with output + feedback) take over at the end.
-function LiveAgentsPanel({ agents }: { agents: LiveAgent[] }) {
+function LiveAgentsPanel({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: string) => void }) {
   return (
     <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
       {agents.map((a) => (
@@ -427,11 +427,22 @@ function LiveAgentsPanel({ agents }: { agents: LiveAgent[] }) {
                 : <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-400" />}
               <span className="truncate text-sm font-medium text-zinc-200">{a.role}</span>
             </div>
-            {a.usage && (
-              <span className="shrink-0 font-mono text-[10px] tabular-nums text-zinc-500" title="LLM tokens (prompt → completion)">
-                {fmtTok(a.usage.prompt_tokens)}→{fmtTok(a.usage.completion_tokens)} tok
-              </span>
-            )}
+            <div className="flex shrink-0 items-center gap-2">
+              {a.usage && (
+                <span className="font-mono text-[10px] tabular-nums text-zinc-500" title="LLM tokens (prompt → completion)">
+                  {fmtTok(a.usage.prompt_tokens)}→{fmtTok(a.usage.completion_tokens)} tok
+                </span>
+              )}
+              {onSkip && !a.done && (
+                <button
+                  onClick={() => onSkip(a.role)}
+                  title="Skip this agent — cancel its current turn and move on"
+                  className="rounded p-0.5 text-zinc-500 transition-colors hover:text-rose-400"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                </button>
+              )}
+            </div>
           </div>
           <div className="mt-1.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">
             Activity ({a.actions.length})
@@ -1052,7 +1063,10 @@ export function BasnaPage() {
                 <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
                   Agents working ({liveAgents.length})
                 </span>
-                <LiveAgentsPanel agents={liveAgents} />
+                <LiveAgentsPanel
+                  agents={liveAgents}
+                  onSkip={vatraMode && activeSession ? (role) => { void apiVatraSkipAgent(activeSession.id, role) } : undefined}
+                />
               </div>
             )}
 
