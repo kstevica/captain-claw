@@ -1,6 +1,29 @@
 import { useEffect, useState } from 'react'
-import { CornerDownRight, ArrowRight, Check, X, Loader2, Users, Share2, ClipboardList } from 'lucide-react'
+import { CornerDownRight, ArrowRight, Check, X, Loader2, Users, Share2, ClipboardList, Download } from 'lucide-react'
 import { apiListVatraAsks, apiListVatraBoard, type VatraAsk, type VatraBoardEntry, type VatraSubtask } from '../stores/basnaStore'
+
+// Render the shared board as a markdown document — the substantive entries
+// (notes/outputs/files), chronological, with author + title headings. Narration is
+// the live activity feed, not document content, so it's left out of the export.
+function boardToMarkdown(entries: VatraBoardEntry[], titleFor: (id: string) => string | undefined): string {
+  const out = ['# Vatra — shared board', '']
+  for (const e of entries) {
+    if (e.kind === 'narration') continue
+    const who = titleFor(e.from_owner) || e.from_owner
+    out.push(`## [${e.kind}] ${who}${e.title ? ` — ${e.title}` : ''}`, '', (e.content || '').trim(), '')
+  }
+  return out.join('\n').trim() + '\n'
+}
+
+function downloadMarkdown(filename: string, content: string): void {
+  const blob = new Blob([content], { type: 'text/markdown' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 // Vatra collaboration views, split into two pieces so the page can place them in
 // different spots: the team PLAN (the Lead's decomposition — who owns what) up top
@@ -115,13 +138,24 @@ export function VatraBlackboard({
         <ClipboardList className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
         <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Shared board</span>
         {boardShown.length > 0 && <Chip className="text-zinc-400">{boardShown.length} entries</Chip>}
-        {asks.length > 0 && (
-          <span className="ml-auto flex items-center gap-2 text-[11px] text-zinc-500">
-            {counts.answered ? <span className="text-emerald-500">{counts.answered} answered</span> : null}
-            {(counts.open || counts.claimed) ? <span className="text-amber-500">{(counts.open || 0) + (counts.claimed || 0)} pending</span> : null}
-            {counts.dropped ? <span className="text-rose-500">{counts.dropped} dropped</span> : null}
-          </span>
-        )}
+        <span className="ml-auto flex items-center gap-2 text-[11px] text-zinc-500">
+          {asks.length > 0 && (
+            <>
+              {counts.answered ? <span className="text-emerald-500">{counts.answered} answered</span> : null}
+              {(counts.open || counts.claimed) ? <span className="text-amber-500">{(counts.open || 0) + (counts.claimed || 0)} pending</span> : null}
+              {counts.dropped ? <span className="text-rose-500">{counts.dropped} dropped</span> : null}
+            </>
+          )}
+          {board.some((e) => e.kind !== 'narration') && (
+            <button
+              onClick={() => downloadMarkdown('vatra-shared-board.md', boardToMarkdown(board, (id) => subtasks?.find((s) => s.owner_archetype_id === id)?.title))}
+              title="Export the shared board (notes & outputs) as Markdown"
+              className="flex items-center gap-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </span>
       </div>
 
       {/* Shared memory — notes & outputs the team streamed, newest first. */}
