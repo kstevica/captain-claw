@@ -977,7 +977,7 @@ export function BasnaPage() {
 
             {/* Vatra: the team plan (decomposition) — sits where the route plan would. */}
             {vatraMode && activeSession && (
-              <VatraTeamPlan subtasks={routePlan?.subtasks} />
+              <VatraTeamPlan subtasks={routePlan?.subtasks} sharedContext={routePlan?.shared_context} />
             )}
 
             {/* Live per-agent panels — actions + running LLM usage as they stream.

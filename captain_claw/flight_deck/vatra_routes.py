@@ -146,6 +146,7 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
     for s in subtasks:
         s["depends_on"] = [d for d in s["depends_on"] if d in valid_ids and d != s["id"]]
     return {"domain": domain, "rationale": str(raw.get("rationale") or "").strip(),
+            "shared_context": str(raw.get("shared_context") or "").strip(),
             "subtasks": subtasks}
 
 
@@ -209,6 +210,7 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
                  "role": arch_by_id[s["owner_archetype_id"]].get("role", ""),
                  "why": s["title"]} for s in plan["subtasks"]]
     return {"mode": "vatra", "domain": plan["domain"], "rationale": plan["rationale"],
+            "shared_context": plan.get("shared_context", ""),
             "subtasks": plan["subtasks"], "selected": selected}
 
 
@@ -381,6 +383,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _progress(sid, "route", f"{len(route['subtasks'])} subtask(s) · {route['domain']}")
     domain = route["domain"]
     subtasks = route["subtasks"]
+    shared_context = route.get("shared_context", "")
 
     spawned: list[dict] = []   # {subtask, slug, port, auth}
     results: list[dict] = []   # {id, owner, role, output, ok, latency_ms, actions}
@@ -477,7 +480,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
-            prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files], subtasks)
+            prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files], subtasks, shared_context)
             d = await _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=_on_action, fleet_instructions=fleet, agent_name=label,
@@ -534,6 +537,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         tiers=body.tiers, api_key=body.api_key, env_vars=body.env_vars,
         dispatch_timeout=body.dispatch_timeout, input_names=input_names,
         dest_dir=dest_dir, seen_gen=seen_gen, answered_asks=answered,
+        shared_context=shared_context,
     )
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
@@ -739,14 +743,21 @@ async def _learn(db, user: dict, sid: str, domain: str, intent: str,
 
 
 def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str],
-                          all_subtasks: list[dict]) -> str:
-    """Frame one subtask for its owner — with awareness of the whole team and an
-    explicit nudge to delegate cross-slice needs through the blackboard."""
+                          all_subtasks: list[dict], shared_context: str = "") -> str:
+    """Frame one subtask for its owner — with the team contract everyone must
+    follow, awareness of the whole team, and a nudge to delegate cross-slice needs."""
     files_block = ""
     if file_names:
         listed = "\n".join(f"- {n}" for n in file_names)
         files_block = ("\n\n## Attached files (in your working directory)\n"
                        f"{listed}\nUse your read / extract tools to work with them.\n")
+    contract_block = ""
+    if shared_context.strip():
+        contract_block = (
+            "\n\n## Shared conventions — follow these EXACTLY\n"
+            "Every teammate is building against the same contract so the pieces fit together "
+            "without rework. Do not invent your own; use these verbatim:\n"
+            f"{shared_context.strip()}\n")
     # The running team — who owns which piece, so this owner knows whom to ask.
     by_id = {s["id"]: s for s in all_subtasks}
     roster = "\n".join(
@@ -767,7 +778,7 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"together. You own ONE part; your teammates are producing the others in parallel. "
         f"Produce only your part, in full — a reporter assembles all parts at the end.\n\n"
         f"## Overall task (for context)\n{intent}\n\n"
-        f"## The team and their pieces\n{roster}\n\n"
+        f"## The team and their pieces\n{roster}{contract_block}\n\n"
         f"## Your part — {st['title']}\n{st['brief']}{files_block}{deps_block}\n\n"
         f"## Collaborate — don't work in a silo\n"
         f"Reach your teammates through the shared blackboard with the `vatra` tool:\n"
@@ -786,7 +797,8 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                         intent: str, usable: list[dict], cfg: dict, arch_by_id: dict, *,
                         tiers, api_key, env_vars, dispatch_timeout, input_names,
                         dest_dir: Path, seen_gen: set[str],
-                        answered_asks: list[dict] | None = None) -> tuple[str, list[dict]]:
+                        answered_asks: list[dict] | None = None,
+                        shared_context: str = "") -> tuple[str, list[dict]]:
     """Spawn a dedicated reporter, feed it the slices (plus any answered cross-agent
     asks), and capture the assembled deliverable. Falls back to a labeled
     concatenation if the reporter fails."""
@@ -843,6 +855,11 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         inline = slices_full[:_SLICES_INLINE_CHARS] + ("\n\n…(full text in vatra-slices.md)" if big else "")
         template = (_INSTRUCTIONS_DIR / "vatra" / "reporter.md").read_text()
         prompt = template.replace("{intent}", intent).replace("{slices}", inline)
+        if shared_context.strip():
+            prompt += ("\n\n## Shared conventions the pieces were built against\n"
+                       "Keep the final deliverable fully consistent with these (the pieces should "
+                       "already follow them; enforce it if any drifted):\n"
+                       f"{shared_context.strip()}\n")
 
         def _on_action(act: dict) -> None:
             detail = act.get("detail", "")

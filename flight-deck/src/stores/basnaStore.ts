@@ -94,6 +94,7 @@ export interface RoutePlan {
   // Present on Vatra sessions: 'vatra' + the Lead's decomposition.
   mode?: 'basna' | 'vatra'
   subtasks?: VatraSubtask[]
+  shared_context?: string   // the team contract every piece must follow
 }
 
 export async function apiListVatraAsks(sessionId: string): Promise<VatraAsk[]> {

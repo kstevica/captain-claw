@@ -21,7 +21,7 @@ const PANEL = 'rounded-lg border border-violet-300/70 bg-violet-50/60 p-4 dark:b
 
 // ── Team plan: the decomposition (owner · piece), shown for review + while running ──
 
-export function VatraTeamPlan({ subtasks }: { subtasks?: VatraSubtask[] }) {
+export function VatraTeamPlan({ subtasks, sharedContext }: { subtasks?: VatraSubtask[]; sharedContext?: string }) {
   return (
     <div className={PANEL}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -30,6 +30,12 @@ export function VatraTeamPlan({ subtasks }: { subtasks?: VatraSubtask[] }) {
         <Chip className="text-violet-600 dark:text-violet-300">vatra · collaborative</Chip>
         {!!subtasks?.length && <Chip className="text-zinc-400">{subtasks.length} piece(s)</Chip>}
       </div>
+      {sharedContext?.trim() && (
+        <div className="mb-3 rounded-md border border-violet-300/50 bg-violet-100/40 p-2.5 dark:border-violet-800/40 dark:bg-violet-900/20">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">Shared contract — every piece follows this</div>
+          <p className="whitespace-pre-wrap text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">{sharedContext.trim()}</p>
+        </div>
+      )}
       {subtasks?.length ? (
         <div className="flex flex-wrap gap-1.5">
           {subtasks.map((s) => (
