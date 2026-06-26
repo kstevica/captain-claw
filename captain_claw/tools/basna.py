@@ -56,7 +56,7 @@ class BasnaTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "deepen", "list", "get", "agents", "output", "truth", "analysis", "files", "get_file"],
+                "enum": ["start", "deepen", "list", "get", "agents", "output", "truth", "analysis", "files", "get_file", "blackboard"],
                 "description": (
                     "'start' — launch a NEW autonomous Basna run on `task` (optional `title`, "
                     "`max_agents`); use this when the user asks to run/execute/start a Basna, and "
@@ -71,7 +71,9 @@ class BasnaTool(Tool):
                     "'truth' — compiled answer + confidence for `session_id`. "
                     "'analysis' — cross-agent analysis for `session_id`. "
                     "'files' — files attached to `session_id`. "
-                    "'get_file' — fetch `name` from `session_id`."
+                    "'get_file' — fetch `name` from `session_id`. "
+                    "'blackboard' — for a Vatra (collaborative) run, the delegation log: "
+                    "every cross-agent ask, who answered it, and the answer, for `session_id`."
                 ),
             },
             "task": {"type": "string", "description": "The task to run for 'start' — a clear, self-contained statement of what to research/produce."},
@@ -173,6 +175,8 @@ class BasnaTool(Tool):
                 return await self._files(fd_url, **kwargs)
             if action == "get_file":
                 return await self._get_file(fd_url, **kwargs)
+            if action == "blackboard":
+                return await self._blackboard(fd_url, **kwargs)
             return ToolResult(success=False, error=f"Unknown action '{action}'.")
         except Exception as e:
             log.warning("basna tool error", action=action, error=str(e))
@@ -414,6 +418,33 @@ class BasnaTool(Tool):
             lines.append(f"| {f['name']} | {f.get('kind','')} | {f.get('size',0)} "
                          f"| {f.get('mime','')} | {f.get('agent','')} |")
         lines.append("\n_Use action='get_file' with `name` to retrieve one._")
+        return ToolResult(success=True, content="\n".join(lines))
+
+    async def _blackboard(self, fd_url: str, **kwargs: Any) -> ToolResult:
+        """The delegation log of a Vatra run — every cross-agent ask + its answer."""
+        sid = (kwargs.get("session_id") or "").strip()
+        if not sid:
+            return ToolResult(success=False, error="Provide `session_id`.")
+        r = await self._post(fd_url, "/fd/vatra/agent/blackboard", {"session_id": sid})
+        if isinstance(r, dict) and r.get("_error"):
+            return ToolResult(success=False, error=r["_error"])
+        asks = (r.json().get("asks") or [])
+        if not asks:
+            return ToolResult(success=True, content=(
+                "No delegation recorded for this run — the specialists worked their slices "
+                "independently (or it isn't a Vatra run)."))
+        lines = [f"**{len(asks)} cross-agent ask(s):**"]
+        for a in asks:
+            head = f"- #{a.get('id')} **{a.get('from_owner','?')} → {a.get('answered_by') or '—'}** ({a.get('status','')})"
+            if a.get("depth"):
+                head += f" · depth {a['depth']}"
+            lines.append(head)
+            lines.append(f"  - asked: {(a.get('text') or '').strip()}")
+            ans = (a.get("answer") or "").strip()
+            if ans:
+                lines.append(f"  - answer: {ans[:600]}{'…' if len(ans) > 600 else ''}")
+            elif a.get("note"):
+                lines.append(f"  - note: {a['note']}")
         return ToolResult(success=True, content="\n".join(lines))
 
     async def _get_file(self, fd_url: str, **kwargs: Any) -> ToolResult:

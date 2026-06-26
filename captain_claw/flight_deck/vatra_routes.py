@@ -463,6 +463,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     _progress(sid, "action", f"{label} → {act['tool']}{suffix}",
                               agent=label, tool=act["tool"], detail=detail)
 
+            def _on_usage(pt: int, ct: int, tt: int) -> None:
+                _progress(sid, "usage", f"{label} · {pt:,}→{ct:,} tok",
+                          agent=label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
             from captain_claw.flight_deck.server import DATA_DIR
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
@@ -471,7 +475,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             d = await _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=_on_action, fleet_instructions=fleet, agent_name=label,
-                file_paths=doc, image_paths=img)
+                file_paths=doc, image_paths=img, on_usage=_on_usage)
             mark = "✓" if d["ok"] else "✗"
             extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
             _progress(sid, "dispatch",
@@ -762,9 +766,13 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                 suffix = f": {detail}" if detail else ""
                 _progress(sid, "action", f"{role} → {act['tool']}{suffix}", agent=role, tool=act["tool"], detail=detail)
 
+        def _on_usage(pt: int, ct: int, tt: int) -> None:
+            _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok",
+                      agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
                                 on_action=_on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                                agent_name=role)
+                                agent_name=role, on_usage=_on_usage)
         out = (d.get("output") or "").strip()
         files, text = _capture_generated(sp["slug"], input_names | {"vatra-slices.md"},
                                          dest_dir, role, seen_gen)
@@ -854,11 +862,17 @@ async def _fulfill_ask(request: Request, user: dict, sid: str, sid8: str, run_ta
         _progress(sid, "ask", f"Ask #{ask['id']} dropped — helper spawn failed", ok=False)
         return False
     _track_worker(sid, sp["slug"], add=True)
+    helper_label = f"{role} (helper #{ask['id']})"
+
+    def _on_usage(pt: int, ct: int, tt: int) -> None:
+        _progress(sid, "usage", f"{helper_label} · {pt:,}→{ct:,} tok",
+                  agent=helper_label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
     try:
         prompt = _build_helper_prompt(role, intent, text)
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
                                 fleet_instructions=arch.get("fleet_instructions", ""),
-                                agent_name=role)
+                                agent_name=helper_label, on_usage=_on_usage)
         out = (d.get("output") or "").strip()
         if out:
             await db.answer_vatra_ask(ask["id"], out, arch["id"])
@@ -1062,6 +1076,22 @@ async def list_session_asks(session_id: str, user: dict = Depends(get_current_us
     if not sess:
         raise HTTPException(404, "session not found")
     return {"asks": await db.list_vatra_asks(session_id)}
+
+
+@router.post("/agent/blackboard")
+async def agent_blackboard(body: _AgentReq):
+    """Read a Vatra session's persisted blackboard (every ask + answer) on behalf of
+    the calling agent's owner. Lets a solo agent inspect how a past collaborative
+    run delegated work, via the `basna` tool's `blackboard` action."""
+    owner = _resolve_owner(body)
+    if not body.session_id:
+        raise HTTPException(400, "session_id is required")
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, owner)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    asks = await db.list_vatra_asks(body.session_id)
+    return {"session_id": body.session_id, "count": len(asks), "asks": asks}
 
 
 # ── Fire-and-forget entry (mirrors Basna's agent/start) ──────────────

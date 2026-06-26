@@ -8,7 +8,11 @@ A Lead split this task into subtasks, and several specialists each produced one 
 
 ## The pieces
 
-The specialists' contributions are below (and, if large, also saved in your working directory as `vatra-slices.md` — read it for the full text before writing).
+Your teammates' **complete** contributions are saved in your working directory as **`vatra-slices.md`**. **Read that whole file first** — it is the source of truth. The excerpt inlined below may be truncated, so never assemble from the excerpt alone; open `vatra-slices.md` and work from its full text.
+
+Do NOT condense the pieces into a short summary. Your output is the full integrated deliverable, not a digest of what the team found.
+
+Excerpt (may be truncated — read the file for the rest):
 
 {slices}
 
