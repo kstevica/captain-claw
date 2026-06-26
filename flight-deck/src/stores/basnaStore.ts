@@ -352,6 +352,7 @@ interface BasnaStore {
 
   listLoading: boolean
   routing: boolean
+  planning: boolean   // Vatra "Plan as Vatra" step in flight (separate from Basna routing)
   executing: boolean
   recompiling: boolean
   error: string | null
@@ -394,6 +395,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
 
   listLoading: false,
   routing: false,
+  planning: false,
   executing: false,
   recompiling: false,
   error: null,
@@ -528,7 +530,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   // plan then shows in the collaboration panel for review before Run.
   planVatra: async (intent, tiers, title = '') => {
     if (!intent.trim()) return
-    set({ routing: true, error: null })
+    set({ planning: true, error: null })
     try {
       const { session_id } = await apiVatraRoute({
         intent: intent.trim(), max_agents: get().maxAgents, tiers,
@@ -539,7 +541,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'vatra plan failed' })
     } finally {
-      set({ routing: false })
+      set({ planning: false })
     }
   },
 

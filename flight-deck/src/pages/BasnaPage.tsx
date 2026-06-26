@@ -114,7 +114,9 @@ function parentIdOf(config?: string): string | null {
 function SessionCard({ s, active, onOpen, onDelete, onCancel }: {
   s: BasnaSession; active: boolean; onOpen: () => void; onDelete: () => void; onCancel: () => void
 }) {
-  const working = s.status === 'running' || s.status === 'routing' || s.status === 'routed'
+  // Only show the spinner + stop control while genuinely active. 'routed' is the
+  // idle prepared state (Basna routed, or a Vatra plan awaiting Run) — not running.
+  const working = s.status === 'running' || s.status === 'routing'
   const origin = agentOrigin(s.config)
   return (
     <div
@@ -455,7 +457,7 @@ function LiveAgentsPanel({ agents }: { agents: LiveAgent[] }) {
 export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
-    routing, executing, recompiling, error,
+    routing, planning, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
     updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
   } = useBasnaStore()
@@ -519,8 +521,8 @@ export function BasnaPage() {
   // A run already in flight (e.g. a deepen that route+ran server-side) must not
   // be re-routed or re-run. 'routed' stays runnable — that's the normal Route→Run step.
   const activeBusy = !!activeSession && (activeSession.status === 'running' || activeSession.status === 'routing')
-  const canRoute = intent.trim().length > 0 && !routing && !activeBusy
-  const canRun = !!routePlan && !!activeSession && !executing && !activeBusy
+  const canRoute = intent.trim().length > 0 && !routing && !planning && !activeBusy
+  const canRun = !!routePlan && !!activeSession && !executing && !planning && !activeBusy
   const truth = lastExecute?.truth ?? activeSession?.truth ?? ''
   const confidence = lastExecute?.confidence ?? activeSession?.confidence ?? 0
   const analysis = lastExecute?.analysis ?? parseAnalysis(activeSession?.analysis)
@@ -744,7 +746,7 @@ export function BasnaPage() {
                     title="Collaborative mode: a Lead splits the task into parts; review the plan, then Run team. Best for multi-part build tasks."
                     className="flex items-center gap-1.5 rounded-lg border border-violet-700/70 px-3 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-800/30 disabled:opacity-40"
                   >
-                    {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
+                    {planning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
                     Plan as Vatra
                   </button>
                   {vatraMode ? (
