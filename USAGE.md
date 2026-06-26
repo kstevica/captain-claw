@@ -4079,7 +4079,9 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 | Free-form layout | Drag agent cards freely on the desktop, positions persisted to localStorage |
 | Embedded chat | Collapsible chat panel directly on agent cards |
 | Resizable panels | Director (220–500px), chat (320–900px), and tool panels (280–500px) are all resizable with drag handles |
-| Agent Council | Multi-agent deliberation — structured turn-based discussions (debate, brainstorm, review, planning) with synthesis, voting, TL;DR, and minutes export |
+| Agent Council | Multi-agent deliberation — structured turn-based discussions (debate, brainstorm, review, planning) with synthesis, voting, TL;DR, and minutes export. Can **auto-assemble** its own task-modeled panel (NEW in 0.6.3) |
+| Basna | Independent network-source ensemble — routes a task to specialist archetypes, runs them blind and in parallel, and merges by learned reliability |
+| Vatra | Collaborative ensemble (compose mode on Basna, NEW in 0.6.3) — a Lead splits the task into owned subtasks, specialists collaborate on a shared blackboard, and a reporter assembles one deliverable |
 | Agent Forge | AI-powered team decomposition — describe a goal, get a team of agents with roles, instructions, and tools |
 | Fleet-level instructions | Per-agent instructions injected into system prompts, editable from agent config editor |
 | Datastore browser | View agent datastore tables and rows directly from agent cards |
@@ -4272,6 +4274,28 @@ Endpoints under `/fd/basna`: `route`, `execute`, session CRUD, `sessions/{id}/ru
 
 **Deepen (NEW in 0.6.1)** — a follow-up run that resolves a finished Basna's blind spots. Click **Investigate blind spots** on a completed run; FD spawns a fresh ensemble seeded with the prior synthesis as context (inline up to 16k chars; larger goes as a workspace file the agents read). The new run appears in the run list with a **deepened from / deepened into** lineage link, and shows **live per-agent panels** server-side. **Hard-stop** primitive + run-rate breaker (6 runs / 300s per owner) prevent runaways; the arbiter can also propose `stop_run` for stuck Basna or Council deliberations. A `/basna <task>` slash command works on **web, WhatsApp, and Telegram** (help text on no-arg); Croatian verb stems (`pokrenuti`, `izvršiti`) also trigger the deterministic relay. A Basna **worker** can never start another Basna (recursion forbidden — the `basna` tool is stripped from spawned workers and double-checked via env marker).
 
+### Vatra — the collaborative ensemble (NEW in 0.6.3)
+
+Vatra is the **collaborative sibling of Basna**, surfaced as a **compose mode on the Basna page** — a toggle between **Basna** (*independent ensemble — agents answer blind, merged by reliability*) and **Vatra** (*collaborative team — a Lead splits the work, a reporter assembles it*). The choice is remembered per browser; Vatra sessions are badged **vatra** in the run list.
+
+Where Basna spawns agents that each answer the *whole* task blind and then **merges** their uncorrelated outputs, Vatra runs a **team that divides the work** and collaborates as it goes:
+
+**How it works:**
+
+1. Open **Basna**, switch the compose mode to **Vatra**, and describe the task (optionally **pre-pick the archetypes** the Lead must use as owners, attach files, pick tiers / max agents).
+2. **Plan team** — a **Lead** decomposes the task into the smallest set of **complementary, owner-assigned subtasks**, each with a title, an owner archetype, a brief, and `depends_on` links, plus a **shared context** contract every piece must honor. The decomposition persists as a prepared session and renders in the **team plan** panel for review before anything spawns. (A fixed team is guaranteed a piece each — if the Lead misses one, a task-derived subtask is added for it.)
+3. **Run** — each subtask owner spawns fresh and works **in parallel**, but collaborates through a **shared blackboard**. An optional **intro (prep) round** lets each specialist post groundwork (facts, sources, an outline) before writing its full piece, so the team starts from shared footing.
+4. **Delegation by asking** — an owner that needs something from a teammate posts an **ask** to the board; a background **coordinator** spawns a short-lived helper to answer it. Termination is guaranteed: a per-run **ask ceiling (12)**, an **ask depth cap (2)** so an answer that itself asks can't cascade forever, and at most **3 concurrent helpers**. The live **blackboard panel** shows asks and the shared board in real time, with a **per-agent Skip** button to drop a stuck specialist's turn.
+5. **Review round** — the Lead gathers an exec summary of the whole team's work and sends it back to each owner so they can revise their piece against what everyone else produced.
+6. **The reporter assembles** — a dedicated **reporter** archetype (default a strong general writer; configurable) reads every piece and the full blackboard and writes **one coherent deliverable**. There is no weighted merge and no single "winner". The result renders as the **Final report** (shown as *assembled X%*, not *confidence*); generated files are captured for download. The deliverable is **persisted the moment the reporter finishes**, so a late failure can't lose it.
+7. **Learning** — Vatra scores not just the subtask owners but also the **helpers**, the **Lead's decomposition**, and the **reporter's assembly** (the last two as pseudo-archetypes `vatra-lead` / `vatra-reporter`), folding outcomes into per-archetype, per-domain reliability so future decompositions and reporting improve.
+
+**Guarantees** mirror Basna: a Vatra **worker can never start another run** (the run-starting `basna`/`vatra` tools are stripped from spawned agents and a `CLAW_VATRA_WORKER` env marker is double-checked), and spawned owners/helpers are torn down at the end of the run.
+
+**Basna vs Vatra vs Council:** **Basna** for a single best answer from independent voices merged by reliability; **Vatra** for a *composed* deliverable whose parts are interdependent (a report, a plan, a spec) built by a collaborating team; **Council** for a multi-round *deliberation* you watch and steer (and which can now [auto-assemble its own panel](#auto-assemble--a-panel-modeled-to-the-topic-new-in-063)).
+
+Endpoints under `/fd/vatra`: `route` (Lead decompose / prepare), `execute` (spawn + run), `progress`, and the blackboard ask/inbox set; it reuses Basna's session CRUD, archetype catalog, and `archetype_reliability` table.
+
 ### Autonomous Work (NEW in 0.6.1)
 
 The closed-loop autonomy page (sidebar: **Autonomous Work**) where the assistant **notices → decides → acts → judges → learns** on the user's behalf. Per-user, configurable, and ships under a `propose` ceiling — every action waits for human approval until a specific tool action earns auto-fire via the trust ladder.
@@ -4436,9 +4460,22 @@ Agent Council is a multi-agent deliberation system where connected agents discus
 
 1. Navigate to **Council** in the sidebar
 2. Set a topic, select session type, verbosity level, and max rounds
-3. Pick agents — if Old Man is included, moderator mode activates automatically
-4. Choose the first speaker (or random)
+3. Choose the panel — **Auto-assemble** (default, NEW in 0.6.3) to have Council spawn a task-modeled team for you, or **Pick agents** to choose from your already-running agents (if Old Man is included, moderator mode activates automatically)
+4. Choose the first speaker (or random) — Pick-agents mode only
 5. Click **Start Council**
+
+#### Auto-assemble — a panel modeled to the topic (NEW in 0.6.3)
+
+Council can build its own panel instead of requiring agents you've already started — the same archetype auto-spawn Basna and Vatra use, tuned for deliberation. On the setup screen, the **Auto-assemble ↔ Pick agents** toggle (auto is the default):
+
+- **Auto-assemble** — give a topic, pick a **panel size** (2–6), and Start. A **Council Assembler** router (fast tier + the merged archetype catalog) selects a *diverse* set of archetypes — optimizing for complementary, sometimes opposing perspectives rather than the minimal single-answer team Basna routes — and spawns each as a fresh ephemeral agent. Every panelist arrives **briefed for this exact council**: its archetype persona plus a tailored "your seat on this council" charge (the topic, the session type, and the specific angle it should bring). If the router LLM is unavailable it falls back to deterministic keyword matching, so a panel always returns.
+- **Hand-pick the specialists (optional)** — open the specialist list (your full archetype gallery, base + custom) and choose exactly which archetypes form the panel. Selected archetypes are honored **in full**; the panel-size slider steps aside. Leave it empty to let the router compose the panel.
+- Panelist models resolve from your active **Library tiers** (falling back to the registry tier defaults + the provider env var), exactly like Basna/Vatra.
+- The deliberation then runs identically to a picked-agent council. Council waits until **every** panelist has connected before the first speaker runs, so a freshly-spawned agent is never skipped as "disconnected".
+
+**Temporary agents & disposal.** Auto-assembled panelists are ephemeral. The session records their slugs (persisted in config, surviving reloads and every config rewrite), the sidebar shows a **Temporary** badge and a per-agent **temp** tag, and a **Dispose agents** button appears in the concluded controls bar and the sidebar Agents header. Dispose disconnects the sockets, tears the panel down (`POST /fd/council/teardown`), and marks the session **Disposed** (it won't try to reconnect dead agents) — keeping the transcript, synthesis, votes, and TL;DRs. **Deleting** a session disposes its panel automatically, so nothing leaks. Manual (picked-agent) councils show none of this.
+
+Endpoints: `POST /fd/council/assemble` (route + spawn → council-ready agent defs incl. task-tailored fleet instructions) and `POST /fd/council/teardown` (stop + remove). Router prompt: `instructions/council/router.md`.
 
 **Turn flow:**
 
@@ -4481,6 +4518,8 @@ Agents receive context from prior rounds when speaking. A configurable memory se
 | Allow passing | When off, every participant must contribute each round (a passed turn is re-nudged) |
 | Narration log (NEW 0.5.6) | The activity log surfaces the model's between-step narration and reasoning, for debugging long/looping turns |
 | Stuck auto-nudge (NEW 0.5.6) | If an agent returns the canned "I got stuck" reply, the council nudges it to continue (up to 3×) before moving on — and won't let the next agent speak until it does |
+| Auto-assemble (NEW 0.6.3) | Council spawns its own task-modeled panel of archetypes (2–6, diverse perspectives), each briefed for the topic — or hand-pick the exact specialists. See [Auto-assemble](#auto-assemble--a-panel-modeled-to-the-topic-new-in-063) |
+| Dispose agents (NEW 0.6.3) | Auto-assembled panelists are temporary; a **Dispose agents** button (and a Temporary/Disposed badge) tears them down at conclusion or any time, keeping the transcript and artifacts. Deleting a session disposes them automatically |
 
 **Session persistence:**
 

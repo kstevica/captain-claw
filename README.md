@@ -15,6 +15,16 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 48 built-in tools.
 
+## What's New in 0.6.3
+
+**Teams that build themselves — auto-assembled Councils & Vatra.** Fully additive.
+
+- **Council auto-assemble.** Council no longer needs agents you've already started. A new **Auto-assemble** toggle (default) lets you give a topic, pick a panel size (2–6), and Start — a **Council Assembler** router selects a *diverse* set of specialist archetypes (optimizing for complementary, opposing perspectives, not the minimal team Basna routes), spawns each as a fresh agent **briefed for that exact discussion** (its persona + a tailored "your seat on this council" charge), and runs the deliberation over them. Optionally **hand-pick** the exact specialists; the **Pick agents** classic flow is unchanged.
+- **Temporary agents, cleanly disposed.** Auto-assembled panelists are ephemeral. The session tracks them (a **Temporary** badge, a **temp** tag per agent), and a **Dispose agents** button — in the concluded controls bar and the sidebar — tears the panel down via `/fd/council/teardown` while keeping the transcript, synthesis, votes, and TL;DRs. Deleting a session disposes its panel automatically, so nothing leaks.
+- **Vatra — the collaborative ensemble (now documented).** The collaborative sibling of Basna, a compose mode on the Basna page (*Basna — independent* vs *Vatra — collaborative*). A **Lead** decomposes the task into complementary, owner-assigned subtasks under a shared contract (**Plan team** to review first); specialists each own one piece **in parallel** and **collaborate over a shared blackboard** — posting **asks** that a coordinator answers with short-lived helpers (bounded: 12 asks, depth 2, 3 helpers) — then a **review round** lets each revise against the team, and a dedicated **reporter** assembles **one coherent deliverable** (no weighted merge). Vatra **learns** per-archetype reliability for owners, helpers, the Lead, and the reporter. Workers can't start nested runs; a **per-agent Skip** drops a stuck specialist; the deliverable is persisted the moment the reporter finishes.
+
+New endpoints under `/fd/council/*` (`assemble`, `teardown`); no schema changes. Auto-assemble and Vatra both resolve panelist models from your **Library tiers**. See [RELEASE_NOTES_0.6.3.md](release-notes/RELEASE_NOTES_0.6.3.md). Backward compatible with 0.6.2.
+
 ## What's New in 0.6.2
 
 **The remote terminal — text your own machine and watch it work.** Fully additive.
