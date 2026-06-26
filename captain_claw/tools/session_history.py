@@ -85,8 +85,17 @@ class SessionHistoryTool(Tool):
 
 def _fmt_results(results: list[Any], query: str) -> str:
     if not results:
-        return f"Transcript archive — no verbatim matches for {query!r}."
-    lines = [f"Transcript archive matches for {query!r} ({len(results)}):"]
+        return (
+            f"Transcript archive — no relevant verbatim matches for {query!r}. "
+            "Nothing from earlier sessions matches this; answer from the current "
+            "conversation and do not infer from unrelated past sessions."
+        )
+    lines = [
+        f"Transcript archive matches for {query!r} ({len(results)}):",
+        "(These are frozen snippets from PAST sessions — possibly unrelated to the "
+        "current conversation. Confirm a snippet is actually about what the user asked "
+        "before using it, and never present an old session's state as the current one.)",
+    ]
     for r in results:
         snippet = " ".join(str(getattr(r, "snippet", "")).split())[:400]
         created = (getattr(r, "updated_at", "") or "").strip() or "unknown"

@@ -358,6 +358,7 @@ class SemanticMemoryIndex:
         max_results: int = 6,
         candidate_limit: int = 80,
         min_score: float = 0.1,
+        history_min_score: float = 0.35,
         vector_weight: float = 0.65,
         text_weight: float = 0.35,
         temporal_decay_enabled: bool = True,
@@ -393,6 +394,10 @@ class SemanticMemoryIndex:
         self.max_results = max(1, int(max_results))
         self.candidate_limit = max(self.max_results, int(candidate_limit))
         self.min_score = float(min_score)
+        # Verbatim transcript snapshots are large and keyword-match on common words,
+        # so they need a stricter floor than regular chunks — otherwise an off-topic
+        # past session surfaces and contaminates the answer. Always >= min_score.
+        self.history_min_score = max(float(min_score), float(history_min_score))
         self.vector_weight = max(0.0, float(vector_weight))
         self.text_weight = max(0.0, float(text_weight))
         if self.vector_weight == 0 and self.text_weight == 0:
@@ -579,7 +584,15 @@ class SemanticMemoryIndex:
             include_all_sessions=self.cross_session_retrieval,
             project_session_ids=project_sids,
         )
-        merged = self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max)
+        # Pull extra candidates so holding history snapshots to a stricter floor
+        # (below) doesn't starve the note of good non-history results.
+        merged = self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max * 2)
+        # Verbatim transcript snapshots need a higher bar in the passive note too —
+        # a weak keyword match on a past, unrelated session must not be injected.
+        merged = [
+            r for r in merged
+            if r.source != "session_history" or r.score >= self.history_min_score
+        ][:effective_max]
         self._cache[key] = (time.time() + self.cache_ttl_seconds, merged)
         return list(merged)
 
@@ -1569,7 +1582,10 @@ class SemanticMemoryIndex:
             )
             if h.get("source") == "session_history"
         ]
-        return list(self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max))
+        merged = self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max)
+        # Apply the stricter history floor — better to return nothing than an
+        # off-topic snapshot the model would treat as current context.
+        return [r for r in merged if r.score >= self.history_min_score]
 
     def list_history(self, limit: int = 20) -> list[dict[str, Any]]:
         """List recent frozen snapshots (newest first)."""
@@ -2227,6 +2243,7 @@ def create_semantic_memory_index(
         max_results=int(getattr(search_cfg, "max_results", 6)) if search_cfg else 6,
         candidate_limit=int(getattr(search_cfg, "candidate_limit", 80)) if search_cfg else 80,
         min_score=float(getattr(search_cfg, "min_score", 0.1)) if search_cfg else 0.1,
+        history_min_score=float(getattr(search_cfg, "history_min_score", 0.35)) if search_cfg else 0.35,
         vector_weight=float(getattr(search_cfg, "vector_weight", 0.65)) if search_cfg else 0.65,
         text_weight=float(getattr(search_cfg, "text_weight", 0.35)) if search_cfg else 0.35,
         temporal_decay_enabled=bool(getattr(search_cfg, "temporal_decay_enabled", True)) if search_cfg else True,

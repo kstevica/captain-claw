@@ -102,6 +102,9 @@ class MemorySearchConfig(BaseModel):
     max_results: int = 6
     candidate_limit: int = 80
     min_score: float = 0.1
+    # Stricter floor for verbatim transcript snapshots (session_history): they
+    # keyword-match easily, so a low floor surfaces off-topic past sessions.
+    history_min_score: float = 0.35
     vector_weight: float = 0.65
     text_weight: float = 0.35
     temporal_decay_enabled: bool = True
