@@ -725,10 +725,21 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         "latency_ms": r["latency_ms"], "success": None,
     } for r in results])
 
-    # 7) Learn: score owners (slice used + sound), ask-answerers, and the Lead +
-    # reporter (holistic), folding outcomes into per-archetype reliability so the
-    # next route's prior_weight improves. Owners learn under their real archetype
-    # id (shared with Basna); Lead/reporter learn as separate pseudo-archetypes.
+    # 6b) Persist the assembled deliverable NOW — status=done + truth + files — BEFORE
+    # the best-effort learning/coverage steps. So if the process is killed during
+    # scoring, the run is already complete and the report is saved (no run left stuck
+    # 'running', no lost deliverable).
+    files_by_name = {f["name"]: f for f in session_files}
+    for g in generated_files:
+        files_by_name[g["name"]] = g
+    await db.update_basna_session(
+        sid, user["id"], status="done", truth=truth, confidence=confidence,
+        files=json.dumps(list(files_by_name.values())))
+    _progress(sid, "done", f"Done · {len(usable)}/{len(results)} subtask(s) assembled")
+
+    # 7) Learn (best-effort, post-completion): score owners (slice used + sound),
+    # ask-answerers, and the Lead + reporter (holistic), folding outcomes into
+    # per-archetype reliability so the next route's prior_weight improves.
     _progress(sid, "learn", "Scoring contributions…")
     try:
         learned = await _learn(
@@ -740,8 +751,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         learned = []
         _progress(sid, "learn", "Scoring skipped (judge unavailable)", ok=False)
 
-    # 8) Coverage gaps — the Vatra analog of Basna's blind spots: judge the assembled
-    # deliverable against what the task asked for and surface what's missing or thin.
+    # 8) Coverage gaps (best-effort) — judge the assembled deliverable against what the
+    # task asked for; persisted as a follow-up update so the run is already done.
     analysis: dict = {}
     _progress(sid, "learn", "Checking coverage…")
     try:
@@ -749,20 +760,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             _llm_coverage_gaps(intent, subtasks, truth, _creds("reason")), 120)
         if cov:
             analysis = cov
+            await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
             _progress(sid, "learn", f"Coverage: {len(cov.get('gaps') or [])} gap(s)")
     except Exception as e:
         log.warning("Vatra coverage check failed", error=str(e))
         _progress(sid, "learn", "Coverage check skipped", ok=False)
 
-    files_by_name = {f["name"]: f for f in session_files}
-    for g in generated_files:
-        files_by_name[g["name"]] = g
-    await db.update_basna_session(
-        sid, user["id"], status="done", truth=truth, confidence=confidence,
-        files=json.dumps(list(files_by_name.values())),
-        analysis=json.dumps(analysis),
-    )
-    _progress(sid, "done", f"Done · {len(usable)}/{len(results)} subtask(s) assembled")
     _progress_done(sid)
     await db.update_basna_session(
         sid, user["id"],

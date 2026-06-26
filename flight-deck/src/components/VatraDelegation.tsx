@@ -165,7 +165,7 @@ export function VatraBlackboard({
           each can search/read it to build on the others.
         </p>
       ) : (
-        <div className="space-y-1.5">
+        <div className="max-h-80 space-y-1.5 overflow-auto pr-1">
           {[...boardShown].reverse().slice(0, 40).map((e) => {
             const isOpen = !!openBoard[e.id]
             const kindCls = e.kind === 'output'
