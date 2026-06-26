@@ -832,6 +832,13 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
             (ws / "vatra-slices.md").write_text(slices_full)
         except OSError as e:
             log.warning("Vatra slices file write failed", error=str(e))
+        # Also give the reporter the session's input files (e.g. a prior report on a
+        # fill-gaps run, which the intent tells it to integrate into).
+        for name in input_names:
+            try:
+                shutil.copy2(dest_dir / name, ws / name)
+            except OSError:
+                pass
         big = len(slices_full) > _SLICES_INLINE_CHARS
         inline = slices_full[:_SLICES_INLINE_CHARS] + ("\n\n…(full text in vatra-slices.md)" if big else "")
         template = (_INSTRUCTIONS_DIR / "vatra" / "reporter.md").read_text()
@@ -1142,6 +1149,73 @@ async def start_vatra(body: VatraStartRequest, request: Request,
     _basna_agent_tasks.add(t)
     t.add_done_callback(_basna_agent_tasks.discard)
     return {"session_id": sid, "title": title, "status": "running"}
+
+
+# ── Fill the gaps: a follow-up run on a finished run's coverage gaps ──
+
+async def _fill_gaps_run(owner: str, parent_session_id: str, user: dict, *,
+                         tiers: dict | None, env_vars: list | None, api_key: str) -> dict:
+    """Create + run a follow-up Vatra that fills a finished run's coverage gaps,
+    seeded with its final report. The Lead decomposes the gap-filling work, owners
+    produce the missing material (reading the prior report for context), and the
+    reporter assembles the COMPLETE improved deliverable. The Vatra analog of
+    Basna's deepen (which works off blind spots)."""
+    db = get_db()
+    parent = await db.get_basna_session(parent_session_id, owner)
+    if not parent:
+        raise HTTPException(404, "session not found")
+    truth = (parent.get("truth") or "").strip()
+    try:
+        analysis = json.loads(parent.get("analysis") or "{}")
+    except (ValueError, TypeError):
+        analysis = {}
+    gaps = analysis.get("gaps") or []
+    if not gaps:
+        raise HTTPException(400, "This run has no coverage gaps to fill.")
+    if not truth:
+        raise HTTPException(400, "This run has no assembled report to build on yet.")
+    parent_title = (parent.get("title") or parent.get("intent") or "")[:50]
+    gap_lines = "\n".join(
+        f"- [{g.get('severity', 'minor')}] {g.get('item', '')}"
+        + (f" — {g.get('note', '')}" if g.get("note") else "")
+        for g in gaps[:8])
+    _PRIOR_FILE = "prior-report.md"
+    intent = (
+        "Improve and COMPLETE an existing deliverable by filling its coverage gaps — the parts "
+        "the original task asked for that the current report missed or covered only thinly.\n\n"
+        f"The current report is in your workspace as `{_PRIOR_FILE}` — read it first for full "
+        "context. Produce the COMPLETE improved deliverable that integrates the new material into "
+        "the existing report: keep everything already covered well, and add or deepen what the "
+        "gaps call for. Do not output only the missing bits.\n\n"
+        f"COVERAGE GAPS to fill:\n{gap_lines}\n"
+    )
+    title = f"Fill gaps: {parent_title}"[:80]
+    sess = await db.create_basna_session(
+        owner, intent, title=title,
+        config=json.dumps({"mode": "vatra", "source": "ui", "kind": "fill_gaps",
+                           "parent_session_id": parent_session_id, "max_agents": 6}))
+    sid = sess["id"]
+    body_bytes = truth.encode("utf-8")
+    (_session_files_dir(sid) / _PRIOR_FILE).write_bytes(body_bytes)
+    await db.update_basna_session(sid, owner, files=json.dumps([{
+        "name": _PRIOR_FILE, "mime": "text/markdown", "size": len(body_bytes), "kind": "input"}]))
+    exec_req = ExecuteRequest(session_id=sid, tiers=tiers or None,
+                              env_vars=env_vars or None, api_key=api_key or "")
+    stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
+    t = asyncio.create_task(execute_vatra(exec_req, stub, user))
+    _basna_agent_tasks.add(t)
+    t.add_done_callback(_basna_agent_tasks.discard)
+    return {"session_id": sid, "title": title}
+
+
+@router.post("/sessions/{session_id}/fill-gaps")
+async def fill_gaps(session_id: str, user: dict = Depends(get_current_user)):
+    """UI 'Fill the gaps' — spawn a follow-up Vatra on this run's coverage gaps,
+    seeded with its final report. Returns immediately; the UI polls the new run."""
+    tiers, env_vars = await _load_owner_tiers(get_db(), user["id"])
+    res = await _fill_gaps_run(user["id"], session_id, user,
+                               tiers=tiers, env_vars=env_vars, api_key="")
+    return {"ok": True, **res}
 
 
 # ── UI read endpoint: the blackboard for one session (user-scoped) ───

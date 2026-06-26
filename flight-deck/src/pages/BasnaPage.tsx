@@ -459,7 +459,7 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
+    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
@@ -1185,6 +1185,23 @@ export function BasnaPage() {
                       </li>
                     ))}
                   </ul>
+                )}
+                {activeSession?.status === 'done' && !!analysis.gaps?.length && (
+                  <button
+                    onClick={async () => {
+                      if (!activeSession) return
+                      setDeepening(true)
+                      try { await fillGaps(activeSession.id) }
+                      catch { /* surfaced by store error path */ }
+                      finally { setDeepening(false) }
+                    }}
+                    disabled={deepening}
+                    title="Spawn a follow-up Vatra that fills these gaps, seeded with this report"
+                    className="mt-3 flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                  >
+                    {deepening ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanSearch className="h-3.5 w-3.5" />}
+                    Fill the gaps
+                  </button>
                 )}
               </div>
             )}

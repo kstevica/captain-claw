@@ -379,6 +379,7 @@ interface BasnaStore {
   route: (intent: string, tiers: TierMap, title?: string) => Promise<void>
   planVatra: (intent: string, tiers: TierMap, title?: string) => Promise<void>
   runVatra: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
+  fillGaps: (id: string) => Promise<void>
   saveTitle: (title: string) => Promise<void>
   execute: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   recompile: (tiers: TierMap) => Promise<void>
@@ -662,6 +663,19 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   deepenSession: async (id) => {
     const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(id)}/deepen`, { method: 'POST' })
     if (!res.ok) throw new Error((await res.text()) || 'deepen failed')
+    const data = await res.json()
+    await get().loadSessions()
+    if (data.session_id) await get().selectSession(data.session_id)
+  },
+
+  // Vatra analog of deepen: a follow-up run that fills this run's coverage gaps,
+  // seeded with its final report.
+  fillGaps: async (id) => {
+    const res = await _authedFetch(`/fd/vatra/sessions/${encodeURIComponent(id)}/fill-gaps`, { method: 'POST' })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}))
+      throw new Error((detail as { detail?: string }).detail || 'fill gaps failed')
+    }
     const data = await res.json()
     await get().loadSessions()
     if (data.session_id) await get().selectSession(data.session_id)
