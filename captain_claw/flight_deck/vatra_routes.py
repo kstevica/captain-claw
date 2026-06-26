@@ -168,7 +168,9 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
         f"max_agents: {max_agents}. Decompose into the smallest set of complementary, "
         f"owner-assigned subtasks that together cover this task."
     )
-    prov, mt = _provider_call(creds, temperature=0.2, default_max=4096, cap=8192)
+    # The plan now carries shared_context + per-piece briefs + depends_on, so it can
+    # be long — a tight cap truncates the JSON and the whole route fails. Give it room.
+    prov, mt = _provider_call(creds, temperature=0.2, default_max=8192, cap=16384)
     resp = await prov.complete(messages=[
         Message(role="system", content=system_prompt),
         Message(role="user", content=user_prompt),
@@ -176,10 +178,22 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
     content = resp.content.strip()
     if content.startswith("```"):
         content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
-    raw = json.loads(content)
+    truncated = str(getattr(resp, "finish_reason", "") or "").lower() in (
+        "length", "max_tokens", "max_output_tokens", "max_completion_tokens")
+    try:
+        raw = json.loads(content)
+    except json.JSONDecodeError as e:
+        log.warning("Vatra Lead JSON parse failed",
+                    chars=len(content), truncated=truncated, tail=content[-200:])
+        if truncated:
+            raise HTTPException(502, (
+                "The Lead's plan was cut off at the output-token cap before the JSON "
+                "finished. Try fewer max agents, a simpler task, or a planning tier with a "
+                "higher output limit."))
+        raise HTTPException(502, f"The Lead returned invalid JSON: {e}")
     plan = _normalize_plan(raw, arch_by_id, max_agents)
     if not plan["subtasks"]:
-        raise HTTPException(422, "Lead produced no usable subtasks")
+        raise HTTPException(422, "The Lead produced no usable subtasks — try rephrasing the task.")
     return plan
 
 
