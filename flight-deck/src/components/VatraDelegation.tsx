@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { CornerDownRight, ArrowRight, Check, X, Loader2, Users, Share2 } from 'lucide-react'
-import { apiListVatraAsks, type VatraAsk, type VatraSubtask } from '../stores/basnaStore'
+import { CornerDownRight, ArrowRight, Check, X, Loader2, Users, Share2, ClipboardList } from 'lucide-react'
+import { apiListVatraAsks, apiListVatraBoard, type VatraAsk, type VatraBoardEntry, type VatraSubtask } from '../stores/basnaStore'
 
 // Vatra collaboration views, split into two pieces so the page can place them in
 // different spots: the team PLAN (the Lead's decomposition — who owns what) up top
@@ -83,19 +83,24 @@ export function VatraBlackboard({
   active?: boolean
 }) {
   const [asks, setAsks] = useState<VatraAsk[]>([])
+  const [board, setBoard] = useState<VatraBoardEntry[]>([])
   const [open, setOpen] = useState<Record<number, boolean>>({})
+  const [openBoard, setOpenBoard] = useState<Record<number, boolean>>({})
 
   useEffect(() => {
     let cancelled = false
     const load = async () => {
-      const rows = await apiListVatraAsks(sessionId)
-      if (!cancelled) setAsks(rows)
+      const [a, b] = await Promise.all([apiListVatraAsks(sessionId), apiListVatraBoard(sessionId)])
+      if (!cancelled) { setAsks(a); setBoard(b) }
     }
     load()
     if (!active) return () => { cancelled = true }
     const t = setInterval(load, 2500)
     return () => { cancelled = true; clearInterval(t) }
   }, [sessionId, active])
+
+  // Notes + outputs are the shared-memory entries worth showing; narration is noisy.
+  const boardShown = board.filter((e) => e.kind === 'note' || e.kind === 'output' || e.kind === 'file')
 
   const counts = asks.reduce(
     (acc, a) => { acc[a.status] = (acc[a.status] || 0) + 1; return acc },
@@ -106,8 +111,9 @@ export function VatraBlackboard({
   return (
     <div className={PANEL}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Share2 className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Delegation blackboard</span>
+        <ClipboardList className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
+        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Shared board</span>
+        {boardShown.length > 0 && <Chip className="text-zinc-400">{boardShown.length} entries</Chip>}
         {asks.length > 0 && (
           <span className="ml-auto flex items-center gap-2 text-[11px] text-zinc-500">
             {counts.answered ? <span className="text-emerald-500">{counts.answered} answered</span> : null}
@@ -117,13 +123,42 @@ export function VatraBlackboard({
         )}
       </div>
 
-      {asks.length === 0 ? (
+      {/* Shared memory — notes & outputs the team streamed, newest first. */}
+      {boardShown.length === 0 ? (
         <p className="text-xs text-zinc-600">
-          No delegation yet — the specialists are working their slices independently. When one needs
-          something outside its slice, the ask shows up here.
+          Nothing shared yet — teammates' notes and finished pieces stream here as they work, and
+          each can search/read it to build on the others.
         </p>
       ) : (
         <div className="space-y-1.5">
+          {[...boardShown].reverse().slice(0, 40).map((e) => {
+            const isOpen = !!openBoard[e.id]
+            const kindCls = e.kind === 'output'
+              ? 'text-emerald-600 dark:text-emerald-300'
+              : e.kind === 'file' ? 'text-zinc-400' : 'text-sky-600 dark:text-sky-300'
+            return (
+              <div key={e.id} className="rounded-md border border-zinc-800 bg-zinc-900/40 p-2">
+                <button
+                  onClick={() => setOpenBoard((o) => ({ ...o, [e.id]: !o[e.id] }))}
+                  className="flex w-full items-center gap-1.5 text-left"
+                >
+                  <Chip className={kindCls}>{e.kind}</Chip>
+                  <span className="truncate text-[11px] text-zinc-300">{ownerTitle(e.from_owner) || e.from_owner}</span>
+                  {e.title && <span className="truncate text-[11px] text-zinc-500">· {e.title}</span>}
+                </button>
+                <p className={`mt-1 pl-1 text-xs text-zinc-400 ${isOpen ? '' : 'line-clamp-2'}`}>{e.content}</p>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {asks.length > 0 && (
+        <div className="mt-4 space-y-1.5">
+          <div className="flex items-center gap-1.5">
+            <Share2 className="h-3 w-3 text-violet-600 dark:text-violet-400" />
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Delegation (asks)</span>
+          </div>
           {asks.map((a) => {
             const st = STATUS_STYLE[a.status]
             const isOpen = !!open[a.id]

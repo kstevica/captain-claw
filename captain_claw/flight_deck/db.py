@@ -251,6 +251,22 @@ class FlightDeckDB:
             CREATE INDEX IF NOT EXISTS idx_basna_asks_session
                 ON basna_asks(session_id);
 
+            -- Vatra shared board: every agent's notes, outputs, and files stream
+            -- here as they work, so teammates can read/search each other's work in
+            -- real time (a shared memory / clipboard for the run).
+            CREATE TABLE IF NOT EXISTS vatra_board (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id   TEXT NOT NULL REFERENCES basna_sessions(id) ON DELETE CASCADE,
+                from_owner   TEXT NOT NULL DEFAULT '',   -- archetype id of the author
+                from_subtask TEXT NOT NULL DEFAULT '',
+                kind         TEXT NOT NULL DEFAULT 'note',  -- note|narration|output|file
+                title        TEXT NOT NULL DEFAULT '',
+                content      TEXT NOT NULL DEFAULT '',
+                created_at   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_vatra_board_session
+                ON vatra_board(session_id);
+
             CREATE TABLE IF NOT EXISTS prompts (
                 id         TEXT PRIMARY KEY,
                 user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1092,6 +1108,62 @@ class FlightDeckDB:
         )
         await self._db.commit()
         return cur.rowcount > 0
+
+    # ── Vatra shared board (real-time shared memory) ─────────────────
+
+    async def add_vatra_board(
+        self, session_id: str, from_owner: str, from_subtask: str,
+        kind: str, title: str, content: str,
+    ) -> dict:
+        assert self._db is not None
+        now = _utcnow()
+        cur = await self._db.execute(
+            "INSERT INTO vatra_board"
+            " (session_id, from_owner, from_subtask, kind, title, content, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, from_owner, from_subtask, kind, title, content, now),
+        )
+        await self._db.commit()
+        return {"id": cur.lastrowid, "session_id": session_id, "from_owner": from_owner,
+                "from_subtask": from_subtask, "kind": kind, "title": title,
+                "content": content, "created_at": now}
+
+    async def list_vatra_board(
+        self, session_id: str, kinds: list[str] | None = None, limit: int = 100,
+        exclude_owner: str | None = None,
+    ) -> list[dict]:
+        assert self._db is not None
+        query = "SELECT * FROM vatra_board WHERE session_id = ?"
+        params: list = [session_id]
+        if kinds:
+            query += " AND kind IN (%s)" % ",".join("?" * len(kinds))
+            params.extend(kinds)
+        if exclude_owner:
+            query += " AND from_owner != ?"
+            params.append(exclude_owner)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        async with self._db.execute(query, params) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        rows.reverse()  # oldest-first for readability
+        return rows
+
+    async def search_vatra_board(
+        self, session_id: str, query: str, limit: int = 20,
+        exclude_owner: str | None = None,
+    ) -> list[dict]:
+        assert self._db is not None
+        like = f"%{query.strip()}%"
+        sql = ("SELECT * FROM vatra_board WHERE session_id = ?"
+               " AND (content LIKE ? OR title LIKE ?)")
+        params: list = [session_id, like, like]
+        if exclude_owner:
+            sql += " AND from_owner != ?"
+            params.append(exclude_owner)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        async with self._db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
     # ── Archetype reliability (learned routing weights) ──────────────
 

@@ -104,6 +104,24 @@ export async function apiListVatraAsks(sessionId: string): Promise<VatraAsk[]> {
   return (data.asks || []) as VatraAsk[]
 }
 
+// An entry on the Vatra shared board (live shared memory across the team).
+export interface VatraBoardEntry {
+  id: number
+  from_owner: string
+  from_subtask: string
+  kind: 'note' | 'narration' | 'output' | 'file'
+  title: string
+  content: string
+  created_at: string
+}
+
+export async function apiListVatraBoard(sessionId: string): Promise<VatraBoardEntry[]> {
+  const res = await _authedFetch(`/fd/vatra/sessions/${encodeURIComponent(sessionId)}/board`)
+  if (!res.ok) return []
+  const data = await res.json()
+  return (data.entries || []) as VatraBoardEntry[]
+}
+
 export interface BasnaRun {
   id: number
   session_id: string

@@ -28,15 +28,17 @@ log = structlog.get_logger(__name__)
 class VatraTool(Tool):
     name = "vatra"
     description = (
-        "Collaborate with your teammates during a Vatra run via the shared blackboard. "
-        "You own ONE slice of the task; when you need something another specialist should "
-        "produce, do NOT wait — post an ask and keep working. "
-        "'ask' — post a request for something outside your slice (`text`); returns immediately "
-        "with an ask id. A teammate/helper answers it in the background. "
-        "'inbox' — collect answers to your asks so far; pass `wait` (seconds, optional) to give "
-        "the team a moment to respond before returning. Call it once you've done other work. "
-        "Answers you don't receive in time are still folded into the final deliverable by the "
-        "reporter, so never block on an ask."
+        "The shared team board for a Vatra run — a live shared memory where every teammate's "
+        "notes, outputs and files appear as they work. You own ONE slice; use the board to build "
+        "ON your teammates' work instead of guessing or duplicating it.\n"
+        "'search' — find what teammates have produced by keyword (`query`) — use this FIRST "
+        "whenever your piece needs a fact, figure, decision, or section another piece owns.\n"
+        "'read' — recent entries from teammates (optional `kind` = note|output|narration|file).\n"
+        "'post' — share a key finding, decision, or your draft so others can use it (`text`, "
+        "optional `title`).\n"
+        "'ask' — when you need a teammate to DO new work, post a request (`text`); a helper "
+        "answers in the background. 'inbox' — collect answers to your asks (optional `wait`).\n"
+        "Prefer search/read/post — the board is always there; only 'ask' when new work is needed."
     )
     timeout_seconds = 60.0
 
@@ -45,13 +47,19 @@ class VatraTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["ask", "inbox"],
+                "enum": ["search", "read", "post", "ask", "inbox"],
                 "description": (
-                    "'ask' — post a request to the blackboard (requires `text`). "
-                    "'inbox' — return answers to your asks (optional `wait` seconds)."
+                    "'search' — keyword search the team board (`query`). "
+                    "'read' — recent teammate entries (optional `kind`). "
+                    "'post' — share a note to the board (`text`, optional `title`). "
+                    "'ask' — request new work from a teammate (`text`). "
+                    "'inbox' — answers to your asks (optional `wait`)."
                 ),
             },
-            "text": {"type": "string", "description": "For 'ask' — what you need, self-contained and specific."},
+            "query": {"type": "string", "description": "For 'search' — keywords to find teammates' work."},
+            "text": {"type": "string", "description": "For 'post'/'ask' — the note to share, or what you need."},
+            "title": {"type": "string", "description": "For 'post' — optional short label."},
+            "kind": {"type": "string", "description": "For 'read' — filter to note|output|narration|file."},
             "wait": {"type": "integer", "description": "For 'inbox' — seconds to wait for answers (0–30, default 0)."},
         },
         "required": ["action"],
@@ -123,14 +131,76 @@ class VatraTool(Tool):
         if not fd_url:
             return ToolResult(success=False, error="Flight Deck URL unavailable; cannot reach the blackboard.")
         try:
+            if action == "search":
+                return await self._search(fd_url, ctx, **kwargs)
+            if action == "read":
+                return await self._read(fd_url, ctx, **kwargs)
+            if action == "post":
+                return await self._post_note(fd_url, ctx, **kwargs)
             if action == "ask":
                 return await self._ask(fd_url, ctx, **kwargs)
             if action == "inbox":
                 return await self._inbox(fd_url, ctx, **kwargs)
-            return ToolResult(success=False, error=f"Unknown action '{action}' (use 'ask' or 'inbox').")
+            return ToolResult(success=False, error=f"Unknown action '{action}' (use search/read/post/ask/inbox).")
         except Exception as e:
             log.warning("vatra tool error", action=action, error=str(e))
-            return ToolResult(success=False, error=f"Vatra blackboard request failed: {e}")
+            return ToolResult(success=False, error=f"Vatra board request failed: {e}")
+
+    @staticmethod
+    def _fmt_entries(entries: list[dict]) -> str:
+        lines = []
+        for e in entries:
+            head = f"[{e.get('kind', '')}] {e.get('from', '?')}"
+            if e.get("title"):
+                head += f" · {e['title']}"
+            body = " ".join(str(e.get("content", "")).split())
+            if len(body) > 1200:
+                body = body[:1200] + " …"
+            lines.append(f"### {head}\n{body}")
+        return "\n\n".join(lines)
+
+    async def _search(self, fd_url: str, ctx: dict, **kwargs: Any) -> ToolResult:
+        q = (kwargs.get("query") or "").strip()
+        if not q:
+            return ToolResult(success=False, error="Provide `query` keywords to search the board.")
+        r = await self._post(fd_url, "/fd/vatra/agent/board/search", {
+            "session_id": ctx["session_id"], "owner": ctx["owner"], "query": q, "limit": 20,
+        })
+        if isinstance(r, dict) and r.get("_error"):
+            return ToolResult(success=False, error=r["_error"])
+        entries = r.json().get("entries") or []
+        if not entries:
+            return ToolResult(success=True, content=(
+                f"No teammate board entries match {q!r} yet. They may not have produced it — "
+                f"do the part you can, or post a note / ask if you need new work."))
+        return ToolResult(success=True, content=f"Board matches for {q!r}:\n\n{self._fmt_entries(entries)}")
+
+    async def _read(self, fd_url: str, ctx: dict, **kwargs: Any) -> ToolResult:
+        r = await self._post(fd_url, "/fd/vatra/agent/board/read", {
+            "session_id": ctx["session_id"], "owner": ctx["owner"],
+            "kind": (kwargs.get("kind") or "").strip(), "limit": 40,
+        })
+        if isinstance(r, dict) and r.get("_error"):
+            return ToolResult(success=False, error=r["_error"])
+        entries = r.json().get("entries") or []
+        if not entries:
+            return ToolResult(success=True, content=(
+                "The team board has nothing from your teammates yet — they're still working. "
+                "Proceed with your slice; check back with 'search' or 'read' as you go."))
+        return ToolResult(success=True, content=f"Recent team board:\n\n{self._fmt_entries(entries)}")
+
+    async def _post_note(self, fd_url: str, ctx: dict, **kwargs: Any) -> ToolResult:
+        text = (kwargs.get("text") or "").strip()
+        if not text:
+            return ToolResult(success=False, error="Provide `text` to share on the board.")
+        r = await self._post(fd_url, "/fd/vatra/agent/board/post", {
+            "session_id": ctx["session_id"], "owner": ctx["owner"], "subtask_id": ctx["subtask_id"],
+            "kind": "note", "title": (kwargs.get("title") or "").strip(), "text": text,
+        })
+        if isinstance(r, dict) and r.get("_error"):
+            return ToolResult(success=False, error=r["_error"])
+        return ToolResult(success=True, content=(
+            "Shared to the team board — teammates can now search/read it. Keep working."))
 
     async def _ask(self, fd_url: str, ctx: dict, **kwargs: Any) -> ToolResult:
         text = (kwargs.get("text") or "").strip()

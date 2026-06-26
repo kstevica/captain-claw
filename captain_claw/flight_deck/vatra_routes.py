@@ -477,12 +477,15 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             role = arch.get("role") or arch["id"]
             return f"{role} · {sp['subtask']['title']}" if owner_counts.get(arch["id"], 1) > 1 else role
 
-        def _owner_callbacks(label: str):
+        def _owner_callbacks(label: str, owner: str, subtask: str):
             def _on_action(act: dict) -> None:
                 detail = act.get("detail", "")
                 if act["tool"] == "narration":
                     _progress(sid, "narration", f"{label}: {detail}", agent=label,
                               tool="narration", detail=detail)
+                    # Stream the agent's narration onto the shared board so teammates
+                    # can see what it's thinking/doing in real time.
+                    _board_post_bg(sid, owner, subtask, "narration", "", detail)
                 else:
                     suffix = f": {detail}" if detail else ""
                     _progress(sid, "action", f"{label} → {act['tool']}{suffix}",
@@ -497,7 +500,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             arch, st = sp["arch"], sp["subtask"]
             role = arch.get("role") or arch["id"]
             label = _owner_label(sp)
-            on_action, on_usage = _owner_callbacks(label)
+            on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
@@ -511,6 +514,15 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             _progress(sid, "dispatch",
                       f"{label} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}",
                       ok=d["ok"], agent=label)
+            # Post the finished piece to the shared board so teammates still working
+            # (and the next round) can read and build on it.
+            out = (d.get("output") or "").strip()
+            if out:
+                try:
+                    await get_db().add_vatra_board(sid, arch["id"], st["id"], "output",
+                                                   st["title"], out[:_BOARD_CONTENT_CAP])
+                except Exception as e:
+                    log.debug("Vatra board output write failed", error=str(e))
             return d
 
         dispatched = await asyncio.gather(*[_dispatch_owner(sp) for sp in spawned])
@@ -557,7 +569,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                         arch, st = sp["arch"], sp["subtask"]
                         role = arch.get("role") or arch["id"]
                         label = _owner_label(sp)
-                        on_action, on_usage = _owner_callbacks(label)
+                        on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
                         prompt = _build_review_prompt(role, st, digest, shared_context)
                         d = await _dispatch_one(
                             sp["port"], sp["auth"], prompt, body.dispatch_timeout,
@@ -836,9 +848,9 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         deps_block = (
             "\n\n## Your piece builds on these teammates' work\n"
             f"{listed}\n"
-            "For anything you need from them — a fact, a figure, a decision — POST AN ASK NOW "
-            "(`vatra` action='ask'), naming exactly what you need, then keep working. Do not "
-            "guess these and do not reproduce their slice yourself.\n")
+            "For anything you need from them, FIRST search the shared board (`vatra` "
+            "action='search') — they may have already produced it. Only `ask` if it isn't there "
+            "yet. Don't guess these and don't reproduce their slice yourself.\n")
     return (
         f"You are the {role}, one specialist on a collaborating team building ONE deliverable "
         f"together. You own ONE part; your teammates are producing the others in parallel. "
@@ -846,15 +858,19 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"## Overall task (for context)\n{intent}\n\n"
         f"## The team and their pieces\n{roster}{contract_block}\n\n"
         f"## Your part — {st['title']}\n{st['brief']}{files_block}{deps_block}\n\n"
-        f"## Collaborate — don't work in a silo\n"
-        f"Reach your teammates through the shared blackboard with the `vatra` tool:\n"
-        f"- `vatra` action='ask' — when your part needs something ANOTHER piece owns (see the "
-        f"team list above), post a focused request, say which piece it's for, and KEEP WORKING. "
-        f"Don't block, don't guess, don't redo their slice.\n"
-        f"- `vatra` action='inbox' — after you've made progress, collect answers to your asks "
-        f"and fold them in.\n"
-        f"Whenever your part touches another piece's territory, that's a signal to ask rather "
-        f"than invent. If an answer doesn't arrive in time, do your best — the reporter reconciles.\n\n"
+        f"## Collaborate through the shared team board\n"
+        f"Everything your teammates produce — their notes, outputs, and progress — streams onto a "
+        f"shared board you can read and search at any time with the `vatra` tool:\n"
+        f"- `vatra` action='search' (query=…) — do this FIRST whenever your part needs a fact, "
+        f"figure, decision, or section another piece owns. Pull what they've made instead of "
+        f"guessing or duplicating it.\n"
+        f"- `vatra` action='read' — skim what teammates have shared recently.\n"
+        f"- `vatra` action='post' (text=…) — share a key finding, decision, or draft as you "
+        f"produce it, so others can build on it.\n"
+        f"- `vatra` action='ask' (text=…) — only when you need a teammate to DO new work that "
+        f"isn't on the board yet.\n"
+        f"Build ON your teammates' work: search before you invent, and share what you find. If "
+        f"something you need isn't there yet, do your best — the reporter reconciles at the end.\n\n"
         f"Return only your finished part — no preamble, no meta-commentary about the team."
     )
 
@@ -1188,6 +1204,102 @@ async def agent_inbox(body: _VatraInboxReq):
         await asyncio.sleep(_INBOX_POLL_S)
 
 
+# ── Shared board: real-time shared memory across the team ────────────
+
+_BOARD_CONTENT_CAP = 30_000  # per-entry content stored on the board
+
+
+def _board_post_bg(sid: str, owner: str, subtask: str, kind: str, title: str, content: str) -> None:
+    """Fire-and-forget board write from a sync streaming callback (we're already on
+    the event loop). Best-effort: a failed write must never break the agent's turn."""
+    text = (content or "").strip()
+    if not text:
+        return
+
+    async def _w() -> None:
+        try:
+            await get_db().add_vatra_board(sid, owner, subtask, kind, title, text[:_BOARD_CONTENT_CAP])
+        except Exception as e:
+            log.debug("Vatra board write failed", error=str(e))
+    try:
+        t = asyncio.create_task(_w())
+        _basna_agent_tasks.add(t)
+        t.add_done_callback(_basna_agent_tasks.discard)
+    except RuntimeError:
+        pass
+
+
+def _board_entry(e: dict) -> dict:
+    return {"id": e.get("id"), "from": e.get("from_owner", ""), "kind": e.get("kind", ""),
+            "title": e.get("title", ""), "content": e.get("content", ""),
+            "at": e.get("created_at", "")}
+
+
+class _VatraBoardPostReq(_AgentReq):
+    owner: str = ""
+    subtask_id: str = ""
+    kind: str = "note"
+    title: str = ""
+    text: str = ""
+
+
+class _VatraBoardReadReq(_AgentReq):
+    owner: str = ""
+    kind: str = ""
+    limit: int = 40
+
+
+class _VatraBoardSearchReq(_AgentReq):
+    owner: str = ""
+    query: str = ""
+    limit: int = 20
+
+
+async def _board_session(body) -> tuple[str, str]:
+    owner_id = _resolve_owner(body)
+    if not body.session_id:
+        raise HTTPException(400, "session_id is required")
+    sess = await get_db().get_basna_session(body.session_id, owner_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    return owner_id, body.session_id
+
+
+@router.post("/agent/board/post")
+async def agent_board_post(body: _VatraBoardPostReq):
+    """An agent shares a note/finding to the team board for everyone to see."""
+    await _board_session(body)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    kind = body.kind if body.kind in ("note", "output") else "note"
+    e = await get_db().add_vatra_board(
+        body.session_id, body.owner, body.subtask_id, kind, body.title, text[:_BOARD_CONTENT_CAP])
+    return {"status": "ok", "id": e["id"]}
+
+
+@router.post("/agent/board/read")
+async def agent_board_read(body: _VatraBoardReadReq):
+    """Recent board entries from TEAMMATES (the caller's own entries are excluded)."""
+    await _board_session(body)
+    kinds = [body.kind] if body.kind else None
+    rows = await get_db().list_vatra_board(
+        body.session_id, kinds=kinds, limit=body.limit, exclude_owner=body.owner or None)
+    return {"entries": [_board_entry(e) for e in rows], "count": len(rows)}
+
+
+@router.post("/agent/board/search")
+async def agent_board_search(body: _VatraBoardSearchReq):
+    """Search teammates' board entries by keyword."""
+    await _board_session(body)
+    q = (body.query or "").strip()
+    if not q:
+        raise HTTPException(400, "query is required")
+    rows = await get_db().search_vatra_board(
+        body.session_id, q, limit=body.limit, exclude_owner=body.owner or None)
+    return {"entries": [_board_entry(e) for e in rows], "count": len(rows)}
+
+
 # ── UI manual start (user-scoped, background) ────────────────────────
 
 class VatraStartRequest(BaseModel):
@@ -1362,6 +1474,17 @@ async def list_session_asks(session_id: str, user: dict = Depends(get_current_us
     if not sess:
         raise HTTPException(404, "session not found")
     return {"asks": await db.list_vatra_asks(session_id)}
+
+
+@router.get("/sessions/{session_id}/board")
+async def list_session_board(session_id: str, user: dict = Depends(get_current_user)):
+    """The Vatra shared board for a session — every note/output/narration/file the
+    team streamed, for the live shared-memory view."""
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    return {"entries": await db.list_vatra_board(session_id, limit=200)}
 
 
 @router.post("/agent/blackboard")
