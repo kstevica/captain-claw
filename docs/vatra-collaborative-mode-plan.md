@@ -7,7 +7,11 @@
 > delegation actually fires: the Lead now KEEPS interdependent pieces separate (records
 > `depends_on`) instead of folding them, never emits an integration/polish subtask (that's the
 > reporter), and owners get the full team roster + a proactive nudge to ask teammates for
-> cross-slice needs. A **Lead-run review round** follows the first pass: the Lead gathers an
+> cross-slice needs. The run is now **three rounds**: an **intro round** (each specialist does
+> groundwork and posts it to the shared board — a barrier; the main round starts only once all
+> intros finish, so the main round is collaborative, not blind; an intro digest is injected into
+> each main-round brief), then the **main round** (full pieces), then the **outro/review round**.
+> A **Lead-run review round** follows the first pass: the Lead gathers an
 > exec-summary digest of every piece and each owner (kept alive) revises its own piece against
 > the whole team's work before the reporter assembles (config `review_round`, default on) — this
 > is where real collaboration happens, since round-1 owners are blind to each other. The Lead is

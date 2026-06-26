@@ -528,6 +528,11 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                           agent=label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
             return _on_action, _on_usage
 
+        # Set by the intro round below (a digest of every specialist's prep), then
+        # injected into each owner's main-round brief so the main round starts
+        # collaborative instead of blind. Read at dispatch time (closure).
+        intro_digest = ""
+
         async def _dispatch_owner(sp: dict) -> dict:
             arch, st = sp["arch"], sp["subtask"]
             role = arch.get("role") or arch["id"]
@@ -536,7 +541,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
-            prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files], subtasks, shared_context)
+            prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files],
+                                           subtasks, shared_context, team_prep=intro_digest)
             d = await _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
@@ -557,6 +563,49 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     log.debug("Vatra board output write failed", error=str(e))
             return d
 
+        # 2c) Intro round — before the real work, each specialist does PREPARATION
+        # (groundwork: key facts, sources, outline) and posts it to the shared board.
+        # This is a barrier: the main round starts only once ALL intros finish, so the
+        # board is already populated and the main round is collaborative, not blind.
+        if bool(cfg.get("intro_round", True)) and len(spawned) >= 2:
+            _progress(sid, "intro", "Intro round — each specialist preparing groundwork…")
+
+            async def _intro_owner(sp: dict) -> dict | None:
+                arch, st = sp["arch"], sp["subtask"]
+                role = arch.get("role") or arch["id"]
+                label = _owner_label(sp)
+                on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
+                prompt = _build_intro_prompt(role, st, shared_context)
+                d = await _dispatch_one(
+                    sp["port"], sp["auth"], prompt, body.dispatch_timeout,
+                    on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
+                    agent_name=label, on_usage=on_usage)
+                mark = "✓" if d["ok"] else "✗"
+                _progress(sid, "dispatch",
+                          f"{label} (intro) {mark} · {len(d['actions'])} action(s) "
+                          f"({d['latency_ms'] / 1000:.1f}s)", ok=d["ok"], agent=label)
+                out = (d.get("output") or "").strip()
+                if out:
+                    try:
+                        await get_db().add_vatra_board(sid, arch["id"], st["id"], "note",
+                                                       f"{st['title']} — prep", out[:_BOARD_CONTENT_CAP])
+                    except Exception as e:
+                        log.debug("Vatra intro board write failed", error=str(e))
+                    return {"title": st["title"], "role": role, "output": out}
+                return None
+
+            intro_out = await asyncio.gather(*[_intro_owner(sp) for sp in spawned])
+            prep = [p for p in intro_out if p]
+            if len(prep) >= 2:
+                try:
+                    intro_digest = await asyncio.wait_for(
+                        _llm_team_digest(intent, prep, _creds("reason")), 180)
+                except Exception as e:
+                    log.warning("Vatra intro digest failed", error=str(e))
+            _progress(sid, "intro", f"Intro round done — {len(prep)} specialist(s) prepared; starting the build")
+
+        # 3) Main round — each owner produces its full piece (now able to build on the
+        # team's prep via the injected intro digest + the shared board).
         dispatched = await asyncio.gather(*[_dispatch_owner(sp) for sp in spawned])
         for sp, d in zip(spawned, dispatched):
             results.append({
@@ -868,8 +917,30 @@ async def _learn(db, user: dict, sid: str, domain: str, intent: str,
     return learned
 
 
+def _build_intro_prompt(role: str, st: dict, shared_context: str = "") -> str:
+    """Round-0 preparation: groundwork the agent posts to the shared board before the
+    team writes their actual pieces, so the main round starts collaborative."""
+    contract = ""
+    if shared_context.strip():
+        contract = "\n## Shared conventions the team will follow\n" + shared_context.strip() + "\n"
+    return (
+        f"Round 0 — PREPARATION. You are the {role}, on a team about to build ONE deliverable "
+        f"together. You own the '{st['title']}' part. Before anyone writes their actual piece, do "
+        f"GROUNDWORK for yours:\n"
+        f"- Gather the key facts, figures, sources, and decisions your part will need.\n"
+        f"- Sketch a short outline of what your piece will cover.\n"
+        f"- Note open questions or anything you'll need from a teammate.\n\n"
+        f"## Your part (for context)\n{st['brief']}{contract}\n"
+        f"POST your prep to the shared board so teammates can build on it: call "
+        f"`vatra(action=\"post\", text=\"<your key findings + outline>\")`. Keep it CONCISE — this "
+        f"is groundwork, NOT the final piece (you write that next round). Then reply with a short "
+        f"summary of what you prepared — no preamble."
+    )
+
+
 def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str],
-                          all_subtasks: list[dict], shared_context: str = "") -> str:
+                          all_subtasks: list[dict], shared_context: str = "",
+                          team_prep: str = "") -> str:
     """Frame one subtask for its owner — with the team contract everyone must
     follow, awareness of the whole team, and a nudge to delegate cross-slice needs."""
     files_block = ""
@@ -899,12 +970,20 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
             "For anything you need from them, call `vatra` action='search' (query=…) — they may "
             "have already posted it. Only `ask` if it isn't there yet. Don't guess these and "
             "don't reproduce their slice yourself.\n")
+    prep_block = ""
+    if team_prep.strip():
+        prep_block = (
+            "\n\n## What your teammates prepared (intro round)\n"
+            "Everyone did groundwork first and posted it to the shared board. Build ON this — "
+            "don't duplicate it; for a teammate's full prep call `vatra(action=\"search\", "
+            "query=\"<topic>\")`:\n"
+            f"{team_prep.strip()}\n")
     return (
         f"You are the {role}, one specialist on a collaborating team building ONE deliverable "
         f"together. You own ONE part; your teammates are producing the others in parallel. "
         f"Produce only your part, in full — a reporter assembles all parts at the end.\n\n"
         f"## Overall task (for context)\n{intent}\n\n"
-        f"## The team and their pieces\n{roster}{contract_block}\n\n"
+        f"## The team and their pieces\n{roster}{contract_block}{prep_block}\n\n"
         f"## Your part — {st['title']}\n{st['brief']}{files_block}{deps_block}\n\n"
         f"## Reaching your team — use the `vatra` tool (it is ALWAYS available)\n"
         f"Your teammates' notes and finished pieces stream onto a shared board. Reach it ONLY "
