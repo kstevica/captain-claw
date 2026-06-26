@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { CornerDownRight, ArrowRight, Check, X, Loader2, Users } from 'lucide-react'
+import { CornerDownRight, ArrowRight, Check, X, Loader2, Users, Share2 } from 'lucide-react'
 import { apiListVatraAsks, type VatraAsk, type VatraSubtask } from '../stores/basnaStore'
 
-// The Vatra collaboration view: the Lead's decomposition (who owns what) plus the
-// blackboard — every cross-agent ask, who it went to, and the answer. Renders
-// alongside the Basna detail pane when a session is in collaborative mode.
+// Vatra collaboration views, split into two pieces so the page can place them in
+// different spots: the team PLAN (the Lead's decomposition — who owns what) up top
+// where Basna's route plan would be, and the delegation BLACKBOARD (cross-agent
+// asks) lower down, between the working agents and the progress log.
 
 function Chip({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
@@ -13,6 +14,42 @@ function Chip({ children, className = '' }: { children: React.ReactNode; classNa
     </span>
   )
 }
+
+const PANEL = 'rounded-lg border border-violet-800/40 bg-violet-950/10 p-4'
+
+// ── Team plan: the decomposition (owner · piece), shown for review + while running ──
+
+export function VatraTeamPlan({ subtasks }: { subtasks?: VatraSubtask[] }) {
+  return (
+    <div className={PANEL}>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <Users className="h-3.5 w-3.5 text-violet-400" />
+        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Team plan</span>
+        <Chip className="text-violet-600 dark:text-violet-300">vatra · collaborative</Chip>
+        {!!subtasks?.length && <Chip className="text-zinc-400">{subtasks.length} piece(s)</Chip>}
+      </div>
+      {subtasks?.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {subtasks.map((s) => (
+            <span
+              key={s.id}
+              title={s.brief || ''}
+              className="rounded-md border border-zinc-800 bg-zinc-900/50 px-2 py-1 text-[11px] text-zinc-300"
+            >
+              <span className="text-violet-300/80">{s.owner_archetype_id}</span>
+              <span className="mx-1 text-zinc-700">·</span>
+              {s.title}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-zinc-500">The Lead is decomposing the task into complementary pieces…</p>
+      )}
+    </div>
+  )
+}
+
+// ── Blackboard: cross-agent asks (owner → helper), live while the run is active ──
 
 const STATUS_STYLE: Record<VatraAsk['status'], { label: string; cls: string }> = {
   open: { label: 'open', cls: 'text-amber-600 dark:text-amber-300' },
@@ -28,7 +65,7 @@ function StatusIcon({ status }: { status: VatraAsk['status'] }) {
   return <Loader2 className="h-3 w-3 text-amber-500" />
 }
 
-export function VatraDelegation({
+export function VatraBlackboard({
   sessionId,
   subtasks,
   active,
@@ -47,7 +84,6 @@ export function VatraDelegation({
       if (!cancelled) setAsks(rows)
     }
     load()
-    // Poll while the run is live so the ledger fills in as helpers answer.
     if (!active) return () => { cancelled = true }
     const t = setInterval(load, 2500)
     return () => { cancelled = true; clearInterval(t) }
@@ -60,46 +96,26 @@ export function VatraDelegation({
   const ownerTitle = (id: string) => subtasks?.find((s) => s.owner_archetype_id === id)?.title
 
   return (
-    <div className="rounded-lg border border-violet-800/40 bg-violet-950/10 p-4">
+    <div className={PANEL}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Users className="h-3.5 w-3.5 text-violet-400" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Collaboration</span>
-        <Chip className="text-violet-600 dark:text-violet-300">vatra</Chip>
-        {!!subtasks?.length && <Chip className="text-zinc-400">{subtasks.length} piece(s)</Chip>}
+        <Share2 className="h-3.5 w-3.5 text-violet-400" />
+        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Delegation blackboard</span>
         {asks.length > 0 && (
           <span className="ml-auto flex items-center gap-2 text-[11px] text-zinc-500">
             {counts.answered ? <span className="text-emerald-500">{counts.answered} answered</span> : null}
-            {counts.open || counts.claimed ? <span className="text-amber-500">{(counts.open || 0) + (counts.claimed || 0)} pending</span> : null}
+            {(counts.open || counts.claimed) ? <span className="text-amber-500">{(counts.open || 0) + (counts.claimed || 0)} pending</span> : null}
             {counts.dropped ? <span className="text-rose-500">{counts.dropped} dropped</span> : null}
           </span>
         )}
       </div>
 
-      {/* The decomposition — who owns which piece of the deliverable. */}
-      {!!subtasks?.length && (
-        <div className="mb-3 flex flex-wrap gap-1.5">
-          {subtasks.map((s) => (
-            <span
-              key={s.id}
-              title={s.brief || ''}
-              className="rounded-md border border-zinc-800 bg-zinc-900/50 px-2 py-1 text-[11px] text-zinc-300"
-            >
-              <span className="text-zinc-500">{s.owner_archetype_id}</span>
-              <span className="mx-1 text-zinc-700">·</span>
-              {s.title}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* The blackboard — each cross-agent ask as owner → helper, expandable. */}
       {asks.length === 0 ? (
         <p className="text-xs text-zinc-600">
-          No delegation yet — the specialists are working their slices independently.
+          No delegation yet — the specialists are working their slices independently. When one needs
+          something outside its slice, the ask shows up here.
         </p>
       ) : (
         <div className="space-y-1.5">
-          <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-600">Delegation</span>
           {asks.map((a) => {
             const st = STATUS_STYLE[a.status]
             const isOpen = !!open[a.id]

@@ -7,7 +7,7 @@ import {
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useBasnaStore, parseAnalysis, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis } from '../stores/basnaStore'
-import { VatraDelegation } from '../components/VatraDelegation'
+import { VatraTeamPlan, VatraBlackboard } from '../components/VatraDelegation'
 import { useTierConfig, TIER_ORDER, PROVIDERS } from '../services/tierConfig'
 
 const COGNITIVE_MODES = ['neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian']
@@ -465,6 +465,10 @@ export function BasnaPage() {
 
   const [intent, setIntent] = useState('')
   const [title, setTitle] = useState('')
+  // Compose mode for a NEW run; a selected run locks to its own mode (effectiveMode).
+  const [composeMode, setComposeMode] = useState<'basna' | 'vatra'>(
+    () => ((typeof localStorage !== 'undefined' && localStorage.getItem('basna.composeMode')) as 'basna' | 'vatra') || 'basna',
+  )
   const [agentOnly, setAgentOnly] = useState(false)
   const [deepening, setDeepening] = useState(false)
   const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
@@ -500,8 +504,11 @@ export function BasnaPage() {
   }, [progress.length])
 
   useEffect(() => { loadSessions() }, [loadSessions])
-  useEffect(() => { setIntent(activeSession?.intent || '') }, [activeSession?.id, activeSession?.intent])
-  useEffect(() => { setTitle(activeSession?.title || '') }, [activeSession?.id, activeSession?.title])
+  // Load a selected run's intent/title, but DON'T wipe the textarea when the
+  // selection is cleared (New and mode-switch handle clearing explicitly) — this
+  // lets switching modes keep what you've typed.
+  useEffect(() => { if (activeSession) setIntent(activeSession.intent || '') }, [activeSession?.id, activeSession?.intent])
+  useEffect(() => { if (activeSession) setTitle(activeSession.title || '') }, [activeSession?.id, activeSession?.title])
 
   // Live monitor: while any run (incl. agent-started) is mid-flight, poll the
   // list status + the open session's progress every few seconds; stop when idle.
@@ -510,6 +517,21 @@ export function BasnaPage() {
   // (their route's `selected` carries no tier/prior_weight). Read from config so
   // it's correct even before the Lead has decomposed (route is still empty).
   const vatraMode = !!activeSession && isVatra(activeSession.config)
+  // The mode the controls act in: a selected run is locked to its own mode; with
+  // no run selected, the toggle (composeMode) decides.
+  const effectiveMode: 'basna' | 'vatra' = activeSession ? (vatraMode ? 'vatra' : 'basna') : composeMode
+  // Keep the toggle in sync with whatever run is open.
+  useEffect(() => {
+    if (activeSession) setComposeMode(isVatra(activeSession.config) ? 'vatra' : 'basna')
+  }, [activeSession?.id, activeSession?.config])
+  const pickMode = (m: 'basna' | 'vatra') => {
+    if (m === effectiveMode) return
+    setComposeMode(m)
+    try { localStorage.setItem('basna.composeMode', m) } catch { /* ignore */ }
+    // A run is locked to its mode, so switching means composing a fresh one — but
+    // keep the typed intent/title (the cleared selection no longer wipes them).
+    if (activeSession) newSession()
+  }
   useEffect(() => {
     if (!anyRunning || executing) return
     const iv = setInterval(() => { pollRunning() }, 4000)
@@ -708,13 +730,40 @@ export function BasnaPage() {
                   ))}
                 </div>
               )}
+              {/* Mode selector — the two ways to run a team, clearly distinguished. */}
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {([
+                  { id: 'basna', icon: Network, name: 'Basna', sub: 'Independent ensemble — agents answer blind, merged by reliability', on: 'border-sky-500/70 bg-sky-950/30', dot: 'text-sky-400' },
+                  { id: 'vatra', icon: Users, name: 'Vatra', sub: 'Collaborative team — a Lead splits the work, a reporter assembles it', on: 'border-violet-500/70 bg-violet-950/30', dot: 'text-violet-400' },
+                ] as const).map((m) => {
+                  const Icon = m.icon
+                  const sel = effectiveMode === m.id
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => pickMode(m.id)}
+                      className={`flex items-start gap-2 rounded-lg border p-2.5 text-left transition-colors ${
+                        sel ? m.on : 'border-zinc-800 bg-zinc-900/40 hover:bg-zinc-800/40'}`}
+                    >
+                      <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${sel ? m.dot : 'text-zinc-500'}`} />
+                      <span className="min-w-0">
+                        <span className={`block text-xs font-semibold ${sel ? 'text-zinc-100' : 'text-zinc-300'}`}>
+                          {m.name}{sel && <span className="ml-1.5 text-[10px] font-normal text-zinc-500">selected</span>}
+                        </span>
+                        <span className="block text-[11px] leading-snug text-zinc-500">{m.sub}</span>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+
               <div className="mt-3 flex flex-wrap items-center gap-3">
                 <label className="flex items-center gap-2 text-xs text-zinc-400">
                   Router tier
                   <select
                     value={routerTier}
                     onChange={(e) => setRouterTier(e.target.value)}
-                    title="Which Library tier picks the archetypes"
+                    title="Which Library tier picks the archetypes / leads the team"
                     className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
                   >
                     {TIER_ORDER.filter((t) => tiers[t]).map((t) => (
@@ -732,41 +781,46 @@ export function BasnaPage() {
                   />
                 </label>
                 <div className="ml-auto flex items-center gap-2">
-                  <button
-                    onClick={() => route(intent, tiers, title)}
-                    disabled={!canRoute || vatraMode}
-                    className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
-                  >
-                    {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                    Route
-                  </button>
-                  <button
-                    onClick={() => planVatra(intent, tiers, title)}
-                    disabled={!canRoute || vatraMode}
-                    title="Collaborative mode: a Lead splits the task into parts; review the plan, then Run team. Best for multi-part build tasks."
-                    className="flex items-center gap-1.5 rounded-lg border border-violet-700/70 px-3 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-800/30 disabled:opacity-40"
-                  >
-                    {planning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Users className="h-3.5 w-3.5" />}
-                    Plan as Vatra
-                  </button>
-                  {vatraMode ? (
-                    <button
-                      onClick={() => runVatra(tiers, envVars)}
-                      disabled={!canRun}
-                      className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
-                    >
-                      {(executing || activeBusy) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                      Run team
-                    </button>
+                  {effectiveMode === 'vatra' ? (
+                    <>
+                      <button
+                        onClick={() => planVatra(intent, tiers, title)}
+                        disabled={!canRoute || vatraMode}
+                        title="Decompose the task into owned pieces — review the team, then Run team."
+                        className="flex items-center gap-1.5 rounded-lg border border-violet-700/70 px-3 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-800/30 disabled:opacity-40"
+                      >
+                        {planning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                        Plan team
+                      </button>
+                      <button
+                        onClick={() => runVatra(tiers, envVars)}
+                        disabled={!canRun}
+                        className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                      >
+                        {(executing || activeBusy) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                        Run team
+                      </button>
+                    </>
                   ) : (
-                    <button
-                      onClick={() => execute(tiers, envVars)}
-                      disabled={!canRun}
-                      className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
-                    >
-                      {executing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                      Run ensemble
-                    </button>
+                    <>
+                      <button
+                        onClick={() => route(intent, tiers, title)}
+                        disabled={!canRoute}
+                        title="Select the minimal archetype team — review/edit it, then Run ensemble."
+                        className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+                      >
+                        {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                        Route
+                      </button>
+                      <button
+                        onClick={() => execute(tiers, envVars)}
+                        disabled={!canRun}
+                        className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                      >
+                        {executing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                        Run ensemble
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
@@ -921,13 +975,9 @@ export function BasnaPage() {
               </div>
             )}
 
-            {/* Vatra (collaborative mode): the decomposition + delegation blackboard. */}
+            {/* Vatra: the team plan (decomposition) — sits where the route plan would. */}
             {vatraMode && activeSession && (
-              <VatraDelegation
-                sessionId={activeSession.id}
-                subtasks={routePlan?.subtasks}
-                active={activeBusy || executing}
-              />
+              <VatraTeamPlan subtasks={routePlan?.subtasks} />
             )}
 
             {/* Live per-agent panels — actions + running LLM usage as they stream.
@@ -940,6 +990,16 @@ export function BasnaPage() {
                 </span>
                 <LiveAgentsPanel agents={liveAgents} />
               </div>
+            )}
+
+            {/* Vatra: the delegation blackboard — below the working agents, above the
+                progress log. Shown once the run is live or finished (not for an idle plan). */}
+            {vatraMode && activeSession && activeSession.status !== 'routed' && (
+              <VatraBlackboard
+                sessionId={activeSession.id}
+                subtasks={routePlan?.subtasks}
+                active={activeBusy || executing}
+              />
             )}
 
             {/* Live progress log */}
