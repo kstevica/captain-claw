@@ -29,8 +29,9 @@ class VatraTool(Tool):
     name = "vatra"
     description = (
         "The shared team board for a Vatra run — a live shared memory where every teammate's "
-        "notes, outputs and files appear as they work. You own ONE slice; use the board to build "
-        "ON your teammates' work instead of guessing or duplicating it.\n"
+        "notes, outputs and files appear as they work. ALWAYS available inside a Vatra run: call "
+        "it directly, never run a shell command or `flight_deck` to 'check' it first. You own ONE "
+        "slice; use the board to build ON your teammates' work instead of guessing or duplicating it.\n"
         "'search' — find what teammates have produced by keyword (`query`) — use this FIRST "
         "whenever your piece needs a fact, figure, decision, or section another piece owns.\n"
         "'read' — recent entries from teammates (optional `kind` = note|output|narration|file).\n"
