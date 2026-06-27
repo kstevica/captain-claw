@@ -42,9 +42,10 @@ def factory_raises():
     return f
 
 
-@pytest.fixture
-def allow_test_tiers(monkeypatch):
-    monkeypatch.setattr(dr, "_allowed_ids", lambda: {"t1": object(), "t2": object()})
+# Library tier map a test "user" would have configured.
+TIERS_MAP = {"t1": {"provider": "openai", "model": "m1"},
+             "t2": {"provider": "openai", "model": "m2"}}
+LADDER = ["t1", "t2"]
 
 
 @pytest.fixture
@@ -57,20 +58,23 @@ async def store(tmp_path):
 
 # ── build_ladder ─────────────────────────────────────────────────────
 
-def test_build_ladder_explicit_tiers(allow_test_tiers):
-    ladder = dr.build_ladder("coder", "t1", "t2", ["t1", "t2"])
+def test_build_ladder_explicit_tiers():
+    ladder = dr.build_ladder("t1", "t2", ["t1", "t2"],
+                             default_ladder=LADDER, allowed={"t1", "t2"})
     assert [t.id for t in ladder] == ["t1", "t2"]
     assert ladder[0].cost < ladder[1].cost   # cost escalates by position
 
 
-def test_build_ladder_single_tier_when_base_equals_max(allow_test_tiers):
-    assert [t.id for t in dr.build_ladder("coder", "t1", "t1", None)] == ["t1"]
+def test_build_ladder_single_tier_when_base_equals_max():
+    assert [t.id for t in dr.build_ladder("t1", "t1", None,
+                                          default_ladder=LADDER, allowed={"t1"})] == ["t1"]
 
 
-def test_build_ladder_rejects_unknown_tier(allow_test_tiers):
+def test_build_ladder_rejects_unknown_tier():
     from fastapi import HTTPException
     with pytest.raises(HTTPException):
-        dr.build_ladder("coder", "t1", "ghost", ["t1", "ghost"])
+        dr.build_ladder("t1", "ghost", ["t1", "ghost"],
+                        default_ladder=LADDER, allowed={"t1"})
 
 
 def test_final_status_mapping():
@@ -81,7 +85,7 @@ def test_final_status_mapping():
 
 # ── execute_coder (end to end through the engine) ────────────────────
 
-async def test_execute_coder_elevates_and_persists(tmp_path, allow_test_tiers, store):
+async def test_execute_coder_elevates_and_persists(tmp_path, store):
     (tmp_path / "test_add.py").write_text("from solution import add\n")
     req = dr.CoderRequest(
         task="implement add(a, b)", workspace=str(tmp_path),
@@ -91,7 +95,7 @@ async def test_execute_coder_elevates_and_persists(tmp_path, allow_test_tiers, s
     run_id = await store.create_run("coder", "u1", req.task, "t1", "t2", 0.0)
 
     result = await dr.execute_coder(
-        store, run_id, req,
+        store, run_id, req, tiers_map=TIERS_MAP,
         provider_factory=factory_const("```python\ndef add(a, b): return a + b  # CORRECT\n```"),
         runner=runner_passes_on("CORRECT"),
     )
@@ -103,12 +107,12 @@ async def test_execute_coder_elevates_and_persists(tmp_path, allow_test_tiers, s
     assert len(run["steps"]) >= 1            # the ladder log was persisted
 
 
-async def test_execute_coder_records_error_status(tmp_path, allow_test_tiers, store):
+async def test_execute_coder_records_error_status(tmp_path, store):
     # A failing provider must be recorded as an error run, not crash the loop.
     req = dr.CoderRequest(task="x", workspace=str(tmp_path),
                           base_tier="t1", max_tier="t1", tiers=["t1"])
     run_id = await store.create_run("coder", "u1", req.task, "t1", "t1", 0.0)
-    await dr.execute_coder(store, run_id, req,
+    await dr.execute_coder(store, run_id, req, tiers_map=TIERS_MAP,
                            provider_factory=factory_raises(),
                            runner=runner_passes_on("CORRECT"))
     run = await store.get_run("coder", run_id)
@@ -117,7 +121,7 @@ async def test_execute_coder_records_error_status(tmp_path, allow_test_tiers, st
 
 # ── execute_reason (elevated via self-consistency) ───────────────────
 
-async def test_execute_reason_passes_on_agreement(tmp_path, allow_test_tiers, store):
+async def test_execute_reason_passes_on_agreement(tmp_path, store):
     req = dr.ReasonRequest(
         task="what is 2+2?", base_tier="t1", max_tier="t2", tiers=["t1", "t2"],
         agreement_threshold=0.6, critic_modes=[],   # high agreement -> critics moot
@@ -126,7 +130,7 @@ async def test_execute_reason_passes_on_agreement(tmp_path, allow_test_tiers, st
     run_id = await store.create_run("reason", "u1", req.task, "t1", "t2", 0.0)
 
     result = await dr.execute_reason(
-        store, run_id, req,
+        store, run_id, req, tiers_map=TIERS_MAP,
         provider_factory=factory_const("reasoning...\nAnswer: 42"),
     )
     assert result.passed

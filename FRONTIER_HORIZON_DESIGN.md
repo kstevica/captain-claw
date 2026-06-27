@@ -226,6 +226,11 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
   Horizon". User-selectable base/max tier, budget, sample/fix caps, reasoning
   stakes + agreement threshold; live ladder log (rung/tier/kind/samples/conf) polled
   from the run detail; per-track history. `npm run build` (tsc + vite) clean.
+- **Tiers come from the Library** (not desktop `config.model.allowed`): the four
+  named tiers `fast`/`balanced`/`reason`/`longctx` from the user's active Library set
+  (`fd:forge-tiers`), resolved server-side via `_load_owner_tiers` → `create_provider`
+  (reusing Basna's tier seam). Default ladders `fast→balanced→reason`; `build_ladder`
+  validates against the user's configured tier names. No API keys cross the wire.
 
 ### Phase 4 — Measurement (closes the "simulation" claim) ✅ done (coder; target-agnostic)
 - **Reframed**: no Fable 5 / GPT-5.6 max access, so the ceiling is **whatever tier you

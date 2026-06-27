@@ -16,15 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import math
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from captain_claw.config import get_config
 from captain_claw.dubina import (
-    CODER_LADDER,
-    REASON_LADDER,
     Budget,
     CoderVerifier,
     EngineConfig,
@@ -38,8 +34,6 @@ from captain_claw.dubina import (
     load_critic_modes,
     make_coder_generator,
     make_reasoning_generator,
-    provider_for_tier_from_config,
-    resolve_ladder,
     shell_command_runner,
 )
 from captain_claw.dubina.coder import (
@@ -49,8 +43,10 @@ from captain_claw.dubina.coder import (
     Workspace,
 )
 from captain_claw.dubina.reasoning import DEFAULT_CRITIC_MODES
-from captain_claw.flight_deck.auth import get_current_user
+from captain_claw.flight_deck.auth import get_current_user, get_db
+from captain_claw.flight_deck.basna_routes import _load_owner_tiers
 from captain_claw.flight_deck.dubina_store import TRACKS, DubinaStore
+from captain_claw.llm import create_provider
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -72,30 +68,55 @@ def _store() -> DubinaStore:
     return _STORE
 
 
-# ── Tier / ladder helpers ────────────────────────────────────────────
+# ── Tier / ladder helpers (Library tiers) ────────────────────────────
 
-def _allowed_ids() -> dict[str, Any]:
-    return {m.id: m for m in get_config().model.allowed}
+# Flight Deck Library tiers, cheap → expensive. ``longctx`` is a special-purpose
+# tier, not part of the default escalation ladders.
+TIER_ORDER = ("fast", "balanced", "reason", "longctx")
+LIBRARY_CODER_LADDER = ["fast", "balanced", "reason"]
+LIBRARY_REASON_LADDER = ["fast", "balanced", "reason"]
 
 
-def build_ladder(track: str, base_tier: str, max_tier: str, tiers: list[str] | None) -> list[Tier]:
+async def _resolve_tiers(db, user_id: str) -> dict[str, dict]:
+    """The user's configured Library tier map (name -> {provider, model, ...})."""
+    tiers_map, _env = await _load_owner_tiers(db, user_id)
+    return tiers_map or {}
+
+
+def _library_provider_factory(tiers_map: dict[str, dict]):
+    """A ``ProviderForTier`` backed by the user's Library tier configs."""
+    def factory(tier: str):
+        t = tiers_map.get(tier)
+        if not t:
+            raise ValueError(f"tier {tier!r} is not configured in your Library")
+        return create_provider(
+            provider=t.get("provider", "anthropic"), model=t.get("model", ""),
+            base_url=t.get("base_url") or None, api_key=t.get("api_key") or None,
+            temperature=0.7, max_tokens=int(t.get("output_ctx") or 0) or 8000,
+        )
+    return factory
+
+
+def build_ladder(
+    base_tier: str, max_tier: str, tiers: list[str] | None,
+    *, default_ladder: list[str], allowed: set[str],
+) -> list[Tier]:
     """Resolve the active escalation ladder (cheap→expensive) from the request.
 
     Priority: an explicit ordered ``tiers`` list; else the track's default ladder
     sliced ``base_tier``..``max_tier``; else a two-rung ``[base, max]`` ladder. All
-    ids are validated against ``config.model.allowed``. Costs escalate by position.
+    ids are validated against the user's configured Library tier names (``allowed``).
+    Costs escalate by position.
     """
-    allowed = _allowed_ids()
     if tiers:
         ids = list(dict.fromkeys(t for t in tiers if t))
+    elif base_tier in default_ladder and max_tier in default_ladder:
+        lo, hi = default_ladder.index(base_tier), default_ladder.index(max_tier)
+        if lo > hi:
+            raise HTTPException(400, f"base_tier {base_tier!r} is above max_tier {max_tier!r}")
+        ids = default_ladder[lo:hi + 1]
     else:
-        default = CODER_LADDER if track == "coder" else REASON_LADDER
-        default_ids = [t.id for t in default]
-        if base_tier in default_ids and max_tier in default_ids:
-            sliced = resolve_ladder(default, base_tier, max_tier)
-            ids = [t.id for t in sliced]
-        else:
-            ids = [base_tier] if base_tier == max_tier else [base_tier, max_tier]
+        ids = [base_tier] if base_tier == max_tier else [base_tier, max_tier]
     unknown = [i for i in ids if i not in allowed]
     if unknown:
         raise HTTPException(400, f"unknown tier(s): {unknown}")
@@ -149,12 +170,15 @@ class ReasonRequest(BaseModel):
 
 async def execute_coder(
     store: DubinaStore, run_id: str, req: CoderRequest,
-    *, provider_factory=None, runner=None,
+    *, provider_factory=None, runner=None, tiers_map: dict | None = None,
 ):
     try:
-        provider_factory = provider_factory or provider_for_tier_from_config()
+        tiers_map = tiers_map or {}
+        allowed = set(tiers_map) or set(TIER_ORDER)
+        ladder = build_ladder(req.base_tier, req.max_tier, req.tiers,
+                              default_ladder=LIBRARY_CODER_LADDER, allowed=allowed)
+        provider_factory = provider_factory or _library_provider_factory(tiers_map)
         runner = runner or shell_command_runner
-        ladder = build_ladder("coder", req.base_tier, req.max_tier, req.tiers)
         config = EngineConfig(
             ladder=ladder, max_step_samples=req.max_step_samples,
             max_fix_attempts=req.max_fix_attempts,
@@ -183,11 +207,15 @@ async def execute_coder(
 
 
 async def execute_reason(
-    store: DubinaStore, run_id: str, req: ReasonRequest, *, provider_factory=None,
+    store: DubinaStore, run_id: str, req: ReasonRequest,
+    *, provider_factory=None, tiers_map: dict | None = None,
 ):
     try:
-        provider_factory = provider_factory or provider_for_tier_from_config()
-        ladder = build_ladder("reason", req.base_tier, req.max_tier, req.tiers)
+        tiers_map = tiers_map or {}
+        allowed = set(tiers_map) or set(TIER_ORDER)
+        ladder = build_ladder(req.base_tier, req.max_tier, req.tiers,
+                              default_ladder=LIBRARY_REASON_LADDER, allowed=allowed)
+        provider_factory = provider_factory or _library_provider_factory(tiers_map)
         config = EngineConfig(
             ladder=ladder, max_step_samples=req.max_step_samples,
             max_fix_attempts=req.max_fix_attempts,
@@ -247,43 +275,47 @@ def _reason_summary(result) -> dict:
 # ── Endpoints ────────────────────────────────────────────────────────
 
 @router.get("/tiers")
-async def list_tiers(user: dict = Depends(get_current_user)):
-    """Available model tiers + the default per-track ladders, for the UI selectors."""
+async def list_tiers(db=Depends(get_db), user: dict = Depends(get_current_user)):
+    """The user's configured Library tiers + default per-track ladders, for the UI."""
+    tiers_map = await _resolve_tiers(db, user["id"])
+    ordered = ([n for n in TIER_ORDER if n in tiers_map]
+               + [n for n in tiers_map if n not in TIER_ORDER])
     tiers = [
-        {"id": m.id, "provider": m.provider, "model": m.model,
-         "description": m.description, "reasoning_level": m.reasoning_level}
-        for m in get_config().model.allowed if m.model_type == "llm"
+        {"id": n, "provider": tiers_map[n].get("provider", ""),
+         "model": tiers_map[n].get("model", ""),
+         "description": f"{tiers_map[n].get('provider', '')}/{tiers_map[n].get('model', '')}",
+         "reasoning_level": ""}
+        for n in ordered
     ]
     return {
         "tiers": tiers,
-        "default_ladders": {
-            "coder": [t.id for t in CODER_LADDER],
-            "reason": [t.id for t in REASON_LADDER],
-        },
+        "default_ladders": {"coder": LIBRARY_CODER_LADDER, "reason": LIBRARY_REASON_LADDER},
     }
 
 
 @router.post("/coder")
-async def start_coder(req: CoderRequest, user: dict = Depends(get_current_user)):
+async def start_coder(req: CoderRequest, db=Depends(get_db), user: dict = Depends(get_current_user)):
     store = _store()
+    tiers_map = await _resolve_tiers(db, user["id"])
     run_id = await store.create_run(
         "coder", user["id"], req.task, req.base_tier, req.max_tier,
         _budget_value(req.compute_budget),
         config=req.model_dump(exclude={"task"}),
     )
-    asyncio.create_task(execute_coder(store, run_id, req))
+    asyncio.create_task(execute_coder(store, run_id, req, tiers_map=tiers_map))
     return {"run_id": run_id, "track": "coder", "status": "running"}
 
 
 @router.post("/reason")
-async def start_reason(req: ReasonRequest, user: dict = Depends(get_current_user)):
+async def start_reason(req: ReasonRequest, db=Depends(get_db), user: dict = Depends(get_current_user)):
     store = _store()
+    tiers_map = await _resolve_tiers(db, user["id"])
     run_id = await store.create_run(
         "reason", user["id"], req.task, req.base_tier, req.max_tier,
         _budget_value(req.compute_budget),
         config=req.model_dump(exclude={"task"}),
     )
-    asyncio.create_task(execute_reason(store, run_id, req))
+    asyncio.create_task(execute_reason(store, run_id, req, tiers_map=tiers_map))
     return {"run_id": run_id, "track": "reason", "status": "running"}
 
 
