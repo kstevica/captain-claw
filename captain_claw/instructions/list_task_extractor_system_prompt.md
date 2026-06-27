@@ -16,6 +16,7 @@ Return ONLY a JSON object (no markdown, no code fences):
 }
 
 Rules:
+- CRITICAL — members are EXISTING things to READ/PROCESS (sources: files on disk, URLs, pages, records). They are NEVER files or artifacts to be CREATED. If the task is to build/implement/write/code/refactor/debug something (a game, app, component, script, or named output files like `foo.html`/`bar.js`), there is no list work to extract: return `has_list_work: false` with empty `members`. Deliverable filenames the task will produce are OUTPUTS, not members. Only treat items as members when they already exist and the task reads or processes each one.
 - Use only the user request + provided context.
 - Extract only members relevant to the user request.
 - Deduplicate members and keep original readable names.

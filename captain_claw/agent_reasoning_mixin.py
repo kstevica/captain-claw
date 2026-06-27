@@ -1010,38 +1010,92 @@ class AgentReasoningMixin:
             )
         )
 
-    @staticmethod
-    def _is_list_processing_request(user_input: str) -> bool:
-        """Detect requests that imply processing multiple items/entities.
+    # Nouns that turn a bare quantifier ("all/each/every/per") into a real
+    # list of items to process. Without one of these, "all"/"each"/"per" is
+    # almost always ordinary prose ("all files need to be written", "as per
+    # the spec", "each game has its own logic") — NOT list-extraction work.
+    _LIST_NOUN = (
+        r"(?:files?|urls?|links?|pages?|articles?|items?|entries|records?|rows?|"
+        r"documents?|docs?|pdfs?|sources?|companies|cities|names?|sites?|"
+        r"products?|images?|photos?|videos?|messages?|emails?|tickets?|"
+        r"results?|sections?|entities|people|users?|customers?|accounts?)"
+    )
 
-        Covers three categories:
-        1. Per-item processing language (for each, every, per, ...)
-        2. User explicitly providing a list (here are the urls, these files, ...)
-        3. Task that will produce a list (create a list, compile a list, ...)
+    @staticmethod
+    def _is_creation_request(user_input: str) -> bool:
+        """Detect tasks that CREATE or modify artifacts (code, games, apps,
+        components) rather than consume a list of existing inputs.
+
+        These must never enter the input-extraction scale loop: their "items"
+        are OUTPUTS to produce, not sources to read — feeding deliverable
+        filenames into the micro-loop just burns tokens to processed=0 and
+        then re-fires. Returns False for list-PRODUCING tasks ("create a
+        CSV/list/table"), which the scale system legitimately handles.
         """
         text = (user_input or "").strip().lower()
         if not text:
             return False
+        # List-PRODUCING tasks stay in the scale system — not artifact creation.
+        if re.search(
+            r"\b(?:create|compile|build|make|generate|produce|prepare|populate)\s+"
+            r"(?:an?\s+|the\s+)?(?:\w+\s+){0,2}(?:list|csv|spreadsheet|table|report|index|dataset)\b",
+            text,
+        ):
+            return False
+        artifact = (
+            r"(?:game|app|application|web\s*app|website|web\s*page|webpage|component|"
+            r"feature|function|class|method|module|script|program|launcher|engine|"
+            r"library|api|endpoint|server|backend|frontend|plugin|extension|ui|"
+            r"interface|page|screen|form|dashboard|widget|suite|bot|cli|tool|"
+            r"implementation|codebase)s?\b"
+        )
+        # Strong code-creation/modification verbs — creation regardless of object.
+        if re.search(r"\b(?:implement|develop|scaffold|refactor|rewrite|reimplement|program|debug)\b", text):
+            return True
+        # Other create/modify verbs only count as creation with a code/artifact object.
+        if re.search(
+            r"\b(?:build|create|make|write|code|design|add|fix|test|update|modify|enhance|improve|port|wire)\b"
+            r"[\s\S]{0,40}?" + artifact,
+            text,
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _is_list_processing_request(user_input: str) -> bool:
+        """Detect requests that imply processing multiple existing items/entities.
+
+        Covers three categories:
+        1. Per-item processing language (for each FILE/URL/ITEM, ...)
+        2. User explicitly providing a list (here are the urls, these files, ...)
+        3. Task that will produce a list (create a list, compile a list, ...)
+
+        A bare quantifier ("all/each/every/per") no longer fires on its own —
+        it must be paired with a list noun — and artifact-CREATION tasks are
+        excluded outright (their items are outputs, not inputs).
+        """
+        text = (user_input or "").strip().lower()
+        if not text:
+            return False
+        # Creation/modification of code or artifacts is never input-list work.
+        if AgentReasoningMixin._is_creation_request(text):
+            return False
         if re.search(r"\btop\s+\d+\b", text):
             return True
+        _noun = AgentReasoningMixin._LIST_NOUN
         list_markers = (
-            # Per-item processing
-            r"\bfor each\b",
-            r"\beach\b",
-            r"\bevery\b",
-            r"\ball\b",
-            r"\bper\b",
-            r"\blist\s+(?:all|of|out|every|each|the|them|these|those)\b",
+            # Per-item processing — quantifier MUST be followed by a list noun.
+            r"\bfor\s+each\s+(?:\w+\s+){0,2}" + _noun,
+            r"\b(?:each|every|all|per)\s+(?:\w+\s+){0,3}" + _noun,
+            r"\b(?:loop|iterate)\s+(?:over|through)\b",
+            r"\blist\s+(?:all|of|out|every|each|the|them|these|those)\s+(?:\w+\s+){0,3}" + _noun,
             r"\bextract\b.{0,30}\bnames?\b",
-            r"\bcompanies?\b",
-            r"\bcities?\b",
-            r"\bsources?\b",
             # User explicitly providing items
-            r"\bhere (?:is|are) the\b",
-            r"\bthese (?:urls?|links?|files?|pages?|items?|articles?)\b",
-            r"\bthe following\b",
-            r"\bfrom (?:these|the following)\b",
-            r"\bbelow (?:is|are)\b",
+            r"\bhere (?:is|are) the\s+(?:list|" + _noun + r")",
+            r"\bthese\s+(?:urls?|links?|files?|pages?|items?|articles?|documents?)\b",
+            r"\bthe following\s+(?:urls?|links?|files?|pages?|items?|articles?|list)\b",
+            r"\bfrom (?:these|the following)\s+" + _noun,
+            r"\bbelow (?:is|are)\s+(?:a\s+)?(?:list|" + _noun + r")",
             # Task producing a list
             r"\b(?:create|compile|build|make|generate|produce|prepare)\s+(?:a\s+)?(?:list|csv|spreadsheet|table|report)\b",
             r"\b(?:list|csv|spreadsheet|table)\s+(?:of|with|containing)\b",

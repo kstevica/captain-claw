@@ -311,6 +311,13 @@ class AgentScaleDetectionMixin:
         if not large_from_members and not large_from_input:
             return ""
 
+        # Artifact-CREATION tasks ("build a game suite", "implement X / write
+        # these files") are output-lists, not input-lists — never inject the
+        # extraction advisory or the scale machinery would treat deliverables
+        # as sources to read.
+        if self._is_creation_request(_stripped_input):
+            return ""
+
         # Skip scale detection for tasks whose primary purpose is not
         # per-item processing (e.g. file discovery, sending email, merging).
         # Strip the "Results from previous steps:" dependency-output section
@@ -391,6 +398,10 @@ class AgentScaleDetectionMixin:
         # Strip dependency output section so upstream task titles don't
         # falsely match skip patterns for the current task.
         _skip_check_text = _strip_dep_output_section(effective_user_input)
+        # Artifact-CREATION tasks never need deferred scale init — their items
+        # are outputs to write, not sources to fetch and extract.
+        if self._is_creation_request(_skip_check_text):
+            return list_task_plan
         if _SKIP_SCALE_DETECTION_RE.search(_skip_check_text):
             # But DON'T skip when the text also contains per-item processing
             # language — this is a combined process+assemble task that needs
@@ -841,6 +852,36 @@ class AgentScaleDetectionMixin:
         """
         sp = getattr(self, "_scale_progress", None)
 
+        # ── Resolvability guard ──────────────────────────────────────────
+        # The micro-loop is an INPUT-extraction loop (web fetch / file read /
+        # gdrive). If none of the "members" are resolvable inputs (no URL, not
+        # on disk), they are almost certainly OUTPUTS to create — running the
+        # loop just burns tokens to processed=0 and then re-fires. Skip it,
+        # latch scale off for this task, and hand back to the main reasoning.
+        _items = sp.get("items", []) if sp else []
+        if _items and not self._members_look_resolvable(_items):
+            self._skip_deferred_scale = True
+            self._scale_progress = None
+            self._emit_tool_output(
+                "task_contract",
+                {"step": f"{step_label}_skipped_unresolvable", "items": len(_items)},
+                (
+                    f"step={step_label}_skipped_unresolvable\n"
+                    f"items={len(_items)}\n"
+                    "note=members are not resolvable inputs (likely outputs to "
+                    "create); skipping scale loop and returning to main reasoning"
+                ),
+            )
+            return {
+                "total": len(_items), "processed": 0, "completed_total": 0,
+                "failed": 0, "cancelled": False, "errors": [],
+                "skipped_unresolvable": True,
+                "summary": (
+                    "Scale loop skipped — the listed items are outputs to create, "
+                    "not existing sources to read. Proceeding with normal execution."
+                ),
+            }
+
         # Derive per-member action
         task_input = self._strip_scale_advisory(effective_user_input)
         per_member_action = task_input[:2000]
@@ -904,6 +945,46 @@ class AgentScaleDetectionMixin:
     # ------------------------------------------------------------------
     # Deferred scale check helper
     # ------------------------------------------------------------------
+
+    def _members_look_resolvable(self, items: list[str]) -> bool:
+        """Return True if at least one member is a resolvable INPUT source.
+
+        A resolvable input is a URL, a vfs: path that exists, an absolute path
+        that exists, or a workspace-relative path that exists. When nothing
+        resolves, the "members" are outputs to create — not sources to read —
+        and the input-extraction micro-loop must not run on them.
+        """
+        if not items:
+            return False
+        base = getattr(self, "workspace_base_path", None)
+        if not base:
+            tools = getattr(self, "tools", None)
+            base = getattr(tools, "runtime_base_path", None) if tools else None
+        for raw in items:
+            s = str(raw or "").strip()
+            if not s:
+                continue
+            # A "name — https://url" member counts as a URL-bearing input.
+            if s.startswith(("http://", "https://")) or "http://" in s or "https://" in s:
+                return True
+            if s.lower().startswith("vfs:"):
+                try:
+                    from captain_claw.vfs import resolve_vfs_path
+                    p = resolve_vfs_path(s)
+                    if p is not None and p.exists():
+                        return True
+                except Exception:
+                    pass
+                continue
+            try:
+                p = Path(s).expanduser()
+                if p.is_absolute() and p.exists():
+                    return True
+                if base and (Path(base) / s).exists():
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _needs_deferred_scale_init(self) -> bool:
         """Check whether deferred scale initialization should be attempted.
@@ -983,6 +1064,10 @@ class AgentScaleDetectionMixin:
         # Strip dependency output to avoid false matches from upstream
         # task titles.
         _stripped_input = _strip_dep_output_section(effective_user_input)
+        # Artifact-CREATION tasks: glob results are existing scaffolding, not a
+        # per-item work list — never seed scale progress from them.
+        if self._is_creation_request(_stripped_input):
+            return []
         if _SKIP_SCALE_DETECTION_RE.search(_stripped_input):
             if not (
                 self._input_suggests_large_scale(_stripped_input)
