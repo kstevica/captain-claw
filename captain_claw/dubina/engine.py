@@ -260,10 +260,16 @@ class HorizonEngine:
         if self._on_event is not None:
             self._on_event(event)
 
-    async def run(self, task: Step) -> RunResult:
-        """Decompose, then drive each step in sequence — the horizon."""
+    async def run(self, task: Step, budget: Budget | None = None) -> RunResult:
+        """Decompose, then drive each step in sequence — the horizon.
+
+        Pass an external ``budget`` to share one meter with an async aggregator that
+        also spends (e.g. the reasoning judge's critics); otherwise one is created
+        from ``config.compute_budget``.
+        """
         steps = await self.decompose(task)
-        budget = Budget(self.config.compute_budget)
+        if budget is None:
+            budget = Budget(self.config.compute_budget)
         outcomes: list[StepOutcome] = []
 
         for step in steps:

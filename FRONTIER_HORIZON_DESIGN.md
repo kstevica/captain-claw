@@ -204,14 +204,25 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
     `agreement_score` for clustering; `make_reasoning_generator` for the rollouts.
 - Engine change: aggregator may now be async (backward-compatible) so the judge can
   make conditional critic calls. 11 new tests (30 total) green, ruff clean.
-- Deferred: critic token cost isn't charged to the engine budget yet — wired with
-  the FD layer in Phase 3. Claims/assumptions ledger still to surface in the artifact.
+- Deferred: claims/assumptions ledger still to surface in the artifact. (Critic
+  budget accounting landed in Phase 3.)
 
-### Phase 3 — Flight Deck surface
-- `flight_deck/dubina_routes.py` (`/fd/dubina`), two sections (Coder, Reasoning) as
-  presets over the same engine, exposing budget/ceiling/caps + the one-paid-rung opt-in.
-- Split run-history tables (`dubina_coder_runs`, `dubina_reason_runs`) over a shared base.
-- Live run view: which rung each step reached, tier used, budget burndown.
+### Phase 3 — Flight Deck surface ✅ done (backend)
+- `flight_deck/dubina_routes.py` (`/fd/dubina`): `GET /tiers`, `POST /coder`,
+  `POST /reason` (run in background), `GET /runs/{track}`, `GET /runs/{track}/{id}`.
+  Two track executors over one engine, exposing `base_tier`/`max_tier`/`tiers`,
+  `compute_budget`, sample/fix caps, and (reasoning) critic modes + threshold.
+- `build_ladder`: resolves the active ladder from an explicit tier list or the
+  track default sliced base..max, validated against `config.model.allowed`.
+- `flight_deck/dubina_store.py` (`dubina.db`): split `dubina_coder_runs` /
+  `dubina_reason_runs` over a shared column set + `dubina_run_steps` event log for
+  the live run view (rung/tier/kind/samples/passed/confidence per attempt).
+- Critic-cost budgeting wired: the judge shares the engine's `Budget` and charges
+  per critic call (skips unaffordable critics).
+- Server lifespan inits the store + injects it (`set_store`) and mounts the router,
+  mirroring the flow engine. 11 new tests (41 total) green, ruff clean.
+- Remaining: the React/Vite frontend panels (two sections) that bind to these
+  endpoints — backend is complete and exercised; UI is the thin layer left.
 
 ### Phase 4 — Measurement (closes the "simulation" claim)
 - Add **Fable 5 / GPT-5.6 max as benchmark endpoints** (not in `model.allowed` yet).

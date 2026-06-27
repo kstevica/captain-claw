@@ -17,13 +17,15 @@ Because self-consistency is inherently a property of the whole sample set, the g
 lives in the engine's **aggregator** seam (`ReasoningJudge`), not the per-candidate
 verifier. The per-candidate `ReasonVerifier` only does a cheap well-formedness check.
 
-Critics' own token cost is not yet charged against the engine budget — that wiring
-lands with the Flight Deck layer in Phase 3.
+When constructed with a shared `Budget`, the judge charges each critic call against
+the run's compute ceiling and skips critics it cannot afford — so critic spend counts
+toward the same meter the engine's generations do.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
@@ -31,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from captain_claw.cognitive_mode import cognitive_mode_to_prompt_block, get_mode
-from captain_claw.dubina.engine import Candidate, Step, Verdict
+from captain_claw.dubina.engine import Budget, Candidate, Step, Verdict
 from captain_claw.llm import LLMProvider, Message
 from captain_claw.logging import get_logger
 
@@ -165,10 +167,14 @@ class ReasoningJudge:
         *,
         agreement_threshold: float = DEFAULT_AGREEMENT_THRESHOLD,
         min_samples: int = MIN_SAMPLES_FOR_AGREEMENT,
+        budget: Budget | None = None,
+        critic_cost: float = 1.0,
     ):
         self._critics = list(critics)
         self._threshold = agreement_threshold
         self._min_samples = min_samples
+        self._budget = budget
+        self._critic_cost = critic_cost
 
     async def __call__(
         self, candidates: Sequence[Candidate], verdicts: Sequence[Verdict]
@@ -197,23 +203,32 @@ class ReasoningJudge:
         question = candidate.metadata.get(PROMPT_KEY, "")
 
         run_critics = ratio < self._threshold or stakes == "high"
-        if not run_critics or not self._critics:
-            # Agreement gate alone — the cheap path.
+        critics = self._affordable_critics() if run_critics else []
+        if not critics:
+            # Agreement gate alone — the cheap path (or critics unaffordable/none).
             passed = ratio >= self._threshold
             fb = "" if passed else f"low self-consistency ({ratio:.2f})"
             return candidate, Verdict(passed, ratio, fb)
 
-        # Expensive path: diverse-lens critics must majority-survive.
-        results = await asyncio.gather(
-            *(c(question, majority) for c in self._critics)
-        )
+        # Expensive path: diverse-lens critics must majority-survive. Charge the
+        # shared budget so critic spend counts toward the run's compute ceiling.
+        if self._budget is not None:
+            self._budget.charge(len(critics) * self._critic_cost)
+        results = await asyncio.gather(*(c(question, majority) for c in critics))
         survived = sum(1 for r in results if not r.refuted)
-        passed = survived * 2 > len(self._critics)
-        confidence = survived / len(self._critics)
+        passed = survived * 2 > len(critics)
+        confidence = survived / len(critics)
         feedback = ""
         if not passed:
             feedback = " | ".join(r.reason for r in results if r.refuted)
         return candidate, Verdict(passed, confidence, feedback)
+
+    def _affordable_critics(self) -> list[Critic]:
+        """How many critics the shared budget can pay for (all, if no budget)."""
+        if self._budget is None or math.isinf(self._budget.remaining):
+            return self._critics
+        n = int(self._budget.remaining // self._critic_cost)
+        return self._critics[: max(0, n)]
 
 
 # ── Generator ────────────────────────────────────────────────────────
