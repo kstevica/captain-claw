@@ -207,7 +207,7 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
 - Deferred: claims/assumptions ledger still to surface in the artifact. (Critic
   budget accounting landed in Phase 3.)
 
-### Phase 3 — Flight Deck surface ✅ done (backend)
+### Phase 3 — Flight Deck surface ✅ done
 - `flight_deck/dubina_routes.py` (`/fd/dubina`): `GET /tiers`, `POST /coder`,
   `POST /reason` (run in background), `GET /runs/{track}`, `GET /runs/{track}/{id}`.
   Two track executors over one engine, exposing `base_tier`/`max_tier`/`tiers`,
@@ -221,8 +221,11 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
   per critic call (skips unaffordable critics).
 - Server lifespan inits the store + injects it (`set_store`) and mounts the router,
   mirroring the flow engine. 11 new tests (41 total) green, ruff clean.
-- Remaining: the React/Vite frontend panels (two sections) that bind to these
-  endpoints — backend is complete and exercised; UI is the thin layer left.
+- Frontend (`flight-deck/src`): `DubinaPage.tsx` (one page, two track tabs — Coder /
+  Reasoning), `dubinaApi.ts` (auth'd `/fd/dubina` client), nav entry "Frontier
+  Horizon". User-selectable base/max tier, budget, sample/fix caps, reasoning
+  stakes + agreement threshold; live ladder log (rung/tier/kind/samples/conf) polled
+  from the run detail; per-track history. `npm run build` (tsc + vite) clean.
 
 ### Phase 4 — Measurement (closes the "simulation" claim)
 - Add **Fable 5 / GPT-5.6 max as benchmark endpoints** (not in `model.allowed` yet).
