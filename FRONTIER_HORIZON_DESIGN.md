@@ -171,7 +171,7 @@ controller, and a FD section + routes.
 Build the coder track first — it has a ground-truth verifier, so it's the cleanest
 proof that the engine elevates a weak local model. Reasoning track reuses the engine.
 
-### Phase 0 — Engine skeleton (no UI)
+### Phase 0 — Engine skeleton (no UI) ✅ done
 - `captain_claw/dubina/engine.py`: the budget-bounded `decompose → step → verify →
   escalate → advance` loop + `Verifier` protocol + `Verdict`/`Step`/`Candidate`.
 - Escalation-ladder controller reading `model.allowed` tiers + budget config.
@@ -179,12 +179,17 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
 - Tests: `tests/test_dubina/test_engine.py` (ladder transitions, budget exhaustion,
   no-silent-truncation behavior) with a stub verifier.
 
-### Phase 1 — Coder track (ground-truth verifier)
-- `CoderVerifier` over `shell`/`terminal`: run tests/typecheck/lint, parse exit +
-  failure text into `Verdict`.
-- Spec→tests→code path when no tests exist.
-- Worktree/vfs isolation for parallel fix attempts.
-- Tests against a tiny fixture repo with a known-failing function the loop must fix.
+### Phase 1 — Coder track (ground-truth verifier) ✅ done
+- `CoderVerifier` over an injected `CommandRunner` (default = `ShellTool`): run the
+  step's test command, exit 0 → pass, failure output → `feedback`.
+- `make_coder_generator`: LLM codegen at a tier → writes the solution file into an
+  isolated attempt dir; sees the test file it must satisfy; threads fix feedback.
+- `Workspace.prepare_attempt`: per-candidate copy isolation (copytree; vfs overlay
+  is a later optimization) so parallel samples don't collide.
+- `ensure_tests`: spec→tests→code so a ground-truth verifier always exists.
+- `provider_for_tier_from_config` + `shell_command_runner` as the real defaults.
+- 19 unit tests (engine + coder) green, ruff clean. Stub runner/provider prove the
+  end-to-end elevation + fix loop without a real model or subprocess.
 
 ### Phase 2 — Reasoning track (statistical verifier)
 - `ReasonVerifier`: self-consistency sampling + agreement scoring; diverse-lens

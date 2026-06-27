@@ -13,6 +13,17 @@ The two verifier plug-ins (coder = ground-truth tests; reasoning = self-consiste
 
 from __future__ import annotations
 
+from captain_claw.dubina.coder import (
+    CoderVerifier,
+    CommandRunner,
+    ProviderForTier,
+    Workspace,
+    ensure_tests,
+    extract_code_blocks,
+    make_coder_generator,
+    provider_for_tier_from_config,
+    shell_command_runner,
+)
 from captain_claw.dubina.engine import (
     CODER_LADDER,
     REASON_LADDER,
@@ -37,16 +48,25 @@ __all__ = [
     "REASON_LADDER",
     "Budget",
     "Candidate",
+    "CoderVerifier",
+    "CommandRunner",
     "EngineConfig",
     "Generator",
     "HorizonEngine",
+    "ProviderForTier",
     "RunResult",
     "Step",
     "StepOutcome",
     "Tier",
     "Verdict",
     "Verifier",
+    "Workspace",
     "any_pass_aggregator",
+    "ensure_tests",
+    "extract_code_blocks",
     "majority_agreement_aggregator",
+    "make_coder_generator",
+    "provider_for_tier_from_config",
     "resolve_ladder",
+    "shell_command_runner",
 ]
