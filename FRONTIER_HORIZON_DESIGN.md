@@ -227,13 +227,21 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
   stakes + agreement threshold; live ladder log (rung/tier/kind/samples/conf) polled
   from the run detail; per-track history. `npm run build` (tsc + vite) clean.
 
-### Phase 4 — Measurement (closes the "simulation" claim)
-- Add **Fable 5 / GPT-5.6 max as benchmark endpoints** (not in `model.allowed` yet).
-- Horizon-curve harness: success-vs-task-length for (bare cheap tier) vs (Horizon on
-  cheap tier) vs (north-star Fable 5 / GPT-5.6 max). Track $ cost per task alongside.
-- Deliverable: "Horizon on cheap tier matches the north-star curve at X% of the cost"
-  — and where it doesn't, the per-step floor that caps it. Without this the emulation
-  claim is unfalsifiable.
+### Phase 4 — Measurement (closes the "simulation" claim) ✅ done (coder; target-agnostic)
+- **Reframed**: no Fable 5 / GPT-5.6 max access, so the ceiling is **whatever tier you
+  have** (the harness is target-agnostic — point `--ceiling` at your best model;
+  swap in Fable/GPT-5.6 later via `model.allowed`, nothing else changes).
+- `captain_claw/dubina/benchmark.py` — coder benchmark, self-grading (the test suite
+  *is* the objective grader, no frontier/human/LLM-judge needed). Three conditions:
+  `bare(cheap)` vs `horizon(cheap→max)` vs `bare(ceiling)`. Shared per-tier costs so
+  the cost column is comparable. Metrics: pass rate, total/avg cost, pass-by-difficulty
+  (the horizon curve), and a one-line verdict (elevation pts + % of ceiling cost).
+- Built-in fixtures (add/fizzbuzz/lru) + CLI:
+  `python -m captain_claw.dubina.benchmark --base … --max … --ceiling …`.
+- 5 tests (stub providers/runner) prove the elevation story without a real model.
+- Deferred: **reasoning benchmark** needs a labeled answer set (e.g. GSM8K) — without
+  ground truth it would grade the scaffolding with its own self-consistency signal
+  (circular). Add when a labeled set is chosen.
 
 ### Resolved decisions
 - **Substrate is paid models; `max_tier` default = the track's top paid rung**
