@@ -1,10 +1,14 @@
 # Frontier Horizon — Design Draft (v1)
 
-Status: draft for review. A Flight Deck feature that **simulates a strong frontier
-model on a weak local model** by spending test-time compute, gated by verifiers,
-instead of buying it from a bigger model. Sibling to Basna/Vatra/Council, but a
-different *shape*: those parallelize **breadth** across a fleet; this drives
-**depth** on one cheap model.
+Status: draft for review. A Flight Deck feature that **reproduces top-frontier
+behavior (north star: Fable 5, GPT-5.6 max) from a cheaper paid model** by spending
+test-time compute, gated by verifiers, escalating up the *paid* tier ladder only when
+a verifier demands it. Sibling to Basna/Vatra/Council, but a different *shape*: those
+parallelize **breadth** across a fleet; this drives **depth** on one model.
+
+> Substrate is **paid models** (default driver `gemini-3-flash-preview`), not local.
+> Paid calls — including the expensive tiers — are expected. The bet: cheap-tier +
+> scaffolding ≈ Fable-5 / GPT-5.6-max quality at a fraction of the cost.
 
 > Codename: **Dubina** ("depth") — placeholder, in the Basna/Vatra family.
 > User-facing: "Frontier Horizon". Tables/routes use `dubina` to avoid collision.
@@ -94,26 +98,39 @@ class Verifier(Protocol):
 
 ### The escalation ladder (where #1 elevation + #3 cheap-proxy merge)
 
-The weak model runs everything by default **and** is the cheap proxy that *detects*
-when frontier-level effort is needed:
+The cheap-tier model runs everything by default **and** is the cheap proxy that
+*detects* when frontier-level effort is needed:
 
 ```
-1. weak model, single pass
+1. cheap tier, single pass
 2.  └─ low agreement / verifier fail? → N-sample + vote        (parallel axis)
 3.      └─ still failing?             → decompose deeper + critic (sequential axis)
-4.          └─ still failing?         → escalate model tier      (last resort)
+4.          └─ still failing?         → escalate model tier      (up to max_tier)
 ```
 
-Most steps stop at rung 1 (cheap). Only hard atoms climb; only the rare few hit a
-higher tier. Tiers map to `model.allowed` (existing `fast`/`balanced`/`reason`/`longctx`).
+Most steps stop at rung 1 (cheap). Only hard atoms climb; only the rare few hit the
+expensive tier. Rungs are concrete `model.allowed` ids, per track:
+
+| Rung | **Coder track** | **Reasoning track** |
+|---|---|---|
+| draft | `gemini-flash` (`gemini-3-flash-preview`) | `gemini-flash` |
+| mid | `gpt-5-mini` (light coding) | `gpt-5-mini` / `claude-sonnet` |
+| top | `gpt-5.3-codex` ("extremely good for coding") | `claude-opus` / `gemini-pro` ("best, expensive") |
+| north star (benchmark only) | GPT-5.6 max | Fable 5 |
+
+The north-star models aren't in `model.allowed` — they're the Phase-4 benchmark the
+ladder's output is graded against, added as benchmark endpoints, not run per step.
 
 ### Budget & ceiling (the knob Basna/Vatra don't have)
 
-The feature is only "frontier *simulation*" if it stays cheap. Engine config:
+The feature beats just-call-the-expensive-model only if it stays cost-efficient —
+most work on cheap tiers, expensive tiers reserved for steps that earn them. Engine
+config:
 
-- `compute_budget` — token/step ceiling for the whole run.
-- `max_tier` — highest `model.allowed` tier the ladder may climb to (default: never
-  leave local; escalation to a paid frontier tier is opt-in).
+- `compute_budget` — token/$ ceiling for the whole run (cost, not "avoid paid").
+- `max_tier` — highest `model.allowed` id the ladder may climb to. Default: the
+  track's **top** rung (`gpt-5.3-codex` / `claude-opus`), since matching frontier
+  quality is the whole point. Lower it per run to cap cost.
 - `max_step_samples`, `max_fix_attempts`, `max_depth` — per-rung caps.
 - On budget exhaustion: return best verified-so-far + an honest "stopped at rung N"
   note. **No silent truncation.**
@@ -177,15 +194,18 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
 - Live run view: which rung each step reached, tier used, budget burndown.
 
 ### Phase 4 — Measurement (closes the "simulation" claim)
-- Horizon curve harness: success-vs-task-length for (bare local) vs (Horizon local)
-  vs (frontier baseline). The deliverable is "scaffolded weak ≈ frontier curve, at
-  X% of the cost" — without it, "frontier simulation" is unfalsifiable.
+- Add **Fable 5 / GPT-5.6 max as benchmark endpoints** (not in `model.allowed` yet).
+- Horizon-curve harness: success-vs-task-length for (bare cheap tier) vs (Horizon on
+  cheap tier) vs (north-star Fable 5 / GPT-5.6 max). Track $ cost per task alongside.
+- Deliverable: "Horizon on cheap tier matches the north-star curve at X% of the cost"
+  — and where it doesn't, the per-step floor that caps it. Without this the emulation
+  claim is unfalsifiable.
 
 ### Resolved decisions
-- **`max_tier` default: hard local-only**, with one-paid-rung as a per-run opt-in
-  (FD checkbox). "Local-only" is still a full ladder — it may climb *within* local
-  models (fast 7B → 32B reasoner) but never crosses into a paid API unless opted in.
-  Keeps the default honest + free and the Phase-4 measurement clean.
+- **Substrate is paid models; `max_tier` default = the track's top paid rung**
+  (`gpt-5.3-codex` for coding, `claude-opus`/`gemini-pro` for reasoning). Paid calls
+  are expected; the cost discipline comes from the ladder resolving most steps cheap,
+  not from forbidding expensive tiers. Lower `max_tier` per run to cap cost.
 - **Reasoning confidence: both gates, sequenced by cost — not either/or.**
   Agreement (self-consistency) is the always-on cheap gate and difficulty trigger
   (measures *confidence/precision*). Diverse-lens critics are the gate that hard or
