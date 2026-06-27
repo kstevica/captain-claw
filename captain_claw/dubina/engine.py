@@ -30,6 +30,7 @@ Pure orchestration: no I/O beyond the injected plug-points, fully unit-testable.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -99,8 +100,11 @@ class Verifier(Protocol):
 
 
 # Aggregator: collapse the N parallel samples of one attempt into a single winner.
+# May be sync (coder: pick a passing solution) or async (reasoning: a self-
+# consistency + conditional-critic judge that makes its own LLM calls).
 Aggregator = Callable[
-    [Sequence[Candidate], Sequence[Verdict]], tuple[Candidate, Verdict]
+    [Sequence[Candidate], Sequence[Verdict]],
+    "tuple[Candidate, Verdict] | Awaitable[tuple[Candidate, Verdict]]",
 ]
 
 
@@ -319,7 +323,10 @@ class HorizonEngine:
                 verdicts = await asyncio.gather(
                     *(self.verifier.check(step, c) for c in cands)
                 )
-                cand, verdict = self.aggregator(cands, verdicts)
+                aggregated = self.aggregator(cands, verdicts)
+                if inspect.isawaitable(aggregated):
+                    aggregated = await aggregated
+                cand, verdict = aggregated
                 if best_verdict is None or verdict.confidence >= best_verdict.confidence:
                     best, best_verdict = cand, verdict
 

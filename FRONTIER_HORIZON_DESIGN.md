@@ -191,10 +191,21 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
 - 19 unit tests (engine + coder) green, ruff clean. Stub runner/provider prove the
   end-to-end elevation + fix loop without a real model or subprocess.
 
-### Phase 2 — Reasoning track (statistical verifier)
-- `ReasonVerifier`: self-consistency sampling + agreement scoring; diverse-lens
-  critics wired to `phrygian`/`aeolian`/`locrian`.
-- Claims/assumptions ledger surfaced in the artifact.
+### Phase 2 — Reasoning track (statistical verifier) ✅ done
+- Two-stage gate sequenced by cost, implemented at the engine's **aggregator** seam
+  (self-consistency is a property of the whole sample set, not one candidate):
+  - `ReasoningJudge` (async aggregator): agreement gate first (free — clusters the
+    N-sample answers); diverse-lens critics only when agreement < threshold or the
+    step is high-stakes. A lone sample defers, forcing the vote rung.
+  - Critics reuse real cognitive modes via `make_mode_critic` /
+    `cognitive_mode_to_prompt_block` (`phrygian`/`aeolian`/`locrian` refuters); pass
+    iff a majority fail to refute.
+  - `ReasonVerifier`: cheap per-candidate well-formedness; `extract_answer` +
+    `agreement_score` for clustering; `make_reasoning_generator` for the rollouts.
+- Engine change: aggregator may now be async (backward-compatible) so the judge can
+  make conditional critic calls. 11 new tests (30 total) green, ruff clean.
+- Deferred: critic token cost isn't charged to the engine budget yet — wired with
+  the FD layer in Phase 3. Claims/assumptions ledger still to surface in the artifact.
 
 ### Phase 3 — Flight Deck surface
 - `flight_deck/dubina_routes.py` (`/fd/dubina`), two sections (Coder, Reasoning) as
