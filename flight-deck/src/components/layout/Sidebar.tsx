@@ -24,6 +24,7 @@ import {
   Library,
   Cpu,
   FolderTree,
+  Mountain,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -43,6 +44,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'library', icon: Library, label: 'Library' },
   { id: 'council', icon: Users, label: 'Council' },
   { id: 'basna', icon: Network, label: 'Basna' },
+  { id: 'dubina', icon: Mountain, label: 'Frontier Horizon' },
   { id: 'vfs', icon: FolderTree, label: 'VFS' },
   { id: 'flows', icon: Workflow, label: 'Flows' },
   { id: 'observatory', icon: Brain, label: 'Observatory' },
