@@ -127,6 +127,10 @@ The feature beats just-call-the-expensive-model only if it stays cost-efficient 
 most work on cheap tiers, expensive tiers reserved for steps that earn them. Engine
 config:
 
+- `base_tier` — the `model.allowed` id the whole run starts on (rung 1).
+  **User-selected** in the FD section (defaults to the track's draft rung). The
+  ladder escalates from here toward `max_tier`; set `base_tier == max_tier` to pin
+  the entire run to one chosen tier.
 - `compute_budget` — token/$ ceiling for the whole run (cost, not "avoid paid").
 - `max_tier` — highest `model.allowed` id the ladder may climb to. Default: the
   track's **top** rung (`gpt-5.3-codex` / `claude-opus`), since matching frontier
