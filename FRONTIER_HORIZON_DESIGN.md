@@ -87,6 +87,11 @@ class Verifier(Protocol):
      `locrian` (deconstruction). Diversity beats N identical critics and softens the
      model-judges-itself ceiling. State = a claims/assumptions ledger in working memory.
 
+  The two signals are **sequenced by cost**: agreement is always-on (cheap, also the
+  difficulty trigger); critics fire only when agreement is low or the step is pivotal.
+  Agreement catches *unsure*; critics catch *confidently wrong* — agreement measures
+  precision, not accuracy, so it cannot stand alone.
+
 ### The escalation ladder (where #1 elevation + #3 cheap-proxy merge)
 
 The weak model runs everything by default **and** is the cheap proxy that *detects*
@@ -167,7 +172,8 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
 
 ### Phase 3 — Flight Deck surface
 - `flight_deck/dubina_routes.py` (`/fd/dubina`), two sections (Coder, Reasoning) as
-  presets over the same engine, exposing budget/ceiling/caps.
+  presets over the same engine, exposing budget/ceiling/caps + the one-paid-rung opt-in.
+- Split run-history tables (`dubina_coder_runs`, `dubina_reason_runs`) over a shared base.
 - Live run view: which rung each step reached, tier used, budget burndown.
 
 ### Phase 4 — Measurement (closes the "simulation" claim)
@@ -175,7 +181,22 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
   vs (frontier baseline). The deliverable is "scaffolded weak ≈ frontier curve, at
   X% of the cost" — without it, "frontier simulation" is unfalsifiable.
 
-### Open questions
-- Default `max_tier`: hard-local-only, or allow one paid rung by default?
-- Reasoning track confidence: agreement threshold, or require ≥2 of 3 critics to pass?
-- Should the two sections share one run history table or split by track?
+### Resolved decisions
+- **`max_tier` default: hard local-only**, with one-paid-rung as a per-run opt-in
+  (FD checkbox). "Local-only" is still a full ladder — it may climb *within* local
+  models (fast 7B → 32B reasoner) but never crosses into a paid API unless opted in.
+  Keeps the default honest + free and the Phase-4 measurement clean.
+- **Reasoning confidence: both gates, sequenced by cost — not either/or.**
+  Agreement (self-consistency) is the always-on cheap gate and difficulty trigger
+  (measures *confidence/precision*). Diverse-lens critics are the gate that hard or
+  pivotal steps must clear (measure *correctness/accuracy* — they catch the
+  "confidently wrong" case agreement is blind to). Critics run only when agreement
+  is low or the step is load-bearing.
+- **Split run-history per track.** Coder and reasoning produce different artifacts
+  (diffs + test results vs. answer + claims ledger) and different metrics
+  (tests-passing vs. agreement/critic-survival). Separate tables (`dubina_coder_runs`,
+  `dubina_reason_runs`) over a small shared base, rather than one all-nullable table.
+
+### Still open
+- Agreement threshold value, and critic-survival bar (≥2 of 3?) — tune empirically
+  in Phase 2, not decided up front.
