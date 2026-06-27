@@ -232,6 +232,26 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
   (reusing Basna's tier seam). Default ladders `fast→balanced→reason`; `build_ladder`
   validates against the user's configured tier names. No API keys cross the wire.
 
+### Intent track — Dubina as a system-wide intent runner ✅ done
+
+A third track that runs an arbitrary intent over the **system's agents**, not just raw
+tiers. The key seam: a *run-target* is just a provider-shaped adapter
+(`DispatchProvider.complete` dispatches and returns text), so the whole reasoning
+stack (generator, self-consistency, critics) runs unchanged over agents.
+
+- `flight_deck/dubina_agents.py`: `DispatchProvider`; `make_agent_factory` (dispatch
+  to a live fleet agent via `_send_chat_and_collect` — tier ignored, escalation =
+  sampling/fix axes); `ArchetypeRunner` (spawn a fresh archetype per tier via
+  `spawn_process`, cache, dispose). Spawn/send/stop are injected → unit-tested with
+  stubs, real bindings to the server/basna seams.
+- `POST /fd/dubina/intent` (`target = "agent:<id>" | "archetype:<id>"`, per-run):
+  runs inline (Request stays valid for spawn), critics use a real Library-tier model
+  (never the target judging itself), disposes spawned agents after.
+- Store: third split table `dubina_intent_runs`. Frontend: "Intent" track tab with a
+  run-target selector populated from `/fd/archetypes` + `/fd/fleet`.
+- Decisions: per-run target; Intent + Coder/Reasoning share the engine. 10 new tests
+  (61 total), ruff clean, `npm run build` clean.
+
 ### Phase 4 — Measurement (closes the "simulation" claim) ✅ done (coder; target-agnostic)
 - **Reframed**: no Fable 5 / GPT-5.6 max access, so the ceiling is **whatever tier you
   have** (the harness is target-agnostic — point `--ceiling` at your best model;

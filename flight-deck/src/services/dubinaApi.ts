@@ -4,7 +4,7 @@ import { useAuthStore, refreshAccessToken } from '../stores/authStore'
 
 const BASE = '/fd/dubina'
 
-export type Track = 'coder' | 'reason'
+export type Track = 'coder' | 'reason' | 'intent'
 
 export interface Tier {
   id: string
@@ -78,6 +78,10 @@ export interface ReasonRequest {
   critic_cost?: number
 }
 
+export interface IntentRequest extends ReasonRequest {
+  target: string // "agent:<id>" | "archetype:<id>"
+}
+
 function _authHeaders(): Record<string, string> {
   const { token, authEnabled } = useAuthStore.getState()
   const headers: Record<string, string> = {}
@@ -110,6 +114,37 @@ function jsonInit(method: string, body?: unknown): RequestInit {
   }
 }
 
+// Reach /fd endpoints outside the /fd/dubina prefix (archetypes, fleet).
+async function fdRoot<T>(path: string): Promise<T> {
+  const headers = _authHeaders()
+  let res = await fetch(`/fd${path}`, { headers, credentials: 'include' })
+  if (res.status === 401 && useAuthStore.getState().authEnabled) {
+    if (await refreshAccessToken()) res = await fetch(`/fd${path}`, { headers: _authHeaders(), credentials: 'include' })
+  }
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  const text = await res.text()
+  return (text ? JSON.parse(text) : {}) as T
+}
+
+export interface TargetOption { value: string; label: string }
+
+// Combined run-target options for the Intent track: archetypes + live agents.
+export async function getTargets(): Promise<TargetOption[]> {
+  const out: TargetOption[] = []
+  try {
+    const reg = await fdRoot<{ archetypes: { id: string; role?: string }[] }>('/archetypes')
+    for (const a of reg.archetypes || [])
+      out.push({ value: `archetype:${a.id}`, label: `archetype · ${a.role || a.id}` })
+  } catch { /* ignore */ }
+  try {
+    const fleet = await fdRoot<{ slug: string; name: string; status: string }[]>('/fleet')
+    for (const f of fleet || [])
+      if (f.status === 'running')
+        out.push({ value: `agent:${f.slug}`, label: `agent · ${f.name || f.slug}` })
+  } catch { /* ignore */ }
+  return out
+}
+
 export const getTiers = () => fdFetch<TiersResponse>('/tiers')
 
 export const startCoder = (req: CoderRequest) =>
@@ -117,6 +152,10 @@ export const startCoder = (req: CoderRequest) =>
 
 export const startReason = (req: ReasonRequest) =>
   fdFetch<{ run_id: string; track: Track; status: string }>('/reason', jsonInit('POST', req))
+
+// Intent runs inline server-side and returns the finished run.
+export const startIntent = (req: IntentRequest) =>
+  fdFetch<DubinaRun>('/intent', jsonInit('POST', req))
 
 export const getRun = (track: Track, id: string) =>
   fdFetch<DubinaRun>(`/runs/${track}/${id}`)

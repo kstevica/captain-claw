@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import math
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from captain_claw.dubina import (
@@ -45,6 +45,11 @@ from captain_claw.dubina.coder import (
 from captain_claw.dubina.reasoning import DEFAULT_CRITIC_MODES
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+from captain_claw.flight_deck.dubina_agents import (
+    ArchetypeRunner,
+    make_agent_factory,
+    resolve_agent_port_token,
+)
 from captain_claw.flight_deck.dubina_store import TRACKS, DubinaStore
 from captain_claw.llm import create_provider
 from captain_claw.logging import get_logger
@@ -166,6 +171,22 @@ class ReasonRequest(BaseModel):
     critic_cost: float = 1.0
 
 
+class IntentRequest(BaseModel):
+    """Run an arbitrary intent via an archetype or a live agent (statistical verifier)."""
+    task: str
+    target: str                          # "agent:<id>" | "archetype:<id>"
+    base_tier: str
+    max_tier: str
+    tiers: list[str] | None = None
+    compute_budget: float = 0.0
+    max_step_samples: int = 3
+    max_fix_attempts: int = 1
+    stakes: str = "normal"
+    critic_modes: list[str] = Field(default_factory=lambda: list(DEFAULT_CRITIC_MODES))
+    agreement_threshold: float = 0.6
+    critic_cost: float = 1.0
+
+
 # ── Execution (awaitable; injectable for tests) ──────────────────────
 
 async def execute_coder(
@@ -243,6 +264,49 @@ async def execute_reason(
                                stopped_reason="error", cost_spent=0.0, error=str(e))
 
 
+async def execute_intent(
+    store: DubinaStore, run_id: str, req: IntentRequest,
+    *, provider_factory, critic_provider=None, dispose=None, allowed: set[str] | None = None,
+):
+    """Run an intent through the reasoning engine over a chosen run-target.
+
+    ``provider_factory`` dispatches to the target (agent/archetype). Critics use a
+    separate real-model ``critic_provider`` so the target isn't grading itself.
+    """
+    try:
+        allowed = allowed or set(TIER_ORDER)
+        ladder = build_ladder(req.base_tier, req.max_tier, req.tiers,
+                              default_ladder=LIBRARY_REASON_LADDER, allowed=allowed)
+        config = EngineConfig(
+            ladder=ladder, max_step_samples=req.max_step_samples,
+            max_fix_attempts=req.max_fix_attempts,
+            compute_budget=_budget_value(req.compute_budget),
+        )
+        budget = Budget(config.compute_budget)
+        critics = load_critic_modes(critic_provider, req.critic_modes) if critic_provider else []
+        judge = ReasoningJudge(critics, agreement_threshold=req.agreement_threshold,
+                               budget=budget, critic_cost=req.critic_cost)
+        events: list[dict] = []
+        engine = HorizonEngine(
+            config, make_reasoning_generator(provider_factory), ReasonVerifier(),
+            aggregator=judge, on_event=events.append,
+        )
+        step = Step(id="task", prompt=req.task, stakes=req.stakes)
+        result = await engine.run(step, budget=budget)
+        await _persist(store, "intent", run_id, events, result, _reason_summary(result))
+        return result
+    except Exception as e:  # noqa: BLE001
+        log.exception("dubina intent run failed", run_id=run_id)
+        await store.finish_run("intent", run_id, status="error", passed=False,
+                               stopped_reason="error", cost_spent=0.0, error=str(e))
+    finally:
+        if dispose is not None:
+            try:
+                await dispose()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                log.warning("dubina intent dispose failed", run_id=run_id)
+
+
 async def _persist(store, track, run_id, events, result, summary):
     for i, e in enumerate(events):
         await store.append_step(run_id, track, i, e)
@@ -317,6 +381,53 @@ async def start_reason(req: ReasonRequest, db=Depends(get_db), user: dict = Depe
     )
     asyncio.create_task(execute_reason(store, run_id, req, tiers_map=tiers_map))
     return {"run_id": run_id, "track": "reason", "status": "running"}
+
+
+async def _find_archetype(db, user_id: str, arch_id: str) -> dict:
+    from captain_claw.flight_deck.archetypes import merged_archetypes
+    arch = next((a for a in await merged_archetypes(db, user_id) if a.get("id") == arch_id), None)
+    if arch is None:
+        raise HTTPException(404, f"archetype {arch_id!r} not found")
+    return arch
+
+
+@router.post("/intent")
+async def start_intent(req: IntentRequest, request: Request,
+                       db=Depends(get_db), user: dict = Depends(get_current_user)):
+    """Run an intent via a live agent or a spawned archetype, verified statistically.
+
+    Runs inline (so the Request stays valid for archetype spawn) and returns the
+    finished run; archetype agents are disposed afterward.
+    """
+    store = _store()
+    tiers_map = await _resolve_tiers(db, user["id"])
+    allowed = set(tiers_map) or set(TIER_ORDER)
+    # Critics use a real Library model (base tier) — never the target judging itself.
+    try:
+        critic_provider = _library_provider_factory(tiers_map)(req.base_tier)
+    except Exception:  # noqa: BLE001 — no base-tier model configured → agreement-only
+        critic_provider = None
+
+    kind, _, ident = req.target.partition(":")
+    dispose = None
+    if kind == "agent":
+        port, token = resolve_agent_port_token(ident)
+        provider_factory = make_agent_factory(port, token, agent_name=ident)
+    elif kind == "archetype":
+        runner = ArchetypeRunner(await _find_archetype(db, user["id"], ident),
+                                 request, user, tiers_map)
+        provider_factory = runner.provider_for_tier()
+        dispose = runner.dispose
+    else:
+        raise HTTPException(400, "target must be 'agent:<id>' or 'archetype:<id>'")
+
+    run_id = await store.create_run(
+        "intent", user["id"], req.task, req.base_tier, req.max_tier,
+        _budget_value(req.compute_budget), config=req.model_dump(exclude={"task"}),
+    )
+    await execute_intent(store, run_id, req, provider_factory=provider_factory,
+                         critic_provider=critic_provider, dispose=dispose, allowed=allowed)
+    return await store.get_run("intent", run_id)
 
 
 @router.get("/runs/{track}/{run_id}")

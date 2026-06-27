@@ -23,8 +23,12 @@ from typing import Any
 
 import aiosqlite
 
-TRACKS = ("coder", "reason")
-_RUN_TABLE = {"coder": "dubina_coder_runs", "reason": "dubina_reason_runs"}
+TRACKS = ("coder", "reason", "intent")
+_RUN_TABLE = {
+    "coder": "dubina_coder_runs",
+    "reason": "dubina_reason_runs",
+    "intent": "dubina_intent_runs",  # arbitrary intents run via archetypes / live agents
+}
 
 
 def _now() -> str:
@@ -87,10 +91,13 @@ class DubinaStore:
         await db.executescript(f"""
             CREATE TABLE IF NOT EXISTS dubina_coder_runs ({_RUN_COLUMNS});
             CREATE TABLE IF NOT EXISTS dubina_reason_runs ({_RUN_COLUMNS});
+            CREATE TABLE IF NOT EXISTS dubina_intent_runs ({_RUN_COLUMNS});
             CREATE INDEX IF NOT EXISTS idx_dubina_coder_user
                 ON dubina_coder_runs(user_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_dubina_reason_user
                 ON dubina_reason_runs(user_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_dubina_intent_user
+                ON dubina_intent_runs(user_id, created_at DESC);
 
             CREATE TABLE IF NOT EXISTS dubina_run_steps (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,

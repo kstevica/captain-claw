@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Mountain, Code2, Brain, Play, Loader2, CheckCircle2, XCircle, AlertTriangle,
+  Mountain, Code2, Brain, Boxes, Play, Loader2, CheckCircle2, XCircle, AlertTriangle,
 } from 'lucide-react'
 import {
-  getTiers, startCoder, startReason, getRun, listRuns,
-  type Track, type Tier, type DubinaRun,
+  getTiers, startCoder, startReason, startIntent, getTargets, getRun, listRuns,
+  type Track, type Tier, type DubinaRun, type TargetOption,
 } from '../services/dubinaApi'
 
 const POLL_MS = 1200
@@ -29,9 +29,13 @@ export function DubinaPage() {
   const [testPath, setTestPath] = useState('')
   const [spec, setSpec] = useState('')
 
-  // Reasoning-only
+  // Reasoning / Intent
   const [stakes, setStakes] = useState('normal')
   const [threshold, setThreshold] = useState(0.6)
+
+  // Intent-only: the run target (archetype or live agent)
+  const [target, setTarget] = useState('')
+  const [targets, setTargets] = useState<TargetOption[]>([])
 
   const [run, setRun] = useState<DubinaRun | null>(null)
   const [history, setHistory] = useState<DubinaRun[]>([])
@@ -39,7 +43,7 @@ export function DubinaPage() {
   const [error, setError] = useState('')
   const poll = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Load tiers once.
+  // Load tiers + run-targets once.
   useEffect(() => {
     getTiers()
       .then((r) => {
@@ -47,11 +51,16 @@ export function DubinaPage() {
         setDefaults(r.default_ladders)
       })
       .catch((e) => setError(String(e)))
+    getTargets().then(setTargets).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (!target && targets.length) setTarget(targets[0].value)
+  }, [targets, target])
 
   // When the track (or defaults) change, seed the base/max selectors.
   useEffect(() => {
-    const ladder = defaults[track]
+    const ladder = (defaults as Record<string, string[]>)[track] || defaults.reason
     if (ladder && ladder.length) {
       setBaseTier((b) => (ladder.includes(b) ? b : ladder[0]))
       setMaxTier((m) => (ladder.includes(m) ? m : ladder[ladder.length - 1]))
@@ -94,6 +103,17 @@ export function DubinaPage() {
     setRun(null)
     try {
       const computeBudget = budget ? Number(budget) : 0
+      if (track === 'intent') {
+        // Intent runs inline server-side and returns the finished run.
+        const finished = await startIntent({
+          task, target, base_tier: baseTier, max_tier: maxTier, compute_budget: computeBudget,
+          max_step_samples: samples, max_fix_attempts: fixes, stakes, agreement_threshold: threshold,
+        })
+        setRun(finished)
+        setBusy(false)
+        refreshHistory()
+        return
+      }
       let started: { run_id: string; track: Track }
       if (track === 'coder') {
         started = await startCoder({
@@ -116,7 +136,9 @@ export function DubinaPage() {
   }
 
   const llmTiers = tiers
-  const canRun = task.trim() && baseTier && maxTier && (track !== 'coder' || workspace.trim()) && !busy
+  const canRun = task.trim() && baseTier && maxTier && !busy
+    && (track !== 'coder' || workspace.trim())
+    && (track !== 'intent' || target)
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
@@ -137,6 +159,7 @@ export function DubinaPage() {
         <div className="mb-4 inline-flex items-center gap-1 rounded-xl border border-zinc-800 p-1 text-sm">
           <TrackTab active={track === 'coder'} onClick={() => setTrack('coder')} icon={<Code2 className="h-3.5 w-3.5" />} label="Coder" />
           <TrackTab active={track === 'reason'} onClick={() => setTrack('reason')} icon={<Brain className="h-3.5 w-3.5" />} label="Reasoning" />
+          <TrackTab active={track === 'intent'} onClick={() => setTrack('intent')} icon={<Boxes className="h-3.5 w-3.5" />} label="Intent" />
         </div>
 
         {error && (
@@ -172,7 +195,15 @@ export function DubinaPage() {
               </>
             )}
 
-            {track === 'reason' && (
+            {track === 'intent' && (
+              <Field label="Run target (archetype or live agent)">
+                <Select value={target} onChange={setTarget}
+                  options={targets.length ? targets.map((t) => [t.value, t.label])
+                                          : [['', 'no archetypes or running agents found']]} />
+              </Field>
+            )}
+
+            {(track === 'reason' || track === 'intent') && (
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Stakes">
                   <Select value={stakes} onChange={setStakes} options={[['normal', 'normal'], ['high', 'high (always run critics)']]} />
