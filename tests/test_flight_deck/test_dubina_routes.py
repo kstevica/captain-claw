@@ -139,3 +139,24 @@ async def test_execute_reason_passes_on_agreement(tmp_path, store):
     assert run["status"] == "passed"
     assert run["result"]["answer"].endswith("Answer: 42")
     assert run["steps"]                       # vote attempt logged
+
+
+async def test_execute_reason_target_agreement_only_and_disposes(tmp_path, store):
+    # Target generator with no critic model → agreement-only; dispose must be awaited.
+    disposed = []
+
+    async def dispose():
+        disposed.append(True)
+
+    req = dr.ReasonRequest(
+        task="q", base_tier="t1", max_tier="t1", tiers=["t1"],
+        agreement_threshold=0.6, max_step_samples=3,
+    )
+    run_id = await store.create_run("reason", "u1", req.task, "t1", "t1", 0.0)
+    result = await dr.execute_reason(
+        store, run_id, req, tiers_map=TIERS_MAP,
+        provider_factory=factory_const("reasoning...\nAnswer: 7"),
+        critic_provider=None, dispose=dispose,   # target path: critics off, cleanup on
+    )
+    assert result.passed                          # unanimous agreement carries it
+    assert disposed == [True]                      # cleanup ran even on success

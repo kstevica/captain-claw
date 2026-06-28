@@ -8,6 +8,9 @@ export interface VFSProject {
   files: number
   bytes: number
   mtime: number
+  kind?: string   // 'basna' | 'vatra' | 'council' | '' — parsed from the folder name
+  run_id?: string // the run's session-id prefix
+  title?: string  // the human title of the Basna/Vatra run that created it
 }
 
 export interface VFSEntry {
@@ -17,6 +20,8 @@ export interface VFSEntry {
   project: string
   size: number
   mtime: number
+  author?: string     // the agent that last wrote this file (VFS files only)
+  author_ts?: number
 }
 
 export interface VFSFile {

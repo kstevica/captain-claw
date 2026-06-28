@@ -207,10 +207,18 @@ async function _authedFetch(url: string, init: RequestInit = {}): Promise<Respon
   return res
 }
 
+// Plan-step child sessions (each step of a Plan-Horizon ensemble run is a real Basna
+// session) are hidden from the list — they belong under their parent plan run.
+function isPlanChild(config?: string): boolean {
+  if (!config) return false
+  try { return JSON.parse(config)?.source === 'plan-step' } catch { return false }
+}
+
 async function apiListSessions(): Promise<BasnaSession[]> {
   const res = await _authedFetch('/fd/basna/sessions')
   if (!res.ok) return []
-  return res.json()
+  const rows: BasnaSession[] = await res.json()
+  return Array.isArray(rows) ? rows.filter((s) => !isPlanChild(s.config)) : []
 }
 
 async function apiGetSession(id: string): Promise<BasnaSession | null> {
@@ -295,6 +303,17 @@ async function apiVatraExecute(body: Record<string, unknown>): Promise<{ session
   return res.json()
 }
 
+async function apiPlan(body: Record<string, unknown>): Promise<{ session_id: string }> {
+  const res = await _authedFetch('/fd/basna/plan', {
+    method: 'POST', body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { detail?: string }).detail || 'plan run failed')
+  }
+  return res.json()
+}
+
 async function apiUploadFiles(sessionId: string, files: File[]): Promise<{ files: BasnaFile[] }> {
   const form = new FormData()
   for (const f of files) form.append('files', f)
@@ -368,6 +387,7 @@ export function parseAnalysis(s?: string): BasnaAnalysis | null {
 }
 
 const _ROUTER_TIER_LS = 'basna.routerTier'
+const _DEEP_LS = 'basna.deep'
 
 // ── Store ────────────────────────────────────────────────────────────
 
@@ -389,9 +409,22 @@ interface BasnaStore {
 
   routerTier: string   // which Library tier selects the archetypes (the router)
   maxAgents: number
+  deep: boolean        // Deep / Horizon mode: each worker runs the self-consistency
+  deepSamples: number  // vote + critics + fix loop (frontier-grade depth) instead of one shot
+  planMode: boolean    // Plan-Horizon (Lever C): decompose → verify each step → re-plan
+  planSteps: number    // max steps in the plan
+  planComplex: boolean // simple = one model per step; complex = a full Basna/Vatra per step
+  planDag: boolean     // planner emits a DAG; independent steps run in parallel waves
 
   setRouterTier: (t: string) => void
   setMaxAgents: (n: number) => void
+  setDeep: (v: boolean) => void
+  setDeepSamples: (n: number) => void
+  setPlanMode: (v: boolean) => void
+  setPlanSteps: (n: number) => void
+  setPlanComplex: (v: boolean) => void
+  setPlanDag: (v: boolean) => void
+  runPlan: (intent: string, tiers: TierMap, title: string, envVars: EnvVar[], archetypeIds?: string[], stepMode?: string) => Promise<void>
   addFiles: (files: FileList | File[]) => void
   removeFile: (name: string) => Promise<void>
   downloadFile: (name: string) => Promise<void>
@@ -433,12 +466,27 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
 
   routerTier: (typeof localStorage !== 'undefined' && localStorage.getItem(_ROUTER_TIER_LS)) || 'reason',
   maxAgents: 6,
+  deep: (typeof localStorage !== 'undefined' && localStorage.getItem(_DEEP_LS) === '1') || false,
+  deepSamples: 3,
+  planMode: false,
+  planSteps: 5,
+  planComplex: false,
+  planDag: false,
 
   setRouterTier: (t) => {
     try { localStorage.setItem(_ROUTER_TIER_LS, t) } catch { /* ignore */ }
     set({ routerTier: t })
   },
   setMaxAgents: (n) => set({ maxAgents: Math.max(1, Math.min(10, n)) }),
+  setDeep: (v) => {
+    try { localStorage.setItem(_DEEP_LS, v ? '1' : '0') } catch { /* ignore */ }
+    set({ deep: v, ...(v ? { planMode: false } : {}) })  // Deep and Plan are distinct run paths
+  },
+  setDeepSamples: (n) => set({ deepSamples: Math.max(2, Math.min(8, n)) }),
+  setPlanMode: (v) => set({ planMode: v, ...(v ? { deep: false } : {}) }),
+  setPlanSteps: (n) => set({ planSteps: Math.max(1, Math.min(12, n)) }),
+  setPlanComplex: (v) => set({ planComplex: v }),
+  setPlanDag: (v) => set({ planDag: v }),
 
   addFiles: (files) => {
     const incoming = Array.from(files).map((f): AttachedFile => ({
@@ -587,12 +635,38 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     set({ error: null })
     try {
       const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
-      await apiVatraExecute({ session_id: sid, tiers, env_vars })
+      // Deep mode in Vatra = Horizon depth: verify + revise EACH specialist's slice
+      // (worker, blackboard-safe — no spawn pools) AND the final assembled deliverable.
+      const horizon = get().deep ? { worker: true, close: true } : undefined
+      await apiVatraExecute({ session_id: sid, tiers, env_vars, ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       if (s) set({ activeSession: s })
       await get().loadSessions()
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'vatra run failed' })
+    }
+  },
+
+  runPlan: async (intent, tiers, title, envVars, archetypeIds, stepMode) => {
+    if (!intent.trim()) return
+    set({ error: null })
+    try {
+      const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
+      // Plan-Horizon: decompose → verify each step → re-plan → synthesize. Creates a
+      // fresh session that runs in the background; open it so the live log polls.
+      // step_mode: 'llm' (simple) | 'ensemble' | 'vatra' (complex, per the selected mode).
+      // A fixed team (archetype_ids) staffs each step's ensemble / Vatra team.
+      const r = await apiPlan({
+        intent, title: title || '', tiers, env_vars,
+        max_steps: get().planSteps,
+        step_mode: stepMode || 'llm',
+        dag: get().planDag,
+        ...((archetypeIds && archetypeIds.length) ? { archetype_ids: archetypeIds } : {}),
+      })
+      await get().loadSessions()
+      if (r.session_id) await get().selectSession(r.session_id)
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'plan run failed' })
     }
   },
 
@@ -635,7 +709,10 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // Spawned agents + merge calls resolve their model/key from the Library tiers;
       // env vars (Library "Additional API Keys") are passed to every agent.
       const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
-      const res = await apiExecute({ session_id: sid, tiers, env_vars })
+      // Deep / Horizon mode: drive each worker through the self-consistency vote +
+      // critics + fix loop, then verify-and-revise the merged answer (the closer).
+      const horizon = get().deep ? { samples: get().deepSamples, close: true } : undefined
+      const res = await apiExecute({ session_id: sid, tiers, env_vars, ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       const runs = await apiListRuns(sid)
       // Refresh attachments from the updated session so files the agents

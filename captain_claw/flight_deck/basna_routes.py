@@ -27,6 +27,21 @@ from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
+from captain_claw.flight_deck.horizon_plan import (
+    PlanConfig,
+    make_llm_dag_planner,
+    make_llm_planner,
+    make_llm_step_runner,
+    make_llm_synthesizer,
+    make_llm_verifier,
+    run_dag_horizon,
+    run_plan_horizon,
+)
+from captain_claw.flight_deck.horizon_worker import (
+    HorizonConfig,
+    run_horizon_closer,
+    run_worker_horizon,
+)
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -420,7 +435,8 @@ def _resolve_owner(body: _AgentReq) -> str:
     hint it sent.
     """
     from captain_claw.flight_deck.server import (
-        _resolve_agent_owner, _resolve_agent_owner_by_auth,
+        _resolve_agent_owner,
+        _resolve_agent_owner_by_auth,
     )
     owner = ""
     if body.web_auth:
@@ -610,6 +626,7 @@ async def _notify_source_agent(
     agent's reply lands where the user asked. Best-effort; logs on failure.
     """
     import websockets
+
     from captain_claw.flight_deck.server import _resolve_agent_auth
     if not source_port:
         return
@@ -640,7 +657,7 @@ async def _notify_source_agent(
             await ws.send(json.dumps(payload))
             try:
                 await asyncio.wait_for(ws.recv(), timeout=30)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
     except Exception as exc:
         log.warning("Basna completion delivery failed",
@@ -960,7 +977,7 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
     raw: dict | None = None
     source = "llm"
     try:
-        from captain_claw.llm import create_provider, Message
+        from captain_claw.llm import Message, create_provider
         prov = create_provider(
             provider=provider, model=model,
             api_key=body.api_key or None, base_url=base_url or None,
@@ -1215,6 +1232,21 @@ def _tier_creds(registry: dict, tier: str, api_key: str) -> dict:
     return {"provider": t.get("provider", "anthropic"), "model": t.get("model", ""),
             "base_url": t.get("base_url", "") or None, "api_key": api_key or None,
             "output_ctx": int(t.get("output_ctx") or 0)}
+
+
+def _resolve_merge_creds(body, registry: dict, tier: str) -> dict:
+    """LLM creds for a tier: Library config first, registry tier defaults as fallback.
+
+    Shared by the merge/judge closures and the Horizon critic provider (which must
+    run on a model *different* from the worker — never the worker grading itself).
+    """
+    lt = (body.tiers or {}).get(tier)
+    if lt and lt.get("model"):
+        return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
+                "base_url": lt.get("base_url") or None,
+                "api_key": lt.get("api_key") or body.api_key or None,
+                "output_ctx": int(lt.get("output_ctx") or 0)}
+    return _tier_creds(registry, tier, body.api_key)
 
 
 def _provider_call(creds: dict, *, temperature: float, default_max: int, cap: int) -> tuple:
@@ -1525,7 +1557,7 @@ async def _send_chat_and_collect(
                             rd = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
                             if rd.get("type") == "replay_done":
                                 break
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pass
                     answer = ""  # discard anything observed during the replay
                     if fleet_instructions:
@@ -1551,7 +1583,7 @@ async def _send_chat_and_collect(
                         return answer.strip(), actions  # overall budget spent
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=min(rem, 30))
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # A quiet socket is not a dead one: the agent may be deep in
                         # an LLM synthesis with nothing to stream. Keep waiting until
                         # the overall deadline rather than tearing the turn down and
@@ -1607,6 +1639,190 @@ class ExecuteRequest(BaseModel):
     api_key: str = ""
     agent_max_tokens: int = Field(default=8192, ge=512, le=32768)
     dispatch_timeout: float = Field(default=600.0, ge=10.0, le=3600.0)
+    # Deep / Horizon mode (opt-in): when set, each worker is driven through the
+    # Frontier-Horizon engine (N-sample self-consistency vote + diverse-lens critics
+    # + fix loop) instead of a single one-shot dispatch. Keys: samples, fix_attempts,
+    # critics[], stakes, agreement_threshold, critic_tier, compute_budget. None → off.
+    horizon: dict | None = None
+
+
+async def _spawn_horizon_member(
+    arch: dict, sel: dict, body, request, user, *,
+    sid8: str, run_tag: str, input_files: list[dict], src_dir: Path, name_suffix: str,
+) -> tuple[int, str, str]:
+    """Spawn one Basna-correct ephemeral worker for a Horizon pool → (port, token, slug).
+
+    Same config as the normal Basna spawn — basna tool stripped (no recursion),
+    worker env marker, shared VFS project, input files materialized — but returns
+    the live (port, token, slug) the engine needs and raises on an unusable spawn.
+    """
+    from captain_claw.flight_deck.server import (
+        DATA_DIR,
+        AgentConfig,
+        _load_process_registry,
+        spawn_process,
+    )
+    lt = (body.tiers or {}).get(sel["tier"]) or {}
+    provider = sel.get("provider") or lt.get("provider")
+    model = sel.get("model") or lt.get("model")
+    api_key = sel.get("api_key") or lt.get("api_key") or body.api_key or ""
+    base_url = sel.get("base_url") or lt.get("base_url") or ""
+    max_tokens = int(sel.get("max_tokens") or lt.get("output_ctx") or 0) or 32768
+    max_context = int(sel.get("max_context") or lt.get("input_ctx") or 0)
+    worker_tools = [t for t in (arch.get("tools") or AgentConfig().tools) if t != "basna"]
+    base = dict(
+        name=f"basna-{sid8}-{run_tag}-{arch['id']}-{name_suffix}",
+        description=f"Basna horizon · {sel.get('role') or arch.get('role', '')}",
+        cognitive_mode=sel.get("cognitive_mode") or arch.get("cognitive_mode", "neutra"),
+        tools=worker_tools,
+        env_vars=(body.env_vars or []) + [
+            {"key": "CLAW_BASNA_WORKER", "value": "1"},
+            {"key": "CLAW_VFS_PROJECT", "value": f"basna-{sid8}"},
+            {"key": "CLAW_AGENT_LABEL",
+             "value": sel.get("role") or arch.get("role") or arch["id"]},
+        ],
+        web_enabled=True, web_port=0,
+    )
+    if model:
+        cfg = AgentConfig(
+            **base, tier="", provider=provider or "", model=model,
+            provider_api_key=api_key, base_url=base_url,
+            max_tokens=max_tokens, max_context=max_context,
+        )
+    else:
+        cfg = AgentConfig(**base, tier=sel["tier"], provider_api_key=api_key)
+    res = await spawn_process(cfg, request, user)
+    entry = _load_process_registry().get(res.slug) or {}
+    port = entry.get("web_port")
+    if not res.ok or not port:
+        raise RuntimeError(res.message or "spawn failed: no port")
+    if input_files:
+        ws = DATA_DIR / res.slug / "data" / "workspace"
+        for f in input_files:
+            try:
+                shutil.copy2(src_dir / f["name"], ws / f["name"])
+            except OSError as e:
+                log.warning("Basna horizon file copy failed", file=f["name"], error=str(e))
+    return int(port), entry.get("web_auth", ""), res.slug
+
+
+async def _dispatch_horizon_workers(
+    plan: list[tuple[dict, dict]], sess: dict, merge_kind: str, hcfg: HorizonConfig,
+    body, request, user, sid: str, sid8: str, run_tag: str, input_files: list[dict],
+    *, critic_provider,
+) -> list[dict]:
+    """Dispatch each routed worker through the Horizon engine instead of one-shot.
+
+    Each worker self-manages a pool of ``hcfg.samples`` fresh archetype instances
+    (independent rollouts for self-consistency); pools are torn down centrally after
+    the gather to avoid concurrent process-registry writes. Returns Basna-shaped
+    result dicts so merge/learning downstream are untouched.
+    """
+    from captain_claw.flight_deck.server import (
+        DATA_DIR,
+        _do_stop_process,
+        _load_process_registry,
+        _processes,
+        _save_process_registry,
+    )
+    src_dir = _session_files_dir(sid)
+    _run_workers.setdefault(sid, [])
+
+    def _register(slugs: list[str]) -> None:
+        _run_workers.setdefault(sid, []).extend(slugs)
+
+    async def _noop_stop(_slug: str) -> None:
+        return None  # central teardown below — keeps registry writes serial
+
+    async def _one(sel: dict, arch: dict) -> dict:
+        role = sel.get("role") or arch.get("role") or arch["id"]
+        fleet = sel.get("fleet_instructions") or arch.get("fleet_instructions", "")
+        tier = sel["tier"]
+        prompt = _build_dispatch_prompt(
+            role, sess["intent"], merge_kind,
+            [f["name"] for f in input_files], extra=sel.get("extra", ""))
+
+        def _on_action(act: dict) -> None:
+            s = act.get("sample")
+            tag = f"{role}[s{s}]" if s is not None else role
+            if act.get("tool") == "narration":
+                _progress(sid, "narration", f"{tag}: {act.get('detail', '')}",
+                          agent=role, tool="narration", detail=act.get("detail", ""), sample=s)
+            else:
+                detail = f": {act['detail']}" if act.get("detail") else ""
+                _progress(sid, "action", f"{tag} → {act.get('tool')}{detail}",
+                          agent=role, tool=act.get("tool"), detail=act.get("detail", ""), sample=s)
+
+        def _on_usage(pt: int, ct: int, tt: int) -> None:
+            _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok",
+                      agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
+        def _on_event(e: dict) -> None:
+            conf = float(e.get("confidence", 0.0) or 0.0)
+            mark = "✓ passed" if e.get("passed") else "✗ retry"
+            _progress(sid, "attempt",
+                      f"{role} · {e.get('kind', '?')} · {e.get('samples', 0)} sample(s) "
+                      f"→ conf {conf:.2f} · {mark}",
+                      agent=role, kind=e.get("kind"), samples=e.get("samples"),
+                      passed=bool(e.get("passed")), confidence=conf)
+
+        async def _spawn_member(name_suffix: str) -> tuple[int, str, str]:
+            return await _spawn_horizon_member(
+                arch, sel, body, request, user, sid8=sid8, run_tag=run_tag,
+                input_files=input_files, src_dir=src_dir, name_suffix=name_suffix)
+
+        res = await run_worker_horizon(
+            spawn=_spawn_member, tier=tier, prompt=prompt, cfg=hcfg,
+            critic_provider=critic_provider, fleet_instructions=fleet, agent_name=role,
+            on_action=_on_action, on_usage=_on_usage, on_event=_on_event,
+            on_spawn=_register, stop=_noop_stop, timeout=body.dispatch_timeout,
+        )
+        mark = "✓" if res["ok"] else "✗"
+        err = "" if res.get("ok") else f" — {str(res.get('error', ''))[:160]}"
+        _progress(sid, "dispatch",
+                  f"{role} {mark} · rung {res.get('rung_reached', 0)} · "
+                  f"{res.get('samples_used', 0)} sample(s) · "
+                  f"conf {res.get('confidence', 0.0):.0%}{err}",
+                  ok=res["ok"], agent=role)
+        return {
+            "archetype_id": arch["id"],
+            "role": role,
+            "tier": tier, "provider": "", "model": "",
+            "weight": float(sel.get("prior_weight", 0.7)),
+            "output": res["output"], "ok": res["ok"],
+            "latency_ms": res["latency_ms"], "actions": res.get("actions", []),
+        }
+
+    _progress(sid, "spawn",
+              f"Deep mode (Horizon) · {len(plan)} worker(s) × {hcfg.samples} sample(s) "
+              f"· critics: {', '.join(hcfg.critics) or 'none'}")
+    out = await asyncio.gather(*[_one(sel, arch) for sel, arch in plan], return_exceptions=True)
+
+    # Central teardown — serial to avoid concurrent process-registry writes.
+    all_slugs = list(_run_workers.get(sid, []))
+    for slug in all_slugs:
+        try:
+            _do_stop_process(slug)
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.warning("Basna horizon stop failed", slug=slug, error=str(e))
+    if all_slugs:
+        try:
+            reg = _load_process_registry()
+            for slug in all_slugs:
+                reg.pop(slug, None)
+                _processes.pop(slug, None)
+                shutil.rmtree(DATA_DIR / slug, ignore_errors=True)
+            _save_process_registry(reg)
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.warning("Basna horizon cleanup failed", error=str(e))
+
+    results: list[dict] = []
+    for item in out:
+        if isinstance(item, Exception):
+            log.warning("Basna horizon worker crashed", error=str(item))
+            continue
+        results.append(item)
+    return results
 
 
 @router.post("/execute")
@@ -1648,8 +1864,13 @@ async def execute_route(
 
     # Lazy import to avoid a circular import (server imports this module).
     from captain_claw.flight_deck.server import (
-        AgentConfig, spawn_process, _do_stop_process, _load_process_registry,
-        _save_process_registry, _processes, DATA_DIR,
+        DATA_DIR,
+        AgentConfig,
+        _do_stop_process,
+        _load_process_registry,
+        _processes,
+        _save_process_registry,
+        spawn_process,
     )
 
     await db.update_basna_session(body.session_id, user["id"], status="running")
@@ -1660,138 +1881,162 @@ async def execute_route(
     run_tag = format(int(time.time()), "x")[-6:]  # unique per run → no slug collisions on re-run
     plan = [(s, arch_by_id[s["archetype_id"]]) for s in selected if s["archetype_id"] in arch_by_id]
     _progress(sid, "route", f"Selected {len(plan)} archetype(s) · {domain} / {merge_kind}")
+
+    # Deep / Horizon mode (opt-in): drive each worker through the Frontier-Horizon
+    # engine. Critics must run on a model *different* from the worker (never self-
+    # judge), so resolve a separate Library-tier critic provider here.
+    _hraw = body.horizon if body.horizon is not None else route.get("horizon")
+    horizon_cfg = HorizonConfig.from_dict(_hraw) if _hraw else None
+    critic_provider = None
+    if horizon_cfg is not None:
+        try:
+            cc = _resolve_merge_creds(body, registry, horizon_cfg.critic_tier)
+            if cc.get("model"):
+                critic_provider, _ = _provider_call(
+                    cc, temperature=0.7, default_max=1200, cap=2048)
+        except Exception as e:  # noqa: BLE001 — no critic model → agreement-only
+            log.warning("Basna horizon critic provider unavailable", error=str(e))
+
     spawned: list[dict] = []  # {sel, arch, slug, port, auth}
     results: list[dict] = []
     try:
-        _progress(sid, "spawn", f"Spawning {len(plan)} agent(s)…")
-        # 1) Spawn the selected archetypes (spawn_process serializes internally).
-        # Resolve each archetype's tier to a concrete model from the Library config
-        # when provided; otherwise let the backend resolve the registry tier.
-        async def _spawn(sel: dict, arch: dict):
-            # Per-agent overrides from the route editor take precedence over the
-            # Library tier, which takes precedence over the registry tier default.
-            lt = (body.tiers or {}).get(sel["tier"]) or {}
-            provider = sel.get("provider") or lt.get("provider")
-            model = sel.get("model") or lt.get("model")
-            api_key = sel.get("api_key") or lt.get("api_key") or body.api_key or ""
-            base_url = sel.get("base_url") or lt.get("base_url") or ""
-            max_tokens = int(sel.get("max_tokens") or lt.get("output_ctx") or 0) or 32768
-            max_context = int(sel.get("max_context") or lt.get("input_ctx") or 0)
-            # No recursion: a Basna worker must never be able to start another
-            # Basna. Strip the `basna` tool from the spawn (this also disables the
-            # deterministic relay, which is gated on has_tool("basna")) and stamp
-            # an env marker the tool double-checks.
-            _worker_tools = [
-                t for t in (arch.get("tools") or AgentConfig().tools) if t != "basna"
-            ]
-            base = dict(
-                name=f"basna-{sid8}-{run_tag}-{arch['id']}",
-                description=f"Basna ephemeral · {sel.get('role') or arch.get('role', '')}",
-                cognitive_mode=sel.get("cognitive_mode") or arch.get("cognitive_mode", "neutra"),
-                tools=_worker_tools,
-                env_vars=(body.env_vars or []) + [
-                    {"key": "CLAW_BASNA_WORKER", "value": "1"},
-                    # Shared VFS project for all workers in this Basna session.
-                    {"key": "CLAW_VFS_PROJECT", "value": f"basna-{sid8}"},
-                ],
-                web_enabled=True, web_port=0,
-            )
-            if model:
-                cfg = AgentConfig(
-                    **base, tier="", provider=provider or "", model=model,
-                    provider_api_key=api_key, base_url=base_url,
-                    max_tokens=max_tokens, max_context=max_context,
+        if horizon_cfg is not None and horizon_cfg.worker:
+            results = await _dispatch_horizon_workers(
+                plan, sess, merge_kind, horizon_cfg, body, request, user,
+                sid, sid8, run_tag, input_files, critic_provider=critic_provider)
+        else:
+            _progress(sid, "spawn", f"Spawning {len(plan)} agent(s)…")
+            # 1) Spawn the selected archetypes (spawn_process serializes internally).
+            # Resolve each archetype's tier to a concrete model from the Library config
+            # when provided; otherwise let the backend resolve the registry tier.
+            async def _spawn(sel: dict, arch: dict):
+                # Per-agent overrides from the route editor take precedence over the
+                # Library tier, which takes precedence over the registry tier default.
+                lt = (body.tiers or {}).get(sel["tier"]) or {}
+                provider = sel.get("provider") or lt.get("provider")
+                model = sel.get("model") or lt.get("model")
+                api_key = sel.get("api_key") or lt.get("api_key") or body.api_key or ""
+                base_url = sel.get("base_url") or lt.get("base_url") or ""
+                max_tokens = int(sel.get("max_tokens") or lt.get("output_ctx") or 0) or 32768
+                max_context = int(sel.get("max_context") or lt.get("input_ctx") or 0)
+                # No recursion: a Basna worker must never be able to start another
+                # Basna. Strip the `basna` tool from the spawn (this also disables the
+                # deterministic relay, which is gated on has_tool("basna")) and stamp
+                # an env marker the tool double-checks.
+                _worker_tools = [
+                    t for t in (arch.get("tools") or AgentConfig().tools) if t != "basna"
+                ]
+                base = dict(
+                    name=f"basna-{sid8}-{run_tag}-{arch['id']}",
+                    description=f"Basna ephemeral · {sel.get('role') or arch.get('role', '')}",
+                    cognitive_mode=sel.get("cognitive_mode") or arch.get("cognitive_mode", "neutra"),
+                    tools=_worker_tools,
+                    env_vars=(body.env_vars or []) + [
+                        {"key": "CLAW_BASNA_WORKER", "value": "1"},
+                        # Shared VFS project for all workers in this Basna session.
+                        {"key": "CLAW_VFS_PROJECT", "value": f"basna-{sid8}"},
+                        # Authorship label for files this worker writes to the VFS.
+                        {"key": "CLAW_AGENT_LABEL",
+                         "value": sel.get("role") or arch.get("role") or arch["id"]},
+                    ],
+                    web_enabled=True, web_port=0,
                 )
-            else:
-                cfg = AgentConfig(**base, tier=sel["tier"], provider_api_key=api_key)
-            res = await spawn_process(cfg, request, user)
-            # Materialize input files into this agent's workspace.
-            if input_files and res.ok:
-                ws = DATA_DIR / res.slug / "data" / "workspace"
-                src = _session_files_dir(body.session_id)
-                for f in input_files:
-                    try:
-                        shutil.copy2(src / f["name"], ws / f["name"])
-                    except OSError as e:
-                        log.warning("Basna file copy failed", file=f["name"], error=str(e))
-            return sel, arch, res
-
-        spawn_out = await asyncio.gather(
-            *[_spawn(sel, arch) for sel, arch in plan], return_exceptions=True,
-        )
-        proc_reg = _load_process_registry()
-        for item in spawn_out:
-            if isinstance(item, Exception):
-                log.warning("Basna spawn failed", error=str(item))
-                _progress(sid, "spawn", f"spawn failed: {str(item)[:200]}", ok=False)
-                continue
-            sel, arch, res = item
-            entry = proc_reg.get(res.slug) or {}
-            port = entry.get("web_port")
-            if not res.ok or not port:
-                log.warning("Basna spawn unusable", slug=res.slug, ok=res.ok, message=res.message)
-                _progress(sid, "spawn",
-                          f"{arch.get('role') or arch['id']}: unusable — {res.message or 'no port'}", ok=False)
-                continue
-            spawned.append({"sel": sel, "arch": arch, "slug": res.slug,
-                            "port": port, "auth": entry.get("web_auth", "")})
-        _progress(sid, "spawn", f"Spawned {len(spawned)}/{len(plan)}; dispatching…")
-        # Track workers so a Stop/stop_run can hard-kill this run mid-flight.
-        _run_workers[body.session_id] = [sp["slug"] for sp in spawned]
-
-        # 2) Dispatch the task to each agent in parallel; log each tool call live
-        # and each agent's completion as it returns.
-        async def _dispatch_tracked(sp: dict) -> dict:
-            sel, arch = sp["sel"], sp["arch"]
-            role = sel.get("role") or arch.get("role") or arch["id"]
-            fleet = sel.get("fleet_instructions") or arch.get("fleet_instructions", "")
-
-            # Tag each event with structured fields (agent / tool / detail) so the
-            # UI can group the streaming log into live per-agent panels — not just
-            # parse the flat message string.
-            def _on_action(act: dict) -> None:
-                if act["tool"] == "narration":
-                    _progress(sid, "narration", f"{role}: {act['detail']}",
-                              agent=role, tool="narration", detail=act.get("detail", ""))
+                if model:
+                    cfg = AgentConfig(
+                        **base, tier="", provider=provider or "", model=model,
+                        provider_api_key=api_key, base_url=base_url,
+                        max_tokens=max_tokens, max_context=max_context,
+                    )
                 else:
-                    detail = f": {act['detail']}" if act.get("detail") else ""
-                    _progress(sid, "action", f"{role} → {act['tool']}{detail}",
-                              agent=role, tool=act["tool"], detail=act.get("detail", ""))
+                    cfg = AgentConfig(**base, tier=sel["tier"], provider_api_key=api_key)
+                res = await spawn_process(cfg, request, user)
+                # Materialize input files into this agent's workspace.
+                if input_files and res.ok:
+                    ws = DATA_DIR / res.slug / "data" / "workspace"
+                    src = _session_files_dir(body.session_id)
+                    for f in input_files:
+                        try:
+                            shutil.copy2(src / f["name"], ws / f["name"])
+                        except OSError as e:
+                            log.warning("Basna file copy failed", file=f["name"], error=str(e))
+                return sel, arch, res
 
-            def _on_usage(pt: int, ct: int, tt: int) -> None:
-                _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok",
-                          agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
-
-            ws = DATA_DIR / sp["slug"] / "data" / "workspace"
-            img_paths = [str(ws / f["name"]) for f in input_files
-                         if str(f.get("mime", "")).startswith("image/")]
-            doc_paths = [str(ws / f["name"]) for f in input_files
-                         if not str(f.get("mime", "")).startswith("image/")]
-            d = await _dispatch_one(
-                sp["port"], sp["auth"],
-                _build_dispatch_prompt(role, sess["intent"], merge_kind,
-                                       [f["name"] for f in input_files], extra=sel.get("extra", "")),
-                body.dispatch_timeout, on_action=_on_action,
-                fleet_instructions=fleet, agent_name=role,
-                file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
+            spawn_out = await asyncio.gather(
+                *[_spawn(sel, arch) for sel, arch in plan], return_exceptions=True,
             )
-            mark = "✓" if d["ok"] else "✗"
-            extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
-            _progress(sid, "dispatch",
-                      f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}",
-                      ok=d["ok"], agent=role)
-            return d
+            proc_reg = _load_process_registry()
+            for item in spawn_out:
+                if isinstance(item, Exception):
+                    log.warning("Basna spawn failed", error=str(item))
+                    _progress(sid, "spawn", f"spawn failed: {str(item)[:200]}", ok=False)
+                    continue
+                sel, arch, res = item
+                entry = proc_reg.get(res.slug) or {}
+                port = entry.get("web_port")
+                if not res.ok or not port:
+                    log.warning("Basna spawn unusable", slug=res.slug, ok=res.ok, message=res.message)
+                    _progress(sid, "spawn",
+                              f"{arch.get('role') or arch['id']}: unusable — {res.message or 'no port'}", ok=False)
+                    continue
+                spawned.append({"sel": sel, "arch": arch, "slug": res.slug,
+                                "port": port, "auth": entry.get("web_auth", "")})
+            _progress(sid, "spawn", f"Spawned {len(spawned)}/{len(plan)}; dispatching…")
+            # Track workers so a Stop/stop_run can hard-kill this run mid-flight.
+            _run_workers[body.session_id] = [sp["slug"] for sp in spawned]
 
-        dispatched = await asyncio.gather(*[_dispatch_tracked(sp) for sp in spawned])
-        for sp, d in zip(spawned, dispatched):
-            results.append({
-                "archetype_id": sp["arch"]["id"],
-                "role": sp["sel"].get("role") or sp["arch"].get("role", ""),
-                "tier": sp["sel"]["tier"], "provider": "", "model": "",
-                "weight": float(sp["sel"].get("prior_weight", 0.7)),
-                "output": d["output"], "ok": d["ok"], "latency_ms": d["latency_ms"],
-                "actions": d.get("actions", []),
-            })
+            # 2) Dispatch the task to each agent in parallel; log each tool call live
+            # and each agent's completion as it returns.
+            async def _dispatch_tracked(sp: dict) -> dict:
+                sel, arch = sp["sel"], sp["arch"]
+                role = sel.get("role") or arch.get("role") or arch["id"]
+                fleet = sel.get("fleet_instructions") or arch.get("fleet_instructions", "")
+
+                # Tag each event with structured fields (agent / tool / detail) so the
+                # UI can group the streaming log into live per-agent panels — not just
+                # parse the flat message string.
+                def _on_action(act: dict) -> None:
+                    if act["tool"] == "narration":
+                        _progress(sid, "narration", f"{role}: {act['detail']}",
+                                  agent=role, tool="narration", detail=act.get("detail", ""))
+                    else:
+                        detail = f": {act['detail']}" if act.get("detail") else ""
+                        _progress(sid, "action", f"{role} → {act['tool']}{detail}",
+                                  agent=role, tool=act["tool"], detail=act.get("detail", ""))
+
+                def _on_usage(pt: int, ct: int, tt: int) -> None:
+                    _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok",
+                              agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
+                ws = DATA_DIR / sp["slug"] / "data" / "workspace"
+                img_paths = [str(ws / f["name"]) for f in input_files
+                             if str(f.get("mime", "")).startswith("image/")]
+                doc_paths = [str(ws / f["name"]) for f in input_files
+                             if not str(f.get("mime", "")).startswith("image/")]
+                d = await _dispatch_one(
+                    sp["port"], sp["auth"],
+                    _build_dispatch_prompt(role, sess["intent"], merge_kind,
+                                           [f["name"] for f in input_files], extra=sel.get("extra", "")),
+                    body.dispatch_timeout, on_action=_on_action,
+                    fleet_instructions=fleet, agent_name=role,
+                    file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
+                )
+                mark = "✓" if d["ok"] else "✗"
+                extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
+                _progress(sid, "dispatch",
+                          f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}",
+                          ok=d["ok"], agent=role)
+                return d
+
+            dispatched = await asyncio.gather(*[_dispatch_tracked(sp) for sp in spawned])
+            for sp, d in zip(spawned, dispatched):
+                results.append({
+                    "archetype_id": sp["arch"]["id"],
+                    "role": sp["sel"].get("role") or sp["arch"].get("role", ""),
+                    "tier": sp["sel"]["tier"], "provider": "", "model": "",
+                    "weight": float(sp["sel"].get("prior_weight", 0.7)),
+                    "output": d["output"], "ok": d["ok"], "latency_ms": d["latency_ms"],
+                    "actions": d.get("actions", []),
+                })
     finally:
         # 3a) Capture any files the agents generated, BEFORE teardown deletes their
         # workspaces — so generated content is preserved on the session.
@@ -1872,13 +2117,7 @@ async def execute_route(
     # Resolve LLM creds for a tier from the Library config, falling back to the
     # registry tier defaults + env key.
     def _merge_creds(tier: str) -> dict:
-        lt = (body.tiers or {}).get(tier)
-        if lt and lt.get("model"):
-            return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
-                    "base_url": lt.get("base_url") or None,
-                    "api_key": lt.get("api_key") or body.api_key or None,
-                    "output_ctx": int(lt.get("output_ctx") or 0)}
-        return _tier_creds(registry, tier, body.api_key)
+        return _resolve_merge_creds(body, registry, tier)
 
     # 5) Compile the truth (weighted; LLM synthesis only on genuine conflict).
     _progress(sid, "merge", "Compiling the truth…")
@@ -1907,6 +2146,32 @@ async def execute_route(
                 len(analysis.get("blind_spots") or [])))
         else:
             _progress(sid, "merge", "Analysis: none produced", ok=False)
+
+    # 5c) Horizon closer (Lever B, opt-in): adversarially verify the merged truth and
+    # revise once if a diverse-lens critic panel refutes it — the back-edge Basna
+    # otherwise lacks. Critics run on a separate Library-tier model (never self-judge).
+    if horizon_cfg is not None and horizon_cfg.close and (agg.get("truth") or "").strip():
+        _progress(sid, "merge", "Horizon closer: verifying the answer…")
+        try:
+            cc = _merge_creds(horizon_cfg.critic_tier)
+            cp = rp = None
+            if cc.get("model"):
+                cp, _ = _provider_call(cc, temperature=0.7, default_max=1200, cap=2048)
+                rp, _ = _provider_call(cc, temperature=0.3, default_max=8192, cap=32768)
+            closed = await run_horizon_closer(
+                question=sess["intent"], answer=agg["truth"],
+                critic_provider=cp, revise_provider=rp, critics=horizon_cfg.critics,
+                on_event=_closer_on_event(sid, "Closer", "merge"),
+            )
+            if closed["revised"]:
+                agg["truth"] = closed["answer"]
+                agg["method"] = f"{agg.get('method', 'merge')}+revised"
+                _progress(sid, "merge", "Closer revised the answer")
+            else:
+                _progress(sid, "merge",
+                          f"Closer: answer held ({closed['survived']}/{closed['total']})")
+        except Exception as e:  # noqa: BLE001 — closer is best-effort
+            log.warning("Basna horizon closer failed", error=str(e))
 
     # 6) Close the learning loop: score each run against the truth and fold the
     # outcome into per-archetype reliability, so the next route's prior_weight
@@ -1959,6 +2224,345 @@ async def execute_route(
     }
 
 
+# ── Plan-Horizon (Lever C): verify-gated multi-step run ───────────────
+
+class PlanRequest(BaseModel):
+    intent: str
+    title: str = ""
+    tiers: dict | None = None
+    env_vars: list[dict] | None = None
+    api_key: str = ""
+    max_steps: int = Field(default=5, ge=1, le=12)
+    max_fix_per_step: int = Field(default=1, ge=0, le=3)
+    max_replans: int = Field(default=1, ge=0, le=3)
+    min_step_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    # The Library tier the planner / step / verifier / synthesizer run on.
+    plan_tier: str = "reason"
+    # How each step is executed: "llm" = one plan-tier generation (fast); "ensemble"
+    # = a full Basna ensemble (route+execute) per step (stronger, much costlier).
+    step_mode: str = "llm"
+    step_max_agents: int = Field(default=4, ge=1, le=10)
+    dispatch_timeout: float = Field(default=600.0, ge=10.0, le=3600.0)
+    # User-fixed team: each step's Basna ensemble / Vatra team is staffed from these
+    # archetypes. Empty → each step routes its own team freely. (No effect on "llm".)
+    archetype_ids: list[str] = Field(default_factory=list)
+    # When true, the planner emits a dependency DAG and independent steps run in
+    # parallel waves (each step sees only its dependencies' outputs). Else a linear
+    # chain with re-plan on failure.
+    dag: bool = False
+
+
+async def _mirror_progress(parent_sid: str, child_sid: str) -> None:
+    """Forward a plan-step's child run's live agent activity into the parent plan log.
+
+    A plan step (Basna ensemble / Vatra team) runs as a child session that streams
+    into its own ``_PROGRESS[child_sid]``; this tails those events and re-emits the
+    meaningful ones (agent narration, tool calls, completions, merges) under the
+    parent, so the plan log shows the agents working — not just a step summary.
+    Fully exception-safe: it can never break the step it's mirroring.
+    """
+    seen = 0
+    mirror_stages = {"narration", "action", "dispatch", "merge"}
+
+    def drain() -> None:
+        nonlocal seen
+        try:
+            p = _PROGRESS.get(child_sid)
+            if not p:
+                return
+            evs = p.get("events", [])
+            while seen < len(evs):
+                e = evs[seen]
+                seen += 1
+                if e.get("stage") in mirror_stages:
+                    _progress(parent_sid, e.get("stage", "action"),
+                              f"↳ {str(e.get('message', ''))[:280]}",
+                              agent=e.get("agent"), tool=e.get("tool"))
+        except Exception:  # noqa: BLE001 — mirroring is best-effort, never fatal
+            pass
+
+    try:
+        while True:
+            drain()
+            await asyncio.sleep(0.8)
+    except asyncio.CancelledError:
+        drain()  # final catch-up before we stop
+        raise
+
+
+def make_basna_ensemble_step_runner(
+    parent_sid: str, body: "PlanRequest", user: dict, *,
+    route_fn=None, execute_fn=None, on_step=None,
+):
+    """A plan-horizon ``step_runner`` where each step is a full Basna ensemble.
+
+    Per step: route+execute a child Basna session on the step goal (with prior
+    verified results as context), tag it as a plan-step child of ``parent_sid``, and
+    return the ensemble's merged truth. ``route_fn``/``execute_fn`` are injectable so
+    the runner unit-tests without spawning agents. Child sessions are real Basna runs
+    — their archetype-reliability learning still closes — just hidden from the list.
+    """
+    route_fn = route_fn or route_intent
+    execute_fn = execute_fn or execute_route
+    ft = (body.tiers or {}).get("fast") or {}
+
+    async def step_runner(goal: str, context: str) -> str:
+        step_intent = f"{context}\n\n# Your step now\n{goal}"
+        rr = RouteRequest(
+            intent=step_intent, max_agents=body.step_max_agents,
+            provider=ft.get("provider", ""), model=ft.get("model", ""),
+            api_key=ft.get("api_key", "") or body.api_key, base_url=ft.get("base_url", ""),
+            archetype_ids=list(body.archetype_ids or []))  # staff each step from the fixed team
+        routed = await route_fn(rr, user)
+        child_sid = (routed or {}).get("session_id")
+        if not child_sid:
+            return ""
+        try:  # tag the child as a plan-step (best-effort; hidden from the session list)
+            await get_db().update_basna_session(
+                child_sid, user["id"],
+                config=json.dumps({"mode": "basna", "source": "plan-step", "parent": parent_sid}))
+        except Exception:  # noqa: BLE001 — tagging is best-effort
+            pass
+        er = ExecuteRequest(
+            session_id=child_sid, tiers=body.tiers, env_vars=body.env_vars,
+            api_key=body.api_key, dispatch_timeout=body.dispatch_timeout)
+        stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
+        mirror = asyncio.create_task(_mirror_progress(parent_sid, child_sid))
+        try:
+            result = await execute_fn(er, stub, user)
+        finally:
+            mirror.cancel()
+            try:
+                await mirror
+            except asyncio.CancelledError:
+                pass
+        if on_step is not None:
+            on_step(child_sid, result or {})
+        return ((result or {}).get("truth") or "").strip()
+
+    return step_runner
+
+
+def make_vatra_team_step_runner(
+    parent_sid: str, body: "PlanRequest", user: dict, *,
+    create_session_fn=None, execute_fn=None, on_step=None,
+):
+    """A plan-horizon ``step_runner`` where each step is a full **Vatra team**.
+
+    Per step: create a child Vatra session on the step goal (with prior verified
+    results as context), run ``execute_vatra`` (the Lead decomposes, specialists
+    collaborate on the blackboard, the reporter assembles), and return the assembled
+    deliverable. ``create_session_fn``/``execute_fn`` are injectable for tests.
+    ``execute_vatra`` is imported lazily — vatra_routes imports this module.
+    """
+    async def _default_create(intent: str, config_json: str, title: str):
+        return await get_db().create_basna_session(
+            user["id"], intent, config_json, title=title)
+
+    async def _default_execute(er, request, u):
+        from captain_claw.flight_deck.vatra_routes import execute_vatra
+        return await execute_vatra(er, request, u)
+
+    create_session_fn = create_session_fn or _default_create
+    execute_fn = execute_fn or _default_execute
+
+    async def step_runner(goal: str, context: str) -> str:
+        step_intent = f"{context}\n\n# Your step now\n{goal}"
+        config_json = json.dumps({
+            "mode": "vatra", "source": "plan-step", "parent": parent_sid,
+            "max_agents": body.step_max_agents,
+            **({"force_ids": list(body.archetype_ids)} if body.archetype_ids else {})})
+        sess = await create_session_fn(step_intent, config_json, goal[:60])
+        child_sid = (sess or {}).get("id")
+        if not child_sid:
+            return ""
+        er = ExecuteRequest(
+            session_id=child_sid, tiers=body.tiers, env_vars=body.env_vars,
+            api_key=body.api_key, dispatch_timeout=body.dispatch_timeout)
+        stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
+        mirror = asyncio.create_task(_mirror_progress(parent_sid, child_sid))
+        try:
+            result = await execute_fn(er, stub, user)
+        finally:
+            mirror.cancel()
+            try:
+                await mirror
+            except asyncio.CancelledError:
+                pass
+        if on_step is not None:
+            on_step(child_sid, result or {})
+        return ((result or {}).get("truth") or "").strip()
+
+    return step_runner
+
+
+def _closer_on_event(sid: str, label: str, stage_name: str = "merge"):
+    """Map Horizon-closer events onto the live log so the (slow) critic panel shows
+    incremental progress — one line as each diverse-lens critic returns, then the
+    verdict, then the revise pass — instead of a single long-running line."""
+    def on_event(e: dict) -> None:
+        st = e.get("stage")
+        if st == "verify_start":
+            _progress(sid, stage_name, f"{label}: verifying with {e.get('total')} critic(s)…",
+                      agent=label)
+        elif st == "critic":
+            mark = "refuted" if e.get("refuted") else "held"
+            _progress(sid, stage_name,
+                      f"{label}: critic {int(e.get('index', 0)) + 1}/{e.get('total')} "
+                      f"({e.get('mode', '')}) {mark}", agent=label)
+        elif st == "verify":
+            _progress(sid, stage_name, f"{label}: {e.get('survived')}/{e.get('total')} critics held",
+                      agent=label)
+        elif st == "heartbeat":
+            ph = "revising" if e.get("phase") == "revise" else "verifying"
+            _progress(sid, stage_name, f"{label}: still {ph}… ({e.get('elapsed')}s)", agent=label)
+        elif st == "revise":
+            _progress(sid, stage_name, f"{label}: revising…", agent=label)
+        elif st == "revise_rejected":
+            _progress(sid, stage_name, f"{label}: kept original (revision was unusable)",
+                      agent=label, ok=False)
+    return on_event
+
+
+def _plan_on_event(sid: str):
+    """Map plan-horizon events onto the shared Basna live-progress log."""
+    def _label(e: dict) -> str:
+        # DAG events carry a step id; linear events carry a 0-based index.
+        return str(e.get("id")) if e.get("id") is not None else str(int(e.get("index", 0)) + 1)
+
+    def on_event(e: dict) -> None:
+        stage = e.get("stage")
+        lbl = _label(e)
+        if stage == "plan":
+            goals = e.get("goals") or []
+            _progress(sid, "route", f"Planned {len(goals)} step(s)")
+            for j, g in enumerate(goals):
+                _progress(sid, "route", f"  {j + 1}. {str(g)[:140]}")
+        elif stage == "step_start":
+            _progress(sid, "dispatch", f"Step {lbl}: {str(e.get('goal', ''))[:140]}",
+                      agent="plan", ok=True)
+        elif stage == "verify":
+            # ``confidence`` is the verifier's certainty in its verdict (not the
+            # output's quality) — spell out accepted/rejected so a high number next
+            # to a retry doesn't read as a contradiction.
+            conf = float(e.get("confidence", 0) or 0)
+            verdict = (f"accepted ✓ (verifier {conf:.0%} sure)" if e.get("passed")
+                       else f"rejected ✗ (verifier {conf:.0%} sure) — retry")
+            _progress(sid, "attempt", f"Step {lbl} · verify try {e.get('attempt')} → {verdict}")
+        elif stage == "step_done":
+            v = "verified" if e.get("verified") else "unverified"
+            _progress(sid, "dispatch", f"Step {lbl} {v} · conf {float(e.get('confidence', 0) or 0):.0%}",
+                      agent="plan", ok=bool(e.get("verified")))
+        elif stage == "replan":
+            _progress(sid, "merge", f"Re-planning (#{e.get('replans')}) after step {lbl} failed", ok=False)
+        elif stage == "synthesize":
+            _progress(sid, "merge", f"Synthesizing the deliverable from {e.get('steps', 0)} step(s)…")
+    return on_event
+
+
+async def _run_plan(sid: str, body: PlanRequest, user: dict) -> None:
+    """Background plan-horizon run: decompose → verify-gated steps → synthesize."""
+    db = get_db()
+    registry = _load_registry()
+    _progress_start(sid)
+    try:
+        await db.update_basna_session(sid, user["id"], status="running")
+        creds = _resolve_merge_creds(body, registry, body.plan_tier)
+        if not creds.get("model"):
+            raise RuntimeError(f"plan tier {body.plan_tier!r} has no model configured")
+        plan_p, _ = _provider_call(creds, temperature=0.3, default_max=2048, cap=4096)
+        ver_p, _ = _provider_call(creds, temperature=0.0, default_max=1024, cap=2048)
+        synth_p, _ = _provider_call(creds, temperature=0.3, default_max=8192, cap=32768)
+        cfg = PlanConfig(
+            max_steps=body.max_steps, max_fix_per_step=body.max_fix_per_step,
+            max_replans=body.max_replans, min_step_confidence=body.min_step_confidence)
+        # Step execution: a full Basna ensemble, a Vatra team, or a lean generation.
+        if body.step_mode == "ensemble":
+            def _on_child(csid: str, r: dict) -> None:
+                _progress(sid, "dispatch",
+                          f"  ↳ ensemble · {len((r or {}).get('agents') or [])} agent(s) "
+                          f"· merged conf {float((r or {}).get('confidence', 0) or 0):.0%}",
+                          agent="plan")
+            step_runner = make_basna_ensemble_step_runner(sid, body, user, on_step=_on_child)
+        elif body.step_mode == "vatra":
+            def _on_team(csid: str, r: dict) -> None:
+                _progress(sid, "dispatch",
+                          f"  ↳ team · {len((r or {}).get('subtasks') or [])} subtask(s) "
+                          f"· conf {float((r or {}).get('confidence', 0) or 0):.0%}",
+                          agent="plan")
+            step_runner = make_vatra_team_step_runner(sid, body, user, on_step=_on_team)
+        else:
+            step_p, _ = _provider_call(creds, temperature=0.5, default_max=8192, cap=32768)
+            step_runner = make_llm_step_runner(step_p)
+        if body.dag:
+            res = await run_dag_horizon(
+                body.intent.strip(),
+                planner_dag=make_llm_dag_planner(plan_p, max_steps=body.max_steps),
+                step_runner=step_runner,
+                verifier=make_llm_verifier(ver_p),
+                synthesizer=make_llm_synthesizer(synth_p),
+                cfg=cfg, on_event=_plan_on_event(sid))
+        else:
+            res = await run_plan_horizon(
+                body.intent.strip(),
+                planner=make_llm_planner(plan_p, max_steps=body.max_steps),
+                step_runner=step_runner,
+                verifier=make_llm_verifier(ver_p),
+                synthesizer=make_llm_synthesizer(synth_p),
+                cfg=cfg, on_event=_plan_on_event(sid))
+        confidence = round(res.completed / max(1, len(res.steps)), 3)
+        analysis = {
+            "kind": "plan",
+            "steps": [{"goal": s["goal"], "verified": s["verified"],
+                       "confidence": s["confidence"], "attempts": s["attempts"]}
+                      for s in res.steps],
+            "replans": res.replans, "stopped_reason": res.stopped_reason,
+        }
+        await db.update_basna_session(
+            sid, user["id"], status="done", truth=res.deliverable,
+            confidence=confidence, analysis=json.dumps(analysis))
+        note = f" ({res.stopped_reason})" if res.stopped_reason else ""
+        _progress(sid, "done",
+                  f"Done · {res.completed}/{len(res.steps)} step(s) verified, "
+                  f"{res.replans} re-plan(s){note}")
+    except Exception as e:  # noqa: BLE001 — background task: record, don't crash the loop
+        log.exception("Basna plan run failed", sid=sid)
+        _progress(sid, "error", str(e)[:300])
+        await db.update_basna_session(sid, user["id"], status="error")
+    finally:
+        _progress_done(sid)
+        await db.update_basna_session(
+            sid, user["id"], progress=json.dumps((_PROGRESS.get(sid) or {}).get("events", [])))
+
+
+@router.post("/plan")
+async def plan_route(body: PlanRequest, request: Request, user: dict = Depends(get_current_user)):
+    """Run a verify-gated multi-step Plan-Horizon (Lever C) in the background.
+
+    The planner decomposes the intent into ordered steps; each step is driven to a
+    verified result (with a fix loop) before the next; a hard step failure triggers a
+    bounded re-plan; the deliverable is synthesized from the verified steps. Returns
+    immediately with the session id — the UI polls progress like any other run.
+    """
+    intent = (body.intent or "").strip()
+    if not intent:
+        raise HTTPException(400, "intent is required")
+    db = get_db()
+    title = (body.title or intent[:60]).strip()
+    sess = await db.create_basna_session(
+        user["id"], intent,
+        json.dumps({"mode": "plan", "source": "ui", "max_steps": body.max_steps,
+                    "max_replans": body.max_replans, "step_mode": body.step_mode,
+                    "dag": body.dag,
+                    **({"team": list(body.archetype_ids)} if body.archetype_ids else {})}),
+        title=title)
+    sid = sess["id"]
+    t = asyncio.create_task(_run_plan(sid, body, user))
+    _basna_agent_tasks.add(t)
+    t.add_done_callback(_basna_agent_tasks.discard)
+    return {"session_id": sid, "title": title, "status": "running"}
+
+
 class RecompileRequest(BaseModel):
     tiers: dict | None = None
     api_key: str = ""
@@ -1990,13 +2594,7 @@ async def recompile_route(
     merge_kind = sess.get("merge_kind") or "converge"
 
     def _merge_creds(tier: str) -> dict:
-        lt = (body.tiers or {}).get(tier)
-        if lt and lt.get("model"):
-            return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
-                    "base_url": lt.get("base_url") or None,
-                    "api_key": lt.get("api_key") or body.api_key or None,
-                    "output_ctx": int(lt.get("output_ctx") or 0)}
-        return _tier_creds(registry, tier, body.api_key)
+        return _resolve_merge_creds(body, registry, tier)
 
     # Reconcile generated files captured to disk but never persisted (a stalled
     # run saves files to the session dir in `finally`, before the final DB save).

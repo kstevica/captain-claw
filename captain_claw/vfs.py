@@ -32,11 +32,18 @@ escape it is rejected.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import time
 from pathlib import Path
 
 _SCHEME = "vfs:"
+# Per-project sidecar recording who wrote what (append-only → concurrency-safe;
+# many agents writing the same project never race a read-modify-write). Hidden
+# from listings. One JSON object per line: {"path", "agent", "ts"}.
+_META_FILE = ".vfs-meta.jsonl"
+META_FILENAME = _META_FILE  # public: the listing layer hides this sidecar
 _DEFAULT_PROJECT = "shared"
 # Must match Flight Deck's no-auth user id (auth._LOCAL_USER["id"] == "local")
 # so the main interactive agent and the FD browser panel share one tree.
@@ -212,6 +219,75 @@ def to_display(path: Path) -> str:
         return _SCHEME
     project, *rest = parts
     return f"{_SCHEME}{project}" + ("/" + "/".join(rest) if rest else "")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Authorship — who wrote each file (best-effort; never raises)
+# ──────────────────────────────────────────────────────────────────────
+
+def agent_label() -> str:
+    """A human label for the agent writing right now, from its environment.
+
+    ``CLAW_AGENT_LABEL`` is set by the Basna/Vatra spawn paths to the worker's
+    role; ``CLAW_VATRA_OWNER`` (the owning archetype) is the Vatra fallback.
+    Empty when unknown (e.g. the main interactive agent) — we don't record noise.
+    """
+    for key in ("CLAW_AGENT_LABEL", "CLAW_VATRA_OWNER"):
+        v = os.environ.get(key, "").strip()
+        if v:
+            return v
+    return ""
+
+
+def record_author(real_path: str | Path) -> None:
+    """Append an authorship record for a freshly-written VFS file (best-effort).
+
+    Stamps the current :func:`agent_label` against the file's project-relative
+    path in the project's ``.vfs-meta.jsonl``. No-op when the writer is unknown
+    or the path is outside a VFS project.
+    """
+    try:
+        label = agent_label()
+        if not label:
+            return
+        root = user_root().resolve()
+        parts = Path(real_path).resolve().relative_to(root).parts
+        if len(parts) < 2:  # need <project>/<at least one segment>
+            return
+        proj_root = root / parts[0]
+        rel = "/".join(parts[1:])
+        line = json.dumps({"path": rel, "agent": label, "ts": time.time()}, ensure_ascii=False)
+        with open(proj_root / _META_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:  # noqa: BLE001 — authorship is best-effort, never break a write
+        pass
+
+
+def read_authors(proj_root: str | Path) -> dict[str, dict]:
+    """Map ``project-relative path -> {agent, ts}`` from a project's sidecar.
+
+    The last record for a path wins (most recent writer). Returns ``{}`` when no
+    sidecar exists.
+    """
+    out: dict[str, dict] = {}
+    meta = Path(proj_root) / _META_FILE
+    if not meta.is_file():
+        return out
+    try:
+        for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            p = d.get("path")
+            if p:
+                out[p] = {"agent": d.get("agent", ""), "ts": d.get("ts", 0)}
+    except OSError:
+        pass
+    return out
 
 
 def list_projects() -> list[str]:

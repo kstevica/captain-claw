@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -313,7 +313,7 @@ class EditTool(Tool):
         backup_dir = self._backup_dir_for(file_path, kwargs)
         backup_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
         backup_name = f"{file_path.name}.{timestamp}.bak"
         backup_path = backup_dir / backup_name
 
@@ -371,6 +371,9 @@ class EditTool(Tool):
             # Preserve original file permissions
             shutil.copymode(str(file_path), tmp_path)
             os.replace(tmp_path, str(file_path))
+            # Record authorship for shared VFS files (self-guards on non-VFS paths).
+            from captain_claw.vfs import record_author
+            record_author(file_path)
         except Exception:
             # Clean up temp file on failure
             try:

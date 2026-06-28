@@ -1,6 +1,5 @@
 """Write tool for writing file contents."""
 
-import asyncio
 import html
 import re
 from pathlib import Path
@@ -205,7 +204,7 @@ class WriteTool(Tool):
                 saved_root = self._resolve_saved_root(kwargs)
                 session_id = self._normalize_session_id(str(kwargs.get("_session_id", "")))
                 file_path = self._normalize_under_saved(path, saved_root, session_id)
-            
+
             # Ensure parent directory exists
             file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -281,6 +280,11 @@ class WriteTool(Tool):
             with open(file_path, mode, encoding="utf-8") as f:
                 f.write(content)
 
+            # Record who authored this shared file (best-effort, VFS writes only).
+            if is_vfs_path(path):
+                from captain_claw.vfs import record_author
+                record_author(file_path)
+
             redirect_note = ""
             requested = Path(path).expanduser()
             if str(requested) != str(file_path):
@@ -325,7 +329,7 @@ class WriteTool(Tool):
                 content=result_msg,
                 system_hint=_hint,
             )
-            
+
         except Exception as e:
             log.error("Write failed", path=path, error=str(e))
             return ToolResult(

@@ -31,24 +31,24 @@ from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
-from captain_claw.logging import get_logger
 
 # Reuse Basna's standalone spine — these are pure/side-effect-isolated helpers and
 # the shared run-tracking + notify plumbing. Only the coordinator below is new.
 from captain_claw.flight_deck.basna_routes import (
-    AgentStartReq,
-    ExecuteRequest,
-    _AgentReq,
     _AGENT_RUN_WINDOW_SECONDS,
+    _INSTRUCTIONS_DIR,
     _MAX_AGENT_RUNS_PER_OWNER,
     _MAX_AGENT_RUNS_PER_WINDOW,
-    _INSTRUCTIONS_DIR,
     _PROGRESS,
+    AgentStartReq,
+    ExecuteRequest,
     _active_agent_runs,
     _agent_run_starts,
     _agent_run_tasks,
+    _AgentReq,
     _basna_agent_tasks,
     _build_catalog,
+    _closer_on_event,
     _dispatch_one,
     _guess_mime,
     _is_texty,
@@ -68,6 +68,8 @@ from captain_claw.flight_deck.basna_routes import (
     _session_files_dir,
     _tier_creds,
 )
+from captain_claw.flight_deck.horizon_worker import HorizonConfig, run_horizon_closer
+from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
@@ -339,7 +341,9 @@ async def _spawn_worker(request: Request, user: dict, *, name: str, description:
     the `vatra` ask/inbox tool is registered unconditionally and stays available.
     `extra_env` carries the run context (session/subtask/owner/depth)."""
     from captain_claw.flight_deck.server import (
-        AgentConfig, spawn_process, _load_process_registry,
+        AgentConfig,
+        _load_process_registry,
+        spawn_process,
     )
     lt = (tiers or {}).get(tier) or {}
     provider = lt.get("provider") or ""
@@ -375,8 +379,11 @@ async def _spawn_worker(request: Request, user: dict, *, name: str, description:
 def _teardown(slugs: list[str]) -> None:
     """Fully remove ephemeral agents so they don't pile up in the fleet."""
     from captain_claw.flight_deck.server import (
-        _do_stop_process, _load_process_registry, _save_process_registry,
-        _processes, DATA_DIR,
+        DATA_DIR,
+        _do_stop_process,
+        _load_process_registry,
+        _processes,
+        _save_process_registry,
     )
     for slug in slugs:
         try:
@@ -481,7 +488,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     else:
         _progress(sid, "route", "Lead decomposing the task…")
         try:
-            route = await _build_plan(db, user["id"], intent, max_agents, _creds("reason"))
+            # A plan-step child can fix the team via config.force_ids.
+            _force = [str(a) for a in (cfg.get("force_ids") or []) if str(a).strip()]
+            route = await _build_plan(db, user["id"], intent, max_agents, _creds("reason"),
+                                      force_ids=_force or None)
         except HTTPException:
             await db.update_basna_session(sid, user["id"], status="error")
             raise
@@ -774,6 +784,42 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _progress_done(sid)
         raise HTTPException(502, "Vatra: no subtask produced usable output")
 
+    # Horizon config (shared by the per-owner depth pass below and the final closer).
+    _hraw = body.horizon if body.horizon is not None else cfg.get("horizon")
+    _hcfg = HorizonConfig.from_dict(_hraw) if _hraw else None
+
+    # 4b) Horizon per-owner depth (Lever A, opt-in, blackboard-safe): adversarially
+    # verify EACH specialist's slice and revise it once if a diverse-lens critic panel
+    # refutes it — the closer applied per owner. NOT spawn-×N pools (those would each
+    # post/ask and pollute the shared blackboard). Critics run on a separate model.
+    if _hcfg is not None and _hcfg.worker:
+        cc = _creds(_hcfg.critic_tier)
+        cp = rp = None
+        if cc.get("model"):
+            cp, _ = _provider_call(cc, temperature=0.7, default_max=1200, cap=2048)
+            rp, _ = _provider_call(cc, temperature=0.3, default_max=8192, cap=32768)
+        if cp is not None:
+            brief_by_id = {st["id"]: st.get("brief", "") for st in subtasks}
+            _progress(sid, "verify", f"Horizon: verifying {len(usable)} slice(s)…")
+
+            async def _close_slice(r: dict) -> None:
+                q = (f"{intent}\n\n## This piece's assignment\n"
+                     f"{brief_by_id.get(r['id'], r.get('role', ''))}")
+                try:
+                    res = await run_horizon_closer(
+                        question=q, answer=r["output"], critic_provider=cp,
+                        revise_provider=rp, critics=_hcfg.critics,
+                        on_event=_closer_on_event(sid, r.get("role", "slice"), "verify"))
+                    if res["revised"]:
+                        r["output"] = res["answer"]
+                        _progress(sid, "verify",
+                                  f"{r.get('role', 'slice')}: revised "
+                                  f"({res['survived']}/{res['total']} held)", agent=r.get("role"))
+                except Exception as e:  # noqa: BLE001 — per-slice depth is best-effort
+                    log.warning("Vatra per-owner closer failed", error=str(e))
+
+            await asyncio.gather(*[_close_slice(r) for r in usable])
+
     # 5) Reporter assembles the slices (+ any answered asks) into one deliverable.
     answered = await db.list_vatra_asks(sid, status="answered")
     truth, reporter_files = await _run_reporter(
@@ -785,6 +831,29 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     )
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
+
+    # 5b) Horizon closer (Lever B, opt-in): adversarially verify the assembled
+    # deliverable and revise once if a diverse-lens critic panel refutes it. Critics
+    # run on a separate Library-tier model (never the team judging itself).
+    if _hcfg is not None and _hcfg.close and (truth or "").strip():
+        _progress(sid, "verify", "Horizon closer: verifying the deliverable…")
+        try:
+            cc = _creds(_hcfg.critic_tier)
+            cp = rp = None
+            if cc.get("model"):
+                cp, _ = _provider_call(cc, temperature=0.7, default_max=1200, cap=2048)
+                rp, _ = _provider_call(cc, temperature=0.3, default_max=8192, cap=32768)
+            closed = await run_horizon_closer(
+                question=intent, answer=truth, critic_provider=cp, revise_provider=rp,
+                critics=_hcfg.critics, on_event=_closer_on_event(sid, "Closer", "verify"))
+            if closed["revised"]:
+                truth = closed["answer"]
+                _progress(sid, "verify", "Closer revised the deliverable")
+            else:
+                _progress(sid, "verify",
+                          f"Closer: deliverable held ({closed['survived']}/{closed['total']})")
+        except Exception as e:  # noqa: BLE001 — closer is best-effort
+            log.warning("Vatra horizon closer failed", error=str(e))
 
     # 6) Persist one run per owner (success backfilled by the learning step below).
     run_ids = await db.add_basna_runs(sid, user["id"], [{
@@ -1280,7 +1349,7 @@ async def _coordinate_asks(request: Request, user: dict, sid: str, sid8: str,
             break
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=_COORD_POLL_S)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
     if inflight:
         await asyncio.gather(*inflight, return_exceptions=True)
@@ -1531,6 +1600,8 @@ class VatraStartRequest(BaseModel):
     archetype_ids: list[str] = []
     # Which Library tier the Lead (decomposition) runs on — a reasoning task.
     router_tier: str = "reason"
+    # Deep / Horizon closer (verify + revise the assembled deliverable). None → off.
+    horizon: dict | None = None
 
 
 class VatraExecuteRequest(BaseModel):
@@ -1538,6 +1609,9 @@ class VatraExecuteRequest(BaseModel):
     tiers: dict | None = None
     env_vars: list | None = None
     api_key: str = ""
+    # Deep / Horizon: Vatra honors the closer (verify+revise the deliverable). Keys:
+    # close, critics[], critic_tier. Per-owner pools (worker) are deferred. None → off.
+    horizon: dict | None = None
 
 
 @router.post("/route")
@@ -1552,7 +1626,8 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
     title = (body.title or intent[:60]).strip()
     sess = await db.create_basna_session(
         user["id"], intent, title=title,
-        config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents}))
+        config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents,
+                           **({"horizon": body.horizon} if body.horizon else {})}))
     sid = sess["id"]
     registry = _load_registry()
     # The Lead's decomposition is a reasoning task — run it on the user-selected
@@ -1584,7 +1659,8 @@ async def execute_vatra_ui(body: VatraExecuteRequest, request: Request,
         raise HTTPException(404, "session not found")
     exec_req = ExecuteRequest(
         session_id=body.session_id, tiers=body.tiers or None,
-        env_vars=body.env_vars or None, api_key=body.api_key or "")
+        env_vars=body.env_vars or None, api_key=body.api_key or "",
+        horizon=body.horizon or None)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)
@@ -1606,11 +1682,13 @@ async def start_vatra(body: VatraStartRequest, request: Request,
     title = (body.title or intent[:60]).strip()
     sess = await db.create_basna_session(
         user["id"], intent, title=title,
-        config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents}))
+        config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents,
+                           **({"horizon": body.horizon} if body.horizon else {})}))
     sid = sess["id"]
     exec_req = ExecuteRequest(
         session_id=sid, tiers=body.tiers or None,
-        env_vars=body.env_vars or None, api_key=body.api_key or "")
+        env_vars=body.env_vars or None, api_key=body.api_key or "",
+        horizon=body.horizon or None)
     # Background task with a stub request carrying the owner (spawn_process reads
     # request.state.user_id) — the real request object isn't safe to use post-response.
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))

@@ -52,7 +52,8 @@ def test_prompt_from_messages_joins_nonempty():
 async def test_agent_factory_dispatches_to_port():
     seen = {}
 
-    async def send(port, token, prompt, timeout, fleet_instructions="", agent_name=""):
+    async def send(port, token, prompt, timeout, fleet_instructions="", agent_name="",
+                   on_action=None, on_usage=None):
         seen.update(port=port, token=token, prompt=prompt)
         return "agent reply"
 
@@ -69,11 +70,12 @@ async def test_archetype_runner_spawns_per_tier_and_disposes():
     spawns: list[str] = []
     stops: list[str] = []
 
-    async def spawn(arch, tier, tcfg, request, user):
+    async def spawn(arch, tier, tcfg, request, user, name_suffix=""):
         spawns.append(tier)
         return (9000 + len(spawns), f"tok-{tier}", f"slug-{tier}")
 
-    async def send(port, token, prompt, timeout, fleet_instructions="", agent_name=""):
+    async def send(port, token, prompt, timeout, fleet_instructions="", agent_name="",
+                   on_action=None, on_usage=None):
         return f"{token}:{prompt}"
 
     async def stop(slug):

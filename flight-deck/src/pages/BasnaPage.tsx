@@ -2,13 +2,98 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
   Loader2, Check, X, Wrench, Maximize2, Minimize2, Download, Paperclip, FileText, Image as ImageIcon,
-  SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw, Square, CornerDownRight, Users,
+  SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw, Square, CornerDownRight, Users, HelpCircle,
+  Gauge, ListChecks,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis } from '../stores/basnaStore'
 import { VatraTeamPlan, VatraBlackboard } from '../components/VatraDelegation'
 import { useTierConfig, TIER_ORDER, PROVIDERS } from '../services/tierConfig'
+
+const HELP_MD = `
+# Basna, Vatra & Deep mode
+
+Two ways to put a **fleet of specialist agents** on one task — plus an optional
+**Deep** mode that spends extra compute to reach frontier‑grade quality on cheaper models.
+
+---
+
+## Basna — the independent ensemble
+
+A router picks the **minimal set of specialist archetypes** for your task, spawns them
+fresh, runs them **in parallel and blind to each other**, then **merges** their answers
+weighted by each archetype's learned reliability. An LLM only synthesises when the
+answers genuinely conflict.
+
+- **Best for:** truth‑finding — "what's true", options, verification, analysis.
+- **Why it works:** independent experts make *uncorrelated* errors, so merging cancels them.
+- **It learns:** every run scores each archetype, so routing and weighting improve over time.
+
+**Route → review the team → Run ensemble.**
+
+---
+
+## Vatra — the collaborating team
+
+A **Lead** decomposes the task into owned sub‑pieces; specialists work **on a shared
+blackboard** and can **delegate sub‑questions to each other** without blocking; a dedicated
+**reporter** assembles everything into one deliverable.
+
+- **Best for:** building a **multi‑part artifact** whose pieces depend on each other
+  (a design doc, a report, a plan).
+- **Difference from Basna:** Basna *merges* independent answers; Vatra *collaborates* toward
+  one stitched result.
+
+**Plan team → review → Run team.**
+
+---
+
+## ⚡ Deep mode (Frontier Horizon)
+
+Off by default. When on, the system **spends test‑time compute, gated by verifiers**, to
+simulate a much stronger model. Three layers:
+
+1. **Per‑worker depth.**
+   - *Basna:* each worker answers **N times** (self‑consistency vote) and a panel of
+     **adversarial critics** (distinct cognitive lenses) must not refute it; a failed check
+     triggers a fix pass. Set the **samples** number to widen the vote.
+   - *Vatra:* each specialist's slice is **verified by the critic panel and revised once**
+     if refuted (no vote — that would flood the blackboard).
+2. **The closer.** After the answer/deliverable is assembled, the critic panel reviews the
+   **final** result and **revises it once** if a majority refute it — the self‑correction
+   step a single pass lacks.
+3. **Critics never grade themselves** — they run on a *different* model than the worker.
+
+> Deep mode is **much slower and costlier** (many extra model calls). Use it when quality
+> matters more than speed/cost.
+
+---
+
+## 🧭 Plan mode (Basna) — think way ahead
+
+A planner breaks the task into **ordered steps**; each step is **driven to a verified
+result before the next begins**; a step that can't be verified triggers a **re‑plan**; the
+deliverable is synthesised from the verified steps. This is the long‑horizon lever — the
+system plans, checks itself, and recovers instead of charging ahead.
+
+- **Steps engine** — how each step runs:
+  - **single** — one generation per step (fast).
+  - **Basna ensemble** — a full Basna fleet per step.
+  - **Vatra team** — a full Vatra team per step (strongest, slowest).
+- **parallel** — the planner emits a **dependency graph**, so independent steps run at the
+  same time and each step sees only what it depends on.
+
+---
+
+### Rule of thumb
+| Want… | Use |
+|---|---|
+| The true answer / options, fast | **Basna** |
+| One assembled multi‑part artifact | **Vatra** |
+| Frontier‑grade quality, cost no object | add **Deep** |
+| A hard task that needs multi‑step reasoning | **Plan** |
+`.trim()
 
 const COGNITIVE_MODES = ['neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian']
 
@@ -469,7 +554,7 @@ export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, addFiles, removeFile, downloadFile, fetchFileText,
     updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
@@ -484,6 +569,7 @@ export function BasnaPage() {
   // Optional user-fixed team: archetype ids the route/plan MUST use (empty = auto).
   const [team, setTeam] = useState<string[]>([])
   const [teamOpen, setTeamOpen] = useState(false)
+  const [tuning, setTuning] = useState(false)  // router tier + max agents disclosure
   const toggleTeam = (id: string) =>
     setTeam((t) => (t.includes(id) ? t.filter((x) => x !== id) : [...t, id]))
   const [deepening, setDeepening] = useState(false)
@@ -536,6 +622,17 @@ export function BasnaPage() {
   // The mode the controls act in: a selected run is locked to its own mode; with
   // no run selected, the toggle (composeMode) decides.
   const effectiveMode: 'basna' | 'vatra' = activeSession ? (vatraMode ? 'vatra' : 'basna') : composeMode
+  // Plan step engine: simple = one model per step; complex = a full run of the
+  // selected mode (Basna ensemble / Vatra team) per step.
+  const planStepMode: 'llm' | 'ensemble' | 'vatra' =
+    !planComplex ? 'llm' : effectiveMode === 'vatra' ? 'vatra' : 'ensemble'
+  // The three effort levels are mutually exclusive; derive one from the two flags.
+  const strategy: 'standard' | 'deep' | 'plan' = planMode ? 'plan' : deep ? 'deep' : 'standard'
+  const setStrategy = (sId: 'standard' | 'deep' | 'plan') => {
+    if (sId === 'standard') { setDeep(false); setPlanMode(false) }
+    else if (sId === 'deep') setDeep(true)   // setter clears Plan
+    else setPlanMode(true)                   // setter clears Deep
+  }
   // Keep the toggle in sync with whatever run is open.
   useEffect(() => {
     if (activeSession) setComposeMode(isVatra(activeSession.config) ? 'vatra' : 'basna')
@@ -603,8 +700,15 @@ export function BasnaPage() {
           <p className="text-[11px] text-zinc-500">Route → spawn the minimal team → merge by reliability</p>
         </div>
         <button
+          onClick={() => viewFull('Basna, Vatra & Deep mode', HELP_MD)}
+          title="What are Basna, Vatra and Deep mode?"
+          className="ml-auto flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+        >
+          <HelpCircle className="h-3.5 w-3.5" /> Help
+        </button>
+        <button
           onClick={() => { newSession(); setIntent(''); setTitle(''); setTeam([]) }}
-          className="ml-auto flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500"
+          className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500"
         >
           <Plus className="h-3.5 w-3.5" /> New
         </button>
@@ -745,7 +849,7 @@ export function BasnaPage() {
                       key={ex.label}
                       onClick={() => setIntent(ex.text)}
                       title={ex.text}
-                      className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[11px] text-sky-300 hover:bg-sky-500/20 transition-colors"
+                      className="rounded-full border border-sky-300 bg-sky-50 px-2.5 py-1 text-[11px] text-sky-700 transition-colors hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300 dark:hover:bg-sky-500/20"
                     >
                       {ex.label}
                     </button>
@@ -779,85 +883,219 @@ export function BasnaPage() {
                 })}
               </div>
 
-              <div className="mt-3 flex flex-wrap items-center gap-3">
-                <label className="flex items-center gap-2 text-xs text-zinc-400">
-                  Router tier
-                  <select
-                    value={routerTier}
-                    onChange={(e) => setRouterTier(e.target.value)}
-                    title="Which Library tier picks the archetypes / leads the team"
-                    className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
+              {/* ── Effort / strategy ─────────────────────────────────────── */}
+              <div className="mt-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Effort</span>
+                  <div className="inline-flex rounded-lg border border-zinc-700 bg-zinc-900/50 p-0.5">
+                    {([
+                      { id: 'standard', label: 'Standard', icon: Gauge, on: 'bg-sky-600 text-white' },
+                      { id: 'deep', label: 'Deep', icon: ScanSearch, on: 'bg-amber-500 text-zinc-950' },
+                      { id: 'plan', label: 'Plan', icon: ListChecks, on: 'bg-emerald-600 text-white' },
+                    ] as const).map((st) => {
+                      const Icon = st.icon
+                      const sel = strategy === st.id
+                      return (
+                        <button
+                          key={st.id}
+                          onClick={() => setStrategy(st.id)}
+                          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                            sel ? st.on : 'text-zinc-400 hover:text-zinc-200'}`}
+                        >
+                          <Icon className="h-3.5 w-3.5" /> {st.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <button
+                    onClick={() => setTuning((t) => !t)}
+                    title="Router tier and team size"
+                    className={`ml-auto flex items-center gap-1.5 rounded-md px-2 py-1 text-xs ${
+                      tuning ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'}`}
                   >
-                    {TIER_ORDER.filter((t) => tiers[t]).map((t) => (
-                      <option key={t} value={t}>{registry?.tiers[t]?.label || t}</option>
-                    ))}
-                    {Object.keys(tiers).length === 0 && <option value="reason">reason</option>}
-                  </select>
-                </label>
-                <label className="flex items-center gap-2 text-xs text-zinc-400">
-                  Max agents
-                  <input
-                    type="number" min={1} max={10} value={maxAgents}
-                    onChange={(e) => setMaxAgents(Number(e.target.value))}
-                    disabled={team.length > 0}
-                    title={team.length > 0 ? 'Ignored — the team is fixed by your selection' : ''}
-                    className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none disabled:opacity-40"
-                  />
-                </label>
-                <button
-                  onClick={() => setTeamOpen((o) => !o)}
-                  disabled={teamLocked}
-                  className={`flex items-center gap-1.5 rounded border px-2 py-1 text-xs disabled:opacity-40 ${
-                    team.length > 0
-                      ? 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300'
-                      : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
-                  title={teamLocked ? 'Locked while the team is being summoned' : 'Pick exactly which archetypes the team must use (optional)'}
-                >
-                  <Users className="h-3.5 w-3.5" />
-                  {team.length > 0 ? `Team: ${team.length} selected` : 'Select team'}
-                </button>
-                <div className="ml-auto flex items-center gap-2">
-                  {effectiveMode === 'vatra' ? (
-                    <>
-                      <button
-                        onClick={() => planVatra(intent, tiers, title, team)}
-                        disabled={!canRoute || vatraMode}
-                        title="Decompose the task into owned pieces — review the team, then Run team."
-                        className="flex items-center gap-1.5 rounded-lg border border-violet-300 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-40 dark:border-violet-700/70 dark:text-violet-300 dark:hover:bg-violet-800/30"
+                    <SlidersHorizontal className="h-3.5 w-3.5" /> Tuning
+                  </button>
+                </div>
+
+                {/* What the chosen effort does + its options */}
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2.5 text-xs text-zinc-400">
+                  {strategy === 'standard' && (
+                    <p className="leading-relaxed">
+                      A minimal team answers once — {effectiveMode === 'vatra'
+                        ? 'a Lead splits the work and a reporter assembles it.'
+                        : 'independent agents, merged by reliability.'}
+                    </p>
+                  )}
+                  {strategy === 'deep' && (
+                    <div className="space-y-2">
+                      <p className="leading-relaxed">
+                        A diverse critic panel reviews each answer and revises it if refuted{effectiveMode === 'basna'
+                          ? ', and every agent self-consistency-votes' : ''}. Much stronger, much slower & costlier.
+                      </p>
+                      {effectiveMode === 'basna' && (
+                        <label className="flex items-center gap-2 text-zinc-400">
+                          Samples / agent
+                          <input
+                            type="number" min={2} max={8} value={deepSamples}
+                            onChange={(e) => setDeepSamples(Number(e.target.value))}
+                            title="Self-consistency vote width per agent"
+                            className="w-14 rounded border border-amber-700/50 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-amber-500 focus:outline-none"
+                          />
+                        </label>
+                      )}
+                    </div>
+                  )}
+                  {strategy === 'plan' && (
+                    <div className="space-y-2.5">
+                      <p className="leading-relaxed">
+                        Break the task into steps, drive each to a <span className="text-zinc-300">verified</span> result before the next, re-plan on failure, then synthesize.
+                      </p>
+                      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                        <label className="flex items-center gap-2 text-zinc-400">
+                          Steps
+                          <input
+                            type="number" min={1} max={12} value={planSteps}
+                            onChange={(e) => setPlanSteps(Number(e.target.value))}
+                            title="Max steps in the plan"
+                            className="w-14 rounded border border-emerald-700/50 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-emerald-500 focus:outline-none"
+                          />
+                        </label>
+                        <div className="flex items-center gap-2 text-zinc-400">
+                          Each step
+                          <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-950/50 p-0.5">
+                            {([
+                              { complex: false, label: 'simple' },
+                              { complex: true, label: effectiveMode === 'vatra' ? 'Vatra team' : 'Basna ensemble' },
+                            ]).map((opt) => (
+                              <button
+                                key={opt.label}
+                                onClick={() => setPlanComplex(opt.complex)}
+                                title={opt.complex
+                                  ? `Each step runs a full ${effectiveMode === 'vatra' ? 'Vatra team' : 'Basna ensemble'} — strongest, slowest.`
+                                  : 'One fast model per step.'}
+                                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                                  planComplex === opt.complex ? 'bg-emerald-600 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+                              >
+                                {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <label
+                          className="flex items-center gap-1.5 text-zinc-400"
+                          title="Planner emits a dependency graph — independent steps run in parallel, each seeing only what it depends on."
+                        >
+                          <input
+                            type="checkbox" checked={planDag}
+                            onChange={(e) => setPlanDag(e.target.checked)}
+                            className="accent-emerald-500"
+                          />
+                          parallel
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Tuning (router tier + team size) */}
+                {tuning && (
+                  <div className="flex flex-wrap items-center gap-5 rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2 text-xs">
+                    <label className="flex items-center gap-2 text-zinc-400">
+                      Router tier
+                      <select
+                        value={routerTier}
+                        onChange={(e) => setRouterTier(e.target.value)}
+                        title="Which Library tier picks the team / leads it"
+                        className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
                       >
-                        {planning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                        Plan team
-                      </button>
+                        {TIER_ORDER.filter((t) => tiers[t]).map((t) => (
+                          <option key={t} value={t}>{registry?.tiers[t]?.label || t}</option>
+                        ))}
+                        {Object.keys(tiers).length === 0 && <option value="reason">reason</option>}
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-2 text-zinc-400">
+                      Max agents
+                      <input
+                        type="number" min={1} max={10} value={maxAgents}
+                        onChange={(e) => setMaxAgents(Number(e.target.value))}
+                        disabled={team.length > 0}
+                        title={team.length > 0 ? 'Ignored — the team is fixed by your selection' : 'Team size cap'}
+                        className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none disabled:opacity-40"
+                      />
+                    </label>
+                  </div>
+                )}
+
+                {/* Team chip + run */}
+                <div className="flex items-center gap-2 pt-0.5">
+                  <button
+                    onClick={() => setTeamOpen((o) => !o)}
+                    disabled={teamLocked}
+                    className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs disabled:opacity-40 ${
+                      team.length > 0
+                        ? 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300'
+                        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
+                    title={teamLocked ? 'Locked while running' : 'Pin exactly which archetypes the team must use (optional)'}
+                  >
+                    <Users className="h-3.5 w-3.5" />
+                    {team.length > 0 ? `Team: ${team.length}` : 'Select team'}
+                  </button>
+                  <div className="ml-auto flex items-center gap-2">
+                    {planMode ? (
                       <button
-                        onClick={() => runVatra(tiers, envVars)}
-                        disabled={!canRun}
-                        className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
-                      >
-                        {(executing || activeBusy) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                        Run team
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        onClick={() => route(intent, tiers, title, team)}
+                        onClick={() => runPlan(intent, tiers, title, envVars, team, planStepMode)}
                         disabled={!canRoute}
-                        title="Select the minimal archetype team — review/edit it, then Run ensemble."
-                        className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
-                      >
-                        {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                        Route
-                      </button>
-                      <button
-                        onClick={() => execute(tiers, envVars)}
-                        disabled={!canRun}
-                        className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                        title={team.length > 0 && !planComplex
+                          ? 'A team is selected but "simple" steps do not route — switch to a full ensemble/team step.'
+                          : `Decompose → verify each step (${planComplex ? (effectiveMode === 'vatra' ? 'Vatra team' : 'Basna ensemble') : 'single model'}/step) → re-plan → synthesize.`}
+                        className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
                       >
                         {executing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                        Run ensemble
+                        Run plan
                       </button>
-                    </>
-                  )}
+                    ) : effectiveMode === 'vatra' ? (
+                      <>
+                        <button
+                          onClick={() => planVatra(intent, tiers, title, team)}
+                          disabled={!canRoute || vatraMode}
+                          title="Decompose the task into owned pieces — review the team, then Run team."
+                          className="flex items-center gap-1.5 rounded-lg border border-violet-300 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-40 dark:border-violet-700/70 dark:text-violet-300 dark:hover:bg-violet-800/30"
+                        >
+                          {planning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                          Plan team
+                        </button>
+                        <button
+                          onClick={() => runVatra(tiers, envVars)}
+                          disabled={!canRun}
+                          className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                        >
+                          {(executing || activeBusy) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                          Run team
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => route(intent, tiers, title, team)}
+                          disabled={!canRoute}
+                          title="Select the minimal archetype team — review/edit it, then Run ensemble."
+                          className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+                        >
+                          {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                          Route
+                        </button>
+                        <button
+                          onClick={() => execute(tiers, envVars)}
+                          disabled={!canRun}
+                          className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                        >
+                          {executing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                          Run ensemble
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -1084,7 +1322,7 @@ export function BasnaPage() {
             {(executing || progress.length > 0) && (
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
                 <div className="mb-2 flex items-center gap-2">
-                  {executing
+                  {(executing || activeBusy)
                     ? <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
                     : <Check className="h-4 w-4 text-emerald-500" />}
                   <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Progress</span>

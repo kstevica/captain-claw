@@ -19,6 +19,12 @@ export interface TiersResponse {
   default_ladders: { coder: string[]; reason: string[] }
 }
 
+export interface RunFile {
+  name: string
+  mime: string
+  size: number
+}
+
 export interface RunStep {
   seq: number
   step_id: string
@@ -28,6 +34,25 @@ export interface RunStep {
   samples: number
   passed: number
   confidence: number
+}
+
+export interface ProgressEvent {
+  i: number
+  ts?: number // epoch seconds (server clock)
+  stage: string // start | attempt | action | narration | llm | done | error
+  message: string
+  tier?: string
+  rung?: number
+  kind?: string
+  samples?: number
+  passed?: boolean
+  confidence?: number
+  agent?: string // run-target agent/archetype this step belongs to
+  tool?: string // tool name on action/narration events
+  detail?: string // tool-arg summary on action events
+  prompt_tokens?: number // on llm events — turn's running token counts
+  completion_tokens?: number
+  total_tokens?: number
 }
 
 export interface DubinaRun {
@@ -62,6 +87,7 @@ export interface CoderRequest {
   compute_budget?: number
   max_step_samples?: number
   max_fix_attempts?: number
+  target?: string // "" → Library tier model; else "agent:<id>" | "archetype:<id>"
 }
 
 export interface ReasonRequest {
@@ -76,6 +102,7 @@ export interface ReasonRequest {
   critic_modes?: string[]
   agreement_threshold?: number
   critic_cost?: number
+  target?: string // "" → Library tier model; else "agent:<id>" | "archetype:<id>"
 }
 
 export interface IntentRequest extends ReasonRequest {
@@ -153,12 +180,47 @@ export const startCoder = (req: CoderRequest) =>
 export const startReason = (req: ReasonRequest) =>
   fdFetch<{ run_id: string; track: Track; status: string }>('/reason', jsonInit('POST', req))
 
-// Intent runs inline server-side and returns the finished run.
 export const startIntent = (req: IntentRequest) =>
-  fdFetch<DubinaRun>('/intent', jsonInit('POST', req))
+  fdFetch<{ run_id: string; track: Track; status: string }>('/intent', jsonInit('POST', req))
 
 export const getRun = (track: Track, id: string) =>
   fdFetch<DubinaRun>(`/runs/${track}/${id}`)
+
+export const getProgress = (track: Track, id: string) =>
+  fdFetch<{ events: ProgressEvent[]; active: boolean }>(`/runs/${track}/${id}/progress`)
+
+export const stopRun = (track: Track, id: string) =>
+  fdFetch<{ ok: boolean; status: string }>(`/runs/${track}/${id}/stop`, jsonInit('POST'))
+
+// Raw fetch (with auth + refresh) for a generated file — used for view + download.
+async function fileFetch(track: Track, id: string, name: string): Promise<Response> {
+  const path = `${BASE}/runs/${track}/${encodeURIComponent(id)}/files/${encodeURIComponent(name)}`
+  let res = await fetch(path, { headers: _authHeaders(), credentials: 'include' })
+  if (res.status === 401 && useAuthStore.getState().authEnabled) {
+    if (await refreshAccessToken()) res = await fetch(path, { headers: _authHeaders(), credentials: 'include' })
+  }
+  return res
+}
+
+export async function fetchRunFileText(track: Track, id: string, name: string): Promise<string> {
+  const res = await fileFetch(track, id, name)
+  return res.ok ? res.text() : ''
+}
+
+export async function downloadRunFile(track: Track, id: string, name: string): Promise<void> {
+  const res = await fileFetch(track, id, name)
+  if (!res.ok) return
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+export const cleanupAgents = () =>
+  fdFetch<{ stopped: string[]; count: number }>('/agents/cleanup', jsonInit('POST'))
 
 export const listRuns = (track: Track, limit = 50) =>
   fdFetch<{ runs: DubinaRun[] }>(`/runs/${track}?limit=${limit}`)

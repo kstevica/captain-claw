@@ -20,6 +20,7 @@ Both produce a ``provider_for_tier`` the executor hands to the engine.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 
 from captain_claw.llm import LLMResponse, Message
@@ -56,23 +57,30 @@ class DispatchProvider:
 # ── Live agent target ────────────────────────────────────────────────
 
 async def _real_send(port: int, token: str, prompt: str, timeout: float,
-                     fleet_instructions: str = "", agent_name: str = "") -> str:
+                     fleet_instructions: str = "", agent_name: str = "",
+                     on_action=None, on_usage=None) -> str:
     from captain_claw.flight_deck.basna_routes import _send_chat_and_collect
     reply, _actions = await _send_chat_and_collect(
         port, token, prompt, timeout,
         fleet_instructions=fleet_instructions, agent_name=agent_name,
+        on_action=on_action, on_usage=on_usage,
     )
     return reply
 
 
 def make_agent_factory(
     port: int, token: str, *, send=_real_send, timeout: float = _DEFAULT_TIMEOUT,
-    fleet_instructions: str = "", agent_name: str = "",
+    fleet_instructions: str = "", agent_name: str = "", on_action=None, on_usage=None,
 ):
-    """Build a ``provider_for_tier`` that dispatches to one live agent (tier ignored)."""
+    """Build a ``provider_for_tier`` that dispatches to one live agent (tier ignored).
+
+    ``on_action(act)`` / ``on_usage(pt, ct, tt)`` stream the agent's tool calls,
+    narration and token usage live (the same monitor events Basna surfaces).
+    """
     async def dispatch(prompt: str) -> str:
         return await send(port, token, prompt, timeout,
-                          fleet_instructions=fleet_instructions, agent_name=agent_name)
+                          fleet_instructions=fleet_instructions, agent_name=agent_name,
+                          on_action=on_action, on_usage=on_usage)
 
     def factory(tier: str) -> DispatchProvider:
         return DispatchProvider(dispatch)
@@ -95,9 +103,10 @@ def resolve_agent_port_token(agent_id: str) -> tuple[int, str]:
 
 # ── Archetype target (spawn per tier) ────────────────────────────────
 
-async def _real_spawn(archetype: dict, tier: str, tcfg: dict, request, user) -> tuple[int, str, str]:
+async def _real_spawn(archetype: dict, tier: str, tcfg: dict, request, user,
+                      name_suffix: str = "") -> tuple[int, str, str]:
     from captain_claw.flight_deck.server import _load_process_registry, spawn_process
-    cfg = _build_agent_config(archetype, tier, tcfg)
+    cfg = _build_agent_config(archetype, tier, tcfg, name_suffix=name_suffix)
     res = await spawn_process(cfg, request, user)
     slug = getattr(res, "slug", "")
     entry = _load_process_registry().get(slug) or {}
@@ -111,11 +120,16 @@ async def _real_stop(slug: str) -> None:
     await _do_stop_process(slug)
 
 
-def _build_agent_config(archetype: dict, tier: str, tcfg: dict):
-    """An ephemeral AgentConfig for an archetype, modeled on Basna's spawn path."""
+def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str = ""):
+    """An ephemeral AgentConfig for an archetype, modeled on Basna's spawn path.
+
+    ``name_suffix`` keeps each run's agent name/slug unique so concurrent or
+    back-to-back runs of the same archetype+tier don't collide on spawn.
+    """
     from captain_claw.flight_deck.server import AgentConfig
+    suffix = f"-{name_suffix}" if name_suffix else ""
     base = dict(
-        name=f"dubina-{archetype.get('id', 'arch')}-{tier}",
+        name=f"dubina-{archetype.get('id', 'arch')}-{tier}{suffix}",
         description=f"Dubina ephemeral · {archetype.get('role', '')}",
         cognitive_mode=archetype.get("cognitive_mode", "neutra"),
         tools=archetype.get("tools") or AgentConfig().tools,
@@ -139,6 +153,7 @@ class ArchetypeRunner:
     def __init__(
         self, archetype: dict, request, user, tiers_map: dict | None = None,
         *, spawn=_real_spawn, send=_real_send, stop=_real_stop, timeout: float = _DEFAULT_TIMEOUT,
+        on_action=None, on_usage=None, name_suffix: str = "",
     ):
         self.archetype = archetype
         self.request = request
@@ -146,6 +161,8 @@ class ArchetypeRunner:
         self.tiers_map = tiers_map or {}
         self._spawn, self._send, self._stop = spawn, send, stop
         self._timeout = timeout
+        self._on_action, self._on_usage = on_action, on_usage
+        self._suffix = name_suffix or uuid.uuid4().hex[:6]  # unique per runner → per run
         self._agents: dict[str, tuple[int, str]] = {}  # tier -> (port, token)
         self._slugs: list[str] = []
 
@@ -153,6 +170,7 @@ class ArchetypeRunner:
         if tier not in self._agents:
             port, token, slug = await self._spawn(
                 self.archetype, tier, self.tiers_map.get(tier, {}), self.request, self.user,
+                name_suffix=self._suffix,
             )
             self._agents[tier] = (port, token)
             if slug:
@@ -167,9 +185,14 @@ class ArchetypeRunner:
                     port, token, prompt, self._timeout,
                     fleet_instructions=self.archetype.get("fleet_instructions", ""),
                     agent_name=self.archetype.get("role", ""),
+                    on_action=self._on_action, on_usage=self._on_usage,
                 )
             return DispatchProvider(dispatch)
         return factory
+
+    def agent_slugs(self) -> list[str]:
+        """Slugs of the agents spawned so far — to capture their generated files."""
+        return list(self._slugs)
 
     async def dispose(self) -> None:
         for slug in self._slugs:

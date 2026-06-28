@@ -21,6 +21,28 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`
 }
 
+// Compact relative timestamp from a unix-seconds mtime.
+function fmtTime(ts?: number): string {
+  if (!ts) return ''
+  const d = new Date(ts * 1000)
+  const diff = Date.now() - d.getTime()
+  if (diff < 60_000) return 'just now'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+function fmtFull(ts?: number): string {
+  return ts ? new Date(ts * 1000).toLocaleString([], { hour12: false }) : ''
+}
+
+const KIND_BADGE: Record<string, string> = {
+  basna: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
+  vatra: 'border-violet-500/40 bg-violet-500/10 text-violet-300',
+  council: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+}
+
 export function VFSBrowser() {
   const s = useVFSStore()
   const [creating, setCreating] = useState(false)
@@ -64,11 +86,18 @@ export function VFSBrowser() {
               >
                 <button onClick={() => s.openProject(p.name)} className="flex items-center gap-2 text-left">
                   <Folder className="h-4 w-4 shrink-0 text-violet-400" />
-                  <span className="truncate text-sm font-medium text-zinc-100">{p.name}</span>
+                  <span className="truncate text-sm font-medium text-zinc-100">{p.title || p.name}</span>
+                  {p.kind && (
+                    <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-medium uppercase ${KIND_BADGE[p.kind] || 'border-zinc-700 text-zinc-400'}`}>
+                      {p.kind}
+                    </span>
+                  )}
                 </button>
+                {p.title && <span className="truncate font-mono text-[10px] text-zinc-600">{p.name}</span>}
                 <div className="flex items-center justify-between text-[11px] text-zinc-500">
-                  <span>
+                  <span title={fmtFull(p.mtime)}>
                     {p.files} file{p.files !== 1 ? 's' : ''} · {fmtBytes(p.bytes)}
+                    {p.mtime ? ` · ${fmtTime(p.mtime)}` : ''}
                   </span>
                   <button
                     onClick={() => {
@@ -220,6 +249,15 @@ function EntryRow({ entry, active }: { entry: VFSEntry; active: boolean }) {
         <span className="truncate text-zinc-200">{entry.name}</span>
         {entry.type === 'file' && <span className="shrink-0 text-[11px] text-zinc-600">{fmtBytes(entry.size)}</span>}
       </button>
+      {/* metadata: who wrote it + when (always visible) */}
+      <div className="flex shrink-0 items-center gap-2 text-[11px] text-zinc-600">
+        {entry.author && (
+          <span className="max-w-[14rem] truncate text-zinc-500" title={`Last written by ${entry.author}`}>
+            ✎ {entry.author}
+          </span>
+        )}
+        {entry.mtime ? <span title={fmtFull(entry.mtime)}>{fmtTime(entry.mtime)}</span> : null}
+      </div>
       <div className="flex shrink-0 items-center gap-1 opacity-0 group-hover:opacity-100">
         {entry.type === 'file' && (
           <button onClick={() => s.download(entry)} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="Download">

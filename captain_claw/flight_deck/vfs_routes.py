@@ -10,16 +10,15 @@ from __future__ import annotations
 
 import mimetypes
 import shutil
-import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from captain_claw.flight_deck.auth import get_current_user
+from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.logging import get_logger
-from captain_claw.vfs import safe_join, safe_name
+from captain_claw.vfs import META_FILENAME, read_authors, safe_join, safe_name
 
 log = get_logger(__name__)
 
@@ -49,6 +48,33 @@ def _resolve(user_id: str, project: str, path: str) -> Path:
     if target is None:
         raise HTTPException(400, "invalid path (escapes project root)")
     return target
+
+
+def _project_origin(name: str) -> tuple[str, str]:
+    """Parse a VFS project name into ``(kind, run_id)``.
+
+    Multi-agent runs auto-bind a project named ``<mode>-<session-id[:8]>`` (e.g.
+    ``vatra-a925b98c``), so the folder name already carries which run wrote it.
+    """
+    for kind in ("basna", "vatra", "council"):
+        if name.startswith(f"{kind}-"):
+            return kind, name[len(kind) + 1:]
+    return "", ""
+
+
+async def _run_titles(user_id: str) -> dict[str, str]:
+    """Map ``session-id[:8] -> title`` so a ``<mode>-<sid8>`` project can show the
+    human name of the Basna/Vatra run that created it (best-effort)."""
+    try:
+        rows = await get_db().list_basna_sessions(user_id)
+    except Exception:  # noqa: BLE001 — titles are a nicety, never block listing
+        return {}
+    out: dict[str, str] = {}
+    for r in rows:
+        sid = str(r.get("id") or "")
+        if sid:
+            out[sid[:8]] = str(r.get("title") or "")
+    return out
 
 
 def _entry(p: Path, project: str, root: Path) -> dict:
@@ -91,7 +117,12 @@ async def list_projects(user: dict = Depends(get_current_user)):
                         latest = max(latest, stt.st_mtime)
                     except OSError:
                         pass
-            out.append({"name": proj.name, "files": files, "bytes": total, "mtime": latest})
+            kind, run_id = _project_origin(proj.name)
+            out.append({"name": proj.name, "files": files, "bytes": total, "mtime": latest,
+                        "kind": kind, "run_id": run_id})
+    titles = await _run_titles(user["id"]) if any(p.get("run_id") for p in out) else {}
+    for p in out:
+        p["title"] = titles.get(p.get("run_id") or "", "")
     return {"projects": out}
 
 
@@ -104,10 +135,18 @@ async def list_dir(project: str, path: str = "", user: dict = Depends(get_curren
         raise HTTPException(404, "not found")
     if not target.is_dir():
         raise HTTPException(400, "not a directory")
-    entries = sorted(
-        (_entry(c, project, proj_root) for c in target.iterdir()),
-        key=lambda e: (e["type"] == "file", e["name"].lower()),
-    )
+    authors = read_authors(proj_root)
+    entries = []
+    for c in target.iterdir():
+        if c.name == META_FILENAME:  # hide the authorship sidecar itself
+            continue
+        e = _entry(c, project, proj_root)
+        a = authors.get(e["path"])
+        if a:
+            e["author"] = a.get("agent", "")
+            e["author_ts"] = a.get("ts", 0)
+        entries.append(e)
+    entries.sort(key=lambda e: (e["type"] == "file", e["name"].lower()))
     return {"project": project, "path": path, "entries": entries}
 
 

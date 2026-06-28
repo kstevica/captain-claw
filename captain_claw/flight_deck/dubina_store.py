@@ -16,6 +16,7 @@ Tables:
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +38,30 @@ def _now() -> str:
 
 def _new_id() -> str:
     return f"dub_{uuid.uuid4().hex[:12]}"
+
+
+def _finite(x: float) -> float:
+    """Map non-finite floats (inf/nan) to 0.0 so they survive JSON serialization.
+
+    For ``compute_budget`` 0.0 already means *unbounded*, so collapsing ``inf`` → 0.0
+    is also semantically correct; for confidence/cost it's a safe sentinel.
+    """
+    return float(x) if math.isfinite(x) else 0.0
+
+
+def _json_safe(obj: Any) -> Any:
+    """Recursively replace NaN/±Inf floats with 0.0 anywhere in a run/step dict.
+
+    FastAPI's ``JSONResponse`` renders with ``allow_nan=False``, so a single inf/nan
+    (e.g. an unbounded budget, or a 0/0 confidence) would otherwise 500 the endpoint.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else 0.0
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 def _run_table(track: str) -> str:
@@ -141,7 +166,7 @@ class DubinaStore:
                 (id, user_id, task, base_tier, max_tier, compute_budget,
                  status, config, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
-            (run_id, user_id, task, base_tier, max_tier, float(compute_budget),
+            (run_id, user_id, task, base_tier, max_tier, _finite(compute_budget),
              json.dumps(config or {}), now, now),
         )
         await db.commit()
@@ -181,8 +206,8 @@ class DubinaStore:
                 SET status = ?, passed = ?, stopped_reason = ?, cost_spent = ?,
                     result = ?, error = ?, updated_at = ?
                 WHERE id = ?""",
-            (status, 1 if passed else 0, stopped_reason, float(cost_spent),
-             json.dumps(result or {}), error, _now(), run_id),
+            (status, 1 if passed else 0, stopped_reason, _finite(cost_spent),
+             json.dumps(_json_safe(result or {})), error, _now(), run_id),
         )
         await db.commit()
 
@@ -198,7 +223,7 @@ class DubinaStore:
             "SELECT * FROM dubina_run_steps WHERE run_id = ? ORDER BY seq", (run_id,)
         ) as cur:
             run["steps"] = [dict(r) for r in await cur.fetchall()]
-        return run
+        return _json_safe(run)
 
     async def list_runs(self, track: str, user_id: str, limit: int = 50) -> list[dict]:
         table = _run_table(track)
@@ -208,7 +233,7 @@ class DubinaStore:
                 ORDER BY created_at DESC LIMIT ?""",
             (user_id, int(limit)),
         ) as cur:
-            return [_row_to_run(r) for r in await cur.fetchall()]
+            return [_json_safe(_row_to_run(r)) for r in await cur.fetchall()]
 
 
 def _row_to_run(row: aiosqlite.Row) -> dict:
