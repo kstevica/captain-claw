@@ -1537,6 +1537,9 @@ async def agent_wait(body: _VatraWaitReq):
     project = _vfs_project(body.session_id)
     wait = max(0, min(_MAX_WAIT_S, int(body.wait or 0)))
     deadline = time.monotonic() + wait
+    who = body.owner or "agent"
+    target = path or f"posts matching {query!r}"
+    _progress(body.session_id, "wait", f"⏳ {who} waiting on {target} (≤{wait}s)…", agent=who)
     while True:
         if path:
             real = _vfs_resolve_under(owner_id, project, path)
@@ -1546,6 +1549,7 @@ async def agent_wait(body: _VatraWaitReq):
                 except Exception:
                     data = ""
                 if data.strip():
+                    _progress(body.session_id, "wait", f"✓ {who} got {path}", agent=who)
                     return {"ready": True, "kind": "file", "path": path,
                             "content": data[:_WAIT_CONTENT_CAP],
                             "truncated": len(data) > _WAIT_CONTENT_CAP}
@@ -1553,9 +1557,12 @@ async def agent_wait(body: _VatraWaitReq):
             rows = await db.search_vatra_board(
                 body.session_id, query, limit=20, exclude_owner=body.owner or None)
             if rows:
+                _progress(body.session_id, "wait", f"✓ {who} got a board match for {query!r}", agent=who)
                 return {"ready": True, "kind": "board",
                         "entries": [_board_entry(e) for e in rows]}
         if time.monotonic() >= deadline:
+            _progress(body.session_id, "wait", f"⌛ {who} wait timed out ({wait}s) — {target} not ready",
+                      agent=who, ok=False)
             recent = await db.list_vatra_board(
                 body.session_id, limit=12, exclude_owner=body.owner or None)
             return {"ready": False, "waited": wait,
