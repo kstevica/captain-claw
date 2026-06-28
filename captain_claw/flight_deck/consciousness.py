@@ -454,7 +454,9 @@ def _model_rank(provider: str, model: str) -> int:
 # context, not reasoning; ``fast`` is the cheap/high-volume tier.
 _TIER_RANK: dict[str, int] = {
     "reason": 100,
+    "coding": 95,
     "balanced": 80,
+    "vision": 75,
     "longctx": 70,
     "fast": 40,
 }
