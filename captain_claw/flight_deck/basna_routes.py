@@ -2257,12 +2257,13 @@ async def _mirror_progress(parent_sid: str, child_sid: str) -> None:
 
     A plan step (Basna ensemble / Vatra team) runs as a child session that streams
     into its own ``_PROGRESS[child_sid]``; this tails those events and re-emits the
-    meaningful ones (agent narration, tool calls, completions, merges) under the
-    parent, so the plan log shows the agents working — not just a step summary.
-    Fully exception-safe: it can never break the step it's mirroring.
+    meaningful ones (agent narration, tool calls, completions, merges, and token
+    usage) under the parent, so the plan log shows the agents working — and the
+    per-agent cards show running token usage — not just a step summary. Fully
+    exception-safe: it can never break the step it's mirroring.
     """
     seen = 0
-    mirror_stages = {"narration", "action", "dispatch", "merge"}
+    mirror_stages = {"narration", "action", "dispatch", "merge", "usage"}
 
     def drain() -> None:
         nonlocal seen
@@ -2274,10 +2275,16 @@ async def _mirror_progress(parent_sid: str, child_sid: str) -> None:
             while seen < len(evs):
                 e = evs[seen]
                 seen += 1
-                if e.get("stage") in mirror_stages:
-                    _progress(parent_sid, e.get("stage", "action"),
-                              f"↳ {str(e.get('message', ''))[:280]}",
-                              agent=e.get("agent"), tool=e.get("tool"))
+                if e.get("stage") not in mirror_stages:
+                    continue
+                extra = {"agent": e.get("agent"), "tool": e.get("tool")}
+                if e.get("stage") == "usage":  # carry the token counts the cards read
+                    extra["prompt_tokens"] = e.get("prompt_tokens")
+                    extra["completion_tokens"] = e.get("completion_tokens")
+                    extra["total_tokens"] = e.get("total_tokens")
+                _progress(parent_sid, e.get("stage", "action"),
+                          f"↳ {str(e.get('message', ''))[:280]}",
+                          **{k: v for k, v in extra.items() if v is not None})
         except Exception:  # noqa: BLE001 — mirroring is best-effort, never fatal
             pass
 
