@@ -4082,6 +4082,7 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 | Agent Council | Multi-agent deliberation — structured turn-based discussions (debate, brainstorm, review, planning) with synthesis, voting, TL;DR, and minutes export. Can **auto-assemble** its own task-modeled panel (NEW in 0.6.3) |
 | Basna | Independent network-source ensemble — routes a task to specialist archetypes, runs them blind and in parallel, and merges by learned reliability |
 | Vatra | Collaborative ensemble (compose mode on Basna, NEW in 0.6.3) — a Lead splits the task into owned subtasks, specialists collaborate on a shared blackboard, and a reporter assembles one deliverable |
+| Frontier Horizon | Optional **Deep** and **Plan** depth for Basna/Vatra (NEW in 0.6.4) — self-consistency voting + diverse-lens critics + a verify-and-revise closer, and a verify-gated, re-planning multi-step plan whose steps run as a single model, a Basna ensemble, or a Vatra team |
 | Agent Forge | AI-powered team decomposition — describe a goal, get a team of agents with roles, instructions, and tools |
 | Fleet-level instructions | Per-agent instructions injected into system prompts, editable from agent config editor |
 | Datastore browser | View agent datastore tables and rows directly from agent cards |
@@ -4438,6 +4439,34 @@ Agent Forge is a dedicated Flight Deck page that uses an LLM to decompose a busi
 - The lead agent's name includes `[Lead]` suffix
 
 The forge system prompt includes the full Captain Claw tool reference (44 tools with descriptions) and guidelines for tool selection per role type (research, content, data, coordination, communication, automation).
+
+### Frontier Horizon — Deep & Plan modes (NEW in 0.6.4)
+
+Basna and Vatra parallelize **breadth** — a fleet answering once. **Frontier Horizon** adds optional **depth**: it spends test-time compute, gated by verifiers, to reach frontier-grade quality on cheaper models. It's surfaced on the Basna/Vatra page as a single **Effort** choice — **Standard · Deep · Plan** — with the chosen effort's options revealed below it (router tier and team size live behind a **Tuning** toggle). Everything is **off by default** (Standard = today's behavior). A **Help** button opens an in-app explainer.
+
+**Deep mode** — frontier-grade depth on a single answer:
+
+- **Basna (per-worker).** Instead of one shot per agent, each worker spawns a small pool of **independent rollouts**, **self-consistency-votes** across them, runs the leading answer past a panel of **diverse-lens critics** (the `phrygian`/`aeolian`/`locrian` cognitive modes as adversarial refuters), and **fixes** with the critique if it fails. The **Samples / agent** field sets the vote width.
+- **Vatra (per-owner).** Spawning N copies of each specialist would flood the shared blackboard, so Vatra instead verifies **each owner's slice** with the critic panel and revises it once if a majority refute it — the same depth, blackboard-safe.
+- **The closer (both).** After the answer is merged (Basna) or the deliverable assembled (Vatra), a critic panel reviews the **final** result and rewrites it once if it's refuted.
+
+Critics always run on a model **different** from the one that produced the answer (never self-grading) — point your **critic / reason tier at a model that returns real `content`**, not a reasoning-only model. Deep is much slower and costlier than Standard; the live log streams **per-critic** progress and a **heartbeat** during the (slow) verification.
+
+**Plan mode** — think way ahead, way long:
+
+A planner decomposes the task into **ordered steps**, drives each to a **verified** result before the next begins, **re-plans** the remainder when a step can't be verified, and **synthesizes** the deliverable from the verified steps — so the system never compounds an unverified step.
+
+- **Steps** — cap the plan length.
+- **Each step runs as** — *simple* (one fast model), or *complex* → a full **Basna ensemble** or **Vatra team** per step (the mode card above decides which). When a step runs an ensemble/team, its **live agent activity is mirrored into the plan log**.
+- **parallel** — the planner emits a **dependency graph** instead of a linear list; independent steps run concurrently in dependency waves, each seeing only what it depends on.
+- **Select team** — a fixed team staffs **every** step's ensemble/team.
+- Steps, fix attempts, and re-plans are all **bounded**; the run ends with an explicit reason and never silently drops an unverified step.
+
+Plan runs in the background (`POST /fd/basna/plan`); the UI polls the live log. Plan-step child runs are real Basna/Vatra sessions — their reliability learning still closes — and are hidden from the session list under their parent.
+
+**VFS provenance (NEW in 0.6.4)** — the Shared VFS viewer now shows **timestamps** on every file/folder, the **agent that wrote each file** (`✎ <agent>`, recorded in an append-only `.vfs-meta.jsonl` sidecar; the main interactive agent writes anonymously), and the **Basna/Vatra run title** behind each `basna-…` / `vatra-…` project, with a colored mode badge. Authorship is recorded going forward.
+
+**Notes:** Deep/Plan settings ride in the existing session `config` JSON — no schema changes. New endpoint `POST /fd/basna/plan`; the closer/per-owner/plan paths reuse your Library tiers. Rebuild the Flight Deck bundle (`cd flight-deck && npm run build`) if running from source.
 
 ### Agent Council (NEW in 0.4.15)
 

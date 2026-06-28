@@ -15,6 +15,17 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 48 built-in tools.
 
+## What's New in 0.6.4
+
+**Think way ahead, way long — Frontier Horizon comes to Basna & Vatra.** Fully additive; everything new is off by default.
+
+- **Deep mode.** A new toggle on the Basna/Vatra page spends test-time compute, gated by verifiers, to reach frontier-grade quality on cheaper models. In Basna each worker spawns a pool of **independent rollouts**, **self-consistency-votes**, runs the leading answer past a panel of **diverse-lens critics** (the `phrygian`/`aeolian`/`locrian` cognitive modes as adversarial refuters), and **fixes** with the critique. In Vatra each owner's **slice** is verified and revised (blackboard-safe — no spawn pools). And a **closer** reviews the **final** merged answer / assembled deliverable and rewrites it once if a majority of critics refute it. Critics always run on a model **different** from the producer (never self-grading), and the whole thing is budget-bounded.
+- **Plan mode — the long-horizon lever.** A new toggle decomposes a task into **ordered steps**, drives each to a **verified** result before the next, **re-plans** the remainder when a step can't be verified, and **synthesizes** from the verified steps — so the system never compounds an unverified step. Each step can run as a single fast model, a full **Basna ensemble**, or a full **Vatra team** (chosen by the mode card); the step's live agent activity is **mirrored into the plan log**. Tick **parallel** and the planner emits a **dependency graph** so independent steps run in concurrent waves. New endpoint `POST /fd/basna/plan`.
+- **VFS provenance.** The shared cross-agent filesystem viewer now shows **timestamps** on every file/folder, the **agent that wrote each file** (an append-only, concurrency-safe sidecar), and the **Basna/Vatra run title** behind each `basna-…` / `vatra-…` project.
+- **Redesigned controls.** The scattered row of selects and checkboxes is replaced by a single **Effort** choice — **Standard · Deep · Plan** — with progressive disclosure (only the chosen effort's options show), router tier and team size tucked behind **Tuning**, Deep/Plan in both modes, and a **Help** button that explains it all.
+
+No schema changes — Deep/Plan ride in the session `config`; the VFS sidecar is a per-project file. Point your critic/reason tier at a **content-returning** model for best results. See [RELEASE_NOTES_0.6.4.md](release-notes/RELEASE_NOTES_0.6.4.md). Backward compatible with 0.6.3.
+
 ## What's New in 0.6.3
 
 **Teams that build themselves — auto-assembled Councils & Vatra.** Fully additive.

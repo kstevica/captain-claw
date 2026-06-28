@@ -426,7 +426,7 @@ wheels = [
 
 [[package]]
 name = "captain-claw"
-version = "0.6.3"
+version = "0.6.4"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
