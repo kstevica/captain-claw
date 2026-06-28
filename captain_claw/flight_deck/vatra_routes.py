@@ -97,6 +97,13 @@ _MAX_WAIT_S = 90        # max a single `vatra wait` may block; < dispatch timeou
 _WAIT_CONTENT_CAP = 20_000  # chars of a ready file handed back to the waiter
 
 
+def _phase(sid: str, label: str, **extra) -> None:
+    """Emit one high-level phase banner (Planning / Intro / Main / Synthesizing …)
+    so the live UI can always show which stage of the run is active, separate from
+    the noisy per-action detail events."""
+    _progress(sid, "phase", label, **extra)
+
+
 def _vfs_project(sid: str) -> str:
     """The single shared VFS project folder for this run.
 
@@ -477,6 +484,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     run_tag = format(int(time.time()), "x")[-6:]
     _progress_start(sid)
     await db.update_basna_session(sid, user["id"], status="running")
+    _phase(sid, "Planning")
 
     # 1) Plan. Reuse a route prepared by the UI's /route step if present; otherwise
     # decompose now (the one-shot /start and agent paths). Splitting decompose from
@@ -520,6 +528,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
 
     try:
         # 2) Spawn one owner per subtask.
+        _phase(sid, "Spawning team")
         _progress(sid, "spawn", f"Spawning {len(subtasks)} specialist(s)…")
         tiers = body.tiers or None
 
@@ -650,6 +659,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         # This is a barrier: the main round starts only once ALL intros finish, so the
         # board is already populated and the main round is collaborative, not blind.
         if bool(cfg.get("intro_round", True)) and len(spawned) >= 2:
+            _phase(sid, "Intro round")
             _progress(sid, "intro", "Intro round — each specialist preparing groundwork…")
 
             async def _intro_owner(sp: dict) -> dict | None:
@@ -688,6 +698,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
 
         # 3) Main round — each owner produces its full piece (now able to build on the
         # team's prep via the injected intro digest + the shared board).
+        _phase(sid, "Main round")
+        _progress(sid, "main", f"{len(spawned)} specialist(s) producing their pieces…")
         dispatched = await asyncio.gather(*[_dispatch_owner(sp) for sp in spawned])
         for sp, d in zip(spawned, dispatched):
             results.append({
@@ -717,6 +729,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                   if (results[i].get("ok") or results[i].get("produced_file"))
                   and (results[i].get("output") or "").strip()]
             if len(r1) >= 2:
+                _phase(sid, "Review round")
                 _progress(sid, "review", "Lead gathering each specialist's summary…")
                 try:
                     digest = await asyncio.wait_for(
@@ -804,6 +817,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             rp, _ = _provider_call(cc, temperature=0.3, default_max=8192, cap=32768)
         if cp is not None:
             brief_by_id = {st["id"]: st.get("brief", "") for st in subtasks}
+            _phase(sid, "Verifying slices")
             _progress(sid, "verify", f"Horizon: verifying {len(usable)} slice(s)…")
 
             async def _close_slice(r: dict) -> None:
@@ -825,6 +839,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             await asyncio.gather(*[_close_slice(r) for r in usable])
 
     # 5) Reporter assembles the slices (+ any answered asks) into one deliverable.
+    _phase(sid, "Synthesizing")
     answered = await db.list_vatra_asks(sid, status="answered")
     truth, reporter_files = await _run_reporter(
         request, user, sid, sid8, run_tag, intent, usable, cfg, arch_by_id,
@@ -840,6 +855,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # deliverable and revise once if a diverse-lens critic panel refutes it. Critics
     # run on a separate Library-tier model (never the team judging itself).
     if _hcfg is not None and _hcfg.close and (truth or "").strip():
+        _phase(sid, "Verifying deliverable")
         _progress(sid, "verify", "Horizon closer: verifying the deliverable…")
         try:
             cc = _creds(_hcfg.critic_tier)
@@ -882,6 +898,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # 7) Learn (best-effort, post-completion): score owners (slice used + sound),
     # ask-answerers, and the Lead + reporter (holistic), folding outcomes into
     # per-archetype reliability so the next route's prior_weight improves.
+    _phase(sid, "Learning")
     _progress(sid, "learn", "Scoring contributions…")
     try:
         learned = await _learn(
@@ -908,6 +925,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         log.warning("Vatra coverage check failed", error=str(e))
         _progress(sid, "learn", "Coverage check skipped", ok=False)
 
+    _phase(sid, "Done")
     _progress_done(sid)
     await db.update_basna_session(
         sid, user["id"],

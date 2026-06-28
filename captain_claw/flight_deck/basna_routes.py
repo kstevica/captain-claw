@@ -1100,6 +1100,13 @@ def _progress_done(session_id: str) -> None:
         p["active"] = False
 
 
+def _phase(session_id: str, label: str, **extra) -> None:
+    """Emit one high-level phase banner (Routing / Generating / Merging / Step x/y …)
+    so the live UI can always show which stage of the run is active, separate from
+    the noisy per-action detail events."""
+    _progress(session_id, "phase", label, **extra)
+
+
 def _build_dispatch_prompt(role: str, intent: str, merge_kind: str,
                            file_names: list[str] | None = None, extra: str = "") -> str:
     """Frame the task for one ephemeral agent.
@@ -1880,6 +1887,7 @@ async def execute_route(
     sid8 = sid[:8]
     run_tag = format(int(time.time()), "x")[-6:]  # unique per run → no slug collisions on re-run
     plan = [(s, arch_by_id[s["archetype_id"]]) for s in selected if s["archetype_id"] in arch_by_id]
+    _phase(sid, "Routing")
     _progress(sid, "route", f"Selected {len(plan)} archetype(s) · {domain} / {merge_kind}")
 
     # Deep / Horizon mode (opt-in): drive each worker through the Frontier-Horizon
@@ -1905,6 +1913,7 @@ async def execute_route(
                 plan, sess, merge_kind, horizon_cfg, body, request, user,
                 sid, sid8, run_tag, input_files, critic_provider=critic_provider)
         else:
+            _phase(sid, "Spawning")
             _progress(sid, "spawn", f"Spawning {len(plan)} agent(s)…")
             # 1) Spawn the selected archetypes (spawn_process serializes internally).
             # Resolve each archetype's tier to a concrete model from the Library config
@@ -2027,6 +2036,8 @@ async def execute_route(
                           ok=d["ok"], agent=role)
                 return d
 
+            _phase(sid, "Generating")
+            _progress(sid, "generate", f"{len(spawned)} agent(s) working the task…")
             dispatched = await asyncio.gather(*[_dispatch_tracked(sp) for sp in spawned])
             for sp, d in zip(spawned, dispatched):
                 results.append({
@@ -2120,6 +2131,7 @@ async def execute_route(
         return _resolve_merge_creds(body, registry, tier)
 
     # 5) Compile the truth (weighted; LLM synthesis only on genuine conflict).
+    _phase(sid, "Merging")
     _progress(sid, "merge", "Compiling the truth…")
     agg = await _aggregate(
         results, merge_kind, domain,
@@ -2151,6 +2163,7 @@ async def execute_route(
     # revise once if a diverse-lens critic panel refutes it — the back-edge Basna
     # otherwise lacks. Critics run on a separate Library-tier model (never self-judge).
     if horizon_cfg is not None and horizon_cfg.close and (agg.get("truth") or "").strip():
+        _phase(sid, "Verifying")
         _progress(sid, "merge", "Horizon closer: verifying the answer…")
         try:
             cc = _merge_creds(horizon_cfg.critic_tier)
@@ -2202,6 +2215,7 @@ async def execute_route(
         files=json.dumps(list(files_by_name.values())),
         analysis=json.dumps(analysis or {}),
     )
+    _phase(sid, "Done")
     _progress(sid, "done", f"Done · {len(results)} agent(s), {len(learned)} learned")
     _progress_done(sid)
     # Persist the progress log so reopening the session shows it.
@@ -2433,6 +2447,10 @@ def _closer_on_event(sid: str, label: str, stage_name: str = "merge"):
 
 def _plan_on_event(sid: str):
     """Map plan-horizon events onto the shared Basna live-progress log."""
+    # Captured across events so a step banner can read "Step x/y" (the total is
+    # only known once the planner has emitted its plan).
+    total = {"n": 0}
+
     def _label(e: dict) -> str:
         # DAG events carry a step id; linear events carry a 0-based index.
         return str(e.get("id")) if e.get("id") is not None else str(int(e.get("index", 0)) + 1)
@@ -2442,10 +2460,15 @@ def _plan_on_event(sid: str):
         lbl = _label(e)
         if stage == "plan":
             goals = e.get("goals") or []
+            total["n"] = len(goals)
+            _phase(sid, f"Planning · {len(goals)} step(s)")
             _progress(sid, "route", f"Planned {len(goals)} step(s)")
             for j, g in enumerate(goals):
                 _progress(sid, "route", f"  {j + 1}. {str(g)[:140]}")
         elif stage == "step_start":
+            suffix = f"/{total['n']}" if total["n"] else ""
+            goal = str(e.get("goal", ""))[:80]
+            _phase(sid, f"Step {lbl}{suffix}" + (f": {goal}" if goal else ""))
             _progress(sid, "dispatch", f"Step {lbl}: {str(e.get('goal', ''))[:140]}",
                       agent="plan", ok=True)
         elif stage == "verify":
@@ -2463,6 +2486,7 @@ def _plan_on_event(sid: str):
         elif stage == "replan":
             _progress(sid, "merge", f"Re-planning (#{e.get('replans')}) after step {lbl} failed", ok=False)
         elif stage == "synthesize":
+            _phase(sid, "Synthesizing")
             _progress(sid, "merge", f"Synthesizing the deliverable from {e.get('steps', 0)} step(s)…")
     return on_event
 
@@ -2529,6 +2553,7 @@ async def _run_plan(sid: str, body: PlanRequest, user: dict) -> None:
             sid, user["id"], status="done", truth=res.deliverable,
             confidence=confidence, analysis=json.dumps(analysis))
         note = f" ({res.stopped_reason})" if res.stopped_reason else ""
+        _phase(sid, "Done")
         _progress(sid, "done",
                   f"Done · {res.completed}/{len(res.steps)} step(s) verified, "
                   f"{res.replans} re-plan(s){note}")
