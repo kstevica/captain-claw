@@ -231,9 +231,9 @@ def _finalize_summary(run_id: str, summary: dict, capture_slugs) -> dict:
 
 # ── Tier / ladder helpers (Library tiers) ────────────────────────────
 
-# Flight Deck Library tiers, cheap → expensive. ``longctx`` is a special-purpose
-# tier, not part of the default escalation ladders.
-TIER_ORDER = ("fast", "balanced", "reason", "longctx")
+# Flight Deck Library tiers, cheap → expensive. ``longctx``, ``coding`` and
+# ``vision`` are special-purpose tiers, not part of the default escalation ladders.
+TIER_ORDER = ("fast", "balanced", "reason", "longctx", "coding", "vision")
 LIBRARY_CODER_LADDER = ["fast", "balanced", "reason"]
 LIBRARY_REASON_LADDER = ["fast", "balanced", "reason"]
 

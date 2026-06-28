@@ -94,7 +94,7 @@ interface SetsBlob { sets: TierSet[]; activeSetId: string }
 
 export const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter', 'litert']
 
-export const TIER_ORDER = ['reason', 'balanced', 'fast', 'longctx']
+export const TIER_ORDER = ['reason', 'balanced', 'fast', 'longctx', 'coding', 'vision']
 
 export const DEFAULT_TOOLS = [
   'shell', 'read', 'write', 'glob', 'edit', 'web_fetch', 'web_search',
@@ -189,6 +189,41 @@ export function seedTiers(registry: ArchetypeRegistry, legacy: LegacyForgeConfig
     }
   }
   return out
+}
+
+// Backfill a set's tier map with any registry tiers it doesn't have yet (e.g.
+// `coding`/`vision` added after the set was first seeded). Missing tiers inherit
+// the set's existing provider/key/base_url from a representative sibling — so a
+// new tier in an all-DeepSeek set is wired to DeepSeek, not empty Anthropic —
+// while ctx limits come from the registry def. When the sibling is on the tier's
+// canonical provider we use the curated default model; otherwise we carry the
+// sibling's model forward as a starting point. Returns the SAME reference when
+// nothing is missing, so callers can cheaply skip a re-render/persist.
+export function backfillTierMap(tiers: TierMap, registry: ArchetypeRegistry): TierMap {
+  // Preferred credential donor per new tier, then sensible fallbacks.
+  const donorFor = (t: string): TierConfig | undefined => {
+    const pref = t === 'coding' ? 'reason' : t === 'vision' ? 'balanced' : 'balanced'
+    return tiers[pref] || tiers.balanced || tiers.reason || Object.values(tiers)[0]
+  }
+  let changed = false
+  const out: TierMap = { ...tiers }
+  for (const t of TIER_ORDER) {
+    if (out[t]) continue
+    const def = registry.tiers[t]
+    if (!def) continue
+    const sib = donorFor(t)
+    const sameProvider = !!sib && sib.provider === def.provider
+    out[t] = {
+      provider: sib?.provider || def.provider,
+      model: sameProvider ? def.model : (sib?.model || def.model),
+      api_key: sib?.api_key || '',
+      base_url: sib?.base_url || def.base_url || '',
+      input_ctx: def.input_ctx || 200000,
+      output_ctx: def.output_ctx || 32768,
+    }
+    changed = true
+  }
+  return changed ? out : tiers
 }
 
 // Build a brand-new set seeded from the registry defaults (carrying the legacy
@@ -294,6 +329,21 @@ export function useTierConfig(): TierConfigState {
     if (!bootstrapped || !registry || sets.length > 0) return
     const def = freshSet(registry, loadLegacyConfig(), 'Default')
     setSets([def]); setActiveSetId(def.id)
+  }, [bootstrapped, registry, sets])
+
+  // Backfill saved sets with any registry tiers added after they were seeded
+  // (e.g. `coding`/`vision`), so existing users get the new tier cards without
+  // losing their edits. No-op (stable ref) once every set has every tier.
+  useEffect(() => {
+    if (!bootstrapped || !registry || sets.length === 0) return
+    let changed = false
+    const next = sets.map((s) => {
+      const filled = backfillTierMap(s.tiers, registry)
+      if (filled === s.tiers) return s
+      changed = true
+      return { ...s, tiers: filled }
+    })
+    if (changed) setSets(next)
   }, [bootstrapped, registry, sets])
 
   // Keep the active id valid (e.g. after a delete, or a migration id mismatch).
