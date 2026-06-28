@@ -33,6 +33,7 @@ import { FlowsPage } from './pages/FlowsPage'
 import { ObservatoryPage } from './pages/ObservatoryPage'
 import { AutonomousWorkPage } from './pages/AutonomousWorkPage'
 import { VFSPage } from './pages/VFSPage'
+import { AgentFoldersPage } from './pages/AgentFoldersPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -315,6 +316,7 @@ function AppContent() {
       {view === 'basna' && <BasnaPage />}
       {view === 'dubina' && <DubinaPage />}
       {view === 'vfs' && <VFSPage />}
+      {view === 'agent-folders' && <AgentFoldersPage />}
       {view === 'connections' && <ConnectionsPage />}
       {view === 'gpu-cloud' && <GPUCloudPage />}
       {view === 'scheduler' && <SchedulerPage />}

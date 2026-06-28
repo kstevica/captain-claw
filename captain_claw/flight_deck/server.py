@@ -795,6 +795,7 @@ from captain_claw.flight_deck.consciousness_routes import router as consciousnes
 from captain_claw.flight_deck.autonomy_routes import router as autonomy_router
 from captain_claw.flight_deck.event_routes import router as event_router
 from captain_claw.flight_deck.delivery_routes import router as delivery_router
+from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.terminal.relay import router as pty_router
 
 app.include_router(auth_router)
@@ -832,6 +833,7 @@ app.include_router(consciousness_router)
 app.include_router(autonomy_router)
 app.include_router(event_router)
 app.include_router(delivery_router)
+app.include_router(agents_fs_router)
 app.include_router(pty_router)
 
 
