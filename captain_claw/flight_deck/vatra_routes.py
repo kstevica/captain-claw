@@ -70,6 +70,7 @@ from captain_claw.flight_deck.basna_routes import (
 )
 from captain_claw.flight_deck.horizon_worker import HorizonConfig, run_horizon_closer
 from captain_claw.logging import get_logger
+from captain_claw.vfs import resolve_under as _vfs_resolve_under
 
 log = get_logger(__name__)
 
@@ -91,6 +92,16 @@ _MAX_ASK_DEPTH = 2      # an answer that itself asks increments depth; caps casc
 _MAX_HELPERS = 3        # concurrent helpers the coordinator may run at once
 _COORD_POLL_S = 1.5     # how often the coordinator polls the blackboard
 _INBOX_POLL_S = 1.0     # inbox long-poll granularity
+_WAIT_POLL_S = 1.0      # `wait` long-poll granularity
+_MAX_WAIT_S = 90        # max a single `vatra wait` may block; < dispatch timeout so it can't hang a run
+_WAIT_CONTENT_CAP = 20_000  # chars of a ready file handed back to the waiter
+
+
+def _phase(sid: str, label: str, **extra) -> None:
+    """Emit one high-level phase banner (Planning / Intro / Main / Synthesizing …)
+    so the live UI can always show which stage of the run is active, separate from
+    the noisy per-action detail events."""
+    _progress(sid, "phase", label, **extra)
 
 
 def _vfs_project(sid: str) -> str:
@@ -473,6 +484,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     run_tag = format(int(time.time()), "x")[-6:]
     _progress_start(sid)
     await db.update_basna_session(sid, user["id"], status="running")
+    _phase(sid, "Planning")
 
     # 1) Plan. Reuse a route prepared by the UI's /route step if present; otherwise
     # decompose now (the one-shot /start and agent paths). Splitting decompose from
@@ -516,6 +528,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
 
     try:
         # 2) Spawn one owner per subtask.
+        _phase(sid, "Spawning team")
         _progress(sid, "spawn", f"Spawning {len(subtasks)} specialist(s)…")
         tiers = body.tiers or None
 
@@ -646,6 +659,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         # This is a barrier: the main round starts only once ALL intros finish, so the
         # board is already populated and the main round is collaborative, not blind.
         if bool(cfg.get("intro_round", True)) and len(spawned) >= 2:
+            _phase(sid, "Intro round")
             _progress(sid, "intro", "Intro round — each specialist preparing groundwork…")
 
             async def _intro_owner(sp: dict) -> dict | None:
@@ -684,6 +698,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
 
         # 3) Main round — each owner produces its full piece (now able to build on the
         # team's prep via the injected intro digest + the shared board).
+        _phase(sid, "Main round")
+        _progress(sid, "main", f"{len(spawned)} specialist(s) producing their pieces…")
         dispatched = await asyncio.gather(*[_dispatch_owner(sp) for sp in spawned])
         for sp, d in zip(spawned, dispatched):
             results.append({
@@ -713,6 +729,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                   if (results[i].get("ok") or results[i].get("produced_file"))
                   and (results[i].get("output") or "").strip()]
             if len(r1) >= 2:
+                _phase(sid, "Review round")
                 _progress(sid, "review", "Lead gathering each specialist's summary…")
                 try:
                     digest = await asyncio.wait_for(
@@ -800,6 +817,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             rp, _ = _provider_call(cc, temperature=0.3, default_max=8192, cap=32768)
         if cp is not None:
             brief_by_id = {st["id"]: st.get("brief", "") for st in subtasks}
+            _phase(sid, "Verifying slices")
             _progress(sid, "verify", f"Horizon: verifying {len(usable)} slice(s)…")
 
             async def _close_slice(r: dict) -> None:
@@ -821,6 +839,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             await asyncio.gather(*[_close_slice(r) for r in usable])
 
     # 5) Reporter assembles the slices (+ any answered asks) into one deliverable.
+    _phase(sid, "Synthesizing")
     answered = await db.list_vatra_asks(sid, status="answered")
     truth, reporter_files = await _run_reporter(
         request, user, sid, sid8, run_tag, intent, usable, cfg, arch_by_id,
@@ -836,6 +855,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # deliverable and revise once if a diverse-lens critic panel refutes it. Critics
     # run on a separate Library-tier model (never the team judging itself).
     if _hcfg is not None and _hcfg.close and (truth or "").strip():
+        _phase(sid, "Verifying deliverable")
         _progress(sid, "verify", "Horizon closer: verifying the deliverable…")
         try:
             cc = _creds(_hcfg.critic_tier)
@@ -878,6 +898,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # 7) Learn (best-effort, post-completion): score owners (slice used + sound),
     # ask-answerers, and the Lead + reporter (holistic), folding outcomes into
     # per-archetype reliability so the next route's prior_weight improves.
+    _phase(sid, "Learning")
     _progress(sid, "learn", "Scoring contributions…")
     try:
         learned = await _learn(
@@ -904,6 +925,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         log.warning("Vatra coverage check failed", error=str(e))
         _progress(sid, "learn", "Coverage check skipped", ok=False)
 
+    _phase(sid, "Done")
     _progress_done(sid)
     await db.update_basna_session(
         sid, user["id"],
@@ -1110,7 +1132,10 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
             f"{listed}\n"
             "For anything you need from them, call `vatra` action='search' (query=…) — they may "
             "have already posted it. Only `ask` if it isn't there yet. Don't guess these and "
-            "don't reproduce their slice yourself.\n")
+            "don't reproduce their slice yourself. If you genuinely cannot start your part "
+            "without a specific teammate output, call `vatra(action=\"wait\", "
+            "path=\"vfs:<their file>\")` (or `query=\"<topic>\"`) to BLOCK until it's ready "
+            "(up to 90s) instead of guessing or skipping ahead.\n")
     prep_block = ""
     if team_prep.strip():
         prep_block = (
@@ -1139,9 +1164,14 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"others can build on it. Post your important results as you produce them.\n"
         f"- `vatra(action=\"ask\", text=\"<request>\")` — only when you need a teammate to DO new "
         f"work that isn't on the board.\n"
-        f"Search before you invent; post what you find. If the board is empty (teammates are "
-        f"still working), just proceed with your part — the team runs a final review round where "
-        f"you WILL see everyone's work and can revise. Don't stall waiting or checking.\n\n"
+        f"- `vatra(action=\"wait\", path=\"vfs:<file>\")` or `vatra(action=\"wait\", query=\"<topic>\")` "
+        f"— when your part TRULY depends on a specific teammate artifact: it BLOCKS until that file "
+        f"exists or a matching post appears (up to 90s), then hands it to you. Use this instead of "
+        f"reading once, finding nothing, and improvising a guess.\n"
+        f"Search before you invent; post what you find. If you only MIGHT benefit from a teammate's "
+        f"work, don't busy-poll — proceed with your part and the final review round lets you revise "
+        f"once everyone's work is visible. Only when your part is genuinely BLOCKED on a specific "
+        f"artifact should you `wait` for it (once) rather than guessing.\n\n"
         f"You are AUTONOMOUS: never ask the user a question, never refuse, and never stop to say "
         f"you're missing teammate input — produce your best version of your part with what you "
         f"have; the review round and reporter reconcile the rest.\n\n"
@@ -1488,6 +1518,74 @@ async def agent_inbox(body: _VatraInboxReq):
                                   "answered_by": a.get("answered_by", "")} for a in answered],
                     "pending": len(pending)}
         await asyncio.sleep(_INBOX_POLL_S)
+
+
+class _VatraWaitReq(_AgentReq):
+    owner: str = ""
+    path: str = ""
+    query: str = ""
+    wait: int = 0
+
+
+@router.post("/agent/wait")
+async def agent_wait(body: _VatraWaitReq):
+    """Block until a teammate's artifact is ready, then hand it back.
+
+    A specialist whose part genuinely depends on another piece calls this instead
+    of reading once, finding nothing, and improvising. Two ready conditions
+    (provide at least one — if both, whichever lands first wins):
+
+      * ``path`` — a shared-VFS file (``vfs:<proj>/<file>``): ready when it exists
+        and is non-empty; returns its content.
+      * ``query`` — keywords: ready when a teammate's board post matches.
+
+    Bounded by ``wait`` (capped at ``_MAX_WAIT_S``, itself < the per-dispatch
+    timeout) so it can NEVER hang a run. On timeout it returns ``ready=False`` plus
+    a board digest, so the caller proceeds deliberately rather than guessing. Other
+    owners keep working while this awaits — they run as sibling coroutines."""
+    owner_id = _resolve_owner(body)
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, owner_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    path = (body.path or "").strip()
+    query = (body.query or "").strip()
+    if not path and not query:
+        raise HTTPException(400, "provide path or query to wait for")
+    project = _vfs_project(body.session_id)
+    wait = max(0, min(_MAX_WAIT_S, int(body.wait or 0)))
+    deadline = time.monotonic() + wait
+    who = body.owner or "agent"
+    target = path or f"posts matching {query!r}"
+    _progress(body.session_id, "wait", f"⏳ {who} waiting on {target} (≤{wait}s)…", agent=who)
+    while True:
+        if path:
+            real = _vfs_resolve_under(owner_id, project, path)
+            if real and real.is_file():
+                try:
+                    data = real.read_text(errors="replace")
+                except Exception:
+                    data = ""
+                if data.strip():
+                    _progress(body.session_id, "wait", f"✓ {who} got {path}", agent=who)
+                    return {"ready": True, "kind": "file", "path": path,
+                            "content": data[:_WAIT_CONTENT_CAP],
+                            "truncated": len(data) > _WAIT_CONTENT_CAP}
+        if query:
+            rows = await db.search_vatra_board(
+                body.session_id, query, limit=20, exclude_owner=body.owner or None)
+            if rows:
+                _progress(body.session_id, "wait", f"✓ {who} got a board match for {query!r}", agent=who)
+                return {"ready": True, "kind": "board",
+                        "entries": [_board_entry(e) for e in rows]}
+        if time.monotonic() >= deadline:
+            _progress(body.session_id, "wait", f"⌛ {who} wait timed out ({wait}s) — {target} not ready",
+                      agent=who, ok=False)
+            recent = await db.list_vatra_board(
+                body.session_id, limit=12, exclude_owner=body.owner or None)
+            return {"ready": False, "waited": wait,
+                    "board": [_board_entry(e) for e in recent]}
+        await asyncio.sleep(_WAIT_POLL_S)
 
 
 # ── Shared board: real-time shared memory across the team ────────────

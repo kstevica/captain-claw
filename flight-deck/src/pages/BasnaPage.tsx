@@ -690,6 +690,16 @@ export function BasnaPage() {
     return order.map((r) => byRole.get(r) as LiveAgent)
   }, [progress])
 
+  // The active high-level stage — the most recent `phase` banner the backend
+  // emitted (Planning / Intro / Main / Synthesizing / Step x/y …). Shown stickily
+  // in the progress header so it never scrolls out of view under action spam.
+  const currentPhase = useMemo<string | null>(() => {
+    for (let i = progress.length - 1; i >= 0; i--) {
+      if (progress[i].stage === 'phase') return progress[i].message
+    }
+    return null
+  }, [progress])
+
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
@@ -1326,6 +1336,12 @@ export function BasnaPage() {
                     ? <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
                     : <Check className="h-4 w-4 text-emerald-500" />}
                   <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Progress</span>
+                  {currentPhase && (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300">
+                      {(executing || activeBusy) && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+                      {currentPhase}
+                    </span>
+                  )}
                   {progress.length > 30 && (
                     <span className="text-[10px] text-zinc-600">showing last 30 of {progress.length}</span>
                   )}
@@ -1343,9 +1359,12 @@ export function BasnaPage() {
                       <span className="shrink-0 font-mono text-[10px] tabular-nums text-zinc-600">
                         {ev.ts ? new Date(ev.ts * 1000).toLocaleTimeString([], { hour12: false }) : ''}
                       </span>
-                      <span className="w-16 shrink-0 font-mono text-[10px] uppercase text-zinc-600">{ev.stage}</span>
+                      <span className={`w-16 shrink-0 font-mono text-[10px] uppercase ${
+                        ev.stage === 'phase' ? 'text-sky-600 dark:text-sky-400' : 'text-zinc-600'
+                      }`}>{ev.stage}</span>
                       <span className={
-                        ev.stage === 'narration' ? 'text-zinc-100 font-medium'
+                        ev.stage === 'phase' ? 'text-sky-700 dark:text-sky-300 font-semibold'
+                          : ev.stage === 'narration' ? 'text-zinc-100 font-medium'
                           : ev.ok === false ? 'text-rose-400'
                           : 'text-zinc-400'
                       }>{ev.message}</span>

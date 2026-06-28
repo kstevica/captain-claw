@@ -39,29 +39,36 @@ class VatraTool(Tool):
         "optional `title`).\n"
         "'ask' — when you need a teammate to DO new work, post a request (`text`); a helper "
         "answers in the background. 'inbox' — collect answers to your asks (optional `wait`).\n"
-        "Prefer search/read/post — the board is always there; only 'ask' when new work is needed."
+        "'wait' — when your part TRULY depends on a teammate's artifact, BLOCK until it's ready: "
+        "give a `path` (a vfs:<proj>/<file> they're producing) or a `query` (keywords for their "
+        "board post). Returns the artifact when ready, or a board digest on timeout so you can "
+        "proceed deliberately — use it instead of reading once, finding nothing, and guessing.\n"
+        "Prefer search/read/post — the board is always there; only 'ask' when new work is needed, "
+        "and only 'wait' when you're genuinely blocked on a specific piece."
     )
-    timeout_seconds = 60.0
+    timeout_seconds = 120.0
 
     parameters = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["search", "read", "post", "ask", "inbox"],
+                "enum": ["search", "read", "post", "ask", "inbox", "wait"],
                 "description": (
                     "'search' — keyword search the team board (`query`). "
                     "'read' — recent teammate entries (optional `kind`). "
                     "'post' — share a note to the board (`text`, optional `title`). "
                     "'ask' — request new work from a teammate (`text`). "
-                    "'inbox' — answers to your asks (optional `wait`)."
+                    "'inbox' — answers to your asks (optional `wait`). "
+                    "'wait' — block until a teammate artifact is ready (`path` or `query`)."
                 ),
             },
-            "query": {"type": "string", "description": "For 'search' — keywords to find teammates' work."},
+            "query": {"type": "string", "description": "For 'search'/'wait' — keywords to find teammates' work."},
             "text": {"type": "string", "description": "For 'post'/'ask' — the note to share, or what you need."},
             "title": {"type": "string", "description": "For 'post' — optional short label."},
             "kind": {"type": "string", "description": "For 'read' — filter to note|output|narration|file."},
-            "wait": {"type": "integer", "description": "For 'inbox' — seconds to wait for answers (0–30, default 0)."},
+            "path": {"type": "string", "description": "For 'wait' — a teammate's vfs:<proj>/<file> to block on until it exists."},
+            "wait": {"type": "integer", "description": "Seconds to block: 'inbox' 0–30, 'wait' 0–90 (default 90)."},
         },
         "required": ["action"],
     }
@@ -108,10 +115,10 @@ class VatraTool(Tool):
             "depth": int(os.environ.get("CLAW_VATRA_DEPTH", "0") or 0),
         }
 
-    async def _post(self, fd_url: str, path: str, payload: dict) -> Any:
+    async def _post(self, fd_url: str, path: str, payload: dict, *, timeout: float = 45.0) -> Any:
         import httpx
         body = {**self._identity(), **payload}
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(f"{fd_url}{path}", json=body)
         if resp.status_code == 403:
             return {"_error": "not authorized for this Vatra session"}
@@ -142,7 +149,9 @@ class VatraTool(Tool):
                 return await self._ask(fd_url, ctx, **kwargs)
             if action == "inbox":
                 return await self._inbox(fd_url, ctx, **kwargs)
-            return ToolResult(success=False, error=f"Unknown action '{action}' (use search/read/post/ask/inbox).")
+            if action == "wait":
+                return await self._wait(fd_url, ctx, **kwargs)
+            return ToolResult(success=False, error=f"Unknown action '{action}' (use search/read/post/ask/inbox/wait).")
         except Exception as e:
             log.warning("vatra tool error", action=action, error=str(e))
             return ToolResult(success=False, error=f"Vatra board request failed: {e}")
@@ -242,3 +251,34 @@ class VatraTool(Tool):
                  for a in answered]
         tail = f"\n\n({pending} other ask(s) still pending.)" if pending else ""
         return ToolResult(success=True, content="\n\n".join(parts) + tail)
+
+    async def _wait(self, fd_url: str, ctx: dict, **kwargs: Any) -> ToolResult:
+        path = (kwargs.get("path") or "").strip()
+        query = (kwargs.get("query") or "").strip()
+        if not path and not query:
+            return ToolResult(success=False, error=(
+                "Provide `path` (a teammate's vfs:<proj>/<file> to wait on) or `query` "
+                "(keywords for a teammate's board post) to wait for."))
+        # Default to the full 90s when blocked — the agent asked to wait, so wait.
+        wait = max(0, min(90, int(kwargs.get("wait") or 90)))
+        r = await self._post(fd_url, "/fd/vatra/agent/wait", {
+            "session_id": ctx["session_id"], "owner": ctx["owner"],
+            "path": path, "query": query, "wait": wait,
+        }, timeout=wait + 15.0)
+        if isinstance(r, dict) and r.get("_error"):
+            return ToolResult(success=False, error=r["_error"])
+        data = r.json()
+        if data.get("ready"):
+            if data.get("kind") == "file":
+                tail = " (truncated — read the file for the rest)" if data.get("truncated") else ""
+                return ToolResult(success=True, content=(
+                    f"Ready — {data.get('path')}{tail}:\n\n{data.get('content', '')}"))
+            return ToolResult(success=True, content=(
+                "Ready — teammate posts now match:\n\n" + self._fmt_entries(data.get("entries") or [])))
+        board = data.get("board") or []
+        digest = self._fmt_entries(board) if board else "(the board is still empty)"
+        target = path or f"posts matching {query!r}"
+        return ToolResult(success=True, content=(
+            f"Not ready after {data.get('waited', wait)}s — {target} hasn't appeared. The teammate "
+            f"who owns it may be delayed or may have failed. Proceed with your best alternative and "
+            f"note the gap; the review round and reporter reconcile the rest. Board so far:\n\n{digest}"))

@@ -208,6 +208,43 @@ def resolve_vfs_path(path: str, *, create_parents: bool = False) -> Path | None:
     return candidate
 
 
+def resolve_under(user_id: str, default_proj: str, path: str) -> Path | None:
+    """Resolve a vfs/bare *path* to an on-disk file for an EXPLICIT user + project,
+    independent of this process's ambient env.
+
+    :func:`resolve_vfs_path` keys off ``FD_OWNER_ID``/``CLAW_VFS_PROJECT`` in the
+    environment — correct inside a spawned worker, but wrong in the Flight Deck
+    server process, which serves many users. Endpoints that act on behalf of a
+    run's owner use this to read the same files a worker wrote: pass the run's
+    owner id and shared project explicitly. A path that already names a project
+    (``vfs:proj/file`` or ``proj/file``) uses that; a bare ``file`` falls back to
+    *default_proj*. Returns ``None`` on an empty path or one that would escape the
+    user's root.
+    """
+    raw = str(path or "").strip().replace("\\", "/")
+    if not raw:
+        return None
+    if raw[: len(_SCHEME)].lower() == _SCHEME:
+        raw = raw[len(_SCHEME):]
+    raw = raw.lstrip("/")
+    if "/" in raw:
+        proj, rel = raw.split("/", 1)
+    else:
+        proj, rel = (default_proj or ""), raw
+    user_root_p = (vfs_base() / _sanitize(user_id or "", fallback=_DEFAULT_USER)).resolve()
+    candidate = user_root_p / _sanitize(proj or default_proj, fallback=_DEFAULT_PROJECT)
+    # Keep ``..`` so ``.resolve()`` collapses it and the sandbox check below can
+    # reject any path that tries to climb out of the user root.
+    for part in (p for p in rel.split("/") if p not in ("", ".")):
+        candidate = candidate / part
+    candidate = candidate.resolve()
+    try:
+        candidate.relative_to(user_root_p)
+    except ValueError:
+        return None
+    return candidate
+
+
 def to_display(path: Path) -> str:
     """Render an absolute VFS path back as a ``vfs:<project>/...`` URI."""
     try:
