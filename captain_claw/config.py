@@ -335,6 +335,12 @@ class BrowserToolConfig(BaseModel):
 
     timeout_seconds: int = 60
     headless: bool = True
+    # Auto-install the Chromium browser binary on first launch if it is
+    # missing (idempotent, once per process; the binary cache is shared
+    # host-wide so one install serves all agents). Set false to require a
+    # manual `playwright install chromium`.
+    auto_install_browser: bool = True
+    auto_install_timeout_seconds: int = 300
     viewport_width: int = 1280
     viewport_height: int = 720
     screenshot_max_pixels: int = 800  # longest edge cap before sending to vision LLM

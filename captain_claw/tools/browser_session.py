@@ -8,6 +8,7 @@ between tool calls.  Handles startup, page management, and cleanup.
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,74 @@ except ImportError:  # pragma: no cover
 def has_playwright() -> bool:
     """Return True if Playwright is installed."""
     return _HAS_PLAYWRIGHT
+
+
+# ---------- lazy Chromium binary install -------------------------------------
+# The Playwright *package* can be importable while the *browser binary* is
+# absent (a fresh host that never ran `playwright install`). The binary lives in
+# a host-wide cache, so installing it once serves every agent on the machine.
+# We install lazily on first launch failure, guarded so only one install runs
+# per process and we don't retry a hopeless install on every browser call.
+_install_lock = asyncio.Lock()
+_install_done = False
+_install_failed_reason: str | None = None
+
+
+def _is_missing_browser_error(exc: BaseException) -> bool:
+    """Heuristically detect Playwright's "browser binary not installed" error."""
+    msg = str(exc).lower()
+    return (
+        "executable doesn't exist" in msg
+        or "playwright install" in msg
+        or "looks like playwright was just installed" in msg
+        or ("browsers" in msg and "download" in msg)
+    )
+
+
+async def ensure_chromium_installed(timeout_seconds: int = 300) -> tuple[bool, str]:
+    """Install the Chromium browser binary via Playwright, once per process.
+
+    Idempotent and safe under concurrency: a single install runs while siblings
+    wait on the lock, and a prior success/failure short-circuits. Returns
+    ``(ok, detail)``.
+    """
+    global _install_done, _install_failed_reason
+    async with _install_lock:
+        if _install_done:
+            return True, "already installed this process"
+        if _install_failed_reason is not None:
+            return False, _install_failed_reason
+        cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+        log.info("Installing Chromium via Playwright", cmd=" ".join(cmd))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                _install_failed_reason = f"install timed out after {timeout_seconds}s"
+                log.error("Chromium install timed out", timeout=timeout_seconds)
+                return False, _install_failed_reason
+        except Exception as exc:  # installer couldn't even be launched
+            _install_failed_reason = f"could not run installer: {exc}"
+            log.error("Chromium install failed to start", error=str(exc))
+            return False, _install_failed_reason
+
+        tail = (out or b"").decode("utf-8", "replace").strip()[-600:]
+        if proc.returncode == 0:
+            _install_done = True
+            log.info("Chromium install complete")
+            return True, "ok"
+        _install_failed_reason = f"exit {proc.returncode}: {tail}"
+        log.error("Chromium install failed", returncode=proc.returncode, output=tail)
+        return False, _install_failed_reason
 
 
 # ---------- BrowserSession ---------------------------------------------------
@@ -100,7 +169,7 @@ class BrowserSession:
 
         self._playwright = await async_playwright().start()
         log.info("Playwright started")
-        self._browser = await self._playwright.chromium.launch(headless=effective_headless)
+        self._browser = await self._launch_chromium(effective_headless)
         log.info("Chromium browser launched")
 
         context_kwargs: dict[str, Any] = {
@@ -128,6 +197,31 @@ class BrowserSession:
             viewport=f"{self._config.viewport_width}x{self._config.viewport_height}",
             network_capture=self._config.network_capture_enabled,
         )
+
+    async def _launch_chromium(self, headless: bool) -> Any:
+        """Launch Chromium, auto-installing the binary once if it's missing."""
+        try:
+            return await self._playwright.chromium.launch(headless=headless)
+        except Exception as exc:
+            if not _is_missing_browser_error(exc):
+                raise
+            if not getattr(self._config, "auto_install_browser", True):
+                raise RuntimeError(
+                    "Chromium browser binary is not installed. Run "
+                    "`playwright install chromium` (or set "
+                    "tools.browser.auto_install_browser = true)."
+                ) from exc
+            log.warning("Chromium binary missing — auto-installing", error=str(exc)[:200])
+            ok, detail = await ensure_chromium_installed(
+                timeout_seconds=getattr(self._config, "auto_install_timeout_seconds", 300),
+            )
+            if not ok:
+                raise RuntimeError(
+                    f"Chromium binary is missing and auto-install failed ({detail}). "
+                    "Run `playwright install chromium` on the host."
+                ) from exc
+            log.info("Chromium installed — retrying launch")
+            return await self._playwright.chromium.launch(headless=headless)
 
     @property
     def network(self) -> NetworkInterceptor:
