@@ -672,6 +672,131 @@ async def lifespan(app: FastAPI):
         from captain_claw.flight_deck import flow_router
         _flow_store = FlowStore(DATA_DIR / "flows.db")
         _fd_port = os.environ.get("FD_PORT", "25080")
+
+        # ── `agent on archetype:<id>` seams ──
+        # A flow step can run on a freshly spawned ephemeral archetype agent. The
+        # runner owns the lifecycle (spawn-once-per-run, dispose at end); these
+        # closures give it the registry + the proven background-spawn path used by
+        # Basna/Dubina (a stub Request whose .state.user_id stamps the owner).
+        def _flow_owner_id(payload: dict) -> str:
+            """Resolve the user who owns this flow run. Flows carry no owner column
+            yet, so: explicit payload.user_id → the origin agent's registry owner
+            (the agent that received the triggering message) → FD_OWNER_ID env. This
+            is what lets us load the RIGHT user's Library tier keys for the spawn."""
+            uid = str(payload.get("user_id") or "")
+            if uid:
+                return uid
+            port = int(payload.get("origin_port") or 0)
+            name = str(payload.get("origin_name") or "")
+            if port or name:
+                for _slug, e in _load_process_registry().items():
+                    if (port and int(e.get("web_port") or 0) == port) or (name and e.get("name") == name):
+                        owner = str(e.get("owner") or "")
+                        if owner:
+                            return owner
+            return os.environ.get("FD_OWNER_ID", "")
+
+        def _flow_origin_env(payload: dict) -> list:
+            """The triggering agent's own .env (KEY=VALUE pairs) so a spawned
+            specialist inherits ITS tool/provider keys (BRAVE_API_KEY, OPENAI_API_KEY,
+            …). This is the 'use the same keys as the agent I'm talking to' fallback
+            — tool keys live in the agent's .env, not its config.yaml. Best-effort."""
+            port = int(payload.get("origin_port") or 0)
+            name = str(payload.get("origin_name") or "")
+            slug = ""
+            for s, e in _load_process_registry().items():
+                if (port and int(e.get("web_port") or 0) == port) or (name and e.get("name") == name):
+                    slug = s
+                    break
+            if not slug:
+                return []
+            out: list = []
+            try:
+                for line in (DATA_DIR / slug / ".env").read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if k.strip():
+                        out.append({"key": k.strip(), "value": v})
+            except Exception:
+                pass
+            return out
+
+        async def _flow_load_archetype(payload: dict, aid: str):
+            from captain_claw.flight_deck.archetypes import merged_archetypes
+            from captain_claw.flight_deck.auth import get_db
+            uid = _flow_owner_id(payload) or None
+            for a in await merged_archetypes(get_db(), uid):
+                if a.get("id") == aid:
+                    return a
+            return None
+
+        async def _flow_owner(payload: dict):
+            """(user_dict | None, stub_request) for a background archetype spawn.
+            `spawn_process` reads request.state.user_id for ownership and `user`
+            for plan/quota; with auth off both degrade to the local/None defaults."""
+            import types as _types
+            from captain_claw.flight_deck.auth import get_db
+            uid = _flow_owner_id(payload)
+            user = None
+            if AUTH_ENABLED and uid:
+                try:
+                    user = await get_db().get_user_by_id(uid)
+                except Exception:
+                    user = None
+            stub = _types.SimpleNamespace(state=_types.SimpleNamespace(user_id=uid))
+            return user, stub
+
+        async def _flow_spawn_archetype(arch: dict, tier: str, tcfg: dict, payload: dict):
+            from captain_claw.flight_deck import dubina_agents
+            from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+            from captain_claw.flight_deck.auth import get_db
+            user, stub = await _flow_owner(payload)
+            # No explicit `@tier` → fall back to the archetype's own default tier.
+            eff_tier = tier or str(arch.get("tier") or "")
+            # Resolve the OWNER's Library config: the tier's provider/model/api_key/
+            # base_url AND the env vars (BRAVE_API_KEY, TAVILY_API_KEY, …). The tier
+            # is only a NAME until resolved against the user — without the LLM key
+            # the agent can't call the model, and without the env vars its tools
+            # (web_search/browser/…) have no credentials. Same source Basna uses.
+            resolved = dict(tcfg or {})
+            owner_env: list = []
+            try:
+                tiers_map, owner_env = await _load_owner_tiers(get_db(), _flow_owner_id(payload))
+                if not resolved.get("api_key") and eff_tier:
+                    resolved = (tiers_map or {}).get(eff_tier) or resolved
+            except Exception as exc:
+                log.warning("flow archetype owner-config resolve failed", tier=eff_tier, error=str(exc))
+            # Env precedence: the triggering agent's own .env (base) overlaid by the
+            # owner's Library env (authoritative where set). So a spawned specialist
+            # inherits the main agent's tool keys by default, while explicit Library
+            # config still wins.
+            merged_env: dict = {}
+            for ev in _flow_origin_env(payload):
+                merged_env[ev["key"]] = ev.get("value", "")
+            for ev in (owner_env or []):
+                if ev.get("key"):
+                    merged_env[ev["key"]] = ev.get("value", "")
+            # Don't let an inherited LLM-provider key override the resolved tier key
+            # (_build_env writes env_vars AFTER provider_api_key, so a same-named env
+            # var would otherwise clobber it). Only strip when we actually resolved one.
+            if resolved.get("api_key"):
+                _prov_env = {
+                    "anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
+                    "gemini": "GEMINI_API_KEY", "xai": "XAI_API_KEY",
+                    "openrouter": "OPENROUTER_API_KEY",
+                }.get(str(resolved.get("provider") or ""), "")
+                if _prov_env:
+                    merged_env.pop(_prov_env, None)
+            env_list = [{"key": k, "value": v} for k, v in merged_env.items()]
+            return await dubina_agents.spawn_archetype_agent(
+                arch, eff_tier, resolved, stub, user, env_vars=env_list)
+
+        async def _flow_stop_archetype(slug: str):
+            from captain_claw.flight_deck import dubina_agents
+            await dubina_agents.stop_archetype_agent(slug)
+
         _flow_runner = FlowRunner(
             _flow_store,
             get_agents=_running_agents,
@@ -680,6 +805,9 @@ async def lifespan(app: FastAPI):
             fd_tools=_fd_internal_tools(),
             whatsapp_send=_flow_whatsapp_send,
             transfer_file=_transfer_file_to_agent,
+            load_archetype=_flow_load_archetype,
+            spawn_archetype=_flow_spawn_archetype,
+            stop_archetype=_flow_stop_archetype,
         )
         app.state.flow_store = _flow_store
         app.state.flow_runner = _flow_runner
@@ -2713,7 +2841,15 @@ async def _ai_compile_flow(text: str, agent: str = "", current: str = "") -> dic
         "matches) — pick ONE, don't mix. For 'any of these words' use `or`, e.g. "
         "`trigger any when contains \"hungry\" or contains \"gladan\" or contains "
         "\"gladni\"`. Write quotes plainly — never backslash-escape them.\n"
-        "Selectors: origin, fd, any, capability:vision, name:<agent>. "
+        "Selectors: origin, fd, any, capability:vision, name:<agent>, and "
+        "archetype:<id>[@tier]. Use `agent on archetype:<id>` to run a step on a "
+        "freshly spawned, role-specialised agent that is disposed when the flow "
+        "ends — ideal for multi-stage pipelines (research → fact-check → write). "
+        "Archetype ids include: deep-researcher, market-scanner, fact-checker, "
+        "editor-writer, comms-outbound, social-repurposer, data-analyst, "
+        "report-builder, monitor-watchdog, triage-router. Example: "
+        "`agent on archetype:fact-checker`. Add `@tier` (reason/balanced/fast/"
+        "longctx/coding/vision) only to override the archetype's default model. "
         "Template with {{trigger.text}}, {{trigger.image_path}}, "
         "{{trigger.fd_image_path}}, {{steps.<id>.output}}. Always include a "
         "trigger, at least one step, and an `output -> same` line."
@@ -3226,6 +3362,7 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
 
                 # Stream events until we get the final assistant response
                 response_parts: list[str] = []
+                final_usage: dict | None = None  # trailing LLM-usage summary
                 deadline = asyncio.get_event_loop().time() + req.timeout
                 recv_interval = 15.0  # heartbeat every 15s of silence
                 _busy_retries = 0     # peer is single-threaded; wait it out
@@ -3254,6 +3391,21 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
                         content = msg.get("content", "")
                         if content:
                             response_parts.append(content)
+                        # The agent emits a `usage` summary (model + token counts)
+                        # right AFTER the final reply. Drain briefly to capture it
+                        # so the done payload can carry per-turn LLM usage; bail the
+                        # moment it arrives (usually within ms) so we add no latency.
+                        try:
+                            for _ in range(4):
+                                raw2 = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                                m2 = json.loads(raw2)
+                                if m2.get("type") == "usage":
+                                    final_usage = m2
+                                    break
+                                if m2.get("type") in _FORWARD_TYPES:
+                                    yield json.dumps({"event": m2.get("type"), "data": m2}) + "\n"
+                        except Exception:
+                            pass
                         break
                     elif msg_type == "error":
                         _err = str(msg.get("message", "Agent error"))
@@ -3272,11 +3424,14 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
                         yield json.dumps({"ok": False, "error": _err}) + "\n"
                         return
 
-            yield json.dumps({
+            _done: dict[str, Any] = {
                 "ok": True,
                 "done": True,
                 "response": "\n".join(response_parts) if response_parts else "(no response)",
-            }) + "\n"
+            }
+            if final_usage is not None:
+                _done["usage"] = final_usage  # per-turn LLM token usage for the caller
+            yield json.dumps(_done) + "\n"
         except Exception as exc:
             yield json.dumps({"ok": False, "error": f"Connection failed: {exc}"}) + "\n"
         finally:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from datetime import UTC, datetime
@@ -46,7 +47,8 @@ class _Root:
     are shared so recursion can't multiply per-flow limits and the run log sees
     one ordered, depth-tagged timeline."""
 
-    __slots__ = ("run_id", "control", "trace", "budget", "depth_cap", "dry")
+    __slots__ = ("run_id", "control", "trace", "budget", "depth_cap", "dry",
+                 "arch_agents", "arch_slugs", "arch_lock")
 
     def __init__(self, run_id: str, control: "_RunControl | None", dry: bool,
                  budget: dict[str, int], depth_cap: int) -> None:
@@ -56,6 +58,14 @@ class _Root:
         self.budget = budget          # mutable {"steps_left": int}
         self.depth_cap = depth_cap
         self.dry = dry
+        # Ephemeral archetype agents spawned by `on archetype:<id>` selectors,
+        # cached for the whole run (shared across gosub frames) and disposed in
+        # run()'s finally. `arch_agents`: archetype id → resolved agent dict;
+        # `arch_slugs`: spawn slugs to stop; `arch_lock` serialises lazy spawns
+        # so two concurrent steps on the same archetype don't double-spawn.
+        self.arch_agents: dict[str, dict[str, Any]] = {}
+        self.arch_slugs: list[str] = []
+        self.arch_lock = asyncio.Lock()
 
 
 class _RunControl:
@@ -490,6 +500,10 @@ class FlowRunner:
         fd_tools: dict[str, Callable[[dict[str, Any]], Awaitable[str]]] | None = None,
         whatsapp_send: Callable[[str, str], Awaitable[Any]] | None = None,
         transfer_file: Callable[[str, int, str], Awaitable[tuple[list[str], list[str]]]] | None = None,
+        load_archetype: Callable[[dict[str, Any], str], Awaitable[dict[str, Any] | None]] | None = None,
+        spawn_archetype: Callable[..., Awaitable[tuple[int, str, str]]] | None = None,
+        stop_archetype: Callable[[str], Awaitable[None]] | None = None,
+        resolve_tier_cfg: Callable[[dict[str, Any], str, str], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self.store = store
         self.get_agents = get_agents
@@ -500,6 +514,19 @@ class FlowRunner:
         # Uploads a file to a target agent, returning (image_paths, file_paths)
         # ON THE TARGET. Lets the runner verify delivery + use the target's path.
         self.transfer_file = transfer_file
+        # ── archetype selector seams (`agent on archetype:<id>`) ──
+        # All optional: if any is None the selector is unavailable and a step
+        # using it fails cleanly with a clear message (never a crash). Injected
+        # by the FD server, which owns the registry + spawn path.
+        #   load_archetype(payload, arch_id) -> archetype dict | None
+        #     (resolves the owning user from the payload, merges user archetypes)
+        #   spawn_archetype(archetype, tier, tcfg, payload) -> (port, token, slug)
+        #   stop_archetype(slug) -> None
+        #   resolve_tier_cfg(payload, arch_id, tier) -> tier-config dict ({} ok)
+        self.load_archetype = load_archetype
+        self.spawn_archetype = spawn_archetype
+        self.stop_archetype = stop_archetype
+        self.resolve_tier_cfg = resolve_tier_cfg
 
     # ── agent pool selection ───────────────────────────────────────────
 
@@ -542,9 +569,134 @@ class FlowRunner:
         # "any"
         return agents[0] if agents else None
 
+    # ── ephemeral archetype agents (`on archetype:<id>[@tier]`) ─────────
+
+    @staticmethod
+    def _parse_archetype_selector(selector: str) -> tuple[str, str]:
+        """`archetype:fact-checker@reason` → ('fact-checker', 'reason'); the tier
+        is optional and defaults to '' (the archetype's own tier resolves)."""
+        rest = selector.split(":", 1)[1].strip()
+        if "@" in rest:
+            aid, _, tier = rest.partition("@")
+            return aid.strip(), tier.strip()
+        return rest, ""
+
+    async def _ensure_archetype_agent(
+        self, selector: str, root: "_Root", payload: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Resolve `archetype:<id>[@tier]` to a spawned agent dict, spawning once
+        per run and caching on `root`. Returns (agent_dict | None, error). The
+        agent dict carries the usual {name,host,port,auth} plus `fleet_instructions`
+        (the archetype's SOP, prepended to the step prompt since the spawn config
+        sets tools+mode but not the system prompt)."""
+        if not (self.load_archetype and self.spawn_archetype):
+            return None, ("archetype selectors are not available in this deployment "
+                          "(no spawn seam configured)")
+        aid, tier = self._parse_archetype_selector(selector)
+        if not aid:
+            return None, "archetype selector needs an id, e.g. archetype:fact-checker"
+        cache_key = f"{aid}@{tier}"
+        # Serialise lazy spawns so two concurrent steps on the same archetype
+        # don't each spawn an agent (the second would wastefully orphan one).
+        async with root.arch_lock:
+            cached = root.arch_agents.get(cache_key)
+            if cached is not None:
+                return cached, ""
+            try:
+                arch = await self.load_archetype(payload, aid)
+            except Exception as exc:  # noqa: BLE001
+                return None, f"archetype lookup failed: {exc}"
+            if not arch:
+                return None, f"no archetype '{aid}' (check the id / your archetype library)"
+            tcfg: dict[str, Any] = {}
+            if tier and self.resolve_tier_cfg:
+                try:
+                    tcfg = await self.resolve_tier_cfg(payload, aid, tier) or {}
+                except Exception as exc:  # noqa: BLE001
+                    return None, f"tier '{tier}' could not be resolved: {exc}"
+            try:
+                port, token, slug = await self.spawn_archetype(arch, tier, tcfg, payload)
+            except Exception as exc:  # noqa: BLE001
+                return None, f"could not spawn archetype '{aid}': {exc}"
+            # Track the slug for disposal BEFORE the readiness wait, so a spawn
+            # that comes up too slowly is still cleaned up by run()'s finally.
+            if slug:
+                root.arch_slugs.append(slug)
+            # `spawn_archetype` returns after only a short settle (~0.3s), but a
+            # fresh agent's HTTP server takes seconds to boot — dispatching now
+            # would hit connection-refused. Wait until it actually serves before
+            # handing the agent to the step (consult-peer handles busy/retry from
+            # there, but not the initial not-listening-yet window).
+            ready = await self._wait_agent_ready("localhost", int(port), token or "")
+            if not ready:
+                return None, (f"archetype '{aid}' spawned (port {port}) but did not become "
+                              f"reachable in time — it may be slow to boot or failed to start")
+            agent = {
+                "name": f"archetype:{aid}",
+                "host": "localhost",
+                "port": int(port),
+                "auth": token or "",
+                "fleet_instructions": str(arch.get("fleet_instructions") or ""),
+            }
+            root.arch_agents[cache_key] = agent
+            log.info("flow spawned ephemeral archetype", archetype=aid, tier=tier or "(default)", slug=slug)
+            return agent, ""
+
+    async def _wait_agent_ready(self, host: str, port: int, token: str,
+                                timeout: float | None = None) -> bool:
+        """Poll a freshly spawned agent until its HTTP app serves (any non-5xx
+        response on a cheap endpoint) or `timeout` elapses. A FastAPI app mounts
+        all routes at once, so a served `/api/files` means `/ws` (the dispatch
+        surface) is up too. Connection-refused → keep waiting; the agent is still
+        booting (model init, session create)."""
+        import httpx
+        if timeout is None:
+            try:
+                timeout = float(os.environ.get("FD_FLOW_ARCH_READY_S", "60"))
+            except (TypeError, ValueError):
+                timeout = 60.0
+        url = f"http://{host}:{port}/api/files" + (f"?token={token}" if token else "")
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + max(1.0, timeout)
+        delay = 0.4
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            while loop.time() < deadline:
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code < 500:
+                        return True
+                except Exception:  # noqa: BLE001 — connection refused while booting
+                    pass
+                await asyncio.sleep(delay)
+                delay = min(1.5, delay * 1.3)
+        return False
+
+    async def _dispose_archetypes(self, root: "_Root") -> None:
+        """Stop every archetype agent spawned during the run (best-effort)."""
+        if not (self.stop_archetype and root.arch_slugs):
+            return
+        for slug in root.arch_slugs:
+            try:
+                await self.stop_archetype(slug)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("flow archetype dispose failed", slug=slug, error=str(exc))
+        root.arch_slugs.clear()
+        root.arch_agents.clear()
+
+    async def _resolve_step_agent(
+        self, selector: str, root: "_Root", payload: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Resolve a step's `on` selector to a target agent dict. For
+        `archetype:<id>` this spawns (or reuses) an ephemeral archetype agent;
+        every other selector resolves synchronously against the live pool."""
+        sel = (selector or "").strip()
+        if sel.startswith("archetype:"):
+            return await self._ensure_archetype_agent(sel, root, payload)
+        return self._select_agent(sel, payload), ""
+
     # ── step dispatch ──────────────────────────────────────────────────
 
-    async def _run_tool(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> tuple[str, str]:
+    async def _run_tool(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any], root: "_Root") -> tuple[str, str]:
         """Return (output, agent_label)."""
         tool = str(step.get("tool") or "")
         args = _render(step.get("args") or {}, ctx)
@@ -557,9 +709,9 @@ class FlowRunner:
                 return f"(no FD-internal tool '{tool}')", "fd"
             return (await fn(args)), "fd"
 
-        agent = self._select_agent(selector, payload)
+        agent, aerr = await self._resolve_step_agent(selector, root, payload)
         if not agent:
-            return f"(no agent available for selector '{selector}')", ""
+            return f"(no agent available for selector '{selector}'{': ' + aerr if aerr else ''})", ""
         import httpx
         url = f"http://{agent['host']}:{agent['port']}/api/tool"
         token = self.resolve_auth(int(agent["port"]))
@@ -574,14 +726,14 @@ class FlowRunner:
         except Exception as exc:
             return f"(tool {tool} dispatch failed: {exc})", agent.get("name", "")
 
-    async def _run_agent_step(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> tuple[str, str]:
+    async def _run_agent_step(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any], root: "_Root") -> tuple[str, str]:
         guard = step.get("guardrails") or {}
         deny = guard.get("deny") or []
         attach = _render(str(step.get("attach") or ""), ctx)
         selector = str(step.get("on") or "capability:vision")
-        agent = self._select_agent(selector, payload)
+        agent, aerr = await self._resolve_step_agent(selector, root, payload)
         if not agent:
-            return f"(no agent for selector '{selector}')", ""
+            return f"(no agent for selector '{selector}'{': ' + aerr if aerr else ''})", ""
 
         # When a file/image is attached, UPLOAD it to the target FIRST and use
         # the TARGET-local path. `attach`/{{trigger.image_path}} is the ORIGIN
@@ -611,6 +763,15 @@ class FlowRunner:
             render_ctx["attached_image_path"] = _tpath
 
         prompt = _render(str(step.get("prompt") or ""), render_ctx)
+
+        # Ephemeral archetype agents are spawned with the archetype's tools +
+        # cognitive_mode but NOT its SOP (the spawn config has no system-prompt
+        # slot), so fold the archetype's `fleet_instructions` in as a preamble —
+        # this is what makes `on archetype:fact-checker` actually behave like a
+        # fact-checker rather than a generic agent.
+        _fleet = str(agent.get("fleet_instructions") or "")
+        if _fleet:
+            prompt = f"{_fleet}\n\n---\n\n{prompt}"
 
         # FD-only mitigation (works even if the target runs older code): when a
         # file/image is attached, prepend a hard instruction to ignore memory and
@@ -649,7 +810,13 @@ class FlowRunner:
             "image_paths": target_images,   # already on the TARGET (verified)
             "file_paths": target_files,
         }
+        # Progress breadcrumb: name the specialist working this step so a long /
+        # multi-stage flow isn't a silent "thinking" spinner in the origin UI.
+        who = self._who(agent)
+        await self._push_progress(payload, "narration", {"text": f"▶ {who} working…"})
+
         final, err = "", ""
+        _last_note = ""  # de-dupe identical consecutive progress lines
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
                 async with client.stream("POST", f"{self.fd_self_base}/fd/consult-peer", json=body) as resp:
@@ -665,23 +832,54 @@ class FlowRunner:
                             continue
                         if evt.get("done") and evt.get("ok"):
                             final = str(evt.get("response") or "")
+                            # Surface the peer's LLM token usage as an activity
+                            # entry, attributed to the specialist (no clobbering of
+                            # the origin agent's own context meter).
+                            _usage = evt.get("usage")
+                            if isinstance(_usage, dict):
+                                _udet = self._usage_detail(_usage)
+                                if _udet:
+                                    await self._push_progress(payload, "monitor", {
+                                        "tool_name": f"{who}:llm",
+                                        "arguments": {},
+                                        "output": _udet,
+                                    })
                             break
                         if evt.get("ok") is False:
                             err = str(evt.get("error") or "agent error")
                             break
+                        # Forward the peer's intermediate activity to the origin UI
+                        # as TRANSIENT events (no chat-bubble spam): its narration /
+                        # status update the activity line, its tool calls land in the
+                        # monitor panel. The final answer still returns below.
+                        ev = str(evt.get("event") or "")
+                        data = evt.get("data") or {}
+                        if ev in ("narration", "status", "thinking"):
+                            note = str(data.get("text") or data.get("status") or "").strip()
+                            if note and note != _last_note:
+                                _last_note = note
+                                await self._push_progress(payload, "thinking", {"text": f"{who}: {note[:200]}"})
+                        elif ev == "monitor":
+                            tool = str(data.get("tool_name") or data.get("tool") or "").strip()
+                            if tool:
+                                await self._push_progress(payload, "monitor", {
+                                    "tool_name": f"{who}:{tool}",
+                                    "arguments": data.get("arguments") or {},
+                                    "output": str(data.get("output") or "")[:400],
+                                })
         except Exception as exc:
             err = str(exc)
         return (final or f"(no result: {err})"), agent.get("name", "")
 
-    async def _run_vision_step(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> tuple[str, str]:
+    async def _run_vision_step(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any], root: "_Root") -> tuple[str, str]:
         """Lean image describe: upload the image to a vision agent and call its
         /api/vision (raw model call) — NO agent loop, memory, tools, or history."""
         image_src = _render(str(step.get("attach") or step.get("image") or "{{trigger.image_path}}"), ctx)
         prompt = _render(str(step.get("prompt") or "Describe this image in detail."), ctx)
         selector = str(step.get("on") or "capability:vision")
-        agent = self._select_agent(selector, payload)
+        agent, aerr = await self._resolve_step_agent(selector, root, payload)
         if not agent:
-            return f"(no vision agent for selector '{selector}')", ""
+            return f"(no vision agent for selector '{selector}'{': ' + aerr if aerr else ''})", ""
         if not image_src:
             return "(no image to describe)", agent.get("name", "")
         if not self.transfer_file:
@@ -742,6 +940,63 @@ class FlowRunner:
         except Exception as exc:
             log.warning("flow deliver (agent push) failed: %s", exc)
             return False
+
+    async def _push_progress(self, payload: dict[str, Any], kind: str, fields: dict[str, Any]) -> None:
+        """Push a live-progress event into the origin agent's chat UI so the user
+        sees what a flow step (or its spawned specialist) is doing in real time.
+
+        `kind` is a transient UI event the agent already renders: `thinking`/
+        `status` update the activity line the user is watching, `monitor` lands in
+        the tool panel, `narration` is a one-line breadcrumb bubble. Skipped on
+        WhatsApp (per-event progress would spam a messaging channel) and when there
+        is no origin agent (scheduled runs). Best-effort — never raises."""
+        if str(payload.get("waid") or payload.get("whatsapp_waid") or ""):
+            return
+        if not (payload.get("origin_port") or payload.get("origin_name")):
+            return  # no origin chat UI to render into (e.g. scheduler runs)
+        agent = self._select_agent("origin", payload)
+        if not agent:
+            return
+        import httpx
+        url = f"http://{agent['host']}:{agent['port']}/api/chat/push"
+        token = agent.get("auth") or (self.resolve_auth(int(agent["port"])) if self.resolve_auth else "")
+        params = {"token": token} if token else {}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(url, params=params, json={"kind": kind, "event": fields})
+        except Exception:
+            pass  # progress is advisory; never fail a step over it
+
+    @staticmethod
+    def _who(agent: dict[str, Any]) -> str:
+        """Friendly label for progress lines — strips the `archetype:` prefix."""
+        name = str(agent.get("name") or "agent")
+        return name.split(":", 1)[1] if name.startswith("archetype:") else name
+
+    @staticmethod
+    def _usage_detail(usage: dict[str, Any]) -> str:
+        """Render a peer's end-of-turn LLM usage as one line: 'model · in→out tok ·
+        N total'. Tolerates the agent's field shape (input_tokens|prompt_tokens)."""
+        last = usage.get("last") if isinstance(usage.get("last"), dict) else usage
+        model = str(last.get("model") or usage.get("model") or "").strip()
+        it = last.get("input_tokens")
+        if it is None:
+            it = last.get("prompt_tokens")
+        ot = last.get("output_tokens")
+        if ot is None:
+            ot = last.get("completion_tokens")
+        tot = None
+        total = usage.get("total")
+        if isinstance(total, dict):
+            tot = total.get("total_tokens") or total.get("total")
+        parts: list[str] = []
+        if model:
+            parts.append(model)
+        if it is not None or ot is not None:
+            parts.append(f"{int(it or 0)}→{int(ot or 0)} tok")
+        if tot:
+            parts.append(f"{int(tot)} total")
+        return " · ".join(parts)
 
     async def _run_input_step(
         self, step: dict[str, Any], ctx: dict[str, Any],
@@ -1185,11 +1440,11 @@ class FlowRunner:
                 elif stype == "wait":
                     out, agent = await self._run_wait_step(step, ctx, payload, flow, dry=dry)
                 elif stype == "tool":
-                    out, agent = await self._run_tool(step, ctx, payload)
+                    out, agent = await self._run_tool(step, ctx, payload, root)
                 elif stype == "agent":
-                    out, agent = await self._run_agent_step(step, ctx, payload)
+                    out, agent = await self._run_agent_step(step, ctx, payload, root)
                 elif stype == "vision":
-                    out, agent = await self._run_vision_step(step, ctx, payload)
+                    out, agent = await self._run_vision_step(step, ctx, payload, root)
                 elif stype == "input":
                     out, agent = await self._run_input_step(step, ctx, payload, flow, dry=dry)
                 elif stype == "emit":
@@ -1314,6 +1569,10 @@ class FlowRunner:
                 status = "error"
                 error = str(exc)
                 log.warning("flow run failed", flow=flow.get("name"), error=error)
+        finally:
+            # Always dispose ephemeral archetype agents spawned by this run,
+            # whatever the outcome (done / stopped / error) — no orphaned agents.
+            await self._dispose_archetypes(root)
 
         if not dry:
             await self.store.finish_run(run_id, status, error)

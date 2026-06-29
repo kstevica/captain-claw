@@ -463,6 +463,21 @@ The `on` clause says **where** a step runs:
 | `any` | any available pooled agent |
 | `capability:vision` | an agent that has a vision model (default for `vision`) |
 | `name:DeepSeek V4 Flash` | a specific agent by name |
+| `archetype:fact-checker` | a **freshly spawned, role-specialised agent**, disposed when the run ends |
+| `archetype:deep-researcher@reason` | same, but overriding the model tier (`@<tier>`) |
+
+> **Archetype selectors** spin up a temporary agent built from one of the curated
+> archetypes (its tools, cognitive mode, and SOP) just for this run. The agent is
+> spawned lazily on first use, **reused across every step (and gosub'd sub-flow)
+> that names the same `archetype:<id>`**, and **disposed automatically** when the
+> run finishes — even on error or stop. Add `@<tier>`
+> (`reason`/`balanced`/`fast`/`longctx`/`coding`/`vision`) only to override the
+> archetype's default model. This is what lets a single flow run a
+> research → fact-check → write pipeline where each stage is a different specialist.
+> Available ids: `deep-researcher`, `market-scanner`, `fact-checker`,
+> `editor-writer`, `comms-outbound`, `social-repurposer`, `data-analyst`,
+> `report-builder`, `monitor-watchdog`, `triage-router`, plus any you've added to
+> your archetype library. An unknown id fails the step cleanly with a clear error.
 
 > Cross-agent file steps transfer the file to the target and use the target-local path automatically — you don’t manage paths.
 
@@ -1218,7 +1233,7 @@ step <id>:
 
 output -> <same|whatsapp|web|glasses|log>
 
-selectors : origin | fd | any | capability:vision | name:<Agent>
+selectors : origin | fd | any | capability:vision | name:<Agent> | archetype:<id>[@tier]
 templating: {{trigger.*}} {{steps.<id>.output}} {{steps.<id>.<field>}} {{system.*}}
 conditions: and or not ( )  ==  !=  >  <  >=  <=  contains  matches/~  (bare = truthy)
 ```

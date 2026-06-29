@@ -1410,11 +1410,32 @@ class WebServer:
             data = await request.json()
         except Exception:
             return web.json_response({"success": False, "error": "invalid JSON body"}, status=400)
+        from datetime import datetime, timezone
+        # Optional `kind` lets the Flow engine push LIVE PROGRESS (a spawned
+        # specialist's narration / tool calls) as transient UI events instead of
+        # permanent chat bubbles: `thinking`/`status` update the activity line the
+        # user is already watching, `monitor` lands in the tool panel. Back-compat:
+        # no `kind` → the original chat_message path (a real bubble), so older
+        # callers are unaffected. Transient kinds carry their fields in `event`
+        # (not top-level `text`), so an un-upgraded agent simply 400s and the
+        # caller ignores it rather than rendering a stray bubble.
+        _TRANSIENT_KINDS = {"narration", "thinking", "status", "monitor"}
+        kind = str(data.get("kind") or "").strip()
+        if kind in _TRANSIENT_KINDS:
+            evt: dict = {"type": kind, "timestamp": datetime.now(timezone.utc).isoformat()}
+            fields = data.get("event")
+            if isinstance(fields, dict):
+                evt.update(fields)
+            try:
+                self._broadcast(evt)
+                return web.json_response({"success": True})
+            except Exception as exc:
+                log.warning("api_chat_push (progress) failed", error=str(exc))
+                return web.json_response({"success": False, "error": str(exc)}, status=500)
         text = str(data.get("text") or "").strip()
         if not text:
             return web.json_response({"success": False, "error": "missing 'text'"}, status=400)
         try:
-            from datetime import datetime, timezone
             self._broadcast({
                 "type": "chat_message",
                 "role": str(data.get("role") or "assistant"),

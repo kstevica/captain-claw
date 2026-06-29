@@ -104,9 +104,9 @@ def resolve_agent_port_token(agent_id: str) -> tuple[int, str]:
 # ── Archetype target (spawn per tier) ────────────────────────────────
 
 async def _real_spawn(archetype: dict, tier: str, tcfg: dict, request, user,
-                      name_suffix: str = "") -> tuple[int, str, str]:
+                      name_suffix: str = "", env_vars: list | None = None) -> tuple[int, str, str]:
     from captain_claw.flight_deck.server import _load_process_registry, spawn_process
-    cfg = _build_agent_config(archetype, tier, tcfg, name_suffix=name_suffix)
+    cfg = _build_agent_config(archetype, tier, tcfg, name_suffix=name_suffix, env_vars=env_vars)
     res = await spawn_process(cfg, request, user)
     slug = getattr(res, "slug", "")
     entry = _load_process_registry().get(slug) or {}
@@ -120,11 +120,15 @@ async def _real_stop(slug: str) -> None:
     await _do_stop_process(slug)
 
 
-def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str = ""):
+def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str = "",
+                        env_vars: list | None = None):
     """An ephemeral AgentConfig for an archetype, modeled on Basna's spawn path.
 
     ``name_suffix`` keeps each run's agent name/slug unique so concurrent or
     back-to-back runs of the same archetype+tier don't collide on spawn.
+    ``env_vars`` are the owner's configured tool keys/env (e.g. BRAVE_API_KEY,
+    TAVILY_API_KEY) — without them the spawned agent's web_search/etc. tools have
+    no credentials. Written into the child's .env by ``_build_env``.
     """
     from captain_claw.flight_deck.server import AgentConfig
     suffix = f"-{name_suffix}" if name_suffix else ""
@@ -133,6 +137,7 @@ def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str
         description=f"Dubina ephemeral · {archetype.get('role', '')}",
         cognitive_mode=archetype.get("cognitive_mode", "neutra"),
         tools=archetype.get("tools") or AgentConfig().tools,
+        env_vars=list(env_vars or []),
         web_enabled=True, web_port=0,
     )
     model = tcfg.get("model")
@@ -145,6 +150,35 @@ def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str
             max_context=int(tcfg.get("input_ctx") or 0),
         )
     return AgentConfig(**base, tier=tier)
+
+
+# ── Shared spawn/dispose seam (used by Dubina AND the Flow engine) ────
+#
+# The Flow runner's ``archetype:<id>`` selector spawns an ephemeral archetype
+# agent for the duration of a run, then disposes it — exactly the lifecycle
+# ``ArchetypeRunner`` already implements per tier. Rather than duplicate the
+# spawn path, both go through these thin public wrappers over ``_real_spawn`` /
+# ``_real_stop`` so the agent config (tools, cognitive_mode, tier→model) stays
+# defined in one place.
+
+async def spawn_archetype_agent(
+    archetype: dict, tier: str, tcfg: dict, request, user, name_suffix: str = "",
+    env_vars: list | None = None,
+) -> tuple[int, str, str]:
+    """Spawn one ephemeral archetype agent; return ``(port, token, slug)``.
+
+    ``tcfg`` is the resolved tier config (provider/model/key) for ``tier`` — pass
+    ``{}`` to let the archetype's own tier resolve via ``AgentConfig(tier=...)``.
+    ``env_vars`` are the owner's tool keys/env (BRAVE_API_KEY, …) so the spawned
+    agent's tools have credentials.
+    """
+    return await _real_spawn(archetype, tier, tcfg, request, user,
+                             name_suffix=name_suffix, env_vars=env_vars)
+
+
+async def stop_archetype_agent(slug: str) -> None:
+    """Dispose a previously spawned archetype agent (best-effort)."""
+    await _real_stop(slug)
 
 
 class ArchetypeRunner:
