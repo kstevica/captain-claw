@@ -1,19 +1,55 @@
 # Captain Claw
 
+### Command a fleet of AI agents
+
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI-black)](#quick-start)
-[![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#multi-model-support)
+[![Version](https://img.shields.io/badge/version-0.6.5-purple)](release-notes/RELEASE_NOTES_0.6.5.md)
+[![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](#quick-start)
+[![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#multi-model-support)
 
-![Captain Claw](docs/screenshot.png)
+> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center — spawn specialist teams, run **five orchestration modes**, and compose deterministic **Flows**. Self-hosted, MIT licensed, and works with every major LLM provider (or 100% local with Ollama).
+
+**[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://flight-deck.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)**
+
+![Flight Deck — spawn a team of specialists, monitor them live, and chat with any one from a single dashboard](docs/screenshots/flight-deck.png)
+
+<p align="center"><strong>5 orchestration modes</strong> &nbsp;·&nbsp; <strong>47 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>24 ready-made specialists</strong></p>
+
+An open-source AI agent platform that **thinks, remembers, and acts**. It connects to OpenAI, Anthropic, Google Gemini, DeepSeek, Ollama, and OpenRouter (plus "Sign in with ChatGPT" — no API key), and gives you a rich workspace for research, document and video understanding, browser automation, and multi-agent orchestration — backed by persistent cross-session memory and autonomous "dream cycle" cognition.
+
+### Pick the right shape for the problem
+
+One agent isn't always the answer — and one orchestration strategy never is. Captain Claw ships **five distinct modes**, each tuned to a different kind of work.
+
+| | |
+|---|---|
+| **🛠️ Agent Forge** — describe a goal, an LLM designs the whole team (roles, models, tools, SOPs) | **🏛️ Agent Council** — specialists deliberate across moderated rounds, then vote and synthesize |
+| [![Agent Forge](docs/screenshots/agent-forge.png)](docs/screenshots/agent-forge.png) | [![Agent Council](docs/screenshots/agent-council.png)](docs/screenshots/agent-council.png) |
+| **🔀 Basna** — N agents answer the same question *blind*, merged by reliability into one high-confidence result | **🤝 Vatra** — a team collaborates on a shared blackboard, each owning sections, improving over review rounds |
+| [![Basna](docs/screenshots/basna.png)](docs/screenshots/basna.png) | [![Vatra](docs/screenshots/vatra.png)](docs/screenshots/vatra.png) |
+
+The fifth mode is **Flight Deck** itself (above) — spawn, monitor, and coordinate the whole crew from one dashboard.
+
+### More than orchestration
+
+| | |
+|---|---|
+| **⚙️ Flows** — a deterministic automation DSL (triggers, `gosub`, parallel `spawn`/`join`, `on error`), validated by a parser, not interpreted by an LLM | **🔭 Observatory** — it keeps thinking when you're away: a live, auditable stream of thoughts, dreams, and standing intentions |
+| [![Flows](docs/screenshots/flows.png)](docs/screenshots/flows.png) | [![Observatory](docs/screenshots/observatory.png)](docs/screenshots/observatory.png) |
+
+- **Plan Mode & Deep Mode** — for when "probably right" isn't good enough: a reviewable DAG of verified steps, and frontier-quality answers via multiple rollouts + self-consistency voting + diverse-lens critics.
+- **6-layer shared memory** — working, semantic (vector + BM25), deep (full-text), insights, autonomous nervous system, and self-reflection — carried across sessions and across every agent.
+- **Shared Virtual File System** — a host-sandboxed, per-user workspace the whole fleet reads and writes, with per-file authorship.
+- **24 ready-made specialists** — an editable archetype library spanning research, writing, engineering, data, ops, finance, and multimedia.
+
+#### See it in action
 
 [![asciicast](https://asciinema.org/a/R1UPSHi4Y6UrOnpY.svg)](https://asciinema.org/a/R1UPSHi4Y6UrOnpY)
 
 [![Watch the video](https://img.youtube.com/vi/4g_aA_WnEaw/maxresdefault.jpg)](https://www.youtube.com/watch?v=4g_aA_WnEaw)
 
 [![Glasses Bridge demo](https://img.youtube.com/vi/ZTepr5PP3WQ/maxresdefault.jpg)](https://www.youtube.com/shorts/ZTepr5PP3WQ)
-
-An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 48 built-in tools.
 
 ## What's New in 0.6.5
 
