@@ -191,7 +191,7 @@ async def generate_archetype(body: GenerateRequest, user: dict = Depends(get_cur
 
     try:
         from captain_claw.llm import create_provider, Message
-        max_tokens = body.max_tokens if body.max_tokens > 0 else 8192
+        max_tokens = body.max_tokens if body.max_tokens > 0 else 16384
         provider = create_provider(
             provider=body.provider,
             model=body.model,

@@ -5470,7 +5470,7 @@ class ForgeRequest(BaseModel):
     base_url: str = ""  # optional custom endpoint (matches the chosen tier)
     # Output token budget for the decomposition. The frontend sends the forge
     # tier's configured output_ctx so a big team's JSON isn't truncated.
-    max_tokens: int = 16384
+    max_tokens: int = 32768
     project_id: str = ""  # optional: forge agents for an existing project
 
 
@@ -5576,7 +5576,7 @@ async def forge_decompose(
     # Create an LLM provider and make the decomposition call
     try:
         from captain_claw.llm import create_provider, Message
-        forge_max_tokens = body.max_tokens if body.max_tokens > 0 else 16384
+        forge_max_tokens = body.max_tokens if body.max_tokens > 0 else 32768
         provider = create_provider(
             provider=body.provider,
             model=body.model,

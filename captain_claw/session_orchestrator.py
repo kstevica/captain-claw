@@ -44,8 +44,8 @@ log = get_logger(__name__)
 # Timeout for the decomposition and synthesis LLM calls.
 _PLANNER_TIMEOUT_SECONDS = 120.0
 # Max output tokens for the decompose / synthesize LLM calls.
-_DECOMPOSE_MAX_TOKENS = 16000
-_SYNTHESIZE_MAX_TOKENS = 16000
+_DECOMPOSE_MAX_TOKENS = 32000
+_SYNTHESIZE_MAX_TOKENS = 32000
 # How often to poll for task graph changes during execution.
 _POLL_INTERVAL_SECONDS = 1.0
 

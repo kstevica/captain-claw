@@ -150,7 +150,7 @@ export function ForgePage() {
     setLoading(true)
     setError('')
     try {
-      const result = await callForge(prompt, ft.provider, ft.model, ft.api_key, ft.base_url, ft.output_ctx > 0 ? ft.output_ctx : 16384, selectedProjectId || undefined)
+      const result = await callForge(prompt, ft.provider, ft.model, ft.api_key, ft.base_url, ft.output_ctx > 0 ? ft.output_ctx : 32768, selectedProjectId || undefined)
       setTeamName(result.team_name || 'Agent Team')
       setSummary(result.summary || '')
       const proposals: AgentProposal[] = (result.agents || []).map((a: any, i: number) => {
