@@ -75,6 +75,10 @@ class ContextConfig(BaseModel):
     compaction_ratio: float = 0.4
     micro_instructions: bool = False
     nano_instructions: bool = False
+    # IANA timezone for the user's local "now" shown to the agent (e.g.
+    # "Europe/Zagreb"). Empty falls back to the CLAW_TZ/TZ env, then UTC-only.
+    # The injected date/time is always anchored on UTC and labelled.
+    timezone: str = ""
     chunked_processing: ChunkedProcessingConfig = Field(
         default_factory=ChunkedProcessingConfig,
     )

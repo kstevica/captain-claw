@@ -8,7 +8,80 @@ import shutil
 import socket
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+
+try:  # Python 3.9+ stdlib; project requires 3.11+.
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - defensive
+    ZoneInfo = None  # type: ignore[assignment]
+
+
+def _resolve_timezone(tz_name: str | None):
+    """Resolve a ZoneInfo from an explicit name or the environment.
+
+    Precedence: explicit ``tz_name`` arg → ``CLAW_TZ`` env → ``TZ`` env.
+    Returns ``(label, zone)`` where *zone* is a tzinfo or ``None`` when no
+    valid non-UTC zone could be resolved (callers then show UTC only).
+    """
+    candidate = (tz_name or os.environ.get("CLAW_TZ") or os.environ.get("TZ") or "").strip()
+    if not candidate or candidate.upper() == "UTC" or ZoneInfo is None:
+        return candidate, None
+    try:
+        return candidate, ZoneInfo(candidate)
+    except Exception:
+        return "", None
+
+
+def user_local_now(tz_name: str | None = None) -> datetime:
+    """Return the current time as a tz-aware datetime in the user's zone.
+
+    Resolves the display timezone like :func:`build_datetime_lines` (arg →
+    ``CLAW_TZ`` → ``TZ``) and falls back to UTC when none is configured. Use
+    this for any user-facing "what day/part of day is it" reasoning instead of
+    naive ``datetime.now()`` (which is UTC on a UTC server and mislabels the
+    weekday near midnight).
+    """
+    now_utc = datetime.now(timezone.utc)
+    _label, zone = _resolve_timezone(tz_name)
+    return now_utc.astimezone(zone) if zone is not None else now_utc
+
+
+def build_datetime_lines(tz_name: str | None = None) -> tuple[list[str], str]:
+    """Build unambiguous current-date/time lines for the system prompt.
+
+    Always anchors on timezone-aware UTC and labels it explicitly. When a
+    valid non-UTC display timezone is configured (arg, ``CLAW_TZ`` or ``TZ``),
+    it also shows the user's local date/time and instructs the model to treat
+    that as "now" — so agents stop confusing the UTC server clock with the
+    user's calendar.
+
+    Returns ``(normal_lines, micro_str)``.
+    """
+    now_utc = datetime.now(timezone.utc)
+    label, zone = _resolve_timezone(tz_name)
+
+    if zone is None:
+        normal = [
+            f"- Current date & time: {now_utc:%A, %B %d, %Y %H:%M} UTC "
+            "(the server clock runs on UTC)",
+        ]
+        micro = f"{now_utc:%a %Y-%m-%d %H:%M} UTC"
+        return normal, micro
+
+    local = now_utc.astimezone(zone)
+    tz_abbr = local.tzname() or label
+    offset = local.utcoffset()
+    off_hours = (offset.total_seconds() / 3600.0) if offset is not None else 0.0
+    off_str = f"UTC{off_hours:+g}"
+    normal = [
+        f"- Current date & time (user's local, {label}): "
+        f"{local:%A, %B %d, %Y %H:%M} {tz_abbr} ({off_str})",
+        f"- Current date & time (UTC, server clock): {now_utc:%A, %B %d, %Y %H:%M} UTC",
+        "- Treat the user's local date/time above as \"now\" for all day/date "
+        "reasoning (today, tomorrow, this week, deadlines); the server runs on UTC.",
+    ]
+    micro = f"{local:%a %Y-%m-%d %H:%M} {tz_abbr} ({off_str}; {now_utc:%H:%M} UTC)"
+    return normal, micro
 
 
 def _get_local_ip() -> str:
@@ -230,13 +303,16 @@ def _get_uptime_compact() -> str:
     return f"{minutes}m"
 
 
-def build_system_info_block(detail_level: str = "normal") -> str:
+def build_system_info_block(detail_level: str = "normal", tz_name: str | None = None) -> str:
     """Build a system environment info block for the agent system prompt.
 
     Args:
         detail_level: ``"normal"`` for full labelled block,
                       ``"micro"`` for a single compact line,
                       ``"nano"`` returns empty string (nano prompts are ultra-minimal).
+        tz_name: Optional IANA timezone (e.g. ``"Europe/Zagreb"``) for the
+                 user's local time; falls back to ``CLAW_TZ``/``TZ`` env, then
+                 UTC-only. The date/time line is always anchored on UTC.
 
     Returns:
         Formatted string ready for template injection, or ``""`` if *nano*.
@@ -244,7 +320,7 @@ def build_system_info_block(detail_level: str = "normal") -> str:
     if detail_level == "nano":
         return ""
 
-    now = datetime.now()
+    datetime_normal, datetime_micro = build_datetime_lines(tz_name)
     hostname = socket.gethostname()
     disk_free = _get_disk_free()
     local_ip = _get_local_ip()
@@ -253,7 +329,7 @@ def build_system_info_block(detail_level: str = "normal") -> str:
     mem_normal, mem_compact = _get_memory_usage()
 
     if detail_level == "micro":
-        parts = [f"{now:%a %Y-%m-%d %H:%M}"]
+        parts = [datetime_micro]
         parts.append(f"host={hostname}")
         if mem_compact:
             parts.append(f"mem={mem_compact}")
@@ -272,7 +348,7 @@ def build_system_info_block(detail_level: str = "normal") -> str:
 
     # Normal (full) format.
     lines = ["System environment:"]
-    lines.append(f"- Date: {now:%A, %B %d, %Y %H:%M}")
+    lines.extend(datetime_normal)
     lines.append(f"- Hostname: {hostname}")
     if mem_normal:
         lines.append(f"- Memory: {mem_normal}")

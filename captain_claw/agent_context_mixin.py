@@ -2830,7 +2830,11 @@ class AgentContextMixin:
             _detail = "micro"
         else:
             _detail = "normal"
-        system_info_block = build_system_info_block(detail_level=_detail)
+        try:
+            _tz_name = get_config().context.timezone
+        except Exception:
+            _tz_name = ""
+        system_info_block = build_system_info_block(detail_level=_detail, tz_name=_tz_name or None)
         # Append activity-timing lines (last user message / reply / cron run /
         # session start) so the model knows recency, not just the current clock.
         _timing_block = self._build_timing_block(detail_level=_detail)

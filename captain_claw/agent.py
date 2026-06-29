@@ -249,9 +249,17 @@ class Agent(
             except (ValueError, TypeError):
                 next_run_str = ""
 
-        # Part-of-day + weekday, from LOCAL time (the absolute clock is already
-        # in the system-info block; this is a derived tone hint).
-        local_now = datetime.now()
+        # Part-of-day + weekday, from the user's LOCAL time (the absolute clock
+        # is already in the system-info block; this is a derived tone hint).
+        # Use the configured timezone, not naive now() — on the UTC server the
+        # latter would name the wrong weekday/part-of-day for the user.
+        try:
+            from captain_claw.config import get_config
+            from captain_claw.system_info import user_local_now
+
+            local_now = user_local_now(get_config().context.timezone or None)
+        except Exception:
+            local_now = datetime.now()
         weekday = local_now.strftime("%A")
         is_weekend = local_now.weekday() >= 5
         part = self._part_of_day(local_now.hour)

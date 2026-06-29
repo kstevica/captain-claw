@@ -1454,6 +1454,11 @@ context:
   max_tokens: 160000              # total context window budget
   compaction_threshold: 0.8       # trigger compaction at 80% usage
   compaction_ratio: 0.4           # keep 40% recent messages after compaction
+  timezone: "Europe/Zagreb"       # user's IANA timezone for the agent's "now"
+                                  # (empty → CLAW_TZ/TZ env → UTC-only). The
+                                  # injected date/time is always anchored on UTC
+                                  # and labelled; set this so day/date reasoning
+                                  # (today/tomorrow/this week) uses local time.
   chunked_processing:
     enabled: false                # master switch (or use auto_threshold)
     auto_threshold: 0             # auto-enable when max_tokens <= this value (0 = off)
