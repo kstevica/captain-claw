@@ -15,6 +15,17 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 48 built-in tools.
 
+## What's New in 0.6.5
+
+**Teams that wait for each other — Vatra rendezvous, specialist tiers, and a tidier deck.** Fully additive; backward compatible with 0.6.4.
+
+- **Vatra `wait` rendezvous.** A specialist that genuinely depends on a teammate's artifact now **blocks until it's ready** instead of improvising a guess. A new `wait` action takes a `path` (`vfs:<project>/<file>`) or a `query` (board keywords); the `/agent/wait` endpoint **long-polls** the VFS file or blackboard every second, capped at **90s** (below the dispatch timeout, so it can't hang a run). On timeout it returns a **board digest** + a "proceed deliberately" nudge rather than an error. Sibling owners keep working while one awaits. Waits are **visible in the timeline** — start (⏳ ≤Ns), resolve (✓ got file/board match), and timeout (⌛ not ready). Steered, not forced: no `depends_on` ordering, the tool is the whole mechanism.
+- **Coding & Vision tiers in the Library.** Two new model tiers route work to a model suited for it — **`coding`** (default `opus-4-8`, 65 536 output ctx) for multi-file diffs/debugging, **`vision`** (default `sonnet-4-6`) for image/screenshot/document understanding. Wired through every touchpoint (archetypes, `_VALID_TIERS`, Dubina `TIER_ORDER`, consciousness `_TIER_RANK`, frontend). A **`backfillTierMap`** gives existing saved tier sets the new cards (inheriting provider/key). Code archetypes (`code-implementer`, `debugger`, `simplifier`) move to **coding**, and a new **Vision & Multimodal** family (`visual-extractor`, `ui-reviewer`, `brand-design-reviewer`) is added.
+- **Sticky phase pill + Plan-mode tokens.** Basna/Vatra/Plan runs now emit an explicit **phase** event at every transition and show the current stage **stickily** in the Progress header (spinner while running) — Vatra (Planning → … → Synthesizing → … → Done), Basna (Routing → … → Done), Plan (`Step x/y: <goal>`). Plan mode's live agent cards now also show **per-agent token counts** (usage events are forwarded into the parent plan log).
+- **Agent Folders page.** A new admin-gated Flight Deck page to inspect and clean up agent subfolders under `fd-data` — on-disk size, file counts, last-modified, and desktop presence (**running / on-desktop / orphaned**). New `/fd/agentfs` router (list / view / download / delete, path-sandboxed, refuses to delete a running agent) plus a file viewer that renders HTML (sandboxed iframe) and Markdown with GFM tables.
+
+No schema changes, no new required config. New endpoints: `POST /fd/<run>/agent/wait` and the `/fd/agentfs/*` router. Existing tier configs are auto-backfilled with the new cards. See [RELEASE_NOTES_0.6.5.md](release-notes/RELEASE_NOTES_0.6.5.md). Backward compatible with 0.6.4.
+
 ## What's New in 0.6.4
 
 **Think way ahead, way long — Frontier Horizon comes to Basna & Vatra.** Fully additive; everything new is off by default.
