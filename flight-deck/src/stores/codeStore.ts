@@ -22,6 +22,8 @@ export interface CodeRoute {
   why?: string
 }
 
+export interface CodeFinding { title: string; severity: string; file?: string }
+
 export interface CodeMessage {
   id: string
   role: 'user' | 'assistant'
@@ -32,6 +34,11 @@ export interface CodeMessage {
   ok?: boolean
   commit?: string
   route?: CodeRoute
+  // Big-job phases: plan | build | review | fix | note | approval
+  kind?: string
+  findings?: CodeFinding[]
+  needs_fix?: boolean
+  round?: number
 }
 
 export interface CodeCommit {
@@ -120,6 +127,13 @@ async function apiMessage(project: string, text: string): Promise<{ message: Cod
   return res.json()
 }
 
+async function apiApprove(project: string, plan?: string): Promise<void> {
+  const res = await _authedFetch('/fd/code/plan/approve', {
+    method: 'POST', body: JSON.stringify({ project, ...(plan ? { plan } : {}) }),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'approve failed')
+}
+
 async function apiDiff(project: string, refA = '', refB = ''): Promise<string> {
   const qs = new URLSearchParams({ ref_a: refA, ref_b: refB }).toString()
   const res = await _authedFetch(`/fd/code/projects/${enc(project)}/diff?${qs}`)
@@ -135,6 +149,7 @@ interface CodeStore {
   messages: CodeMessage[]
   commits: CodeCommit[]
   progress: CodeProgressEvent[]
+  status: string            // current project run state: idle | running | awaiting_plan
   sending: boolean
   loading: boolean
   error: string | null
@@ -143,7 +158,12 @@ interface CodeStore {
   createProject: (name: string) => Promise<void>
   selectProject: (name: string) => Promise<void>
   send: (text: string) => Promise<void>
+  approvePlan: (plan?: string) => Promise<void>
   diff: (refA?: string, refB?: string) => Promise<string>
+}
+
+function _statusOf(state: Record<string, unknown>): string {
+  return (state?.status as string) || 'idle'
 }
 
 export const useCodeStore = create<CodeStore>((set, get) => ({
@@ -152,6 +172,7 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   messages: [],
   commits: [],
   progress: [],
+  status: 'idle',
   sending: false,
   loading: false,
   error: null,
@@ -178,9 +199,9 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   },
 
   selectProject: async (name) => {
-    set({ activeProject: name, messages: [], commits: [], progress: [] })
+    set({ activeProject: name, messages: [], commits: [], progress: [], status: 'idle' })
     const [chat, commits] = await Promise.all([apiGetChat(name), apiLog(name)])
-    set({ messages: chat.messages, commits })
+    set({ messages: chat.messages, commits, status: _statusOf(chat.state) })
   },
 
   send: async (text) => {
@@ -197,13 +218,37 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     try {
       await apiMessage(project, text.trim())
       const [chat, commits] = await Promise.all([apiGetChat(project), apiLog(project)])
-      set({ messages: chat.messages, commits })
+      set({ messages: chat.messages, commits, status: _statusOf(chat.state) })
       await get().loadProjects()
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'message failed' })
     } finally {
       clearInterval(poll)
       try { const p = await apiProgress(project); set({ progress: p.events || [] }) } catch { /* ignore */ }
+      set({ sending: false })
+    }
+  },
+
+  approvePlan: async (plan) => {
+    const project = get().activeProject
+    if (!project) return
+    set({ sending: true, error: null, progress: [], status: 'running' })
+    try {
+      await apiApprove(project, plan)
+      // The build → review → fix loop runs in the background. Follow it: poll
+      // progress for the live trace and the chat/state until it goes idle.
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1500))
+        const [prog, chat] = await Promise.all([apiProgress(project), apiGetChat(project)])
+        set({ progress: prog.events || [], messages: chat.messages, status: _statusOf(chat.state) })
+        if (_statusOf(chat.state) !== 'running' && !prog.active) break
+      }
+      const commits = await apiLog(project)
+      set({ commits })
+      await get().loadProjects()
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'approve failed' })
+    } finally {
       set({ sending: false })
     }
   },

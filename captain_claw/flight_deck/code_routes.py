@@ -14,6 +14,7 @@ conversation is portable with the folder and needs no DB migration.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -55,6 +56,8 @@ _DISPATCH_TIMEOUT = 900.0  # coding turns can install deps + run tests
 
 _PLANNERS = {"light-planner", "long-horizon-planner", "architect"}
 _SMALL = {"quick-dirty", "code-implementer", "debugger"}
+_REVIEWERS = ["code-reviewer", "security-reviewer", "qa-engineer"]
+_MAX_FIX_ROUNDS = 3
 
 
 # ── per-project storage (under <project>/.code/) ─────────────────────
@@ -183,10 +186,10 @@ def _exec_prompt(intent: str) -> str:
     )
 
 
-async def _run_single(request: Request, user: dict, project: str, pdir: Path,
-                      archetype_id: str, intent: str, tiers_map: dict,
-                      env_vars: list, by_id: dict) -> dict:
-    """Spawn one archetype anchored at the project dir, dispatch the task, dispose."""
+async def _run_agent(request: Request, user: dict, project: str, pdir: Path,
+                     archetype_id: str, prompt: str, by_id: dict,
+                     tiers_map: dict, env_vars: list) -> dict:
+    """Spawn one archetype anchored at the project dir, dispatch ``prompt``, dispose."""
     arch = by_id[archetype_id]
     role = arch.get("role", archetype_id)
     tier = arch.get("tier", "coding")
@@ -206,21 +209,176 @@ async def _run_single(request: Request, user: dict, project: str, pdir: Path,
         _progress(project, "usage", f"{role} · {pt:,}→{ct:,} tok",
                   agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
-    _phase(project, f"Spawning {role}")
+    _phase(project, f"{role} working")
     port, token, slug = await spawn_archetype_agent(
         arch, tier, tcfg, request, user, name_suffix=suffix,
         env_vars=env_vars, workspace_path=str(pdir),
     )
     try:
-        _phase(project, f"{role} working")
         d = await _dispatch_one(
-            port, token, _exec_prompt(intent), _DISPATCH_TIMEOUT,
-            on_action=_on_action, fleet_instructions=arch.get("fleet_instructions", ""),
+            port, token, prompt, _DISPATCH_TIMEOUT, on_action=_on_action,
+            fleet_instructions=arch.get("fleet_instructions", ""),
             agent_name=role, on_usage=_on_usage,
         )
     finally:
         await stop_archetype_agent(slug)
     return d
+
+
+# ── big-job prompts (Vatra plan→build, Basna review fan-out, fix loop) ─
+
+def _plan_prompt(intent: str) -> str:
+    return (
+        "You are planning a coding task in THIS repository — it is your workspace and "
+        "current directory. Survey the existing code first (relative paths, your shell), "
+        "then produce a clear, scoped implementation plan and WRITE it to `plan.md` in the "
+        "project root. The plan drives an implementer next, so make it concrete and ordered. "
+        "Do NOT write any other code yet.\n\n"
+        f"Task:\n{intent}"
+    )
+
+
+def _build_prompt(intent: str) -> str:
+    return (
+        "An implementation plan has been approved and saved as `plan.md` in THIS repository "
+        "(your workspace and current directory). Implement it fully: create/edit files with "
+        "plain relative paths, install deps and run/verify via your shell. Follow the plan; "
+        "if you must deviate, say why. Do NOT use any `vfs:` prefix.\n\n"
+        f"Original request for context:\n{intent}\n\n"
+        "When finished, summarize what you built and how you verified it runs."
+    )
+
+
+_REVIEW_PROMPTS = {
+    "code-reviewer": (
+        "Review the CURRENT state of this repository (your workspace) for correctness bugs, "
+        "edge cases, error handling, and regressions against the task. Read the files and use "
+        "read-only shell (git diff, grep) — do not edit. Report findings ranked by severity "
+        "(blocking / major / minor) with file:line and a concrete fix."
+    ),
+    "security-reviewer": (
+        "Security-review the CURRENT state of this repository (your workspace): injection, "
+        "auth/authz, secrets in code, unsafe input handling, dependency risks. Read-only — do "
+        "not edit. Report CVSS-ranked findings with file:line and remediation."
+    ),
+    "qa-engineer": (
+        "Assess this repository (your workspace) for test coverage and correctness. ACTUALLY "
+        "RUN the test suite and/or the program via your shell to verify it works. If there are "
+        "no tests, add a minimal test file covering the core path. Report failing tests, "
+        "missing coverage, and edge cases as findings ranked by severity."
+    ),
+}
+
+
+def _review_prompt(reviewer: str, intent: str) -> str:
+    return f"{_REVIEW_PROMPTS[reviewer]}\n\nTask under review:\n{intent}"
+
+
+def _fix_prompt(intent: str, fix_instructions: str) -> str:
+    return (
+        "A code review of THIS repository (your workspace) found issues that must be fixed. "
+        "Apply the fixes with relative paths and verify via your shell. Fix ONLY the issues "
+        "listed; keep working code intact.\n\n"
+        f"Issues to fix:\n{fix_instructions}\n\n"
+        f"Original request for context:\n{intent}"
+    )
+
+
+async def _triage_reviews(reviews: list[dict], intent: str,
+                          tiers_map: dict, registry: dict) -> dict:
+    """Merge the reviewers' reports into a fix decision (Basna-style verdict)."""
+    sys_file = _INSTRUCTIONS_DIR / "code" / "triage.md"
+    parts = [f"## {r['role']} report\n{r['output'] or '(no output)'}" for r in reviews]
+    user_prompt = f"Task:\n{intent}\n\n" + "\n\n".join(parts)
+    tier = tiers_map.get("reason") or registry.get("tiers", {}).get("reason", {})
+    try:
+        from captain_claw.llm import Message, create_provider
+        prov = create_provider(
+            provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
+            api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+            temperature=0.1, max_tokens=1500,
+        )
+        resp = await prov.complete(messages=[
+            Message(role="system", content=sys_file.read_text()),
+            Message(role="user", content=user_prompt),
+        ], temperature=0.1, max_tokens=1500)
+        content = resp.content.strip()
+        if content.startswith("```"):
+            content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
+        raw = json.loads(content)
+    except Exception as e:  # noqa: BLE001 — be conservative: no auto-fix if triage fails
+        log.warning("code triage failed", error=str(e))
+        return {"needs_fix": False, "fixer": "code-implementer",
+                "summary": "Review complete (triage unavailable — not auto-fixing).",
+                "fix_instructions": "", "findings": []}
+    raw["needs_fix"] = bool(raw.get("needs_fix"))
+    if raw.get("fixer") not in ("debugger", "code-implementer"):
+        raw["fixer"] = "code-implementer"
+    return raw
+
+
+async def _run_build_loop(request: Request, user: dict, project: str, pdir: Path,
+                          intent: str, by_id: dict, tiers_map: dict,
+                          env_vars: list, registry: dict) -> None:
+    """Big-job pipeline: build → review fan-out → capped fix loop. Runs in background;
+    communicates via progress events, the chat log, and per-phase git commits."""
+    _progress_start(project)
+    _write_state(pdir, {"status": "running"})
+    try:
+        # 1) Build from the approved plan.md (Vatra-style: plan → implement).
+        _phase(project, "Building")
+        d = await _run_agent(request, user, project, pdir, "code-implementer",
+                             _build_prompt(intent), by_id, tiers_map, env_vars)
+        sha = await code_git.git_commit(pdir, f"[build] code-implementer: {intent[:60]}")
+        _append_chat(pdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
+                     kind="build", archetype="code-implementer", ok=bool(d.get("ok")), commit=sha or "")
+
+        # 2) Review → fix loop (Basna-style parallel review fan-out → triage → fix).
+        for rnd in range(_MAX_FIX_ROUNDS + 1):
+            _phase(project, "Reviewing")
+            reviews_raw = await asyncio.gather(*[
+                _run_agent(request, user, project, pdir, rv, _review_prompt(rv, intent),
+                           by_id, tiers_map, env_vars)
+                for rv in _REVIEWERS
+            ], return_exceptions=True)
+            reviews = []
+            for rv, res in zip(_REVIEWERS, reviews_raw):
+                role = by_id[rv].get("role", rv)
+                out = "" if isinstance(res, Exception) else (res.get("output") or "")
+                reviews.append({"role": role, "id": rv, "output": out})
+            # qa-engineer may have added tests during review — capture them.
+            await code_git.git_commit(pdir, f"[review r{rnd}] reviewer notes/tests")
+
+            triage = await _triage_reviews(reviews, intent, tiers_map, registry)
+            review_summary = triage.get("summary", "Review complete.")
+            _append_chat(pdir, "assistant", review_summary, kind="review", round=rnd,
+                         findings=triage.get("findings", []), needs_fix=triage["needs_fix"])
+
+            if not triage["needs_fix"] or rnd == _MAX_FIX_ROUNDS:
+                if triage["needs_fix"]:
+                    _append_chat(pdir, "assistant",
+                                 f"Reached the fix-round cap ({_MAX_FIX_ROUNDS}); stopping with "
+                                 "open findings above.", kind="note")
+                break
+
+            # 3) Fix the blocking/major findings, then re-review.
+            _phase(project, f"Fixing (round {rnd + 1})")
+            fixer = triage["fixer"]
+            fd = await _run_agent(request, user, project, pdir, fixer,
+                                  _fix_prompt(intent, triage.get("fix_instructions", "")),
+                                  by_id, tiers_map, env_vars)
+            fsha = await code_git.git_commit(pdir, f"[fix r{rnd + 1}] {fixer}")
+            _append_chat(pdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
+                         kind="fix", round=rnd + 1, archetype=fixer,
+                         ok=bool(fd.get("ok")), commit=fsha or "")
+
+        _write_state(pdir, {"status": "idle"})
+    except Exception as e:  # noqa: BLE001 — never leave the project stuck in "running"
+        log.warning("code build loop failed", project=project, error=str(e))
+        _append_chat(pdir, "assistant", f"⚠️ Build loop failed: {e}", kind="note", ok=False)
+        _write_state(pdir, {"status": "idle"})
+    finally:
+        _progress_done(project)
 
 
 # ── endpoints ────────────────────────────────────────────────────────
@@ -337,26 +495,74 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         prior = _read_chat(pdir)[-8:]
         context = "\n".join(f"{m['role']}: {m['text'][:200]}" for m in prior[:-1])
         route = await _classify(intent, context, archetypes, tiers_map, registry)
-        # Phase 1: both sizes run a single best-fit archetype. Phase 2 swaps the
-        # "big" branch for the Vatra build → Basna review → fix loop.
-        executor = route["small_archetype"] if route["size"] == "small" else "code-implementer"
-        _progress(project, "route",
-                  f"size={route['size']} · {executor} · {route.get('why', '')}",
-                  size=route["size"], executor=executor)
+        _progress(project, "route", f"size={route['size']} · {route.get('why', '')}",
+                  size=route["size"])
 
-        d = await _run_single(request, user, project, pdir, executor, intent,
-                              tiers_map, env_vars, by_id)
+        # ── SMALL: one best-fit archetype runs the edit directly. ──
+        if route["size"] == "small":
+            executor = route["small_archetype"]
+            d = await _run_agent(request, user, project, pdir, executor,
+                                 _exec_prompt(intent), by_id, tiers_map, env_vars)
+            sha = await code_git.git_commit(
+                pdir, f"[edit] {executor}: {route.get('title', intent)[:60]}")
+            out = (d.get("output") or "").strip() or "(no output)"
+            if not d.get("ok"):
+                out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
+            assistant = _append_chat(pdir, "assistant", out, archetype=executor,
+                                     size="small", ok=bool(d.get("ok")), commit=sha or "",
+                                     route=route)
+            _write_state(pdir, {"status": "idle", "last_route": route})
+            return {"message": assistant, "route": route, "commit": sha}
 
-        tag = "edit" if route["size"] == "small" else "build"
-        sha = await code_git.git_commit(pdir, f"[{tag}] {executor}: {route.get('title', intent)[:60]}")
-        out = (d.get("output") or "").strip() or "(no output)"
-        if not d.get("ok"):
-            out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
+        # ── BIG: plan first, then stop at the approval gate. ──
+        planner = route["planner"]
+        _phase(project, f"Planning ({planner})")
+        d = await _run_agent(request, user, project, pdir, planner,
+                             _plan_prompt(intent), by_id, tiers_map, env_vars)
+        plan_md = pdir / "plan.md"
+        plan_text = plan_md.read_text() if plan_md.is_file() else (d.get("output") or "").strip()
+        sha = await code_git.git_commit(pdir, f"[plan] {planner}: {route.get('title', intent)[:60]}")
         assistant = _append_chat(
-            pdir, "assistant", out, archetype=executor, size=route["size"],
-            ok=bool(d.get("ok")), commit=sha or "", route=route,
-        )
-        _write_state(pdir, {"status": "idle", "last_route": route})
-        return {"message": assistant, "route": route, "commit": sha}
+            pdir, "assistant", plan_text or "(planner produced no plan)",
+            kind="plan", archetype=planner, ok=bool(d.get("ok")), commit=sha or "", route=route)
+        _write_state(pdir, {"status": "awaiting_plan", "intent": intent, "route": route})
+        return {"message": assistant, "route": route, "commit": sha,
+                "status": "awaiting_plan", "plan": plan_text}
     finally:
         _progress_done(project)
+
+
+class ApproveReq(BaseModel):
+    project: str
+    plan: str | None = None  # optional user-edited plan to overwrite plan.md
+
+
+@router.post("/plan/approve")
+async def approve_plan(body: ApproveReq, request: Request,
+                       user: dict = Depends(get_current_user)):
+    """Approve a big job's plan and kick off the build → review → fix loop in the
+    background. Returns immediately; the frontend follows progress + the chat log."""
+    project = safe_name(body.project, fallback="")
+    pdir = _pdir(user["id"], project)
+    if not _is_code_project(pdir):
+        raise HTTPException(404, "project not found")
+    state = _read_state(pdir)
+    if state.get("status") != "awaiting_plan":
+        raise HTTPException(409, "no plan awaiting approval")
+    intent = state.get("intent", "")
+
+    # Honor a user-edited plan.
+    if body.plan and body.plan.strip():
+        (pdir / "plan.md").write_text(body.plan)
+        await code_git.git_commit(pdir, "[plan] user-edited")
+
+    db = get_db()
+    archetypes = await merged_archetypes(db, user["id"])
+    by_id = {a["id"]: a for a in archetypes}
+    registry = _load_registry()
+    tiers_map, env_vars = await _load_owner_tiers(db, user["id"])
+
+    _append_chat(pdir, "user", "✓ Plan approved — building.", kind="approval")
+    asyncio.create_task(_run_build_loop(
+        request, user, project, pdir, intent, by_id, tiers_map, env_vars, registry))
+    return {"status": "running"}
