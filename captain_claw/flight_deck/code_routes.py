@@ -59,6 +59,23 @@ _SMALL = {"quick-dirty", "code-implementer", "debugger"}
 _REVIEWERS = ["code-reviewer", "security-reviewer", "qa-engineer"]
 _MAX_FIX_ROUNDS = 3
 
+# Mirror the frontend's tier inheritance (tierConfig.ts): the `coding`/`vision`
+# tiers were added after many Library sets were first seeded, so a saved
+# `fd:forge-tiers` blob may not carry an explicit entry for them. Resolve a tier
+# to the user's nearest configured tier (with its provider/model/api_key) instead
+# of falling through to the keyless registry default.
+_TIER_FALLBACK = {"coding": "reason", "vision": "balanced"}
+
+
+def _resolve_tcfg(tiers_map: dict, tier: str) -> dict:
+    """The owner's tier config for ``tier``, inheriting a sibling tier when the
+    exact one isn't configured. Returns {} only when the owner has no tiers at all."""
+    if tiers_map.get(tier):
+        return tiers_map[tier]
+    pref = _TIER_FALLBACK.get(tier, "balanced")
+    return (tiers_map.get(pref) or tiers_map.get("balanced")
+            or tiers_map.get("reason") or next(iter(tiers_map.values()), {}))
+
 
 # ── per-project storage (under <project>/.code/) ─────────────────────
 
@@ -127,7 +144,7 @@ async def _classify(intent: str, context: str, archetypes: list[dict],
     by_id = {a["id"]: a for a in archetypes}
     sys_file = _INSTRUCTIONS_DIR / "code" / "router.md"
     system_prompt = sys_file.read_text() + "\n\n" + _build_catalog(archetypes, {})
-    fast = tiers_map.get("fast") or registry.get("tiers", {}).get("fast", {})
+    fast = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
     raw: dict | None = None
     try:
         from captain_claw.llm import Message, create_provider
@@ -193,7 +210,7 @@ async def _run_agent(request: Request, user: dict, project: str, pdir: Path,
     arch = by_id[archetype_id]
     role = arch.get("role", archetype_id)
     tier = arch.get("tier", "coding")
-    tcfg = tiers_map.get(tier, {})
+    tcfg = _resolve_tcfg(tiers_map, tier)
     suffix = uuid.uuid4().hex[:6]
 
     def _on_action(act: dict) -> None:
@@ -290,7 +307,7 @@ async def _triage_reviews(reviews: list[dict], intent: str,
     sys_file = _INSTRUCTIONS_DIR / "code" / "triage.md"
     parts = [f"## {r['role']} report\n{r['output'] or '(no output)'}" for r in reviews]
     user_prompt = f"Task:\n{intent}\n\n" + "\n\n".join(parts)
-    tier = tiers_map.get("reason") or registry.get("tiers", {}).get("reason", {})
+    tier = _resolve_tcfg(tiers_map, "reason") or registry.get("tiers", {}).get("reason", {})
     try:
         from captain_claw.llm import Message, create_provider
         prov = create_provider(
