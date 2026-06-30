@@ -463,10 +463,23 @@ async def get_diff(project: str, ref_a: str = "", ref_b: str = "",
     return {"diff": await code_git.git_diff(pdir, ref_a, ref_b)}
 
 
+@router.get("/projects/{project}/show")
+async def show_commit(project: str, sha: str, user: dict = Depends(get_current_user)):
+    """Return a single commit's patch for the diff viewer."""
+    pdir = _pdir(user["id"], project)
+    return {"diff": await code_git.git_show(pdir, sha)}
+
+
 @router.post("/projects/{project}/rollback")
 async def rollback(project: str, body: RollbackReq, user: dict = Depends(get_current_user)):
     pdir = _pdir(user["id"], project)
+    if _read_state(pdir).get("status") == "running":
+        raise HTTPException(409, "a build is running — wait for it to finish")
+    target = next((c for c in await code_git.git_log(pdir) if c["sha"].startswith(body.ref)), None)
     await code_git.git_reset(pdir, body.ref)
+    _append_chat(pdir, "assistant",
+                 f"↩ Rolled back to {body.ref[:7]}"
+                 + (f": {target['message']}" if target else ""), kind="note")
     return {"ok": True, "head": (await code_git.git_log(pdir, 1))[:1]}
 
 

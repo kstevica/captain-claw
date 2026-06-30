@@ -1,23 +1,52 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2, ShieldAlert, Wrench } from 'lucide-react'
+import { Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2, ShieldAlert, Wrench, RotateCcw, X } from 'lucide-react'
 import { useCodeStore } from '../stores/codeStore'
 
 const SEV_COLOR: Record<string, string> = {
   blocking: 'text-red-400', major: 'text-amber-400', minor: 'text-zinc-400',
 }
 
+function diffLineClass(line: string): string {
+  if (line.startsWith('+') && !line.startsWith('+++')) return 'text-emerald-400'
+  if (line.startsWith('-') && !line.startsWith('---')) return 'text-red-400'
+  if (line.startsWith('@@')) return 'text-sky-400'
+  if (line.startsWith('diff ') || line.startsWith('index ')) return 'text-zinc-500'
+  return 'text-zinc-400'
+}
+
 export function CodePage() {
   const {
     projects, activeProject, messages, commits, progress, status, sending, error,
-    loadProjects, createProject, selectProject, send, approvePlan,
+    loadProjects, createProject, selectProject, send, approvePlan, showCommit, rollback,
   } = useCodeStore()
   const [newName, setNewName] = useState('')
   const [creating, setCreating] = useState(false)
   const [input, setInput] = useState('')
+  const [planDraft, setPlanDraft] = useState('')
+  const [diff, setDiff] = useState<{ sha: string; text: string } | null>(null)
   const chatEnd = useRef<HTMLDivElement>(null)
 
   useEffect(() => { loadProjects() }, [loadProjects])
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, progress])
+
+  // Pre-fill the editable plan from the latest plan message when the gate opens.
+  useEffect(() => {
+    if (status === 'awaiting_plan') {
+      const plan = [...messages].reverse().find((m) => m.kind === 'plan')
+      setPlanDraft(plan?.text || '')
+    }
+  }, [status, messages])
+
+  const openDiff = async (sha: string) => {
+    setDiff({ sha, text: 'Loading…' })
+    setDiff({ sha, text: (await showCommit(sha)) || '(no changes)' })
+  }
+
+  const onRollback = async (sha: string, message: string) => {
+    if (!window.confirm(`Roll back to "${message}"?\nThis discards everything after this commit.`)) return
+    await rollback(sha)
+    setDiff(null)
+  }
 
   const onCreate = async () => {
     const name = newName.trim()
@@ -170,17 +199,25 @@ export function CodePage() {
             {error && <div className="px-4 py-1 text-xs text-red-400">{error}</div>}
 
             {status === 'awaiting_plan' ? (
-              <div className="flex items-center justify-between gap-3 border-t border-amber-500/30 bg-amber-500/5 p-3">
-                <div className="flex items-center gap-2 text-sm text-amber-200/90">
-                  <ClipboardList size={15} /> Plan ready — review it above, then build.
+              <div className="border-t border-amber-500/30 bg-amber-500/5 p-3">
+                <div className="mb-2 flex items-center gap-2 text-sm text-amber-200/90">
+                  <ClipboardList size={15} /> Plan ready — edit if needed, then build.
                 </div>
-                <button
-                  onClick={() => approvePlan()}
-                  disabled={sending}
-                  className="flex h-9 items-center gap-1.5 rounded bg-amber-400 px-3 text-sm font-medium text-zinc-900 hover:bg-amber-300 disabled:opacity-40"
-                >
-                  {sending ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Approve & Build
-                </button>
+                <textarea
+                  value={planDraft}
+                  onChange={(e) => setPlanDraft(e.target.value)}
+                  rows={8}
+                  className="mb-2 w-full resize-y rounded bg-zinc-900 px-3 py-2 font-mono text-[13px] text-zinc-200 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
+                />
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => approvePlan(planDraft)}
+                    disabled={sending}
+                    className="flex h-9 items-center gap-1.5 rounded bg-amber-400 px-3 text-sm font-medium text-zinc-900 hover:bg-amber-300 disabled:opacity-40"
+                  >
+                    {sending ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Approve & Build
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="border-t border-zinc-800 p-3">
@@ -210,23 +247,56 @@ export function CodePage() {
         )}
       </main>
 
-      {/* ── Right: commit timeline ── */}
+      {/* ── Right: phase timeline (click a commit → diff; roll back) ── */}
       {activeProject && (
-        <aside className="hidden w-60 shrink-0 flex-col border-l border-zinc-800 bg-zinc-950/40 lg:flex">
+        <aside className="hidden w-64 shrink-0 flex-col border-l border-zinc-800 bg-zinc-950/40 lg:flex">
           <div className="border-b border-zinc-800 p-3 text-sm font-semibold text-zinc-300">History</div>
           <div className="flex-1 overflow-y-auto p-2">
             {commits.length === 0 && <div className="px-2 py-4 text-xs text-zinc-500">No commits yet.</div>}
-            {commits.map((c) => (
-              <div key={c.sha} className="mb-2 flex gap-2 px-1 text-xs">
+            {commits.map((c, idx) => (
+              <div
+                key={c.sha}
+                className={`group mb-1 flex items-start gap-2 rounded px-2 py-1.5 text-xs hover:bg-zinc-900 ${
+                  diff?.sha === c.sha ? 'bg-zinc-900' : ''
+                }`}
+              >
                 <GitCommit size={13} className="mt-0.5 shrink-0 text-zinc-600" />
-                <div className="min-w-0">
+                <button onClick={() => openDiff(c.sha)} className="min-w-0 flex-1 text-left">
                   <div className="truncate text-zinc-300">{c.message}</div>
                   <div className="text-[10px] text-zinc-600">{c.short}</div>
-                </div>
+                </button>
+                {idx > 0 && status !== 'running' && (
+                  <button
+                    onClick={() => onRollback(c.sha, c.message)}
+                    title="Roll back to this commit"
+                    className="shrink-0 text-zinc-600 opacity-0 hover:text-amber-400 group-hover:opacity-100"
+                  >
+                    <RotateCcw size={13} />
+                  </button>
+                )}
               </div>
             ))}
           </div>
         </aside>
+      )}
+
+      {/* ── Diff overlay ── */}
+      {diff && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={() => setDiff(null)}>
+          <div className="flex max-h-full w-full max-w-4xl flex-col rounded-lg border border-zinc-800 bg-zinc-950" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2">
+              <div className="flex items-center gap-2 text-sm text-zinc-300">
+                <GitCommit size={14} /> {diff.sha.slice(0, 8)}
+              </div>
+              <button onClick={() => setDiff(null)} className="text-zinc-500 hover:text-zinc-200"><X size={16} /></button>
+            </div>
+            <pre className="flex-1 overflow-auto p-4 font-mono text-[12px] leading-relaxed">
+              {diff.text.split('\n').map((line, i) => (
+                <div key={i} className={diffLineClass(line)}>{line || ' '}</div>
+              ))}
+            </pre>
+          </div>
+        </div>
       )}
     </div>
   )

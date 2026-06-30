@@ -141,6 +141,19 @@ async function apiDiff(project: string, refA = '', refB = ''): Promise<string> {
   return (await res.json()).diff || ''
 }
 
+async function apiShow(project: string, sha: string): Promise<string> {
+  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/show?sha=${enc(sha)}`)
+  if (!res.ok) return ''
+  return (await res.json()).diff || ''
+}
+
+async function apiRollback(project: string, ref: string): Promise<void> {
+  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/rollback`, {
+    method: 'POST', body: JSON.stringify({ ref }),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'rollback failed')
+}
+
 // ── Store ─────────────────────────────────────────────────────────────
 
 interface CodeStore {
@@ -160,6 +173,8 @@ interface CodeStore {
   send: (text: string) => Promise<void>
   approvePlan: (plan?: string) => Promise<void>
   diff: (refA?: string, refB?: string) => Promise<string>
+  showCommit: (sha: string) => Promise<string>
+  rollback: (ref: string) => Promise<void>
 }
 
 function _statusOf(state: Record<string, unknown>): string {
@@ -254,4 +269,19 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   },
 
   diff: async (refA = '', refB = '') => apiDiff(get().activeProject, refA, refB),
+
+  showCommit: async (sha) => apiShow(get().activeProject, sha),
+
+  rollback: async (ref) => {
+    const project = get().activeProject
+    if (!project) return
+    try {
+      await apiRollback(project, ref)
+      const [chat, commits] = await Promise.all([apiGetChat(project), apiLog(project)])
+      set({ messages: chat.messages, commits, status: _statusOf(chat.state) })
+      await get().loadProjects()
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'rollback failed' })
+    }
+  },
 }))

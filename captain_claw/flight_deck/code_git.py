@@ -137,6 +137,15 @@ async def git_diff(project_dir: Path | str, ref_a: str = "", ref_b: str = "") ->
     return out
 
 
+async def git_show(project_dir: Path | str, sha: str) -> str:
+    """Return a single commit's patch (``git show <sha>``), no color."""
+    d = Path(project_dir)
+    if not await is_repo(d):
+        return ""
+    _, out = await _git(d, "show", "--no-color", "--stat", "--patch", sha)
+    return out
+
+
 async def git_reset(project_dir: Path | str, ref: str) -> None:
     """Hard-reset the working tree to ``ref`` (rollback)."""
     d = Path(project_dir)
