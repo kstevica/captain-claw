@@ -555,7 +555,7 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
+    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
@@ -573,6 +573,12 @@ export function BasnaPage() {
   const toggleTeam = (id: string) =>
     setTeam((t) => (t.includes(id) ? t.filter((x) => x !== id) : [...t, id]))
   const [deepening, setDeepening] = useState(false)
+  // Continue: carry this run forward into another round (same VFS folder + conclusion).
+  const [continuePanel, setContinuePanel] = useState(false)
+  const [continueText, setContinueText] = useState('')
+  const [continueKind, setContinueKind] = useState('continue')
+  const [continueSameCast, setContinueSameCast] = useState(true)
+  const [continuing, setContinuing] = useState(false)
   const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
   const viewFull = (title: string, content: string) => setModal({ title, content, mode: 'markdown' })
   // Preview a generated file: fetch its text and render by type (md/html/text).
@@ -1492,6 +1498,93 @@ export function BasnaPage() {
                 <div className="fd-markdown text-sm text-zinc-200 leading-relaxed">
                   <Markdown remarkPlugins={[remarkGfm]}>{truth}</Markdown>
                 </div>
+              </div>
+            )}
+
+            {/* Continue — carry this run forward into another round, in the SAME shared
+                VFS folder, building on this conclusion. Works for Basna and Vatra. */}
+            {activeSession?.status === 'done' && truth && (
+              <div className="rounded-lg border border-violet-300/60 bg-violet-50/40 p-4 dark:border-violet-500/30 dark:bg-violet-950/10">
+                <div className="mb-2 flex items-center gap-2">
+                  <CornerDownRight className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Continue</span>
+                  <span className="text-[11px] text-zinc-500">next round · same shared folder &amp; conclusion</span>
+                </div>
+                {!continuePanel ? (
+                  <button
+                    onClick={() => { setContinuePanel(true); setContinueKind('continue'); setContinueSameCast(true) }}
+                    title="Carry this run forward into another round, building on its result"
+                    className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
+                  >
+                    <CornerDownRight className="h-3.5 w-3.5" /> Continue…
+                  </button>
+                ) : (
+                  <div className="space-y-2">
+                    <textarea
+                      value={continueText}
+                      onChange={(e) => setContinueText(e.target.value)}
+                      rows={3}
+                      placeholder="What should the next round do? e.g. extend the research, write the next chapter, act on the conclusion…"
+                      className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950/60 p-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500 focus:outline-none"
+                    />
+                    <div className="flex flex-wrap items-center gap-4">
+                      <label className="flex items-center gap-2 text-xs text-zinc-400">
+                        Mode
+                        <select
+                          value={continueKind}
+                          onChange={(e) => setContinueKind(e.target.value)}
+                          className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-xs text-zinc-200 focus:border-violet-500 focus:outline-none"
+                        >
+                          <option value="continue">Continue (extend)</option>
+                          <option value="revise">Revise (improve)</option>
+                          {vatraMode
+                            ? <option value="fill_gaps">Fill gaps</option>
+                            : <option value="deepen">Deepen (blind spots)</option>}
+                        </select>
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-zinc-400" title="Reuse the prior run's team; uncheck to let the router pick a fresh team">
+                        <input
+                          type="checkbox"
+                          checked={continueSameCast}
+                          onChange={(e) => setContinueSameCast(e.target.checked)}
+                          className="h-3.5 w-3.5"
+                        />
+                        Same team
+                      </label>
+                      <div className="ml-auto flex items-center gap-2">
+                        <button
+                          onClick={() => { setContinuePanel(false); setContinueText('') }}
+                          disabled={continuing}
+                          className="rounded-lg px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-40"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (!activeSession) return
+                            setContinuing(true)
+                            try {
+                              await continueSession(activeSession.id, {
+                                instruction: continueText.trim(),
+                                kind: continueKind,
+                                sameCast: continueSameCast,
+                                vatra: vatraMode,
+                              })
+                              setContinuePanel(false); setContinueText('')
+                            } catch { /* surfaced by store error path */ }
+                            finally { setContinuing(false) }
+                          }}
+                          disabled={continuing || ((continueKind === 'continue' || continueKind === 'revise') && !continueText.trim())}
+                          title="Spawn the next round, seeded with this run's conclusion and shared files"
+                          className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                        >
+                          {continuing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CornerDownRight className="h-3.5 w-3.5" />}
+                          Start round
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

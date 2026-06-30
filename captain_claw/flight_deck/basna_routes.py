@@ -815,58 +815,170 @@ async def agent_start(body: AgentStartReq):
             "n_agents": len(selected)}
 
 
-# ── Deepen: a follow-up run that resolves a finished run's blind spots ──
+# ── Continuation: a follow-up run that carries a finished run forward ──
 
-async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
-    """Create + route + execute a follow-up run seeded with a finished run's
-    compiled truth and its blind spots, focused on resolving those gaps. Returns
-    the new session id. Background execution — the result lands on the new session,
-    which the UI polls / the agent can read back with the basna tool."""
+def _vfs_manifest(owner: str, project: str, *, limit: int = 40) -> str:
+    """A short listing of files already in the shared VFS folder, so a continuation
+    prompt can tell the next round to read prior work instead of recreating it.
+    Empty string when the folder is missing or bare."""
+    try:
+        from captain_claw.vfs import resolve_under
+        root = resolve_under(owner, project, f"{project}/")
+    except Exception:  # noqa: BLE001 — manifest is best-effort
+        root = None
+    if not root or not root.is_dir():
+        return ""
+    names: list[str] = []
+    for p in sorted(root.rglob("*")):
+        if len(names) >= limit:
+            break
+        if p.is_file() and p.name != ".vfs-meta.jsonl":
+            names.append(p.relative_to(root).as_posix())
+    if not names:
+        return ""
+    listing = "\n".join(f"- vfs:{project}/{n}" for n in names)
+    return (
+        f"\n\nThe shared folder `vfs:{project}/` already holds the prior round(s)' "
+        "work — READ what's relevant from it before adding anything, and build on it:\n"
+        f"{listing}\n"
+    )
+
+
+def _round_filename_rule(project: str, round_no: int) -> str:
+    """Directive that keeps continuation rounds from clobbering earlier files in the
+    shared folder: write NEW, round-prefixed files; never overwrite existing ones."""
+    return (
+        f"\n\nThis is round {round_no} of a continuation in the SAME shared folder. "
+        f"Write every NEW file you produce to `vfs:{project}/` with an `r{round_no}-` "
+        "prefix (e.g. "
+        f"`vfs:{project}/r{round_no}-findings.md`). Do NOT overwrite files from earlier "
+        "rounds — read them, then add your new ones alongside.\n"
+    )
+
+
+# Continuation intent templates per kind. Each gets the prior synthesis + manifest
+# appended. {extra} carries the kind-specific focus (blind spots / instruction).
+_CONTINUE_HEADERS = {
+    "deepen": (
+        "Continue and DEEPEN a prior multi-agent investigation — focus ONLY on its "
+        "blind spots, the aspects no prior answer addressed."
+    ),
+    "continue": (
+        "CONTINUE a prior multi-agent run — extend it forward, building directly on "
+        "its conclusion and the work already in the shared folder."
+    ),
+    "revise": (
+        "REVISE the deliverable from a prior multi-agent run — improve it per the "
+        "instruction below, keeping what already works."
+    ),
+}
+
+
+async def _continue_run(
+    owner: str, parent_session_id: str, user: dict, *,
+    instruction: str = "", kind: str = "continue", same_cast: bool = True,
+) -> dict:
+    """Create + route + execute a follow-up run that carries a finished run forward.
+
+    The whole chain shares ONE VFS folder (the root run's), so each round reads and
+    builds on the accumulated data. `kind` picks the framing: 'deepen' (blind spots),
+    'continue' (extend forward), or 'revise' (improve per instruction). `same_cast`
+    reuses the parent's exact archetype set; otherwise the router re-selects. Returns
+    the new session id; execution is in the background (UI polls / agent reads back)."""
     db = get_db()
     parent = await db.get_basna_session(parent_session_id, owner)
     if not parent:
         raise HTTPException(404, "session not found")
     truth = (parent.get("truth") or "").strip()
+    if not truth:
+        raise HTTPException(400, "This run has no compiled result to build on yet.")
     try:
         analysis = json.loads(parent.get("analysis") or "{}")
     except (ValueError, TypeError):
         analysis = {}
-    blind = [str(b).strip() for b in (analysis.get("blind_spots") or []) if str(b).strip()]
-    if not blind:
-        raise HTTPException(400, "This run has no blind spots to investigate.")
-    if not truth:
-        raise HTTPException(400, "This run has no compiled result to build on yet.")
+    try:
+        parent_cfg = json.loads(parent.get("config") or "{}")
+    except (ValueError, TypeError):
+        parent_cfg = {}
+    try:
+        parent_route = json.loads(parent.get("route") or "{}")
+    except (ValueError, TypeError):
+        parent_route = {}
+
+    kind = kind if kind in _CONTINUE_HEADERS else "continue"
+    instruction = (instruction or "").strip()
+    # Lineage: every round in a chain shares the ROOT run's folder + grows the counter.
+    root_sid = parent_cfg.get("root_session_id") or parent_session_id
+    vfs_project = parent_cfg.get("vfs_project") or f"basna-{root_sid[:8]}"
+    round_no = int(parent_cfg.get("round") or 1) + 1
+
+    # The original objective (round 1's task) is the chain's north star — carry it
+    # into every round so the team keeps the overall goal, not just "edit this".
+    original_objective = (parent.get("intent") or "").strip()
+    if root_sid != parent_session_id:
+        root_sess = await db.get_basna_session(root_sid, owner)
+        if root_sess and (root_sess.get("intent") or "").strip():
+            original_objective = root_sess["intent"].strip()
+    obj_block = (
+        f"ORIGINAL OBJECTIVE (round 1 — what this whole effort is for):\n"
+        f"{original_objective[:2000]}\n\n"
+        if original_objective else ""
+    )
+
+    # Kind-specific focus block.
+    if kind == "deepen":
+        blind = [str(b).strip() for b in (analysis.get("blind_spots") or []) if str(b).strip()]
+        if not blind and not instruction:
+            raise HTTPException(400, "This run has no blind spots to investigate.")
+        focus = ""
+        if blind:
+            focus += "\nBLIND SPOTS to resolve:\n" + "\n".join(f"- {b}" for b in blind[:12])
+        if instruction:
+            focus += f"\n\nADDITIONAL FOCUS:\n{instruction}"
+        tail = ("\n\nInvestigate and resolve these and extend the synthesis. "
+                "Do not repeat what is already settled.")
+    else:
+        if not instruction:
+            raise HTTPException(400, "A continuation instruction is required.")
+        focus = f"\nWHAT TO DO NEXT:\n{instruction}"
+        tail = ("\n\nBuild on the prior conclusion and the shared folder; "
+                "do not redo settled work.")
 
     parent_title = (parent.get("title") or parent.get("intent") or "")[:50]
-    # Inline only a preview of the prior synthesis — it rides in every worker's
-    # message history (resent each internal step × N workers), so the token cost
-    # is a per-step multiplier. When the full text is larger, ship it as a
-    # workspace file the workers read on demand instead of re-inlining all of it.
-    _DEEPEN_TRUTH_CHARS = 16_000
+    _TRUTH_CHARS = 16_000
     _PRIOR_FILE = "prior-synthesis.md"
-    big = len(truth) > _DEEPEN_TRUTH_CHARS
+    big = len(truth) > _TRUTH_CHARS
     file_note = (
         f"\nThe COMPLETE prior synthesis is in your workspace as `{_PRIOR_FILE}` — "
-        "read it for full context before addressing the blind spots.\n"
+        "read it for full context first.\n"
         if big else ""
     )
     intent = (
-        "Continue and deepen a prior multi-agent investigation — focus ONLY on its "
-        "blind spots, the aspects no prior answer addressed.\n\n"
-        f"PRIOR SYNTHESIS{' (preview — full text in the workspace file)' if big else ''}:\n"
-        f"{truth[:_DEEPEN_TRUTH_CHARS]}\n"
+        f"{_CONTINUE_HEADERS[kind]}\n\n"
+        + obj_block
+        + f"PRIOR SYNTHESIS{' (preview — full text in the workspace file)' if big else ''}:\n"
+        f"{truth[:_TRUTH_CHARS]}\n"
         + file_note
-        + "\nBLIND SPOTS to resolve:\n"
-        + "\n".join(f"- {b}" for b in blind[:12])
-        + "\n\nInvestigate and resolve these blind spots and extend the synthesis. "
-          "Do not repeat what is already settled above."
+        + focus
+        + tail
+        + _vfs_manifest(owner, vfs_project)
+        + _round_filename_rule(vfs_project, round_no)
     )
+
+    # Same cast: pin the parent's exact archetype set (the router still re-instructs
+    # each for the continuation). Otherwise let the router re-select for the new work.
+    cast_ids: list[str] = []
+    if same_cast:
+        cast_ids = [s["archetype_id"] for s in (parent_route.get("selected") or [])
+                    if s.get("archetype_id")]
 
     tiers, env_vars = await _load_owner_tiers(db, owner)
     fast = (tiers or {}).get("fast", {})
+    label = {"deepen": "Deepen", "revise": "Revise"}.get(kind, "Continue")
     route = await route_intent(
         RouteRequest(
-            intent=intent, title=f"Deepen: {parent_title}"[:80], max_agents=6,
+            intent=intent, title=f"{label}: {parent_title}"[:80], max_agents=6,
+            archetype_ids=cast_ids,
             provider=fast.get("provider", ""), model=fast.get("model", ""),
             api_key=fast.get("api_key", ""), base_url=fast.get("base_url", ""),
         ),
@@ -874,7 +986,10 @@ async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
     )
     sid = route["session_id"]
     update_kwargs: dict[str, Any] = {
-        "config": json.dumps({"kind": "deepen", "parent_session_id": parent_session_id}),
+        "config": json.dumps({
+            "kind": kind, "parent_session_id": parent_session_id,
+            "root_session_id": root_sid, "round": round_no, "vfs_project": vfs_project,
+        }),
     }
     if big:
         # Write the full synthesis as an input file; execute_route copies every
@@ -887,7 +1002,11 @@ async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
         }])
     await db.update_basna_session(sid, owner, **update_kwargs)
 
-    exec_req = ExecuteRequest(session_id=sid, tiers=tiers or None, env_vars=env_vars or None)
+    # Pin the inherited folder so the new round's workers read/write the root folder.
+    exec_req = ExecuteRequest(
+        session_id=sid, tiers=tiers or None, env_vars=env_vars or None,
+        vfs_project=vfs_project,
+    )
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     t = asyncio.create_task(execute_route(exec_req, stub, user))
     _basna_agent_tasks.add(t)
@@ -898,8 +1017,13 @@ async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
         _agent_run_tasks.pop(_sid, None)
 
     t.add_done_callback(_on_done)
-    return {"session_id": sid, "title": route.get("title", "") or f"Deepen: {parent_title}",
-            "n_agents": len(route.get("selected", []))}
+    return {"session_id": sid, "title": route.get("title", "") or f"{label}: {parent_title}",
+            "n_agents": len(route.get("selected", [])), "round": round_no, "kind": kind}
+
+
+async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
+    """Back-compat alias: deepen = continuation focused on blind spots."""
+    return await _continue_run(owner, parent_session_id, user, kind="deepen")
 
 
 @router.post("/sessions/{session_id}/deepen")
@@ -909,12 +1033,67 @@ async def deepen_session(session_id: str, user: dict = Depends(get_current_user)
     return {"ok": True, **res}
 
 
+class ContinueRequest(BaseModel):
+    instruction: str = ""
+    kind: str = "continue"  # continue | deepen | revise
+    same_cast: bool = True
+
+
+@router.post("/sessions/{session_id}/continue")
+async def continue_session(
+    session_id: str, body: ContinueRequest, user: dict = Depends(get_current_user),
+):
+    """Carry a finished run forward into a new round — same VFS folder + conclusion."""
+    res = await _continue_run(
+        user["id"], session_id, user,
+        instruction=body.instruction, kind=body.kind, same_cast=body.same_cast,
+    )
+    return {"ok": True, **res}
+
+
 @router.post("/agent/deepen")
 async def agent_deepen(body: _AgentReq):
     """Agent/tool entry: deepen a finished run by its session id."""
     owner = _resolve_owner(body)
     full_user = await get_db().get_user_by_id(owner) or {"id": owner}
     res = await _deepen_run(owner, body.session_id, full_user)
+    return {"status": "running", **res}
+
+
+class _AgentContinueReq(_AgentReq):
+    instruction: str = ""
+    kind: str = "continue"  # continue | deepen | revise
+    same_cast: bool = True
+
+
+@router.post("/agent/continue")
+async def agent_continue(body: _AgentContinueReq):
+    """Agent/tool entry: carry a finished run forward into a new round, in the SAME
+    VFS folder, building on its conclusion. Dispatches to the Vatra continuation when
+    the parent was a Vatra run, so one tool action covers both modes."""
+    owner = _resolve_owner(body)
+    db = get_db()
+    full_user = await db.get_user_by_id(owner) or {"id": owner}
+    parent = await db.get_basna_session(body.session_id, owner)
+    if not parent:
+        raise HTTPException(404, "session not found")
+    try:
+        mode = (json.loads(parent.get("config") or "{}") or {}).get("mode", "")
+    except (ValueError, TypeError):
+        mode = ""
+    if mode == "vatra":
+        # Lazy import to avoid a circular import (vatra_routes imports this module).
+        from captain_claw.flight_deck.vatra_routes import _continue_run as _vatra_continue
+        tiers, env_vars = await _load_owner_tiers(db, owner)
+        kind = body.kind if body.kind in ("continue", "fill_gaps", "revise") else "continue"
+        res = await _vatra_continue(
+            owner, body.session_id, full_user,
+            instruction=body.instruction, kind=kind, same_cast=body.same_cast,
+            tiers=tiers, env_vars=env_vars, api_key="")
+        return {"status": "running", **res}
+    res = await _continue_run(
+        owner, body.session_id, full_user,
+        instruction=body.instruction, kind=body.kind, same_cast=body.same_cast)
     return {"status": "running", **res}
 
 
@@ -1651,6 +1830,10 @@ class ExecuteRequest(BaseModel):
     # + fix loop) instead of a single one-shot dispatch. Keys: samples, fix_attempts,
     # critics[], stakes, agreement_threshold, critic_tier, compute_budget. None → off.
     horizon: dict | None = None
+    # Shared VFS project folder for every spawned worker. Empty → derived from this
+    # run's own session id (basna-<sid8>). A continuation round sets this to the ROOT
+    # run's folder so all rounds in a chain read/write the SAME accumulated data.
+    vfs_project: str = ""
 
 
 async def _spawn_horizon_member(
@@ -1684,7 +1867,8 @@ async def _spawn_horizon_member(
         tools=worker_tools,
         env_vars=(body.env_vars or []) + [
             {"key": "CLAW_BASNA_WORKER", "value": "1"},
-            {"key": "CLAW_VFS_PROJECT", "value": f"basna-{sid8}"},
+            {"key": "CLAW_VFS_PROJECT",
+             "value": getattr(body, "vfs_project", "") or f"basna-{sid8}"},
             {"key": "CLAW_AGENT_LABEL",
              "value": sel.get("role") or arch.get("role") or arch["id"]},
         ],
@@ -1885,6 +2069,10 @@ async def execute_route(
     sid = body.session_id
     _progress_start(sid)
     sid8 = sid[:8]
+    # One shared VFS folder for the whole run. A continuation round inherits the
+    # ROOT run's folder (body.vfs_project) so every round in a chain accumulates into
+    # the same place; a fresh run falls back to its own session-derived folder.
+    vfs_project = body.vfs_project or f"basna-{sid8}"
     run_tag = format(int(time.time()), "x")[-6:]  # unique per run → no slug collisions on re-run
     plan = [(s, arch_by_id[s["archetype_id"]]) for s in selected if s["archetype_id"] in arch_by_id]
     _phase(sid, "Routing")
@@ -1942,8 +2130,9 @@ async def execute_route(
                     tools=_worker_tools,
                     env_vars=(body.env_vars or []) + [
                         {"key": "CLAW_BASNA_WORKER", "value": "1"},
-                        # Shared VFS project for all workers in this Basna session.
-                        {"key": "CLAW_VFS_PROJECT", "value": f"basna-{sid8}"},
+                        # Shared VFS project for all workers in this Basna session
+                        # (inherited from the root run across a continuation chain).
+                        {"key": "CLAW_VFS_PROJECT", "value": vfs_project},
                         # Authorship label for files this worker writes to the VFS.
                         {"key": "CLAW_AGENT_LABEL",
                          "value": sel.get("role") or arch.get("role") or arch["id"]},

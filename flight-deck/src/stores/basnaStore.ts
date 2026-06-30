@@ -446,6 +446,7 @@ interface BasnaStore {
   deleteSession: (id: string) => Promise<void>
   cancelSession: (id: string) => Promise<void>
   deepenSession: (id: string) => Promise<void>
+  continueSession: (id: string, opts: { instruction: string; kind: string; sameCast: boolean; vatra: boolean }) => Promise<void>
 }
 
 export const useBasnaStore = create<BasnaStore>((set, get) => ({
@@ -781,6 +782,24 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}))
       throw new Error((detail as { detail?: string }).detail || 'fill gaps failed')
+    }
+    const data = await res.json()
+    await get().loadSessions()
+    if (data.session_id) await get().selectSession(data.session_id)
+  },
+
+  // Carry a finished run forward into another round — same VFS folder + conclusion.
+  // Routes to the Basna or Vatra continue endpoint by mode; on success navigates to
+  // the new round's session (same flow as deepen/fillGaps).
+  continueSession: async (id, opts) => {
+    const base = opts.vatra ? 'vatra' : 'basna'
+    const res = await _authedFetch(`/fd/${base}/sessions/${encodeURIComponent(id)}/continue`, {
+      method: 'POST',
+      body: JSON.stringify({ instruction: opts.instruction, kind: opts.kind, same_cast: opts.sameCast }),
+    })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}))
+      throw new Error((detail as { detail?: string }).detail || 'continue failed')
     }
     const data = await res.json()
     await get().loadSessions()

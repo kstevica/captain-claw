@@ -56,7 +56,7 @@ class BasnaTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "deepen", "list", "get", "agents", "output", "truth", "analysis", "files", "get_file", "blackboard"],
+                "enum": ["start", "deepen", "continue", "list", "get", "agents", "output", "truth", "analysis", "files", "get_file", "blackboard"],
                 "description": (
                     "'start' — launch a NEW autonomous Basna run on `task` (optional `title`, "
                     "`max_agents`); use this when the user asks to run/execute/start a Basna, and "
@@ -64,6 +64,11 @@ class BasnaTool(Tool):
                     "'deepen' — launch a follow-up run on `session_id` that resolves that finished "
                     "run's BLIND SPOTS, seeded with its compiled truth; use when the user wants to "
                     "dig further into what the prior run missed. "
+                    "'continue' — carry a finished run (`session_id`) FORWARD into a new round in "
+                    "the SAME shared VFS folder, building on its conclusion and accumulated files; "
+                    "pass `instruction` for what to do next, `kind` ('continue' extend / 'revise' "
+                    "improve / 'deepen' blind spots / 'fill_gaps' for a Vatra run), and `same_cast` "
+                    "(default true = reuse the prior run's team). Works for both Basna and Vatra runs. "
                     "'list' — your sessions (optional `query` substring, `status`, `limit`). "
                     "'get' — full session by `session_id`. "
                     "'agents' — per-agent runs for `session_id`. "
@@ -93,6 +98,9 @@ class BasnaTool(Tool):
             },
             "title": {"type": "string", "description": "Optional short title for the run ('start'); auto-generated if blank."},
             "max_agents": {"type": "integer", "description": "Optional cap on agents for 'start' (1-10, default 6)."},
+            "instruction": {"type": "string", "description": "For 'continue' — what the next round should do, building on the prior conclusion."},
+            "kind": {"type": "string", "enum": ["continue", "revise", "deepen", "fill_gaps"], "description": "For 'continue' — framing of the next round (default 'continue')."},
+            "same_cast": {"type": "boolean", "description": "For 'continue' — reuse the prior run's team (default true); false re-selects the team."},
             "session_id": {"type": "string", "description": "Target session id (all read actions except 'list')."},
             "archetype_id": {"type": "string", "description": "Agent/archetype id for the 'output' action."},
             "name": {"type": "string", "description": "File name for the 'get_file' action."},
@@ -161,6 +169,8 @@ class BasnaTool(Tool):
                 return await self._start(fd_url, **kwargs)
             if action == "deepen":
                 return await self._deepen(fd_url, **kwargs)
+            if action == "continue":
+                return await self._continue(fd_url, **kwargs)
             if action == "list":
                 return await self._list(fd_url, **kwargs)
             if action == "get":
@@ -274,6 +284,42 @@ class BasnaTool(Tool):
             f"Started a deepen run **{data.get('title') or 'follow-up'}** "
             f"({data.get('n_agents', '?')} agent(s), session {data.get('session_id')}) "
             f"focused on the prior run's blind spots. I'll report back when it finishes."
+        ))
+
+    async def _continue(self, fd_url: str, **kwargs: Any) -> ToolResult:
+        """Carry a finished run forward into a new round — same VFS folder + conclusion."""
+        for marker in ("CLAW_BASNA_WORKER", "CLAW_VATRA_WORKER"):
+            if str(os.environ.get(marker, "")).strip().lower() in ("1", "true", "yes"):
+                return ToolResult(
+                    success=False,
+                    error="Cannot start runs (including continue) from inside an ensemble run.",
+                )
+        sid = (kwargs.get("session_id") or "").strip()
+        if not sid:
+            return ToolResult(success=False, error="Provide `session_id` of the finished run to continue.")
+        instruction = (kwargs.get("instruction") or "").strip()
+        kind = (kwargs.get("kind") or "continue").strip() or "continue"
+        if kind not in ("continue", "revise", "deepen", "fill_gaps"):
+            kind = "continue"
+        if kind in ("continue", "revise") and not instruction:
+            return ToolResult(
+                success=False,
+                error="Provide `instruction` for what the next round should do.")
+        same_cast = kwargs.get("same_cast", True)
+        if isinstance(same_cast, str):
+            same_cast = same_cast.strip().lower() not in ("0", "false", "no")
+        r = await self._post(fd_url, "/fd/basna/agent/continue", {
+            "session_id": sid, "instruction": instruction,
+            "kind": kind, "same_cast": bool(same_cast),
+        })
+        if isinstance(r, dict) and r.get("_error"):
+            return ToolResult(success=False, error=r["_error"])
+        data = r.json()
+        return ToolResult(success=True, content=(
+            f"Started a continuation (round {data.get('round', '?')}, {kind}) "
+            f"**{data.get('title') or 'follow-up'}** "
+            f"(session {data.get('session_id')}) in the same shared folder, building on "
+            f"the prior conclusion. I'll report back when it finishes."
         ))
 
     async def _list(self, fd_url: str, **kwargs: Any) -> ToolResult:

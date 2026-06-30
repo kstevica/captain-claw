@@ -64,9 +64,11 @@ from captain_claw.flight_deck.basna_routes import (
     _progress_start,
     _provider_call,
     _resolve_owner,
+    _round_filename_rule,
     _run_workers,
     _session_files_dir,
     _tier_creds,
+    _vfs_manifest,
 )
 from captain_claw.flight_deck.horizon_worker import HorizonConfig, run_horizon_closer
 from captain_claw.logging import get_logger
@@ -104,13 +106,23 @@ def _phase(sid: str, label: str, **extra) -> None:
     _progress(sid, "phase", label, **extra)
 
 
+# Per-run override of the shared VFS folder, keyed by session id. A continuation
+# round registers the ROOT run's folder here so EVERY resolution site below
+# (worker env, prompt directives, reporter, ask helpers, agent_wait) lands on the
+# same accumulated data — without threading a project param through each one.
+# Populated at the top of execute_vatra, cleared in its teardown.
+_run_vfs_project: dict[str, str] = {}
+
+
 def _vfs_project(sid: str) -> str:
     """The single shared VFS project folder for this run.
 
     Source of truth for both the injected CLAW_VFS_PROJECT default and the
     folder pinned into every worker prompt, so all agents write to ONE place.
+    A continuation round inherits the root run's folder via _run_vfs_project;
+    a fresh run derives the folder from its own session id.
     """
-    return f"vatra-{sid[:8]}"
+    return _run_vfs_project.get(sid) or f"vatra-{sid[:8]}"
 
 
 def _vfs_directive(project: str) -> str:
@@ -481,6 +493,11 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
 
     sid = body.session_id
     sid8 = sid[:8]
+    # A continuation round carries the root run's folder in config (or on the
+    # request); register it so every VFS resolution below shares one folder.
+    _vfs_override = (cfg.get("vfs_project") or getattr(body, "vfs_project", "") or "").strip()
+    if _vfs_override:
+        _run_vfs_project[sid] = _vfs_override
     run_tag = format(int(time.time()), "x")[-6:]
     _progress_start(sid)
     await db.update_basna_session(sid, user["id"], status="running")
@@ -792,6 +809,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     finally:
         _teardown([sp["slug"] for sp in spawned])
         _run_workers.pop(sid, None)
+        _run_vfs_project.pop(sid, None)
         _skip_agents.pop(sid, None)
 
     usable = [r for r in results if (r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip()]
@@ -1796,61 +1814,147 @@ async def start_vatra(body: VatraStartRequest, request: Request,
     return {"session_id": sid, "title": title, "status": "running"}
 
 
-# ── Fill the gaps: a follow-up run on a finished run's coverage gaps ──
+# ── Continuation: carry a finished Vatra run forward into another round ──
 
-async def _fill_gaps_run(owner: str, parent_session_id: str, user: dict, *,
-                         tiers: dict | None, env_vars: list | None, api_key: str) -> dict:
-    """Create + run a follow-up Vatra that fills a finished run's coverage gaps,
-    seeded with its final report. The Lead decomposes the gap-filling work, owners
-    produce the missing material (reading the prior report for context), and the
-    reporter assembles the COMPLETE improved deliverable. The Vatra analog of
-    Basna's deepen (which works off blind spots)."""
+# Continuation framings per kind. Each is seeded with the prior report + a manifest
+# of the shared folder, then the Lead re-decomposes the work across the (same) cast.
+_VATRA_HEADERS = {
+    "fill_gaps": (
+        "Improve and COMPLETE an existing deliverable by filling its coverage gaps — "
+        "the parts the original task asked for that the current report missed or "
+        "covered only thinly."
+    ),
+    "continue": (
+        "CONTINUE an existing deliverable — extend it forward per the instruction "
+        "below, building directly on the current report and the shared folder."
+    ),
+    "revise": (
+        "REVISE an existing deliverable — improve it per the instruction below, "
+        "keeping everything that already works."
+    ),
+}
+
+
+async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
+                        instruction: str = "", kind: str = "continue",
+                        same_cast: bool = True,
+                        tiers: dict | None, env_vars: list | None, api_key: str) -> dict:
+    """Create + run a follow-up Vatra that carries a finished run forward, seeded with
+    its final report. The whole chain shares ONE VFS folder (the root run's), so the
+    team reads and builds on the accumulated data. `kind`: 'fill_gaps' (coverage gaps),
+    'continue' (extend forward), or 'revise' (improve per instruction). `same_cast`
+    constrains the Lead to the parent's owner archetypes (it still re-decomposes the
+    continuation work across them); otherwise the Lead re-selects the team."""
     db = get_db()
     parent = await db.get_basna_session(parent_session_id, owner)
     if not parent:
         raise HTTPException(404, "session not found")
     truth = (parent.get("truth") or "").strip()
+    if not truth:
+        raise HTTPException(400, "This run has no assembled report to build on yet.")
     try:
         analysis = json.loads(parent.get("analysis") or "{}")
     except (ValueError, TypeError):
         analysis = {}
-    gaps = analysis.get("gaps") or []
-    if not gaps:
-        raise HTTPException(400, "This run has no coverage gaps to fill.")
-    if not truth:
-        raise HTTPException(400, "This run has no assembled report to build on yet.")
+    try:
+        parent_cfg = json.loads(parent.get("config") or "{}")
+    except (ValueError, TypeError):
+        parent_cfg = {}
+    try:
+        parent_route = json.loads(parent.get("route") or "{}")
+    except (ValueError, TypeError):
+        parent_route = {}
+
+    kind = kind if kind in _VATRA_HEADERS else "continue"
+    instruction = (instruction or "").strip()
+    # Lineage: every round in the chain shares the ROOT run's folder + grows the counter.
+    root_sid = parent_cfg.get("root_session_id") or parent_session_id
+    vfs_project = parent_cfg.get("vfs_project") or f"vatra-{root_sid[:8]}"
+    round_no = int(parent_cfg.get("round") or 1) + 1
+
+    # The original objective (round 1's task) is the chain's north star — carry it
+    # into every round so the team keeps the overall goal, not just "edit this".
+    original_objective = (parent.get("intent") or "").strip()
+    if root_sid != parent_session_id:
+        root_sess = await db.get_basna_session(root_sid, owner)
+        if root_sess and (root_sess.get("intent") or "").strip():
+            original_objective = root_sess["intent"].strip()
+    obj_block = (
+        f"ORIGINAL OBJECTIVE (round 1 — what this whole effort is for):\n"
+        f"{original_objective[:2000]}\n\n"
+        if original_objective else ""
+    )
+
+    # Kind-specific focus block.
+    if kind == "fill_gaps":
+        gaps = analysis.get("gaps") or []
+        if not gaps and not instruction:
+            raise HTTPException(400, "This run has no coverage gaps to fill.")
+        focus = ""
+        if gaps:
+            gap_lines = "\n".join(
+                f"- [{g.get('severity', 'minor')}] {g.get('item', '')}"
+                + (f" — {g.get('note', '')}" if g.get("note") else "")
+                for g in gaps[:8])
+            focus += f"COVERAGE GAPS to fill:\n{gap_lines}\n"
+        if instruction:
+            focus += f"\nADDITIONAL FOCUS:\n{instruction}\n"
+    else:
+        if not instruction:
+            raise HTTPException(400, "A continuation instruction is required.")
+        focus = f"WHAT TO DO NEXT:\n{instruction}\n"
+
     parent_title = (parent.get("title") or parent.get("intent") or "")[:50]
-    gap_lines = "\n".join(
-        f"- [{g.get('severity', 'minor')}] {g.get('item', '')}"
-        + (f" — {g.get('note', '')}" if g.get("note") else "")
-        for g in gaps[:8])
     _PRIOR_FILE = "prior-report.md"
     intent = (
-        "Improve and COMPLETE an existing deliverable by filling its coverage gaps — the parts "
-        "the original task asked for that the current report missed or covered only thinly.\n\n"
-        f"The current report is in your workspace as `{_PRIOR_FILE}` — read it first for full "
-        "context. Produce the COMPLETE improved deliverable that integrates the new material into "
-        "the existing report: keep everything already covered well, and add or deepen what the "
-        "gaps call for. Do not output only the missing bits.\n\n"
-        f"COVERAGE GAPS to fill:\n{gap_lines}\n"
+        f"{_VATRA_HEADERS[kind]}\n\n"
+        + obj_block
+        + f"The current report is in your workspace as `{_PRIOR_FILE}` — read it first "
+        "for full context. Produce the COMPLETE improved deliverable that integrates "
+        "the new material into the existing report: keep everything already covered "
+        "well, and add or deepen what's asked. Do not output only the new bits.\n\n"
+        f"{focus}"
+        + _vfs_manifest(owner, vfs_project)
+        + _round_filename_rule(vfs_project, round_no)
     )
-    title = f"Fill gaps: {parent_title}"[:80]
-    sess = await db.create_basna_session(
-        owner, intent, title=title,
-        config=json.dumps({"mode": "vatra", "source": "ui", "kind": "fill_gaps",
-                           "parent_session_id": parent_session_id, "max_agents": 6}))
+
+    # Same cast: pin the parent's owner archetypes; the Lead re-decomposes within them.
+    cast_ids: list[str] = []
+    if same_cast:
+        cast_ids = [st.get("owner") for st in (parent_route.get("subtasks") or [])
+                    if st.get("owner")]
+        # de-dup, preserve order
+        cast_ids = list(dict.fromkeys(cast_ids))
+
+    title = f"{kind.replace('_', ' ').title()}: {parent_title}"[:80]
+    cfg: dict[str, Any] = {
+        "mode": "vatra", "source": "ui", "kind": kind,
+        "parent_session_id": parent_session_id, "root_session_id": root_sid,
+        "round": round_no, "vfs_project": vfs_project, "max_agents": 6,
+    }
+    if cast_ids:
+        cfg["force_ids"] = cast_ids
+    sess = await db.create_basna_session(owner, intent, title=title, config=json.dumps(cfg))
     sid = sess["id"]
     body_bytes = truth.encode("utf-8")
     (_session_files_dir(sid) / _PRIOR_FILE).write_bytes(body_bytes)
     await db.update_basna_session(sid, owner, files=json.dumps([{
         "name": _PRIOR_FILE, "mime": "text/markdown", "size": len(body_bytes), "kind": "input"}]))
     exec_req = ExecuteRequest(session_id=sid, tiers=tiers or None,
-                              env_vars=env_vars or None, api_key=api_key or "")
+                              env_vars=env_vars or None, api_key=api_key or "",
+                              vfs_project=vfs_project)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)
     t.add_done_callback(_basna_agent_tasks.discard)
-    return {"session_id": sid, "title": title}
+    return {"session_id": sid, "title": title, "round": round_no, "kind": kind}
+
+
+async def _fill_gaps_run(owner: str, parent_session_id: str, user: dict, *,
+                         tiers: dict | None, env_vars: list | None, api_key: str) -> dict:
+    """Back-compat alias: fill-gaps = continuation focused on coverage gaps."""
+    return await _continue_run(owner, parent_session_id, user, kind="fill_gaps",
+                               tiers=tiers, env_vars=env_vars, api_key=api_key)
 
 
 @router.post("/sessions/{session_id}/fill-gaps")
@@ -1860,6 +1964,24 @@ async def fill_gaps(session_id: str, user: dict = Depends(get_current_user)):
     tiers, env_vars = await _load_owner_tiers(get_db(), user["id"])
     res = await _fill_gaps_run(user["id"], session_id, user,
                                tiers=tiers, env_vars=env_vars, api_key="")
+    return {"ok": True, **res}
+
+
+class VatraContinueRequest(BaseModel):
+    instruction: str = ""
+    kind: str = "continue"  # continue | fill_gaps | revise
+    same_cast: bool = True
+
+
+@router.post("/sessions/{session_id}/continue")
+async def continue_session(session_id: str, body: VatraContinueRequest,
+                           user: dict = Depends(get_current_user)):
+    """Carry a finished Vatra run forward into a new round — same folder + report."""
+    tiers, env_vars = await _load_owner_tiers(get_db(), user["id"])
+    res = await _continue_run(
+        user["id"], session_id, user,
+        instruction=body.instruction, kind=body.kind, same_cast=body.same_cast,
+        tiers=tiers, env_vars=env_vars, api_key="")
     return {"ok": True, **res}
 
 
