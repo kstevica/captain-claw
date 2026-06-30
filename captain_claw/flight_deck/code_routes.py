@@ -1,0 +1,362 @@
+"""Flight Deck HTTP API for Code mode — agentic coding over VFS project folders.
+
+Each project is a VFS folder on disk (``<fd-data>/vfs/<user>/<project>/``) that
+is also a git repo (see :mod:`code_git`). A spawned coding agent's workspace is
+pinned to that folder, so it works in a real directory — relative paths, shell,
+``npm``/``pytest``/``git`` all behave like a normal checkout — while the files
+stay browsable through the existing VFS panel.
+
+A cheap router sizes each request: **small** runs a single archetype directly;
+**big** (Phase 2) drives the full Vatra build → Basna review → fix loop. Per-
+project chat + run state live under ``<project>/.code/`` (gitignored), so the
+conversation is portable with the folder and needs no DB migration.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+
+from captain_claw.flight_deck.archetypes import merged_archetypes
+from captain_claw.flight_deck.auth import get_current_user, get_db
+from captain_claw.flight_deck import code_git
+from captain_claw.flight_deck.basna_routes import (
+    _PROGRESS,
+    _build_catalog,
+    _dispatch_one,
+    _fallback_difficulty,
+    _load_owner_tiers,
+    _load_registry,
+    _phase,
+    _progress,
+    _progress_done,
+    _progress_start,
+    _score_archetypes,
+)
+from captain_claw.flight_deck.dubina_agents import (
+    spawn_archetype_agent,
+    stop_archetype_agent,
+)
+from captain_claw.flight_deck.vfs_routes import _project_root, _user_root
+from captain_claw.logging import get_logger
+from captain_claw.vfs import safe_name
+
+log = get_logger(__name__)
+
+router = APIRouter(prefix="/fd/code", tags=["code"])
+
+_INSTRUCTIONS_DIR = Path(__file__).parent.parent / "instructions"
+_DISPATCH_TIMEOUT = 900.0  # coding turns can install deps + run tests
+
+_PLANNERS = {"light-planner", "long-horizon-planner", "architect"}
+_SMALL = {"quick-dirty", "code-implementer", "debugger"}
+
+
+# ── per-project storage (under <project>/.code/) ─────────────────────
+
+def _pdir(user_id: str, project: str) -> Path:
+    """Absolute on-disk dir for a project; 400 on a bad name."""
+    name = safe_name(project, fallback="")
+    if not name:
+        raise HTTPException(400, "invalid project name")
+    return _project_root(user_id, name)
+
+
+def _code_dir(pdir: Path) -> Path:
+    d = pdir / ".code"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _is_code_project(pdir: Path) -> bool:
+    return (pdir / ".code").is_dir()
+
+
+def _read_chat(pdir: Path) -> list[dict]:
+    f = pdir / ".code" / "chat.jsonl"
+    if not f.is_file():
+        return []
+    out: list[dict] = []
+    for line in f.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+def _append_chat(pdir: Path, role: str, text: str, **meta) -> dict:
+    msg = {"id": uuid.uuid4().hex[:12], "role": role, "text": text,
+           "ts": time.time(), **meta}
+    f = _code_dir(pdir) / "chat.jsonl"
+    with f.open("a") as fh:
+        fh.write(json.dumps(msg) + "\n")
+    return msg
+
+
+def _read_state(pdir: Path) -> dict:
+    f = pdir / ".code" / "state.json"
+    if f.is_file():
+        try:
+            return json.loads(f.read_text())
+        except json.JSONDecodeError:
+            pass
+    return {"status": "idle"}
+
+
+def _write_state(pdir: Path, state: dict) -> None:
+    (_code_dir(pdir) / "state.json").write_text(json.dumps(state, indent=2))
+
+
+# ── router (small vs big + archetype pick) ───────────────────────────
+
+async def _classify(intent: str, context: str, archetypes: list[dict],
+                    tiers_map: dict, registry: dict) -> dict:
+    """Size the request and pick the executing archetype(s). LLM with a
+    deterministic fallback so a route is always returned."""
+    by_id = {a["id"]: a for a in archetypes}
+    sys_file = _INSTRUCTIONS_DIR / "code" / "router.md"
+    system_prompt = sys_file.read_text() + "\n\n" + _build_catalog(archetypes, {})
+    fast = tiers_map.get("fast") or registry.get("tiers", {}).get("fast", {})
+    raw: dict | None = None
+    try:
+        from captain_claw.llm import Message, create_provider
+        prov = create_provider(
+            provider=fast.get("provider", "anthropic"), model=fast.get("model", ""),
+            api_key=fast.get("api_key") or None, base_url=fast.get("base_url") or None,
+            temperature=0.1, max_tokens=600,
+        )
+        user_prompt = (f"{context}\nRequest: {intent}" if context else f"Request: {intent}")
+        resp = await prov.complete(messages=[
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=user_prompt),
+        ], temperature=0.1, max_tokens=600)
+        content = resp.content.strip()
+        if content.startswith("```"):
+            content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
+        raw = json.loads(content)
+    except Exception as e:  # noqa: BLE001 — any failure → deterministic fallback
+        log.warning("code router LLM failed; keyword fallback", error=str(e))
+        raw = None
+
+    if not isinstance(raw, dict) or "size" not in raw:
+        low = intent.lower()
+        breadth = len(_score_archetypes(intent, archetypes))
+        difficulty = _fallback_difficulty(intent, breadth)
+        is_bug = any(w in low for w in ("bug", "error", "crash", "fix", "broken", "fails"))
+        size = "big" if difficulty == "hard" else "small"
+        raw = {
+            "size": size,
+            "planner": "architect" if difficulty == "hard" else "light-planner",
+            "small_archetype": "debugger" if is_bug else "code-implementer",
+            "domain": "general", "difficulty": difficulty,
+            "title": intent[:48], "why": "keyword fallback",
+        }
+
+    # Validate / clamp picks to known archetypes.
+    raw["size"] = "big" if str(raw.get("size")).lower() == "big" else "small"
+    if raw.get("planner") not in _PLANNERS or raw["planner"] not in by_id:
+        raw["planner"] = "light-planner" if "light-planner" in by_id else "architect"
+    if raw.get("small_archetype") not in _SMALL or raw["small_archetype"] not in by_id:
+        raw["small_archetype"] = "code-implementer"
+    return raw
+
+
+# ── single-agent execution (small path; Phase-1 also handles big) ────
+
+def _exec_prompt(intent: str) -> str:
+    return (
+        "You are working inside a real project directory — it IS your workspace and "
+        "current working directory, a git repo. Create and edit files with PLAIN "
+        "RELATIVE paths (e.g. `src/main.py`); use your shell to install deps, run, and "
+        "verify. Do NOT use any `vfs:` prefix — just work in the directory you're in.\n\n"
+        f"Task:\n{intent}\n\n"
+        "When finished, briefly summarize what you created/changed and how you "
+        "verified it actually runs."
+    )
+
+
+async def _run_single(request: Request, user: dict, project: str, pdir: Path,
+                      archetype_id: str, intent: str, tiers_map: dict,
+                      env_vars: list, by_id: dict) -> dict:
+    """Spawn one archetype anchored at the project dir, dispatch the task, dispose."""
+    arch = by_id[archetype_id]
+    role = arch.get("role", archetype_id)
+    tier = arch.get("tier", "coding")
+    tcfg = tiers_map.get(tier, {})
+    suffix = uuid.uuid4().hex[:6]
+
+    def _on_action(act: dict) -> None:
+        if act.get("tool") == "narration":
+            _progress(project, "narration", f"{role}: {act.get('detail', '')}",
+                      agent=role, tool="narration", detail=act.get("detail", ""))
+        else:
+            detail = f": {act['detail']}" if act.get("detail") else ""
+            _progress(project, "action", f"{role} → {act.get('tool')}{detail}",
+                      agent=role, tool=act.get("tool"), detail=act.get("detail", ""))
+
+    def _on_usage(pt: int, ct: int, tt: int) -> None:
+        _progress(project, "usage", f"{role} · {pt:,}→{ct:,} tok",
+                  agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
+    _phase(project, f"Spawning {role}")
+    port, token, slug = await spawn_archetype_agent(
+        arch, tier, tcfg, request, user, name_suffix=suffix,
+        env_vars=env_vars, workspace_path=str(pdir),
+    )
+    try:
+        _phase(project, f"{role} working")
+        d = await _dispatch_one(
+            port, token, _exec_prompt(intent), _DISPATCH_TIMEOUT,
+            on_action=_on_action, fleet_instructions=arch.get("fleet_instructions", ""),
+            agent_name=role, on_usage=_on_usage,
+        )
+    finally:
+        await stop_archetype_agent(slug)
+    return d
+
+
+# ── endpoints ────────────────────────────────────────────────────────
+
+class CreateProjectReq(BaseModel):
+    name: str
+
+
+class MessageReq(BaseModel):
+    project: str
+    text: str
+
+
+class RollbackReq(BaseModel):
+    ref: str
+
+
+@router.get("/projects")
+async def list_projects(user: dict = Depends(get_current_user)):
+    """List the user's Code projects (VFS folders that carry a ``.code/`` marker)."""
+    root = _user_root(user["id"])
+    out: list[dict] = []
+    if root.is_dir():
+        for p in sorted(root.iterdir(), key=lambda x: x.name.lower()):
+            if not p.is_dir() or not _is_code_project(p):
+                continue
+            chat = _read_chat(p)
+            last = chat[-1] if chat else None
+            files = sum(1 for f in p.rglob("*")
+                        if f.is_file() and ".code" not in f.parts and ".git" not in f.parts)
+            out.append({
+                "name": p.name, "files": files,
+                "messages": len(chat),
+                "last_message": (last or {}).get("text", "")[:120],
+                "mtime": p.stat().st_mtime,
+                "status": _read_state(p).get("status", "idle"),
+            })
+    return {"projects": out}
+
+
+@router.post("/projects")
+async def create_project(body: CreateProjectReq, user: dict = Depends(get_current_user)):
+    name = safe_name(body.name, fallback="")
+    if not name:
+        raise HTTPException(400, "invalid project name")
+    pdir = _project_root(user["id"], name)
+    if _is_code_project(pdir):
+        raise HTTPException(409, "project already exists")
+    pdir.mkdir(parents=True, exist_ok=True)
+    _code_dir(pdir)
+    await code_git.git_init(pdir)
+    _write_state(pdir, {"status": "idle"})
+    return {"name": name, "files": 0, "messages": 0, "status": "idle"}
+
+
+@router.get("/projects/{project}/chat")
+async def get_chat(project: str, user: dict = Depends(get_current_user)):
+    pdir = _pdir(user["id"], project)
+    if not _is_code_project(pdir):
+        raise HTTPException(404, "project not found")
+    return {"messages": _read_chat(pdir), "state": _read_state(pdir)}
+
+
+@router.get("/projects/{project}/progress")
+async def get_progress(project: str, user: dict = Depends(get_current_user)):
+    p = _PROGRESS.get(safe_name(project, fallback=""))
+    if p is None:
+        return {"events": [], "active": False}
+    return p
+
+
+@router.get("/projects/{project}/log")
+async def get_log(project: str, user: dict = Depends(get_current_user)):
+    pdir = _pdir(user["id"], project)
+    return {"commits": await code_git.git_log(pdir)}
+
+
+@router.get("/projects/{project}/diff")
+async def get_diff(project: str, ref_a: str = "", ref_b: str = "",
+                   user: dict = Depends(get_current_user)):
+    pdir = _pdir(user["id"], project)
+    return {"diff": await code_git.git_diff(pdir, ref_a, ref_b)}
+
+
+@router.post("/projects/{project}/rollback")
+async def rollback(project: str, body: RollbackReq, user: dict = Depends(get_current_user)):
+    pdir = _pdir(user["id"], project)
+    await code_git.git_reset(pdir, body.ref)
+    return {"ok": True, "head": (await code_git.git_log(pdir, 1))[:1]}
+
+
+@router.post("/message")
+async def message(body: MessageReq, request: Request, user: dict = Depends(get_current_user)):
+    """Main entry: route the request, run it, commit, and append to the chat."""
+    intent = body.text.strip()
+    if not intent:
+        raise HTTPException(400, "text is required")
+    project = safe_name(body.project, fallback="")
+    pdir = _pdir(user["id"], project)
+    if not _is_code_project(pdir):
+        raise HTTPException(404, "project not found — create it first")
+
+    db = get_db()
+    archetypes = await merged_archetypes(db, user["id"])
+    by_id = {a["id"]: a for a in archetypes}
+    registry = _load_registry()
+    tiers_map, env_vars = await _load_owner_tiers(db, user["id"])
+
+    _append_chat(pdir, "user", intent)
+    _progress_start(project)
+    _write_state(pdir, {"status": "running"})
+    try:
+        _phase(project, "Routing")
+        prior = _read_chat(pdir)[-8:]
+        context = "\n".join(f"{m['role']}: {m['text'][:200]}" for m in prior[:-1])
+        route = await _classify(intent, context, archetypes, tiers_map, registry)
+        # Phase 1: both sizes run a single best-fit archetype. Phase 2 swaps the
+        # "big" branch for the Vatra build → Basna review → fix loop.
+        executor = route["small_archetype"] if route["size"] == "small" else "code-implementer"
+        _progress(project, "route",
+                  f"size={route['size']} · {executor} · {route.get('why', '')}",
+                  size=route["size"], executor=executor)
+
+        d = await _run_single(request, user, project, pdir, executor, intent,
+                              tiers_map, env_vars, by_id)
+
+        tag = "edit" if route["size"] == "small" else "build"
+        sha = await code_git.git_commit(pdir, f"[{tag}] {executor}: {route.get('title', intent)[:60]}")
+        out = (d.get("output") or "").strip() or "(no output)"
+        if not d.get("ok"):
+            out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
+        assistant = _append_chat(
+            pdir, "assistant", out, archetype=executor, size=route["size"],
+            ok=bool(d.get("ok")), commit=sha or "", route=route,
+        )
+        _write_state(pdir, {"status": "idle", "last_route": route})
+        return {"message": assistant, "route": route, "commit": sha}
+    finally:
+        _progress_done(project)

@@ -104,9 +104,11 @@ def resolve_agent_port_token(agent_id: str) -> tuple[int, str]:
 # ── Archetype target (spawn per tier) ────────────────────────────────
 
 async def _real_spawn(archetype: dict, tier: str, tcfg: dict, request, user,
-                      name_suffix: str = "", env_vars: list | None = None) -> tuple[int, str, str]:
+                      name_suffix: str = "", env_vars: list | None = None,
+                      workspace_path: str = "") -> tuple[int, str, str]:
     from captain_claw.flight_deck.server import _load_process_registry, spawn_process
-    cfg = _build_agent_config(archetype, tier, tcfg, name_suffix=name_suffix, env_vars=env_vars)
+    cfg = _build_agent_config(archetype, tier, tcfg, name_suffix=name_suffix,
+                              env_vars=env_vars, workspace_path=workspace_path)
     res = await spawn_process(cfg, request, user)
     slug = getattr(res, "slug", "")
     entry = _load_process_registry().get(slug) or {}
@@ -121,7 +123,7 @@ async def _real_stop(slug: str) -> None:
 
 
 def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str = "",
-                        env_vars: list | None = None):
+                        env_vars: list | None = None, workspace_path: str = ""):
     """An ephemeral AgentConfig for an archetype, modeled on Basna's spawn path.
 
     ``name_suffix`` keeps each run's agent name/slug unique so concurrent or
@@ -139,6 +141,7 @@ def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str
         tools=archetype.get("tools") or AgentConfig().tools,
         env_vars=list(env_vars or []),
         web_enabled=True, web_port=0,
+        workspace_path=workspace_path or "",
     )
     model = tcfg.get("model")
     if model:
@@ -163,17 +166,20 @@ def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str
 
 async def spawn_archetype_agent(
     archetype: dict, tier: str, tcfg: dict, request, user, name_suffix: str = "",
-    env_vars: list | None = None,
+    env_vars: list | None = None, workspace_path: str = "",
 ) -> tuple[int, str, str]:
     """Spawn one ephemeral archetype agent; return ``(port, token, slug)``.
 
     ``tcfg`` is the resolved tier config (provider/model/key) for ``tier`` — pass
     ``{}`` to let the archetype's own tier resolve via ``AgentConfig(tier=...)``.
     ``env_vars`` are the owner's tool keys/env (BRAVE_API_KEY, …) so the spawned
-    agent's tools have credentials.
+    agent's tools have credentials. ``workspace_path`` anchors the agent's tools
+    (read/write/edit/glob/shell) to an absolute dir — Code mode points this at a
+    VFS project so the agent works in a real repo instead of via ``vfs:``.
     """
     return await _real_spawn(archetype, tier, tcfg, request, user,
-                             name_suffix=name_suffix, env_vars=env_vars)
+                             name_suffix=name_suffix, env_vars=env_vars,
+                             workspace_path=workspace_path)
 
 
 async def stop_archetype_agent(slug: str) -> None:
