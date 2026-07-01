@@ -78,6 +78,91 @@ def _write_report(pdir: Path, name: str, content: str) -> str:
     (rd / safe).write_text(content or "")
     return f"{_REPORTS_DIRNAME}/{safe}"
 
+
+def _persist_trace(project: str, pdir: Path, label: str) -> None:
+    """Append this run's live progress events (tools/narration/usage) to
+    ``.code/trace.jsonl`` so the coding process survives restarts and can be
+    exported. ``_PROGRESS`` is in-memory only; this is its durable record."""
+    events = (_PROGRESS.get(project) or {}).get("events") or []
+    if not events:
+        return
+    tf = _code_dir(pdir) / "trace.jsonl"
+    with tf.open("a") as fh:
+        fh.write(json.dumps({"type": "run", "label": label, "ts": time.time(),
+                             "count": len(events)}) + "\n")
+        for e in events:
+            fh.write(json.dumps({"type": "event", **e}) + "\n")
+
+
+def _read_trace(pdir: Path) -> list[dict]:
+    f = pdir / ".code" / "trace.jsonl"
+    if not f.is_file():
+        return []
+    out: list[dict] = []
+    for line in f.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return out
+
+
+def _export_markdown(pdir: Path, project: str) -> str:
+    """Assemble the full coding process — conversation (outputs), tool/narration
+    trace, and any reports — into one Markdown document."""
+    import time as _t
+
+    def ts(v: float) -> str:
+        try:
+            return _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(v))
+        except (ValueError, OSError):
+            return ""
+
+    lines = [f"# Coding process — {project}", f"_Exported {ts(_t.time())}_", ""]
+
+    # 1) Conversation (requests + agent outputs).
+    lines.append("## Conversation\n")
+    for m in _read_chat(pdir):
+        who = "🧑 User" if m.get("role") == "user" else f"🤖 {m.get('archetype') or 'assistant'}"
+        meta = " · ".join(x for x in [m.get("kind"), m.get("size"),
+                                      (m.get("commit") or "")[:7]] if x)
+        lines.append(f"### {who}{(' — ' + meta) if meta else ''}  ·  {ts(m.get('ts', 0))}")
+        lines.append((m.get("text") or "").rstrip())
+        for f in (m.get("findings") or []):
+            lines.append(f"- **{f.get('severity', '')}** · {f.get('title', '')}"
+                         + (f" ({f['file']})" if f.get("file") else ""))
+        lines.append("")
+
+    # 2) Tool & narration trace (grouped per run).
+    trace = _read_trace(pdir)
+    if trace:
+        lines.append("## Tool & narration trace\n")
+        for rec in trace:
+            if rec.get("type") == "run":
+                lines.append(f"\n### ▶ {rec.get('label', 'run')}  ·  {ts(rec.get('ts', 0))}\n")
+                continue
+            stage = rec.get("stage", "")
+            if stage in ("usage",):
+                continue  # token lines are noise in a readable export; kept in JSON
+            msg = rec.get("message", "")
+            lines.append(f"- `{ts(rec.get('ts', 0))}`  {msg}")
+        lines.append("")
+
+    # 3) Inline any reports so the export is self-contained.
+    rd = pdir / _REPORTS_DIRNAME
+    if rd.is_dir():
+        reports = sorted(f for f in rd.glob("*.md") if f.is_file())
+        if reports:
+            lines.append("## Reports\n")
+            for rf in reports:
+                lines.append(f"<details><summary>{rf.name}</summary>\n")
+                lines.append(rf.read_text().rstrip())
+                lines.append("\n</details>\n")
+
+    return "\n".join(lines) + "\n"
+
 # Mirror the frontend's tier inheritance (tierConfig.ts): the `coding`/`vision`
 # tiers were added after many Library sets were first seeded, so a saved
 # `fd:forge-tiers` blob may not carry an explicit entry for them. Resolve a tier
@@ -423,6 +508,7 @@ async def _run_build_loop(request: Request, user: dict, project: str, pdir: Path
         _append_chat(pdir, "assistant", f"⚠️ Build loop failed: {e}", kind="note", ok=False)
         _write_state(pdir, {"status": "idle"})
     finally:
+        _persist_trace(project, pdir, f"Build → review → fix: {intent[:80]}")
         _progress_done(project)
 
 
@@ -493,6 +579,26 @@ async def get_progress(project: str, user: dict = Depends(get_current_user)):
     if p is None:
         return {"events": [], "active": False}
     return p
+
+
+@router.get("/projects/{project}/export")
+async def export_process(project: str, format: str = "md",
+                         user: dict = Depends(get_current_user)):
+    """Export the full coding process — conversation (outputs), tool/narration
+    trace, and reports — as a downloadable Markdown or JSON document."""
+    from fastapi.responses import JSONResponse, PlainTextResponse
+    pdir = _pdir(user["id"], project)
+    if not _is_code_project(pdir):
+        raise HTTPException(404, "project not found")
+    name = safe_name(project, fallback="project")
+    if format == "json":
+        data = {"project": name, "exported_at": time.time(),
+                "messages": _read_chat(pdir), "trace": _read_trace(pdir)}
+        return JSONResponse(data, headers={
+            "Content-Disposition": f'attachment; filename="{name}-process.json"'})
+    return PlainTextResponse(
+        _export_markdown(pdir, name), media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{name}-process.md"'})
 
 
 @router.get("/projects/{project}/log")
@@ -591,6 +697,8 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         return {"message": assistant, "route": route, "commit": sha,
                 "status": "awaiting_plan", "plan": plan_text}
     finally:
+        _sz = (locals().get("route") or {}).get("size", "")
+        _persist_trace(project, pdir, f"{_sz + ': ' if _sz else ''}{intent[:80]}")
         _progress_done(project)
 
 

@@ -154,6 +154,20 @@ async function apiRollback(project: string, ref: string): Promise<void> {
   if (!res.ok) throw new Error((await res.text()) || 'rollback failed')
 }
 
+async function apiExport(project: string): Promise<void> {
+  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/export?format=md`)
+  if (!res.ok) return
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${project}-process.md`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 // ── Store ─────────────────────────────────────────────────────────────
 
 interface CodeStore {
@@ -175,6 +189,7 @@ interface CodeStore {
   diff: (refA?: string, refB?: string) => Promise<string>
   showCommit: (sha: string) => Promise<string>
   rollback: (ref: string) => Promise<void>
+  exportProcess: () => Promise<void>
 }
 
 function _statusOf(state: Record<string, unknown>): string {
@@ -271,6 +286,11 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   diff: async (refA = '', refB = '') => apiDiff(get().activeProject, refA, refB),
 
   showCommit: async (sha) => apiShow(get().activeProject, sha),
+
+  exportProcess: async () => {
+    const project = get().activeProject
+    if (project) await apiExport(project)
+  },
 
   rollback: async (ref) => {
     const project = get().activeProject

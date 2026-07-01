@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2, ShieldAlert, Wrench, RotateCcw, X } from 'lucide-react'
+import { Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2, ShieldAlert, Wrench, RotateCcw, X, Download } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useCodeStore } from '../stores/codeStore'
@@ -19,7 +19,7 @@ function diffLineClass(line: string): string {
 export function CodePage() {
   const {
     projects, activeProject, messages, commits, progress, status, sending, error,
-    loadProjects, createProject, selectProject, send, approvePlan, showCommit, rollback,
+    loadProjects, createProject, selectProject, send, approvePlan, showCommit, rollback, exportProcess,
   } = useCodeStore()
   const [newName, setNewName] = useState('')
   const [creating, setCreating] = useState(false)
@@ -123,6 +123,14 @@ export function CodePage() {
               <FolderGit2 size={15} className="text-zinc-400" />
               <span className="font-semibold">{activeProject}</span>
               <span className="text-zinc-500">— agentic coding</span>
+              <button
+                onClick={() => exportProcess()}
+                disabled={!messages.length}
+                title="Export the coding process (tools, narration, outputs) as Markdown"
+                className="ml-auto flex items-center gap-1.5 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+              >
+                <Download size={13} /> Export
+              </button>
             </header>
 
             <div className="flex-1 overflow-y-auto px-4 py-4">
