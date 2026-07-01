@@ -249,6 +249,36 @@ async def add_link(body: LinkBody, user: dict = Depends(get_current_user)):
     return {"ok": True, "name": name, "path": str(p), "mode": mode}
 
 
+@router.get("/browse-fs")
+async def browse_fs(path: str = "", user: dict = Depends(get_current_user)):
+    """List sub-directories of a local path (for the 'Link folder' picker).
+
+    FD runs on the user's machine, so this browses the same filesystem the user
+    would link. Directories only; never returns file contents. Starts at $HOME.
+    """
+    base = Path(path).expanduser() if path.strip() else Path.home()
+    try:
+        base = base.resolve()
+    except OSError:
+        raise HTTPException(400, "invalid path")
+    if not base.is_dir():
+        raise HTTPException(404, "not a directory")
+    dirs: list[dict] = []
+    try:
+        for c in base.iterdir():
+            try:
+                if c.is_dir():
+                    dirs.append({"name": c.name, "hidden": c.name.startswith("."),
+                                 "is_git": (c / ".git").exists()})
+            except OSError:
+                pass
+    except PermissionError:
+        raise HTTPException(403, "permission denied")
+    dirs.sort(key=lambda d: (d["hidden"], d["name"].lower()))
+    parent = str(base.parent) if base.parent != base else ""
+    return {"path": str(base), "parent": parent, "dirs": dirs}
+
+
 @router.delete("/links/{name}")
 async def remove_link(name: str, user: dict = Depends(get_current_user)):
     """Unlink a folder — removes only the mapping; never touches the real files."""

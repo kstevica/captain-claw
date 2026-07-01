@@ -104,7 +104,11 @@ interface VFSStore {
   newFolder: (name: string) => Promise<void>
   deleteProject: (name: string) => Promise<void>
   addLink: (name: string, path: string, mode: string) => Promise<void>
+  browseFs: (path: string) => Promise<FsListing>
 }
+
+export interface FsDir { name: string; hidden: boolean; is_git: boolean }
+export interface FsListing { path: string; parent: string; dirs: FsDir[] }
 
 export const useVFSStore = create<VFSStore>((set, get) => ({
   projects: [],
@@ -285,5 +289,11 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     })
     if (!res.ok) throw new Error((await res.text()) || 'link failed')
     await get().loadProjects()
+  },
+
+  browseFs: async (path) => {
+    const res = await _authedFetch(`/fd/vfs/browse-fs?${qp({ path })}`)
+    if (!res.ok) return { path, parent: '', dirs: [] }
+    return res.json()
   },
 }))

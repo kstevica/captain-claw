@@ -66,6 +66,24 @@ export function VFSBrowser() {
     }
   }
 
+  // Server-side folder picker (FD runs on the user's machine).
+  const [fsOpen, setFsOpen] = useState(false)
+  const [fsPath, setFsPath] = useState('')
+  const [fsParent, setFsParent] = useState('')
+  const [fsDirs, setFsDirs] = useState<{ name: string; hidden: boolean; is_git: boolean }[]>([])
+  const [showHidden, setShowHidden] = useState(false)
+
+  const fsGo = async (path: string) => {
+    const r = await s.browseFs(path)
+    setFsPath(r.path); setFsParent(r.parent); setFsDirs(r.dirs)
+  }
+  const openBrowse = async () => { setFsOpen(true); await fsGo(linkPath.trim()) }
+  const useFolder = () => {
+    setLinkPath(fsPath)
+    if (!linkName.trim()) setLinkName((fsPath.split('/').pop() || '').replace(/[^a-zA-Z0-9._-]/g, '-'))
+    setFsOpen(false)
+  }
+
   useEffect(() => {
     if (!s.project) s.loadProjects()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -112,6 +130,13 @@ export function VFSBrowser() {
                 placeholder="/absolute/path/to/folder"
                 className="min-w-0 flex-1 rounded bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
               />
+              <button
+                onClick={openBrowse}
+                className="flex items-center gap-1 rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                title="Browse folders on this machine"
+              >
+                <FolderTree className="h-3.5 w-3.5" /> Browse
+              </button>
               <select
                 value={linkMode}
                 onChange={(e) => setLinkMode(e.target.value)}
@@ -130,6 +155,45 @@ export function VFSBrowser() {
               </button>
             </div>
             {linkErr && <div className="mt-2 text-xs text-red-400">{linkErr}</div>}
+          </div>
+        )}
+        {fsOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={() => setFsOpen(false)}>
+            <div className="flex max-h-full w-full max-w-2xl flex-col rounded-lg border border-zinc-800 bg-zinc-950" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-2">
+                <FolderTree className="h-4 w-4 text-violet-400" />
+                <span className="truncate font-mono text-xs text-zinc-300">{fsPath || '~'}</span>
+                <label className="ml-auto flex items-center gap-1 text-[11px] text-zinc-500">
+                  <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} /> hidden
+                </label>
+                <button onClick={() => setFsOpen(false)} className="text-zinc-500 hover:text-zinc-200"><X className="h-4 w-4" /></button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                {fsParent && (
+                  <button onClick={() => fsGo(fsParent)} className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-zinc-400 hover:bg-zinc-900">
+                    <ArrowLeft className="h-4 w-4" /> ..
+                  </button>
+                )}
+                {fsDirs.filter((d) => showHidden || !d.hidden).map((d) => (
+                  <button
+                    key={d.name}
+                    onClick={() => fsGo(`${fsPath}/${d.name}`)}
+                    className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-zinc-900 ${d.hidden ? 'text-zinc-500' : 'text-zinc-200'}`}
+                  >
+                    <Folder className="h-4 w-4 shrink-0 text-violet-400" />
+                    <span className="truncate">{d.name}</span>
+                    {d.is_git && <span className="ml-auto shrink-0 rounded border border-emerald-500/40 bg-emerald-500/10 px-1 text-[9px] uppercase text-emerald-300">git</span>}
+                  </button>
+                ))}
+                {fsDirs.length === 0 && <div className="px-2 py-4 text-xs text-zinc-500">No sub-folders.</div>}
+              </div>
+              <div className="flex items-center justify-between gap-2 border-t border-zinc-800 px-4 py-2">
+                <span className="truncate font-mono text-[11px] text-zinc-500">{fsPath}</span>
+                <button onClick={useFolder} className="shrink-0 rounded bg-emerald-600/80 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600">
+                  Use this folder
+                </button>
+              </div>
+            </div>
           </div>
         )}
         <div className="flex-1 overflow-auto p-4">
