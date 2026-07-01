@@ -3,13 +3,21 @@ import { useAuthStore, refreshAccessToken } from './authStore'
 
 // ── Types (mirror captain_claw/flight_deck/code_routes.py) ───────────
 
-export interface CodeProject {
+// A folder = one sub-project (its own git repo + chat). id is "project/folder".
+export interface CodeFolder {
+  id: string
   name: string
   files: number
   messages: number
   last_message?: string
   mtime?: number
   status?: string
+}
+
+// A project groups related folders (two-level tree).
+export interface CodeProject {
+  name: string
+  folders: CodeFolder[]
 }
 
 export interface CodeRoute {
@@ -85,6 +93,9 @@ async function _authedFetch(url: string, init: RequestInit = {}): Promise<Respon
 }
 
 const enc = encodeURIComponent
+// Folder ids are "project/folder" — encode each segment but keep the slash so
+// the backend's {project:path} route matches (never %2F).
+const encPath = (id: string) => id.split('/').map(encodeURIComponent).join('/')
 
 async function apiListProjects(): Promise<CodeProject[]> {
   const res = await _authedFetch('/fd/code/projects')
@@ -93,28 +104,28 @@ async function apiListProjects(): Promise<CodeProject[]> {
   return Array.isArray(data.projects) ? data.projects : []
 }
 
-async function apiCreateProject(name: string): Promise<CodeProject> {
+async function apiCreateFolder(project: string, folder: string): Promise<{ project: string; folder: CodeFolder }> {
   const res = await _authedFetch('/fd/code/projects', {
-    method: 'POST', body: JSON.stringify({ name }),
+    method: 'POST', body: JSON.stringify({ project, folder }),
   })
   if (!res.ok) throw new Error((await res.text()) || 'create failed')
   return res.json()
 }
 
-async function apiGetChat(project: string): Promise<{ messages: CodeMessage[]; state: Record<string, unknown> }> {
-  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/chat`)
+async function apiGetChat(id: string): Promise<{ messages: CodeMessage[]; state: Record<string, unknown> }> {
+  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/chat`)
   if (!res.ok) return { messages: [], state: {} }
   return res.json()
 }
 
-async function apiProgress(project: string): Promise<{ events: CodeProgressEvent[]; active: boolean }> {
-  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/progress`)
+async function apiProgress(id: string): Promise<{ events: CodeProgressEvent[]; active: boolean }> {
+  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/progress`)
   if (!res.ok) return { events: [], active: false }
   return res.json()
 }
 
-async function apiLog(project: string): Promise<CodeCommit[]> {
-  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/log`)
+async function apiLog(id: string): Promise<CodeCommit[]> {
+  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/log`)
   if (!res.ok) return []
   return (await res.json()).commits || []
 }
@@ -134,34 +145,34 @@ async function apiApprove(project: string, plan?: string): Promise<void> {
   if (!res.ok) throw new Error((await res.text()) || 'approve failed')
 }
 
-async function apiDiff(project: string, refA = '', refB = ''): Promise<string> {
+async function apiDiff(id: string, refA = '', refB = ''): Promise<string> {
   const qs = new URLSearchParams({ ref_a: refA, ref_b: refB }).toString()
-  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/diff?${qs}`)
+  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/diff?${qs}`)
   if (!res.ok) return ''
   return (await res.json()).diff || ''
 }
 
-async function apiShow(project: string, sha: string): Promise<string> {
-  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/show?sha=${enc(sha)}`)
+async function apiShow(id: string, sha: string): Promise<string> {
+  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/show?sha=${enc(sha)}`)
   if (!res.ok) return ''
   return (await res.json()).diff || ''
 }
 
-async function apiRollback(project: string, ref: string): Promise<void> {
-  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/rollback`, {
+async function apiRollback(id: string, ref: string): Promise<void> {
+  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/rollback`, {
     method: 'POST', body: JSON.stringify({ ref }),
   })
   if (!res.ok) throw new Error((await res.text()) || 'rollback failed')
 }
 
-async function apiExport(project: string): Promise<void> {
-  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/export?format=md`)
+async function apiExport(id: string): Promise<void> {
+  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/export?format=md`)
   if (!res.ok) return
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `${project}-process.md`
+  a.download = `${id.replace(/\//g, '-')}-process.md`
   document.body.appendChild(a)
   a.click()
   a.remove()
@@ -172,18 +183,18 @@ async function apiExport(project: string): Promise<void> {
 
 interface CodeStore {
   projects: CodeProject[]
-  activeProject: string
+  activeFolder: string      // folder id: "project/folder"
   messages: CodeMessage[]
   commits: CodeCommit[]
   progress: CodeProgressEvent[]
-  status: string            // current project run state: idle | running | awaiting_plan
+  status: string            // current folder run state: idle | running | awaiting_plan
   sending: boolean
   loading: boolean
   error: string | null
 
   loadProjects: () => Promise<void>
-  createProject: (name: string) => Promise<void>
-  selectProject: (name: string) => Promise<void>
+  createFolder: (project: string, folder: string) => Promise<void>
+  selectFolder: (id: string) => Promise<void>
   send: (text: string) => Promise<void>
   approvePlan: (plan?: string) => Promise<void>
   diff: (refA?: string, refB?: string) => Promise<string>
@@ -198,7 +209,7 @@ function _statusOf(state: Record<string, unknown>): string {
 
 export const useCodeStore = create<CodeStore>((set, get) => ({
   projects: [],
-  activeProject: '',
+  activeFolder: '',
   messages: [],
   commits: [],
   progress: [],
@@ -217,25 +228,25 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     }
   },
 
-  createProject: async (name) => {
+  createFolder: async (project, folder) => {
     set({ error: null })
     try {
-      await apiCreateProject(name.trim())
+      const { folder: created } = await apiCreateFolder(project.trim(), folder.trim())
       await get().loadProjects()
-      await get().selectProject(name.trim())
+      await get().selectFolder(created.id)
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'create failed' })
     }
   },
 
-  selectProject: async (name) => {
-    set({ activeProject: name, messages: [], commits: [], progress: [], status: 'idle' })
-    const [chat, commits] = await Promise.all([apiGetChat(name), apiLog(name)])
+  selectFolder: async (id) => {
+    set({ activeFolder: id, messages: [], commits: [], progress: [], status: 'idle' })
+    const [chat, commits] = await Promise.all([apiGetChat(id), apiLog(id)])
     set({ messages: chat.messages, commits, status: _statusOf(chat.state) })
   },
 
   send: async (text) => {
-    const project = get().activeProject
+    const project = get().activeFolder
     if (!project || !text.trim()) return
     // Optimistic user bubble.
     set((s) => ({
@@ -260,7 +271,7 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   },
 
   approvePlan: async (plan) => {
-    const project = get().activeProject
+    const project = get().activeFolder
     if (!project) return
     set({ sending: true, error: null, progress: [], status: 'running' })
     try {
@@ -283,17 +294,17 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     }
   },
 
-  diff: async (refA = '', refB = '') => apiDiff(get().activeProject, refA, refB),
+  diff: async (refA = '', refB = '') => apiDiff(get().activeFolder, refA, refB),
 
-  showCommit: async (sha) => apiShow(get().activeProject, sha),
+  showCommit: async (sha) => apiShow(get().activeFolder, sha),
 
   exportProcess: async () => {
-    const project = get().activeProject
+    const project = get().activeFolder
     if (project) await apiExport(project)
   },
 
   rollback: async (ref) => {
-    const project = get().activeProject
+    const project = get().activeFolder
     if (!project) return
     try {
       await apiRollback(project, ref)

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2, ShieldAlert, Wrench, RotateCcw, X, Download } from 'lucide-react'
+import { Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2, ShieldAlert, Wrench, RotateCcw, X, Download, ChevronRight, ChevronDown } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useCodeStore } from '../stores/codeStore'
@@ -18,11 +18,14 @@ function diffLineClass(line: string): string {
 
 export function CodePage() {
   const {
-    projects, activeProject, messages, commits, progress, status, sending, error,
-    loadProjects, createProject, selectProject, send, approvePlan, showCommit, rollback, exportProcess,
+    projects, activeFolder, messages, commits, progress, status, sending, error,
+    loadProjects, createFolder, selectFolder, send, approvePlan, showCommit, rollback, exportProcess,
   } = useCodeStore()
-  const [newName, setNewName] = useState('')
+  const [newProject, setNewProject] = useState('')
+  const [newFolder, setNewFolder] = useState('')
+  const [showNew, setShowNew] = useState(false)
   const [creating, setCreating] = useState(false)
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [input, setInput] = useState('')
   const [planDraft, setPlanDraft] = useState('')
   const [diff, setDiff] = useState<{ sha: string; text: string } | null>(null)
@@ -51,11 +54,21 @@ export function CodePage() {
   }
 
   const onCreate = async () => {
-    const name = newName.trim()
-    if (!name) return
+    const project = newProject.trim()
+    const folder = newFolder.trim()
+    if (!project || !folder) return
     setCreating(true)
-    try { await createProject(name); setNewName('') } finally { setCreating(false) }
+    try {
+      await createFolder(project, folder)
+      setNewFolder(''); setShowNew(false)
+    } finally { setCreating(false) }
   }
+
+  const toggle = (name: string) =>
+    setCollapsed((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n })
+
+  const activeProjectName = activeFolder.includes('/') ? activeFolder.split('/')[0] : activeFolder
+  const activeFolderName = activeFolder.includes('/') ? activeFolder.split('/').slice(1).join('/') : activeFolder
 
   const onSend = async () => {
     const text = input.trim()
@@ -66,63 +79,103 @@ export function CodePage() {
 
   return (
     <div className="flex h-full overflow-hidden text-zinc-100">
-      {/* ── Left rail: projects + new folder ── */}
+      {/* ── Left rail: project → folder tree ── */}
       <aside className="flex w-64 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/40">
         <div className="border-b border-zinc-800 p-3">
-          <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-300">
+          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-300">
             <FolderGit2 size={16} /> Code Projects
-          </div>
-          <div className="flex gap-1">
-            <input
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && onCreate()}
-              placeholder="new-folder-name"
-              className="min-w-0 flex-1 rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
-            />
             <button
-              onClick={onCreate}
-              disabled={creating || !newName.trim()}
-              className="rounded bg-zinc-800 px-2 text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
-              title="Create project folder"
+              onClick={() => setShowNew((v) => !v)}
+              className="ml-auto rounded bg-zinc-800 px-1.5 py-1 text-zinc-200 hover:bg-zinc-700"
+              title="New folder"
             >
-              {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+              <Plus size={14} />
             </button>
           </div>
+          {showNew && (
+            <div className="mt-2 space-y-1">
+              <input
+                value={newProject}
+                onChange={(e) => setNewProject(e.target.value)}
+                list="code-projects"
+                placeholder="project (group)"
+                className="w-full rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
+              />
+              <datalist id="code-projects">
+                {projects.map((p) => <option key={p.name} value={p.name} />)}
+              </datalist>
+              <div className="flex gap-1">
+                <input
+                  value={newFolder}
+                  onChange={(e) => setNewFolder(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && onCreate()}
+                  placeholder="folder (sub-project)"
+                  className="min-w-0 flex-1 rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
+                />
+                <button
+                  onClick={onCreate}
+                  disabled={creating || !newProject.trim() || !newFolder.trim()}
+                  className="rounded bg-zinc-800 px-2 text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
+                  title="Create folder"
+                >
+                  {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
         <div className="flex-1 overflow-y-auto p-2">
           {projects.length === 0 && (
             <div className="px-2 py-4 text-xs text-zinc-500">No projects yet. Create a folder to start.</div>
           )}
-          {projects.map((p) => (
-            <button
-              key={p.name}
-              onClick={() => selectProject(p.name)}
-              className={`mb-1 w-full rounded px-2 py-2 text-left text-sm ${
-                p.name === activeProject ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-900'
-              }`}
-            >
-              <div className="truncate font-medium">{p.name}</div>
-              <div className="truncate text-[11px] text-zinc-500">
-                {p.files} files · {p.messages} msgs{p.status === 'running' ? ' · running…' : ''}
+          {projects.map((p) => {
+            const open = !collapsed.has(p.name)
+            return (
+              <div key={p.name} className="mb-1">
+                <button
+                  onClick={() => toggle(p.name)}
+                  className="flex w-full items-center gap-1 rounded px-1 py-1 text-left text-xs font-semibold uppercase tracking-wide text-zinc-400 hover:bg-zinc-900"
+                >
+                  {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  <span className="truncate">{p.name}</span>
+                  <span className="ml-auto text-[10px] font-normal text-zinc-600">{p.folders.length}</span>
+                </button>
+                {open && p.folders.map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => selectFolder(f.id)}
+                    className={`mb-0.5 ml-3 flex w-[calc(100%-0.75rem)] flex-col rounded px-2 py-1.5 text-left text-sm ${
+                      f.id === activeFolder ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-900'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1 truncate font-medium">
+                      {f.status === 'running' && <Loader2 size={11} className="shrink-0 animate-spin text-amber-400" />}
+                      {f.name}
+                    </span>
+                    <span className="truncate text-[11px] text-zinc-500">
+                      {f.files} files · {f.messages} msgs
+                    </span>
+                  </button>
+                ))}
               </div>
-            </button>
-          ))}
+            )
+          })}
         </div>
       </aside>
 
       {/* ── Center: chat ── */}
       <main className="flex min-w-0 flex-1 flex-col">
-        {!activeProject ? (
+        {!activeFolder ? (
           <div className="flex h-full items-center justify-center text-sm text-zinc-500">
-            Select or create a project folder to start coding.
+            Select or create a folder to start coding.
           </div>
         ) : (
           <>
             <header className="flex items-center gap-2 border-b border-zinc-800 px-4 py-2 text-sm">
               <FolderGit2 size={15} className="text-zinc-400" />
-              <span className="font-semibold">{activeProject}</span>
-              <span className="text-zinc-500">— agentic coding</span>
+              <span className="text-zinc-500">{activeProjectName}</span>
+              <span className="text-zinc-600">/</span>
+              <span className="font-semibold">{activeFolderName}</span>
               <button
                 onClick={() => exportProcess()}
                 disabled={!messages.length}
@@ -264,7 +317,7 @@ export function CodePage() {
       </main>
 
       {/* ── Right: phase timeline (click a commit → diff; roll back) ── */}
-      {activeProject && (
+      {activeFolder && (
         <aside className="hidden w-64 shrink-0 flex-col border-l border-zinc-800 bg-zinc-950/40 lg:flex">
           <div className="border-b border-zinc-800 p-3 text-sm font-semibold text-zinc-300">History</div>
           <div className="flex-1 overflow-y-auto p-2">

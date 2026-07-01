@@ -43,7 +43,7 @@ from captain_claw.flight_deck.dubina_agents import (
     spawn_archetype_agent,
     stop_archetype_agent,
 )
-from captain_claw.flight_deck.vfs_routes import _project_root, _user_root
+from captain_claw.flight_deck.vfs_routes import _user_root
 from captain_claw.logging import get_logger
 from captain_claw.vfs import safe_name
 
@@ -183,12 +183,31 @@ def _resolve_tcfg(tiers_map: dict, tier: str) -> dict:
 
 # ── per-project storage (under <project>/.code/) ─────────────────────
 
-def _pdir(user_id: str, project: str) -> Path:
-    """Absolute on-disk dir for a project; 400 on a bad name."""
-    name = safe_name(project, fallback="")
-    if not name:
-        raise HTTPException(400, "invalid project name")
-    return _project_root(user_id, name)
+def _norm_id(pid: str) -> str:
+    """Normalise a folder id ``project/folder`` (or legacy flat ``folder``).
+
+    Each segment is filesystem-sanitised (no separators, no ``..``); at most two
+    segments are kept. The result is the stable id used for on-disk resolution,
+    progress/trace keys, and what the API returns to the client.
+    """
+    segs = [safe_name(s, fallback="") for s in str(pid or "").split("/") if s.strip()]
+    segs = [s for s in segs if s][:2]
+    return "/".join(segs)
+
+
+def _pdir(user_id: str, pid: str) -> Path:
+    """Absolute on-disk dir for a folder id ``project/folder`` (1–2 segments).
+
+    Each segment is already sanitised by :func:`_norm_id`, so the join can't
+    escape the user's VFS root.
+    """
+    nid = _norm_id(pid)
+    if not nid:
+        raise HTTPException(400, "invalid project/folder id")
+    p = _user_root(user_id)
+    for seg in nid.split("/"):
+        p = p / seg
+    return p.resolve()
 
 
 def _code_dir(pdir: Path) -> Path:
@@ -514,12 +533,13 @@ async def _run_build_loop(request: Request, user: dict, project: str, pdir: Path
 
 # ── endpoints ────────────────────────────────────────────────────────
 
-class CreateProjectReq(BaseModel):
-    name: str
+class CreateFolderReq(BaseModel):
+    project: str          # parent namespace (a project groups related folders)
+    folder: str           # the sub-project folder (its own git repo + chat)
 
 
 class MessageReq(BaseModel):
-    project: str
+    project: str          # folder id: "project/folder" (or legacy "folder")
     text: str
 
 
@@ -527,45 +547,67 @@ class RollbackReq(BaseModel):
     ref: str
 
 
+def _folder_info(pdir: Path, fid: str) -> dict:
+    """Summary card for one code folder (leaf repo)."""
+    chat = _read_chat(pdir)
+    last = chat[-1] if chat else None
+    files = sum(1 for f in pdir.rglob("*")
+                if f.is_file() and ".code" not in f.parts and ".git" not in f.parts)
+    return {
+        "id": fid, "name": pdir.name, "files": files, "messages": len(chat),
+        "last_message": (last or {}).get("text", "")[:120],
+        "mtime": pdir.stat().st_mtime,
+        "status": _read_state(pdir).get("status", "idle"),
+    }
+
+
 @router.get("/projects")
 async def list_projects(user: dict = Depends(get_current_user)):
-    """List the user's Code projects (VFS folders that carry a ``.code/`` marker)."""
+    """List Code projects as a two-level tree: each project groups its folders
+    (sub-projects). A legacy flat code folder (``.code`` directly under the user
+    root) surfaces as a single-folder project of the same name."""
     root = _user_root(user["id"])
-    out: list[dict] = []
+    groups: dict[str, list[dict]] = {}
     if root.is_dir():
-        for p in sorted(root.iterdir(), key=lambda x: x.name.lower()):
-            if not p.is_dir() or not _is_code_project(p):
+        for top in sorted(root.iterdir(), key=lambda x: x.name.lower()):
+            if not top.is_dir():
                 continue
-            chat = _read_chat(p)
-            last = chat[-1] if chat else None
-            files = sum(1 for f in p.rglob("*")
-                        if f.is_file() and ".code" not in f.parts and ".git" not in f.parts)
-            out.append({
-                "name": p.name, "files": files,
-                "messages": len(chat),
-                "last_message": (last or {}).get("text", "")[:120],
-                "mtime": p.stat().st_mtime,
-                "status": _read_state(p).get("status", "idle"),
-            })
-    return {"projects": out}
+            if _is_code_project(top):
+                # Legacy flat folder — its own project.
+                groups.setdefault(top.name, []).append(_folder_info(top, top.name))
+                continue
+            # Container project: its code sub-folders are the folders.
+            for sub in sorted(top.iterdir(), key=lambda x: x.name.lower()):
+                if sub.is_dir() and _is_code_project(sub):
+                    groups.setdefault(top.name, []).append(
+                        _folder_info(sub, f"{top.name}/{sub.name}"))
+    projects = [{"name": name, "folders": folders}
+                for name, folders in sorted(groups.items(), key=lambda kv: kv[0].lower())]
+    return {"projects": projects}
 
 
 @router.post("/projects")
-async def create_project(body: CreateProjectReq, user: dict = Depends(get_current_user)):
-    name = safe_name(body.name, fallback="")
-    if not name:
-        raise HTTPException(400, "invalid project name")
-    pdir = _project_root(user["id"], name)
+async def create_folder(body: CreateFolderReq, user: dict = Depends(get_current_user)):
+    """Create a folder (sub-project) inside a project namespace; git-init it."""
+    proj = safe_name(body.project, fallback="")
+    fol = safe_name(body.folder, fallback="")
+    if not proj or not fol:
+        raise HTTPException(400, "project and folder are required")
+    # A legacy flat folder occupying the project name can't also be a container.
+    if (_user_root(user["id"]) / proj / ".code").is_dir():
+        raise HTTPException(409, f"'{proj}' is already a folder, not a project")
+    fid = f"{proj}/{fol}"
+    pdir = _pdir(user["id"], fid)
     if _is_code_project(pdir):
-        raise HTTPException(409, "project already exists")
+        raise HTTPException(409, "folder already exists")
     pdir.mkdir(parents=True, exist_ok=True)
     _code_dir(pdir)
     await code_git.git_init(pdir)
     _write_state(pdir, {"status": "idle"})
-    return {"name": name, "files": 0, "messages": 0, "status": "idle"}
+    return {"project": proj, "folder": _folder_info(pdir, fid)}
 
 
-@router.get("/projects/{project}/chat")
+@router.get("/projects/{project:path}/chat")
 async def get_chat(project: str, user: dict = Depends(get_current_user)):
     pdir = _pdir(user["id"], project)
     if not _is_code_project(pdir):
@@ -573,15 +615,15 @@ async def get_chat(project: str, user: dict = Depends(get_current_user)):
     return {"messages": _read_chat(pdir), "state": _read_state(pdir)}
 
 
-@router.get("/projects/{project}/progress")
+@router.get("/projects/{project:path}/progress")
 async def get_progress(project: str, user: dict = Depends(get_current_user)):
-    p = _PROGRESS.get(safe_name(project, fallback=""))
+    p = _PROGRESS.get(_norm_id(project))
     if p is None:
         return {"events": [], "active": False}
     return p
 
 
-@router.get("/projects/{project}/export")
+@router.get("/projects/{project:path}/export")
 async def export_process(project: str, format: str = "md",
                          user: dict = Depends(get_current_user)):
     """Export the full coding process — conversation (outputs), tool/narration
@@ -590,18 +632,19 @@ async def export_process(project: str, format: str = "md",
     pdir = _pdir(user["id"], project)
     if not _is_code_project(pdir):
         raise HTTPException(404, "project not found")
-    name = safe_name(project, fallback="project")
+    fid = _norm_id(project)                       # e.g. "web-gaming/tetris"
+    fname = fid.replace("/", "-") or "project"    # filesystem-safe download name
     if format == "json":
-        data = {"project": name, "exported_at": time.time(),
+        data = {"project": fid, "exported_at": time.time(),
                 "messages": _read_chat(pdir), "trace": _read_trace(pdir)}
         return JSONResponse(data, headers={
-            "Content-Disposition": f'attachment; filename="{name}-process.json"'})
+            "Content-Disposition": f'attachment; filename="{fname}-process.json"'})
     return PlainTextResponse(
-        _export_markdown(pdir, name), media_type="text/markdown",
-        headers={"Content-Disposition": f'attachment; filename="{name}-process.md"'})
+        _export_markdown(pdir, fid), media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{fname}-process.md"'})
 
 
-@router.get("/projects/{project}/log")
+@router.get("/projects/{project:path}/log")
 async def get_log(project: str, user: dict = Depends(get_current_user)):
     pdir = _pdir(user["id"], project)
     # Self-heal projects created before per-folder isolation existed: ensure this
@@ -611,21 +654,21 @@ async def get_log(project: str, user: dict = Depends(get_current_user)):
     return {"commits": await code_git.git_log(pdir)}
 
 
-@router.get("/projects/{project}/diff")
+@router.get("/projects/{project:path}/diff")
 async def get_diff(project: str, ref_a: str = "", ref_b: str = "",
                    user: dict = Depends(get_current_user)):
     pdir = _pdir(user["id"], project)
     return {"diff": await code_git.git_diff(pdir, ref_a, ref_b)}
 
 
-@router.get("/projects/{project}/show")
+@router.get("/projects/{project:path}/show")
 async def show_commit(project: str, sha: str, user: dict = Depends(get_current_user)):
     """Return a single commit's patch for the diff viewer."""
     pdir = _pdir(user["id"], project)
     return {"diff": await code_git.git_show(pdir, sha)}
 
 
-@router.post("/projects/{project}/rollback")
+@router.post("/projects/{project:path}/rollback")
 async def rollback(project: str, body: RollbackReq, user: dict = Depends(get_current_user)):
     pdir = _pdir(user["id"], project)
     if _read_state(pdir).get("status") == "running":
@@ -644,7 +687,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
     intent = body.text.strip()
     if not intent:
         raise HTTPException(400, "text is required")
-    project = safe_name(body.project, fallback="")
+    project = _norm_id(body.project)
     pdir = _pdir(user["id"], project)
     if not _is_code_project(pdir):
         raise HTTPException(404, "project not found — create it first")
@@ -712,7 +755,7 @@ async def approve_plan(body: ApproveReq, request: Request,
                        user: dict = Depends(get_current_user)):
     """Approve a big job's plan and kick off the build → review → fix loop in the
     background. Returns immediately; the frontend follows progress + the chat log."""
-    project = safe_name(body.project, fallback="")
+    project = _norm_id(body.project)
     pdir = _pdir(user["id"], project)
     if not _is_code_project(pdir):
         raise HTTPException(404, "project not found")
