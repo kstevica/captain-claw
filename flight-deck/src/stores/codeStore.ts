@@ -12,6 +12,8 @@ export interface CodeFolder {
   last_message?: string
   mtime?: number
   status?: string
+  linked?: boolean   // an external linked folder (not under the VFS root)
+  mode?: string      // 'rw' | 'ro' for linked folders
 }
 
 // A project groups related folders (two-level tree).

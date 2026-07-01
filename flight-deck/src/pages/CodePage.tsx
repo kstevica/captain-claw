@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2, ShieldAlert, Wrench, RotateCcw, X, Download, ChevronRight, ChevronDown } from 'lucide-react'
+import { Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2, ShieldAlert, Wrench, RotateCcw, X, Download, ChevronRight, ChevronDown, Link2 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useCodeStore } from '../stores/codeStore'
@@ -150,10 +150,11 @@ export function CodePage() {
                   >
                     <span className="flex items-center gap-1 truncate font-medium">
                       {f.status === 'running' && <Loader2 size={11} className="shrink-0 animate-spin text-amber-400" />}
+                      {f.linked && <Link2 size={11} className="shrink-0 text-emerald-400" />}
                       {f.name}
                     </span>
                     <span className="truncate text-[11px] text-zinc-500">
-                      {f.files} files · {f.messages} msgs
+                      {f.files} files · {f.messages} msgs{f.linked ? ` · linked${f.mode === 'ro' ? ' · read-only' : ''}` : ''}
                     </span>
                   </button>
                 ))}

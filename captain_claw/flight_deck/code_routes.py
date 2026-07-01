@@ -45,7 +45,7 @@ from captain_claw.flight_deck.dubina_agents import (
 )
 from captain_claw.flight_deck.vfs_routes import _user_root
 from captain_claw.logging import get_logger
-from captain_claw.vfs import safe_name
+from captain_claw.vfs import link_target_at, read_links_at, safe_name
 
 log = get_logger(__name__)
 
@@ -204,15 +204,35 @@ def _pdir(user_id: str, pid: str) -> Path:
     nid = _norm_id(pid)
     if not nid:
         raise HTTPException(400, "invalid project/folder id")
-    p = _user_root(user_id)
-    for seg in nid.split("/"):
+    segs = nid.split("/")
+    root = _user_root(user_id)
+    # A linked folder (first segment names a link) resolves to its external path.
+    tgt = link_target_at(root, segs[0])
+    p = tgt if tgt is not None else (root / segs[0])
+    for seg in segs[1:]:
         p = p / seg
     return p.resolve()
+
+
+def _is_linked(user_id: str, pid: str) -> bool:
+    return link_target_at(_user_root(user_id), _norm_id(pid).split("/")[0]) is not None
+
+
+def _is_code_target(user_id: str, pid: str, pdir: Path) -> bool:
+    """A folder is a valid Code target if it already has a ``.code`` dir OR it's a
+    linked folder (which becomes a code project on the first message)."""
+    return _is_code_project(pdir) or _is_linked(user_id, pid)
 
 
 def _code_dir(pdir: Path) -> Path:
     d = pdir / ".code"
     d.mkdir(parents=True, exist_ok=True)
+    # Never commit chat/trace/state into the repo (crucial for linked real repos):
+    # a self-contained ignore inside the sidecar dir, without touching the repo's
+    # own .gitignore.
+    gi = d / ".gitignore"
+    if not gi.exists():
+        gi.write_text("*\n")
     return d
 
 
@@ -547,12 +567,33 @@ class RollbackReq(BaseModel):
     ref: str
 
 
+_STATS_SKIP = {".git", ".code", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
+
+
+def _count_files(root: Path, cap: int = 20000) -> int:
+    """Bounded file count skipping heavy dirs — a linked repo can be huge."""
+    n = 0
+    stack = [root]
+    while stack and n < cap:
+        try:
+            for c in stack.pop().iterdir():
+                if c.is_dir():
+                    if c.name not in _STATS_SKIP:
+                        stack.append(c)
+                elif c.is_file():
+                    n += 1
+                    if n >= cap:
+                        break
+        except OSError:
+            pass
+    return n
+
+
 def _folder_info(pdir: Path, fid: str) -> dict:
     """Summary card for one code folder (leaf repo)."""
     chat = _read_chat(pdir)
     last = chat[-1] if chat else None
-    files = sum(1 for f in pdir.rglob("*")
-                if f.is_file() and ".code" not in f.parts and ".git" not in f.parts)
+    files = _count_files(pdir)
     return {
         "id": fid, "name": pdir.name, "files": files, "messages": len(chat),
         "last_message": (last or {}).get("text", "")[:120],
@@ -581,6 +622,14 @@ async def list_projects(user: dict = Depends(get_current_user)):
                 if sub.is_dir() and _is_code_project(sub):
                     groups.setdefault(top.name, []).append(
                         _folder_info(sub, f"{top.name}/{sub.name}"))
+    # Linked folders — grouped under a synthetic "linked" project.
+    for name, ent in sorted(read_links_at(root).items()):
+        tgt = link_target_at(root, name)
+        if tgt is not None and tgt.is_dir():
+            info = _folder_info(tgt, name)
+            info["linked"] = True
+            info["mode"] = ent.get("mode", "rw")
+            groups.setdefault("linked", []).append(info)
     projects = [{"name": name, "folders": folders}
                 for name, folders in sorted(groups.items(), key=lambda kv: kv[0].lower())]
     return {"projects": projects}
@@ -610,7 +659,7 @@ async def create_folder(body: CreateFolderReq, user: dict = Depends(get_current_
 @router.get("/projects/{project:path}/chat")
 async def get_chat(project: str, user: dict = Depends(get_current_user)):
     pdir = _pdir(user["id"], project)
-    if not _is_code_project(pdir):
+    if not _is_code_target(user["id"], project, pdir):
         raise HTTPException(404, "project not found")
     return {"messages": _read_chat(pdir), "state": _read_state(pdir)}
 
@@ -630,7 +679,7 @@ async def export_process(project: str, format: str = "md",
     trace, and reports — as a downloadable Markdown or JSON document."""
     from fastapi.responses import JSONResponse, PlainTextResponse
     pdir = _pdir(user["id"], project)
-    if not _is_code_project(pdir):
+    if not _is_code_target(user["id"], project, pdir):
         raise HTTPException(404, "project not found")
     fid = _norm_id(project)                       # e.g. "web-gaming/tetris"
     fname = fid.replace("/", "-") or "project"    # filesystem-safe download name
@@ -649,7 +698,7 @@ async def get_log(project: str, user: dict = Depends(get_current_user)):
     pdir = _pdir(user["id"], project)
     # Self-heal projects created before per-folder isolation existed: ensure this
     # folder is its OWN repo (not resolving to an ancestor repo the VFS tree sits in).
-    if _is_code_project(pdir):
+    if _is_code_target(user["id"], project, pdir):
         await code_git.git_init(pdir)
     return {"commits": await code_git.git_log(pdir)}
 
@@ -689,7 +738,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         raise HTTPException(400, "text is required")
     project = _norm_id(body.project)
     pdir = _pdir(user["id"], project)
-    if not _is_code_project(pdir):
+    if not _is_code_target(user["id"], project, pdir):
         raise HTTPException(404, "project not found — create it first")
 
     db = get_db()
@@ -757,7 +806,7 @@ async def approve_plan(body: ApproveReq, request: Request,
     background. Returns immediately; the frontend follows progress + the chat log."""
     project = _norm_id(body.project)
     pdir = _pdir(user["id"], project)
-    if not _is_code_project(pdir):
+    if not _is_code_target(user["id"], project, pdir):
         raise HTTPException(404, "project not found")
     state = _read_state(pdir)
     if state.get("status") != "awaiting_plan":

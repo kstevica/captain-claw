@@ -8,9 +8,12 @@ export interface VFSProject {
   files: number
   bytes: number
   mtime: number
-  kind?: string   // 'basna' | 'vatra' | 'council' | '' — parsed from the folder name
+  kind?: string   // 'basna' | 'vatra' | 'council' | 'link' | '' — parsed from the folder name
   run_id?: string // the run's session-id prefix
   title?: string  // the human title of the Basna/Vatra run that created it
+  link_path?: string  // external source path (linked folders only)
+  mode?: string       // 'rw' | 'ro' (linked folders only)
+  missing?: boolean   // linked source path no longer exists
 }
 
 export interface VFSEntry {
@@ -100,6 +103,7 @@ interface VFSStore {
   deleteEntry: (entry: VFSEntry) => Promise<void>
   newFolder: (name: string) => Promise<void>
   deleteProject: (name: string) => Promise<void>
+  addLink: (name: string, path: string, mode: string) => Promise<void>
 }
 
 export const useVFSStore = create<VFSStore>((set, get) => ({
@@ -273,5 +277,13 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
       if (get().project === name) get().closeProject()
       await get().loadProjects()
     }
+  },
+
+  addLink: async (name, path, mode) => {
+    const res = await _authedFetch('/fd/vfs/links', {
+      method: 'POST', body: JSON.stringify({ name, path, mode }),
+    })
+    if (!res.ok) throw new Error((await res.text()) || 'link failed')
+    await get().loadProjects()
   },
 }))

@@ -8,6 +8,8 @@ import {
   Download,
   Trash2,
   FolderPlus,
+  Link2,
+  Lock,
   X,
   ArrowLeft,
   HardDrive,
@@ -41,12 +43,28 @@ const KIND_BADGE: Record<string, string> = {
   basna: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
   vatra: 'border-violet-500/40 bg-violet-500/10 text-violet-300',
   council: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+  link: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
 }
 
 export function VFSBrowser() {
   const s = useVFSStore()
   const [creating, setCreating] = useState(false)
   const [folderName, setFolderName] = useState('')
+  const [linking, setLinking] = useState(false)
+  const [linkName, setLinkName] = useState('')
+  const [linkPath, setLinkPath] = useState('')
+  const [linkMode, setLinkMode] = useState('rw')
+  const [linkErr, setLinkErr] = useState('')
+
+  const onAddLink = async () => {
+    setLinkErr('')
+    try {
+      await s.addLink(linkName.trim(), linkPath.trim(), linkMode)
+      setLinking(false); setLinkName(''); setLinkPath('')
+    } catch (e) {
+      setLinkErr(e instanceof Error ? e.message : 'link failed')
+    }
+  }
 
   useEffect(() => {
     if (!s.project) s.loadProjects()
@@ -62,13 +80,58 @@ export function VFSBrowser() {
             <FolderTree className="h-4 w-4 text-violet-400" /> Shared VFS
             <span className="text-xs font-normal text-zinc-500">cross-agent filesystem</span>
           </div>
-          <button
-            onClick={() => s.loadProjects()}
-            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${s.loading ? 'animate-spin' : ''}`} /> Refresh
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setLinking((v) => !v)}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <Link2 className="h-3.5 w-3.5" /> Link folder
+            </button>
+            <button
+              onClick={() => s.loadProjects()}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${s.loading ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
         </div>
+        {linking && (
+          <div className="border-b border-zinc-800 bg-zinc-950/60 px-4 py-3">
+            <div className="mb-2 text-xs font-medium text-zinc-300">Link an existing local folder into the VFS</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                value={linkName}
+                onChange={(e) => setLinkName(e.target.value)}
+                placeholder="vfs name (e.g. my-repo)"
+                className="w-40 rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
+              />
+              <input
+                value={linkPath}
+                onChange={(e) => setLinkPath(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && onAddLink()}
+                placeholder="/absolute/path/to/folder"
+                className="min-w-0 flex-1 rounded bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
+              />
+              <select
+                value={linkMode}
+                onChange={(e) => setLinkMode(e.target.value)}
+                className="rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-200 outline-none ring-1 ring-zinc-800"
+                title="Read-write lets agents modify the folder; read-only is browse-only"
+              >
+                <option value="rw">read-write</option>
+                <option value="ro">read-only</option>
+              </select>
+              <button
+                onClick={onAddLink}
+                disabled={!linkName.trim() || !linkPath.trim()}
+                className="rounded bg-emerald-600/80 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-40"
+              >
+                Link
+              </button>
+            </div>
+            {linkErr && <div className="mt-2 text-xs text-red-400">{linkErr}</div>}
+          </div>
+        )}
         <div className="flex-1 overflow-auto p-4">
           {s.error && <div className="mb-3 rounded bg-red-950/50 px-3 py-2 text-xs text-red-300">{s.error}</div>}
           {s.projects.length === 0 && !s.loading && (
@@ -92,8 +155,13 @@ export function VFSBrowser() {
                       {p.kind}
                     </span>
                   )}
+                  {p.mode === 'ro' && <Lock className="h-3 w-3 shrink-0 text-zinc-500" aria-label="read-only" />}
                 </button>
-                {p.title && <span className="truncate font-mono text-[10px] text-zinc-600">{p.name}</span>}
+                {p.kind === 'link'
+                  ? <span className={`truncate font-mono text-[10px] ${p.missing ? 'text-red-400' : 'text-zinc-600'}`} title={p.link_path}>
+                      {p.missing ? '⚠ missing: ' : '↪ '}{p.link_path}
+                    </span>
+                  : p.title && <span className="truncate font-mono text-[10px] text-zinc-600">{p.name}</span>}
                 <div className="flex items-center justify-between text-[11px] text-zinc-500">
                   <span title={fmtFull(p.mtime)}>
                     {p.files} file{p.files !== 1 ? 's' : ''} · {fmtBytes(p.bytes)}
@@ -109,12 +177,15 @@ export function VFSBrowser() {
                     </button>
                     <button
                       onClick={() => {
-                        if (confirm(`Delete project "${p.name}" and all its files?`)) s.deleteProject(p.name)
+                        const msg = p.kind === 'link'
+                          ? `Unlink "${p.name}"? Your real files at ${p.link_path} are NOT deleted.`
+                          : `Delete project "${p.name}" and all its files?`
+                        if (confirm(msg)) s.deleteProject(p.name)
                       }}
                       className="hover:text-red-400"
-                      title="Delete project"
+                      title={p.kind === 'link' ? 'Unlink (keeps real files)' : 'Delete project'}
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
+                      {p.kind === 'link' ? <Link2 className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
                     </button>
                   </div>
                 </div>
