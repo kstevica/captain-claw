@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2,
   ShieldAlert, Wrench, RotateCcw, X, Download, ChevronRight, ChevronDown, Link2, Lock,
-  MessageSquarePlus, FolderPlus, FolderTree, Trash2,
+  MessageSquarePlus, FolderPlus, FolderTree, Trash2, Map,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -26,8 +26,15 @@ export function CodePage() {
     projects, activeProject, activeSession, messages, commits, progress, status, sending, error,
     loadProjects, createProject, addFolder, linkFolder, createSession, deleteSession,
     setSessionFolder, selectSession, send, approvePlan, showCommit, rollback, exportProcess,
+    loadMap, searchMap, buildMap,
   } = useCodeStore()
   const browseFs = useVFSStore((s) => s.browseFs)
+
+  const [tab, setTab] = useState<'chat' | 'map'>('chat')
+  const [map, setMap] = useState<import('../stores/codeStore').CodeMap | null>(null)
+  const [mapQ, setMapQ] = useState('')
+  const [mapHits, setMapHits] = useState<import('../stores/codeStore').CodeMapHit[]>([])
+  const [mapBusy, setMapBusy] = useState(false)
 
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [newProject, setNewProject] = useState('')
@@ -51,6 +58,19 @@ export function CodePage() {
       setPlanDraft(plan?.text || '')
     }
   }, [status, messages])
+  // Load the code map when the Map tab is open (or session/status changes).
+  useEffect(() => {
+    if (tab === 'map' && activeSession) loadMap().then(setMap)
+  }, [tab, activeSession, status, loadMap])
+
+  const onMapSearch = async (q: string) => {
+    setMapQ(q)
+    setMapHits(q.trim() ? await searchMap(q) : [])
+  }
+  const onRebuildMap = async () => {
+    setMapBusy(true)
+    try { await buildMap() } finally { setMapBusy(false) }
+  }
 
   const activeProj = projects.find((p) => p.name === activeProject)
   const activeSess = activeProj?.sessions.find((s) => s.id === activeSession)
@@ -229,13 +249,69 @@ export function CodePage() {
                   {activeFolders.map((f) => <option key={f.name} value={f.name}>{f.name}{f.kind === 'link' ? ' (linked)' : ''}</option>)}
                 </select>
               </span>
+              <div className="ml-auto flex items-center gap-1 rounded bg-zinc-900 p-0.5 text-xs ring-1 ring-zinc-800">
+                <button onClick={() => setTab('chat')}
+                  className={`rounded px-2 py-0.5 ${tab === 'chat' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}>Chat</button>
+                <button onClick={() => setTab('map')}
+                  className={`flex items-center gap-1 rounded px-2 py-0.5 ${tab === 'map' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}>
+                  <Map size={12} /> Map
+                </button>
+              </div>
               <button onClick={() => exportProcess()} disabled={!messages.length}
                 title="Export the coding process (tools, narration, outputs) as Markdown"
-                className="ml-auto flex items-center gap-1.5 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
+                className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
                 <Download size={13} /> Export
               </button>
             </header>
 
+            {tab === 'map' && (
+              <div className="flex-1 overflow-y-auto px-4 py-4">
+                <div className="mb-3 flex items-center gap-3 text-xs text-zinc-500">
+                  <span>{map?.stats ? `${map.stats.files} files · ${map.stats.symbols} symbols · ${map.stats.summarized} summarized` : 'No map yet.'}</span>
+                  <button onClick={onRebuildMap} disabled={mapBusy || status === 'running'}
+                    className="ml-auto flex items-center gap-1.5 rounded bg-zinc-800 px-2 py-1 text-zinc-200 hover:bg-zinc-700 disabled:opacity-40">
+                    {mapBusy ? <Loader2 size={13} className="animate-spin" /> : <Map size={13} />} Rebuild map
+                  </button>
+                </div>
+                <input value={mapQ} onChange={(e) => onMapSearch(e.target.value)}
+                  placeholder="Search symbols, files, models…"
+                  className="mb-3 w-full rounded bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600" />
+                {mapQ && (
+                  <div className="mb-4 space-y-1">
+                    {mapHits.length === 0 && <div className="text-xs text-zinc-500">No matches.</div>}
+                    {mapHits.map((h, i) => (
+                      <div key={i} className="rounded bg-zinc-900/50 px-2 py-1 text-xs">
+                        <span className="text-zinc-500">{h.kind}</span>{' '}
+                        <span className="font-medium text-zinc-200">{h.signature || h.name}</span>{' '}
+                        <span className="text-zinc-600">— {h.file}:{h.line}</span>
+                        {h.summary && <span className="text-zinc-500"> · {h.summary}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {!mapQ && (
+                  <>
+                    {map?.overview
+                      ? <div className="fd-markdown text-sm text-zinc-200"><Markdown remarkPlugins={[remarkGfm]}>{map.overview}</Markdown></div>
+                      : <div className="text-sm text-zinc-500">No architecture overview yet. Click <b>Rebuild map</b> to have the cartographer map this folder.</div>}
+                    {map?.models && (
+                      <div className="mt-4">
+                        <div className="mb-1 text-xs font-semibold uppercase text-zinc-500">Data models</div>
+                        <pre className="overflow-auto rounded bg-zinc-900/50 p-3 text-xs text-zinc-300">{JSON.stringify(map.models, null, 2)}</pre>
+                      </div>
+                    )}
+                    {map?.ui && (
+                      <div className="mt-4">
+                        <div className="mb-1 text-xs font-semibold uppercase text-zinc-500">UI map</div>
+                        <pre className="overflow-auto rounded bg-zinc-900/50 p-3 text-xs text-zinc-300">{JSON.stringify(map.ui, null, 2)}</pre>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {tab === 'chat' && (<>
             <div className="flex-1 overflow-y-auto px-4 py-4">
               {messages.length === 0 && (
                 <div className="mt-10 text-center text-sm text-zinc-500">
@@ -328,6 +404,7 @@ export function CodePage() {
                 </div>
               </div>
             )}
+            </>)}
           </>
         )}
       </main>

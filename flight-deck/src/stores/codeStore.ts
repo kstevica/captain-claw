@@ -197,6 +197,30 @@ async function apiRollback(p: string, s: string, ref: string): Promise<void> {
   if (!res.ok) throw new Error((await res.text()) || 'rollback failed')
 }
 
+export interface CodeMap {
+  overview: string
+  models: Record<string, unknown> | null
+  ui: Record<string, unknown> | null
+  stats: { files: number; symbols: number; summarized: number }
+}
+export interface CodeMapHit { name: string; kind: string; file: string; line: number; signature: string; summary: string }
+
+async function apiGetMap(p: string, s: string): Promise<CodeMap | null> {
+  const res = await _authedFetch(`${sbase(p, s)}/map`)
+  if (!res.ok) return null
+  return res.json()
+}
+
+async function apiMapSearch(p: string, s: string, q: string): Promise<CodeMapHit[]> {
+  const res = await _authedFetch(`${sbase(p, s)}/map/search?q=${enc(q)}`)
+  if (!res.ok) return []
+  return (await res.json()).results || []
+}
+
+async function apiMapBuild(p: string, s: string): Promise<void> {
+  await _authedFetch(`${sbase(p, s)}/map/build`, { method: 'POST' })
+}
+
 async function apiExport(p: string, s: string, title: string): Promise<void> {
   const res = await _authedFetch(`${sbase(p, s)}/export?format=md`)
   if (!res.ok) return
@@ -239,6 +263,9 @@ interface CodeStore {
   showCommit: (sha: string) => Promise<string>
   rollback: (ref: string) => Promise<void>
   exportProcess: () => Promise<void>
+  loadMap: () => Promise<CodeMap | null>
+  searchMap: (q: string) => Promise<CodeMapHit[]>
+  buildMap: () => Promise<void>
 }
 
 function _statusOf(state: Record<string, unknown>): string {
@@ -369,6 +396,19 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     if (!p || !s) return
     const title = projects.find((x) => x.name === p)?.sessions.find((x) => x.id === s)?.title || `${p}-${s}`
     await apiExport(p, s, `${p}-${title}`)
+  },
+
+  loadMap: async () => {
+    const { activeProject: p, activeSession: s } = get()
+    return (p && s) ? apiGetMap(p, s) : null
+  },
+  searchMap: async (q) => {
+    const { activeProject: p, activeSession: s } = get()
+    return (p && s && q.trim()) ? apiMapSearch(p, s, q.trim()) : []
+  },
+  buildMap: async () => {
+    const { activeProject: p, activeSession: s } = get()
+    if (p && s) await apiMapBuild(p, s)
   },
 
   rollback: async (ref) => {
