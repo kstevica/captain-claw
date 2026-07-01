@@ -3,23 +3,33 @@ import { useAuthStore, refreshAccessToken } from './authStore'
 
 // ── Types (mirror captain_claw/flight_deck/code_routes.py) ───────────
 
-// A folder = one sub-project (its own git repo + chat). id is "project/folder".
+// A folder = one git repo an agent works in (VFS sub-dir, the project dir
+// itself, or an external linked folder). Membership is per-project.
 export interface CodeFolder {
-  id: string
   name: string
-  files: number
-  messages: number
-  last_message?: string
-  mtime?: number
-  status?: string
-  linked?: boolean   // an external linked folder (not under the VFS root)
+  kind: string       // 'vfs' | 'self' | 'link'
+  linked?: boolean
   mode?: string      // 'rw' | 'ro' for linked folders
+  files: number
+  missing?: boolean
 }
 
-// A project groups related folders (two-level tree).
+// A session = one conversation thread targeting a folder.
+export interface CodeSession {
+  id: string
+  title: string
+  folder: string
+  messages: number
+  status: string     // idle | running | awaiting_plan
+  last_message?: string
+  created?: number
+}
+
+// A project groups folders + sessions.
 export interface CodeProject {
   name: string
   folders: CodeFolder[]
+  sessions: CodeSession[]
 }
 
 export interface CodeRoute {
@@ -44,19 +54,13 @@ export interface CodeMessage {
   ok?: boolean
   commit?: string
   route?: CodeRoute
-  // Big-job phases: plan | build | review | fix | note | approval
   kind?: string
   findings?: CodeFinding[]
   needs_fix?: boolean
   round?: number
 }
 
-export interface CodeCommit {
-  sha: string
-  short: string
-  message: string
-  ts: number
-}
+export interface CodeCommit { sha: string; short: string; message: string; ts: number }
 
 export interface CodeProgressEvent {
   i: number
@@ -95,9 +99,8 @@ async function _authedFetch(url: string, init: RequestInit = {}): Promise<Respon
 }
 
 const enc = encodeURIComponent
-// Folder ids are "project/folder" — encode each segment but keep the slash so
-// the backend's {project:path} route matches (never %2F).
-const encPath = (id: string) => id.split('/').map(encodeURIComponent).join('/')
+const sbase = (project: string, session: string) =>
+  `/fd/code/projects/${enc(project)}/sessions/${enc(session)}`
 
 async function apiListProjects(): Promise<CodeProject[]> {
   const res = await _authedFetch('/fd/code/projects')
@@ -106,75 +109,102 @@ async function apiListProjects(): Promise<CodeProject[]> {
   return Array.isArray(data.projects) ? data.projects : []
 }
 
-async function apiCreateFolder(project: string, folder: string): Promise<{ project: string; folder: CodeFolder }> {
-  const res = await _authedFetch('/fd/code/projects', {
-    method: 'POST', body: JSON.stringify({ project, folder }),
-  })
-  if (!res.ok) throw new Error((await res.text()) || 'create failed')
-  return res.json()
+async function apiCreateProject(name: string): Promise<void> {
+  const res = await _authedFetch('/fd/code/projects', { method: 'POST', body: JSON.stringify({ name }) })
+  if (!res.ok) throw new Error((await res.text()) || 'create project failed')
 }
 
-async function apiGetChat(id: string): Promise<{ messages: CodeMessage[]; state: Record<string, unknown> }> {
-  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/chat`)
+async function apiAddFolder(project: string, folder: string): Promise<void> {
+  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/folders`, {
+    method: 'POST', body: JSON.stringify({ folder }),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'add folder failed')
+}
+
+async function apiLinkFolder(project: string, body: Record<string, unknown>): Promise<void> {
+  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/link`, {
+    method: 'POST', body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'link folder failed')
+}
+
+async function apiCreateSession(project: string, title: string, folder: string): Promise<CodeSession> {
+  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/sessions`, {
+    method: 'POST', body: JSON.stringify({ title, folder }),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'create session failed')
+  return (await res.json()).session
+}
+
+async function apiDeleteSession(project: string, session: string): Promise<void> {
+  await _authedFetch(`/fd/code/projects/${enc(project)}/sessions/${enc(session)}`, { method: 'DELETE' })
+}
+
+async function apiSetFolder(project: string, session: string, folder: string): Promise<void> {
+  const res = await _authedFetch(`${sbase(project, session)}/folder`, {
+    method: 'PUT', body: JSON.stringify({ folder }),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'set folder failed')
+}
+
+async function apiGetChat(p: string, s: string): Promise<{ messages: CodeMessage[]; state: Record<string, unknown> }> {
+  const res = await _authedFetch(`${sbase(p, s)}/chat`)
   if (!res.ok) return { messages: [], state: {} }
   return res.json()
 }
 
-async function apiProgress(id: string): Promise<{ events: CodeProgressEvent[]; active: boolean }> {
-  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/progress`)
+async function apiProgress(p: string, s: string): Promise<{ events: CodeProgressEvent[]; active: boolean }> {
+  const res = await _authedFetch(`${sbase(p, s)}/progress`)
   if (!res.ok) return { events: [], active: false }
   return res.json()
 }
 
-async function apiLog(id: string): Promise<CodeCommit[]> {
-  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/log`)
+async function apiLog(p: string, s: string): Promise<CodeCommit[]> {
+  const res = await _authedFetch(`${sbase(p, s)}/log`)
   if (!res.ok) return []
   return (await res.json()).commits || []
 }
 
-async function apiMessage(project: string, text: string): Promise<{ message: CodeMessage; route: CodeRoute; commit: string | null }> {
+async function apiMessage(project: string, session: string, text: string): Promise<void> {
   const res = await _authedFetch('/fd/code/message', {
-    method: 'POST', body: JSON.stringify({ project, text }),
+    method: 'POST', body: JSON.stringify({ project, session, text }),
   })
   if (!res.ok) throw new Error((await res.text()) || 'message failed')
-  return res.json()
 }
 
-async function apiApprove(project: string, plan?: string): Promise<void> {
+async function apiApprove(project: string, session: string, plan?: string): Promise<void> {
   const res = await _authedFetch('/fd/code/plan/approve', {
-    method: 'POST', body: JSON.stringify({ project, ...(plan ? { plan } : {}) }),
+    method: 'POST', body: JSON.stringify({ project, session, ...(plan ? { plan } : {}) }),
   })
   if (!res.ok) throw new Error((await res.text()) || 'approve failed')
 }
 
-async function apiDiff(id: string, refA = '', refB = ''): Promise<string> {
+async function apiDiff(p: string, s: string, refA = '', refB = ''): Promise<string> {
   const qs = new URLSearchParams({ ref_a: refA, ref_b: refB }).toString()
-  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/diff?${qs}`)
+  const res = await _authedFetch(`${sbase(p, s)}/diff?${qs}`)
   if (!res.ok) return ''
   return (await res.json()).diff || ''
 }
 
-async function apiShow(id: string, sha: string): Promise<string> {
-  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/show?sha=${enc(sha)}`)
+async function apiShow(p: string, s: string, sha: string): Promise<string> {
+  const res = await _authedFetch(`${sbase(p, s)}/show?sha=${enc(sha)}`)
   if (!res.ok) return ''
   return (await res.json()).diff || ''
 }
 
-async function apiRollback(id: string, ref: string): Promise<void> {
-  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/rollback`, {
-    method: 'POST', body: JSON.stringify({ ref }),
-  })
+async function apiRollback(p: string, s: string, ref: string): Promise<void> {
+  const res = await _authedFetch(`${sbase(p, s)}/rollback`, { method: 'POST', body: JSON.stringify({ ref }) })
   if (!res.ok) throw new Error((await res.text()) || 'rollback failed')
 }
 
-async function apiExport(id: string): Promise<void> {
-  const res = await _authedFetch(`/fd/code/projects/${encPath(id)}/export?format=md`)
+async function apiExport(p: string, s: string, title: string): Promise<void> {
+  const res = await _authedFetch(`${sbase(p, s)}/export?format=md`)
   if (!res.ok) return
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `${id.replace(/\//g, '-')}-process.md`
+  a.download = `${title.replace(/[^a-zA-Z0-9._-]/g, '-')}-process.md`
   document.body.appendChild(a)
   a.click()
   a.remove()
@@ -185,18 +215,24 @@ async function apiExport(id: string): Promise<void> {
 
 interface CodeStore {
   projects: CodeProject[]
-  activeFolder: string      // folder id: "project/folder"
+  activeProject: string
+  activeSession: string
   messages: CodeMessage[]
   commits: CodeCommit[]
   progress: CodeProgressEvent[]
-  status: string            // current folder run state: idle | running | awaiting_plan
+  status: string
   sending: boolean
   loading: boolean
   error: string | null
 
   loadProjects: () => Promise<void>
-  createFolder: (project: string, folder: string) => Promise<void>
-  selectFolder: (id: string) => Promise<void>
+  createProject: (name: string) => Promise<void>
+  addFolder: (project: string, folder: string) => Promise<void>
+  linkFolder: (project: string, name: string, path: string, mode: string) => Promise<void>
+  createSession: (project: string, title: string, folder: string) => Promise<void>
+  deleteSession: (project: string, session: string) => Promise<void>
+  setSessionFolder: (folder: string) => Promise<void>
+  selectSession: (project: string, session: string) => Promise<void>
   send: (text: string) => Promise<void>
   approvePlan: (plan?: string) => Promise<void>
   diff: (refA?: string, refB?: string) => Promise<string>
@@ -211,7 +247,8 @@ function _statusOf(state: Record<string, unknown>): string {
 
 export const useCodeStore = create<CodeStore>((set, get) => ({
   projects: [],
-  activeFolder: '',
+  activeProject: '',
+  activeSession: '',
   messages: [],
   commits: [],
   progress: [],
@@ -223,71 +260,99 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   loadProjects: async () => {
     set({ loading: true })
     try {
-      const projects = await apiListProjects()
-      set({ projects })
+      set({ projects: await apiListProjects() })
     } finally {
       set({ loading: false })
     }
   },
 
-  createFolder: async (project, folder) => {
+  createProject: async (name) => {
     set({ error: null })
-    try {
-      const { folder: created } = await apiCreateFolder(project.trim(), folder.trim())
-      await get().loadProjects()
-      await get().selectFolder(created.id)
-    } catch (e) {
-      set({ error: e instanceof Error ? e.message : 'create failed' })
-    }
+    try { await apiCreateProject(name.trim()); await get().loadProjects() }
+    catch (e) { set({ error: e instanceof Error ? e.message : 'create failed' }) }
   },
 
-  selectFolder: async (id) => {
-    set({ activeFolder: id, messages: [], commits: [], progress: [], status: 'idle' })
-    const [chat, commits] = await Promise.all([apiGetChat(id), apiLog(id)])
+  addFolder: async (project, folder) => {
+    set({ error: null })
+    try { await apiAddFolder(project, folder.trim()); await get().loadProjects() }
+    catch (e) { set({ error: e instanceof Error ? e.message : 'add folder failed' }) }
+  },
+
+  linkFolder: async (project, name, path, mode) => {
+    set({ error: null })
+    try { await apiLinkFolder(project, { name: name.trim(), path: path.trim(), mode }); await get().loadProjects() }
+    catch (e) { set({ error: e instanceof Error ? e.message : 'link failed' }) }
+  },
+
+  createSession: async (project, title, folder) => {
+    set({ error: null })
+    try {
+      const sess = await apiCreateSession(project, title.trim(), folder)
+      await get().loadProjects()
+      await get().selectSession(project, sess.id)
+    } catch (e) { set({ error: e instanceof Error ? e.message : 'create session failed' }) }
+  },
+
+  deleteSession: async (project, session) => {
+    await apiDeleteSession(project, session)
+    if (get().activeSession === session) set({ activeSession: '', activeProject: '', messages: [], commits: [] })
+    await get().loadProjects()
+  },
+
+  setSessionFolder: async (folder) => {
+    const { activeProject, activeSession } = get()
+    if (!activeProject || !activeSession) return
+    try {
+      await apiSetFolder(activeProject, activeSession, folder)
+      const commits = await apiLog(activeProject, activeSession)
+      set({ commits })
+      await get().loadProjects()
+    } catch (e) { set({ error: e instanceof Error ? e.message : 'set folder failed' }) }
+  },
+
+  selectSession: async (project, session) => {
+    set({ activeProject: project, activeSession: session, messages: [], commits: [], progress: [], status: 'idle' })
+    const [chat, commits] = await Promise.all([apiGetChat(project, session), apiLog(project, session)])
     set({ messages: chat.messages, commits, status: _statusOf(chat.state) })
   },
 
   send: async (text) => {
-    const project = get().activeFolder
-    if (!project || !text.trim()) return
-    // Optimistic user bubble.
-    set((s) => ({
+    const { activeProject: p, activeSession: s } = get()
+    if (!p || !s || !text.trim()) return
+    set((st) => ({
       sending: true, error: null, progress: [],
-      messages: [...s.messages, { id: 'tmp', role: 'user', text: text.trim(), ts: Date.now() / 1000 }],
+      messages: [...st.messages, { id: 'tmp', role: 'user', text: text.trim(), ts: Date.now() / 1000 }],
     }))
     const poll = setInterval(async () => {
-      try { const p = await apiProgress(project); set({ progress: p.events || [] }) } catch { /* ignore */ }
+      try { const pr = await apiProgress(p, s); set({ progress: pr.events || [] }) } catch { /* ignore */ }
     }, 700)
     try {
-      await apiMessage(project, text.trim())
-      const [chat, commits] = await Promise.all([apiGetChat(project), apiLog(project)])
+      await apiMessage(p, s, text.trim())
+      const [chat, commits] = await Promise.all([apiGetChat(p, s), apiLog(p, s)])
       set({ messages: chat.messages, commits, status: _statusOf(chat.state) })
       await get().loadProjects()
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'message failed' })
     } finally {
       clearInterval(poll)
-      try { const p = await apiProgress(project); set({ progress: p.events || [] }) } catch { /* ignore */ }
+      try { const pr = await apiProgress(p, s); set({ progress: pr.events || [] }) } catch { /* ignore */ }
       set({ sending: false })
     }
   },
 
   approvePlan: async (plan) => {
-    const project = get().activeFolder
-    if (!project) return
+    const { activeProject: p, activeSession: s } = get()
+    if (!p || !s) return
     set({ sending: true, error: null, progress: [], status: 'running' })
     try {
-      await apiApprove(project, plan)
-      // The build → review → fix loop runs in the background. Follow it: poll
-      // progress for the live trace and the chat/state until it goes idle.
+      await apiApprove(p, s, plan)
       for (;;) {
         await new Promise((r) => setTimeout(r, 1500))
-        const [prog, chat] = await Promise.all([apiProgress(project), apiGetChat(project)])
+        const [prog, chat] = await Promise.all([apiProgress(p, s), apiGetChat(p, s)])
         set({ progress: prog.events || [], messages: chat.messages, status: _statusOf(chat.state) })
         if (_statusOf(chat.state) !== 'running' && !prog.active) break
       }
-      const commits = await apiLog(project)
-      set({ commits })
+      set({ commits: await apiLog(p, s) })
       await get().loadProjects()
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'approve failed' })
@@ -296,25 +361,24 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     }
   },
 
-  diff: async (refA = '', refB = '') => apiDiff(get().activeFolder, refA, refB),
-
-  showCommit: async (sha) => apiShow(get().activeFolder, sha),
+  diff: async (refA = '', refB = '') => apiDiff(get().activeProject, get().activeSession, refA, refB),
+  showCommit: async (sha) => apiShow(get().activeProject, get().activeSession, sha),
 
   exportProcess: async () => {
-    const project = get().activeFolder
-    if (project) await apiExport(project)
+    const { activeProject: p, activeSession: s, projects } = get()
+    if (!p || !s) return
+    const title = projects.find((x) => x.name === p)?.sessions.find((x) => x.id === s)?.title || `${p}-${s}`
+    await apiExport(p, s, `${p}-${title}`)
   },
 
   rollback: async (ref) => {
-    const project = get().activeFolder
-    if (!project) return
+    const { activeProject: p, activeSession: s } = get()
+    if (!p || !s) return
     try {
-      await apiRollback(project, ref)
-      const [chat, commits] = await Promise.all([apiGetChat(project), apiLog(project)])
+      await apiRollback(p, s, ref)
+      const [chat, commits] = await Promise.all([apiGetChat(p, s), apiLog(p, s)])
       set({ messages: chat.messages, commits, status: _statusOf(chat.state) })
       await get().loadProjects()
-    } catch (e) {
-      set({ error: e instanceof Error ? e.message : 'rollback failed' })
-    }
+    } catch (e) { set({ error: e instanceof Error ? e.message : 'rollback failed' }) }
   },
 }))
