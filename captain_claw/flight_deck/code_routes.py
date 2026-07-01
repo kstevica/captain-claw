@@ -59,6 +59,25 @@ _SMALL = {"quick-dirty", "code-implementer", "debugger"}
 _REVIEWERS = ["code-reviewer", "security-reviewer", "qa-engineer"]
 _MAX_FIX_ROUNDS = 3
 
+_REPORTS_DIRNAME = ".reports"
+
+# Appended to every agent prompt: keep written reports inside the VFS project
+# (committed + downloadable) instead of the agent's throwaway `saved/` tree.
+_REPORTS_DIRECTIVE = (
+    "\n\nIf you produce a written report, findings document, or summary file, save it "
+    "as Markdown under a `.reports/` folder in the project root (create it if needed). "
+    "NEVER write reports to `saved/` — that folder is untracked and won't be kept."
+)
+
+
+def _write_report(pdir: Path, name: str, content: str) -> str:
+    """Persist a report into ``<project>/.reports/`` (committed with the run). Returns rel path."""
+    rd = pdir / _REPORTS_DIRNAME
+    rd.mkdir(parents=True, exist_ok=True)
+    safe = safe_name(name, fallback="report") + ".md"
+    (rd / safe).write_text(content or "")
+    return f"{_REPORTS_DIRNAME}/{safe}"
+
 # Mirror the frontend's tier inheritance (tierConfig.ts): the `coding`/`vision`
 # tiers were added after many Library sets were first seeded, so a saved
 # `fd:forge-tiers` blob may not carry an explicit entry for them. Resolve a tier
@@ -199,7 +218,7 @@ def _exec_prompt(intent: str) -> str:
         "verify. Do NOT use any `vfs:` prefix — just work in the directory you're in.\n\n"
         f"Task:\n{intent}\n\n"
         "When finished, briefly summarize what you created/changed and how you "
-        "verified it actually runs."
+        "verified it actually runs." + _REPORTS_DIRECTIVE
     )
 
 
@@ -267,7 +286,7 @@ def _build_prompt(intent: str) -> str:
         "plain relative paths, install deps and run/verify via your shell. Follow the plan; "
         "if you must deviate, say why. Do NOT use any `vfs:` prefix.\n\n"
         f"Original request for context:\n{intent}\n\n"
-        "When finished, summarize what you built and how you verified it runs."
+        "When finished, summarize what you built and how you verified it runs." + _REPORTS_DIRECTIVE
     )
 
 
@@ -293,7 +312,7 @@ _REVIEW_PROMPTS = {
 
 
 def _review_prompt(reviewer: str, intent: str) -> str:
-    return f"{_REVIEW_PROMPTS[reviewer]}\n\nTask under review:\n{intent}"
+    return f"{_REVIEW_PROMPTS[reviewer]}\n\nTask under review:\n{intent}" + _REPORTS_DIRECTIVE
 
 
 def _fix_prompt(intent: str, fix_instructions: str) -> str:
@@ -302,7 +321,7 @@ def _fix_prompt(intent: str, fix_instructions: str) -> str:
         "Apply the fixes with relative paths and verify via your shell. Fix ONLY the issues "
         "listed; keep working code intact.\n\n"
         f"Issues to fix:\n{fix_instructions}\n\n"
-        f"Original request for context:\n{intent}"
+        f"Original request for context:\n{intent}" + _REPORTS_DIRECTIVE
     )
 
 
@@ -368,11 +387,15 @@ async def _run_build_loop(request: Request, user: dict, project: str, pdir: Path
                 role = by_id[rv].get("role", rv)
                 out = "" if isinstance(res, Exception) else (res.get("output") or "")
                 reviews.append({"role": role, "id": rv, "output": out})
-            # qa-engineer may have added tests during review — capture them.
-            await code_git.git_commit(pdir, f"[review r{rnd}] reviewer notes/tests")
+                # Persist each reviewer's full findings into the VFS project.
+                if out.strip():
+                    _write_report(pdir, f"review-r{rnd}-{rv}", f"# {role} — review r{rnd}\n\n{out}")
 
             triage = await _triage_reviews(reviews, intent, tiers_map, registry)
             review_summary = triage.get("summary", "Review complete.")
+            _write_report(pdir, f"review-r{rnd}-summary", f"# Review summary — r{rnd}\n\n{review_summary}")
+            # Commit reviewer reports + any tests qa-engineer added during review.
+            await code_git.git_commit(pdir, f"[review r{rnd}] reports + reviewer tests")
             _append_chat(pdir, "assistant", review_summary, kind="review", round=rnd,
                          findings=triage.get("findings", []), needs_fix=triage["needs_fix"])
 

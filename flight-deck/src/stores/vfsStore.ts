@@ -96,6 +96,7 @@ interface VFSStore {
   startEdit: () => void
   saveFile: () => Promise<void>
   download: (entry: VFSEntry) => Promise<void>
+  downloadProject: (name: string) => Promise<void>
   deleteEntry: (entry: VFSEntry) => Promise<void>
   newFolder: (name: string) => Promise<void>
   deleteProject: (name: string) => Promise<void>
@@ -222,6 +223,20 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     const a = document.createElement('a')
     a.href = url
     a.download = entry.name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  },
+
+  downloadProject: async (name) => {
+    const res = await _authedFetch(`/fd/vfs/download-zip?${qp({ project: name })}`)
+    if (!res.ok) return
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name}.zip`
     document.body.appendChild(a)
     a.click()
     a.remove()

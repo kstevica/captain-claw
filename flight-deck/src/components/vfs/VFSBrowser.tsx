@@ -99,15 +99,24 @@ export function VFSBrowser() {
                     {p.files} file{p.files !== 1 ? 's' : ''} · {fmtBytes(p.bytes)}
                     {p.mtime ? ` · ${fmtTime(p.mtime)}` : ''}
                   </span>
-                  <button
-                    onClick={() => {
-                      if (confirm(`Delete project "${p.name}" and all its files?`)) s.deleteProject(p.name)
-                    }}
-                    className="opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
-                    title="Delete project"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                    <button
+                      onClick={() => s.downloadProject(p.name)}
+                      className="hover:text-violet-300"
+                      title="Download folder as .zip"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (confirm(`Delete project "${p.name}" and all its files?`)) s.deleteProject(p.name)
+                      }}
+                      className="hover:text-red-400"
+                      title="Delete project"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2, ShieldAlert, Wrench, RotateCcw, X } from 'lucide-react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useCodeStore } from '../stores/codeStore'
 
 const SEV_COLOR: Record<string, string> = {
@@ -156,9 +158,15 @@ export function CodePage() {
                           {m.ok === false && <span className="text-red-400">failed</span>}
                         </div>
                       )}
-                      <div className={`whitespace-pre-wrap break-words text-sm ${
-                        m.kind === 'plan' ? 'rounded border border-zinc-800 bg-zinc-900/40 p-3 font-mono text-[13px] text-zinc-300' : 'text-zinc-200'
-                      }`}>{m.text}</div>
+                      {m.role === 'user' ? (
+                        <div className="whitespace-pre-wrap break-words text-sm text-zinc-200">{m.text}</div>
+                      ) : (
+                        <div className={`fd-markdown break-words text-sm text-zinc-200 ${
+                          m.kind === 'plan' ? 'rounded border border-zinc-800 bg-zinc-900/40 p-3' : ''
+                        }`}>
+                          <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
+                        </div>
+                      )}
                       {!!m.findings?.length && (
                         <ul className="mt-1.5 space-y-0.5">
                           {m.findings.map((f, i) => (

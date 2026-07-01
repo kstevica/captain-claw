@@ -179,6 +179,35 @@ async def download_file(project: str, path: str, user: dict = Depends(get_curren
     return FileResponse(target, filename=target.name, media_type=media)
 
 
+@router.get("/download-zip")
+async def download_zip(project: str, user: dict = Depends(get_current_user)):
+    """Zip an entire project folder and stream it (zip name = project name).
+
+    Skips ``.git`` (internal object store — large and not useful in a zip); keeps
+    everything else, including ``.reports`` and ``.code``.
+    """
+    import io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    root = _project_root(user["id"], project)
+    if not root.is_dir():
+        raise HTTPException(404, "project not found")
+    name = safe_name(project, fallback="project")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(root.rglob("*")):
+            if not f.is_file() or ".git" in f.relative_to(root).parts:
+                continue
+            zf.write(f, arcname=f"{name}/{f.relative_to(root).as_posix()}")
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'},
+    )
+
+
 # ── write endpoints ──────────────────────────────────────────────────
 
 class WriteBody(BaseModel):
