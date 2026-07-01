@@ -118,8 +118,11 @@ async def _real_spawn(archetype: dict, tier: str, tcfg: dict, request, user,
 
 
 async def _real_stop(slug: str) -> None:
+    # _do_stop_process is synchronous (kills the pid + rewrites the registry);
+    # every other caller invokes it directly. Do the same — awaiting its
+    # ProcessActionResult raises TypeError.
     from captain_claw.flight_deck.server import _do_stop_process
-    await _do_stop_process(slug)
+    _do_stop_process(slug)
 
 
 def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str = "",

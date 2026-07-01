@@ -238,7 +238,12 @@ async def _run_agent(request: Request, user: dict, project: str, pdir: Path,
             agent_name=role, on_usage=_on_usage,
         )
     finally:
-        await stop_archetype_agent(slug)
+        # Disposal is best-effort: the agent has already done its work, so a
+        # stop failure must never discard the result or 500 the request.
+        try:
+            await stop_archetype_agent(slug)
+        except Exception as e:  # noqa: BLE001
+            log.warning("code: failed to stop agent", slug=slug, error=str(e))
     return d
 
 
