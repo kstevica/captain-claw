@@ -64,12 +64,30 @@ async def _git(project_dir: Path | str, *args: str, check: bool = False) -> tupl
 
 
 async def is_repo(project_dir: Path | str) -> bool:
-    rc, _ = await _git(project_dir, "rev-parse", "--is-inside-work-tree")
-    return rc == 0
+    """Whether *project_dir* is its OWN git repo root.
+
+    NOT merely "inside a work tree" — the VFS tree can live inside another repo
+    (e.g. captain-claw's own checkout during local dev), and a plain
+    ``--is-inside-work-tree`` would then resolve to that ancestor repo, leaking
+    its history and committing project files into the wrong index. We require the
+    top-level to be exactly this folder so every project stays isolated.
+    """
+    d = Path(project_dir).resolve()
+    rc, out = await _git(d, "rev-parse", "--show-toplevel")
+    if rc != 0:
+        return False
+    try:
+        return Path(out.strip()).resolve() == d
+    except OSError:
+        return False
 
 
 async def git_init(project_dir: Path | str) -> bool:
-    """Initialise the project as a git repo (idempotent). Returns True if newly created."""
+    """Initialise the project as its own git repo (idempotent). Returns True if newly created.
+
+    Safe to nest inside another repo — ``git init`` creates a ``.git`` in this
+    folder, and :func:`is_repo` then confirms this folder is the top-level.
+    """
     d = Path(project_dir)
     d.mkdir(parents=True, exist_ok=True)
     async with _lock(d):
@@ -90,9 +108,9 @@ async def git_init(project_dir: Path | str) -> bool:
 async def git_commit(project_dir: Path | str, message: str) -> str | None:
     """Stage everything and commit. Returns the commit sha, or None if nothing changed."""
     d = Path(project_dir)
+    if not await is_repo(d):
+        await git_init(d)
     async with _lock(d):
-        if not await is_repo(d):
-            await git_init(d)
         await _git(d, "add", "-A")
         rc, _ = await _git(d, "diff", "--cached", "--quiet")
         if rc == 0:

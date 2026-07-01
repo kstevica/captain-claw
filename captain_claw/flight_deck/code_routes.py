@@ -470,6 +470,10 @@ async def get_progress(project: str, user: dict = Depends(get_current_user)):
 @router.get("/projects/{project}/log")
 async def get_log(project: str, user: dict = Depends(get_current_user)):
     pdir = _pdir(user["id"], project)
+    # Self-heal projects created before per-folder isolation existed: ensure this
+    # folder is its OWN repo (not resolving to an ancestor repo the VFS tree sits in).
+    if _is_code_project(pdir):
+        await code_git.git_init(pdir)
     return {"commits": await code_git.git_log(pdir)}
 
 
