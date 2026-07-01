@@ -30,6 +30,7 @@ _AUTHOR = ("-c", "user.name=Captain Claw", "-c", "user.email=code@captain-claw.l
 # be versioned (shell pre-creates ``saved/`` under the workspace root).
 _GITIGNORE = """\
 .code/
+.captain-claw/
 saved/
 node_modules/
 __pycache__/
@@ -42,6 +43,26 @@ dist/
 build/
 .pytest_cache/
 """
+
+# Runtime artifacts an agent litters into ANY workspace (incl. linked real
+# repos). Written to .git/info/exclude — a LOCAL ignore that never modifies the
+# repo's own tracked .gitignore, so linking a real project stays non-invasive.
+_LOCAL_EXCLUDES = ["saved/", ".code/", ".captain-claw/", ".DS_Store"]
+
+
+async def _ensure_excludes(project_dir: Path | str) -> None:
+    info = Path(project_dir) / ".git" / "info"
+    if not info.is_dir():
+        return
+    ex = info / "exclude"
+    try:
+        cur = ex.read_text() if ex.exists() else ""
+        if "captain-claw runtime" in cur:
+            return
+        block = "\n# captain-claw runtime artifacts\n" + "\n".join(_LOCAL_EXCLUDES) + "\n"
+        ex.write_text((cur.rstrip() + "\n" if cur.strip() else "") + block)
+    except OSError:
+        pass
 
 
 def _lock(project_dir: Path | str) -> asyncio.Lock:
@@ -92,8 +113,10 @@ async def git_init(project_dir: Path | str) -> bool:
     d.mkdir(parents=True, exist_ok=True)
     async with _lock(d):
         if await is_repo(d):
+            await _ensure_excludes(d)   # linked real repos: local excludes only
             return False
         await _git(d, "init", check=True)
+        await _ensure_excludes(d)
         gi = d / ".gitignore"
         if not gi.exists():
             gi.write_text(_GITIGNORE)
@@ -110,6 +133,7 @@ async def git_commit(project_dir: Path | str, message: str) -> str | None:
     d = Path(project_dir)
     if not await is_repo(d):
         await git_init(d)
+    await _ensure_excludes(d)
     async with _lock(d):
         await _git(d, "add", "-A")
         rc, _ = await _git(d, "diff", "--cached", "--quiet")

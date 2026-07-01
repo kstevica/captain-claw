@@ -1,6 +1,7 @@
 """Write tool for writing file contents."""
 
 import html
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -200,6 +201,29 @@ class WriteTool(Tool):
                 if not parts:
                     parts = [Path(path).name or "output.txt"]
                 file_path = Path(workflow_run_dir).joinpath(*parts)
+            elif os.environ.get("CLAW_WRITE_DIRECT") and kwargs.get("_runtime_base_path") is not None:
+                # Code mode: write straight into the workspace repo (no saved/
+                # scoping), matching shell/read/glob which anchor on the
+                # workspace root. This is what makes an agent's `write index.html`
+                # land in the project folder instead of saved/tmp/<session>/.
+                base = Path(kwargs["_runtime_base_path"]).expanduser().resolve()
+                requested = Path(path).expanduser()
+                if requested.is_absolute():
+                    cand = requested.resolve()
+                    try:
+                        cand.relative_to(base)
+                        file_path = cand
+                    except ValueError:
+                        tail = [p for p in requested.parts[1:] if p not in ("", ".", "..")]
+                        file_path = base.joinpath(*tail) if tail else base / "output.txt"
+                else:
+                    rel = [p for p in requested.parts if p not in ("", ".", "..")]
+                    file_path = base.joinpath(*rel) if rel else base / "output.txt"
+                # Never escape the workspace.
+                try:
+                    file_path.resolve().relative_to(base)
+                except ValueError:
+                    file_path = base / (requested.name or "output.txt")
             else:
                 saved_root = self._resolve_saved_root(kwargs)
                 session_id = self._normalize_session_id(str(kwargs.get("_session_id", "")))

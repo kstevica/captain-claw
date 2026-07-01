@@ -486,11 +486,14 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
                   agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
     _phase(pkey, f"{role} working")
-    # Add the real-user git identity/config so the agent's own git (esp. the
+    # CLAW_WRITE_DIRECT: the write tool otherwise sandboxes every write into
+    # saved/tmp/<session>/; code agents must write real files into the repo.
+    # Plus the real-user git identity/config so the agent's own git (esp. the
     # git-operator's commit/push) works despite the spawned HOME override.
+    code_env = [{"key": "CLAW_WRITE_DIRECT", "value": "1"}] + _git_env()
     port, token, slug = await spawn_archetype_agent(
         arch, tier, tcfg, request, user, name_suffix=suffix,
-        env_vars=list(env_vars or []) + _git_env(), workspace_path=str(repo),
+        env_vars=list(env_vars or []) + code_env, workspace_path=str(repo),
     )
     try:
         d = await _dispatch_one(
