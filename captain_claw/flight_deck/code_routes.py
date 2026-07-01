@@ -1,21 +1,25 @@
-"""Flight Deck HTTP API for Code mode — agentic coding over VFS project folders.
+"""Flight Deck HTTP API for Code mode — agentic coding over VFS projects.
 
-Each project is a VFS folder on disk (``<fd-data>/vfs/<user>/<project>/``) that
-is also a git repo (see :mod:`code_git`). A spawned coding agent's workspace is
-pinned to that folder, so it works in a real directory — relative paths, shell,
-``npm``/``pytest``/``git`` all behave like a normal checkout — while the files
-stay browsable through the existing VFS panel.
+Model: **project → folders + sessions**.
 
-A cheap router sizes each request: **small** runs a single archetype directly;
-**big** (Phase 2) drives the full Vatra build → Basna review → fix loop. Per-
-project chat + run state live under ``<project>/.code/`` (gitignored), so the
-conversation is portable with the folder and needs no DB migration.
+* A *project* is a namespace dir ``<fd-data>/vfs/<user>/<project>/`` with a
+  control dir ``<project>/.code/`` holding ``project.json`` (folder membership)
+  and ``sessions/<sid>/{chat,trace,state}`` (one conversation each).
+* A *folder* is the actual git repo an agent works in — a VFS sub-dir
+  (``<project>/<folder>/``), the project dir itself (legacy flat), or an
+  external **linked** folder (same local path can be a folder in many projects).
+* A *session* is a conversation that targets one of the project's folders; git
+  commits land in that folder's repo, chat/trace/state live under the session.
+
+A cheap router sizes each request: **small** runs one archetype directly;
+**big** drives the Vatra build → Basna review → capped fix loop.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -60,9 +64,6 @@ _REVIEWERS = ["code-reviewer", "security-reviewer", "qa-engineer"]
 _MAX_FIX_ROUNDS = 3
 
 _REPORTS_DIRNAME = ".reports"
-
-# Appended to every agent prompt: keep written reports inside the VFS project
-# (committed + downloadable) instead of the agent's throwaway `saved/` tree.
 _REPORTS_DIRECTIVE = (
     "\n\nIf you produce a written report, findings document, or summary file, save it "
     "as Markdown under a `.reports/` folder in the project root (create it if needed). "
@@ -70,110 +71,268 @@ _REPORTS_DIRECTIVE = (
 )
 
 
-def _write_report(pdir: Path, name: str, content: str) -> str:
-    """Persist a report into ``<project>/.reports/`` (committed with the run). Returns rel path."""
-    rd = pdir / _REPORTS_DIRNAME
-    rd.mkdir(parents=True, exist_ok=True)
-    safe = safe_name(name, fallback="report") + ".md"
-    (rd / safe).write_text(content or "")
-    return f"{_REPORTS_DIRNAME}/{safe}"
+# ── project / folder / session storage ───────────────────────────────
+
+def _proj_dir(user_id: str, project: str) -> Path:
+    name = safe_name(project, fallback="")
+    if not name:
+        raise HTTPException(400, "invalid project name")
+    return (_user_root(user_id) / name).resolve()
 
 
-def _persist_trace(project: str, pdir: Path, label: str) -> None:
-    """Append this run's live progress events (tools/narration/usage) to
-    ``.code/trace.jsonl`` so the coding process survives restarts and can be
-    exported. ``_PROGRESS`` is in-memory only; this is its durable record."""
-    events = (_PROGRESS.get(project) or {}).get("events") or []
+def _proj_code(user_id: str, project: str) -> Path:
+    """``<project>/.code`` — control dir; gitignored so it never enters a repo
+    (a legacy-flat project's own dir IS a repo)."""
+    d = _proj_dir(user_id, project) / ".code"
+    d.mkdir(parents=True, exist_ok=True)
+    gi = d / ".gitignore"
+    if not gi.exists():
+        gi.write_text("*\n")
+    return d
+
+
+def _read_json(p: Path, default):
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def _read_project(user_id: str, project: str) -> dict:
+    return _read_json(_proj_dir(user_id, project) / ".code" / "project.json", {"folders": []})
+
+
+def _write_project(user_id: str, project: str, data: dict) -> None:
+    (_proj_code(user_id, project) / "project.json").write_text(json.dumps(data, indent=2))
+
+
+def _folder_meta(user_id: str, project: str, folder: str) -> dict | None:
+    for f in _read_project(user_id, project).get("folders", []):
+        if f.get("name") == folder:
+            return f
+    return None
+
+
+def _folder_repo(user_id: str, project: str, folder: str) -> Path:
+    """Resolve a project folder to its on-disk git repo (agent workspace)."""
+    meta = _folder_meta(user_id, project, folder)
+    if not meta:
+        raise HTTPException(404, "folder not found in project")
+    proj = _proj_dir(user_id, project)
+    kind = meta.get("kind")
+    if kind == "link":
+        tgt = link_target_at(_user_root(user_id), meta.get("link", ""))
+        if tgt is None:
+            raise HTTPException(404, "linked folder source is missing")
+        return tgt
+    if kind == "self":
+        return proj
+    return (proj / safe_name(folder, fallback="folder")).resolve()
+
+
+def _read_sessions(user_id: str, project: str) -> list[dict]:
+    data = _read_json(_proj_dir(user_id, project) / ".code" / "sessions.json", [])
+    return data if isinstance(data, list) else []
+
+
+def _write_sessions(user_id: str, project: str, sessions: list[dict]) -> None:
+    (_proj_code(user_id, project) / "sessions.json").write_text(json.dumps(sessions, indent=2))
+
+
+def _sget(user_id: str, project: str, sid: str) -> dict | None:
+    return next((s for s in _read_sessions(user_id, project) if s.get("id") == sid), None)
+
+
+def _session_dir(user_id: str, project: str, sid: str) -> Path:
+    d = _proj_code(user_id, project) / "sessions" / safe_name(sid, fallback="s")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ── chat / state / trace (per session dir) ───────────────────────────
+
+def _read_chat(sdir: Path) -> list[dict]:
+    return [json.loads(l) for l in (sdir / "chat.jsonl").read_text().splitlines()
+            if l.strip()] if (sdir / "chat.jsonl").is_file() else []
+
+
+def _append_chat(sdir: Path, role: str, text: str, **meta) -> dict:
+    msg = {"id": uuid.uuid4().hex[:12], "role": role, "text": text, "ts": time.time(), **meta}
+    with (sdir / "chat.jsonl").open("a") as fh:
+        fh.write(json.dumps(msg) + "\n")
+    return msg
+
+
+def _read_state(sdir: Path) -> dict:
+    return _read_json(sdir / "state.json", {"status": "idle"})
+
+
+def _write_state(sdir: Path, state: dict) -> None:
+    (sdir / "state.json").write_text(json.dumps(state, indent=2))
+
+
+def _read_trace(sdir: Path) -> list[dict]:
+    f = sdir / "trace.jsonl"
+    return [json.loads(l) for l in f.read_text().splitlines() if l.strip()] if f.is_file() else []
+
+
+def _persist_trace(pkey: str, sdir: Path, label: str) -> None:
+    events = (_PROGRESS.get(pkey) or {}).get("events") or []
     if not events:
         return
-    tf = _code_dir(pdir) / "trace.jsonl"
-    with tf.open("a") as fh:
+    with (sdir / "trace.jsonl").open("a") as fh:
         fh.write(json.dumps({"type": "run", "label": label, "ts": time.time(),
                              "count": len(events)}) + "\n")
         for e in events:
             fh.write(json.dumps({"type": "event", **e}) + "\n")
 
 
-def _read_trace(pdir: Path) -> list[dict]:
-    f = pdir / ".code" / "trace.jsonl"
-    if not f.is_file():
-        return []
-    out: list[dict] = []
-    for line in f.read_text().splitlines():
-        line = line.strip()
-        if line:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return out
+# ── reports (per folder repo) ────────────────────────────────────────
+
+def _write_report(repo: Path, name: str, content: str) -> str:
+    rd = repo / _REPORTS_DIRNAME
+    rd.mkdir(parents=True, exist_ok=True)
+    safe = safe_name(name, fallback="report") + ".md"
+    (rd / safe).write_text(content or "")
+    return f"{_REPORTS_DIRNAME}/{safe}"
 
 
-def _export_markdown(pdir: Path, project: str) -> str:
-    """Assemble the full coding process — conversation (outputs), tool/narration
-    trace, and any reports — into one Markdown document."""
-    import time as _t
+# ── migration from the old folder-level model ────────────────────────
 
-    def ts(v: float) -> str:
+def _import_session(user_id: str, project: str, folder: str, code: Path,
+                    sessions: list[dict]) -> None:
+    """Copy an old folder-level ``.code`` (chat/trace/state) into a new session."""
+    chat = code / "chat.jsonl"
+    if not chat.is_file() or not chat.read_text().strip():
+        return
+    sid = uuid.uuid4().hex[:8]
+    sdir = _session_dir(user_id, project, sid)
+    for fn in ("chat.jsonl", "trace.jsonl", "state.json"):
+        src = code / fn
+        if src.is_file():
+            shutil.copy2(src, sdir / fn)
+    sessions.append({"id": sid, "title": folder, "folder": folder,
+                     "created": time.time(), "status": "idle"})
+
+
+def _ensure_migrated(user_id: str, project: str) -> None:
+    """Build ``project.json`` + sessions from the old model on first touch (idempotent)."""
+    proj = _proj_dir(user_id, project)
+    if (proj / ".code" / "project.json").is_file():
+        return
+    folders: list[dict] = []
+    sessions: list[dict] = []
+    subcode = sorted([s for s in proj.iterdir()
+                      if s.is_dir() and s.name != ".code" and (s / ".code").is_dir()],
+                     key=lambda p: p.name.lower()) if proj.is_dir() else []
+    if subcode:
+        for s in subcode:                        # container project → each sub is a vfs folder
+            folders.append({"name": s.name, "kind": "vfs"})
+            _import_session(user_id, project, s.name, s / ".code", sessions)
+    else:                                        # legacy flat → the project dir itself is the repo
+        folders.append({"name": project, "kind": "self"})
+        if (proj / ".code").is_dir():
+            _import_session(user_id, project, project, proj / ".code", sessions)
+    if not sessions and folders:                 # always leave one session to open
+        sessions.append({"id": uuid.uuid4().hex[:8], "title": "Session 1",
+                         "folder": folders[0]["name"], "created": time.time(), "status": "idle"})
+    _write_project(user_id, project, {"folders": folders})
+    _write_sessions(user_id, project, sessions)
+
+
+def _ensure_links_project(user_id: str) -> None:
+    """Surface pre-existing global VFS links as folders of a ``linked`` project so
+    they aren't lost in the move to per-project link membership."""
+    links = read_links_at(_user_root(user_id))
+    if not links:
+        return
+    proj = _proj_dir(user_id, "linked")
+    if (proj / ".code" / "project.json").is_file():
+        return
+    folders = [{"name": name, "kind": "link", "link": name, "mode": ent.get("mode", "rw")}
+               for name, ent in sorted(links.items())]
+    _write_project(user_id, "linked", {"folders": folders})
+    _write_sessions(user_id, "linked", [
+        {"id": uuid.uuid4().hex[:8], "title": "Session 1",
+         "folder": folders[0]["name"], "created": time.time(), "status": "idle"}] if folders else [])
+
+
+def _discover_projects(user_id: str) -> list[str]:
+    root = _user_root(user_id)
+    names: list[str] = []
+    if not root.is_dir():
+        return names
+    for d in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not d.is_dir():
+            continue
+        if (d / ".code").is_dir():
+            names.append(d.name)
+            continue
         try:
-            return _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(v))
-        except (ValueError, OSError):
-            return ""
+            if any(s.is_dir() and (s / ".code").is_dir() for s in d.iterdir()):
+                names.append(d.name)
+        except OSError:
+            pass
+    return names
 
-    lines = [f"# Coding process — {project}", f"_Exported {ts(_t.time())}_", ""]
 
-    # 1) Conversation (requests + agent outputs).
-    lines.append("## Conversation\n")
-    for m in _read_chat(pdir):
-        who = "🧑 User" if m.get("role") == "user" else f"🤖 {m.get('archetype') or 'assistant'}"
-        meta = " · ".join(x for x in [m.get("kind"), m.get("size"),
-                                      (m.get("commit") or "")[:7]] if x)
-        lines.append(f"### {who}{(' — ' + meta) if meta else ''}  ·  {ts(m.get('ts', 0))}")
-        lines.append((m.get("text") or "").rstrip())
-        for f in (m.get("findings") or []):
-            lines.append(f"- **{f.get('severity', '')}** · {f.get('title', '')}"
-                         + (f" ({f['file']})" if f.get("file") else ""))
-        lines.append("")
+# ── tree building ────────────────────────────────────────────────────
 
-    # 2) Tool & narration trace (grouped per run).
-    trace = _read_trace(pdir)
-    if trace:
-        lines.append("## Tool & narration trace\n")
-        for rec in trace:
-            if rec.get("type") == "run":
-                lines.append(f"\n### ▶ {rec.get('label', 'run')}  ·  {ts(rec.get('ts', 0))}\n")
-                continue
-            stage = rec.get("stage", "")
-            if stage in ("usage",):
-                continue  # token lines are noise in a readable export; kept in JSON
-            msg = rec.get("message", "")
-            lines.append(f"- `{ts(rec.get('ts', 0))}`  {msg}")
-        lines.append("")
+_STATS_SKIP = {".git", ".code", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
 
-    # 3) Inline any reports so the export is self-contained.
-    rd = pdir / _REPORTS_DIRNAME
-    if rd.is_dir():
-        reports = sorted(f for f in rd.glob("*.md") if f.is_file())
-        if reports:
-            lines.append("## Reports\n")
-            for rf in reports:
-                lines.append(f"<details><summary>{rf.name}</summary>\n")
-                lines.append(rf.read_text().rstrip())
-                lines.append("\n</details>\n")
 
-    return "\n".join(lines) + "\n"
+def _count_files(root: Path, cap: int = 20000) -> int:
+    n, stack = 0, [root]
+    while stack and n < cap:
+        try:
+            for c in stack.pop().iterdir():
+                if c.is_dir():
+                    if c.name not in _STATS_SKIP:
+                        stack.append(c)
+                elif c.is_file():
+                    n += 1
+                    if n >= cap:
+                        break
+        except OSError:
+            pass
+    return n
 
-# Mirror the frontend's tier inheritance (tierConfig.ts): the `coding`/`vision`
-# tiers were added after many Library sets were first seeded, so a saved
-# `fd:forge-tiers` blob may not carry an explicit entry for them. Resolve a tier
-# to the user's nearest configured tier (with its provider/model/api_key) instead
-# of falling through to the keyless registry default.
+
+def _project_tree(user_id: str, project: str) -> dict:
+    folders_out = []
+    for f in _read_project(user_id, project).get("folders", []):
+        name = f.get("name", "")
+        try:
+            repo = _folder_repo(user_id, project, name)
+            exists = repo.is_dir()
+        except HTTPException:
+            repo, exists = None, False
+        folders_out.append({
+            "name": name, "kind": f.get("kind", "vfs"),
+            "linked": f.get("kind") == "link", "mode": f.get("mode", "rw"),
+            "files": _count_files(repo) if (repo and exists) else 0, "missing": not exists,
+        })
+    sessions_out = []
+    for s in _read_sessions(user_id, project):
+        sdir = _proj_dir(user_id, project) / ".code" / "sessions" / safe_name(s.get("id", ""), fallback="s")
+        chat = _read_chat(sdir) if sdir.is_dir() else []
+        sessions_out.append({
+            "id": s.get("id"), "title": s.get("title", "Session"), "folder": s.get("folder", ""),
+            "messages": len(chat), "status": _read_state(sdir).get("status", "idle"),
+            "last_message": (chat[-1]["text"][:120] if chat else ""), "created": s.get("created", 0),
+        })
+    return {"name": project, "folders": folders_out, "sessions": sessions_out}
+
+
+# ── router (small vs big + archetype pick) ───────────────────────────
+
+# ... orchestration below is model-agnostic: it takes a progress key (pkey), a
+# repo dir (agent workspace / git), and a session dir (sdir) for chat/trace.
+
 _TIER_FALLBACK = {"coding": "reason", "vision": "balanced"}
 
 
 def _resolve_tcfg(tiers_map: dict, tier: str) -> dict:
-    """The owner's tier config for ``tier``, inheriting a sibling tier when the
-    exact one isn't configured. Returns {} only when the owner has no tiers at all."""
     if tiers_map.get(tier):
         return tiers_map[tier]
     pref = _TIER_FALLBACK.get(tier, "balanced")
@@ -181,109 +340,8 @@ def _resolve_tcfg(tiers_map: dict, tier: str) -> dict:
             or tiers_map.get("reason") or next(iter(tiers_map.values()), {}))
 
 
-# ── per-project storage (under <project>/.code/) ─────────────────────
-
-def _norm_id(pid: str) -> str:
-    """Normalise a folder id ``project/folder`` (or legacy flat ``folder``).
-
-    Each segment is filesystem-sanitised (no separators, no ``..``); at most two
-    segments are kept. The result is the stable id used for on-disk resolution,
-    progress/trace keys, and what the API returns to the client.
-    """
-    segs = [safe_name(s, fallback="") for s in str(pid or "").split("/") if s.strip()]
-    segs = [s for s in segs if s][:2]
-    return "/".join(segs)
-
-
-def _pdir(user_id: str, pid: str) -> Path:
-    """Absolute on-disk dir for a folder id ``project/folder`` (1–2 segments).
-
-    Each segment is already sanitised by :func:`_norm_id`, so the join can't
-    escape the user's VFS root.
-    """
-    nid = _norm_id(pid)
-    if not nid:
-        raise HTTPException(400, "invalid project/folder id")
-    segs = nid.split("/")
-    root = _user_root(user_id)
-    # A linked folder (first segment names a link) resolves to its external path.
-    tgt = link_target_at(root, segs[0])
-    p = tgt if tgt is not None else (root / segs[0])
-    for seg in segs[1:]:
-        p = p / seg
-    return p.resolve()
-
-
-def _is_linked(user_id: str, pid: str) -> bool:
-    return link_target_at(_user_root(user_id), _norm_id(pid).split("/")[0]) is not None
-
-
-def _is_code_target(user_id: str, pid: str, pdir: Path) -> bool:
-    """A folder is a valid Code target if it already has a ``.code`` dir OR it's a
-    linked folder (which becomes a code project on the first message)."""
-    return _is_code_project(pdir) or _is_linked(user_id, pid)
-
-
-def _code_dir(pdir: Path) -> Path:
-    d = pdir / ".code"
-    d.mkdir(parents=True, exist_ok=True)
-    # Never commit chat/trace/state into the repo (crucial for linked real repos):
-    # a self-contained ignore inside the sidecar dir, without touching the repo's
-    # own .gitignore.
-    gi = d / ".gitignore"
-    if not gi.exists():
-        gi.write_text("*\n")
-    return d
-
-
-def _is_code_project(pdir: Path) -> bool:
-    return (pdir / ".code").is_dir()
-
-
-def _read_chat(pdir: Path) -> list[dict]:
-    f = pdir / ".code" / "chat.jsonl"
-    if not f.is_file():
-        return []
-    out: list[dict] = []
-    for line in f.read_text().splitlines():
-        line = line.strip()
-        if line:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return out
-
-
-def _append_chat(pdir: Path, role: str, text: str, **meta) -> dict:
-    msg = {"id": uuid.uuid4().hex[:12], "role": role, "text": text,
-           "ts": time.time(), **meta}
-    f = _code_dir(pdir) / "chat.jsonl"
-    with f.open("a") as fh:
-        fh.write(json.dumps(msg) + "\n")
-    return msg
-
-
-def _read_state(pdir: Path) -> dict:
-    f = pdir / ".code" / "state.json"
-    if f.is_file():
-        try:
-            return json.loads(f.read_text())
-        except json.JSONDecodeError:
-            pass
-    return {"status": "idle"}
-
-
-def _write_state(pdir: Path, state: dict) -> None:
-    (_code_dir(pdir) / "state.json").write_text(json.dumps(state, indent=2))
-
-
-# ── router (small vs big + archetype pick) ───────────────────────────
-
 async def _classify(intent: str, context: str, archetypes: list[dict],
                     tiers_map: dict, registry: dict) -> dict:
-    """Size the request and pick the executing archetype(s). LLM with a
-    deterministic fallback so a route is always returned."""
     by_id = {a["id"]: a for a in archetypes}
     sys_file = _INSTRUCTIONS_DIR / "code" / "router.md"
     system_prompt = sys_file.read_text() + "\n\n" + _build_catalog(archetypes, {})
@@ -305,25 +363,20 @@ async def _classify(intent: str, context: str, archetypes: list[dict],
         if content.startswith("```"):
             content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
         raw = json.loads(content)
-    except Exception as e:  # noqa: BLE001 — any failure → deterministic fallback
+    except Exception as e:  # noqa: BLE001
         log.warning("code router LLM failed; keyword fallback", error=str(e))
         raw = None
-
     if not isinstance(raw, dict) or "size" not in raw:
         low = intent.lower()
         breadth = len(_score_archetypes(intent, archetypes))
         difficulty = _fallback_difficulty(intent, breadth)
         is_bug = any(w in low for w in ("bug", "error", "crash", "fix", "broken", "fails"))
-        size = "big" if difficulty == "hard" else "small"
         raw = {
-            "size": size,
+            "size": "big" if difficulty == "hard" else "small",
             "planner": "architect" if difficulty == "hard" else "light-planner",
             "small_archetype": "debugger" if is_bug else "code-implementer",
-            "domain": "general", "difficulty": difficulty,
-            "title": intent[:48], "why": "keyword fallback",
+            "domain": "general", "difficulty": difficulty, "title": intent[:48], "why": "keyword fallback",
         }
-
-    # Validate / clamp picks to known archetypes.
     raw["size"] = "big" if str(raw.get("size")).lower() == "big" else "small"
     if raw.get("planner") not in _PLANNERS or raw["planner"] not in by_id:
         raw["planner"] = "light-planner" if "light-planner" in by_id else "architect"
@@ -332,7 +385,7 @@ async def _classify(intent: str, context: str, archetypes: list[dict],
     return raw
 
 
-# ── single-agent execution (small path; Phase-1 also handles big) ────
+# ── agent execution ──────────────────────────────────────────────────
 
 def _exec_prompt(intent: str) -> str:
     return (
@@ -346,10 +399,10 @@ def _exec_prompt(intent: str) -> str:
     )
 
 
-async def _run_agent(request: Request, user: dict, project: str, pdir: Path,
+async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
                      archetype_id: str, prompt: str, by_id: dict,
                      tiers_map: dict, env_vars: list) -> dict:
-    """Spawn one archetype anchored at the project dir, dispatch ``prompt``, dispose."""
+    """Spawn one archetype anchored at ``repo``, dispatch ``prompt``, dispose."""
     arch = by_id[archetype_id]
     role = arch.get("role", archetype_id)
     tier = arch.get("tier", "coding")
@@ -358,21 +411,21 @@ async def _run_agent(request: Request, user: dict, project: str, pdir: Path,
 
     def _on_action(act: dict) -> None:
         if act.get("tool") == "narration":
-            _progress(project, "narration", f"{role}: {act.get('detail', '')}",
+            _progress(pkey, "narration", f"{role}: {act.get('detail', '')}",
                       agent=role, tool="narration", detail=act.get("detail", ""))
         else:
             detail = f": {act['detail']}" if act.get("detail") else ""
-            _progress(project, "action", f"{role} → {act.get('tool')}{detail}",
+            _progress(pkey, "action", f"{role} → {act.get('tool')}{detail}",
                       agent=role, tool=act.get("tool"), detail=act.get("detail", ""))
 
     def _on_usage(pt: int, ct: int, tt: int) -> None:
-        _progress(project, "usage", f"{role} · {pt:,}→{ct:,} tok",
+        _progress(pkey, "usage", f"{role} · {pt:,}→{ct:,} tok",
                   agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
-    _phase(project, f"{role} working")
+    _phase(pkey, f"{role} working")
     port, token, slug = await spawn_archetype_agent(
         arch, tier, tcfg, request, user, name_suffix=suffix,
-        env_vars=env_vars, workspace_path=str(pdir),
+        env_vars=env_vars, workspace_path=str(repo),
     )
     try:
         d = await _dispatch_one(
@@ -381,16 +434,12 @@ async def _run_agent(request: Request, user: dict, project: str, pdir: Path,
             agent_name=role, on_usage=_on_usage,
         )
     finally:
-        # Disposal is best-effort: the agent has already done its work, so a
-        # stop failure must never discard the result or 500 the request.
         try:
             await stop_archetype_agent(slug)
         except Exception as e:  # noqa: BLE001
             log.warning("code: failed to stop agent", slug=slug, error=str(e))
     return d
 
-
-# ── big-job prompts (Vatra plan→build, Basna review fan-out, fix loop) ─
 
 def _plan_prompt(intent: str) -> str:
     return (
@@ -451,7 +500,6 @@ def _fix_prompt(intent: str, fix_instructions: str) -> str:
 
 async def _triage_reviews(reviews: list[dict], intent: str,
                           tiers_map: dict, registry: dict) -> dict:
-    """Merge the reviewers' reports into a fix decision (Basna-style verdict)."""
     sys_file = _INSTRUCTIONS_DIR / "code" / "triage.md"
     parts = [f"## {r['role']} report\n{r['output'] or '(no output)'}" for r in reviews]
     user_prompt = f"Task:\n{intent}\n\n" + "\n\n".join(parts)
@@ -471,7 +519,7 @@ async def _triage_reviews(reviews: list[dict], intent: str,
         if content.startswith("```"):
             content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
         raw = json.loads(content)
-    except Exception as e:  # noqa: BLE001 — be conservative: no auto-fix if triage fails
+    except Exception as e:  # noqa: BLE001
         log.warning("code triage failed", error=str(e))
         return {"needs_fix": False, "fixer": "code-implementer",
                 "summary": "Review complete (triage unavailable — not auto-fixing).",
@@ -482,27 +530,24 @@ async def _triage_reviews(reviews: list[dict], intent: str,
     return raw
 
 
-async def _run_build_loop(request: Request, user: dict, project: str, pdir: Path,
+async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                           intent: str, by_id: dict, tiers_map: dict,
                           env_vars: list, registry: dict) -> None:
-    """Big-job pipeline: build → review fan-out → capped fix loop. Runs in background;
-    communicates via progress events, the chat log, and per-phase git commits."""
-    _progress_start(project)
-    _write_state(pdir, {"status": "running"})
+    """Big-job pipeline: build → review fan-out → capped fix loop (background)."""
+    _progress_start(pkey)
+    _write_state(sdir, {"status": "running"})
     try:
-        # 1) Build from the approved plan.md (Vatra-style: plan → implement).
-        _phase(project, "Building")
-        d = await _run_agent(request, user, project, pdir, "code-implementer",
+        _phase(pkey, "Building")
+        d = await _run_agent(request, user, pkey, repo, "code-implementer",
                              _build_prompt(intent), by_id, tiers_map, env_vars)
-        sha = await code_git.git_commit(pdir, f"[build] code-implementer: {intent[:60]}")
-        _append_chat(pdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
+        sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
+        _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
                      kind="build", archetype="code-implementer", ok=bool(d.get("ok")), commit=sha or "")
 
-        # 2) Review → fix loop (Basna-style parallel review fan-out → triage → fix).
         for rnd in range(_MAX_FIX_ROUNDS + 1):
-            _phase(project, "Reviewing")
+            _phase(pkey, "Reviewing")
             reviews_raw = await asyncio.gather(*[
-                _run_agent(request, user, project, pdir, rv, _review_prompt(rv, intent),
+                _run_agent(request, user, pkey, repo, rv, _review_prompt(rv, intent),
                            by_id, tiers_map, env_vars)
                 for rv in _REVIEWERS
             ], return_exceptions=True)
@@ -511,320 +556,406 @@ async def _run_build_loop(request: Request, user: dict, project: str, pdir: Path
                 role = by_id[rv].get("role", rv)
                 out = "" if isinstance(res, Exception) else (res.get("output") or "")
                 reviews.append({"role": role, "id": rv, "output": out})
-                # Persist each reviewer's full findings into the VFS project.
                 if out.strip():
-                    _write_report(pdir, f"review-r{rnd}-{rv}", f"# {role} — review r{rnd}\n\n{out}")
+                    _write_report(repo, f"review-r{rnd}-{rv}", f"# {role} — review r{rnd}\n\n{out}")
 
             triage = await _triage_reviews(reviews, intent, tiers_map, registry)
             review_summary = triage.get("summary", "Review complete.")
-            _write_report(pdir, f"review-r{rnd}-summary", f"# Review summary — r{rnd}\n\n{review_summary}")
-            # Commit reviewer reports + any tests qa-engineer added during review.
-            await code_git.git_commit(pdir, f"[review r{rnd}] reports + reviewer tests")
-            _append_chat(pdir, "assistant", review_summary, kind="review", round=rnd,
+            _write_report(repo, f"review-r{rnd}-summary", f"# Review summary — r{rnd}\n\n{review_summary}")
+            await code_git.git_commit(repo, f"[review r{rnd}] reports + reviewer tests")
+            _append_chat(sdir, "assistant", review_summary, kind="review", round=rnd,
                          findings=triage.get("findings", []), needs_fix=triage["needs_fix"])
 
             if not triage["needs_fix"] or rnd == _MAX_FIX_ROUNDS:
                 if triage["needs_fix"]:
-                    _append_chat(pdir, "assistant",
+                    _append_chat(sdir, "assistant",
                                  f"Reached the fix-round cap ({_MAX_FIX_ROUNDS}); stopping with "
                                  "open findings above.", kind="note")
                 break
 
-            # 3) Fix the blocking/major findings, then re-review.
-            _phase(project, f"Fixing (round {rnd + 1})")
+            _phase(pkey, f"Fixing (round {rnd + 1})")
             fixer = triage["fixer"]
-            fd = await _run_agent(request, user, project, pdir, fixer,
+            fd = await _run_agent(request, user, pkey, repo, fixer,
                                   _fix_prompt(intent, triage.get("fix_instructions", "")),
                                   by_id, tiers_map, env_vars)
-            fsha = await code_git.git_commit(pdir, f"[fix r{rnd + 1}] {fixer}")
-            _append_chat(pdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
+            fsha = await code_git.git_commit(repo, f"[fix r{rnd + 1}] {fixer}")
+            _append_chat(sdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
                          kind="fix", round=rnd + 1, archetype=fixer,
                          ok=bool(fd.get("ok")), commit=fsha or "")
 
-        _write_state(pdir, {"status": "idle"})
-    except Exception as e:  # noqa: BLE001 — never leave the project stuck in "running"
-        log.warning("code build loop failed", project=project, error=str(e))
-        _append_chat(pdir, "assistant", f"⚠️ Build loop failed: {e}", kind="note", ok=False)
-        _write_state(pdir, {"status": "idle"})
+        _write_state(sdir, {"status": "idle"})
+    except Exception as e:  # noqa: BLE001
+        log.warning("code build loop failed", pkey=pkey, error=str(e))
+        _append_chat(sdir, "assistant", f"⚠️ Build loop failed: {e}", kind="note", ok=False)
+        _write_state(sdir, {"status": "idle"})
     finally:
-        _persist_trace(project, pdir, f"Build → review → fix: {intent[:80]}")
-        _progress_done(project)
+        _persist_trace(pkey, sdir, f"Build → review → fix: {intent[:80]}")
+        _progress_done(pkey)
 
 
-# ── endpoints ────────────────────────────────────────────────────────
+def _export_markdown(sdir: Path, repo: Path, title: str) -> str:
+    import time as _t
 
-class CreateFolderReq(BaseModel):
-    project: str          # parent namespace (a project groups related folders)
-    folder: str           # the sub-project folder (its own git repo + chat)
+    def ts(v: float) -> str:
+        try:
+            return _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(v))
+        except (ValueError, OSError):
+            return ""
+
+    lines = [f"# Coding process — {title}", f"_Exported {ts(_t.time())}_", "", "## Conversation\n"]
+    for m in _read_chat(sdir):
+        who = "🧑 User" if m.get("role") == "user" else f"🤖 {m.get('archetype') or 'assistant'}"
+        meta = " · ".join(x for x in [m.get("kind"), m.get("size"), (m.get("commit") or "")[:7]] if x)
+        lines.append(f"### {who}{(' — ' + meta) if meta else ''}  ·  {ts(m.get('ts', 0))}")
+        lines.append((m.get("text") or "").rstrip())
+        for f in (m.get("findings") or []):
+            lines.append(f"- **{f.get('severity', '')}** · {f.get('title', '')}"
+                         + (f" ({f['file']})" if f.get("file") else ""))
+        lines.append("")
+    trace = _read_trace(sdir)
+    if trace:
+        lines.append("## Tool & narration trace\n")
+        for rec in trace:
+            if rec.get("type") == "run":
+                lines.append(f"\n### ▶ {rec.get('label', 'run')}  ·  {ts(rec.get('ts', 0))}\n")
+                continue
+            if rec.get("stage") == "usage":
+                continue
+            lines.append(f"- `{ts(rec.get('ts', 0))}`  {rec.get('message', '')}")
+        lines.append("")
+    rd = repo / _REPORTS_DIRNAME
+    if rd.is_dir():
+        reports = sorted(f for f in rd.glob("*.md") if f.is_file())
+        if reports:
+            lines.append("## Reports\n")
+            for rf in reports:
+                lines.append(f"<details><summary>{rf.name}</summary>\n")
+                lines.append(rf.read_text().rstrip())
+                lines.append("\n</details>\n")
+    return "\n".join(lines) + "\n"
+
+
+# ── request models ───────────────────────────────────────────────────
+
+class CreateProjectReq(BaseModel):
+    name: str
+
+
+class NewFolderReq(BaseModel):
+    folder: str
+
+
+class LinkFolderReq(BaseModel):
+    name: str                 # folder name within the project
+    link: str = ""            # existing VFS link name to reference…
+    path: str = ""            # …or create a new link at this absolute path
+    mode: str = "rw"
+
+
+class NewSessionReq(BaseModel):
+    title: str = ""
+    folder: str = ""
 
 
 class MessageReq(BaseModel):
-    project: str          # folder id: "project/folder" (or legacy "folder")
+    project: str
+    session: str
     text: str
+
+
+class ApproveReq(BaseModel):
+    project: str
+    session: str
+    plan: str | None = None
 
 
 class RollbackReq(BaseModel):
     ref: str
 
 
-_STATS_SKIP = {".git", ".code", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
-
-
-def _count_files(root: Path, cap: int = 20000) -> int:
-    """Bounded file count skipping heavy dirs — a linked repo can be huge."""
-    n = 0
-    stack = [root]
-    while stack and n < cap:
-        try:
-            for c in stack.pop().iterdir():
-                if c.is_dir():
-                    if c.name not in _STATS_SKIP:
-                        stack.append(c)
-                elif c.is_file():
-                    n += 1
-                    if n >= cap:
-                        break
-        except OSError:
-            pass
-    return n
-
-
-def _folder_info(pdir: Path, fid: str) -> dict:
-    """Summary card for one code folder (leaf repo)."""
-    chat = _read_chat(pdir)
-    last = chat[-1] if chat else None
-    files = _count_files(pdir)
-    return {
-        "id": fid, "name": pdir.name, "files": files, "messages": len(chat),
-        "last_message": (last or {}).get("text", "")[:120],
-        "mtime": pdir.stat().st_mtime,
-        "status": _read_state(pdir).get("status", "idle"),
-    }
-
+# ── project / folder / session endpoints ─────────────────────────────
 
 @router.get("/projects")
 async def list_projects(user: dict = Depends(get_current_user)):
-    """List Code projects as a two-level tree: each project groups its folders
-    (sub-projects). A legacy flat code folder (``.code`` directly under the user
-    root) surfaces as a single-folder project of the same name."""
-    root = _user_root(user["id"])
-    groups: dict[str, list[dict]] = {}
-    if root.is_dir():
-        for top in sorted(root.iterdir(), key=lambda x: x.name.lower()):
-            if not top.is_dir():
-                continue
-            if _is_code_project(top):
-                # Legacy flat folder — its own project.
-                groups.setdefault(top.name, []).append(_folder_info(top, top.name))
-                continue
-            # Container project: its code sub-folders are the folders.
-            for sub in sorted(top.iterdir(), key=lambda x: x.name.lower()):
-                if sub.is_dir() and _is_code_project(sub):
-                    groups.setdefault(top.name, []).append(
-                        _folder_info(sub, f"{top.name}/{sub.name}"))
-    # Linked folders — grouped under a synthetic "linked" project.
-    for name, ent in sorted(read_links_at(root).items()):
-        tgt = link_target_at(root, name)
-        if tgt is not None and tgt.is_dir():
-            info = _folder_info(tgt, name)
-            info["linked"] = True
-            info["mode"] = ent.get("mode", "rw")
-            groups.setdefault("linked", []).append(info)
-    projects = [{"name": name, "folders": folders}
-                for name, folders in sorted(groups.items(), key=lambda kv: kv[0].lower())]
-    return {"projects": projects}
+    """Full tree: each project with its folders and sessions."""
+    uid = user["id"]
+    _ensure_links_project(uid)
+    out = []
+    for name in _discover_projects(uid):
+        _ensure_migrated(uid, name)
+        out.append(_project_tree(uid, name))
+    out.sort(key=lambda p: p["name"].lower())
+    return {"projects": out}
 
 
 @router.post("/projects")
-async def create_folder(body: CreateFolderReq, user: dict = Depends(get_current_user)):
-    """Create a folder (sub-project) inside a project namespace; git-init it."""
-    proj = safe_name(body.project, fallback="")
-    fol = safe_name(body.folder, fallback="")
-    if not proj or not fol:
-        raise HTTPException(400, "project and folder are required")
-    # A legacy flat folder occupying the project name can't also be a container.
-    if (_user_root(user["id"]) / proj / ".code").is_dir():
-        raise HTTPException(409, f"'{proj}' is already a folder, not a project")
-    fid = f"{proj}/{fol}"
-    pdir = _pdir(user["id"], fid)
-    if _is_code_project(pdir):
-        raise HTTPException(409, "folder already exists")
-    pdir.mkdir(parents=True, exist_ok=True)
-    _code_dir(pdir)
-    await code_git.git_init(pdir)
-    _write_state(pdir, {"status": "idle"})
-    return {"project": proj, "folder": _folder_info(pdir, fid)}
+async def create_project(body: CreateProjectReq, user: dict = Depends(get_current_user)):
+    name = safe_name(body.name, fallback="")
+    if not name:
+        raise HTTPException(400, "invalid project name")
+    proj = _proj_dir(user["id"], name)
+    if (proj / ".code" / "project.json").is_file():
+        raise HTTPException(409, "project already exists")
+    proj.mkdir(parents=True, exist_ok=True)
+    _write_project(user["id"], name, {"folders": []})
+    _write_sessions(user["id"], name, [])
+    return {"project": _project_tree(user["id"], name)}
 
 
-@router.get("/projects/{project:path}/chat")
-async def get_chat(project: str, user: dict = Depends(get_current_user)):
-    pdir = _pdir(user["id"], project)
-    if not _is_code_target(user["id"], project, pdir):
-        raise HTTPException(404, "project not found")
-    return {"messages": _read_chat(pdir), "state": _read_state(pdir)}
+@router.post("/projects/{project}/folders")
+async def add_folder(project: str, body: NewFolderReq, user: dict = Depends(get_current_user)):
+    """Create a new VFS folder (git repo) inside a project."""
+    uid = user["id"]
+    _ensure_migrated(uid, project)
+    folder = safe_name(body.folder, fallback="")
+    if not folder:
+        raise HTTPException(400, "folder name required")
+    data = _read_project(uid, project)
+    if any(f.get("name") == folder for f in data["folders"]):
+        raise HTTPException(409, "folder already exists in project")
+    repo = (_proj_dir(uid, project) / folder).resolve()
+    repo.mkdir(parents=True, exist_ok=True)
+    await code_git.git_init(repo)
+    data["folders"].append({"name": folder, "kind": "vfs"})
+    _write_project(uid, project, data)
+    return {"project": _project_tree(uid, project)}
 
 
-@router.get("/projects/{project:path}/progress")
-async def get_progress(project: str, user: dict = Depends(get_current_user)):
-    p = _PROGRESS.get(_norm_id(project))
-    if p is None:
-        return {"events": [], "active": False}
-    return p
+@router.post("/projects/{project}/link")
+async def add_link_folder(project: str, body: LinkFolderReq, user: dict = Depends(get_current_user)):
+    """Add a linked external folder to a project. Either references an existing
+    VFS link (``link``) or creates one from ``path``. The same link may be added
+    to multiple projects."""
+    uid = user["id"]
+    _ensure_migrated(uid, project)
+    name = safe_name(body.name, fallback="")
+    if not name:
+        raise HTTPException(400, "folder name required")
+    link_name = safe_name(body.link, fallback="") or name
+    # Create the VFS link if a path was given (reuse the vfs_routes admin path).
+    if body.path.strip():
+        from captain_claw.flight_deck.vfs_routes import LinkBody, add_link
+        await add_link(LinkBody(name=link_name, path=body.path, mode=body.mode), user=user)
+    if link_target_at(_user_root(uid), link_name) is None:
+        raise HTTPException(404, f"no VFS link named '{link_name}'")
+    data = _read_project(uid, project)
+    if any(f.get("name") == name for f in data["folders"]):
+        raise HTTPException(409, "folder already exists in project")
+    data["folders"].append({"name": name, "kind": "link", "link": link_name, "mode": body.mode})
+    _write_project(uid, project, data)
+    return {"project": _project_tree(uid, project)}
 
 
-@router.get("/projects/{project:path}/export")
-async def export_process(project: str, format: str = "md",
+@router.delete("/projects/{project}/folders/{folder}")
+async def remove_folder(project: str, folder: str, user: dict = Depends(get_current_user)):
+    """Remove a folder from a project (drops membership only — never deletes a
+    linked external folder; a VFS folder's files stay on disk)."""
+    uid = user["id"]
+    data = _read_project(uid, project)
+    data["folders"] = [f for f in data["folders"] if f.get("name") != folder]
+    _write_project(uid, project, data)
+    return {"project": _project_tree(uid, project)}
+
+
+@router.post("/projects/{project}/sessions")
+async def create_session(project: str, body: NewSessionReq, user: dict = Depends(get_current_user)):
+    uid = user["id"]
+    _ensure_migrated(uid, project)
+    folders = _read_project(uid, project).get("folders", [])
+    folder = body.folder or (folders[0]["name"] if folders else "")
+    if not folder or not _folder_meta(uid, project, folder):
+        raise HTTPException(400, "a valid folder is required to start a session")
+    sessions = _read_sessions(uid, project)
+    sid = uuid.uuid4().hex[:8]
+    sess = {"id": sid, "title": body.title.strip() or f"Session {len(sessions) + 1}",
+            "folder": folder, "created": time.time(), "status": "idle"}
+    sessions.append(sess)
+    _write_sessions(uid, project, sessions)
+    _session_dir(uid, project, sid)
+    return {"project": _project_tree(uid, project), "session": sess}
+
+
+@router.delete("/projects/{project}/sessions/{session}")
+async def delete_session(project: str, session: str, user: dict = Depends(get_current_user)):
+    uid = user["id"]
+    _write_sessions(uid, project, [s for s in _read_sessions(uid, project) if s.get("id") != session])
+    sdir = _proj_dir(uid, project) / ".code" / "sessions" / safe_name(session, fallback="s")
+    if sdir.is_dir():
+        shutil.rmtree(sdir, ignore_errors=True)
+    return {"project": _project_tree(uid, project)}
+
+
+class SetFolderReq(BaseModel):
+    folder: str
+
+
+@router.put("/projects/{project}/sessions/{session}/folder")
+async def set_session_folder(project: str, session: str, body: SetFolderReq,
+                             user: dict = Depends(get_current_user)):
+    uid = user["id"]
+    if not _folder_meta(uid, project, body.folder):
+        raise HTTPException(404, "folder not in project")
+    sessions = _read_sessions(uid, project)
+    sess = next((s for s in sessions if s.get("id") == session), None)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    sess["folder"] = body.folder
+    _write_sessions(uid, project, sessions)
+    return {"project": _project_tree(uid, project)}
+
+
+# ── session-scoped context helper ────────────────────────────────────
+
+def _sctx(user_id: str, project: str, session: str):
+    """Return (session, repo, sdir, pkey) for a session, or 404."""
+    _ensure_migrated(user_id, project)
+    sess = _sget(user_id, project, session)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    repo = _folder_repo(user_id, project, sess.get("folder", ""))
+    sdir = _session_dir(user_id, project, session)
+    return sess, repo, sdir, f"{project}/{session}"
+
+
+@router.get("/projects/{project}/sessions/{session}/chat")
+async def get_chat(project: str, session: str, user: dict = Depends(get_current_user)):
+    _sess, _repo, sdir, _pk = _sctx(user["id"], project, session)
+    return {"messages": _read_chat(sdir), "state": _read_state(sdir)}
+
+
+@router.get("/projects/{project}/sessions/{session}/progress")
+async def get_progress(project: str, session: str, user: dict = Depends(get_current_user)):
+    p = _PROGRESS.get(f"{project}/{session}")
+    return p if p is not None else {"events": [], "active": False}
+
+
+@router.get("/projects/{project}/sessions/{session}/log")
+async def get_log(project: str, session: str, user: dict = Depends(get_current_user)):
+    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+    await code_git.git_init(repo)   # self-heal / init the target repo
+    return {"commits": await code_git.git_log(repo)}
+
+
+@router.get("/projects/{project}/sessions/{session}/diff")
+async def get_diff(project: str, session: str, ref_a: str = "", ref_b: str = "",
+                   user: dict = Depends(get_current_user)):
+    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+    return {"diff": await code_git.git_diff(repo, ref_a, ref_b)}
+
+
+@router.get("/projects/{project}/sessions/{session}/show")
+async def show_commit(project: str, session: str, sha: str, user: dict = Depends(get_current_user)):
+    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+    return {"diff": await code_git.git_show(repo, sha)}
+
+
+@router.post("/projects/{project}/sessions/{session}/rollback")
+async def rollback(project: str, session: str, body: RollbackReq,
+                   user: dict = Depends(get_current_user)):
+    _sess, repo, sdir, _pk = _sctx(user["id"], project, session)
+    if _read_state(sdir).get("status") == "running":
+        raise HTTPException(409, "a build is running — wait for it to finish")
+    target = next((c for c in await code_git.git_log(repo) if c["sha"].startswith(body.ref)), None)
+    await code_git.git_reset(repo, body.ref)
+    _append_chat(sdir, "assistant", f"↩ Rolled back to {body.ref[:7]}"
+                 + (f": {target['message']}" if target else ""), kind="note")
+    return {"ok": True, "head": (await code_git.git_log(repo, 1))[:1]}
+
+
+@router.get("/projects/{project}/sessions/{session}/export")
+async def export_process(project: str, session: str, format: str = "md",
                          user: dict = Depends(get_current_user)):
-    """Export the full coding process — conversation (outputs), tool/narration
-    trace, and reports — as a downloadable Markdown or JSON document."""
     from fastapi.responses import JSONResponse, PlainTextResponse
-    pdir = _pdir(user["id"], project)
-    if not _is_code_target(user["id"], project, pdir):
-        raise HTTPException(404, "project not found")
-    fid = _norm_id(project)                       # e.g. "web-gaming/tetris"
-    fname = fid.replace("/", "-") or "project"    # filesystem-safe download name
+    sess, repo, sdir, _pk = _sctx(user["id"], project, session)
+    title = f"{project} / {sess.get('title', 'session')}"
+    fname = safe_name(f"{project}-{sess.get('title', 'session')}", fallback="process")
     if format == "json":
-        data = {"project": fid, "exported_at": time.time(),
-                "messages": _read_chat(pdir), "trace": _read_trace(pdir)}
+        data = {"project": project, "session": sess, "exported_at": time.time(),
+                "messages": _read_chat(sdir), "trace": _read_trace(sdir)}
         return JSONResponse(data, headers={
             "Content-Disposition": f'attachment; filename="{fname}-process.json"'})
     return PlainTextResponse(
-        _export_markdown(pdir, fid), media_type="text/markdown",
+        _export_markdown(sdir, repo, title), media_type="text/markdown",
         headers={"Content-Disposition": f'attachment; filename="{fname}-process.md"'})
 
 
-@router.get("/projects/{project:path}/log")
-async def get_log(project: str, user: dict = Depends(get_current_user)):
-    pdir = _pdir(user["id"], project)
-    # Self-heal projects created before per-folder isolation existed: ensure this
-    # folder is its OWN repo (not resolving to an ancestor repo the VFS tree sits in).
-    if _is_code_target(user["id"], project, pdir):
-        await code_git.git_init(pdir)
-    return {"commits": await code_git.git_log(pdir)}
-
-
-@router.get("/projects/{project:path}/diff")
-async def get_diff(project: str, ref_a: str = "", ref_b: str = "",
-                   user: dict = Depends(get_current_user)):
-    pdir = _pdir(user["id"], project)
-    return {"diff": await code_git.git_diff(pdir, ref_a, ref_b)}
-
-
-@router.get("/projects/{project:path}/show")
-async def show_commit(project: str, sha: str, user: dict = Depends(get_current_user)):
-    """Return a single commit's patch for the diff viewer."""
-    pdir = _pdir(user["id"], project)
-    return {"diff": await code_git.git_show(pdir, sha)}
-
-
-@router.post("/projects/{project:path}/rollback")
-async def rollback(project: str, body: RollbackReq, user: dict = Depends(get_current_user)):
-    pdir = _pdir(user["id"], project)
-    if _read_state(pdir).get("status") == "running":
-        raise HTTPException(409, "a build is running — wait for it to finish")
-    target = next((c for c in await code_git.git_log(pdir) if c["sha"].startswith(body.ref)), None)
-    await code_git.git_reset(pdir, body.ref)
-    _append_chat(pdir, "assistant",
-                 f"↩ Rolled back to {body.ref[:7]}"
-                 + (f": {target['message']}" if target else ""), kind="note")
-    return {"ok": True, "head": (await code_git.git_log(pdir, 1))[:1]}
-
+# ── the main message + approve flow ──────────────────────────────────
 
 @router.post("/message")
 async def message(body: MessageReq, request: Request, user: dict = Depends(get_current_user)):
-    """Main entry: route the request, run it, commit, and append to the chat."""
     intent = body.text.strip()
     if not intent:
         raise HTTPException(400, "text is required")
-    project = _norm_id(body.project)
-    pdir = _pdir(user["id"], project)
-    if not _is_code_target(user["id"], project, pdir):
-        raise HTTPException(404, "project not found — create it first")
+    uid = user["id"]
+    sess, repo, sdir, pkey = _sctx(uid, body.project, body.session)
+    await code_git.git_init(repo)
 
     db = get_db()
-    archetypes = await merged_archetypes(db, user["id"])
+    archetypes = await merged_archetypes(db, uid)
     by_id = {a["id"]: a for a in archetypes}
     registry = _load_registry()
-    tiers_map, env_vars = await _load_owner_tiers(db, user["id"])
+    tiers_map, env_vars = await _load_owner_tiers(db, uid)
 
-    _append_chat(pdir, "user", intent)
-    _progress_start(project)
-    _write_state(pdir, {"status": "running"})
+    _append_chat(sdir, "user", intent)
+    _progress_start(pkey)
+    _write_state(sdir, {"status": "running"})
     try:
-        _phase(project, "Routing")
-        prior = _read_chat(pdir)[-8:]
+        _phase(pkey, "Routing")
+        prior = _read_chat(sdir)[-8:]
         context = "\n".join(f"{m['role']}: {m['text'][:200]}" for m in prior[:-1])
         route = await _classify(intent, context, archetypes, tiers_map, registry)
-        _progress(project, "route", f"size={route['size']} · {route.get('why', '')}",
-                  size=route["size"])
+        _progress(pkey, "route", f"size={route['size']} · {route.get('why', '')}", size=route["size"])
 
-        # ── SMALL: one best-fit archetype runs the edit directly. ──
         if route["size"] == "small":
             executor = route["small_archetype"]
-            d = await _run_agent(request, user, project, pdir, executor,
+            d = await _run_agent(request, user, pkey, repo, executor,
                                  _exec_prompt(intent), by_id, tiers_map, env_vars)
-            sha = await code_git.git_commit(
-                pdir, f"[edit] {executor}: {route.get('title', intent)[:60]}")
+            sha = await code_git.git_commit(repo, f"[edit] {executor}: {route.get('title', intent)[:60]}")
             out = (d.get("output") or "").strip() or "(no output)"
             if not d.get("ok"):
                 out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
-            assistant = _append_chat(pdir, "assistant", out, archetype=executor,
-                                     size="small", ok=bool(d.get("ok")), commit=sha or "",
-                                     route=route)
-            _write_state(pdir, {"status": "idle", "last_route": route})
+            assistant = _append_chat(sdir, "assistant", out, archetype=executor,
+                                     size="small", ok=bool(d.get("ok")), commit=sha or "", route=route)
+            _write_state(sdir, {"status": "idle", "last_route": route})
             return {"message": assistant, "route": route, "commit": sha}
 
-        # ── BIG: plan first, then stop at the approval gate. ──
         planner = route["planner"]
-        _phase(project, f"Planning ({planner})")
-        d = await _run_agent(request, user, project, pdir, planner,
+        _phase(pkey, f"Planning ({planner})")
+        d = await _run_agent(request, user, pkey, repo, planner,
                              _plan_prompt(intent), by_id, tiers_map, env_vars)
-        plan_md = pdir / "plan.md"
+        plan_md = repo / "plan.md"
         plan_text = plan_md.read_text() if plan_md.is_file() else (d.get("output") or "").strip()
-        sha = await code_git.git_commit(pdir, f"[plan] {planner}: {route.get('title', intent)[:60]}")
-        assistant = _append_chat(
-            pdir, "assistant", plan_text or "(planner produced no plan)",
-            kind="plan", archetype=planner, ok=bool(d.get("ok")), commit=sha or "", route=route)
-        _write_state(pdir, {"status": "awaiting_plan", "intent": intent, "route": route})
+        sha = await code_git.git_commit(repo, f"[plan] {planner}: {route.get('title', intent)[:60]}")
+        assistant = _append_chat(sdir, "assistant", plan_text or "(planner produced no plan)",
+                                 kind="plan", archetype=planner, ok=bool(d.get("ok")), commit=sha or "", route=route)
+        _write_state(sdir, {"status": "awaiting_plan", "intent": intent, "route": route})
         return {"message": assistant, "route": route, "commit": sha,
                 "status": "awaiting_plan", "plan": plan_text}
     finally:
         _sz = (locals().get("route") or {}).get("size", "")
-        _persist_trace(project, pdir, f"{_sz + ': ' if _sz else ''}{intent[:80]}")
-        _progress_done(project)
-
-
-class ApproveReq(BaseModel):
-    project: str
-    plan: str | None = None  # optional user-edited plan to overwrite plan.md
+        _persist_trace(pkey, sdir, f"{_sz + ': ' if _sz else ''}{intent[:80]}")
+        _progress_done(pkey)
 
 
 @router.post("/plan/approve")
-async def approve_plan(body: ApproveReq, request: Request,
-                       user: dict = Depends(get_current_user)):
-    """Approve a big job's plan and kick off the build → review → fix loop in the
-    background. Returns immediately; the frontend follows progress + the chat log."""
-    project = _norm_id(body.project)
-    pdir = _pdir(user["id"], project)
-    if not _is_code_target(user["id"], project, pdir):
-        raise HTTPException(404, "project not found")
-    state = _read_state(pdir)
+async def approve_plan(body: ApproveReq, request: Request, user: dict = Depends(get_current_user)):
+    uid = user["id"]
+    sess, repo, sdir, pkey = _sctx(uid, body.project, body.session)
+    state = _read_state(sdir)
     if state.get("status") != "awaiting_plan":
         raise HTTPException(409, "no plan awaiting approval")
     intent = state.get("intent", "")
-
-    # Honor a user-edited plan.
     if body.plan and body.plan.strip():
-        (pdir / "plan.md").write_text(body.plan)
-        await code_git.git_commit(pdir, "[plan] user-edited")
+        (repo / "plan.md").write_text(body.plan)
+        await code_git.git_commit(repo, "[plan] user-edited")
 
     db = get_db()
-    archetypes = await merged_archetypes(db, user["id"])
+    archetypes = await merged_archetypes(db, uid)
     by_id = {a["id"]: a for a in archetypes}
     registry = _load_registry()
-    tiers_map, env_vars = await _load_owner_tiers(db, user["id"])
+    tiers_map, env_vars = await _load_owner_tiers(db, uid)
 
-    _append_chat(pdir, "user", "✓ Plan approved — building.", kind="approval")
+    _append_chat(sdir, "user", "✓ Plan approved — building.", kind="approval")
     asyncio.create_task(_run_build_loop(
-        request, user, project, pdir, intent, by_id, tiers_map, env_vars, registry))
+        request, user, pkey, repo, sdir, intent, by_id, tiers_map, env_vars, registry))
     return {"status": "running"}
