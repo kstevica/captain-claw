@@ -30,6 +30,7 @@ _AUTHOR = ("-c", "user.name=Captain Claw", "-c", "user.email=code@captain-claw.l
 # be versioned (shell pre-creates ``saved/`` under the workspace root).
 _GITIGNORE = """\
 .code/
+.codemap/
 .captain-claw/
 saved/
 node_modules/
@@ -47,7 +48,7 @@ build/
 # Runtime artifacts an agent litters into ANY workspace (incl. linked real
 # repos). Written to .git/info/exclude — a LOCAL ignore that never modifies the
 # repo's own tracked .gitignore, so linking a real project stays non-invasive.
-_LOCAL_EXCLUDES = ["saved/", ".code/", ".captain-claw/", ".DS_Store"]
+_LOCAL_EXCLUDES = ["saved/", ".code/", ".codemap/", ".captain-claw/", ".DS_Store"]
 
 
 async def _ensure_excludes(project_dir: Path | str) -> None:

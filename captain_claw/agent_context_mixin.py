@@ -2171,12 +2171,14 @@ class AgentContextMixin:
         "screen_capture": ["screen_capture"],
         "desktop_action": ["desktop_action"],
         "cron": ["cron"],
+        "codemap": ["codemap"],
     }
 
     def _register_default_tools(self) -> None:
         """Register the default tool set."""
         from captain_claw.tools import (
             BrowserTool,
+            CodeMapTool,
             PinchTabTool,
             DocxExtractTool,
             EditTool,
@@ -2242,6 +2244,8 @@ class AgentContextMixin:
                 self.tools.register(GlobTool())
             elif tool_name == "grep":
                 self.tools.register(GrepTool())
+            elif tool_name == "codemap":
+                self.tools.register(CodeMapTool())
             elif tool_name == "web_fetch":
                 self.tools.register(WebFetchTool())
                 self.tools.register(WebGetTool())

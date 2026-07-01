@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck import code_git
+from captain_claw.flight_deck import code_map
 from captain_claw.flight_deck.basna_routes import (
     _PROGRESS,
     _build_catalog,
@@ -67,6 +68,29 @@ _GIT_WORDS = ("commit", "push", "pull", "fetch", "branch", "checkout", "switch",
               "revert", "reset", "cherry-pick", " tag", "remote")
 _REVIEWERS = ["code-reviewer", "security-reviewer", "qa-engineer"]
 _MAX_FIX_ROUNDS = 3
+
+_CARTOGRAPHER = "code-cartographer"
+_MAP_WORDS = ("map this", "map the repo", "map the codebase", "index this", "index the code",
+              "code map", "codemap", "build the map", "update the map", "refresh the map",
+              "cartograph")
+
+
+def _is_map_intent(intent: str) -> bool:
+    low = intent.lower()
+    return any(w in low for w in _MAP_WORDS)
+
+
+async def _update_map(repo: Path, tiers_map: dict, registry: dict) -> None:
+    """Keep the code map fresh after a commit — reindex (blob-hash gated) + a
+    cheap purpose summary for the files that changed."""
+    try:
+        res = code_map.reindex(repo)
+        changed = res.get("changed_files") or []
+        if changed:
+            creds = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
+            await code_map.summarize_changed(repo, changed, creds)
+    except Exception as e:  # noqa: BLE001
+        log.warning("code map update failed", error=str(e))
 
 _REPORTS_DIRNAME = ".reports"
 _REPORTS_DIRECTIVE = (
@@ -436,6 +460,28 @@ async def _classify(intent: str, context: str, archetypes: list[dict],
 
 # ── agent execution ──────────────────────────────────────────────────
 
+def _codemap_preamble(repo: Path) -> str:
+    """Prepend a Code Map hint (+ overview excerpt) so agents query the map
+    instead of reading the whole tree. Empty when the repo isn't mapped yet."""
+    try:
+        st = code_map.stats(repo)
+        if not st.get("symbols"):
+            return ""
+        ov = code_map.read_overview(repo).strip()
+        head = (
+            "## Code Map available (query it before reading files)\n"
+            f"This repo is indexed ({st['files']} files, {st['symbols']} symbols). Use the "
+            "`codemap` tool to locate things fast: `overview`, `search <query>`, "
+            "`symbol <name>`, `file <path>`, `models`, `ui`. It returns file:line "
+            "pointers — read the actual file only when you need the source.\n"
+        )
+        if ov:
+            head += "\n### Architecture overview\n" + ov[:2500] + "\n"
+        return head + "\n---\n\n"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _exec_prompt(intent: str) -> str:
     return (
         "You are working inside a real project directory — it IS your workspace and "
@@ -466,11 +512,17 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
                      archetype_id: str, prompt: str, by_id: dict,
                      tiers_map: dict, env_vars: list) -> dict:
     """Spawn one archetype anchored at ``repo``, dispatch ``prompt``, dispose."""
-    arch = by_id[archetype_id]
+    src = by_id[archetype_id]
+    # Every code agent gets the codemap tool (query the repo's blackboard).
+    tools = list(src.get("tools") or [])
+    if "codemap" not in tools:
+        tools = tools + ["codemap"]
+    arch = {**src, "tools": tools}
     role = arch.get("role", archetype_id)
     tier = arch.get("tier", "coding")
     tcfg = _resolve_tcfg(tiers_map, tier)
     suffix = uuid.uuid4().hex[:6]
+    prompt = _codemap_preamble(repo) + prompt
 
     def _on_action(act: dict) -> None:
         if act.get("tool") == "narration":
@@ -507,6 +559,21 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
         except Exception as e:  # noqa: BLE001
             log.warning("code: failed to stop agent", slug=slug, error=str(e))
     return d
+
+
+async def _run_cartographer(request: Request, user: dict, pkey: str, repo: Path,
+                            by_id: dict, tiers_map: dict, env_vars: list, registry: dict) -> dict | None:
+    """Refresh the skeleton, then have the cartographer write the semantic layer."""
+    if _CARTOGRAPHER not in by_id:
+        return None
+    _phase(pkey, "Mapping the codebase")
+    await _update_map(repo, tiers_map, registry)
+    return await _run_agent(
+        request, user, pkey, repo, _CARTOGRAPHER,
+        "Build or refresh this repository's Code Map. Use the codemap tool to write a "
+        "concise architecture overview (set_overview), the data-models map (set_models), "
+        "and the UI map (set_ui). Summarize — don't dump code.",
+        by_id, tiers_map, env_vars)
 
 
 def _plan_prompt(intent: str) -> str:
@@ -651,6 +718,12 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                          kind="fix", round=rnd + 1, archetype=fixer,
                          ok=bool(fd.get("ok")), commit=fsha or "")
 
+        # The repo just changed substantially — (re)build the code map so future
+        # sessions/tasks can query it instead of re-reading everything.
+        try:
+            await _run_cartographer(request, user, pkey, repo, by_id, tiers_map, env_vars, registry)
+        except Exception as e:  # noqa: BLE001
+            log.warning("cartographer after build failed", error=str(e))
         _write_state(sdir, {"status": "idle"})
     except Exception as e:  # noqa: BLE001
         log.warning("code build loop failed", pkey=pkey, error=str(e))
@@ -947,6 +1020,54 @@ async def export_process(project: str, session: str, format: str = "md",
         headers={"Content-Disposition": f'attachment; filename="{fname}-process.md"'})
 
 
+# ── code map ─────────────────────────────────────────────────────────
+
+@router.get("/projects/{project}/sessions/{session}/map")
+async def get_map(project: str, session: str, user: dict = Depends(get_current_user)):
+    """The session folder's Code Map — overview, models, ui, stats."""
+    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+    return {"overview": code_map.read_overview(repo),
+            "models": code_map.read_json_layer(repo, "models"),
+            "ui": code_map.read_json_layer(repo, "ui"),
+            "stats": code_map.stats(repo)}
+
+
+@router.get("/projects/{project}/sessions/{session}/map/search")
+async def map_search(project: str, session: str, q: str = "",
+                     user: dict = Depends(get_current_user)):
+    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+    return {"results": code_map.search(repo, q) if q.strip() else []}
+
+
+@router.post("/projects/{project}/sessions/{session}/map/build")
+async def map_build(project: str, session: str, request: Request,
+                    user: dict = Depends(get_current_user)):
+    """(Re)build the map in the background: reindex + cartographer."""
+    uid = user["id"]
+    sess, repo, sdir, pkey = _sctx(uid, project, session)
+    if _read_state(sdir).get("status") == "running":
+        raise HTTPException(409, "a run is in progress")
+    db = get_db()
+    archetypes = await merged_archetypes(db, uid)
+    by_id = {a["id"]: a for a in archetypes}
+    registry = _load_registry()
+    tiers_map, env_vars = await _load_owner_tiers(db, uid)
+
+    async def _bg():
+        _progress_start(pkey)
+        _write_state(sdir, {"status": "running"})
+        try:
+            await _run_cartographer(request, user, pkey, repo, by_id, tiers_map, env_vars, registry)
+        except Exception as e:  # noqa: BLE001
+            log.warning("map build failed", error=str(e))
+        finally:
+            _write_state(sdir, {"status": "idle"})
+            _progress_done(pkey)
+
+    asyncio.create_task(_bg())
+    return {"status": "running"}
+
+
 # ── the main message + approve flow ──────────────────────────────────
 
 @router.post("/message")
@@ -968,6 +1089,17 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
     _progress_start(pkey)
     _write_state(sdir, {"status": "running"})
     try:
+        # ── Map/index request → the cartographer (bypass the router). ──
+        if _is_map_intent(intent):
+            d = await _run_cartographer(request, user, pkey, repo, by_id, tiers_map, env_vars, registry)
+            st = code_map.stats(repo)
+            body_out = (d.get("output") or "Code map refreshed.").strip() if d else \
+                "Code map cartographer is unavailable."
+            body_out += f"\n\n_Map: {st['files']} files · {st['symbols']} symbols · {st['summarized']} summarized._"
+            assistant = _append_chat(sdir, "assistant", body_out, archetype=_CARTOGRAPHER, kind="map")
+            _write_state(sdir, {"status": "idle"})
+            return {"message": assistant}
+
         _phase(pkey, "Routing")
         prior = _read_chat(sdir)[-8:]
         context = "\n".join(f"{m['role']}: {m['text'][:200]}" for m in prior[:-1])
@@ -987,6 +1119,8 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
                 sha = head[0]["sha"] if head else None
             else:
                 sha = await code_git.git_commit(repo, f"[edit] {executor}: {route.get('title', intent)[:60]}")
+            if not is_git:
+                await _update_map(repo, tiers_map, registry)   # keep the map fresh
             out = (d.get("output") or "").strip() or "(no output)"
             if not d.get("ok"):
                 out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
