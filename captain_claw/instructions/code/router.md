@@ -5,7 +5,7 @@ You MUST reply with a single JSON object and nothing else:
 {
   "size": "small" | "big",
   "planner": "light-planner" | "long-horizon-planner" | "architect",
-  "small_archetype": "quick-dirty" | "code-implementer" | "debugger",
+  "small_archetype": "quick-dirty" | "code-implementer" | "debugger" | "git-operator",
   "domain": "<one short word, e.g. web, cli, api, data, infra>",
   "difficulty": "trivial" | "moderate" | "hard",
   "title": "<≤6-word title for this task>",
@@ -20,6 +20,12 @@ How to decide `size`:
 - "quick-dirty" — throwaway scripts, prototypes, spikes, "just make it work".
 - "code-implementer" — a real edit/feature that should be done properly.
 - "debugger" — the request is about diagnosing or fixing a bug.
+- "git-operator" — the request is a pure git / version-control operation:
+  commit, push, pull, fetch, branch, checkout/switch, merge, rebase, stash,
+  status, log, diff, tag, revert, reset, cherry-pick, remote. These are ALWAYS
+  size "small". Pick this whenever the request is about managing git history /
+  branches / remotes rather than changing source code (e.g. "commit and push",
+  "create a branch", "what changed", "undo my last commit").
 
 `planner` (used only when size is "big"):
 - "light-planner" — moderate task, clear shape, just needs a quick plan.

@@ -59,7 +59,12 @@ _INSTRUCTIONS_DIR = Path(__file__).parent.parent / "instructions"
 _DISPATCH_TIMEOUT = 900.0  # coding turns can install deps + run tests
 
 _PLANNERS = {"light-planner", "long-horizon-planner", "architect"}
-_SMALL = {"quick-dirty", "code-implementer", "debugger"}
+_GIT = "git-operator"
+_SMALL = {"quick-dirty", "code-implementer", "debugger", _GIT}
+# git verbs that, in the coding context, mean a version-control operation.
+_GIT_WORDS = ("commit", "push", "pull", "fetch", "branch", "checkout", "switch",
+              "merge", "rebase", "stash", "git status", "git log", "git diff",
+              "revert", "reset", "cherry-pick", " tag", "remote")
 _REVIEWERS = ["code-reviewer", "security-reviewer", "qa-engineer"]
 _MAX_FIX_ROUNDS = 3
 
@@ -332,6 +337,46 @@ def _project_tree(user_id: str, project: str) -> dict:
 _TIER_FALLBACK = {"coding": "reason", "vision": "balanced"}
 
 
+_GIT_ENV_CACHE: list[dict] | None = None
+
+
+def _git_env() -> list[dict]:
+    """Real-user git identity + config for spawned agents.
+
+    Spawned agents run with ``HOME`` overridden to their own config dir, so a raw
+    ``git commit``/``git push`` loses the user's identity, global config, and
+    credential helper. Re-inject them: identity via ``GIT_AUTHOR_*``/
+    ``GIT_COMMITTER_*``, the user's global config via ``GIT_CONFIG_GLOBAL`` (so
+    credential.helper etc. still apply), and an SSH command that uses the real
+    known_hosts and auto-accepts new hosts (SSH agent socket is inherited)."""
+    global _GIT_ENV_CACHE
+    if _GIT_ENV_CACHE is not None:
+        return _GIT_ENV_CACHE
+    import os
+    import subprocess
+    home = os.path.expanduser("~")
+    env: list[dict] = []
+    try:
+        name = subprocess.run(["git", "config", "--get", "user.name"],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+        email = subprocess.run(["git", "config", "--get", "user.email"],
+                               capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:  # noqa: BLE001
+        name = email = ""
+    if name:
+        env += [{"key": "GIT_AUTHOR_NAME", "value": name}, {"key": "GIT_COMMITTER_NAME", "value": name}]
+    if email:
+        env += [{"key": "GIT_AUTHOR_EMAIL", "value": email}, {"key": "GIT_COMMITTER_EMAIL", "value": email}]
+    gc = Path(home) / ".gitconfig"
+    if gc.is_file():
+        env.append({"key": "GIT_CONFIG_GLOBAL", "value": str(gc)})
+    kh = Path(home) / ".ssh" / "known_hosts"
+    env.append({"key": "GIT_SSH_COMMAND",
+                "value": f"ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={kh}"})
+    _GIT_ENV_CACHE = env
+    return env
+
+
 def _resolve_tcfg(tiers_map: dict, tier: str) -> dict:
     if tiers_map.get(tier):
         return tiers_map[tier]
@@ -371,10 +416,11 @@ async def _classify(intent: str, context: str, archetypes: list[dict],
         breadth = len(_score_archetypes(intent, archetypes))
         difficulty = _fallback_difficulty(intent, breadth)
         is_bug = any(w in low for w in ("bug", "error", "crash", "fix", "broken", "fails"))
+        is_git = any(w in low for w in _GIT_WORDS)
         raw = {
-            "size": "big" if difficulty == "hard" else "small",
+            "size": "small" if is_git else ("big" if difficulty == "hard" else "small"),
             "planner": "architect" if difficulty == "hard" else "light-planner",
-            "small_archetype": "debugger" if is_bug else "code-implementer",
+            "small_archetype": _GIT if is_git else ("debugger" if is_bug else "code-implementer"),
             "domain": "general", "difficulty": difficulty, "title": intent[:48], "why": "keyword fallback",
         }
     raw["size"] = "big" if str(raw.get("size")).lower() == "big" else "small"
@@ -382,6 +428,9 @@ async def _classify(intent: str, context: str, archetypes: list[dict],
         raw["planner"] = "light-planner" if "light-planner" in by_id else "architect"
     if raw.get("small_archetype") not in _SMALL or raw["small_archetype"] not in by_id:
         raw["small_archetype"] = "code-implementer"
+    # A git op is inherently small even if the LLM oversized it.
+    if raw.get("small_archetype") == _GIT:
+        raw["size"] = "small"
     return raw
 
 
@@ -396,6 +445,20 @@ def _exec_prompt(intent: str) -> str:
         f"Task:\n{intent}\n\n"
         "When finished, briefly summarize what you created/changed and how you "
         "verified it actually runs." + _REPORTS_DIRECTIVE
+    )
+
+
+def _git_prompt(intent: str) -> str:
+    return (
+        "You are performing a git / version-control operation in THIS repository "
+        "(your workspace and current directory). Use your shell to run `git`. Do "
+        "EXACTLY what is asked and nothing more. Inspect state first (`git status`, "
+        "`git diff`); for commits write a clear message derived from the real diff. "
+        "Never force-push or rewrite published history unless explicitly told; if a "
+        "remote/auth isn't configured or a push is rejected, report it plainly.\n\n"
+        f"Request:\n{intent}\n\n"
+        "Report the commands you ran and the resulting state (commit sha + subject, "
+        "branch, push result)."
     )
 
 
@@ -423,9 +486,11 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
                   agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
     _phase(pkey, f"{role} working")
+    # Add the real-user git identity/config so the agent's own git (esp. the
+    # git-operator's commit/push) works despite the spawned HOME override.
     port, token, slug = await spawn_archetype_agent(
         arch, tier, tcfg, request, user, name_suffix=suffix,
-        env_vars=env_vars, workspace_path=str(repo),
+        env_vars=list(env_vars or []) + _git_env(), workspace_path=str(repo),
     )
     try:
         d = await _dispatch_one(
@@ -908,9 +973,17 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
 
         if route["size"] == "small":
             executor = route["small_archetype"]
-            d = await _run_agent(request, user, pkey, repo, executor,
-                                 _exec_prompt(intent), by_id, tiers_map, env_vars)
-            sha = await code_git.git_commit(repo, f"[edit] {executor}: {route.get('title', intent)[:60]}")
+            is_git = executor == _GIT
+            prompt = _git_prompt(intent) if is_git else _exec_prompt(intent)
+            d = await _run_agent(request, user, pkey, repo, executor, prompt,
+                                 by_id, tiers_map, env_vars)
+            if is_git:
+                # The git agent runs commits/pushes itself — don't wrap another
+                # commit; just report where HEAD landed.
+                head = await code_git.git_log(repo, 1)
+                sha = head[0]["sha"] if head else None
+            else:
+                sha = await code_git.git_commit(repo, f"[edit] {executor}: {route.get('title', intent)[:60]}")
             out = (d.get("output") or "").strip() or "(no output)"
             if not d.get("ok"):
                 out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
