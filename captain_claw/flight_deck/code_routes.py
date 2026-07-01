@@ -577,12 +577,12 @@ async def _triage_reviews(reviews: list[dict], intent: str,
         prov = create_provider(
             provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
             api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
-            temperature=0.1, max_tokens=1500,
+            temperature=0.1, max_tokens=4000,
         )
         resp = await prov.complete(messages=[
             Message(role="system", content=sys_file.read_text()),
             Message(role="user", content=user_prompt),
-        ], temperature=0.1, max_tokens=1500)
+        ], temperature=0.1, max_tokens=4000)
         content = resp.content.strip()
         if content.startswith("```"):
             content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
