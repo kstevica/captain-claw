@@ -411,7 +411,10 @@ class AgentCompletionMixin:
                 setattr(self, "_pw_enforcement_streak", 0)
 
         # ── List member coverage ─────────────────────────────────────
-        if bool(list_task_plan.get("enabled", False)):
+        # Master switch: latched-off agents (code agents, non-scale workers)
+        # never face the coverage gate — their completion is judged
+        # externally (orchestrator/reviewers), not by reply-text scanning.
+        if bool(list_task_plan.get("enabled", False)) and not self._scale_system_disabled():
             members = list_task_plan.get("members")
             if isinstance(members, list) and members:
                 # When a Python script was successfully executed this
@@ -461,6 +464,20 @@ class AgentCompletionMixin:
                             member_count=len(members),
                         )
                         _skip_coverage = True
+
+                # When the edit tool successfully mutated files this turn,
+                # the work's evidence lives in the files on disk — never in
+                # the reply text the coverage gate scans.  Fix prompts
+                # ("apply these 5 fixes") false-positive as list tasks;
+                # without this bypass the gate blocks a correctly finished
+                # agent forever (SENKO2 hang: covered=0 despite all fixes
+                # applied, because edits don't echo members into the reply).
+                if not _skip_coverage and self._turn_has_successful_tool(turn_start_idx, "edit"):
+                    log.info(
+                        "Skipping list_member_coverage — edit tool mutated files (evidence on disk)",
+                        member_count=len(members),
+                    )
+                    _skip_coverage = True
 
                 if _skip_coverage:
                     members = []  # prevent downstream evaluation
@@ -520,32 +537,68 @@ class AgentCompletionMixin:
                 )
                 if missing_members:
                     # ── Stuck-loop detection ──────────────────────────
-                    # If the gate blocks repeatedly with the same missing
-                    # count the agent is stuck (e.g. file content is not
-                    # in the conversation haystack).  After a few retries
-                    # with zero progress, let finalisation through.
-                    _streak_attr = "_coverage_gate_streak"
-                    _prev_attr = "_coverage_gate_prev_missing"
-                    _streak: int = getattr(self, _streak_attr, 0)
-                    _prev: int = getattr(self, _prev_attr, -1)
+                    # The gate can block a finished agent forever when the
+                    # member "evidence" can never appear in the reply text
+                    # (it lives in files on disk).  Two independent trips,
+                    # both scoped to THIS turn:
+                    #  1. No-net-progress streak: a block only counts as
+                    #     progress when the missing count strictly improves
+                    #     on the best (lowest) seen this turn.  The old
+                    #     same-count check let OSCILLATING counts (5→4→5→4,
+                    #     e.g. from line-shifted re-reads) reset the streak
+                    #     forever — the SENKO2 hang.
+                    #  2. Absolute cap on total blocks per turn: whatever
+                    #     the counts do, the gate never blocks finalization
+                    #     more than _max_blocks times.
+                    # Counters are keyed to turn_start_idx so stale state
+                    # from a previous turn can never leak in.
+                    if getattr(self, "_coverage_gate_turn_idx", None) != turn_start_idx:
+                        self._coverage_gate_turn_idx = turn_start_idx
+                        self._coverage_gate_streak = 0
+                        self._coverage_gate_best_missing = None
+                        self._coverage_gate_blocks = 0
                     _cur = len(missing_members)
-                    if _cur == _prev:
-                        _streak += 1
-                    else:
+                    _best = getattr(self, "_coverage_gate_best_missing", None)
+                    if _best is None or _cur < _best:
+                        # Net progress — strictly fewer missing than ever
+                        # before this turn.
+                        self._coverage_gate_best_missing = _cur
                         _streak = 1
-                    setattr(self, _streak_attr, _streak)
-                    setattr(self, _prev_attr, _cur)
+                    else:
+                        _streak = getattr(self, "_coverage_gate_streak", 0) + 1
+                    self._coverage_gate_streak = _streak
+                    _blocks = getattr(self, "_coverage_gate_blocks", 0) + 1
+                    self._coverage_gate_blocks = _blocks
 
                     _max_retries = 3
-                    if _streak > _max_retries:
+                    _max_blocks = 8
+                    if _streak > _max_retries or _blocks > _max_blocks:
                         log.warning(
-                            "Coverage gate stuck — same missing count for %d consecutive blocks; allowing finalization",
+                            "Coverage gate stuck — %d consecutive blocks without net progress, %d total blocks this turn; allowing finalization",
                             _streak,
+                            _blocks,
                             missing=_cur,
                         )
-                        # Reset streak and fall through to finalize.
-                        setattr(self, _streak_attr, 0)
-                        setattr(self, _prev_attr, -1)
+                        self._emit_tool_output(
+                            "completion_gate",
+                            {
+                                "step": "coverage_valve_release",
+                                "streak": _streak,
+                                "blocks": _blocks,
+                                "missing": _cur,
+                            },
+                            (
+                                "step=coverage_valve_release\n"
+                                f"streak={_streak}\n"
+                                f"blocks={_blocks}\n"
+                                f"missing={_cur}\n"
+                                "note=coverage gate made no net progress; forcing finalization"
+                            ),
+                        )
+                        # Reset and fall through to finalize.
+                        self._coverage_gate_streak = 0
+                        self._coverage_gate_best_missing = None
+                        self._coverage_gate_blocks = 0
                     else:
                         completion_feedback = self._build_list_coverage_feedback(
                             missing_members=missing_members,
@@ -564,10 +617,10 @@ class AgentCompletionMixin:
                             log.info("Finalize BLOCKED by list_member_coverage gate", iteration=iteration, missing=len(missing_members), streak=_streak)
                             return False, "", finish_success, completion_feedback, python_worker_attempted
                 else:
-                    # Reset streak on success.
-                    if hasattr(self, "_coverage_gate_streak"):
-                        self._coverage_gate_streak = 0
-                        self._coverage_gate_prev_missing = -1
+                    # Reset valve counters on success.
+                    self._coverage_gate_streak = 0
+                    self._coverage_gate_best_missing = None
+                    self._coverage_gate_blocks = 0
 
         # ── Scale-loop reply coverage gate ───────────────────────────
         # When the scale_micro_loop processed N items, the user-facing reply
@@ -582,24 +635,33 @@ class AgentCompletionMixin:
         except Exception:
             _missing_scale = []
         if _missing_scale and iteration < (hard_turn_iterations - 1):
-            _scale_streak_attr = "_scale_reply_gate_streak"
-            _scale_prev_attr = "_scale_reply_gate_prev_missing"
-            _streak: int = getattr(self, _scale_streak_attr, 0)
-            _prev: int = getattr(self, _scale_prev_attr, -1)
+            # Same no-net-progress valve as the list-coverage gate above:
+            # only a strictly-lower missing count resets the streak, so
+            # oscillating counts can't dodge the release; an absolute
+            # per-turn block cap backstops everything.  Turn-keyed.
+            if getattr(self, "_scale_reply_gate_turn_idx", None) != turn_start_idx:
+                self._scale_reply_gate_turn_idx = turn_start_idx
+                self._scale_reply_gate_streak = 0
+                self._scale_reply_gate_best_missing = None
+                self._scale_reply_gate_blocks = 0
             _cur = len(_missing_scale)
-            if _cur == _prev:
-                _streak += 1
-            else:
+            _best = getattr(self, "_scale_reply_gate_best_missing", None)
+            if _best is None or _cur < _best:
+                self._scale_reply_gate_best_missing = _cur
                 _streak = 1
-            setattr(self, _scale_streak_attr, _streak)
-            setattr(self, _scale_prev_attr, _cur)
-            if _streak > 3:
+            else:
+                _streak = getattr(self, "_scale_reply_gate_streak", 0) + 1
+            self._scale_reply_gate_streak = _streak
+            _blocks = getattr(self, "_scale_reply_gate_blocks", 0) + 1
+            self._scale_reply_gate_blocks = _blocks
+            if _streak > 3 or _blocks > 8:
                 log.warning(
-                    "Scale-reply gate stuck — same missing count for %d consecutive blocks; allowing finalization",
-                    _streak, missing=_cur,
+                    "Scale-reply gate stuck — %d consecutive blocks without net progress, %d total blocks this turn; allowing finalization",
+                    _streak, _blocks, missing=_cur,
                 )
-                setattr(self, _scale_streak_attr, 0)
-                setattr(self, _scale_prev_attr, -1)
+                self._scale_reply_gate_streak = 0
+                self._scale_reply_gate_best_missing = None
+                self._scale_reply_gate_blocks = 0
             else:
                 _show = ", ".join(f"'{m}'" for m in _missing_scale[:5])
                 completion_feedback = (
@@ -617,9 +679,10 @@ class AgentCompletionMixin:
                 )
                 return False, "", finish_success, completion_feedback, python_worker_attempted
         else:
-            if hasattr(self, "_scale_reply_gate_streak"):
-                self._scale_reply_gate_streak = 0
-                self._scale_reply_gate_prev_missing = -1
+            # Reset valve counters on success.
+            self._scale_reply_gate_streak = 0
+            self._scale_reply_gate_best_missing = None
+            self._scale_reply_gate_blocks = 0
 
         # ── Contract completion validation ───────────────────────────
         if completion_requirements and task_contract is not None:

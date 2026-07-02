@@ -540,9 +540,17 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
     _phase(pkey, f"{role} working")
     # CLAW_WRITE_DIRECT: the write tool otherwise sandboxes every write into
     # saved/tmp/<session>/; code agents must write real files into the repo.
+    # CLAW_CODE_AGENT: latches off the agent's list/scale contract machinery
+    # (list extraction, scale advisory, task rephrase, coverage gate) — code
+    # agents are orchestrated externally and a numbered fix prompt otherwise
+    # gets parsed as "list members" the completion gate then blocks on
+    # forever (SENKO2 stuck-loop post-mortem).
     # Plus the real-user git identity/config so the agent's own git (esp. the
     # git-operator's commit/push) works despite the spawned HOME override.
-    code_env = [{"key": "CLAW_WRITE_DIRECT", "value": "1"}] + _git_env()
+    code_env = [
+        {"key": "CLAW_WRITE_DIRECT", "value": "1"},
+        {"key": "CLAW_CODE_AGENT", "value": "1"},
+    ] + _git_env()
     port, token, slug = await spawn_archetype_agent(
         arch, tier, tcfg, request, user, name_suffix=suffix,
         env_vars=list(env_vars or []) + code_env, workspace_path=str(repo),

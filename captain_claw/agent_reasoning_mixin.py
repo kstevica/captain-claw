@@ -1196,6 +1196,12 @@ class AgentReasoningMixin:
         Returns (rephrased_text, was_rephrased).
         If rephrasing fails or is not needed, returns (user_input, False).
         """
+        # Externally-orchestrated code agents get precise prompts written by
+        # the code orchestrator — an LLM rewrite only distorts them (SENKO2:
+        # a 5-fix prompt was rephrased 1968→2271 chars before misfiring the
+        # list pipeline).  Never rephrase.
+        if self._scale_system_disabled():
+            return user_input, False
         if not self._should_rephrase_task(user_input):
             return user_input, False
 
@@ -1691,6 +1697,10 @@ class AgentReasoningMixin:
             "output_filename_template": "",
             "final_action": "reply",
         }
+        # Master switch: code agents / latched-off workers never extract
+        # list members — a numbered fix prompt is instructions, not a list.
+        if self._scale_system_disabled():
+            return fallback
         if not self._is_list_processing_request(user_input):
             return fallback
 

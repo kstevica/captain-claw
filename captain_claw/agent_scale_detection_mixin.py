@@ -297,6 +297,11 @@ class AgentScaleDetectionMixin:
 
         Returns an empty string when no advisory is needed.
         """
+        # Externally-orchestrated code agents never get the scale advisory —
+        # it nudges the model toward batch/list processing, which is exactly
+        # the wrong frame for a focused code-edit task.
+        if self._scale_system_disabled():
+            return ""
         member_count = len(list_task_plan.get("members", []))
         _scale_cfg = get_config().scale
         large_from_members = member_count >= _scale_cfg.scale_advisory_min_members
@@ -389,6 +394,9 @@ class AgentScaleDetectionMixin:
 
         Returns the updated ``list_task_plan`` (unchanged if no new members).
         """
+        # Master switch: latched-off agents never re-enter the scale path.
+        if self._scale_system_disabled():
+            return list_task_plan
         # ── Skip scale detection for non-scalable tasks ──
         # Tasks like "send an email" or "combine all markdowns into one file"
         # should NEVER be hijacked by the scale micro-loop.  Without this
@@ -986,6 +994,54 @@ class AgentScaleDetectionMixin:
                 continue
         return False
 
+    # ------------------------------------------------------------------
+    # Master switch for the list/scale contract machinery
+    # ------------------------------------------------------------------
+
+    def _scale_system_disabled(self) -> bool:
+        """Single authoritative check: is the list/scale contract machinery off?
+
+        True for:
+        - Agents that latched ``_skip_deferred_scale`` (orchestrator workers
+          on non-scale tasks, unresolvable-members takeover skip).
+        - Externally-orchestrated code agents (``CLAW_CODE_AGENT=1`` in the
+          environment).  Code-mode spawns are driven by a build→review→fix
+          orchestrator that judges completion via reviewers and git diffs.
+          The list-extraction / coverage-gate pipeline actively harms them:
+          a numbered fix prompt gets parsed as "list members" whose textual
+          evidence can never appear in the reply — the evidence is file
+          edits on disk — so the completion gate blocks a correctly
+          finished agent forever (SENKO2 stuck-loop post-mortem).
+
+        Every entry point of the pipeline (list extraction, scale advisory,
+        deferred scale init, glob scale init, task rephrase, coverage gate)
+        consults this ONE predicate, so a single latch turns the whole
+        machinery off coherently.
+        """
+        if getattr(self, "_skip_deferred_scale", False):
+            return True
+        if os.environ.get("CLAW_CODE_AGENT"):
+            # Latch + one-time trace so process logs show why the contract
+            # pipeline never fired for this agent.
+            self._skip_deferred_scale = True
+            try:
+                self._emit_tool_output(
+                    "task_contract",
+                    {"step": "scale_system_disabled", "reason": "code_agent"},
+                    (
+                        "step=scale_system_disabled\n"
+                        "reason=code_agent\n"
+                        "note=externally-orchestrated code agent; list extraction, "
+                        "scale advisory, deferred scale init, task rephrase and the "
+                        "coverage gate are all skipped — the code orchestrator "
+                        "judges completion"
+                    ),
+                )
+            except Exception:
+                pass  # tracing must never block the latch
+            return True
+        return False
+
     def _needs_deferred_scale_init(self) -> bool:
         """Check whether deferred scale initialization should be attempted.
 
@@ -993,9 +1049,9 @@ class AgentScaleDetectionMixin:
         2 items, or all items are just source URLs.
         """
         # The orchestrator sets this flag on worker agents for non-scale
-        # tasks (combine, send, assemble) to avoid wasting LLM calls on
-        # list extraction that will never produce useful results.
-        if getattr(self, "_skip_deferred_scale", False):
+        # tasks (combine, send, assemble); code agents latch it via
+        # CLAW_CODE_AGENT — both routed through the master switch.
+        if self._scale_system_disabled():
             return False
         sp = getattr(self, "_scale_progress", None)
         items = sp.get("items", []) if sp else []
@@ -1029,7 +1085,7 @@ class AgentScaleDetectionMixin:
         Returns the list of items if scale progress was initialized,
         or an empty list otherwise.
         """
-        if getattr(self, "_skip_deferred_scale", False):
+        if self._scale_system_disabled():
             return []
 
         # Only act when scale progress has no items yet.

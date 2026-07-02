@@ -582,9 +582,12 @@ class AgentOrchestrationMixin:
         # stall ("Let me…", "I'll fetch…").  Capped by MAX_STALL_RETRIES
         # so a genuinely-stuck turn still terminates.
         self._stall_retry_count: int = 0
-        # Reset per-turn coverage gate streak.
+        # Reset per-turn coverage-gate valve counters (no-net-progress
+        # streak, best missing seen, total blocks, turn key).
         self._coverage_gate_streak: int = 0
-        self._coverage_gate_prev_missing: int = -1
+        self._coverage_gate_best_missing: int | None = None
+        self._coverage_gate_blocks: int = 0
+        self._coverage_gate_turn_idx: int | None = None
         self._pw_enforcement_streak: int = 0
         # Reset per-turn success flag (updated by finish()).
         self._last_complete_success = True
@@ -927,7 +930,9 @@ class AgentOrchestrationMixin:
         # extraction from the worker prompt would re-enable the list task
         # plan that was intentionally disabled above, causing endless
         # coverage-check loops on simple fetch-and-summarize tasks.
-        if not is_worker and not _force_script:
+        # Same for latched-off agents (code agents): URLs in a code prompt
+        # (docs links, API endpoints) are references, not work items.
+        if not is_worker and not _force_script and not self._scale_system_disabled():
             url_extraction_source = user_input if clarification_context_applied else effective_user_input
             input_urls = self._extract_urls(url_extraction_source)
             if len(input_urls) > len(list_task_plan.get("members", [])):
