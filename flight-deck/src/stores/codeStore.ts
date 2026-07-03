@@ -58,6 +58,7 @@ export interface CodeMessage {
   findings?: CodeFinding[]
   needs_fix?: boolean
   round?: number
+  usage?: string
 }
 
 export interface CodeCommit { sha: string; short: string; message: string; ts: number }
@@ -165,11 +166,12 @@ async function apiLog(p: string, s: string): Promise<CodeCommit[]> {
   return (await res.json()).commits || []
 }
 
-async function apiMessage(project: string, session: string, text: string): Promise<void> {
+async function apiMessage(project: string, session: string, text: string): Promise<{ status?: string }> {
   const res = await _authedFetch('/fd/code/message', {
     method: 'POST', body: JSON.stringify({ project, session, text }),
   })
   if (!res.ok) throw new Error((await res.text()) || 'message failed')
+  return res.json()
 }
 
 async function apiApprove(project: string, session: string, plan?: string): Promise<void> {
@@ -363,8 +365,19 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     }, 700)
     try {
       await apiMessage(p, s, text.trim())
-      const [chat, commits] = await Promise.all([apiGetChat(p, s), apiLog(p, s)])
+      let [chat, commits] = await Promise.all([apiGetChat(p, s), apiLog(p, s)])
       set({ messages: chat.messages, commits, status: _statusOf(chat.state) })
+      // Backlog continuation (and other background runs) return immediately
+      // while the loop keeps working — follow it until idle, like approvePlan.
+      while (_statusOf(chat.state) === 'running') {
+        await new Promise((r) => setTimeout(r, 1500))
+        const [prog, chat2] = await Promise.all([apiProgress(p, s), apiGetChat(p, s)])
+        chat = chat2
+        set({ progress: prog.events || [], messages: chat.messages, status: _statusOf(chat.state) })
+        if (_statusOf(chat.state) !== 'running' && !prog.active) break
+      }
+      commits = await apiLog(p, s)
+      set({ commits })
       await get().loadProjects()
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'message failed' })

@@ -1,6 +1,7 @@
 """Read tool for reading file contents."""
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -47,17 +48,27 @@ class ReadTool(Tool):
                     "limit=41 reads lines 630–670."
                 ),
             },
+            "force": {
+                "type": "boolean",
+                "description": (
+                    "Re-send the full content even if you already read this exact "
+                    "(unchanged) file in full earlier — identical full re-reads are "
+                    "otherwise short-circuited to save context."
+                ),
+            },
         },
         "required": ["path"],
     }
 
-    async def execute(self, path: str, limit: int | None = None, offset: int | None = None, **kwargs: Any) -> ToolResult:
+    async def execute(self, path: str, limit: int | None = None, offset: int | None = None,
+                      force: bool = False, **kwargs: Any) -> ToolResult:
         """Read a file.
 
         Args:
             path: Path to file
             limit: Optional line limit
             offset: Optional line offset
+            force: Re-send full content even if unchanged since the last full read
 
         Returns:
             ToolResult with file contents
@@ -183,7 +194,8 @@ class ReadTool(Tool):
                 )
 
             # Check if file is too large
-            file_size = file_path.stat().st_size
+            _stat = file_path.stat()
+            file_size = _stat.st_size
             from captain_claw.config import get_config
             max_size = get_config().tools.read.max_file_bytes
             if file_size > max_size:
@@ -191,6 +203,34 @@ class ReadTool(Tool):
                     success=False,
                     error=f"File too large: {file_size} bytes (max {max_size})",
                 )
+
+            # ── Duplicate full-read short-circuit (code agents) ──────
+            # Code agents re-read whole files they already hold in context
+            # (SW3: index.html fully read 115×) — each re-read compounds the
+            # tool-loop's quadratic context growth. If THIS process already
+            # served a full read of this exact file and it is unchanged on
+            # disk (mtime+size), return a short pointer instead of the
+            # content. offset/limit range reads and force=true always pass.
+            _full_read = offset is None and limit is None
+            _dedup_on = bool(os.environ.get("CLAW_CODE_AGENT"))
+            _served: dict = getattr(self, "_served_full", None) or {}
+            self._served_full = _served
+            _key = str(file_path)
+            if _full_read and _dedup_on and not force:
+                prev = _served.get(_key)
+                if prev and prev[0] == _stat.st_mtime_ns and prev[1] == file_size:
+                    log.info("Read short-circuited (unchanged full re-read)", path=_key)
+                    return ToolResult(
+                        success=True,
+                        content=(
+                            f"[{file_path} UNCHANGED — content omitted]\n"
+                            f"You already read this file in full ({prev[2]} lines, "
+                            f"{file_size} bytes) and it has not changed on disk since. "
+                            "Use the copy already in your context. To see a specific "
+                            "part again, read a range with offset/limit; if you "
+                            "genuinely need the whole file re-sent, pass force=true."
+                        ),
+                    )
 
             # Read file
             try:
@@ -203,6 +243,11 @@ class ReadTool(Tool):
                         "If it's an image, use the image_vision tool instead."
                     ),
                 )
+
+            # Register the served full read for the duplicate short-circuit.
+            if _full_read and _dedup_on:
+                _served[_key] = (_stat.st_mtime_ns, file_size,
+                                 content.count("\n") + 1)
 
             # Apply offset and limit
             all_lines = content.splitlines()

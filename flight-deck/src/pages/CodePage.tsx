@@ -347,6 +347,7 @@ export function CodePage() {
                           {m.size && <span className="rounded bg-zinc-800 px-1.5 py-0.5">{m.size}</span>}
                           {m.archetype && <span className="text-zinc-400">{m.archetype}</span>}
                           {m.commit && <span className="flex items-center gap-1 text-emerald-500/80"><GitCommit size={11} /> {m.commit.slice(0, 7)}</span>}
+                          {m.usage && <span className="text-zinc-600">{m.usage}</span>}
                           {m.ok === false && <span className="text-red-400">failed</span>}
                         </div>
                       )}

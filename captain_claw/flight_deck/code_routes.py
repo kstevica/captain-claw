@@ -81,6 +81,15 @@ def _is_map_intent(intent: str) -> bool:
     return any(w in low for w in _MAP_WORDS)
 
 
+_BACKLOG_WORDS = ("continue fixing", "fix the backlog", "fix backlog",
+                  "resume fixing", "resume the fixes", "finish the fixes")
+
+
+def _is_backlog_intent(intent: str) -> bool:
+    low = intent.lower()
+    return any(w in low for w in _BACKLOG_WORDS)
+
+
 async def _update_map(repo: Path, tiers_map: dict, registry: dict) -> None:
     """Keep the code map fresh after a commit — reindex (blob-hash gated) + a
     cheap purpose summary for the files that changed."""
@@ -92,6 +101,39 @@ async def _update_map(repo: Path, tiers_map: dict, registry: dict) -> None:
             await code_map.summarize_changed(repo, changed, creds)
     except Exception as e:  # noqa: BLE001
         log.warning("code map update failed", error=str(e))
+
+# ── per-turn token accounting (P4: cost visibility) ─────────────────
+# One entry per progress key; reset at turn start, fed by _run_agent's
+# usage callback, summarized into chat at turn end.
+_TURN_USAGE: dict[str, dict] = {}
+
+
+def _usage_reset(pkey: str) -> None:
+    _TURN_USAGE[pkey] = {"prompt": 0, "completion": 0, "runs": 0}
+
+
+def _usage_add(pkey: str, pt: int, ct: int) -> None:
+    u = _TURN_USAGE.setdefault(pkey, {"prompt": 0, "completion": 0, "runs": 0})
+    u["prompt"] += int(pt or 0)
+    u["completion"] += int(ct or 0)
+    u["runs"] += 1
+
+
+def _fmt_tok(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}K"
+    return str(n)
+
+
+def _usage_summary(pkey: str) -> str:
+    u = _TURN_USAGE.get(pkey)
+    if not u or not u["runs"]:
+        return ""
+    return (f"{u['runs']} agent run{'s' if u['runs'] != 1 else ''} · "
+            f"{_fmt_tok(u['prompt'])} in → {_fmt_tok(u['completion'])} out tokens")
+
 
 _REPORTS_DIRNAME = ".reports"
 _REPORTS_DIRECTIVE = (
@@ -532,6 +574,9 @@ def _codemap_preamble(repo: Path) -> str:
             "`codemap` tool to locate things fast: `overview`, `search <query>`, "
             "`symbol <name>`, `file <path>`, `models`, `ui`. It returns file:line "
             "pointers — read the actual file only when you need the source.\n"
+            "READ DISCIPLINE: read specific line RANGES (offset/limit) at the "
+            "pointers codemap gives you — do not re-read whole files you already "
+            "have in context (identical full re-reads are short-circuited).\n"
         )
         if ov:
             head += "\n### Architecture overview\n" + ov[:2500] + "\n"
@@ -628,6 +673,7 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
                       agent=role, tool=act.get("tool"), detail=act.get("detail", ""))
 
     def _on_usage(pt: int, ct: int, tt: int) -> None:
+        _usage_add(pkey, pt, ct)
         _progress(pkey, "usage", f"{role} · {pt:,}→{ct:,} tok",
                   agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
@@ -723,8 +769,63 @@ _REVIEW_PROMPTS = {
 }
 
 
-def _review_prompt(reviewer: str, intent: str) -> str:
-    return f"{_REVIEW_PROMPTS[reviewer]}\n\nTask under review:\n{intent}" + _REPORTS_DIRECTIVE
+_DELTA_REVIEW_PROMPTS = {
+    "code-reviewer": (
+        "DELTA review — a fix round just landed in this repository. Below are the prior "
+        "findings and the diff of the fix commit. Your job: (1) verify each prior finding "
+        "is actually fixed, (2) review ONLY the changed hunks for new issues the fix may "
+        "have introduced. Do NOT re-review unchanged code — your earlier full review "
+        "stands. Read-only; report per-finding fixed/not-fixed plus any NEW issues with "
+        "file:line."
+    ),
+    "security-reviewer": (
+        "DELTA security review — a fix round just landed. Below are the prior findings "
+        "and the diff of the fix commit. Verify the security-relevant fixes and check "
+        "ONLY the changed hunks for newly introduced security issues. Do NOT re-audit "
+        "unchanged code. Read-only; report fixed/not-fixed + any NEW findings."
+    ),
+    "qa-engineer": (
+        "DELTA QA — a fix round just landed. RE-RUN the existing test suite via your "
+        "shell and report pass/fail. Add tests ONLY for the just-fixed findings if they "
+        "lack coverage. Do NOT write a fresh full assessment and do NOT rewrite the "
+        "suite — your earlier report stands for unchanged code."
+    ),
+}
+
+# Findings/fix-instructions that mention any of these keep the security
+# reviewer in delta rounds; otherwise it sits those rounds out (its full
+# round-0 audit stands for unchanged code).
+_SECURITY_HINT_RE = re.compile(
+    r"(?i)secur|xss|inject|csp\b|auth|secret|credential|sanitiz|escap|csrf|"
+    r"vuln|cve-|prototype|eval\(|innerhtml")
+
+
+def _review_prompt(reviewer: str, intent: str, *, rnd: int = 0,
+                   diff: str = "", prior_findings: list | None = None) -> str:
+    """Round 0: full review. Rounds 1+: delta review of the fix commit only."""
+    if rnd == 0 or not diff:
+        return f"{_REVIEW_PROMPTS[reviewer]}\n\nTask under review:\n{intent}" + _REPORTS_DIRECTIVE
+    prior = "\n".join(
+        f"- [{f.get('severity', '?')}] {f.get('title', '')} ({f.get('file', '') or 'n/a'})"
+        for f in (prior_findings or [])
+    ) or "(none recorded)"
+    return (
+        f"{_DELTA_REVIEW_PROMPTS[reviewer]}\n\n"
+        f"Task under review:\n{intent}\n\n"
+        f"Prior findings (round {rnd - 1}):\n{prior}\n\n"
+        f"Diff of the fix commit:\n```diff\n{diff}\n```" + _REPORTS_DIRECTIVE
+    )
+
+
+def _select_reviewers(rnd: int, prior_findings: list | None, fix_instructions: str) -> list[str]:
+    """All three on the full round; delta rounds drop the security reviewer
+    unless the prior findings / fix instructions touch a security surface."""
+    if rnd == 0:
+        return list(_REVIEWERS)
+    blob = fix_instructions + " " + " ".join(
+        f"{f.get('title', '')} {f.get('file', '')}" for f in (prior_findings or []))
+    keep_security = bool(_SECURITY_HINT_RE.search(blob))
+    return [rv for rv in _REVIEWERS if keep_security or rv != "security-reviewer"]
 
 
 def _fix_prompt(intent: str, fix_instructions: str) -> str:
@@ -769,29 +870,93 @@ async def _triage_reviews(reviews: list[dict], intent: str,
     return raw
 
 
+_BACKLOG_REPORT = "backlog"
+
+
+def _write_backlog(repo: Path, triage: dict) -> str:
+    """Persist the open findings at the fix-round cap so a follow-up turn can
+    resume exactly where the loop stopped."""
+    lines = ["# Fix backlog — open findings at the fix-round cap", ""]
+    for f in triage.get("findings", []):
+        lines.append(f"- [{f.get('severity', '?')}] {f.get('title', '')}"
+                     + (f" ({f['file']})" if f.get("file") else ""))
+    fi = (triage.get("fix_instructions") or "").strip()
+    if fi:
+        lines += ["", "## Fix instructions (from triage)", "", fi]
+    return _write_report(repo, _BACKLOG_REPORT, "\n".join(lines))
+
+
+def _backlog_path(repo: Path) -> Path:
+    return repo / _REPORTS_DIRNAME / f"{_BACKLOG_REPORT}.md"
+
+
+async def _fix_commit_diff(repo: Path, fsha: str | None, cap: int = 12000) -> str:
+    """The fix commit's patch, truncated — the delta reviewers' whole world."""
+    if not fsha:
+        return ""
+    try:
+        patch = await code_git.git_show(repo, fsha)
+    except Exception:  # noqa: BLE001
+        return ""
+    if len(patch) > cap:
+        patch = patch[:cap] + f"\n… (truncated at {cap} chars — use `git show {fsha[:10]}` for the rest)"
+    return patch
+
+
 async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                           intent: str, by_id: dict, tiers_map: dict,
-                          env_vars: list, registry: dict, plan_file: str = "plan.md") -> None:
-    """Big-job pipeline: build → review fan-out → capped fix loop (background)."""
+                          env_vars: list, registry: dict, plan_file: str = "plan.md",
+                          seed_fix: str = "") -> None:
+    """Big-job pipeline: build → review fan-out → capped fix loop (background).
+
+    ``seed_fix``: backlog continuation — skip the build, apply the seeded fix
+    instructions first, then run delta review rounds on the fix diff.
+    """
     _progress_start(pkey)
+    _usage_reset(pkey)
     _write_state(sdir, {"status": "running"})
     try:
-        _phase(pkey, "Building")
-        d = await _run_agent(request, user, pkey, repo, "code-implementer",
-                             _build_prompt(intent, plan_file), by_id, tiers_map, env_vars)
-        sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
-        _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
-                     kind="build", archetype="code-implementer", ok=bool(d.get("ok")), commit=sha or "")
+        last_fix_sha: str | None = None
+        if seed_fix:
+            _phase(pkey, "Fixing (backlog)")
+            fd = await _run_agent(request, user, pkey, repo, "debugger",
+                                  _fix_prompt(intent, seed_fix), by_id, tiers_map, env_vars)
+            last_fix_sha = await code_git.git_commit(repo, "[fix backlog] debugger")
+            _append_chat(sdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
+                         kind="fix", archetype="debugger", ok=bool(fd.get("ok")),
+                         commit=last_fix_sha or "")
+        else:
+            _phase(pkey, "Building")
+            d = await _run_agent(request, user, pkey, repo, "code-implementer",
+                                 _build_prompt(intent, plan_file), by_id, tiers_map, env_vars)
+            sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
+            _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
+                         kind="build", archetype="code-implementer", ok=bool(d.get("ok")), commit=sha or "")
 
+        prior_findings: list = []
+        prior_fix_instructions: str = seed_fix
         for rnd in range(_MAX_FIX_ROUNDS + 1):
-            _phase(pkey, "Reviewing")
+            # Round 0 after a fresh build = full review of everything.
+            # Rounds 1+ (and round 0 of a backlog continuation) = DELTA
+            # review: verify prior findings + scan the fix diff only —
+            # re-reviewing the whole repo every round was 53% of all
+            # tokens on the SW3 run.
+            diff_text = ""
+            if rnd > 0 or seed_fix:
+                diff_text = await _fix_commit_diff(repo, last_fix_sha)
+            delta = bool(diff_text)          # no diff → fall back to a full review
+            eff_rnd = max(rnd, 1) if delta else 0
+            reviewers = _select_reviewers(eff_rnd, prior_findings, prior_fix_instructions)
+            _phase(pkey, "Reviewing" + (" (delta)" if delta else ""))
             reviews_raw = await asyncio.gather(*[
-                _run_agent(request, user, pkey, repo, rv, _review_prompt(rv, intent),
+                _run_agent(request, user, pkey, repo, rv,
+                           _review_prompt(rv, intent, rnd=eff_rnd,
+                                          diff=diff_text, prior_findings=prior_findings),
                            by_id, tiers_map, env_vars)
-                for rv in _REVIEWERS
+                for rv in reviewers
             ], return_exceptions=True)
             reviews = []
-            for rv, res in zip(_REVIEWERS, reviews_raw):
+            for rv, res in zip(reviewers, reviews_raw):
                 role = by_id[rv].get("role", rv)
                 out = "" if isinstance(res, Exception) else (res.get("output") or "")
                 reviews.append({"role": role, "id": rv, "output": out})
@@ -804,12 +969,19 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             await code_git.git_commit(repo, f"[review r{rnd}] reports + reviewer tests")
             _append_chat(sdir, "assistant", review_summary, kind="review", round=rnd,
                          findings=triage.get("findings", []), needs_fix=triage["needs_fix"])
+            prior_findings = triage.get("findings", []) or []
+            prior_fix_instructions = triage.get("fix_instructions", "") or ""
 
-            if not triage["needs_fix"] or rnd == _MAX_FIX_ROUNDS:
-                if triage["needs_fix"]:
-                    _append_chat(sdir, "assistant",
-                                 f"Reached the fix-round cap ({_MAX_FIX_ROUNDS}); stopping with "
-                                 "open findings above.", kind="note")
+            if not triage["needs_fix"]:
+                # Clean pass — a stale backlog from an earlier capped run is done.
+                _backlog_path(repo).unlink(missing_ok=True)
+                break
+            if rnd == _MAX_FIX_ROUNDS:
+                rel = _write_backlog(repo, triage)
+                _append_chat(sdir, "assistant",
+                             f"Reached the fix-round cap ({_MAX_FIX_ROUNDS}). Open findings "
+                             f"saved to `{rel}` — say **continue fixing** to resume from "
+                             "the backlog.", kind="note")
                 break
 
             _phase(pkey, f"Fixing (round {rnd + 1})")
@@ -818,6 +990,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                                   _fix_prompt(intent, triage.get("fix_instructions", "")),
                                   by_id, tiers_map, env_vars)
             fsha = await code_git.git_commit(repo, f"[fix r{rnd + 1}] {fixer}")
+            last_fix_sha = fsha or last_fix_sha
             _append_chat(sdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
                          kind="fix", round=rnd + 1, archetype=fixer,
                          ok=bool(fd.get("ok")), commit=fsha or "")
@@ -828,6 +1001,9 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             await _run_cartographer(request, user, pkey, repo, by_id, tiers_map, env_vars, registry)
         except Exception as e:  # noqa: BLE001
             log.warning("cartographer after build failed", error=str(e))
+        _u = _usage_summary(pkey)
+        if _u:
+            _append_chat(sdir, "assistant", f"_Run total: {_u}._", kind="note")
         _write_state(sdir, {"status": "idle"})
     except Exception as e:  # noqa: BLE001
         log.warning("code build loop failed", pkey=pkey, error=str(e))
@@ -1166,6 +1342,7 @@ async def map_build(project: str, session: str, request: Request,
     # /progress immediately without racing the background task's startup
     # (otherwise the first poll can read idle+inactive and stop at once).
     _progress_start(pkey)
+    _usage_reset(pkey)
     _write_state(sdir, {"status": "running"})
     _phase(pkey, "Mapping the codebase")
 
@@ -1200,7 +1377,21 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
     tiers_map, env_vars = await _load_owner_tiers(db, uid)
 
     _append_chat(sdir, "user", intent)
+
+    # ── Backlog continuation → resume the fix loop (bypass the router). ──
+    # Checked BEFORE the try/finally below: the background loop owns
+    # state/progress/trace for this turn, so message() must not run its
+    # finally-block progress_done/persist against it.
+    if _is_backlog_intent(intent) and _backlog_path(repo).is_file():
+        seed = _backlog_path(repo).read_text()
+        _write_state(sdir, {"status": "running"})
+        asyncio.create_task(_run_build_loop(
+            request, user, pkey, repo, sdir, intent, by_id, tiers_map,
+            env_vars, registry, seed_fix=seed))
+        return {"status": "running"}
+
     _progress_start(pkey)
+    _usage_reset(pkey)
     _write_state(sdir, {"status": "running"})
     try:
         # ── Map/index request → the cartographer (bypass the router). ──
@@ -1210,6 +1401,8 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
             body_out = (d.get("output") or "Code map refreshed.").strip() if d else \
                 "Code map cartographer is unavailable."
             body_out += f"\n\n_Map: {st['files']} files · {st['symbols']} symbols · {st['summarized']} summarized._"
+            _u = _usage_summary(pkey)
+            body_out += f"\n\n_{_u}._" if _u else ""
             assistant = _append_chat(sdir, "assistant", body_out, archetype=_CARTOGRAPHER, kind="map")
             _write_state(sdir, {"status": "idle"})
             return {"message": assistant}
@@ -1258,6 +1451,9 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
                 out = (d.get("output") or "").strip() or "(no output)"
                 if not d.get("ok"):
                     out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
+                _u = _usage_summary(pkey)
+                if _u:
+                    out += f"\n\n_{_u}._"
                 assistant = _append_chat(sdir, "assistant", out, archetype=executor,
                                          size="small", ok=bool(d.get("ok")), commit=sha or "", route=route)
                 _write_state(sdir, {"status": "idle", "last_route": route})
@@ -1281,8 +1477,11 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         if not plan_abs.is_file() and plan_text:
             plan_abs.write_text(plan_text)   # persist chat-only plans so build can read them
         sha = await code_git.git_commit(repo, f"[plan] {planner}: {route.get('title', intent)[:60]}")
+        # Usage rides as metadata — the plan text itself feeds the editable
+        # approval textarea, so no suffix on it.
         assistant = _append_chat(sdir, "assistant", plan_text or "(planner produced no plan)",
-                                 kind="plan", archetype=planner, ok=bool(d.get("ok")), commit=sha or "", route=route)
+                                 kind="plan", archetype=planner, ok=bool(d.get("ok")), commit=sha or "",
+                                 route=route, usage=_usage_summary(pkey))
         _write_state(sdir, {"status": "awaiting_plan", "intent": intent,
                             "route": route, "plan_file": plan_rel})
         return {"message": assistant, "route": route, "commit": sha,
