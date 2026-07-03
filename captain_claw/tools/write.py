@@ -220,17 +220,43 @@ class WriteTool(Tool):
                 # land in the project folder instead of saved/tmp/<session>/.
                 base = Path(kwargs["_runtime_base_path"]).expanduser().resolve()
                 requested = Path(path).expanduser()
+
+                def _strip_saved_prefix(parts: list[str]) -> list[str]:
+                    # The generic agent instructions teach a
+                    # saved/<category>/<session>/ output convention; in code
+                    # mode `saved/` is GITIGNORED runtime scratch, so a
+                    # deliverable written there would silently vanish from
+                    # git/history/review. Strip that prefix so the file lands
+                    # in the real repo tree instead.
+                    if not parts or parts[0].lower() != "saved":
+                        return parts
+                    parts = parts[1:]
+                    _categories = {"downloads", "media", "output", "scripts",
+                                   "showcase", "skills", "summaries", "tmp", "tools"}
+                    if parts and parts[0].lower() in _categories:
+                        parts = parts[1:]
+                    # Session-ish segment: uuid-shaped, 8+ hex chars, or a
+                    # literal "<session>"-style placeholder from a plan.
+                    if parts:
+                        seg = parts[0]
+                        if (
+                            (len(seg) >= 32 and seg.count("-") >= 4)
+                            or re.fullmatch(r"[0-9a-fA-F]{8,}", seg)
+                            or (seg.startswith("<") and seg.endswith(">"))
+                        ):
+                            parts = parts[1:]
+                    return parts
+
                 if requested.is_absolute():
                     cand = requested.resolve()
                     try:
-                        cand.relative_to(base)
-                        file_path = cand
+                        rel_parts = list(cand.relative_to(base).parts)
                     except ValueError:
-                        tail = [p for p in requested.parts[1:] if p not in ("", ".", "..")]
-                        file_path = base.joinpath(*tail) if tail else base / "output.txt"
+                        rel_parts = [p for p in requested.parts[1:] if p not in ("", ".", "..")]
                 else:
-                    rel = [p for p in requested.parts if p not in ("", ".", "..")]
-                    file_path = base.joinpath(*rel) if rel else base / "output.txt"
+                    rel_parts = [p for p in requested.parts if p not in ("", ".", "..")]
+                rel_parts = _strip_saved_prefix(rel_parts)
+                file_path = base.joinpath(*rel_parts) if rel_parts else base / "output.txt"
                 # Never escape the workspace.
                 try:
                     file_path.resolve().relative_to(base)

@@ -145,6 +145,11 @@ _REPORTS_DIRECTIVE = (
     "Reserve `write` for brand-new files. A write that would shrink an existing "
     "file is refused; if you genuinely need a full rewrite, read the file first "
     "and pass overwrite=true."
+    "\n\nFILE LOCATIONS: all project files live at the REPO ROOT or its real "
+    "subfolders, as plain relative paths (`index.html`, `src/game.js`). The "
+    "`saved/` folder is untracked runtime scratch — NEVER put source files or "
+    "deliverables there (such writes are auto-relocated to the repo root). "
+    "No `vfs:` prefixes, no absolute paths."
 )
 
 
@@ -732,6 +737,9 @@ def _plan_prompt(intent: str, plan_rel: str = "plan.md") -> str:
         "(create the parent folder if needed). Use exactly that path — do NOT write "
         "`plan.md` or any other filename. The plan drives an implementer next, so make it "
         "concrete and ordered. Do NOT write any other code yet.\n\n"
+        "In the plan, reference every project file as a plain REPO-RELATIVE path "
+        "(`index.html`, `src/game.js`) — never under `saved/` (untracked scratch), "
+        "never with a `vfs:` prefix, never absolute.\n\n"
         f"Task:\n{intent}"
     )
 
