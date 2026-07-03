@@ -4,23 +4,29 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.5-purple)](release-notes/RELEASE_NOTES_0.6.5.md)
+[![Version](https://img.shields.io/badge/version-0.7.0-purple)](release-notes/RELEASE_NOTES_0.7.0.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](#quick-start)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#multi-model-support)
 
-> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center — spawn specialist teams, run **five orchestration modes**, and compose deterministic **Flows**. Self-hosted, MIT licensed, and works with every major LLM provider (or 100% local with Ollama).
+> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center — spawn specialist teams, run **six orchestration modes**, ship software with **Code** (a plan → build → independent-review pipeline), and compose deterministic **Flows**. Self-hosted, MIT licensed, and works with every major LLM provider (or 100% local with Ollama).
 
 **[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://flight-deck.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)**
 
 ![Flight Deck — spawn a team of specialists, monitor them live, and chat with any one from a single dashboard](docs/screenshots/flight-deck.png)
 
-<p align="center"><strong>5 orchestration modes</strong> &nbsp;·&nbsp; <strong>47 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>24 ready-made specialists</strong></p>
+<p align="center"><strong>6 orchestration modes</strong> &nbsp;·&nbsp; <strong>48 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>31 ready-made specialists</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong></p>
 
 An open-source AI agent platform that **thinks, remembers, and acts**. It connects to OpenAI, Anthropic, Google Gemini, DeepSeek, Ollama, and OpenRouter (plus "Sign in with ChatGPT" — no API key), and gives you a rich workspace for research, document and video understanding, browser automation, and multi-agent orchestration — backed by persistent cross-session memory and autonomous "dream cycle" cognition.
 
+### 💻 NEW: Code — an engineering department, not a coding assistant
+
+Describe what you want built. A router sizes the job; big work runs **plan → your approval → build → three independent reviewers in parallel → triage → capped fix loop**, every phase a git commit in the folder's own repo. Agents query a persistent **Code Map** (symbols + architecture, git-hash-fresh) instead of re-reading your tree; per-turn **token costs are shown in chat**; the whole process **exports as one auditable Markdown transcript**. Works on fresh folders or **your existing local repos linked in** — on any models you configure, including a cheap implementer with a premium reviewer.
+
+Cursor and Claude Code give you one very good agent that plans, writes, reviews, and tests in a single context. Code splits those roles across **independent agents** — the reviewer never grades its own homework, QA actually runs the tests — and puts **you at the approval gate** before anything is built. Self-hosted, model-agnostic, no lock-in. A complete real run (an RTS game with 185 tests, ~$2.50 on DeepSeek) ships in [`examples/code/`](examples/code/). Details in [RELEASE_NOTES_0.7.0.md](release-notes/RELEASE_NOTES_0.7.0.md) and [USAGE.md](USAGE.md#code--the-agentic-coding-studio-new-in-070).
+
 ### Pick the right shape for the problem
 
-One agent isn't always the answer — and one orchestration strategy never is. Captain Claw ships **five distinct modes**, each tuned to a different kind of work.
+One agent isn't always the answer — and one orchestration strategy never is. Captain Claw ships **six distinct modes**, each tuned to a different kind of work.
 
 | | |
 |---|---|
@@ -29,7 +35,7 @@ One agent isn't always the answer — and one orchestration strategy never is. C
 | **🔀 Basna** — N agents answer the same question *blind*, merged by reliability into one high-confidence result | **🤝 Vatra** — a team collaborates on a shared blackboard, each owning sections, improving over review rounds |
 | [![Basna](docs/screenshots/basna.png)](docs/screenshots/basna.png) | [![Vatra](docs/screenshots/vatra.png)](docs/screenshots/vatra.png) |
 
-The fifth mode is **Flight Deck** itself (above) — spawn, monitor, and coordinate the whole crew from one dashboard.
+The fifth mode is **💻 Code** (above) — a plan-gated, independently-reviewed engineering pipeline. The sixth is **Flight Deck** itself — spawn, monitor, and coordinate the whole crew from one dashboard.
 
 ### More than orchestration
 
@@ -41,7 +47,7 @@ The fifth mode is **Flight Deck** itself (above) — spawn, monitor, and coordin
 - **Plan Mode & Deep Mode** — for when "probably right" isn't good enough: a reviewable DAG of verified steps, and frontier-quality answers via multiple rollouts + self-consistency voting + diverse-lens critics.
 - **6-layer shared memory** — working, semantic (vector + BM25), deep (full-text), insights, autonomous nervous system, and self-reflection — carried across sessions and across every agent.
 - **Shared Virtual File System** — a host-sandboxed, per-user workspace the whole fleet reads and writes, with per-file authorship.
-- **24 ready-made specialists** — an editable archetype library spanning research, writing, engineering, data, ops, finance, and multimedia.
+- **31 ready-made specialists** — an editable archetype library spanning research, writing, engineering (a full coding family: planners, implementers, debugger, reviewers, QA, git operator, cartographer), data, ops, finance, and multimedia.
 
 #### See it in action
 
@@ -60,6 +66,19 @@ Captain Claw is **MIT licensed and free forever** — your data stays on your ma
 </p>
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
+
+## What's New in 0.7.0
+
+**Code — an engineering department, not a coding assistant.** Fully additive; backward compatible with 0.6.5.
+
+- **The Code page.** Projects hold **folders** (each a real git repo and agent workspace) and **sessions** (conversations driving one folder). A **router** sizes every request: quick edits go straight to one specialist; real features run **plan → editable approval gate → build → review → fix**. Every phase is a commit (`[plan]` / `[build]` / `[review rN]` / `[fix rN]`) with a diff timeline and one-click rollback.
+- **Independent review, built in.** Three reviewers run in parallel after every build — correctness, security (CVSS-ranked), and a QA engineer that **actually executes the test suite**. A triage judge decides ship-or-fix on blocking/major findings only; a capped fix loop applies precise instructions; rounds 2+ are **delta reviews** of the fix diff, not full re-reads. At the cap, open findings persist to a backlog and **"continue fixing"** resumes exactly there.
+- **The Code Map.** A persistent per-repo index — every function/method/class with `file:line` (SQLite + FTS5, git-blob-hash-gated freshness) plus an LLM-authored architecture overview, data-model map, and UI map. Agents query it via a `codemap` tool instead of re-reading your tree; humans browse it in the **Map tab**.
+- **Your repos, your models.** Link any local repo into the VFS (read-write or read-only, server-side Browse picker) — commits land in *your* git history. Every pipeline role resolves from your Library tiers: DeepSeek typing with Claude reviewing, or 100% local with Ollama.
+- **Trust the process.** Live phase log with per-agent token meters, **per-turn cost lines in chat**, a red **Stop** button, escalation (a mis-sized quick edit promotes itself to a full plan), destructive-write guards, and a one-click **export** of the entire run as Markdown. A complete real run ships in `examples/code/`.
+- **Agent-core wins for everyone:** the system prompt is now **frozen per turn**, fixing a prompt-cache-busting clock that caused 94% cache misses on long tool loops (~4-5× input-cost cut on every provider with prefix caching); stuck-loop valves release on no-net-progress; write tool refuses fragment-over-file clobbering; per-turn usage totals now match your provider's dashboard.
+
+New endpoints under `/fd/code/*`; VFS gains link admin, browse, and zip download. No schema changes. See [RELEASE_NOTES_0.7.0.md](release-notes/RELEASE_NOTES_0.7.0.md) — including a detailed comparison with Cursor, Lovable, Claude Code, Codex, OpenClaw, and autonomous coder daemons. Backward compatible with 0.6.5.
 
 ## What's New in 0.6.5
 
@@ -314,6 +333,7 @@ A full management dashboard for running teams of AI agents. Spawn, monitor, conf
 captain-claw-fd    # http://0.0.0.0:25080
 ```
 
+- **Code** — An agentic coding studio. A router sizes each request; big jobs run plan → your approval → build → three independent reviewers → triage → capped fix loop, each phase a git commit with diff timeline and rollback. Agents query a persistent Code Map instead of re-reading the tree; runs work on VFS folders or your own linked local repos, with per-turn token costs in chat and full process export.
 - **Agent Forge** — Describe a business goal in plain text. An LLM designs a specialized team with roles, tools, operating procedures, and a lead coordinator. Review, customize, and spawn the entire team in one click.
 - **Basna** — A network-source ensemble. Describe a task and a router picks the smallest set of specialist archetypes, spawns them fresh, runs them blind and in parallel, and merges their answers weighted by each archetype's learned reliability (synthesizing only on disagreement). Attach files/images, edit each agent before the run, watch a live progress log, and download generated files. Reliability is learned per-archetype so routing improves over time.
 - **Library** — One place for your model tiers (Reasoning / Balanced / Fast / Long context, each with its own provider/model/key/base-URL/context) and the curated archetype gallery (one-click spawn). Agent Forge and Basna both resolve their models from here.
