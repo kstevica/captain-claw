@@ -582,9 +582,16 @@ class AgentOrchestrationMixin:
         # stall ("Let me…", "I'll fetch…").  Capped by MAX_STALL_RETRIES
         # so a genuinely-stuck turn still terminates.
         self._stall_retry_count: int = 0
-        # Reset per-turn coverage gate streak.
+        # New turn → re-render the system prompt once (it embeds the clock;
+        # _build_messages freezes it for the rest of the turn so the
+        # provider's prompt-prefix cache hits on every tool-loop call).
+        self._turn_system_prompt = None
+        # Reset per-turn coverage-gate valve counters (no-net-progress
+        # streak, best missing seen, total blocks, turn key).
         self._coverage_gate_streak: int = 0
-        self._coverage_gate_prev_missing: int = -1
+        self._coverage_gate_best_missing: int | None = None
+        self._coverage_gate_blocks: int = 0
+        self._coverage_gate_turn_idx: int | None = None
         self._pw_enforcement_streak: int = 0
         # Reset per-turn success flag (updated by finish()).
         self._last_complete_success = True
@@ -927,7 +934,9 @@ class AgentOrchestrationMixin:
         # extraction from the worker prompt would re-enable the list task
         # plan that was intentionally disabled above, causing endless
         # coverage-check loops on simple fetch-and-summarize tasks.
-        if not is_worker and not _force_script:
+        # Same for latched-off agents (code agents): URLs in a code prompt
+        # (docs links, API endpoints) are references, not work items.
+        if not is_worker and not _force_script and not self._scale_system_disabled():
             url_extraction_source = user_input if clarification_context_applied else effective_user_input
             input_urls = self._extract_urls(url_extraction_source)
             if len(input_urls) > len(list_task_plan.get("members", [])):
@@ -2621,6 +2630,8 @@ class AgentOrchestrationMixin:
         self._last_memory_debug_signature = None
         self._last_semantic_memory_debug_signature = None
         self.last_usage = self._empty_usage()
+        # New turn → re-render the (turn-frozen) system prompt once.
+        self._turn_system_prompt = None
 
         # Tool-calling and streaming over a single pass is currently limited.
         # Preserve tool behavior and guard checks by using complete() and

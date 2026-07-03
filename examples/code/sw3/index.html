@@ -1,0 +1,1843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RealmCraft — RTS</title>
+<style>
+/* ===== CSS RESET & LAYOUT ===== */
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#1a1a1a;color:#e0d8c0;user-select:none}
+
+#game-container{display:flex;flex-direction:column;width:100%;height:100%}
+
+/* Top bar */
+#top-bar{display:flex;align-items:center;gap:24px;padding:4px 16px;background:linear-gradient(180deg,#2a2010,#1a1408);border-bottom:2px solid #4a3828;min-height:36px;font-size:14px;flex-shrink:0}
+.resource{display:flex;align-items:center;gap:4px}
+.resource .icon{font-size:18px}
+.resource .val{color:#ffd700;font-weight:bold}
+.resource .max{color:#888;font-size:12px}
+#game-timer{margin-left:auto;color:#aaa;font-variant-numeric:tabular-nums}
+
+/* Canvas area */
+#canvas-wrapper{flex:1;position:relative;overflow:hidden;cursor:default}
+#game-canvas{display:block;width:100%;height:100%}
+#minimap{position:absolute;bottom:8px;right:8px;border:2px solid #4a3828;border-radius:4px;background:rgba(0,0,0,0.5);cursor:pointer;image-rendering:pixelated}
+
+/* Bottom panel */
+#bottom-panel{display:flex;min-height:140px;max-height:200px;background:linear-gradient(180deg,#1a1408,#2a2010);border-top:2px solid #4a3828;flex-shrink:0}
+#info-panel{flex:1;padding:8px 12px;border-right:1px solid #3a2a18;overflow:hidden}
+#info-panel .entity-name{font-size:16px;font-weight:bold;color:#ffd700}
+#info-panel .entity-stats{font-size:12px;color:#b0a080;margin-top:4px;display:flex;flex-wrap:wrap;gap:8px}
+#info-panel .hp-bar-outer{width:200px;height:8px;background:#333;border:1px solid #555;border-radius:4px;margin-top:4px;overflow:hidden}
+#info-panel .hp-bar-inner{height:100%;background:linear-gradient(90deg,#4a4,#8c4);transition:width 0.2s}
+#info-panel .progress-outer{width:120px;height:6px;background:#333;border:1px solid #555;border-radius:3px;margin-top:4px;overflow:hidden}
+#info-panel .progress-inner{height:100%;background:linear-gradient(90deg,#48f,#8af);transition:width 0.1s}
+#info-panel .queue-info{font-size:11px;color:#888;margin-top:2px}
+
+#action-panel{flex:1;padding:8px 12px;display:flex;flex-wrap:wrap;gap:6px;align-content:flex-start;overflow-y:auto}
+#action-panel button{min-width:100px;padding:6px 10px;background:linear-gradient(180deg,#3a2a10,#2a1a08);border:2px solid #5a4a28;border-radius:4px;color:#e0d8c0;font-size:12px;cursor:pointer;transition:all 0.15s}
+#action-panel button:hover{background:linear-gradient(180deg,#5a4a20,#3a2a10);border-color:#8a7a48}
+#action-panel button:active{background:#2a1a08;transform:scale(0.96)}
+#action-panel button:disabled{opacity:0.4;cursor:not-allowed;filter:grayscale(0.5)}
+#action-panel button.cant-afford{color:#f44;border-color:#844}
+#action-panel .cost{font-size:10px;color:#aaa}
+#action-panel .cost.not-enough{color:#f44}
+
+/* Tooltip */
+#tooltip{position:absolute;pointer-events:none;background:rgba(0,0,0,0.85);border:1px solid #5a4a28;border-radius:4px;padding:6px 10px;font-size:12px;color:#e0d8c0;z-index:100;display:none;white-space:nowrap}
+
+/* Cursor states */
+body.cursor-normal #game-canvas{cursor:default}
+body.cursor-build #game-canvas{cursor:crosshair}
+body.cursor-attack #game-canvas{cursor:crosshair}
+body.cursor-move #game-canvas{cursor:pointer}
+</style>
+</head>
+<body class="cursor-normal">
+
+<div id="game-container">
+  <div id="top-bar">
+    <div class="resource"><span class="icon">🔵</span><span class="val" id="res-gold">200</span><span style="color:#888">Gold</span>
+    <span style="font-size:10px;color:#666;margin-left:16px" id="debug-info">debug</span></div>
+    <div class="resource"><span class="icon">🪵</span><span class="val" id="res-wood">150</span><span style="color:#888">Wood</span></div>
+    <div class="resource"><span class="icon">🍖</span><span class="val" id="res-food">3</span><span class="max" id="res-maxfood">/5</span></div>
+    <span id="game-timer">00:00</span>
+  </div>
+  <div id="canvas-wrapper">
+    <canvas id="game-canvas"></canvas>
+    <canvas id="minimap" width="180" height="180"></canvas>
+  </div>
+  <div id="bottom-panel">
+    <div id="info-panel">
+      <div class="entity-name" id="info-name">RealmCraft</div>
+      <div class="entity-stats" id="info-stats">Select a unit or building to begin</div>
+    </div>
+    <div id="action-panel"></div>
+  </div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+// ===========================
+// REALMCRAFT — RTS GAME
+// ===========================
+
+// ── CONSTANTS ──
+const TILE_SIZE = 32;
+const MAP_COLS = 64;
+const MAP_ROWS = 64;
+const WORLD_W = MAP_COLS * TILE_SIZE; // 2048
+const WORLD_H = MAP_ROWS * TILE_SIZE; // 2048
+const TERRAIN = { GRASS:0, DIRT:1, WATER:2, TREE:3, GOLD:4 };
+const TERRAIN_COLORS = {
+  [TERRAIN.GRASS]:'#4a8c2a', [TERRAIN.DIRT]:'#b8a060', [TERRAIN.WATER]:'#3060a0',
+  [TERRAIN.TREE]:'#2a5a18', [TERRAIN.GOLD]:'#8a7a30'
+};
+const TERRAIN_COLORS_MINIMAP = {
+  [TERRAIN.GRASS]:'#3a7a20', [TERRAIN.DIRT]:'#a89050', [TERRAIN.WATER]:'#2050a0',
+  [TERRAIN.TREE]:'#1a4a10', [TERRAIN.GOLD]:'#c8a020'
+};
+
+// ── BUILDING DEFS ──
+const BUILDING_DEFS = {
+  town_hall: { name:'Town Hall', cost:{gold:200,wood:100}, hp:800, buildTime:10, size:{w:96,h:96}, provides:['food5'], dropoff:true, trains:['peasant'] },
+  barracks:  { name:'Barracks', cost:{gold:150,wood:50}, hp:500, buildTime:6, size:{w:80,h:80}, trains:['footman','archer'] },
+  stable:    { name:'Stable', cost:{gold:100,wood:100}, hp:400, buildTime:6, size:{w:80,h:80}, trains:['knight'] },
+  lumber_mill:{ name:'Lumber Mill', cost:{gold:100,wood:50}, hp:350, buildTime:5, size:{w:64,h:64}, dropoff_wood:true },
+  refinery:  { name:'Refinery', cost:{gold:100,wood:50}, hp:350, buildTime:5, size:{w:64,h:64}, dropoff_gold:true },
+  watch_tower:{ name:'Watch Tower', cost:{gold:50,wood:50}, hp:300, buildTime:4, size:{w:48,h:48}, attack:{damage:15,range:160,cooldown:1.5} },
+  wall:      { name:'Wall', cost:{gold:20,wood:10}, hp:200, buildTime:2, size:{w:32,h:32}, blocking:true }
+};
+
+// ── UNIT DEFS ──
+const UNIT_DEFS = {
+  peasant: { name:'Peasant', cost:{gold:50}, hp:40, speed:140, atk:{damage:5,range:24,cooldown:1.2}, food:1, canGather:true, canBuild:true, size:16 },
+  footman: { name:'Footman', cost:{gold:100,wood:30}, hp:60, speed:120, atk:{damage:10,range:24,cooldown:1.0}, food:2, size:18 },
+  archer:  { name:'Archer', cost:{gold:120,wood:40}, hp:45, speed:120, atk:{damage:8,range:140,cooldown:1.4}, food:2, size:16, ranged:true },
+  knight:  { name:'Knight', cost:{gold:150,wood:60}, hp:80, speed:200, atk:{damage:12,range:24,cooldown:1.1}, food:2, size:22 }
+};
+
+// ── GAME STATE ──
+const game = {
+  entities: new Map(),
+  resources: { gold:200, wood:150, food:3, maxFood:5 },
+  selectedIds: new Set(),
+  map: null, // Tile[][]
+  camera: { x:0, y:0, zoom:1.0 },
+  ui: { mode:'normal', buildingType:null, attackMode:false },
+  nextId: 1,
+  time: 0,
+  mouse: { x:0, y:0, worldX:0, worldY:0, down:false, middleDown:false, rightDown:false, dragStart:null, dragEnd:null },
+  selectionBox: null,
+  ghostBuilding: null,
+  minimapSize: 180,
+  particles: [],
+  floatingTexts: [],
+  autoBuildCooldown: {},
+  playerColor: '#4488cc'
+};
+
+// ── HELPERS ──
+function genId() { return (game.nextId++).toString(); }
+function dist(a,b) { return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2); }
+function clamp(v,lo,hi) { return Math.max(lo,Math.min(hi,v)); }
+function lerp(a,b,t) { return a+(b-a)*t; }
+function rectsOverlap(a,b) { return !(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y); }
+function tileAt(px,py) {
+  const tx=Math.floor(px/TILE_SIZE), ty=Math.floor(py/TILE_SIZE);
+  if(tx<0||ty<0||tx>=MAP_COLS||ty>=MAP_ROWS) return -1;
+  return game.map[ty][tx];
+}
+function isPassable(px,py) {
+  const t=tileAt(px,py);
+  if(t===TERRAIN.WATER) return false;
+  // Check buildings
+  for(const e of game.entities.values()) {
+    if(e.type in BUILDING_DEFS && e.progress>=1) {
+      if(px>=e.x-e.w/2&&px<=e.x+e.w/2&&py>=e.y-e.h/2&&py<=e.y+e.h/2) return false;
+    }
+  }
+  return true;
+}
+function spawnParticles(x,y,count,color) {
+  for(let i=0;i<count;i++) {
+    game.particles.push({x,y,vx:(Math.random()-0.5)*60,vy:(Math.random()-0.5)*60-30,life:0.4+Math.random()*0.4,color,size:2+Math.random()*3});
+  }
+}
+function spawnFloatingText(x,y,text,color) {
+  game.floatingTexts.push({x,y,text,color,yOff:0,life:1.2});
+}
+function showFeedback(text) {
+  spawnFloatingText(game.mouse.worldX,game.mouse.worldY,text,'#ffaa44');
+  const debugEl=document.getElementById('debug-info');
+  if(debugEl) debugEl.textContent=text;
+}
+// Find nearest passable tile outside a building footprint
+function findNearestClearSpace(building, unit) {
+  const hw=building.w/2+unit.size+2, hh=building.h/2+unit.size+2;
+  let bestX=unit.x, bestY=unit.y, bestD=Infinity;
+  // Check positions around the building perimeter
+  for(let side=0;side<4;side++) {
+    for(let t=0;t<20;t++) {
+      let cx, cy;
+      const frac=t/19;
+      if(side===0) { cx=building.x-hw; cy=building.y-hh+frac*(building.h+unit.size*2); }
+      else if(side===1) { cx=building.x+hw; cy=building.y-hh+frac*(building.h+unit.size*2); }
+      else if(side===2) { cx=building.x-hw+frac*(building.w+unit.size*2); cy=building.y-hh; }
+      else { cx=building.x-hw+frac*(building.w+unit.size*2); cy=building.y+hh; }
+      cx=clamp(cx,unit.size,WORLD_W-unit.size);
+      cy=clamp(cy,unit.size,WORLD_H-unit.size);
+      if(isPassable(cx,cy)) {
+        const d=dist({x:cx,y:cy},{x:unit.x,y:unit.y});
+        if(d<bestD) { bestD=d; bestX=cx; bestY=cy; }
+      }
+    }
+  }
+  return {x:bestX,y:bestY};
+}
+
+// ── MAP GENERATION ──
+function generateMap() {
+  const map = [];
+  for(let y=0;y<MAP_ROWS;y++) { map[y]=new Array(MAP_COLS).fill(TERRAIN.GRASS); }
+
+  // Dirt blobs
+  const simpleRandom = (seed) => { let s=seed; return ()=>{ s=(s*16807+0)%2147483647; return s/2147483647; }; };
+  const rng=simpleRandom(42);
+  for(let y=0;y<MAP_ROWS;y++) {
+    for(let x=0;x<MAP_COLS;x++) {
+      if(rng()<0.03) map[y][x]=TERRAIN.DIRT;
+    }
+  }
+  // Smooth dirt clusters
+  for(let pass=0;pass<3;pass++) {
+    const tmp=map.map(r=>[...r]);
+    for(let y=1;y<MAP_ROWS-1;y++) {
+      for(let x=1;x<MAP_COLS-1;x++) {
+        let d=0; for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++) if(tmp[y+dy][x+dx]===TERRAIN.DIRT) d++;
+        if(d>=5) map[y][x]=TERRAIN.DIRT; else if(d<=2) map[y][x]=TERRAIN.GRASS;
+      }
+    }
+  }
+
+  // Water blobs (3-5)
+  const waterSeeds=[{x:10,y:30},{x:50,y:15},{x:35,y:48},{x:18,y:50}];
+  for(const ws of waterSeeds) {
+    let cx=ws.x,cy=ws.y;
+    for(let i=0;i<80;i++) {
+      if(cx>=0&&cy>=0&&cx<MAP_COLS&&cy<MAP_ROWS) map[cy][cx]=TERRAIN.WATER;
+      if(i%3===0) { cx+=Math.floor(rng()*3)-1; cy+=Math.floor(rng()*3)-1; }
+      // spread in random direction
+      const d=Math.floor(rng()*4);
+      if(d===0) cx++; else if(d===1) cx--; else if(d===2) cy++; else cy--;
+      if(cx<0||cy<0||cx>=MAP_COLS||cy>=MAP_ROWS) break;
+      map[cy][cx]=TERRAIN.WATER;
+    }
+  }
+
+  // Water edge smoothing
+  for(let y=0;y<MAP_ROWS;y++) {
+    for(let x=0;x<MAP_COLS;x++) {
+      if(map[y][x]===TERRAIN.WATER) continue;
+      let w=0; for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++) {
+        const nx=x+dx,ny=y+dy; if(nx>=0&&ny>=0&&nx<MAP_COLS&&ny<MAP_ROWS&&map[ny][nx]===TERRAIN.WATER) w++;
+      }
+      if(w>=4) map[y][x]=TERRAIN.WATER;
+    }
+  }
+
+  // Trees
+  for(let y=0;y<MAP_ROWS;y++) {
+    for(let x=0;x<MAP_COLS;x++) {
+      if(map[y][x]===TERRAIN.GRASS||map[y][x]===TERRAIN.DIRT) {
+        if(rng()<0.12) map[y][x]=TERRAIN.TREE;
+      }
+    }
+  }
+
+  // Gold mines (~8)
+  const goldSpots=[
+    {x:15,y:20},{x:45,y:22},{x:30,y:40},{x:52,y:45},
+    {x:8,y:42},{x:55,y:12},{x:25,y:55},{x:48,y:35}
+  ];
+  for(const gs of goldSpots) {
+    for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++) {
+      const nx=gs.x+dx,ny=gs.y+dy;
+      if(nx>=0&&ny>=0&&nx<MAP_COLS&&ny<MAP_ROWS) {
+        if(dx===0&&dy===0) map[ny][nx]=TERRAIN.GOLD;
+        else if(map[ny][nx]!==TERRAIN.WATER) map[ny][nx]=TERRAIN.DIRT;
+      }
+    }
+  }
+
+  // Clear starting area (center-bottom area)
+  const sx=30,sy=30; // starting town hall position in tiles
+  for(let dy=-4;dy<=4;dy++) for(let dx=-4;dx<=4;dx++) {
+    const nx=sx+dx,ny=sy+dy;
+    if(nx>=0&&ny>=0&&nx<MAP_COLS&&ny<MAP_ROWS) {
+      if(map[ny][nx]===TERRAIN.TREE||map[ny][nx]===TERRAIN.WATER) map[ny][nx]=TERRAIN.GRASS;
+    }
+  }
+
+  game.map=map;
+  return {startX:sx*TILE_SIZE+48, startY:sy*TILE_SIZE+48};
+}
+
+// ── ENTITY CREATION ──
+function createUnit(type, x, y) {
+  if(typeof type!=='string'||!UNIT_DEFS[type]) return null;
+  if(!Number.isFinite(x)||!Number.isFinite(y)) return null;
+  const def=UNIT_DEFS[type];
+  return {
+    id:genId(), type, owner:'player', x, y, w:def.size*2, h:def.size*2,
+    hp:def.hp, maxHp:def.hp, state:'idle', speed:def.speed, isBuilding:false,
+    attackDamage:def.atk.damage, attackRange:def.atk.range, attackCooldown:def.atk.cooldown, attackTimer:0,
+    targetId:null, moveTarget:null, path:[], attackTarget:null,
+    carryAmount:0, carryType:null, // resource type: 'gold' or 'wood'
+    buildTarget:null, // building ID peasant is constructing
+    canGather:!!def.canGather, canBuild:!!def.canBuild,
+    food:def.food||0, size:def.size, ranged:!!def.ranged,
+    gatheringNode:null, // {x,y} of resource node
+    gatheringTimer:0,
+    attackMove:false, // attack-move mode
+    faceDir:0, // radians
+    animTimer:0
+  };
+}
+function createBuilding(type, x, y, progress=0) {
+  if(typeof type!=='string'||!BUILDING_DEFS[type]) return null;
+  if(!Number.isFinite(x)||!Number.isFinite(y)) return null;
+  const def=BUILDING_DEFS[type];
+  return {
+    id:genId(), type, owner:'player', x, y, w:def.size.w, h:def.size.h,
+    hp:Math.floor(def.hp*Math.max(0.1,progress)), maxHp:def.hp,
+    state:progress>=1?'idle':'constructing', speed:0, isBuilding:true,
+    attackDamage:def.attack?def.attack.damage:0, attackRange:def.attack?def.attack.range:0, attackCooldown:def.attack?def.attack.cooldown:1, attackTimer:0,
+    targetId:null, moveTarget:null, path:[],
+    progress, produces:def.trains||[], rallyPoint:null,
+    dropoff:!!def.dropoff, dropoff_gold:!!def.dropoff_gold, dropoff_wood:!!def.dropoff_wood,
+    provides:def.provides||[], size:Math.max(def.size.w,def.size.h)/2, blocking:!!def.blocking,
+    queue:[], queueTimer:0, queueTotal:0
+  };
+}
+
+// ── ENTITY RENDERING (canvas drawing helpers) ──
+function drawHealthBar(ctx, ent, cam) {
+  if(ent.hp>=ent.maxHp && !game.selectedIds.has(ent.id)) return;
+  const ex=(ent.x-cam.x)*cam.zoom, ey=(ent.y-cam.y)*cam.zoom;
+  const bw=ent.w*cam.zoom, barh=5*cam.zoom;
+  const bx=ex, by=ey-bw*0.3-10*cam.zoom;
+  const pct=ent.hp/ent.maxHp;
+  const color=pct>0.6?'#4c4':pct>0.3?'#cc4':'#c44';
+  ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(bx-1,by-1,bw+2,barh+2);
+  ctx.fillStyle=color; ctx.fillRect(bx,by,bw*pct,barh);
+}
+
+function drawSelectionCircle(ctx, ent, cam) {
+  const ex=(ent.x-cam.x)*cam.zoom, ey=(ent.y-cam.y)*cam.zoom;
+  const r=(ent.size+4)*cam.zoom;
+  ctx.strokeStyle='#44ff44'; ctx.lineWidth=2; ctx.globalAlpha=0.8;
+  ctx.beginPath(); ctx.arc(ex,ey,r,0,Math.PI*2); ctx.stroke();
+  ctx.globalAlpha=1;
+}
+
+function drawUnit(ctx, u, cam) {
+  const ex=(u.x-cam.x)*cam.zoom, ey=(u.y-cam.y)*cam.zoom;
+  const s=u.size*cam.zoom;
+  ctx.save(); ctx.translate(ex,ey);
+
+  const t=game.time*3+u.animTimer;
+  const bob=(u.state==='moving'||u.state==='gathering')?Math.sin(t*5)*2*cam.zoom:0;
+  const facing=u.faceDir;
+  ctx.rotate(facing);
+
+  switch(u.type) {
+    case 'peasant':
+      // Body
+      ctx.fillStyle='#5577aa'; ctx.fillRect(-s*0.5,-s*0.5+bob,s*1.0,s*0.8);
+      ctx.fillStyle='#446688'; ctx.fillRect(-s*0.3,-s*0.3+bob,s*0.6,s*0.6);
+      // Head
+      ctx.fillStyle='#ddbb99'; ctx.beginPath(); ctx.arc(0,-s*0.7+bob,s*0.35,0,Math.PI*2); ctx.fill();
+      // Arms
+      ctx.fillStyle='#5577aa'; ctx.fillRect(-s*0.7,-s*0.3+bob,s*0.3,s*0.2);
+      ctx.fillRect(s*0.4,-s*0.3+bob,s*0.3,s*0.2);
+      // Legs
+      ctx.fillStyle='#443322'; ctx.fillRect(-s*0.3,s*0.3+bob,s*0.25,s*0.4);
+      ctx.fillRect(s*0.05,s*0.3+bob,s*0.25,s*0.4);
+      // Carry indicator
+      if(u.carryAmount>0) {
+        ctx.fillStyle=u.carryType==='gold'?'#ffd700':'#8B4513';
+        ctx.beginPath(); ctx.arc(s*0.6,s*0.2+bob,s*0.2,0,Math.PI*2); ctx.fill();
+      }
+      if(u.state==='building') {
+        // Hammer animation
+        const hx=-s*0.7, hy=-s*0.6+bob; const ha=Math.sin(t*8)*0.5;
+        ctx.save(); ctx.translate(hx,hy); ctx.rotate(ha);
+        ctx.fillStyle='#888'; ctx.fillRect(-s*0.15,-s*0.1,s*0.3,s*0.6);
+        ctx.fillStyle='#aaa'; ctx.fillRect(-s*0.25,-s*0.15,s*0.5,s*0.2);
+        ctx.restore();
+      }
+      break;
+    case 'footman':
+      ctx.fillStyle='#884422'; ctx.fillRect(-s*0.5,-s*0.5+bob,s*1.0,s*0.9);
+      ctx.fillStyle='#663311'; ctx.fillRect(-s*0.35,-s*0.35+bob,s*0.7,s*0.65);
+      ctx.fillStyle='#ddbb99'; ctx.beginPath(); ctx.arc(0,-s*0.7+bob,s*0.33,0,Math.PI*2); ctx.fill();
+      // Shield
+      ctx.fillStyle='#cc8844'; ctx.fillRect(-s*0.45,-s*0.3+bob,s*0.3,s*0.55);
+      ctx.strokeStyle='#aa6622'; ctx.lineWidth=1; ctx.strokeRect(-s*0.45,-s*0.3+bob,s*0.3,s*0.55);
+      // Sword
+      ctx.fillStyle='#ccc'; ctx.fillRect(s*0.4,-s*0.1+bob,s*0.15,s*0.5);
+      ctx.fillStyle='#ff0'; ctx.fillRect(s*0.35,-s*0.15+bob,s*0.25,s*0.1);
+      // Legs
+      ctx.fillStyle='#443322'; ctx.fillRect(-s*0.25,s*0.35+bob,s*0.22,s*0.35);
+      ctx.fillRect(s*0.03,s*0.35+bob,s*0.22,s*0.35);
+      break;
+    case 'archer':
+      ctx.fillStyle='#448844'; ctx.fillRect(-s*0.45,-s*0.45+bob,s*0.9,s*0.8);
+      ctx.fillStyle='#336633'; ctx.fillRect(-s*0.3,-s*0.3+bob,s*0.6,s*0.55);
+      ctx.fillStyle='#ddbb99'; ctx.beginPath(); ctx.arc(0,-s*0.65+bob,s*0.3,0,Math.PI*2); ctx.fill();
+      // Bow
+      ctx.strokeStyle='#aa8844'; ctx.lineWidth=2*cam.zoom; ctx.beginPath();
+      ctx.arc(-s*0.7,-s*0.15+bob,s*0.6,-0.8,0.8); ctx.stroke();
+      ctx.strokeStyle='#cc9944'; ctx.beginPath(); ctx.moveTo(-s*0.6,-s*0.55+bob); ctx.lineTo(-s*0.6,s*0.25+bob); ctx.stroke();
+      // Quiver
+      ctx.fillStyle='#886644'; ctx.fillRect(s*0.35,-s*0.4+bob,s*0.15,s*0.5);
+      break;
+    case 'knight':
+      // Horse body
+      ctx.fillStyle='#aa6622'; ctx.fillRect(-s*0.7,-s*0.3+bob,s*1.4,s*0.7);
+      ctx.fillRect(-s*0.7,-s*0.5+bob,s*0.25,s*0.3); // neck
+      // Rider body
+      ctx.fillStyle='#6666aa'; ctx.fillRect(-s*0.2,-s*0.7+bob,s*0.6,s*0.55);
+      ctx.fillStyle='#ddbb99'; ctx.beginPath(); ctx.arc(s*0.05,-s*0.9+bob,s*0.28,0,Math.PI*2); ctx.fill();
+      // Lance
+      ctx.fillStyle='#ccc'; ctx.fillRect(s*0.5,-s*0.5+bob,s*0.6,s*0.1);
+      ctx.fillStyle='#ff0'; ctx.beginPath(); ctx.arc(s*1.1,-s*0.45+bob,s*0.08,0,Math.PI*2); ctx.fill();
+      // Legs
+      ctx.fillStyle='#443322'; ctx.fillRect(-s*0.5,-s*0.15+bob,s*0.25,s*0.15);
+      ctx.fillRect(s*0.1,-s*0.15+bob,s*0.25,s*0.15);
+      // Tail
+      ctx.fillStyle='#663311'; ctx.fillRect(-s*0.85,-s*0.1+bob,s*0.2,s*0.15);
+      break;
+  }
+  ctx.restore();
+
+  // Selection circle
+  if(game.selectedIds.has(u.id)) drawSelectionCircle(ctx,u,cam);
+  drawHealthBar(ctx,u,cam);
+}
+
+function drawBuilding(ctx, b, cam) {
+  const ex=(b.x-cam.x)*cam.zoom, ey=(b.y-cam.y)*cam.zoom;
+  const bw=b.w*cam.zoom, bh=b.h*cam.zoom;
+  const constructing=b.progress<1;
+
+  ctx.save(); ctx.translate(ex-bw/2,ey-bh/2);
+
+  const base=constructing?'#555':'#6b5b3e';
+  const roof=constructing?'#444':'#4a3828';
+  const wall=constructing?'#444':'#5a4a30';
+  const isSelected=game.selectedIds.has(b.id);
+
+  // Shadow
+  ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.fillRect(3*cam.zoom,3*cam.zoom,bw,bh);
+
+  switch(b.type) {
+    case 'town_hall':
+      ctx.fillStyle=wall; ctx.fillRect(4,bh*0.3,bw-8,bh*0.7);
+      ctx.fillStyle=roof; ctx.beginPath(); ctx.moveTo(0,bh*0.35); ctx.lineTo(bw/2,0); ctx.lineTo(bw,bh*0.35); ctx.fill();
+      ctx.fillStyle='#ffd700'; ctx.fillRect(bw*0.4,bh*0.45,bw*0.2,bh*0.25); // door
+      ctx.fillStyle='#88aacc'; ctx.fillRect(bw*0.15,bh*0.45,bw*0.12,bh*0.15); ctx.fillRect(bw*0.73,bh*0.45,bw*0.12,bh*0.15); // windows
+      break;
+    case 'barracks':
+      ctx.fillStyle=wall; ctx.fillRect(0,bh*0.2,bw,bh*0.8);
+      ctx.fillStyle=roof; ctx.fillRect(-4,0,bw+8,bh*0.25);
+      ctx.fillStyle='#884444'; ctx.fillRect(bw*0.3,bh*0.35,bw*0.4,bh*0.45); // door
+      ctx.fillStyle='#88aacc'; ctx.fillRect(bw*0.1,bh*0.35,bw*0.15,bh*0.12); ctx.fillRect(bw*0.75,bh*0.35,bw*0.15,bh*0.12);
+      // Sword icon
+      ctx.fillStyle='#ccc'; ctx.fillRect(bw/2-2,bh*0.05,bw*0.04,bh*0.15);
+      ctx.fillStyle='#ff0'; ctx.fillRect(bw*0.44,bh*0.03,bw*0.12,bh*0.04);
+      break;
+    case 'stable':
+      ctx.fillStyle=wall; ctx.fillRect(0,bh*0.15,bw,bh*0.85);
+      ctx.fillStyle=roof; ctx.fillRect(-4,0,bw+8,bh*0.2);
+      ctx.fillStyle='#664422'; ctx.fillRect(bw*0.25,bh*0.25,bw*0.5,bh*0.5); // door
+      break;
+    case 'lumber_mill':
+      ctx.fillStyle=wall; ctx.fillRect(0,bh*0.2,bw,bh*0.8);
+      ctx.fillStyle=roof; ctx.fillRect(-3,0,bw+6,bh*0.25);
+      ctx.fillStyle='#8B4513'; ctx.fillRect(bw*0.1,bh*0.3,bw*0.25,bh*0.15); ctx.fillRect(bw*0.45,bh*0.3,bw*0.25,bh*0.15);
+      ctx.fillRect(bw*0.1,bh*0.5,bw*0.25,bh*0.15); ctx.fillRect(bw*0.45,bh*0.5,bw*0.25,bh*0.15); // logs
+      break;
+    case 'refinery':
+      ctx.fillStyle=wall; ctx.fillRect(0,bh*0.2,bw,bh*0.8);
+      ctx.fillStyle='#cc8800'; ctx.fillRect(bw*0.15,bh*0.3,bw*0.3,bh*0.5); // furnace
+      ctx.fillStyle=roof; ctx.fillRect(-3,0,bw+6,bh*0.25);
+      ctx.fillStyle='#ff8844'; ctx.beginPath(); ctx.arc(bw*0.3,bh*0.5,bh*0.08,0,Math.PI*2); ctx.fill(); // glow
+      break;
+    case 'watch_tower':
+      ctx.fillStyle='#777'; ctx.fillRect(bw*0.2,0,bw*0.6,bh*0.7);
+      ctx.fillStyle=wall; ctx.fillRect(0,bh*0.6,bw,bh*0.4);
+      ctx.fillStyle=roof; ctx.beginPath(); ctx.moveTo(bw*0.1,bh*0.1); ctx.lineTo(bw/2,-8*cam.zoom); ctx.lineTo(bw*0.9,bh*0.1); ctx.fill();
+      break;
+    case 'wall':
+      ctx.fillStyle='#888'; ctx.fillRect(0,0,bw,bh);
+      ctx.strokeStyle='#666'; ctx.lineWidth=1; ctx.strokeRect(1,1,bw-2,bh-2);
+      ctx.fillStyle='#999'; ctx.fillRect(bw*0.15,bh*0.15,bw*0.2,bh*0.2);
+      ctx.fillRect(bw*0.5,bh*0.3,bw*0.2,bh*0.2);
+      ctx.fillRect(bw*0.25,bh*0.55,bw*0.2,bh*0.2);
+      break;
+  }
+
+  // Construction scaffolding
+  if(constructing) {
+    ctx.strokeStyle='rgba(255,255,200,0.5)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(bw,bh); ctx.moveTo(bw,0); ctx.lineTo(0,bh); ctx.stroke();
+    ctx.fillStyle='rgba(255,255,200,0.15)'; ctx.fillRect(0,0,bw,bh);
+  }
+  ctx.restore();
+
+  // Progress bar for constructing buildings
+  if(constructing) {
+    const px=(b.x-b.w/2-cam.x)*cam.zoom;
+    const py=(b.y-b.h/2-12)*cam.zoom;
+    const pbw=bw;
+    ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(px-1,py-1,pbw+2,5*cam.zoom+2);
+    ctx.fillStyle='#48f'; ctx.fillRect(px,py,pbw*b.progress,5*cam.zoom);
+  }
+
+  // Training progress bar
+  if(b.queue&&b.queue.length>0) {
+    const qprog=b.queueTimer>0?(b.queueTimer/b.queueTotal):0;
+    const px=(b.x-b.w/2-cam.x)*cam.zoom;
+    const py=(b.y+b.h/2+2)*cam.zoom;
+    const pbw=bw;
+    ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(px-1,py-1,pbw+2,4*cam.zoom+2);
+    ctx.fillStyle='#fa0'; ctx.fillRect(px,py,pbw*qprog,4*cam.zoom);
+    // Show queue count
+    ctx.fillStyle='#fff'; ctx.font=`${10*cam.zoom}px sans-serif`;
+    ctx.fillText(`${b.queue.length}`,px+pbw*0.5,py-2);
+  }
+
+  if(isSelected) {
+    // Selection highlight
+    const sx=(b.x-b.w/2-cam.x)*cam.zoom, sy=(b.y-b.h/2-cam.y)*cam.zoom;
+    ctx.strokeStyle='#44ff44'; ctx.lineWidth=2; ctx.globalAlpha=0.7;
+    ctx.strokeRect(sx-2,sy-2,bw+4,bh+4);
+    ctx.globalAlpha=1;
+  }
+  drawHealthBar(ctx,b,cam);
+}
+
+// ── MAIN RENDER ──
+function render(ctx, canvas, minimapCtx, minimapCanvas) {
+  const cam=game.camera;
+  const z=cam.zoom;
+  const vw=canvas.width, vh=canvas.height;
+
+  // Clear
+  ctx.fillStyle='#1a1a0a'; ctx.fillRect(0,0,vw,vh);
+
+  // Compute visible tile range
+  const tx0=Math.max(0,Math.floor(cam.x/TILE_SIZE));
+  const ty0=Math.max(0,Math.floor(cam.y/TILE_SIZE));
+  const tx1=Math.min(MAP_COLS-1,Math.floor((cam.x+vw/z)/TILE_SIZE)+1);
+  const ty1=Math.min(MAP_ROWS-1,Math.floor((cam.y+vh/z)/TILE_SIZE)+1);
+
+  // Draw terrain tiles
+  for(let ty=ty0;ty<=ty1;ty++) {
+    for(let tx=tx0;tx<=tx1;tx++) {
+      const tile=game.map[ty][tx];
+      const px=(tx*TILE_SIZE-cam.x)*z, py=(ty*TILE_SIZE-cam.y)*z;
+      ctx.fillStyle=TERRAIN_COLORS[tile];
+      ctx.fillRect(Math.floor(px),Math.floor(py),Math.ceil(TILE_SIZE*z)+1,Math.ceil(TILE_SIZE*z)+1);
+      // Tile grid lines (subtle)
+      ctx.strokeStyle='rgba(0,0,0,0.08)';
+      ctx.strokeRect(Math.floor(px),Math.floor(py),Math.ceil(TILE_SIZE*z),Math.ceil(TILE_SIZE*z));
+
+      // Draw tree decorations
+      if(tile===TERRAIN.TREE) {
+        const cx=px+TILE_SIZE*z/2, cy=py+TILE_SIZE*z*0.3;
+        const r=TILE_SIZE*z*0.5;
+        ctx.fillStyle='#2a6a1a'; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='#1a4a10'; ctx.beginPath(); ctx.arc(cx-r*0.25,cy-r*0.15,r*0.6,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='#332211'; ctx.fillRect(cx-2*z,cy,z*4,r*0.8); // trunk
+      }
+      // Gold mine decoration
+      if(tile===TERRAIN.GOLD) {
+        const cx=px+TILE_SIZE*z/2, cy=py+TILE_SIZE*z*0.6;
+        // Draw gold rocks
+        ctx.fillStyle='#ddaa00'; ctx.beginPath(); ctx.arc(cx-8*z,cy,TILE_SIZE*z*0.35,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='#ffcc22'; ctx.beginPath(); ctx.arc(cx+6*z,cy-4*z,TILE_SIZE*z*0.3,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='#cc8800'; ctx.beginPath(); ctx.arc(cx-2*z,cy+2*z,TILE_SIZE*z*0.28,0,Math.PI*2); ctx.fill();
+      }
+    }
+  }
+
+  // Collect drawable entities sorted by y for depth
+  const ents=[];
+  for(const e of game.entities.values()) ents.push(e);
+  ents.sort((a,b)=>a.y-b.y);
+
+  // Draw entities
+  for(const e of ents) {
+    // Cull offscreen
+    const ex=(e.x-cam.x)*z, ey=(e.y-cam.y)*z;
+    if(ex+e.w*z<-50||ey+e.h*z<-50||ex>vw+50||ey>vh+50) continue;
+    if(e.type in BUILDING_DEFS) {
+      drawBuilding(ctx,e,cam);
+    } else {
+      drawUnit(ctx,e,cam);
+    }
+  }
+
+  // Rally point indicators
+  for(const e of ents) {
+    if(e.type in BUILDING_DEFS && e.rallyPoint && game.selectedIds.has(e.id)) {
+      const rx=(e.rallyPoint.x-cam.x)*z, ry=(e.rallyPoint.y-cam.y)*z;
+      ctx.strokeStyle='#ffaa00'; ctx.lineWidth=2; ctx.setLineDash([4,4]);
+      ctx.beginPath(); ctx.arc(rx,ry,6,0,Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+      // Line from building to rally
+      const bx=(e.x-cam.x)*z, by=(e.y-cam.y)*z;
+      ctx.strokeStyle='rgba(255,170,0,0.4)'; ctx.setLineDash([2,3]);
+      ctx.beginPath(); ctx.moveTo(bx,by); ctx.lineTo(rx,ry); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // Ghost building placement
+  if(game.ui.mode==='placeBuilding' && game.ghostBuilding) {
+    const gb=game.ghostBuilding;
+    const gx=(gb.x-cam.x)*z, gy=(gb.y-cam.y)*z;
+    const gw=gb.w*z, gh=gb.h*z;
+    const valid=gb.valid;
+    ctx.fillStyle=valid?'rgba(0,255,0,0.25)':'rgba(255,0,0,0.25)';
+    ctx.fillRect(gx,gy,gw,gh);
+    ctx.strokeStyle=valid?'#0f0':'#f00'; ctx.lineWidth=2;
+    ctx.setLineDash([5,5]); ctx.strokeRect(gx,gy,gw,gh); ctx.setLineDash([]);
+  }
+
+  // Selection box
+  if(game.selectionBox) {
+    const sb=game.selectionBox;
+    ctx.fillStyle='rgba(0,255,0,0.1)'; ctx.strokeStyle='#0f0'; ctx.lineWidth=1;
+    const sx=Math.min(sb.x1,sb.x2), sy=Math.min(sb.y1,sb.y2);
+    const sw=Math.abs(sb.x2-sb.x1), sh=Math.abs(sb.y2-sb.y1);
+    ctx.fillRect(sx,sy,sw,sh); ctx.strokeRect(sx,sy,sw,sh);
+  }
+
+  // Particles
+  for(const p of game.particles) {
+    const px=(p.x-cam.x)*z, py=(p.y-cam.y)*z;
+    ctx.fillStyle=p.color; ctx.globalAlpha=p.life/0.8;
+    ctx.fillRect(px,py,p.size*z,p.size*z);
+  }
+  ctx.globalAlpha=1;
+
+  // Floating texts
+  for(const ft of game.floatingTexts) {
+    const fx=(ft.x-cam.x)*z, fy=(ft.y-ft.yOff-cam.y)*z;
+    ctx.fillStyle=ft.color; ctx.globalAlpha=ft.life/1.2;
+    ctx.font=`${12*z}px sans-serif`; ctx.textAlign='center';
+    ctx.fillText(ft.text,fx,fy);
+  }
+  ctx.globalAlpha=1; ctx.textAlign='start';
+
+  // Minimap
+  renderMinimap(minimapCtx, minimapCanvas);
+}
+
+function renderMinimap(ctx, canvas) {
+  const ms=game.minimapSize, scale=ms/MAP_COLS;
+  // Terrain
+  for(let y=0;y<MAP_ROWS;y++) {
+    for(let x=0;x<MAP_COLS;x++) {
+      ctx.fillStyle=TERRAIN_COLORS_MINIMAP[game.map[y][x]];
+      ctx.fillRect(x*scale,y*scale,scale+1,scale+1);
+    }
+  }
+  // Entities
+  for(const e of game.entities.values()) {
+    const ex=e.x/TILE_SIZE*scale, ey=e.y/TILE_SIZE*scale;
+    if(e.type in BUILDING_DEFS) {
+      ctx.fillStyle=e.owner==='player'?'#4488cc':'#cc4444';
+      ctx.fillRect(ex-2,ey-2,4,4);
+    } else {
+      ctx.fillStyle=e.owner==='player'?'#88ccff':'#ff8888';
+      ctx.fillRect(ex-1,ey-1,2,2);
+    }
+  }
+  // Viewport indicator
+  const cam=game.camera;
+  const canvasEl2=document.getElementById('game-canvas');
+  const canvasW=canvasEl2.clientWidth;
+  const canvasH=canvasEl2.clientHeight;
+  ctx.strokeStyle='#fff'; ctx.lineWidth=1;
+  ctx.strokeRect(cam.x/TILE_SIZE*scale, cam.y/TILE_SIZE*scale,
+    (canvasW/cam.zoom)/TILE_SIZE*scale, (canvasH/cam.zoom)/TILE_SIZE*scale);
+}
+
+// ── INPUT HANDLING ──
+function screenToWorld(sx, sy) {
+  const cam=game.camera;
+  const canvas=document.getElementById('game-canvas');
+  const dpr=window.devicePixelRatio||1;
+  return {
+    x: sx*(canvas.width/canvas.clientWidth)/cam.zoom+cam.x,
+    y: sy*(canvas.height/canvas.clientHeight)/cam.zoom+cam.y
+  };
+}
+function worldToScreen(wx, wy) {
+  const cam=game.camera;
+  return {
+    x: (wx-cam.x)*cam.zoom,
+    y: (wy-cam.y)*cam.zoom
+  };
+}
+
+function entityAtWorld(wx, wy) {
+  // Check in reverse draw order (top entities drawn last)
+  const ents=[]; for(const e of game.entities.values()) ents.push(e);
+  // Sort by y descending so we pick topmost entity
+  ents.sort((a,b)=>b.y-a.y);
+  for(const e of ents) {
+    const hw=e.w/2, hh=e.h/2;
+    if(wx>=e.x-hw&&wx<=e.x+hw&&wy>=e.y-hh&&wy<=e.y+hh) return e;
+  }
+  return null;
+}
+
+function entitiesInRect(x1,y1,x2,y2) {
+  const rx=Math.min(x1,x2), ry=Math.min(y1,y2);
+  const rw=Math.abs(x2-x1), rh=Math.abs(y2-y1);
+  const result=[];
+  for(const e of game.entities.values()) {
+    if(e.owner!=='player') continue;
+    if(rectsOverlap({x:rx,y:ry,w:rw,h:rh},{x:e.x-e.w/2,y:e.y-e.h/2,w:e.w,h:e.h})) result.push(e);
+  }
+  return result;
+}
+
+function findNearestDropoff(x, y, resType) {
+  let best=null, bestDist=Infinity;
+  for(const e of game.entities.values()) {
+    if(e.owner!=='player'||e.progress<1) continue;
+    const def=BUILDING_DEFS[e.type];
+    if(!def) continue;
+    if(resType==='gold' && (def.dropoff||def.dropoff_gold)) {
+      const d=dist({x,y},{x:e.x,y:e.y});
+      if(d<bestDist) { bestDist=d; best=e; }
+    }
+    if(resType==='wood' && (def.dropoff||def.dropoff_wood)) {
+      const d=dist({x,y},{x:e.x,y:e.y});
+      if(d<bestDist) { bestDist=d; best=e; }
+    }
+  }
+  return best;
+}
+
+
+// ── AUTO-BUILD DROPOFF ──
+function getDropoffBuildingType(resType) {
+  if(resType==='gold') return 'refinery';
+  if(resType==='wood') return 'lumber_mill';
+  return null;
+}
+
+function hasDropoffUnderConstruction(resType, nearX, nearY) {
+  const MAX_DIST=400; const bldType=getDropoffBuildingType(resType);
+  // A town hall under construction is also a universal dropoff — no need to auto-build a separate one
+  for(const e of game.entities.values()) {
+    if(e.owner==='player'&&e.progress<1) {
+      if(e.type===bldType && dist({x:nearX,y:nearY},{x:e.x,y:e.y})<MAX_DIST) return true;
+      if(e.type==='town_hall' && dist({x:nearX,y:nearY},{x:e.x,y:e.y})<MAX_DIST) return true;
+    }
+  }
+  return false;
+}
+
+function findAutoBuildSite(buildingType, nearX, nearY) {
+  const def=BUILDING_DEFS[buildingType];
+  if(!def) return null;
+  // Search in expanding rings (radius in tiles)
+  const startTX=Math.floor(nearX/TILE_SIZE), startTY=Math.floor(nearY/TILE_SIZE);
+  for(const ringSize of [3,5,7,10]) {
+    for(let dy=-ringSize;dy<=ringSize;dy++) {
+      for(let dx=-ringSize;dx<=ringSize;dx++) {
+        if(Math.abs(dx)!==ringSize&&Math.abs(dy)!==ringSize) continue; // only perimeter
+        const tx=startTX+dx, ty=startTY+dy;
+        if(tx<0||ty<0||tx>=MAP_COLS||ty>=MAP_ROWS) continue;
+        const wx=tx*TILE_SIZE+TILE_SIZE/2, wy=ty*TILE_SIZE+TILE_SIZE/2;
+        if(isPlacementValid(buildingType, wx, wy)) return {x:wx, y:wy};
+      }
+    }
+  }
+  // Fallback: search entire map loosely for nearest valid spot
+  let best=null, bestDist=Infinity;
+  for(let ty=0;ty<MAP_ROWS;ty++) {
+    for(let tx=0;tx<MAP_COLS;tx++) {
+      if(game.map[ty][tx]===TERRAIN.WATER||game.map[ty][tx]===TERRAIN.TREE) continue;
+      const wx=tx*TILE_SIZE+TILE_SIZE/2, wy=ty*TILE_SIZE+TILE_SIZE/2;
+      if(!isPlacementValid(buildingType, wx, wy)) continue;
+      const d=dist({x:nearX,y:nearY},{x:wx,y:wy});
+      if(d<bestDist) { bestDist=d; best={x:wx,y:wy}; }
+    }
+  }
+  return best;
+}
+
+function autoBuildDropoff(peasant) {
+  const resType=peasant.carryType;
+  if(!resType||peasant.carryAmount<=0) return false;
+  // Check if a dropoff already exists
+  const existing=findNearestDropoff(peasant.x, peasant.y, resType);
+  if(existing) return false;
+  // Check if one is under construction (only within reasonable distance)
+  if(hasDropoffUnderConstruction(resType, peasant.x, peasant.y)) return false;
+  const buildingType=getDropoffBuildingType(resType);
+  if(!buildingType) return false;
+  // Cooldown check — prevent multiple peasants from auto-building same type
+  if(game.autoBuildCooldown[buildingType] && (game.time - game.autoBuildCooldown[buildingType]) < 15) return false;
+  // Affordability check
+  const cost=BUILDING_DEFS[buildingType].cost;
+  if(game.resources.gold<(cost.gold||0)||game.resources.wood<(cost.wood||0)) {
+    showFeedback('Need more resources for '+BUILDING_DEFS[buildingType].name);
+    game.autoBuildCooldown[buildingType]=game.time+3; // short cooldown to avoid spam
+    return false;
+  }
+  // Find build site — search near the gathering node if available, otherwise near the peasant
+  const siteOrigin=peasant.gatheringNode||peasant;
+  const site=findAutoBuildSite(buildingType, siteOrigin.x, siteOrigin.y);
+  if(!site) {
+    game.autoBuildCooldown[buildingType]=game.time+3; // short cooldown to avoid spam
+    return false;
+  }
+  // Per-frame lock: prevent double-spend by two peasants in same frame
+  if(game._autoBuildThisFrame.has(buildingType)) return false;
+  game._autoBuildThisFrame.add(buildingType);
+  // Deduct resources
+  game.resources.gold-=(cost.gold||0);
+  game.resources.wood-=(cost.wood||0);
+  // Create building
+  const b=createBuilding(buildingType, site.x, site.y, 0);
+  game.entities.set(b.id, b);
+  // Assign peasant
+  peasant.state='moving';
+  peasant.moveTarget={x:site.x, y:site.y};
+  peasant.buildTarget=b.id;
+  // Cooldown
+  game.autoBuildCooldown[buildingType]=game.time;
+  // Feedback
+  spawnFloatingText(peasant.x, peasant.y-peasant.size, 'Auto-building '+BUILDING_DEFS[buildingType].name+'!', '#ffaa44');
+  showFeedback('Auto-building '+BUILDING_DEFS[buildingType].name+'!');
+  return true;
+}
+
+function findNearestResource(wx, wy, resType) {
+  let best=null, bestDist=Infinity;
+  const tileType=resType==='gold'?TERRAIN.GOLD:TERRAIN.TREE;
+  // Search nearby tiles
+  const searchR=30; // tiles
+  const cx=Math.floor(wx/TILE_SIZE), cy=Math.floor(wy/TILE_SIZE);
+  for(let ty=Math.max(0,cy-searchR);ty<=Math.min(MAP_ROWS-1,cy+searchR);ty++) {
+    for(let tx=Math.max(0,cx-searchR);tx<=Math.min(MAP_COLS-1,cx+searchR);tx++) {
+      if(game.map[ty][tx]===tileType) {
+        const rx=tx*TILE_SIZE+TILE_SIZE/2, ry=ty*TILE_SIZE+TILE_SIZE/2;
+        const d=dist({x:wx,y:wy},{x:rx,y:ry});
+        if(d<bestDist) { bestDist=d; best={x:rx,y:ry,tx,ty}; }
+      }
+    }
+  }
+  return best;
+}
+
+function findNearestEnemy(wx, wy) {
+  let best=null, bestDist=Infinity;
+  for(const e of game.entities.values()) {
+    if(e.owner==='player'||e.hp<=0) continue;
+    const d=dist({x:wx,y:wy},{x:e.x,y:e.y});
+    if(d<bestDist) { bestDist=d; best=e; }
+  }
+  return best;
+}
+
+function isPlacementValid(buildingType, wx, wy) {
+  const def=BUILDING_DEFS[buildingType];
+  if(!def) return false;
+  const hw=def.size.w/2, hh=def.size.h/2;
+  // Bounds check
+  if(wx-hw<0||wy-hh<0||wx+hw>WORLD_W||wy+hh>WORLD_H) return false;
+  // Terrain check (check corners + center)
+  const checkPoints=[
+    {x:wx-hw+4,y:wy-hh+4},{x:wx+hw-4,y:wy-hh+4},
+    {x:wx-hw+4,y:wy+hh-4},{x:wx+hw-4,y:wy+hh-4},
+    {x:wx,y:wy}
+  ];
+  for(const p of checkPoints) {
+    const t=tileAt(p.x,p.y);
+    if(t===TERRAIN.WATER||t===TERRAIN.TREE) return false;
+  }
+  // Entity overlap check
+  const box={x:wx-hw,y:wy-hh,w:def.size.w,h:def.size.h};
+  for(const e of game.entities.values()) {
+    const eBox={x:e.x-e.w/2,y:e.y-e.h/2,w:e.w,h:e.h};
+    if(rectsOverlap(box,eBox)) return false;
+  }
+  return true;
+}
+
+// ── BUILDING / TRAINING ──
+function startBuildingPlacement(type) {
+  game.ui.mode='placeBuilding';
+  game.ui.buildingType=type;
+  game.ui.attackMode=false;
+  document.body.className='cursor-build';
+}
+
+function cancelPlacement() {
+  if(game.ui.mode!=='placeBuilding') return;
+  game.ui.mode='normal';
+  game.ui.buildingType=null;
+  game.ghostBuilding=null;
+  document.body.className='cursor-normal';
+}
+
+function placeBuilding(wx, wy) {
+  if(!game.ui.buildingType) return;
+  const def=BUILDING_DEFS[game.ui.buildingType];
+  const cost=def.cost;
+  if(game.resources.gold<(cost.gold||0)||game.resources.wood<(cost.wood||0)) {
+    showFeedback('Not enough resources for '+def.name);
+    return;
+  }
+  if(!isPlacementValid(game.ui.buildingType, wx, wy)) {
+    showFeedback('Cannot place '+def.name+' here');
+    return;
+  }
+
+  // Deduct resources
+  game.resources.gold-=(cost.gold||0);
+  game.resources.wood-=(cost.wood||0);
+
+  const b=createBuilding(game.ui.buildingType, wx, wy, 0);
+  game.entities.set(b.id, b);
+
+  // Assign nearest idle peasant
+  let nearest=null, nearestDist=Infinity;
+  for(const e of game.entities.values()) {
+    if(e.owner==='player'&&e.type==='peasant'&&e.state==='idle'&&e.canBuild) {
+      const d=dist({x:e.x,y:e.y},{x:wx,y:wy});
+      if(d<nearestDist){nearestDist=d;nearest=e;}
+    }
+  }
+  // Check if any peasant exists at all
+  let peasantCount=0;
+  for(const e of game.entities.values()) {
+    if(e.owner==='player'&&e.type==='peasant') peasantCount++;
+  }
+  if(nearest) {
+    nearest.state='moving';
+    nearest.moveTarget={x:wx,y:wy};
+    nearest.buildTarget=b.id;
+  } else if(peasantCount===0&&game.ui.buildingType==='town_hall') {
+    // Soft-lock prevention: auto-complete Town Hall when no peasants exist
+    b.progress=1; b.hp=b.maxHp; b.state='idle';
+    if(b.provides) {
+      for(const p of b.provides) {
+        if(p==='food5') game.resources.maxFood+=5;
+      }
+    }
+    spawnFloatingText(b.x,b.y,'Auto-built!','#ffd700');
+  }
+
+  cancelPlacement();
+  updateUI();
+}
+
+function startTraining(building, unitType) {
+  const def=UNIT_DEFS[unitType];
+  if(!def) return;
+  // Validate building can produce this unit
+  if(!building.produces||!building.produces.includes(unitType)) return;
+  const cost=def.cost;
+  if(game.resources.gold<(cost.gold||0)||game.resources.wood<(cost.wood||0)) return;
+  // Check food
+  const foodNeeded=def.food||0;
+  if(game.resources.food+foodNeeded>game.resources.maxFood) return;
+  // Deduct
+  game.resources.gold-=(cost.gold||0);
+  game.resources.wood-=(cost.wood||0);
+  game.resources.food+=foodNeeded;
+  // Queue
+  building.queue.push(unitType);
+  if(building.queue.length===1) {
+    building.queueTimer=0; building.queueTotal=getTrainTime(unitType);
+  }
+  updateUI();
+}
+
+function getTrainTime(unitType) {
+  switch(unitType) {
+    case 'peasant': return 3;
+    case 'footman': return 4;
+    case 'archer': return 5;
+    case 'knight': return 6;
+    default: return 4;
+  }
+}
+
+function getBuildTime(buildingType) {
+  return (BUILDING_DEFS[buildingType]||{}).buildTime||5;
+}
+
+// ── COMMANDS ──
+function issueMove(targetX, targetY) {
+  const isAttackMove=game.ui.attackMode;
+  for(const id of game.selectedIds) {
+    const e=game.entities.get(id);
+    if(!e||e.owner!=='player') continue;
+    if(e.isBuilding) continue;
+    e.state='moving'; e.moveTarget={x:targetX,y:targetY};
+    e.attackTarget=null;
+    e.attackMove=isAttackMove;
+    if(e.type==='peasant') {
+      e.gatheringNode=null;
+      // If within deposit range of a dropoff, deposit before moving
+      const dropoffChk=e.carryType?findNearestDropoff(e.x,e.y,e.carryType):null;
+      if(dropoffChk){
+        const halfSize=Math.max(dropoffChk.w,dropoffChk.h)/2;
+        const d=Math.sqrt((e.x-dropoffChk.x)**2+(e.y-dropoffChk.y)**2);
+        if(d<halfSize+24){
+          if(e.carryType==='gold'||e.carryType==='wood') game.resources[e.carryType]+=e.carryAmount;
+          spawnFloatingText(e.x,e.y-e.size,'+'+e.carryAmount,e.carryType==='gold'?'#ffd700':'#8B4513');
+          e.carryAmount=0;e.carryType=null;
+        }
+      }
+      e.buildTarget=null;
+    }
+  }
+}
+
+function issueGather(entity, wx, wy) {
+  if(!entity.canGather) return;
+  const tile=tileAt(wx,wy);
+  if(tile===TERRAIN.GOLD||tile===TERRAIN.TREE) {
+    const resType=tile===TERRAIN.GOLD?'gold':'wood';
+    const node=findNearestResource(wx,wy,resType);
+    if(!node) {
+      // No resource node found — move there anyway as fallback
+      entity.state='moving';
+      entity.moveTarget={x:wx,y:wy};
+      showFeedback('No '+resType+' resource nearby');
+      return;
+    }
+    entity.state='moving';
+    entity.moveTarget={x:node.x,y:node.y};
+    entity.gatheringNode=node;
+    entity.carryType=resType;
+    entity.carryAmount=0;
+    entity.buildTarget=null;
+    entity.attackTarget=null;
+  } else {
+    // Move if not a resource
+    entity.state='moving';
+    entity.moveTarget={x:wx,y:wy};
+  }
+}
+
+// ── GAME LOGIC UPDATE ──
+function update(dt) {
+  game.time+=dt;
+  const cappedDt=Math.min(dt,0.1); // Cap to prevent huge jumps
+
+  // Smooth camera
+  const cam=game.camera;
+  const canvas=document.getElementById('game-canvas');
+  const edge=10; const speed=400;
+
+  if(!game.mouse.middleDown&&!game.mouse.down) {
+    let dx=0,dy=0;
+    if(game.mouse.x>=0&&game.mouse.x<edge) dx=-speed;
+    if(game.mouse.x>canvas.clientWidth-edge&&game.mouse.x<=canvas.clientWidth) dx=speed;
+    if(game.mouse.y>=0&&game.mouse.y<edge) dy=-speed;
+    if(game.mouse.y>canvas.clientHeight-edge&&game.mouse.y<=canvas.clientHeight) dy=speed;
+    if(dx!==0||dy!==0) {
+      cam.x+=dx*dt/cam.zoom;
+      cam.y+=dy*dt/cam.zoom;
+    }
+  }
+  // Clamp camera
+  if(canvas.clientWidth>0) cam.x=clamp(cam.x,0,Math.max(0,WORLD_W-canvas.clientWidth/cam.zoom));
+  if(canvas.clientHeight>0) cam.y=clamp(cam.y,0,Math.max(0,WORLD_H-canvas.clientHeight/cam.zoom));
+
+  // Update mouse world pos
+  const world=screenToWorld(game.mouse.x, game.mouse.y);
+  game.mouse.worldX=world.x; game.mouse.worldY=world.y;
+
+  // Update ghost building
+  if(game.ui.mode==='placeBuilding'&&game.ui.buildingType) {
+    const def=BUILDING_DEFS[game.ui.buildingType];
+    game.ghostBuilding={
+      x:world.x-def.size.w/2, y:world.y-def.size.h/2,
+      w:def.size.w, h:def.size.h,
+      valid:isPlacementValid(game.ui.buildingType, world.x, world.y)
+    };
+  }
+
+  // Update entities
+  const toRemove=[];
+  for(const e of game.entities.values()) {
+    updateEntity(e, cappedDt, toRemove);
+  }
+  // Clear per-frame auto-build lock
+  game._autoBuildThisFrame.clear();
+  // Process removals
+  for(const id of toRemove) {
+    game.entities.delete(id);
+    game.selectedIds.delete(id);
+  }
+
+  // Update particles
+  game.particles=game.particles.filter(p=>{ p.x+=p.vx*cappedDt; p.y+=p.vy*cappedDt; p.life-=cappedDt; return p.life>0; });
+  // Update floating texts
+  game.floatingTexts=game.floatingTexts.filter(ft=>{ ft.yOff+=40*cappedDt; ft.life-=cappedDt; return ft.life>0; });
+
+  // Lightweight HUD update — only resources and timer (buttons are NOT recreated here)
+  document.getElementById('res-gold').textContent=game.resources.gold;
+  document.getElementById('res-wood').textContent=game.resources.wood;
+  document.getElementById('res-food').textContent=game.resources.food;
+  const mins=Math.floor(game.time/60), secs=Math.floor(game.time%60);
+  document.getElementById('game-timer').textContent=
+    String(mins).padStart(2,'0')+':'+String(secs).padStart(2,'0');
+}
+
+function updateEntity(e, dt, toRemove) {
+  // Death check
+  if(e.hp<=0) {
+    spawnParticles(e.x,e.y,12,'#ff8844');
+    // If it was a building that provided food, remove food
+    if(e.type in BUILDING_DEFS && e.progress>=1 && e.provides) {
+      for(const p of e.provides) {
+        if(p==='food5') { game.resources.maxFood-=5; game.resources.food=Math.min(game.resources.food,game.resources.maxFood); }
+      }
+    }
+    // If unit, remove food
+    if(e.type in UNIT_DEFS && e.owner==='player') {
+      game.resources.food=Math.max(0,game.resources.food-(UNIT_DEFS[e.type].food||0));
+    }
+    toRemove.push(e.id);
+    return;
+  }
+
+  // Building under construction
+  if(e.type in BUILDING_DEFS && e.progress<1) {
+    e.state='constructing';
+    // Count peasants building this
+    let builders=0;
+    for(const u of game.entities.values()) {
+      if(u.type==='peasant'&&u.buildTarget===e.id) builders++;
+    }
+    e.progress+=(dt/getBuildTime(e.type))*Math.max(1,builders);
+    if(e.progress>=1) {
+      e.progress=1; e.hp=e.maxHp; e.state='idle';
+      // Apply provides
+      if(e.provides) {
+        for(const p of e.provides) {
+          if(p==='food5') game.resources.maxFood+=5;
+        }
+      }
+      // Free up peasants and move them outside the building
+      for(const u of game.entities.values()) {
+        if(u.type==='peasant'&&u.buildTarget===e.id) {
+          u.buildTarget=null; u.state='idle';
+          const clear=findNearestClearSpace(e, u);
+          u.x=clear.x; u.y=clear.y;
+        }
+      }
+      spawnParticles(e.x,e.y,20,'#ffff88');
+      spawnFloatingText(e.x,e.y,'Built!','#ffd700');
+      updateUI();
+    }
+    return;
+  }
+
+  // Building training queue
+  if(e.type in BUILDING_DEFS && e.queue&&e.queue.length>0) {
+    e.queueTimer+=dt;
+    if(e.queueTimer>=e.queueTotal) {
+      // Spawn unit
+      const unitType=e.queue.shift();
+      const spawnX=e.rallyPoint?e.rallyPoint.x:e.x;
+      const spawnY=e.rallyPoint?e.rallyPoint.y:(e.y+e.h/2);
+      const unit=createUnit(unitType, spawnX, spawnY);
+      game.entities.set(unit.id, unit);
+      spawnFloatingText(spawnX,spawnY-10,UNIT_DEFS[unitType].name+' ready','#88ff88');
+      // Start next
+      if(e.queue.length>0) {
+        e.queueTimer=0; e.queueTotal=getTrainTime(e.queue[0]);
+      } else {
+        e.queueTimer=0; e.queueTotal=0;
+      }
+    }
+  }
+
+  // Attacking
+  if(e.attackTimer>0) e.attackTimer-=dt;
+
+  // Auto-target acquisition: if a combat unit has no target, seek nearest enemy
+  if(e.attackDamage>0&&!e.attackTarget&&e.attackTimer<=0&&!e.isBuilding) {
+    const enemy=findNearestEnemy(e.x,e.y);
+    if(enemy&&dist({x:e.x,y:e.y},{x:enemy.x,y:enemy.y})<e.attackRange+80) {
+      e.attackTarget=enemy.id;
+    }
+  }
+
+  // Attack logic: if unit has an attack target, pursue and engage
+  if(e.attackTarget) {
+    const target=game.entities.get(e.attackTarget);
+    if(!target||target.hp<=0) {
+      e.attackTarget=null; e.state='idle'; return;
+    }
+    const d=dist({x:e.x,y:e.y},{x:target.x,y:target.y});
+    const engageDist=e.attackRange+(target.size||target.w/2);
+    if(d<=engageDist) {
+      // In range — attack
+      e.state='attacking';
+      if(e.attackTimer<=0) {
+        target.hp-=e.attackDamage;
+        e.attackTimer=e.attackCooldown;
+        e.faceDir=Math.atan2(target.y-e.y,target.x-e.x);
+        spawnParticles(target.x,target.y,3,'#ff4444');
+        spawnFloatingText(target.x,target.y-target.size,'-'+e.attackDamage,'#ff4444');
+        if(target.hp<=0) {
+          e.attackTarget=null; e.state='idle';
+          // If attack-move, find next enemy
+          if(e.attackMove) {
+            const nextEnemy=findNearestEnemy(e.x,e.y);
+            if(nextEnemy) { e.attackTarget=nextEnemy.id; e.moveTarget={x:nextEnemy.x,y:nextEnemy.y}; e.state='moving'; }
+            else e.attackMove=false;
+          }
+        }
+      }
+    } else {
+      // Out of range — move toward target
+      e.state='moving'; e.moveTarget={x:target.x,y:target.y};
+    }
+  }
+
+  // Attack-move: seek nearby enemies while moving
+  if(e.attackMove&&!e.attackTarget&&e.state==='moving') {
+    const enemy=findNearestEnemy(e.x,e.y);
+    if(enemy&&dist({x:e.x,y:e.y},{x:enemy.x,y:enemy.y})<160) {
+      e.attackTarget=enemy.id; e.moveTarget={x:enemy.x,y:enemy.y};
+    }
+  }
+
+  // Unit movement
+  if(e.state==='moving'&&e.moveTarget) {
+    const dx=e.moveTarget.x-e.x, dy=e.moveTarget.y-e.y;
+    const d=Math.sqrt(dx*dx+dy*dy);
+    if(d<3) {
+      e.x=e.moveTarget.x; e.y=e.moveTarget.y; e.state='idle';
+      e.moveTarget=null;
+      // If peasant has a build target, start building
+      if(e.type==='peasant'&&e.buildTarget) {
+        const b=game.entities.get(e.buildTarget);
+        if(b&&b.progress<1) e.state='building';
+      }
+      // If peasant has a gathering node, start gathering (only if not carrying resources)
+      if(e.type==='peasant'&&e.gatheringNode&&e.carryAmount===0) {
+        e.state='gathering'; /* preserve gatheringTimer if peasant was pushed off tile */
+      }
+    } else {
+      const speed=e.speed*dt;
+      const mx=dx/d*speed, my=dy/d*speed;
+      const newX=e.x+mx, newY=e.y+my;
+      // Collision: only move to passable positions
+      if(isPassable(newX,newY)||e.state==='attacking') {
+        e.x=newX; e.y=newY;
+      } else {
+        // Try axis-aligned sliding
+        if(isPassable(newX,e.y)) e.x=newX;
+        else if(isPassable(e.x,newY)) e.y=newY;
+      }
+      e.faceDir=Math.atan2(dy,dx);
+    }
+    // Stay in bounds
+    e.x=clamp(e.x,e.size,WORLD_W-e.size);
+    e.y=clamp(e.y,e.size,WORLD_H-e.size);
+  }
+
+  // Peasant building
+  if(e.type==='peasant'&&e.state==='building') {
+    const b=e.buildTarget?game.entities.get(e.buildTarget):null;
+    if(!b||b.progress>=1) {
+      e.state='idle'; e.buildTarget=null;
+      if(b&&b.progress>=1) { const clear=findNearestClearSpace(b, e); e.x=clear.x; e.y=clear.y; }
+      return;
+    }
+    // Builder particles
+    if(Math.random()<0.3) spawnParticles(e.x,e.y-e.size,1,'#ffcc88');
+  }
+
+  // Peasant gathering
+  if(e.type==='peasant'&&e.state==='gathering') {
+    // Re-validate the tile under the peasant
+    const curTile=tileAt(e.x,e.y);
+    if(curTile!==(e.carryType==='gold'?TERRAIN.GOLD:TERRAIN.TREE)) {
+      // Entity separation may have pushed peasant off the resource tile.
+      // Walk back toward gatheringNode instead of resetting all progress.
+      if(e.gatheringNode) {
+        e.state='moving';
+        e.moveTarget={x:e.gatheringNode.x,y:e.gatheringNode.y};
+      } else {
+        e.state='idle'; e.gatheringNode=null; e.carryAmount=0; e.carryType=null;
+      }
+      return;
+    }
+    e.gatheringTimer+=dt;
+    if(e.gatheringTimer>=1.5) {
+      e.carryAmount=10;
+      e.gatheringTimer=0;
+      // Find drop-off
+      const dropoff=findNearestDropoff(e.x, e.y, e.carryType);
+      if(dropoff) {
+        e.state='moving';
+        // Steer to the building edge, not its impassable center
+        const dx=e.x-dropoff.x, dy=e.y-dropoff.y;
+        const dOff=Math.sqrt(dx*dx+dy*dy)||1;
+        const edgeDist=Math.max(dropoff.w,dropoff.h)/2+12;
+        e.moveTarget={x:dropoff.x+(dx/dOff)*edgeDist,y:dropoff.y+(dy/dOff)*edgeDist};
+      } else if (!autoBuildDropoff(e)) {
+        // Auto-build failed (not affordable, no space, etc.)
+        // Keep carrying resources and retry next cycle
+        e.state='idle';
+        // Do NOT clear carryAmount/carryType — preserve them
+      }
+    }
+    // Gather particles
+    if(Math.random()<0.2 && e.gatheringNode) {
+      spawnParticles(e.x,e.y-e.size,1,e.carryType==='gold'?'#ffd700':'#8B4513');
+    }
+  }
+
+  // Peasant arriving at dropoff (idle case handled by retry block with ~2s cooldown below)
+  if(e.type==='peasant'&&(e.state==='moving'||e.state==='idle')&&e.carryAmount>0) {
+    const dropoff=findNearestDropoff(e.x,e.y,e.carryType);
+    if(dropoff) {
+      const cx=dropoff.x, cy=dropoff.y;
+      const d=dist({x:e.x,y:e.y},{x:cx,y:cy});
+      const dropRange=Math.max(dropoff.w,dropoff.h)/2+24;
+      if(d<dropRange) {
+        // Deposit
+        if(e.carryType==='gold'||e.carryType==='wood') game.resources[e.carryType]+=e.carryAmount;
+        spawnFloatingText(e.x,e.y-e.size,'+'+e.carryAmount,e.carryType==='gold'?'#ffd700':'#8B4513');
+        e.carryAmount=0;
+        // Go back to node
+        if(e.gatheringNode) {
+          e.state='moving';
+          e.moveTarget={x:e.gatheringNode.x,y:e.gatheringNode.y};
+        } else {
+          e.state='idle'; e.carryType=null;
+        }
+      }
+    } else if (!autoBuildDropoff(e)) {
+      // Auto-build failed — keep carrying and retry next cycle
+      e.state='idle';
+      // Do NOT clear carryAmount/carryType
+    }
+  }
+
+  // Entity separation (units only, not buildings)
+  if((e.state==='moving'||e.state==='idle'||e.state==='attacking') && !e.isBuilding) {
+    let sx=0,sy=0,count=0;
+    for(const other of game.entities.values()) {
+      if(other.id===e.id) continue;
+      const dx=e.x-other.x, dy=e.y-other.y;
+      const d=Math.sqrt(dx*dx+dy*dy);
+      const minDist=(e.size+other.size)*1.2;
+      if(d<minDist&&d>0) {
+        sx+=dx/d*(minDist-d)*0.5;
+        sy+=dy/d*(minDist-d)*0.5;
+        count++;
+      }
+    }
+    if(count>0) {
+      const sepX=e.x+sx*dt*3, sepY=e.y+sy*dt*3;
+      if(isPassable(sepX,sepY)) { e.x=sepX; e.y=sepY; }
+      e.x=clamp(e.x,e.size,WORLD_W-e.size);
+      e.y=clamp(e.y,e.size,WORLD_H-e.size);
+    }
+  }
+
+  e.animTimer=(e.animTimer||0)+dt;
+
+  // Retry check: idle peasant carrying resources tries to find/build dropoff
+  if(e.type==='peasant'&&e.state==='idle'&&e.carryAmount>0&&e.carryType&&!e.isBuilding) {
+    if(Math.floor(game.time*10)%20===0) { // check every ~2 seconds
+      const dropoff=findNearestDropoff(e.x, e.y, e.carryType);
+      if(dropoff) {
+        e.state='moving';
+        e.moveTarget={x:dropoff.x, y:dropoff.y};
+      } else {
+        autoBuildDropoff(e);
+      }
+    }
+  }
+}
+
+// ── UI UPDATE ──
+function updateUI() {
+  const selCount=game.selectedIds.size;
+
+  // Resources
+  document.getElementById('res-gold').textContent=game.resources.gold;
+  document.getElementById('res-wood').textContent=game.resources.wood;
+  document.getElementById('res-food').textContent=game.resources.food;
+  document.getElementById('res-maxfood').textContent='/'+game.resources.maxFood;
+
+  // Timer
+  const mins=Math.floor(game.time/60), secs=Math.floor(game.time%60);
+  document.getElementById('game-timer').textContent=
+    String(mins).padStart(2,'0')+':'+String(secs).padStart(2,'0');
+
+  // Info panel
+  const infoName=document.getElementById('info-name');
+  const infoStats=document.getElementById('info-stats');
+  const actionPanel=document.getElementById('action-panel');
+
+  if(selCount===0) {
+    infoName.textContent='RealmCraft';
+    infoStats.innerHTML='Select a unit or building to begin<br><small style="color:#888">Right-click to move · Drag to box-select · Edge-scroll to pan · Scroll to zoom</small>';
+    actionPanel.innerHTML='<span style="color:#666;font-size:12px;padding:8px">Select a unit to see actions</span>';
+    return;
+  }
+
+  if(selCount===1) {
+    // Single selection
+    const e=game.entities.get([...game.selectedIds][0]);
+    if(!e) return;
+
+    const defB=BUILDING_DEFS[e.type];
+    const defU=UNIT_DEFS[e.type];
+
+    if(defB) {
+      // Building
+      infoName.textContent=defB.name+(e.progress<1?' (Constructing '+Math.floor(e.progress*100)+'%)':'');
+      let stats='HP: '+Math.floor(e.hp)+'/'+e.maxHp;
+      stats+=`<div class="hp-bar-outer"><div class="hp-bar-inner" style="width:${(e.hp/e.maxHp*100)}%"></div></div>`;
+      if(e.progress<1) {
+        stats+=`<div class="progress-outer"><div class="progress-inner" style="width:${e.progress*100}%"></div></div>`;
+      }
+      if(e.queue&&e.queue.length>0) {
+        stats+=`<div class="queue-info">Queue: ${e.queue.map(t=>UNIT_DEFS[t]?UNIT_DEFS[t].name:t).join(', ')}</div>`;
+        stats+=`<div class="progress-outer"><div class="progress-inner" style="width:${(e.queueTimer/e.queueTotal*100)}%"></div></div>`;
+      }
+      const hpPct=(e.hp/e.maxHp*100);
+      infoStats.textContent=stats;
+      const hpOuter=document.createElement('div'); hpOuter.className='hp-bar-outer';
+      const hpInner=document.createElement('div'); hpInner.className='hp-bar-inner'; hpInner.style.width=hpPct+'%';
+      hpOuter.appendChild(hpInner);
+      infoStats.appendChild(hpOuter);
+      if(e.progress<1) {
+        const progOuter=document.createElement('div'); progOuter.className='progress-outer';
+        const progInner=document.createElement('div'); progInner.className='progress-inner'; progInner.style.width=(e.progress*100)+'%';
+        progOuter.appendChild(progInner);
+        infoStats.appendChild(progOuter);
+      }
+      if(e.queue&&e.queue.length>0) {
+        const qi=document.createElement('div'); qi.className='queue-info';
+        qi.textContent='Queue: '+e.queue.map(t=>UNIT_DEFS[t]?UNIT_DEFS[t].name:t).join(', ');
+        infoStats.appendChild(qi);
+        const qpOuter=document.createElement('div'); qpOuter.className='progress-outer';
+        const qpInner=document.createElement('div'); qpInner.className='progress-inner'; qpInner.style.width=(e.queueTimer/e.queueTotal*100)+'%';
+        qpOuter.appendChild(qpInner);
+        infoStats.appendChild(qpOuter);
+      }
+
+      // Action buttons
+      if(e.progress>=1 && e.produces) {
+        actionPanel.innerHTML='';
+        for(const ut of e.produces) {
+          const udef=UNIT_DEFS[ut];
+          if(!udef) continue;
+          const cost=udef.cost||{};
+          const canAfford=(game.resources.gold>=(cost.gold||0)&&game.resources.wood>=(cost.wood||0));
+          const foodOk=game.resources.food+(udef.food||0)<=game.resources.maxFood;
+          const canTrain=canAfford&&foodOk;
+          const btn=document.createElement('button');
+          btn.textContent=`Train ${udef.name}`;
+          if(!canTrain) btn.disabled=true;
+          btn.title=`Cost: ${cost.gold||0}g ${cost.wood||0}w | Food: ${udef.food||0}`;
+          btn.onclick=()=>startTraining(e,ut);
+          const costSpan=document.createElement('span');
+          costSpan.className='cost'+(canAfford?'':' not-enough');
+          costSpan.textContent=` ${cost.gold||0}g ${cost.wood||0}w`;
+          btn.appendChild(costSpan);
+          actionPanel.appendChild(btn);
+        }
+      } else if(e.progress<1) {
+        actionPanel.innerHTML='<span style="color:#888;font-size:12px;padding:8px">Building under construction...</span>';
+      } else {
+        actionPanel.innerHTML='<span style="color:#888;font-size:12px;padding:8px">No actions available</span>';
+      }
+    } else if(defU) {
+      // Unit
+      infoName.textContent=defU.name+' ('+e.state+')';
+      let stats=`HP: ${Math.floor(e.hp)}/${e.maxHp} | Speed: ${defU.speed} | Atk: ${defU.atk.damage} | Range: ${defU.atk.range}`;
+      stats+=`<div class="hp-bar-outer"><div class="hp-bar-inner" style="width:${(e.hp/e.maxHp*100)}%"></div></div>`;
+      if(e.carryAmount>0) stats+=`<br>Carrying: ${e.carryAmount} ${e.carryType}`;
+      if(e.state==='gathering') stats+=`<br>Gathering: ${e.carryType} (${Math.floor(e.gatheringTimer/1.5*100)}%)`;
+      const unitHpPct=(e.hp/e.maxHp*100);
+      infoStats.textContent=stats;
+      const hpOuterU=document.createElement('div'); hpOuterU.className='hp-bar-outer';
+      const hpInnerU=document.createElement('div'); hpInnerU.className='hp-bar-inner'; hpInnerU.style.width=unitHpPct+'%';
+      hpOuterU.appendChild(hpInnerU);
+      infoStats.appendChild(hpOuterU);
+      if(e.carryAmount>0) {
+        const br1=document.createElement('br');
+        const carrySpan=document.createElement('span');
+        carrySpan.textContent='Carrying: '+e.carryAmount+' '+e.carryType;
+        infoStats.appendChild(br1);
+        infoStats.appendChild(carrySpan);
+      }
+      if(e.state==='gathering') {
+        const br2=document.createElement('br');
+        const gatherSpan=document.createElement('span');
+        gatherSpan.textContent='Gathering: '+e.carryType+' ('+Math.floor(e.gatheringTimer/1.5*100)+'%)';
+        infoStats.appendChild(br2);
+        infoStats.appendChild(gatherSpan);
+      }
+
+      // Action buttons (unit)
+      actionPanel.innerHTML='';
+      if(e.type==='peasant'&&e.canBuild) {
+        // Building construction buttons
+        for(const [btype,bdef] of Object.entries(BUILDING_DEFS)) {
+          const cost=bdef.cost||{};
+          const canAfford=game.resources.gold>=(cost.gold||0)&&game.resources.wood>=(cost.wood||0);
+          const btn=document.createElement('button');
+          btn.textContent=`Build ${bdef.name}`;
+          if(!canAfford) btn.disabled=true;
+          btn.onclick=()=>startBuildingPlacement(btype);
+          const costSpan=document.createElement('span');
+          costSpan.className='cost'+(canAfford?'':' not-enough');
+          costSpan.textContent=` ${cost.gold||0}g ${cost.wood||0}w`;
+          btn.appendChild(costSpan);
+          actionPanel.appendChild(btn);
+        }
+      }
+      // Stop button
+      const stopBtn=document.createElement('button');
+      stopBtn.textContent='Stop (S)'; stopBtn.onclick=()=>commandStop();
+      actionPanel.appendChild(stopBtn);
+    }
+  } else {
+    // Multiple selection
+    let totalHp=0, maxHp=0, unitCount=0;
+    for(const id of game.selectedIds) {
+      const e=game.entities.get(id);
+      if(e) { totalHp+=e.hp; maxHp+=e.maxHp; unitCount++; }
+    }
+    infoName.textContent=unitCount+' units selected';
+    const avgPct=maxHp>0?totalHp/maxHp:0;
+    let stats=`Avg HP: ${Math.floor(avgPct*100)}%`;
+    stats+=`<div class="hp-bar-outer"><div class="hp-bar-inner" style="width:${avgPct*100}%"></div></div>`;
+    infoStats.innerHTML=stats;
+    actionPanel.innerHTML='';
+    const stopBtn=document.createElement('button');
+    stopBtn.textContent='Stop (S)'; stopBtn.onclick=()=>commandStop();
+    actionPanel.appendChild(stopBtn);
+  }
+}
+
+function commandStop() {
+  for(const id of game.selectedIds) {
+    const e=game.entities.get(id);
+    if(!e) continue;
+    e.state='idle'; e.moveTarget=null; e.attackTarget=null; e.attackMove=false;
+    if(e.type==='peasant') {
+      e.buildTarget=null;
+      e.gatheringNode=null;
+      // If within deposit range of a dropoff, deposit before stopping
+      const dropoffChk=e.carryType?findNearestDropoff(e.x,e.y,e.carryType):null;
+      if(dropoffChk){
+        const halfSize=Math.max(dropoffChk.w,dropoffChk.h)/2;
+        const d=Math.sqrt((e.x-dropoffChk.x)**2+(e.y-dropoffChk.y)**2);
+        if(d<halfSize+24){
+          if(e.carryType==='gold'||e.carryType==='wood') game.resources[e.carryType]+=e.carryAmount;
+          spawnFloatingText(e.x,e.y-e.size,'+'+e.carryAmount,e.carryType==='gold'?'#ffd700':'#8B4513');
+          e.carryAmount=0;e.carryType=null;
+        }
+      }
+    }
+  }
+}
+
+// ── EVENT HANDLERS ──
+const canvas=document.getElementById('game-canvas');
+const minimap=document.getElementById('minimap');
+const wrapper=document.getElementById('canvas-wrapper');
+
+function resizeCanvas() {
+  const rect=wrapper.getBoundingClientRect();
+  const dpr=window.devicePixelRatio||1;
+  canvas.width=rect.width*dpr;
+  canvas.height=rect.height*dpr;
+  const ctx=canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  // Re-clamp camera after resize
+  const cam=game.camera;
+  if(canvas.clientWidth>0) cam.x=clamp(cam.x,0,Math.max(0,WORLD_W-canvas.clientWidth/cam.zoom));
+  if(canvas.clientHeight>0) cam.y=clamp(cam.y,0,Math.max(0,WORLD_H-canvas.clientHeight/cam.zoom));
+}
+
+window.addEventListener('resize', resizeCanvas);
+
+canvas.addEventListener('contextmenu', e=>e.preventDefault());
+
+canvas.addEventListener('mousedown', e=>{
+  game.mouse.x=e.clientX-wrapper.getBoundingClientRect().left;
+  game.mouse.y=e.clientY-wrapper.getBoundingClientRect().top;
+  const world=screenToWorld(game.mouse.x, game.mouse.y);
+  game.mouse.worldX=world.x; game.mouse.worldY=world.y;
+
+  if(e.button===0) { // Left click
+    // Check placement mode first
+    if(game.ui.mode==='placeBuilding') {
+      placeBuilding(world.x, world.y);
+      return;
+    }
+
+    game.mouse.down=true;
+    game.mouse.dragStart={x:game.mouse.x,y:game.mouse.y};
+
+    // Check if clicked on entity
+    const ent=entityAtWorld(world.x, world.y);
+    if(ent&&ent.owner==='player') {
+      if(e.shiftKey) {
+        if(game.selectedIds.has(ent.id)) game.selectedIds.delete(ent.id);
+        else game.selectedIds.add(ent.id);
+      } else if(!game.selectedIds.has(ent.id)) {
+        game.selectedIds.clear(); game.selectedIds.add(ent.id);
+      }
+      updateUI();
+      // Don't count as drag start if clicking entity
+      game.mouse.clickEntity=true;
+    } else {
+      if(!e.shiftKey) game.selectedIds.clear();
+      game.mouse.clickEntity=false;
+      updateUI();
+    }
+  } else if(e.button===1) { // Middle click
+    game.mouse.middleDown=true;
+    game.mouse.dragStart={x:e.clientX,y:e.clientY};
+    e.preventDefault();
+  } else if(e.button===2) { // Right click
+    game.mouse.rightDown=true;
+    if(game.ui.mode==='placeBuilding') {
+      cancelPlacement(); return;
+    }
+    const ent=entityAtWorld(world.x, world.y);
+    const tile=tileAt(world.x, world.y);
+
+    // Priority 1: Attack enemy entity
+    if(ent&&ent.owner!=='player') {
+      for(const id of game.selectedIds) {
+        const e=game.entities.get(id);
+        if(e&&!e.isBuilding) {
+          e.state='moving'; e.attackTarget=ent.id; e.attackMove=false;
+          e.moveTarget={x:ent.x,y:ent.y};
+        }
+      }
+    }
+    // Priority 2: Gather on resource (even if entity is on the tile)
+    else if(tile===TERRAIN.GOLD||tile===TERRAIN.TREE) {
+      let hasPeasant=false;
+      for(const id of game.selectedIds) {
+        const e=game.entities.get(id);
+        if(e&&e.type==='peasant') { hasPeasant=true; break; }
+      }
+      if(hasPeasant) {
+        for(const id of game.selectedIds) {
+          const e=game.entities.get(id);
+          if(e&&e.type==='peasant') issueGather(e, world.x, world.y);
+          else if(e&&e.owner==='player'&&!e.isBuilding) issueMove(world.x, world.y);
+        }
+      } else {
+        issueMove(world.x, world.y);
+      }
+    }
+    // Priority 3: Interact with player building (deposit or rally)
+    else if(ent&&ent.type in BUILDING_DEFS&&ent.owner==='player') {
+      // Only deposit if building accepts the carried resource type
+      for(const id of game.selectedIds) {
+        const e=game.entities.get(id);
+        if(e&&e.type==='peasant'&&e.carryAmount>0) {
+          const def=BUILDING_DEFS[ent.type];
+          const canDeposit=(e.carryType==='gold'&&(def.dropoff||def.dropoff_gold))||
+                          (e.carryType==='wood'&&(def.dropoff||def.dropoff_wood));
+          if(canDeposit) {
+            e.state='moving'; e.moveTarget={x:ent.x,y:ent.y};
+          }
+        } else if(e) {
+          e.state='moving'; e.moveTarget={x:ent.x,y:ent.y};
+        }
+      }
+      // If building selected, set rally point
+      if(game.selectedIds.has(ent.id)) {
+        if(!isPassable(world.x,world.y)) {
+          showFeedback('Cannot set rally on impassable terrain');
+        } else {
+          ent.rallyPoint={x:world.x,y:world.y};
+        }
+      }
+    } else {
+      issueMove(world.x, world.y);
+    }
+    updateUI();
+  }
+});
+
+canvas.addEventListener('mousemove', e=>{
+  game.mouse.x=e.clientX-wrapper.getBoundingClientRect().left;
+  game.mouse.y=e.clientY-wrapper.getBoundingClientRect().top;
+  const world=screenToWorld(game.mouse.x, game.mouse.y);
+  game.mouse.worldX=world.x; game.mouse.worldY=world.y;
+
+  if(game.mouse.middleDown) {
+    const dx=(e.clientX-game.mouse.dragStart.x)/game.camera.zoom;
+    const dy=(e.clientY-game.mouse.dragStart.y)/game.camera.zoom;
+    game.camera.x-=dx; game.camera.y-=dy;
+    game.mouse.dragStart={x:e.clientX,y:e.clientY};
+  }
+
+  if(game.mouse.down&&!game.mouse.clickEntity) {
+    game.mouse.dragEnd={x:game.mouse.x,y:game.mouse.y};
+    // Update selection box
+    if(game.mouse.dragStart) {
+      game.selectionBox={x1:game.mouse.dragStart.x,x2:game.mouse.x,y1:game.mouse.dragStart.y,y2:game.mouse.y};
+    }
+  }
+});
+
+canvas.addEventListener('mouseup', e=>{
+  if(e.button===0) {
+    // Process selection box
+    if(game.selectionBox&&!game.mouse.clickEntity) {
+      const sw0=screenToWorld(game.mouse.dragStart.x, game.mouse.dragStart.y);
+      const sw1=screenToWorld(game.mouse.x, game.mouse.y);
+      const ents=entitiesInRect(sw0.x,sw0.y,sw1.x,sw1.y);
+      if(!e.shiftKey) game.selectedIds.clear();
+      for(const ent of ents) {
+        if(ent.owner==='player') game.selectedIds.add(ent.id);
+      }
+      updateUI();
+    }
+    game.selectionBox=null;
+    game.mouse.down=false;
+    game.mouse.dragStart=null;
+    game.mouse.dragEnd=null;
+    game.mouse.clickEntity=false;
+  }
+  if(e.button===1) { game.mouse.middleDown=false; }
+  if(e.button===2) { game.mouse.rightDown=false; }
+});
+
+canvas.addEventListener('wheel', e=>{
+  e.preventDefault();
+  const zoom=game.camera.zoom;
+  const factor=e.deltaY>0?0.9:1.1;
+  const newZoom=clamp(zoom*factor,0.5,2.0);
+  // Zoom toward mouse
+  const world=screenToWorld(game.mouse.x, game.mouse.y);
+  game.camera.zoom=newZoom;
+  const worldAfter=screenToWorld(game.mouse.x, game.mouse.y);
+  game.camera.x+=world.x-worldAfter.x;
+  game.camera.y+=world.y-worldAfter.y;
+}, {passive:false});
+
+// Minimap click
+minimap.addEventListener('click', e=>{
+  const scale=game.minimapSize/MAP_COLS;
+  const tx=e.offsetX/scale, ty=e.offsetY/scale;
+  const canvasEl=document.getElementById('game-canvas');
+  game.camera.x=tx*TILE_SIZE-(canvasEl.clientWidth/game.camera.zoom)/2;
+  game.camera.y=ty*TILE_SIZE-(canvasEl.clientHeight/game.camera.zoom)/2;
+  game.camera.x=clamp(game.camera.x,0,Math.max(0,WORLD_W-canvasEl.clientWidth/game.camera.zoom));
+  game.camera.y=clamp(game.camera.y,0,Math.max(0,WORLD_H-canvasEl.clientHeight/game.camera.zoom));
+});
+
+// Keyboard shortcuts
+window.addEventListener('keydown', e=>{
+  if(e.key==='Escape') {
+    if(game.ui.mode==='placeBuilding') cancelPlacement();
+    else { game.selectedIds.clear(); updateUI(); }
+  }
+  if(e.key==='s'||e.key==='S') { commandStop(); updateUI(); }
+  // 'a' for attack move (we don't have enemies, but toggle it)
+  if(e.key==='a'||e.key==='A') {
+    if(game.ui.mode==='placeBuilding') return;
+    game.ui.attackMode=!game.ui.attackMode;
+    document.body.className=game.ui.attackMode?'cursor-attack':'cursor-normal';
+  }
+  if(e.key==='h'||e.key==='H') {
+    for(const id of game.selectedIds) {
+      const e=game.entities.get(id); if(e) e.state='idle';
+    }
+    updateUI();
+  }
+});
+
+// ── INITIAL SETUP ──
+function initGame() {
+  resizeCanvas();
+  const {startX, startY}=generateMap();
+
+  // Initialize per-frame auto-build lock
+  game._autoBuildThisFrame=new Set();
+  // Create starting Town Hall
+  const th=createBuilding('town_hall', startX, startY, 1);
+  game.entities.set(th.id, th);
+
+  // Create starting peasants
+  for(let i=0;i<3;i++) {
+    const p=createUnit('peasant', startX+40+i*30, startY+80);
+    game.entities.set(p.id, p);
+  }
+
+  // Initial camera centering
+  const canvasEl=document.getElementById('game-canvas');
+  game.camera.x=startX-canvasEl.clientWidth/4;
+  game.camera.y=startY-canvasEl.clientHeight/4;
+
+  updateUI();
+}
+
+// ── GAME LOOP ──
+let lastTime=performance.now();
+
+function gameLoop(timestamp) {
+  let dt=(timestamp-lastTime)/1000;
+  if(dt<=0) dt=0.016; // ~60fps fallback
+  if(dt>0.2) dt=0.2; // Cap
+  lastTime=timestamp;
+
+  // Don't update if tab is in background (high dt)
+  if(dt<0.3) update(dt);
+
+  const ctx=canvas.getContext('2d');
+  const minimapCtx=minimap.getContext('2d');
+  render(ctx, canvas, minimapCtx, minimap);
+
+  requestAnimationFrame(gameLoop);
+}
+
+// Start
+initGame();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>

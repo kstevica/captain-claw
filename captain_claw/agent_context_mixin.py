@@ -7,6 +7,7 @@ import json
 import hashlib
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -2171,12 +2172,14 @@ class AgentContextMixin:
         "screen_capture": ["screen_capture"],
         "desktop_action": ["desktop_action"],
         "cron": ["cron"],
+        "codemap": ["codemap"],
     }
 
     def _register_default_tools(self) -> None:
         """Register the default tool set."""
         from captain_claw.tools import (
             BrowserTool,
+            CodeMapTool,
             PinchTabTool,
             DocxExtractTool,
             EditTool,
@@ -2242,6 +2245,8 @@ class AgentContextMixin:
                 self.tools.register(GlobTool())
             elif tool_name == "grep":
                 self.tools.register(GrepTool())
+            elif tool_name == "codemap":
+                self.tools.register(CodeMapTool())
             elif tool_name == "web_fetch":
                 self.tools.register(WebFetchTool())
                 self.tools.register(WebGetTool())
@@ -3331,9 +3336,31 @@ class AgentContextMixin:
     ) -> list[Message]:
         """Build message list for LLM."""
         cfg = get_config()
-        system_prompt = self._build_system_prompt()
+        # ── Turn-frozen system prompt (prompt-prefix cache) ──────────
+        # The system prompt embeds the current clock and humanized activity
+        # ages ("3 minutes ago"), so re-rendering it on every tool-loop
+        # iteration changes the FIRST tokens of the request call-to-call —
+        # busting the provider's prompt-prefix cache for the ENTIRE
+        # conversation behind it (measured: 94% cache-miss / $10 on a 24.5M-
+        # token coding run). Render it once per turn and reuse it for every
+        # LLM call in the turn; `complete()`/`stream()` clear the cache at
+        # turn start, and a TTL bounds clock staleness on any path that
+        # skips the reset. A mid-turn `planning_enabled` flip re-renders.
+        _sp_key = bool(getattr(self, "planning_enabled", False))
+        _sp_cache = getattr(self, "_turn_system_prompt", None)
+        if (
+            isinstance(_sp_cache, tuple)
+            and len(_sp_cache) == 4
+            and _sp_cache[0] == _sp_key
+            and (time.monotonic() - _sp_cache[3]) < 600.0
+        ):
+            system_prompt = _sp_cache[1]
+            system_tokens = _sp_cache[2]
+        else:
+            system_prompt = self._build_system_prompt()
+            system_tokens = self._count_tokens(system_prompt)
+            self._turn_system_prompt = (_sp_key, system_prompt, system_tokens, time.monotonic())
         messages = [Message(role="system", content=system_prompt)]
-        system_tokens = self._count_tokens(system_prompt)
         context_budget = max(1, int(cfg.context.max_tokens))
         history_budget = max(0, context_budget - system_tokens)
 

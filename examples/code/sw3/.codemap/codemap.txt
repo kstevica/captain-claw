@@ -1,0 +1,242 @@
+# RealmCraft — Code Map
+
+## OVERVIEW (2026-07-03)
+
+**RealmCraft** is a single-file HTML/CSS/JS RTS game (1,571 lines, `index.html`) inspired by Warcraft/StarCraft. The player builds structures, trains units, gathers gold/wood, and manages food-population on a 64×64 tile map. No AI opponents, no multiplayer, no sound. Runs entirely in-browser with no external dependencies.
+
+### File Inventory
+| File | Lines | Purpose |
+|------|-------|---------|
+| `index.html` | 1,571 | Complete game: HTML shell, CSS theme, all JS game logic (36 functions, 1 main loop) |
+| `plan.md` | ~280 | Design document (24 sections, implementation order) |
+| `test_game.js` | ~1,100 | Test suite (125+ tests) for entity creation, resources, placement, gameplay |
+| `canvas.clientWidth` | ~20 | Fix notes: 9 fixes applied |
+| `.reports/` (20 files) | various | QA + correctness + security reviews (R0–R3), latest: 0 BLOCKING / 7 MAJOR / 9 MINOR |
+
+### Architecture Layers (bottom-up, 10 layers)
+1. **Constants & Config** (line 86) — TILE_SIZE=32, MAP 64×64, TERRAIN enum (5 types), BUILDING_DEFS (7), UNIT_DEFS (4), TERRAIN_COLORS
+2. **Game State** (line 122) — `const game = {...}` single state object: entities Map, resources, selectedIds Set, camera, ui mode, mouse, particles, floatingTexts
+3. **Helpers** (line 142) — `genId()`, `dist()`, `clamp()`, `lerp()`, `rectsOverlap()`, `tileAt()`, `isPassable()`, `spawnParticles()`, `showFeedback()`
+4. **Map Generation** (line 176) — `generateMap()` with seed 42: grass base, dirt paths, water bodies, tree clusters, 8 gold mines. Deterministic procedural
+5. **Entity Creation** (line 262) — `createUnit(type, x, y)` and `createBuilding(type, x, y, progress)` factories
+6. **Rendering** (line 297–624) — Canvas drawing pipeline: drawHealthBar → drawSelectionCircle → drawUnit (geometric shapes per unit type) → drawBuilding → render (terrain→buildings→units→selection→UI→minimap). Minimap render separate at line 625
+7. **Camera** — Edge-scroll (10px zone), middle-click drag, zoom lerp (0.5×–2.0×), transform clamped to world bounds
+8. **Input & Selection** (line 655) — screenToWorld/worldToScreen transforms, entityAtWorld hit-test, entitiesInRect for box-select, findNearestDropoff, findNearestResource, isPlacementValid validation
+9. **Game Logic** (line 900) — `update(dt)` → `updateEntity(e, dt, toRemove)` per-entity: movement steering (lerp to target), resource gathering (mine→return→deposit loop), building construction progress, training queue, attack (target selection + cooldown), death/cleanup, particle lifecycle
+10. **UI & Events** (line 1183–1567) — `updateUI()` rebuilds info/action panels, `resizeCanvas()` responsive resize, mouse handlers (mousedown/move/up/click/contextmenu/wheel), keyboard (A/S/H/Escape), minimap click pan, `initGame()` bootstrap, `gameLoop()` rAF loop
+
+### Key Design Patterns
+- **Flat JS objects** for entities (no classes, no ECS library)
+- **Map<string, Entity>** for entity storage, simple iteration
+- **Camera-relative rendering** via ctx.translate + ctx.scale
+- **Delta-time game loop** rAF with dt cap at 50ms
+- **State machine** per entity (idle/moving/attacking/gathering/building/constructing)
+- **Procedural geometric graphics** — no spritesheets
+
+## DATA MODELS
+
+### Terrain
+```
+TERRAIN = { GRASS:0, DIRT:1, WATER:2, TREE:3, GOLD:4 }
+```
+- 64×64 grid of 32px tiles → 2048×2048 px world
+- WATER: impassable; TREE: walkable + resource node
+- Colors (game/minimap): grass #4a8c2a/#3a7a20, dirt #b8a060/#a89050, water #3060a0/#2050a0, tree #2a5a18/#1a4a10, gold #8a7a30/#c8a020
+
+### UNIT_DEFS (4)
+| Key | Name | Cost | HP | Speed | Atk | Range | Food | Size | Special |
+|-----|------|------|-----|-------|-----|-------|------|------|---------|
+| `peasant` | Peasant | 50g | 40 | 140 | 5 | 24 | 1 | 16 | canGather, canBuild |
+| `footman` | Footman | 100g+30w | 60 | 120 | 10 | 24 | 2 | 18 | melee |
+| `archer` | Archer | 120g+40w | 45 | 120 | 8 | 140 | 2 | 16 | ranged |
+| `knight` | Knight | 150g+60w | 80 | 200 | 12 | 24 | 2 | 22 | fast cavalry |
+
+### BUILDING_DEFS (7)
+| Key | Name | Cost | Size | HP | BuildTime | Special |
+|-----|------|------|------|-----|-----------|---------|
+| `town_hall` | Town Hall | 200g+100w | 96×96 | 800 | 10s | trains peasant, dropoff, +5 food |
+| `barracks` | Barracks | 150g+50w | 80×80 | 500 | 6s | trains footman+archer |
+| `stable` | Stable | 100g+100w | 80×80 | 400 | 6s | trains knight |
+| `lumber_mill` | Lumber Mill | 100g+50w | 64×64 | 350 | 5s | wood dropoff |
+| `refinery` | Refinery | 100g+50w | 64×64 | 350 | 5s | gold dropoff |
+| `watch_tower` | Watch Tower | 50g+50w | 48×48 | 300 | 4s | auto-attack (cosmetic, no targets) |
+| `wall` | Wall | 20g+10w | 32×32 | 200 | 2s | blocking barrier |
+
+### Entity Shape (flat JS object)
+**Shared fields:** `{id, type, owner, x, y(world center), w, h, hp, maxHp, state, attackDamage, attackRange, attackCooldown, attackTimer, targetId, moveTarget, path, isBuilding}`
+**Unit extras:** `speed, canGather, canBuild, food, size, ranged, faceDir, carryAmount, carryType, gatheringNode, gatheringTimer, buildTarget`
+**Building extras:** `progress (0-1), produces[], queue[], queueTimer, queueTotal, rallyPoint, dropoff, dropoff_gold, dropoff_wood, provides[], blocking`
+
+### Game State Object (line 122)
+```js
+const game = {
+  entities: Map<string, Entity>,  // all units + buildings
+  resources: { gold:200, wood:150, food:3, maxFood:5 },
+  selectedIds: Set<string>,
+  map: { tiles: Terrain[][] },     // 64x64
+  camera: { x, y, targetX, targetY, zoom },
+  ui: { mode, buildingType, attackMode },
+  mouse: { sx, sy, worldX, worldY, button, drag },
+  selectionBox: { x1,y1,x2,y2 } | null,
+  ghostBuilding: Building | null,
+  particles: Particle[],
+  floatingTexts: FloatingText[],
+  nextId: 0,
+  time: 0,
+  resourcesEarned: { gold, wood }  // stats
+};
+```
+
+## UI MAP
+
+### Layout (CSS flexbox, no framework)
+```
+┌──────────────────────────────────────────────────────┐
+│ 🔵 200 Gold  🪵 150 Wood  🍖 3/5 Food    ⏱ 00:00   │  #top-bar (36px, gradient bg)
+├──────────────────────────────────────────────────────┤
+│                                                        │
+│              #game-canvas (fills viewport)              │
+│                                                        │
+│                                     ┌──────────┐       │
+│                                     │ #minimap  │       │
+│                                     │ 180×180   │       │
+│                                     │ border:2px│       │
+│                                     └──────────┘       │
+├──────────────────────────────────────────────────────┤
+│ #info-panel (flex:1)        │ #action-panel (flex:1)  │  #bottom-panel (140-200px)
+│  - entity name (gold)       │  - action buttons       │
+│  - HP bar (gradient)        │  - train buttons        │
+│  - stats (flex wrap)        │  - build buttons        │
+│  - progress bar             │  - cost labels          │
+│  - queue info               │  - disabled/cant-afford │
+└──────────────────────────────────────────────────────┘
+```
+
+### Visual Theme
+- Dark brown/gold palette: bg `#1a1a1a`, text `#e0d8c0`, gold accent `#ffd700`
+- Top bar: `linear-gradient(180deg, #2a2010, #1a1408)` with `#4a3828` border
+- Bottom panel: `linear-gradient(180deg, #1a1408, #2a2010)` with `#4a3828` border
+- Buttons: `linear-gradient(180deg, #3a2a10, #2a1a08)` with `#5a4a28` border, hover brightens
+- Tooltip: black semi-transparent `rgba(0,0,0,0.85)` with `#5a4a28` border
+- 4 cursor states via body class: `cursor-normal` (default), `cursor-build` (crosshair), `cursor-attack` (crosshair), `cursor-move` (pointer)
+
+### Interaction Table
+| Action | Input | Implementation |
+|--------|-------|---------------|
+| Select single | Left-click entity | `entityAtWorld()` → distance-based hit test on entities array |
+| Box-select | Left-drag on terrain | `entitiesInRect()` → filter entities in drag rect |
+| Add to selection | Shift+click | `game.selectedIds` toggle via Set |
+| Deselect | Right-click/Escape on terrain | Clear `game.selectedIds` |
+| Move | Right-click ground | `issueMove()` → sets moveTarget for all selected |
+| Gather | Right-click resource node | `issueGather()` on peasants → mine at resource, return to dropoff |
+| Attack-move | A + right-click ground | Sets `ui.attackMode=true`, next r-click sets attack-move on selected |
+| Stop | S key | `commandStop()` → clears moveTarget, targetId, state→idle |
+| Build placement | Click build button in action panel | `startBuildingPlacement()` → ui.mode='placeBuilding', ghost follows cursor |
+| Place building | Left-click in placement mode | `placeBuilding()` → validate + find nearest idle peasant |
+| Cancel build | Right-click/Escape | `cancelPlacement()` → restore normal mode |
+| Train unit | Click training button | `startTraining()` → deduct resources, push to building queue |
+| Minimap pan | Click minimap | Jump camera to proportional world position |
+| Camera edge-scroll | Mouse in 10px viewport edge | Lerp camera toward scroll direction |
+| Camera drag | Middle-mouse drag | Delta-based camera translation |
+| Zoom | Mousewheel | Lerp zoom 0.5×–2.0× range |
+
+### UI Data Flow
+1. `updateUI()` (line 1184) called every frame after game logic update
+2. Reads `game.selectedIds` → if 1 entity: shows name, HP bar, stats; if multiple: count + avg HP
+3. Builds action buttons based on selected entity type:
+   - Building selected → "Train [unit]" buttons per `produces[]`
+   - Peasant selected → "Build [building]" buttons for all 7 types
+   - Military selected → "Stop" button
+4. Top bar resources updated from `game.resources` + timer from `game.time`
+5. Minimap redrawn each frame with colored terrain dots + entity dots
+
+### Symbol Index (all functions, index.html)
+| Line | Signature | Purpose |
+|------|-----------|---------|
+| 143 | `genId()` | Unique entity ID generator |
+| 144 | `dist(a,b)` | Euclidean distance |
+| 145 | `clamp(v,lo,hi)` | Numeric clamping |
+| 146 | `lerp(a,b,t)` | Linear interpolation |
+| 147 | `rectsOverlap(a,b)` | AABB collision test |
+| 148 | `tileAt(px,py)` | Get terrain at world pixel |
+| 153 | `isPassable(px,py)` | Collision check (water blocked) |
+| 164 | `spawnParticles(x,y,count,color)` | Visual particle effects |
+| 169 | `showFeedback(text)` | Floating text feedback |
+| 176 | `generateMap()` | Procedural 64×64 terrain generation |
+| 263 | `createUnit(type,x,y)` | Unit entity factory |
+| 282 | `createBuilding(type,x,y,progress)` | Building entity factory |
+| 298 | `drawHealthBar(ctx,ent,cam)` | HP bar rendering |
+| 310 | `drawSelectionCircle(ctx,ent,cam)` | Green selection circle |
+| 318 | `drawUnit(ctx,u,cam)` | Unit sprite (geometric shapes per type) |
+| 404 | `drawBuilding(ctx,b,cam)` | Building sprite (colored rects + details) |
+| 507 | `render(ctx,canvas,minimapCtx,minimapCanvas)` | Main render orchestrator |
+| 625 | `renderMinimap(ctx,canvas)` | Minimap render |
+| 656 | `screenToWorld(sx,sy)` | Viewport→world coord transform |
+| 663 | `worldToScreen(wx,wy)` | World→viewport coord transform |
+| 671 | `entityAtWorld(wx,wy)` | Click hit-test for entities |
+| 683 | `entitiesInRect(x1,y1,x2,y2)` | Box-select filter |
+| 694 | `findNearestDropoff(x,y,resType)` | Nearest resource dropoff building |
+| 712 | `findNearestResource(wx,wy,resType)` | Nearest gold mine/tree node |
+| 730 | `findNearestEnemy(wx,wy)` | Nearest hostile entity (no enemies exist) |
+| 740 | `isPlacementValid(buildingType,wx,wy)` | Building placement validation |
+| 765 | `startBuildingPlacement(type)` | Enter build placement mode |
+| 772 | `cancelPlacement()` | Exit placement mode |
+| 780 | `placeBuilding(wx,wy)` | Execute building placement |
+| 826 | `startTraining(building,unitType)` | Queue unit training |
+| 848 | `getTrainTime(unitType)` | Training duration lookup |
+| 858 | `getBuildTime(buildingType)` | Building duration lookup |
+| 863 | `issueMove(targetX,targetY)` | Move command for selection |
+| 875 | `issueGather(entity,wx,wy)` | Gather command for peasants |
+| 901 | `update(dt)` | Main game logic update |
+| 958 | `updateEntity(e,dt,toRemove)` | Per-entity state machine update |
+| 1184 | `updateUI()` | UI panel rebuild |
+| 1309 | `commandStop()` | Stop command handler |
+| 1323 | `resizeCanvas()` | Responsive canvas resize |
+| 1525 | `initGame()` | Game initialization + setup |
+| 1550 | `gameLoop(timestamp)` | requestAnimationFrame main loop |
+
+## UI MAP
+
+### Layout
+```
+┌──────────────────────────────────────────────────────┐
+│ 🔵 Gold 🪵 Wood 🍖 Food N/M    ⏱ timer   (top bar) │
+├──────────────────────────────────────────────────────┤
+│                                                        │
+│                 game-canvas (full viewport)             │
+│                                     ┌──────────┐       │
+│                                     │ minimap   │       │
+│                                     │ 180×180   │       │
+│                                     └──────────┘       │
+├──────────────────────────────────────────────────────┤
+│ info-panel (name, HP, stats, queue) │ action-buttons  │
+│      (left 50%)                     │ (right 50%)     │
+└──────────────────────────────────────────────────────┘
+```
+
+### Visual Theme
+- Dark brown/gold: bg `#1a1a1a`, text `#e0d8c0`, gold accents `#ffd700`
+- Gradients on top bar (`#2a2010→#1a1408`) and bottom panel (`#1a1408→#2a2010`)
+- Buttons: dark brown gradient with gold border (`#5a4a28`)
+- 4 cursor states: `normal`, `build` (crosshair), `attack` (crosshair), `move` (pointer)
+
+### Interaction Table
+| Action | Input | Handler |
+|--------|-------|---------|
+| Select | Left-click entity | `entityAtWorld()` hit-test |
+| Box-select | Left-drag terrain | `entitiesInRect()` |
+| Add to sel | Shift+click | toggle in Set |
+| Move | Right-click ground | `issueMove()` |
+| Gather | Right-click resource | `issueGather()` on peasants |
+| Attack-move | A + right-click | sets `attackMove=true` |
+| Stop | S key | `commandStop()` clears state |
+| Build mode | Click build button | `ui.mode='placeBuilding'` |
+| Cancel build | Right-click/Escape | restore normal mode |
+| Train | Click train button | `startTraining()` deducts resources |
+| Minimap pan | Click minimap | `jumpCamera()` |
+| Camera edge | 10px scroll zone | lerp camera position |
+
+### Known Issues (post-R2, 0 BLOCKING)
+- **Major (7):** No attack logic (military cosmetic), no movement terrain collision, mixed selection right-click edge cases, food display only shows one town hall's maxFood, keyboard event over-removal, dead code, confusing conditional
+- **Minor (9):** HiDPI, FP rounding, empty click handler, unused seed, no tooltip cleanup
+- **125 tests pass** in `test_game.js`

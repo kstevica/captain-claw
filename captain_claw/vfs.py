@@ -135,13 +135,55 @@ def user_root(*, create: bool = False) -> Path:
     return root
 
 
+# ── Linked folders ("mounts") ─────────────────────────────────────────
+# A per-user registry maps a VFS project name to an external absolute path, so
+# `vfs:<name>/...` transparently resolves to a folder living anywhere on disk —
+# no filesystem symlinks. The registry is a single JSON file at the user root,
+# readable identically by the FD server and every spawned agent (both compute
+# `user_root()` the same way). Shape: {"<name>": {"path": "/abs", "mode": "rw"|"ro"}}.
+
+_LINKS_FILE = ".vfs-links.json"
+
+
+def read_links_at(root: Path) -> dict:
+    """Parse the link registry under *root* (a user root). Never raises."""
+    try:
+        data = json.loads((root / _LINKS_FILE).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def read_links() -> dict:
+    """Link registry for this process's user (env-derived root)."""
+    return read_links_at(user_root())
+
+
+def link_target_at(root: Path, name: str) -> Path | None:
+    """Absolute external path for a linked project *name* under *root*, or None."""
+    ent = read_links_at(root).get(name)
+    if isinstance(ent, dict) and ent.get("path"):
+        p = Path(str(ent["path"])).expanduser()
+        if p.is_absolute():
+            return p.resolve()
+    return None
+
+
 def project_root(project: str = "", *, create: bool = False) -> Path:
-    """Return ``<user_root>/<project>``."""
+    """Return the on-disk root for ``<project>``.
+
+    A linked project resolves to its external path (never created here); an
+    ordinary project resolves to ``<user_root>/<project>``.
+    """
     proj = _sanitize(project or default_project(), fallback=_DEFAULT_PROJECT)
-    root = (user_root() / proj).resolve()
+    root = user_root()
+    tgt = link_target_at(root, proj)
+    if tgt is not None:
+        return tgt
+    base = (root / proj).resolve()
     if create:
-        root.mkdir(parents=True, exist_ok=True)
-    return root
+        base.mkdir(parents=True, exist_ok=True)
+    return base
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -188,7 +230,7 @@ def resolve_vfs_path(path: str, *, create_parents: bool = False) -> Path | None:
     if not is_vfs_path(path):
         return None
     project, rel = split_scheme(path)
-    base = project_root(project)
+    base = project_root(project).resolve()
 
     rel_parts = [p for p in rel.replace("\\", "/").split("/") if p not in ("", ".")]
     candidate = base
@@ -196,10 +238,10 @@ def resolve_vfs_path(path: str, *, create_parents: bool = False) -> Path | None:
         candidate = candidate / part
     candidate = candidate.resolve()
 
-    # Sandbox: never allow escaping the user root.
-    root = user_root().resolve()
+    # Sandbox to THIS project's root (external for a linked folder, else under
+    # the user root) so ``..`` can't climb out of the project it addresses.
     try:
-        candidate.relative_to(root)
+        candidate.relative_to(base)
     except ValueError:
         return None
 
@@ -232,14 +274,17 @@ def resolve_under(user_id: str, default_proj: str, path: str) -> Path | None:
     else:
         proj, rel = (default_proj or ""), raw
     user_root_p = (vfs_base() / _sanitize(user_id or "", fallback=_DEFAULT_USER)).resolve()
-    candidate = user_root_p / _sanitize(proj or default_proj, fallback=_DEFAULT_PROJECT)
-    # Keep ``..`` so ``.resolve()`` collapses it and the sandbox check below can
-    # reject any path that tries to climb out of the user root.
+    proj_name = _sanitize(proj or default_proj, fallback=_DEFAULT_PROJECT)
+    # A linked project resolves to its external root; sandbox under whichever
+    # root actually backs the project so ``..`` can't climb out of it.
+    tgt = link_target_at(user_root_p, proj_name)
+    base = tgt if tgt is not None else (user_root_p / proj_name)
+    candidate = base
     for part in (p for p in rel.split("/") if p not in ("", ".")):
         candidate = candidate / part
     candidate = candidate.resolve()
     try:
-        candidate.relative_to(user_root_p)
+        candidate.relative_to(base.resolve())
     except ValueError:
         return None
     return candidate

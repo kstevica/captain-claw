@@ -18,7 +18,18 @@ from pydantic import BaseModel
 
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.logging import get_logger
-from captain_claw.vfs import META_FILENAME, read_authors, safe_join, safe_name
+import json
+
+from captain_claw.vfs import (
+    META_FILENAME,
+    link_target_at,
+    read_authors,
+    read_links_at,
+    safe_join,
+    safe_name,
+)
+
+_LINKS_FILE = ".vfs-links.json"
 
 log = get_logger(__name__)
 
@@ -37,7 +48,55 @@ def _user_root(user_id: str) -> Path:
 
 
 def _project_root(user_id: str, project: str) -> Path:
-    return (_user_root(user_id) / safe_name(project, fallback="shared")).resolve()
+    """On-disk root for a project — the external path if it's a linked folder."""
+    name = safe_name(project, fallback="shared")
+    tgt = link_target_at(_user_root(user_id), name)
+    if tgt is not None:
+        return tgt
+    return (_user_root(user_id) / name).resolve()
+
+
+def _link_entry(user_id: str, project: str) -> dict | None:
+    """The registry entry for *project* if it's a linked folder, else None."""
+    ent = read_links_at(_user_root(user_id)).get(safe_name(project, fallback=""))
+    return ent if isinstance(ent, dict) else None
+
+
+def _assert_writable(user_id: str, project: str) -> None:
+    """Reject mutations on a read-only linked folder."""
+    ent = _link_entry(user_id, project)
+    if ent and str(ent.get("mode", "rw")).lower() == "ro":
+        raise HTTPException(403, "this linked folder is read-only")
+
+
+_STATS_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
+
+
+def _stats(root: Path, cap: int = 20000) -> tuple[int, int, float]:
+    """(files, bytes, latest_mtime) for a folder — bounded, skipping heavy dirs
+    (a linked repo can be huge). Stops counting after *cap* files."""
+    files = total = 0
+    latest = 0.0
+    stack = [root]
+    while stack and files < cap:
+        try:
+            for c in stack.pop().iterdir():
+                if c.is_dir():
+                    if c.name not in _STATS_SKIP:
+                        stack.append(c)
+                elif c.is_file():
+                    files += 1
+                    try:
+                        st = c.stat()
+                        total += st.st_size
+                        latest = max(latest, st.st_mtime)
+                    except OSError:
+                        pass
+                    if files >= cap:
+                        break
+        except OSError:
+            pass
+    return files, total, latest
 
 
 def _resolve(user_id: str, project: str, path: str) -> Path:
@@ -123,7 +182,113 @@ async def list_projects(user: dict = Depends(get_current_user)):
     titles = await _run_titles(user["id"]) if any(p.get("run_id") for p in out) else {}
     for p in out:
         p["title"] = titles.get(p.get("run_id") or "", "")
+    # Linked folders (external dirs) — not physical children of the user root.
+    for name, ent in sorted(read_links_at(root).items()):
+        tgt = link_target_at(root, name)
+        if tgt is None or not tgt.is_dir():
+            out.append({"name": name, "files": 0, "bytes": 0, "mtime": 0.0,
+                        "kind": "link", "run_id": "", "title": "",
+                        "link_path": str(ent.get("path", "")), "mode": ent.get("mode", "rw"),
+                        "missing": True})
+            continue
+        files, total, latest = _stats(tgt)
+        out.append({"name": name, "files": files, "bytes": total, "mtime": latest,
+                    "kind": "link", "run_id": "", "title": "",
+                    "link_path": str(tgt), "mode": ent.get("mode", "rw")})
     return {"projects": out}
+
+
+class LinkBody(BaseModel):
+    name: str
+    path: str
+    mode: str = "rw"          # "rw" | "ro"
+
+
+def _write_links(root: Path, links: dict) -> None:
+    (root / _LINKS_FILE).write_text(json.dumps(links, indent=2))
+
+
+@router.get("/links")
+async def list_links(user: dict = Depends(get_current_user)):
+    """List the user's linked folders."""
+    root = _user_root(user["id"])
+    links = read_links_at(root)
+    out = []
+    for name, ent in sorted(links.items()):
+        p = Path(str(ent.get("path", ""))).expanduser()
+        out.append({"name": name, "path": str(ent.get("path", "")),
+                    "mode": ent.get("mode", "rw"), "exists": p.is_dir()})
+    return {"links": out}
+
+
+@router.post("/links")
+async def add_link(body: LinkBody, user: dict = Depends(get_current_user)):
+    """Link an external absolute directory as a VFS project (no fs symlink)."""
+    from captain_claw.flight_deck.server import DATA_DIR
+    name = safe_name(body.name, fallback="")
+    if not name:
+        raise HTTPException(400, "invalid link name")
+    p = Path(body.path).expanduser()
+    if not p.is_absolute():
+        raise HTTPException(400, "path must be absolute")
+    if not p.is_dir():
+        raise HTTPException(400, "path must be an existing directory")
+    p = p.resolve()
+    data = Path(DATA_DIR).resolve()
+    # Never link the FD data tree itself or an ancestor of it (recursion / self-mount).
+    if p == data or data in p.parents or p in data.parents:
+        raise HTTPException(400, "cannot link the Flight Deck data directory or its ancestors")
+    root = _user_root(user["id"])
+    if (root / name).exists():
+        raise HTTPException(409, f"a physical project named '{name}' already exists")
+    mode = "ro" if str(body.mode).lower() == "ro" else "rw"
+    links = read_links_at(root)
+    root.mkdir(parents=True, exist_ok=True)
+    links[name] = {"path": str(p), "mode": mode}
+    _write_links(root, links)
+    return {"ok": True, "name": name, "path": str(p), "mode": mode}
+
+
+@router.get("/browse-fs")
+async def browse_fs(path: str = "", user: dict = Depends(get_current_user)):
+    """List sub-directories of a local path (for the 'Link folder' picker).
+
+    FD runs on the user's machine, so this browses the same filesystem the user
+    would link. Directories only; never returns file contents. Starts at $HOME.
+    """
+    base = Path(path).expanduser() if path.strip() else Path.home()
+    try:
+        base = base.resolve()
+    except OSError:
+        raise HTTPException(400, "invalid path")
+    if not base.is_dir():
+        raise HTTPException(404, "not a directory")
+    dirs: list[dict] = []
+    try:
+        for c in base.iterdir():
+            try:
+                if c.is_dir():
+                    dirs.append({"name": c.name, "hidden": c.name.startswith("."),
+                                 "is_git": (c / ".git").exists()})
+            except OSError:
+                pass
+    except PermissionError:
+        raise HTTPException(403, "permission denied")
+    dirs.sort(key=lambda d: (d["hidden"], d["name"].lower()))
+    parent = str(base.parent) if base.parent != base else ""
+    return {"path": str(base), "parent": parent, "dirs": dirs}
+
+
+@router.delete("/links/{name}")
+async def remove_link(name: str, user: dict = Depends(get_current_user)):
+    """Unlink a folder — removes only the mapping; never touches the real files."""
+    root = _user_root(user["id"])
+    key = safe_name(name, fallback="")
+    links = read_links_at(root)
+    if key in links:
+        del links[key]
+        _write_links(root, links)
+    return {"ok": True}
 
 
 @router.get("/list")
@@ -179,6 +344,35 @@ async def download_file(project: str, path: str, user: dict = Depends(get_curren
     return FileResponse(target, filename=target.name, media_type=media)
 
 
+@router.get("/download-zip")
+async def download_zip(project: str, user: dict = Depends(get_current_user)):
+    """Zip an entire project folder and stream it (zip name = project name).
+
+    Skips ``.git`` (internal object store — large and not useful in a zip); keeps
+    everything else, including ``.reports`` and ``.code``.
+    """
+    import io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+
+    root = _project_root(user["id"], project)
+    if not root.is_dir():
+        raise HTTPException(404, "project not found")
+    name = safe_name(project, fallback="project")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(root.rglob("*")):
+            if not f.is_file() or ".git" in f.relative_to(root).parts:
+                continue
+            zf.write(f, arcname=f"{name}/{f.relative_to(root).as_posix()}")
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{name}.zip"'},
+    )
+
+
 # ── write endpoints ──────────────────────────────────────────────────
 
 class WriteBody(BaseModel):
@@ -201,6 +395,7 @@ class RenameBody(BaseModel):
 @router.post("/write")
 async def write_file(body: WriteBody, user: dict = Depends(get_current_user)):
     """Create or overwrite a text file (used by the in-panel editor)."""
+    _assert_writable(user["id"], body.project)
     target = _resolve(user["id"], body.project, body.path)
     if target.exists() and target.is_dir():
         raise HTTPException(400, "path is a directory")
@@ -211,6 +406,7 @@ async def write_file(body: WriteBody, user: dict = Depends(get_current_user)):
 
 @router.post("/mkdir")
 async def make_dir(body: MkdirBody, user: dict = Depends(get_current_user)):
+    _assert_writable(user["id"], body.project)
     target = _resolve(user["id"], body.project, body.path)
     target.mkdir(parents=True, exist_ok=True)
     return {"ok": True}
@@ -218,6 +414,7 @@ async def make_dir(body: MkdirBody, user: dict = Depends(get_current_user)):
 
 @router.post("/rename")
 async def rename_entry(body: RenameBody, user: dict = Depends(get_current_user)):
+    _assert_writable(user["id"], body.project)
     src = _resolve(user["id"], body.project, body.path)
     dst = _resolve(user["id"], body.project, body.to)
     if not src.exists():
@@ -230,7 +427,11 @@ async def rename_entry(body: RenameBody, user: dict = Depends(get_current_user))
 @router.delete("/entry")
 async def delete_entry(project: str, path: str, recursive: bool = False,
                        user: dict = Depends(get_current_user)):
+    _assert_writable(user["id"], project)
     target = _resolve(user["id"], project, path)
+    # Deleting the root of a linked folder would wipe the user's real directory.
+    if _link_entry(user["id"], project) and target.resolve() == _project_root(user["id"], project).resolve():
+        raise HTTPException(400, "refusing to delete a linked folder's root — unlink it instead")
     if target.resolve() == _project_root(user["id"], project).resolve() and not recursive:
         raise HTTPException(400, "refusing to delete a project root without recursive=true")
     if not target.exists():
@@ -246,7 +447,10 @@ async def delete_entry(project: str, path: str, recursive: bool = False,
 
 @router.delete("/project")
 async def delete_project(project: str, user: dict = Depends(get_current_user)):
-    """Remove an entire project namespace."""
+    """Remove an entire project namespace. A linked folder is only unlinked —
+    its real files on disk are never deleted."""
+    if _link_entry(user["id"], project):
+        return await remove_link(project, user)
     root = _project_root(user["id"], project)
     if root.resolve() == _user_root(user["id"]).resolve():
         raise HTTPException(400, "invalid project")

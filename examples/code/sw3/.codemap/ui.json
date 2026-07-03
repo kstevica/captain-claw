@@ -1,0 +1,85 @@
+{
+  "layout": "Three-panel vertical flex layout: #top-bar (36px) \u2192 #canvas-wrapper (flex:1, fills remaining) \u2192 #bottom-panel (flex-shrink, min 140px, max 200px). Minimap overlays bottom-right of canvas.",
+  "panels": [
+    {
+      "id": "top-bar",
+      "description": "Resource HUD. Position: top of screen, fixed height 36px, gradient background (#2a2010\u2192#1a1408), border-bottom 2px. Shows: \ud83d\udd35 Gold count (gold), \ud83e\udeb5 Wood count, \ud83c\udf56 Food count / max, and game timer (MM:SS, right-aligned). Debug info inline below gold.",
+      "elements": [
+        "#res-gold (span.val) \u2014 current gold, color #ffd700 bold",
+        "#res-wood (span.val) \u2014 current wood, color #ffd700 bold",
+        "#res-food (span.val) \u2014 current food, color #ffd700 bold",
+        "#res-maxfood \u2014 max food, color #888",
+        "#game-timer \u2014 elapsed time, tabular-nums, color #aaa",
+        "#debug-info \u2014 debug text, color #666, font-size 10px"
+      ]
+    },
+    {
+      "id": "canvas-wrapper",
+      "description": "Main game viewport. Position: fills remaining space, relative positioning for overlays. Contains the game canvas and minimap.",
+      "elements": [
+        "#game-canvas \u2014 main 2D canvas, fills 100%\u00d7100% of wrapper, HTML canvas element",
+        "#minimap \u2014 180\u00d7180px canvas, position:absolute bottom:8px right:8px, border 2px #4a3828, rounded, semi-transparent bg, pixelated rendering, click-to-pan"
+      ]
+    },
+    {
+      "id": "bottom-panel",
+      "description": "Two-column bottom info/action bar. Height 140-200px, gradient (#1a1408\u2192#2a2010), border-top.",
+      "elements": [
+        "#info-panel (left, flex:1) \u2014 shows selected entity details. Dynamic content updated by updateUI().",
+        "  .entity-name \u2014 entity title, color #ffd700, 16px bold",
+        "  .entity-stats \u2014 stat rows (HP, attack, speed, cost, etc.), 12px, color #b0a080",
+        "  .hp-bar-outer \u2014 200\u00d78px HP bar background",
+        "  .hp-bar-inner \u2014 HP fill, gradient green, transition 0.2s",
+        "  .progress-outer \u2014 120\u00d76px construction progress bar bg",
+        "  .progress-inner \u2014 construction fill, gradient blue, transition 0.1s",
+        "  .queue-info \u2014 training queue count, 11px, color #888",
+        "#action-panel (right, flex:1) \u2014 contextual action buttons. Flexbox wrap, 6px gap.",
+        "  button \u2014 100px wide, gradient bg, 2px border (#5a4a28), 12px font. Hover/active/disabled states.",
+        "  button.cant-afford \u2014 red tint (#f44) when insufficient resources",
+        "  .cost span \u2014 shows resource cost, color #aaa; .not-enough variant = #f44"
+      ]
+    },
+    {
+      "id": "tooltip",
+      "description": "Floating tooltip overlay. position:absolute, pointer-events:none, dark bg with border, 12px font, white-space:nowrap. Shown/hidden based on mouse hover over action buttons.",
+      "elements": [
+        "#tooltip (single element, display:none by default)"
+      ]
+    }
+  ],
+  "interactions": [
+    {
+      "type": "mouse",
+      "events": [
+        "mousedown \u2014 start selection box or issue command (move/attack/gather/build)",
+        "mousemove \u2014 drag selection box, camera edge-scroll, update ghost building position",
+        "mouseup \u2014 complete selection, finalize command",
+        "click \u2014 single-select entity (shift=additive), place building",
+        "contextmenu (right-click) \u2014 issue move/gather/attack order, cancel build mode (preventDefault)",
+        "wheel \u2014 zoom in/out (0.5\u00d7\u20132.0\u00d7 range)"
+      ]
+    },
+    {
+      "type": "keyboard",
+      "events": [
+        "A \u2014 toggle attack-move mode",
+        "S \u2014 stop current action",
+        "H \u2014 hold position",
+        "Escape \u2014 deselect all / cancel build placement / cancel selection"
+      ]
+    },
+    {
+      "type": "minimap",
+      "events": [
+        "click on minimap \u2014 pan camera to clicked location (scaled from minimap to world coords)"
+      ]
+    }
+  ],
+  "modes": [
+    "cursor-normal \u2014 default cursor, selection and command mode",
+    "cursor-build \u2014 crosshair cursor, building placement mode (triggered by build buttons in action panel)",
+    "cursor-attack \u2014 crosshair cursor, attack-move mode (toggled by A key)",
+    "cursor-move \u2014 pointer cursor (legacy/minor use)"
+  ],
+  "update_flow": "updateUI() called every frame (from gameLoop). Clears both #info-panel and #action-panel, then re-renders based on selection: \n\u2022 Nothing selected \u2192 info shows 'RealmCraft' welcome text, actions show build buttons for all buildings (with cost/affordability state)\n\u2022 Single unit selected \u2192 shows unit name, stats (HP/atk/speed/cost/food), contextual actions (gather for peasant, attack-move for military)\n\u2022 Single building selected \u2192 shows building name, HP, construction progress if building, training queue info, train-unit buttons for production buildings\n\u2022 Multiple entities selected \u2192 shows 'N units selected' with aggregate info, no actions\n\u2022 Ghost building (placement mode) \u2192 shows building name + cost, cancel option"
+}

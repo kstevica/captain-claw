@@ -8,9 +8,12 @@ export interface VFSProject {
   files: number
   bytes: number
   mtime: number
-  kind?: string   // 'basna' | 'vatra' | 'council' | '' — parsed from the folder name
+  kind?: string   // 'basna' | 'vatra' | 'council' | 'link' | '' — parsed from the folder name
   run_id?: string // the run's session-id prefix
   title?: string  // the human title of the Basna/Vatra run that created it
+  link_path?: string  // external source path (linked folders only)
+  mode?: string       // 'rw' | 'ro' (linked folders only)
+  missing?: boolean   // linked source path no longer exists
 }
 
 export interface VFSEntry {
@@ -96,10 +99,16 @@ interface VFSStore {
   startEdit: () => void
   saveFile: () => Promise<void>
   download: (entry: VFSEntry) => Promise<void>
+  downloadProject: (name: string) => Promise<void>
   deleteEntry: (entry: VFSEntry) => Promise<void>
   newFolder: (name: string) => Promise<void>
   deleteProject: (name: string) => Promise<void>
+  addLink: (name: string, path: string, mode: string) => Promise<void>
+  browseFs: (path: string) => Promise<FsListing>
 }
+
+export interface FsDir { name: string; hidden: boolean; is_git: boolean }
+export interface FsListing { path: string; parent: string; dirs: FsDir[] }
 
 export const useVFSStore = create<VFSStore>((set, get) => ({
   projects: [],
@@ -228,6 +237,20 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     URL.revokeObjectURL(url)
   },
 
+  downloadProject: async (name) => {
+    const res = await _authedFetch(`/fd/vfs/download-zip?${qp({ project: name })}`)
+    if (!res.ok) return
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name}.zip`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  },
+
   deleteEntry: async (entry) => {
     const res = await _authedFetch(
       `/fd/vfs/entry?${qp({ project: entry.project, path: entry.path, recursive: 'true' })}`,
@@ -258,5 +281,19 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
       if (get().project === name) get().closeProject()
       await get().loadProjects()
     }
+  },
+
+  addLink: async (name, path, mode) => {
+    const res = await _authedFetch('/fd/vfs/links', {
+      method: 'POST', body: JSON.stringify({ name, path, mode }),
+    })
+    if (!res.ok) throw new Error((await res.text()) || 'link failed')
+    await get().loadProjects()
+  },
+
+  browseFs: async (path) => {
+    const res = await _authedFetch(`/fd/vfs/browse-fs?${qp({ path })}`)
+    if (!res.ok) return { path, parent: '', dirs: [] }
+    return res.json()
   },
 }))

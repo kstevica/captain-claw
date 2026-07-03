@@ -8,6 +8,8 @@ import {
   Download,
   Trash2,
   FolderPlus,
+  Link2,
+  Lock,
   X,
   ArrowLeft,
   HardDrive,
@@ -41,12 +43,46 @@ const KIND_BADGE: Record<string, string> = {
   basna: 'border-sky-500/40 bg-sky-500/10 text-sky-300',
   vatra: 'border-violet-500/40 bg-violet-500/10 text-violet-300',
   council: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+  link: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
 }
 
 export function VFSBrowser() {
   const s = useVFSStore()
   const [creating, setCreating] = useState(false)
   const [folderName, setFolderName] = useState('')
+  const [linking, setLinking] = useState(false)
+  const [linkName, setLinkName] = useState('')
+  const [linkPath, setLinkPath] = useState('')
+  const [linkMode, setLinkMode] = useState('rw')
+  const [linkErr, setLinkErr] = useState('')
+
+  const onAddLink = async () => {
+    setLinkErr('')
+    try {
+      await s.addLink(linkName.trim(), linkPath.trim(), linkMode)
+      setLinking(false); setLinkName(''); setLinkPath('')
+    } catch (e) {
+      setLinkErr(e instanceof Error ? e.message : 'link failed')
+    }
+  }
+
+  // Server-side folder picker (FD runs on the user's machine).
+  const [fsOpen, setFsOpen] = useState(false)
+  const [fsPath, setFsPath] = useState('')
+  const [fsParent, setFsParent] = useState('')
+  const [fsDirs, setFsDirs] = useState<{ name: string; hidden: boolean; is_git: boolean }[]>([])
+  const [showHidden, setShowHidden] = useState(false)
+
+  const fsGo = async (path: string) => {
+    const r = await s.browseFs(path)
+    setFsPath(r.path); setFsParent(r.parent); setFsDirs(r.dirs)
+  }
+  const openBrowse = async () => { setFsOpen(true); await fsGo(linkPath.trim()) }
+  const useFolder = () => {
+    setLinkPath(fsPath)
+    if (!linkName.trim()) setLinkName((fsPath.split('/').pop() || '').replace(/[^a-zA-Z0-9._-]/g, '-'))
+    setFsOpen(false)
+  }
 
   useEffect(() => {
     if (!s.project) s.loadProjects()
@@ -62,13 +98,104 @@ export function VFSBrowser() {
             <FolderTree className="h-4 w-4 text-violet-400" /> Shared VFS
             <span className="text-xs font-normal text-zinc-500">cross-agent filesystem</span>
           </div>
-          <button
-            onClick={() => s.loadProjects()}
-            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${s.loading ? 'animate-spin' : ''}`} /> Refresh
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setLinking((v) => !v)}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <Link2 className="h-3.5 w-3.5" /> Link folder
+            </button>
+            <button
+              onClick={() => s.loadProjects()}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${s.loading ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
         </div>
+        {linking && (
+          <div className="border-b border-zinc-800 bg-zinc-950/60 px-4 py-3">
+            <div className="mb-2 text-xs font-medium text-zinc-300">Link an existing local folder into the VFS</div>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                value={linkName}
+                onChange={(e) => setLinkName(e.target.value)}
+                placeholder="vfs name (e.g. my-repo)"
+                className="w-40 rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
+              />
+              <input
+                value={linkPath}
+                onChange={(e) => setLinkPath(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && onAddLink()}
+                placeholder="/absolute/path/to/folder"
+                className="min-w-0 flex-1 rounded bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
+              />
+              <button
+                onClick={openBrowse}
+                className="flex items-center gap-1 rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
+                title="Browse folders on this machine"
+              >
+                <FolderTree className="h-3.5 w-3.5" /> Browse
+              </button>
+              <select
+                value={linkMode}
+                onChange={(e) => setLinkMode(e.target.value)}
+                className="rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-200 outline-none ring-1 ring-zinc-800"
+                title="Read-write lets agents modify the folder; read-only is browse-only"
+              >
+                <option value="rw">read-write</option>
+                <option value="ro">read-only</option>
+              </select>
+              <button
+                onClick={onAddLink}
+                disabled={!linkName.trim() || !linkPath.trim()}
+                className="rounded bg-emerald-600/80 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-40"
+              >
+                Link
+              </button>
+            </div>
+            {linkErr && <div className="mt-2 text-xs text-red-400">{linkErr}</div>}
+          </div>
+        )}
+        {fsOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={() => setFsOpen(false)}>
+            <div className="flex max-h-full w-full max-w-2xl flex-col rounded-lg border border-zinc-800 bg-zinc-950" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-2">
+                <FolderTree className="h-4 w-4 text-violet-400" />
+                <span className="truncate font-mono text-xs text-zinc-300">{fsPath || '~'}</span>
+                <label className="ml-auto flex items-center gap-1 text-[11px] text-zinc-500">
+                  <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} /> hidden
+                </label>
+                <button onClick={() => setFsOpen(false)} className="text-zinc-500 hover:text-zinc-200"><X className="h-4 w-4" /></button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                {fsParent && (
+                  <button onClick={() => fsGo(fsParent)} className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-zinc-400 hover:bg-zinc-900">
+                    <ArrowLeft className="h-4 w-4" /> ..
+                  </button>
+                )}
+                {fsDirs.filter((d) => showHidden || !d.hidden).map((d) => (
+                  <button
+                    key={d.name}
+                    onClick={() => fsGo(`${fsPath}/${d.name}`)}
+                    className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-zinc-900 ${d.hidden ? 'text-zinc-500' : 'text-zinc-200'}`}
+                  >
+                    <Folder className="h-4 w-4 shrink-0 text-violet-400" />
+                    <span className="truncate">{d.name}</span>
+                    {d.is_git && <span className="ml-auto shrink-0 rounded border border-emerald-500/40 bg-emerald-500/10 px-1 text-[9px] uppercase text-emerald-300">git</span>}
+                  </button>
+                ))}
+                {fsDirs.length === 0 && <div className="px-2 py-4 text-xs text-zinc-500">No sub-folders.</div>}
+              </div>
+              <div className="flex items-center justify-between gap-2 border-t border-zinc-800 px-4 py-2">
+                <span className="truncate font-mono text-[11px] text-zinc-500">{fsPath}</span>
+                <button onClick={useFolder} className="shrink-0 rounded bg-emerald-600/80 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600">
+                  Use this folder
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="flex-1 overflow-auto p-4">
           {s.error && <div className="mb-3 rounded bg-red-950/50 px-3 py-2 text-xs text-red-300">{s.error}</div>}
           {s.projects.length === 0 && !s.loading && (
@@ -92,22 +219,39 @@ export function VFSBrowser() {
                       {p.kind}
                     </span>
                   )}
+                  {p.mode === 'ro' && <Lock className="h-3 w-3 shrink-0 text-zinc-500" aria-label="read-only" />}
                 </button>
-                {p.title && <span className="truncate font-mono text-[10px] text-zinc-600">{p.name}</span>}
+                {p.kind === 'link'
+                  ? <span className={`truncate font-mono text-[10px] ${p.missing ? 'text-red-400' : 'text-zinc-600'}`} title={p.link_path}>
+                      {p.missing ? '⚠ missing: ' : '↪ '}{p.link_path}
+                    </span>
+                  : p.title && <span className="truncate font-mono text-[10px] text-zinc-600">{p.name}</span>}
                 <div className="flex items-center justify-between text-[11px] text-zinc-500">
                   <span title={fmtFull(p.mtime)}>
                     {p.files} file{p.files !== 1 ? 's' : ''} · {fmtBytes(p.bytes)}
                     {p.mtime ? ` · ${fmtTime(p.mtime)}` : ''}
                   </span>
-                  <button
-                    onClick={() => {
-                      if (confirm(`Delete project "${p.name}" and all its files?`)) s.deleteProject(p.name)
-                    }}
-                    className="opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-100"
-                    title="Delete project"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                    <button
+                      onClick={() => s.downloadProject(p.name)}
+                      className="hover:text-violet-300"
+                      title="Download folder as .zip"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        const msg = p.kind === 'link'
+                          ? `Unlink "${p.name}"? Your real files at ${p.link_path} are NOT deleted.`
+                          : `Delete project "${p.name}" and all its files?`
+                        if (confirm(msg)) s.deleteProject(p.name)
+                      }}
+                      className="hover:text-red-400"
+                      title={p.kind === 'link' ? 'Unlink (keeps real files)' : 'Delete project'}
+                    >
+                      {p.kind === 'link' ? <Link2 className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}

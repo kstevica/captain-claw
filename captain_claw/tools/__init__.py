@@ -14,6 +14,7 @@ from captain_claw.tools.write import WriteTool
 from captain_claw.tools.edit import EditTool
 from captain_claw.tools.glob import GlobTool
 from captain_claw.tools.grep import GrepTool
+from captain_claw.tools.codemap import CodeMapTool
 from captain_claw.tools.web_fetch import WebFetchTool, WebGetTool, WebFetchBatchTool
 from captain_claw.tools.web_search import WebSearchTool
 from captain_claw.tools.document_extract import (
@@ -76,6 +77,7 @@ __all__ = [
     "EditTool",
     "GlobTool",
     "GrepTool",
+    "CodeMapTool",
     "WebFetchTool",
     "WebFetchBatchTool",
     "WebGetTool",

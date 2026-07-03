@@ -1,6 +1,7 @@
 """Write tool for writing file contents."""
 
 import html
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,15 @@ class WriteTool(Tool):
             "append": {
                 "type": "boolean",
                 "description": "Append to file instead of overwriting",
+            },
+            "overwrite": {
+                "type": "boolean",
+                "description": (
+                    "Explicitly allow replacing an existing file with much "
+                    "shorter content. Without this, a write that would shrink "
+                    "an existing file by more than half is refused — use the "
+                    "edit tool for targeted changes instead."
+                ),
             },
         },
         "required": ["path", "content"],
@@ -152,14 +162,17 @@ class WriteTool(Tool):
             fallback = (saved_root / "tmp" / session_id / safe_parts[-1]).resolve()
             return fallback
 
-    async def execute(self, path: str, content: str, append: bool = False, **kwargs: Any) -> ToolResult:
+    async def execute(self, path: str, content: str, append: bool = False,
+                      overwrite: bool = False, **kwargs: Any) -> ToolResult:
         """Write content to a file.
-        
+
         Args:
             path: Path to file
             content: Content to write
             append: Whether to append instead of overwrite
-        
+            overwrite: Explicitly allow a destructive shrink-rewrite of an
+                existing file (see the shrink guard below)
+
         Returns:
             ToolResult with status
         """
@@ -200,6 +213,55 @@ class WriteTool(Tool):
                 if not parts:
                     parts = [Path(path).name or "output.txt"]
                 file_path = Path(workflow_run_dir).joinpath(*parts)
+            elif os.environ.get("CLAW_WRITE_DIRECT") and kwargs.get("_runtime_base_path") is not None:
+                # Code mode: write straight into the workspace repo (no saved/
+                # scoping), matching shell/read/glob which anchor on the
+                # workspace root. This is what makes an agent's `write index.html`
+                # land in the project folder instead of saved/tmp/<session>/.
+                base = Path(kwargs["_runtime_base_path"]).expanduser().resolve()
+                requested = Path(path).expanduser()
+
+                def _strip_saved_prefix(parts: list[str]) -> list[str]:
+                    # The generic agent instructions teach a
+                    # saved/<category>/<session>/ output convention; in code
+                    # mode `saved/` is GITIGNORED runtime scratch, so a
+                    # deliverable written there would silently vanish from
+                    # git/history/review. Strip that prefix so the file lands
+                    # in the real repo tree instead.
+                    if not parts or parts[0].lower() != "saved":
+                        return parts
+                    parts = parts[1:]
+                    _categories = {"downloads", "media", "output", "scripts",
+                                   "showcase", "skills", "summaries", "tmp", "tools"}
+                    if parts and parts[0].lower() in _categories:
+                        parts = parts[1:]
+                    # Session-ish segment: uuid-shaped, 8+ hex chars, or a
+                    # literal "<session>"-style placeholder from a plan.
+                    if parts:
+                        seg = parts[0]
+                        if (
+                            (len(seg) >= 32 and seg.count("-") >= 4)
+                            or re.fullmatch(r"[0-9a-fA-F]{8,}", seg)
+                            or (seg.startswith("<") and seg.endswith(">"))
+                        ):
+                            parts = parts[1:]
+                    return parts
+
+                if requested.is_absolute():
+                    cand = requested.resolve()
+                    try:
+                        rel_parts = list(cand.relative_to(base).parts)
+                    except ValueError:
+                        rel_parts = [p for p in requested.parts[1:] if p not in ("", ".", "..")]
+                else:
+                    rel_parts = [p for p in requested.parts if p not in ("", ".", "..")]
+                rel_parts = _strip_saved_prefix(rel_parts)
+                file_path = base.joinpath(*rel_parts) if rel_parts else base / "output.txt"
+                # Never escape the workspace.
+                try:
+                    file_path.resolve().relative_to(base)
+                except ValueError:
+                    file_path = base / (requested.name or "output.txt")
             else:
                 saved_root = self._resolve_saved_root(kwargs)
                 session_id = self._normalize_session_id(str(kwargs.get("_session_id", "")))
@@ -254,6 +316,43 @@ class WriteTool(Tool):
                                 f"targeted changes."
                             ),
                             error="deliverable_overwrite_refused",
+                        )
+                    # ── Shrink guard ──────────────────────────────────
+                    # Refuse ANY write that would replace a substantial
+                    # existing file with drastically shorter content,
+                    # regardless of what the content looks like. This is
+                    # the failure mode where a model intends "two targeted
+                    # fixes" but emits only a fragment of the file —
+                    # silently destroying the rest (a 1815-line game was
+                    # once replaced by 14 lines this way). `edit` is the
+                    # right tool for changes; `overwrite=true` is the
+                    # explicit, auditable escape hatch for an intentional
+                    # full rewrite.
+                    if (
+                        not overwrite
+                        and _prev_size >= 1024
+                        and new_size < _prev_size // 2
+                    ):
+                        log.warning(
+                            "WriteTool refused shrink overwrite",
+                            path=str(file_path),
+                            prev_size=_prev_size,
+                            new_size=new_size,
+                        )
+                        return ToolResult(
+                            success=False,
+                            content=(
+                                f"❌ Refused to overwrite {path}: the existing file has "
+                                f"{_prev_lines} lines ({_prev_size} bytes) but your new "
+                                f"content is only {new_size} bytes — writing it would "
+                                f"DESTROY most of the file. The write tool replaces the "
+                                f"ENTIRE file; it is not for partial changes. For targeted "
+                                f"changes, use the `edit` tool (old_string → new_string). "
+                                f"If you truly intend to replace the whole file with this "
+                                f"shorter version, read the current file first, then call "
+                                f"write again with overwrite=true."
+                            ),
+                            error="shrink_overwrite_refused",
                         )
                     _overwrite_info = (
                         f"⚠️ Overwrote existing file (was {_prev_lines} lines, "
