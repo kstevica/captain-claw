@@ -582,6 +582,10 @@ class AgentOrchestrationMixin:
         # stall ("Let me…", "I'll fetch…").  Capped by MAX_STALL_RETRIES
         # so a genuinely-stuck turn still terminates.
         self._stall_retry_count: int = 0
+        # New turn → re-render the system prompt once (it embeds the clock;
+        # _build_messages freezes it for the rest of the turn so the
+        # provider's prompt-prefix cache hits on every tool-loop call).
+        self._turn_system_prompt = None
         # Reset per-turn coverage-gate valve counters (no-net-progress
         # streak, best missing seen, total blocks, turn key).
         self._coverage_gate_streak: int = 0
@@ -2626,6 +2630,8 @@ class AgentOrchestrationMixin:
         self._last_memory_debug_signature = None
         self._last_semantic_memory_debug_signature = None
         self.last_usage = self._empty_usage()
+        # New turn → re-render the (turn-frozen) system prompt once.
+        self._turn_system_prompt = None
 
         # Tool-calling and streaming over a single pass is currently limited.
         # Preserve tool behavior and guard checks by using complete() and
