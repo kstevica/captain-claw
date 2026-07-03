@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2,
   ShieldAlert, Wrench, RotateCcw, X, Download, ChevronRight, ChevronDown, Link2, Lock,
-  MessageSquarePlus, FolderPlus, FolderTree, Trash2, Map,
+  MessageSquarePlus, FolderPlus, FolderTree, Trash2, Map, Square, Eraser,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useCodeStore, type CodeProject } from '../stores/codeStore'
+import { useCodeStore } from '../stores/codeStore'
 import { useVFSStore } from '../stores/vfsStore'
 
 const SEV_COLOR: Record<string, string> = {
@@ -26,7 +26,7 @@ export function CodePage() {
     projects, activeProject, activeSession, messages, commits, progress, status, sending, error,
     loadProjects, createProject, addFolder, linkFolder, createSession, deleteSession,
     setSessionFolder, selectSession, send, approvePlan, cancelPlan, showCommit, rollback, exportProcess,
-    loadMap, searchMap, buildMap,
+    loadMap, searchMap, buildMap, stopRun, cleanupAgents,
   } = useCodeStore()
   const browseFs = useVFSStore((s) => s.browseFs)
 
@@ -37,11 +37,21 @@ export function CodePage() {
   const [mapBusy, setMapBusy] = useState(false)
 
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
-  const [newProject, setNewProject] = useState('')
-  const [showNewProject, setShowNewProject] = useState(false)
-  const [sessForm, setSessForm] = useState<{ project: string; title: string; folder: string } | null>(null)
   const [foldersFor, setFoldersFor] = useState<string>('')     // project whose folders panel is open
   const [newVfsFolder, setNewVfsFolder] = useState('')
+  const [cleanupMsg, setCleanupMsg] = useState('')
+  // New-session modal: project → folder → session in one flow.
+  const [modal, setModal] = useState<null | {
+    project: string          // existing project name; '' = create new
+    newProject: string
+    folderMode: 'existing' | 'new' | 'link'
+    folder: string           // existing folder pick
+    newFolder: string
+    linkPath: string
+    linkMode: 'rw' | 'ro'
+    title: string
+    busy: boolean
+  }>(null)
   const [input, setInput] = useState('')
   const [planDraft, setPlanDraft] = useState('')
   const [diff, setDiff] = useState<{ sha: string; text: string } | null>(null)
@@ -95,15 +105,62 @@ export function CodePage() {
     if (!text || sending) return
     setInput(''); await send(text)
   }
-  const startSession = (p: CodeProject) => {
-    setFoldersFor(''); setCollapsed((s) => { const n = new Set(s); n.delete(p.name); return n })
-    setSessForm({ project: p.name, title: '', folder: p.folders[0]?.name || '' })
+  const openModal = (project = '') => {
+    const p = projects.find((x) => x.name === project) || projects.find((x) => x.name === activeProject)
+    const hasFolders = !!p?.folders.length
+    setModal({
+      project: p?.name || '',
+      newProject: '',
+      folderMode: hasFolders ? 'existing' : 'new',
+      folder: p?.folders[0]?.name || '',
+      newFolder: '',
+      linkPath: '',
+      linkMode: 'rw',
+      title: '',
+      busy: false,
+    })
   }
-  const submitSession = async () => {
-    if (!sessForm || !sessForm.folder) return
-    const { project, title, folder } = sessForm
-    setSessForm(null)
-    await createSession(project, title, folder)
+  const onModalProject = (name: string) => {
+    if (!modal) return
+    const p = projects.find((x) => x.name === name)
+    const hasFolders = !!p?.folders.length
+    setModal({
+      ...modal, project: name,
+      folderMode: hasFolders ? 'existing' : (modal.folderMode === 'existing' ? 'new' : modal.folderMode),
+      folder: p?.folders[0]?.name || '',
+    })
+  }
+  const linkNameOf = (path: string) =>
+    (path.split('/').pop() || 'folder').replace(/[^a-zA-Z0-9._-]/g, '-')
+  const modalValid = !!modal && !modal.busy
+    && !!(modal.project || modal.newProject.trim())
+    && !!(modal.folderMode === 'existing' ? modal.folder
+        : modal.folderMode === 'new' ? modal.newFolder.trim()
+        : modal.linkPath)
+  const submitModal = async () => {
+    if (!modal || !modalValid) return
+    const projName = modal.project || modal.newProject.trim()
+    setModal({ ...modal, busy: true })
+    try {
+      if (!modal.project) await createProject(projName)
+      let folderName = modal.folder
+      if (modal.folderMode === 'new') {
+        folderName = modal.newFolder.trim()
+        await addFolder(projName, folderName)
+      } else if (modal.folderMode === 'link') {
+        folderName = linkNameOf(modal.linkPath)
+        await linkFolder(projName, folderName, modal.linkPath, modal.linkMode)
+      }
+      await createSession(projName, modal.title, folderName)
+      setModal(null)
+    } catch {
+      setModal((m) => (m ? { ...m, busy: false } : m))
+    }
+  }
+  const onCleanup = async () => {
+    const n = await cleanupAgents()
+    setCleanupMsg(n ? `Removed ${n} leftover agent${n === 1 ? '' : 's'}.` : 'No leftover agents.')
+    setTimeout(() => setCleanupMsg(''), 4000)
   }
   const fsGo = async (project: string, path: string) => {
     const r = await browseFs(path)
@@ -111,7 +168,14 @@ export function CodePage() {
   }
   const useFolderForLink = async () => {
     if (!fs) return
-    const name = (fs.path.split('/').pop() || 'folder').replace(/[^a-zA-Z0-9._-]/g, '-')
+    if (fs.project === '@modal') {
+      // Browsing from the new-session modal: capture the path, don't link yet.
+      const path = fs.path
+      setFs(null)
+      setModal((m) => (m ? { ...m, linkPath: path } : m))
+      return
+    }
+    const name = linkNameOf(fs.path)
     const proj = fs.project, path = fs.path
     setFs(null)
     await linkFolder(proj, name, path, 'rw')
@@ -124,21 +188,16 @@ export function CodePage() {
         <div className="border-b border-zinc-800 p-3">
           <div className="flex items-center gap-2 text-sm font-semibold text-zinc-300">
             <FolderGit2 size={16} /> Code Projects
-            <button onClick={() => setShowNewProject((v) => !v)}
-              className="ml-auto rounded bg-zinc-800 px-1.5 py-1 text-zinc-200 hover:bg-zinc-700" title="New project">
-              <Plus size={14} />
+            <button onClick={onCleanup} title="Clean up leftover code agents (after crashes/stops)"
+              className="ml-auto rounded px-1.5 py-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+              <Eraser size={14} />
             </button>
           </div>
-          {showNewProject && (
-            <div className="mt-2 flex gap-1">
-              <input value={newProject} onChange={(e) => setNewProject(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && newProject.trim()) { createProject(newProject); setNewProject(''); setShowNewProject(false) } }}
-                placeholder="new project name" autoFocus
-                className="min-w-0 flex-1 rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600" />
-              <button onClick={() => { if (newProject.trim()) { createProject(newProject); setNewProject(''); setShowNewProject(false) } }}
-                className="rounded bg-zinc-800 px-2 text-zinc-200 hover:bg-zinc-700"><Plus size={14} /></button>
-            </div>
-          )}
+          <button onClick={() => openModal()}
+            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded bg-zinc-100 px-2 py-1.5 text-xs font-medium text-zinc-900 hover:bg-white">
+            <MessageSquarePlus size={14} /> New session
+          </button>
+          {cleanupMsg && <div className="mt-2 text-[11px] text-zinc-500">{cleanupMsg}</div>}
         </div>
 
         <div className="flex-1 overflow-y-auto p-2">
@@ -153,7 +212,7 @@ export function CodePage() {
                     <span className="truncate">{p.name}</span>
                     <span className="text-[10px] font-normal text-zinc-600">· {p.sessions.length}</span>
                   </button>
-                  <button onClick={() => startSession(p)} title="New session"
+                  <button onClick={() => openModal(p.name)} title="New session in this project"
                     className="shrink-0 text-zinc-500 opacity-0 hover:text-zinc-200 group-hover/proj:opacity-100"><MessageSquarePlus size={13} /></button>
                   <button onClick={() => setFoldersFor((f) => f === p.name ? '' : p.name)} title="Folders"
                     className={`shrink-0 hover:text-zinc-200 ${foldersFor === p.name ? 'text-zinc-200' : 'text-zinc-500 opacity-0 group-hover/proj:opacity-100'}`}><FolderPlus size={13} /></button>
@@ -177,28 +236,6 @@ export function CodePage() {
                           title="Delete session" className="shrink-0 text-zinc-600 opacity-0 hover:text-red-400 group-hover/sess:opacity-100"><Trash2 size={12} /></button>
                       </div>
                     ))}
-
-                    {/* new-session form */}
-                    {sessForm?.project === p.name && (
-                      <div className="ml-3 mb-1 space-y-1 rounded bg-zinc-900/60 p-2">
-                        <input value={sessForm.title} onChange={(e) => setSessForm({ ...sessForm, title: e.target.value })}
-                          placeholder="session title (optional)" autoFocus
-                          className="w-full rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none ring-1 ring-zinc-800" />
-                        {p.folders.length === 0 ? (
-                          <div className="text-[11px] text-amber-400/80">Add a folder first (folder icon above).</div>
-                        ) : (
-                          <select value={sessForm.folder} onChange={(e) => setSessForm({ ...sessForm, folder: e.target.value })}
-                            className="w-full rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-200 outline-none ring-1 ring-zinc-800">
-                            {p.folders.map((f) => <option key={f.name} value={f.name}>{f.name}{f.kind === 'link' ? ' (linked)' : ''}</option>)}
-                          </select>
-                        )}
-                        <div className="flex justify-end gap-1">
-                          <button onClick={() => setSessForm(null)} className="rounded px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800">Cancel</button>
-                          <button onClick={submitSession} disabled={!sessForm.folder}
-                            className="rounded bg-zinc-100 px-2 py-1 text-[11px] font-medium text-zinc-900 hover:bg-white disabled:opacity-40">Start</button>
-                        </div>
-                      </div>
-                    )}
 
                     {/* folders panel */}
                     {foldersFor === p.name && (
@@ -235,8 +272,12 @@ export function CodePage() {
       {/* ── Center: chat ── */}
       <main className="flex min-w-0 flex-1 flex-col">
         {!activeSess ? (
-          <div className="flex h-full items-center justify-center text-sm text-zinc-500">
-            Select or start a session to code.
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-zinc-500">
+            <div>Select a session on the left, or start a new one.</div>
+            <button onClick={() => openModal()}
+              className="flex items-center gap-1.5 rounded bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 hover:bg-white">
+              <MessageSquarePlus size={15} /> New session
+            </button>
           </div>
         ) : (
           <>
@@ -260,6 +301,13 @@ export function CodePage() {
                   <Map size={12} /> Map
                 </button>
               </div>
+              {(status === 'running' || sending) && (
+                <button onClick={() => stopRun()}
+                  title="Stop the current coding run (agents wind down at the next step)"
+                  className="flex items-center gap-1.5 rounded bg-red-500/15 px-2 py-1 text-xs font-medium text-red-300 ring-1 ring-red-500/40 hover:bg-red-500/25">
+                  <Square size={11} fill="currentColor" /> Stop
+                </button>
+              )}
               <button onClick={() => exportProcess()} disabled={!messages.length}
                 title="Export the coding process (tools, narration, outputs) as Markdown"
                 className="flex items-center gap-1.5 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
@@ -465,6 +513,110 @@ export function CodePage() {
         </div>
       )}
 
+      {/* ── New-session modal: project → folder → session ── */}
+      {modal && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => !modal.busy && setModal(null)}>
+          <div className="w-full max-w-md rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2 border-b border-zinc-800 px-5 py-3">
+              <MessageSquarePlus size={16} className="text-zinc-300" />
+              <span className="text-sm font-semibold text-zinc-100">Start a coding session</span>
+              <button onClick={() => setModal(null)} disabled={modal.busy}
+                className="ml-auto text-zinc-500 hover:text-zinc-200"><X size={16} /></button>
+            </div>
+
+            <div className="space-y-5 px-5 py-4">
+              {/* 1 · Project */}
+              <div>
+                <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">1 · Project</div>
+                <select value={modal.project} onChange={(e) => onModalProject(e.target.value)}
+                  className="w-full rounded bg-zinc-900 px-2.5 py-2 text-sm text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600">
+                  {projects.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+                  <option value="">＋ Create a new project…</option>
+                </select>
+                {!modal.project && (
+                  <input value={modal.newProject} autoFocus
+                    onChange={(e) => setModal({ ...modal, newProject: e.target.value })}
+                    placeholder="new project name"
+                    className="mt-2 w-full rounded bg-zinc-900 px-2.5 py-2 text-sm text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600" />
+                )}
+              </div>
+
+              {/* 2 · Folder */}
+              <div>
+                <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  2 · Folder <span className="font-normal normal-case text-zinc-600">— the repo agents work in</span>
+                </div>
+                <div className="mb-2 flex gap-1 rounded bg-zinc-900 p-0.5 text-xs ring-1 ring-zinc-800">
+                  {([['existing', 'Existing'], ['new', 'New folder'], ['link', 'Link local folder']] as const).map(([k, label]) => (
+                    <button key={k} onClick={() => setModal({ ...modal, folderMode: k })}
+                      disabled={k === 'existing' && !(projects.find((p) => p.name === modal.project)?.folders.length)}
+                      className={`flex-1 rounded px-2 py-1 ${modal.folderMode === k
+                        ? 'bg-zinc-700 text-zinc-100'
+                        : 'text-zinc-400 hover:text-zinc-200 disabled:opacity-30'}`}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {modal.folderMode === 'existing' && (
+                  <select value={modal.folder} onChange={(e) => setModal({ ...modal, folder: e.target.value })}
+                    className="w-full rounded bg-zinc-900 px-2.5 py-2 text-sm text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600">
+                    {(projects.find((p) => p.name === modal.project)?.folders || []).map((f) => (
+                      <option key={f.name} value={f.name}>{f.name}{f.kind === 'link' ? ' (linked)' : ''}</option>
+                    ))}
+                  </select>
+                )}
+                {modal.folderMode === 'new' && (
+                  <input value={modal.newFolder} onChange={(e) => setModal({ ...modal, newFolder: e.target.value })}
+                    placeholder="folder name (becomes a fresh git repo)"
+                    className="w-full rounded bg-zinc-900 px-2.5 py-2 text-sm text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600" />
+                )}
+                {modal.folderMode === 'link' && (
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <input value={modal.linkPath} readOnly placeholder="pick a folder on this machine…"
+                        className="min-w-0 flex-1 rounded bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-300 outline-none ring-1 ring-zinc-800" />
+                      <button onClick={() => fsGo('@modal', modal.linkPath || '')}
+                        className="flex shrink-0 items-center gap-1.5 rounded bg-zinc-800 px-3 text-xs text-zinc-200 hover:bg-zinc-700">
+                        <FolderTree size={13} /> Browse…
+                      </button>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-zinc-400">
+                      <input type="checkbox" checked={modal.linkMode === 'ro'}
+                        onChange={(e) => setModal({ ...modal, linkMode: e.target.checked ? 'ro' : 'rw' })}
+                        className="accent-zinc-400" />
+                      Read-only (agents can look but never modify)
+                    </label>
+                  </div>
+                )}
+              </div>
+
+              {/* 3 · Session */}
+              <div>
+                <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  3 · Session name <span className="font-normal normal-case text-zinc-600">— optional</span>
+                </div>
+                <input value={modal.title} onChange={(e) => setModal({ ...modal, title: e.target.value })}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submitModal() }}
+                  placeholder="e.g. RTS game, auth refactor…"
+                  className="w-full rounded bg-zinc-900 px-2.5 py-2 text-sm text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600" />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3">
+              <button onClick={() => setModal(null)} disabled={modal.busy}
+                className="rounded px-3 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">Cancel</button>
+              <button onClick={submitModal} disabled={!modalValid}
+                className="flex items-center gap-1.5 rounded bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-900 hover:bg-white disabled:opacity-40">
+                {modal.busy ? <Loader2 size={14} className="animate-spin" /> : <MessageSquarePlus size={14} />}
+                Start session
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Folder browser (for linking into a project) ── */}
       {fs && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-8" onClick={() => setFs(null)}>
@@ -472,7 +624,9 @@ export function CodePage() {
             <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-2">
               <FolderTree size={15} className="text-violet-400" />
               <span className="truncate font-mono text-xs text-zinc-300">{fs.path || '~'}</span>
-              <span className="ml-auto text-[11px] text-zinc-500">link into <b className="text-zinc-300">{fs.project}</b></span>
+              <span className="ml-auto text-[11px] text-zinc-500">
+                {fs.project === '@modal' ? 'pick a folder to link' : <>link into <b className="text-zinc-300">{fs.project}</b></>}
+              </span>
               <button onClick={() => setFs(null)} className="text-zinc-500 hover:text-zinc-200"><X size={16} /></button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
@@ -492,7 +646,9 @@ export function CodePage() {
             </div>
             <div className="flex items-center justify-between gap-2 border-t border-zinc-800 px-4 py-2">
               <span className="truncate font-mono text-[11px] text-zinc-500">{fs.path}</span>
-              <button onClick={useFolderForLink} className="shrink-0 rounded bg-emerald-600/80 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600">Link this folder</button>
+              <button onClick={useFolderForLink} className="shrink-0 rounded bg-emerald-600/80 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-600">
+                {fs.project === '@modal' ? 'Use this folder' : 'Link this folder'}
+              </button>
             </div>
           </div>
         </div>

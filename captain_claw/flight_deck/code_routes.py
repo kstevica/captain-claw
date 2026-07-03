@@ -102,6 +102,22 @@ async def _update_map(repo: Path, tiers_map: dict, registry: dict) -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("code map update failed", error=str(e))
 
+# ── run cancellation (Stop button) ───────────────────────────────────
+# A stop request marks the session's progress key cancelled and kills its
+# live agents; the orchestration loops check the flag at every phase
+# boundary and wind down gracefully.
+_CANCELLED: set[str] = set()
+_ACTIVE_SLUGS: dict[str, set[str]] = {}   # pkey → live agent slugs
+
+
+def _cancel_clear(pkey: str) -> None:
+    _CANCELLED.discard(pkey)
+
+
+def _cancelled(pkey: str) -> bool:
+    return pkey in _CANCELLED
+
+
 # ── per-turn token accounting (P4: cost visibility) ─────────────────
 # One entry per progress key; reset at turn start, fed by _run_agent's
 # usage callback, summarized into chat at turn end.
@@ -666,8 +682,14 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
     role = arch.get("role", archetype_id)
     tier = arch.get("tier", "coding")
     tcfg = _resolve_tcfg(tiers_map, tier)
-    suffix = uuid.uuid4().hex[:6]
+    # "-code-" in the suffix marks the spawned slug as a Code-mode ephemeral —
+    # the cleanup endpoint finds leftovers by this marker.
+    suffix = f"code-{uuid.uuid4().hex[:6]}"
     prompt = _codemap_preamble(repo) + prompt
+
+    if _cancelled(pkey):
+        return {"ok": False, "output": "", "actions": [], "error": "stopped by user",
+                "cancelled": True}
 
     def _on_action(act: dict) -> None:
         if act.get("tool") == "narration":
@@ -714,6 +736,7 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
         env_vars=list(env_vars or []) + code_env, workspace_path=str(repo),
     )
     _usage_add(pkey, 0, 0, runs=1)   # one dispatch = one "agent run"
+    _ACTIVE_SLUGS.setdefault(pkey, set()).add(slug)
     try:
         d = await _dispatch_one(
             port, token, prompt, _DISPATCH_TIMEOUT, on_action=_on_action,
@@ -721,10 +744,13 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
             agent_name=role, on_usage=_on_usage,
         )
     finally:
+        _ACTIVE_SLUGS.get(pkey, set()).discard(slug)
         try:
             await stop_archetype_agent(slug)
         except Exception as e:  # noqa: BLE001
             log.warning("code: failed to stop agent", slug=slug, error=str(e))
+    if _cancelled(pkey):
+        return {**d, "ok": False, "error": "stopped by user", "cancelled": True}
     return d
 
 
@@ -936,7 +962,15 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
     """
     _progress_start(pkey)
     _usage_reset(pkey)
+    _cancel_clear(pkey)
     _write_state(sdir, {"status": "running"})
+
+    def _finish_stopped() -> None:
+        _u = _usage_summary(pkey)
+        _append_chat(sdir, "assistant",
+                     "⏹ Stopped by user." + (f" _{_u}._" if _u else ""), kind="note")
+        _write_state(sdir, {"status": "idle"})
+
     try:
         last_fix_sha: str | None = None
         if seed_fix:
@@ -955,9 +989,16 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
                          kind="build", archetype="code-implementer", ok=bool(d.get("ok")), commit=sha or "")
 
+        if _cancelled(pkey):
+            _finish_stopped()
+            return
+
         prior_findings: list = []
         prior_fix_instructions: str = seed_fix
         for rnd in range(_MAX_FIX_ROUNDS + 1):
+            if _cancelled(pkey):
+                _finish_stopped()
+                return
             # Round 0 after a fresh build = full review of everything.
             # Rounds 1+ (and round 0 of a backlog continuation) = DELTA
             # review: verify prior findings + scan the fix diff only —
@@ -1006,6 +1047,9 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                              "the backlog.", kind="note")
                 break
 
+            if _cancelled(pkey):
+                _finish_stopped()
+                return
             _phase(pkey, f"Fixing (round {rnd + 1})")
             fixer = triage["fixer"]
             fd = await _run_agent(request, user, pkey, repo, fixer,
@@ -1019,10 +1063,11 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
 
         # The repo just changed substantially — (re)build the code map so future
         # sessions/tasks can query it instead of re-reading everything.
-        try:
-            await _run_cartographer(request, user, pkey, repo, by_id, tiers_map, env_vars, registry)
-        except Exception as e:  # noqa: BLE001
-            log.warning("cartographer after build failed", error=str(e))
+        if not _cancelled(pkey):
+            try:
+                await _run_cartographer(request, user, pkey, repo, by_id, tiers_map, env_vars, registry)
+            except Exception as e:  # noqa: BLE001
+                log.warning("cartographer after build failed", error=str(e))
         _u = _usage_summary(pkey)
         if _u:
             _append_chat(sdir, "assistant", f"_Run total: {_u}._", kind="note")
@@ -1414,6 +1459,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
 
     _progress_start(pkey)
     _usage_reset(pkey)
+    _cancel_clear(pkey)
     _write_state(sdir, {"status": "running"})
     try:
         # ── Map/index request → the cartographer (bypass the router). ──
@@ -1442,6 +1488,11 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
             prompt = hist + (_git_prompt(intent) if is_git else _exec_prompt(intent))
             d = await _run_agent(request, user, pkey, repo, executor, prompt,
                                  by_id, tiers_map, env_vars)
+
+            if _cancelled(pkey):
+                assistant = _append_chat(sdir, "assistant", "⏹ Stopped by user.", kind="note")
+                _write_state(sdir, {"status": "idle"})
+                return {"message": assistant, "route": route, "commit": None}
 
             # ── Escalation: a non-git quick edit that proved too big is promoted
             # to the full plan→build→review pipeline (agent said ESCALATE, the run
@@ -1486,6 +1537,10 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         plan_rel = _new_plan_rel(repo, route.get("title", intent))
         d = await _run_agent(request, user, pkey, repo, planner,
                              hist + _plan_prompt(intent, plan_rel), by_id, tiers_map, env_vars)
+        if _cancelled(pkey):
+            assistant = _append_chat(sdir, "assistant", "⏹ Stopped by user.", kind="note")
+            _write_state(sdir, {"status": "idle"})
+            return {"message": assistant, "route": route, "commit": None}
         # Land the plan at plan_rel no matter what the planner did: it may have
         # written the requested path, fallen back to the legacy plan.md, or only
         # returned the plan as chat text. Never let a new plan clobber an old one.
@@ -1540,6 +1595,54 @@ async def approve_plan(body: ApproveReq, request: Request, user: dict = Depends(
         request, user, pkey, repo, sdir, intent, by_id, tiers_map, env_vars, registry,
         plan_file=plan_file))
     return {"status": "running"}
+
+
+@router.post("/projects/{project}/sessions/{session}/stop")
+async def stop_run(project: str, session: str, user: dict = Depends(get_current_user)):
+    """Stop the session's current coding run: flag the progress key cancelled
+    and kill its live agents. The orchestration loop notices at the next
+    phase boundary and winds down with a chat note."""
+    _sess, _repo, _sdir, pkey = _sctx(user["id"], project, session)
+    _CANCELLED.add(pkey)
+    killed = []
+    for slug in list(_ACTIVE_SLUGS.get(pkey, ())):
+        try:
+            await stop_archetype_agent(slug)
+            killed.append(slug)
+        except Exception as e:  # noqa: BLE001
+            log.warning("stop: failed to kill agent", slug=slug, error=str(e))
+    _progress(pkey, "note", "⏹ Stop requested — winding down.")
+    return {"status": "stopping", "killed": killed}
+
+
+@router.post("/cleanup")
+async def cleanup_agents(user: dict = Depends(get_current_user)):
+    """Stop + remove leftover Code-mode ephemeral agents (slug contains
+    "-code-"). Normal runs dispose their agents; this sweeps up after
+    crashes, stops, and FD restarts — including their data dirs."""
+    from captain_claw.flight_deck.server import (
+        DATA_DIR,
+        _do_stop_process,
+        _load_process_registry,
+        _processes,
+        _save_process_registry,
+    )
+    registry = _load_process_registry()
+    victims = [slug for slug in registry if "-code-" in slug]
+    removed = []
+    for slug in victims:
+        try:
+            _do_stop_process(slug)
+        except Exception:  # noqa: BLE001
+            pass
+        registry.pop(slug, None)
+        _processes.pop(slug, None)
+        shutil.rmtree(DATA_DIR / slug, ignore_errors=True)
+        removed.append(slug)
+    if removed:
+        _save_process_registry(registry)
+        log.info("code cleanup removed agents", count=len(removed))
+    return {"removed": removed, "count": len(removed)}
 
 
 @router.post("/plan/cancel")

@@ -188,6 +188,17 @@ async function apiCancelPlan(project: string, session: string): Promise<void> {
   if (!res.ok) throw new Error((await res.text()) || 'cancel failed')
 }
 
+async function apiStop(project: string, session: string): Promise<void> {
+  const res = await _authedFetch(`${sbase(project, session)}/stop`, { method: 'POST' })
+  if (!res.ok) throw new Error((await res.text()) || 'stop failed')
+}
+
+async function apiCleanup(): Promise<number> {
+  const res = await _authedFetch('/fd/code/cleanup', { method: 'POST' })
+  if (!res.ok) throw new Error((await res.text()) || 'cleanup failed')
+  return (await res.json()).count || 0
+}
+
 async function apiDiff(p: string, s: string, refA = '', refB = ''): Promise<string> {
   const qs = new URLSearchParams({ ref_a: refA, ref_b: refB }).toString()
   const res = await _authedFetch(`${sbase(p, s)}/diff?${qs}`)
@@ -269,6 +280,8 @@ interface CodeStore {
   send: (text: string) => Promise<void>
   approvePlan: (plan?: string) => Promise<void>
   cancelPlan: () => Promise<void>
+  stopRun: () => Promise<void>
+  cleanupAgents: () => Promise<number>
   diff: (refA?: string, refB?: string) => Promise<string>
   showCommit: (sha: string) => Promise<string>
   rollback: (ref: string) => Promise<void>
@@ -418,6 +431,27 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
       set({ messages: chat.messages, status: _statusOf(chat.state) })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'cancel failed' })
+    }
+  },
+
+  stopRun: async () => {
+    const { activeProject: p, activeSession: s } = get()
+    if (!p || !s) return
+    try {
+      await apiStop(p, s)
+      // The loop winds down at its next phase boundary; the active
+      // send/approve poller will observe the idle state and finish.
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'stop failed' })
+    }
+  },
+
+  cleanupAgents: async () => {
+    try {
+      return await apiCleanup()
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'cleanup failed' })
+      return 0
     }
   },
 
