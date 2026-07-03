@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import time
 import uuid
@@ -224,6 +225,29 @@ def _write_report(repo: Path, name: str, content: str) -> str:
     safe = safe_name(name, fallback="report") + ".md"
     (rd / safe).write_text(content or "")
     return f"{_REPORTS_DIRNAME}/{safe}"
+
+
+_PLANS_DIRNAME = ".plans"
+
+
+def _slugify(text: str, max_len: int = 40) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return s[:max_len].strip("-") or "plan"
+
+
+def _new_plan_rel(repo: Path, intent: str) -> str:
+    """A unique, sortable plan path for this turn: ``.plans/<ts>-<slug>.md``.
+
+    Each big turn gets its OWN plan file so a new plan never overwrites the
+    prior one — the `.plans/` folder becomes the plan history, committed with
+    the repo alongside `.reports/`.
+    """
+    (repo / _PLANS_DIRNAME).mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    rel = f"{_PLANS_DIRNAME}/{ts}-{_slugify(intent)}.md"
+    if (repo / rel).exists():  # same-second collision within a session
+        rel = f"{_PLANS_DIRNAME}/{ts}-{uuid.uuid4().hex[:6]}-{_slugify(intent)}.md"
+    return rel
 
 
 # ── migration from the old folder-level model ────────────────────────
@@ -584,23 +608,25 @@ async def _run_cartographer(request: Request, user: dict, pkey: str, repo: Path,
         by_id, tiers_map, env_vars)
 
 
-def _plan_prompt(intent: str) -> str:
+def _plan_prompt(intent: str, plan_rel: str = "plan.md") -> str:
     return (
         "You are planning a coding task in THIS repository — it is your workspace and "
         "current directory. Survey the existing code first (relative paths, your shell), "
-        "then produce a clear, scoped implementation plan and WRITE it to `plan.md` in the "
-        "project root. The plan drives an implementer next, so make it concrete and ordered. "
-        "Do NOT write any other code yet.\n\n"
+        f"then produce a clear, scoped implementation plan and WRITE it to `{plan_rel}` "
+        "(create the parent folder if needed). Use exactly that path — do NOT write "
+        "`plan.md` or any other filename. The plan drives an implementer next, so make it "
+        "concrete and ordered. Do NOT write any other code yet.\n\n"
         f"Task:\n{intent}"
     )
 
 
-def _build_prompt(intent: str) -> str:
+def _build_prompt(intent: str, plan_rel: str = "plan.md") -> str:
     return (
-        "An implementation plan has been approved and saved as `plan.md` in THIS repository "
-        "(your workspace and current directory). Implement it fully: create/edit files with "
-        "plain relative paths, install deps and run/verify via your shell. Follow the plan; "
-        "if you must deviate, say why. Do NOT use any `vfs:` prefix.\n\n"
+        f"An implementation plan has been approved and saved as `{plan_rel}` in THIS "
+        "repository (your workspace and current directory). Read that plan file, then "
+        "implement it fully: create/edit files with plain relative paths, install deps and "
+        "run/verify via your shell. Follow the plan; if you must deviate, say why. Do NOT "
+        "use any `vfs:` prefix.\n\n"
         f"Original request for context:\n{intent}\n\n"
         "When finished, summarize what you built and how you verified it runs." + _REPORTS_DIRECTIVE
     )
@@ -675,14 +701,14 @@ async def _triage_reviews(reviews: list[dict], intent: str,
 
 async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                           intent: str, by_id: dict, tiers_map: dict,
-                          env_vars: list, registry: dict) -> None:
+                          env_vars: list, registry: dict, plan_file: str = "plan.md") -> None:
     """Big-job pipeline: build → review fan-out → capped fix loop (background)."""
     _progress_start(pkey)
     _write_state(sdir, {"status": "running"})
     try:
         _phase(pkey, "Building")
         d = await _run_agent(request, user, pkey, repo, "code-implementer",
-                             _build_prompt(intent), by_id, tiers_map, env_vars)
+                             _build_prompt(intent, plan_file), by_id, tiers_map, env_vars)
         sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
         _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
                      kind="build", archetype="code-implementer", ok=bool(d.get("ok")), commit=sha or "")
@@ -1144,14 +1170,26 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
 
         planner = route["planner"]
         _phase(pkey, f"Planning ({planner})")
+        plan_rel = _new_plan_rel(repo, route.get("title", intent))
         d = await _run_agent(request, user, pkey, repo, planner,
-                             _plan_prompt(intent), by_id, tiers_map, env_vars)
-        plan_md = repo / "plan.md"
-        plan_text = plan_md.read_text() if plan_md.is_file() else (d.get("output") or "").strip()
+                             _plan_prompt(intent, plan_rel), by_id, tiers_map, env_vars)
+        # Land the plan at plan_rel no matter what the planner did: it may have
+        # written the requested path, fallen back to the legacy plan.md, or only
+        # returned the plan as chat text. Never let a new plan clobber an old one.
+        plan_abs = repo / plan_rel
+        if not plan_abs.is_file():
+            legacy = repo / "plan.md"
+            if legacy.is_file():
+                plan_abs.write_text(legacy.read_text())
+                legacy.unlink()  # don't leave a clobbering plan.md around
+        plan_text = plan_abs.read_text() if plan_abs.is_file() else (d.get("output") or "").strip()
+        if not plan_abs.is_file() and plan_text:
+            plan_abs.write_text(plan_text)   # persist chat-only plans so build can read them
         sha = await code_git.git_commit(repo, f"[plan] {planner}: {route.get('title', intent)[:60]}")
         assistant = _append_chat(sdir, "assistant", plan_text or "(planner produced no plan)",
                                  kind="plan", archetype=planner, ok=bool(d.get("ok")), commit=sha or "", route=route)
-        _write_state(sdir, {"status": "awaiting_plan", "intent": intent, "route": route})
+        _write_state(sdir, {"status": "awaiting_plan", "intent": intent,
+                            "route": route, "plan_file": plan_rel})
         return {"message": assistant, "route": route, "commit": sha,
                 "status": "awaiting_plan", "plan": plan_text}
     finally:
@@ -1168,8 +1206,11 @@ async def approve_plan(body: ApproveReq, request: Request, user: dict = Depends(
     if state.get("status") != "awaiting_plan":
         raise HTTPException(409, "no plan awaiting approval")
     intent = state.get("intent", "")
+    plan_file = state.get("plan_file") or "plan.md"   # legacy sessions used plan.md
     if body.plan and body.plan.strip():
-        (repo / "plan.md").write_text(body.plan)
+        pa = repo / plan_file
+        pa.parent.mkdir(parents=True, exist_ok=True)
+        pa.write_text(body.plan)
         await code_git.git_commit(repo, "[plan] user-edited")
 
     db = get_db()
@@ -1180,5 +1221,6 @@ async def approve_plan(body: ApproveReq, request: Request, user: dict = Depends(
 
     _append_chat(sdir, "user", "✓ Plan approved — building.", kind="approval")
     asyncio.create_task(_run_build_loop(
-        request, user, pkey, repo, sdir, intent, by_id, tiers_map, env_vars, registry))
+        request, user, pkey, repo, sdir, intent, by_id, tiers_map, env_vars, registry,
+        plan_file=plan_file))
     return {"status": "running"}

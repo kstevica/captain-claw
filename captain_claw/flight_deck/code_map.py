@@ -35,7 +35,7 @@ _MAP_DIRNAME = ".codemap"
 _MAX_FILE_BYTES = 1_500_000          # skip files bigger than this
 _SKIP_DIRS = {".git", ".code", ".codemap", ".captain-claw", "saved", "node_modules",
               ".venv", "venv", "__pycache__", "dist", "build", ".next", ".pytest_cache",
-              ".mypy_cache", "vendor", "coverage"}
+              ".mypy_cache", "vendor", "coverage", ".reports", ".plans"}
 _LANG_BY_SUFFIX = {
     ".py": "python", ".js": "js", ".jsx": "js", ".mjs": "js", ".cjs": "js",
     ".ts": "ts", ".tsx": "ts", ".vue": "ts", ".svelte": "ts",
