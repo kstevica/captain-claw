@@ -250,6 +250,35 @@ def _new_plan_rel(repo: Path, intent: str) -> str:
     return rel
 
 
+def _history_preamble(sdir: Path, max_msgs: int = 8, max_chars: int = 700) -> str:
+    """Recent conversation so a fresh ephemeral agent has continuity.
+
+    Each turn spawns a brand-new agent that would otherwise see ONLY the current
+    message — so follow-up turns ("no, don't use the browser", "the build button
+    still does nothing") lose all prior context. This gives the agent the recent
+    back-and-forth. The current user message is excluded (it's already in the
+    task prompt); long messages (plans, review dumps) are truncated.
+    """
+    msgs = _read_chat(sdir)[:-1]  # drop the just-appended current user turn
+    recent = [m for m in msgs[-max_msgs:] if (m.get("text") or "").strip()]
+    if not recent:
+        return ""
+    lines = []
+    for m in recent:
+        who = "User" if m.get("role") == "user" else (m.get("archetype") or "Assistant")
+        text = " ".join((m.get("text") or "").split())
+        if len(text) > max_chars:
+            text = text[:max_chars] + "…"
+        lines.append(f"{who}: {text}")
+    return (
+        "=== Conversation so far (most recent last) — context for continuity. "
+        "The CURRENT request is in the task below; treat this as background, and "
+        "honor any user corrections/preferences stated here. ===\n"
+        + "\n".join(lines)
+        + "\n=== end context ===\n\n"
+    )
+
+
 # ── migration from the old folder-level model ────────────────────────
 
 def _import_session(user_id: str, project: str, folder: str, code: Path,
@@ -844,6 +873,11 @@ class ApproveReq(BaseModel):
     plan: str | None = None
 
 
+class CancelReq(BaseModel):
+    project: str
+    session: str
+
+
 class RollbackReq(BaseModel):
     ref: str
 
@@ -1145,10 +1179,11 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         route = await _classify(intent, context, archetypes, tiers_map, registry)
         _progress(pkey, "route", f"size={route['size']} · {route.get('why', '')}", size=route["size"])
 
+        hist = _history_preamble(sdir)
         if route["size"] == "small":
             executor = route["small_archetype"]
             is_git = executor == _GIT
-            prompt = _git_prompt(intent) if is_git else _exec_prompt(intent)
+            prompt = hist + (_git_prompt(intent) if is_git else _exec_prompt(intent))
             d = await _run_agent(request, user, pkey, repo, executor, prompt,
                                  by_id, tiers_map, env_vars)
             if is_git:
@@ -1172,7 +1207,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         _phase(pkey, f"Planning ({planner})")
         plan_rel = _new_plan_rel(repo, route.get("title", intent))
         d = await _run_agent(request, user, pkey, repo, planner,
-                             _plan_prompt(intent, plan_rel), by_id, tiers_map, env_vars)
+                             hist + _plan_prompt(intent, plan_rel), by_id, tiers_map, env_vars)
         # Land the plan at plan_rel no matter what the planner did: it may have
         # written the requested path, fallen back to the legacy plan.md, or only
         # returned the plan as chat text. Never let a new plan clobber an old one.
@@ -1224,3 +1259,19 @@ async def approve_plan(body: ApproveReq, request: Request, user: dict = Depends(
         request, user, pkey, repo, sdir, intent, by_id, tiers_map, env_vars, registry,
         plan_file=plan_file))
     return {"status": "running"}
+
+
+@router.post("/plan/cancel")
+async def cancel_plan(body: CancelReq, user: dict = Depends(get_current_user)):
+    """Discard a plan awaiting approval — nothing is built. The plan file stays
+    in `.plans/` as history; the session returns to idle for a new request."""
+    uid = user["id"]
+    _sess, _repo, sdir, _pk = _sctx(uid, body.project, body.session)
+    state = _read_state(sdir)
+    if state.get("status") != "awaiting_plan":
+        raise HTTPException(409, "no plan awaiting approval")
+    assistant = _append_chat(sdir, "assistant",
+                             "Plan discarded — nothing was built. Send a new request when ready.",
+                             kind="note")
+    _write_state(sdir, {"status": "idle"})
+    return {"status": "idle", "message": assistant}

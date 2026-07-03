@@ -25,7 +25,7 @@ export function CodePage() {
   const {
     projects, activeProject, activeSession, messages, commits, progress, status, sending, error,
     loadProjects, createProject, addFolder, linkFolder, createSession, deleteSession,
-    setSessionFolder, selectSession, send, approvePlan, showCommit, rollback, exportProcess,
+    setSessionFolder, selectSession, send, approvePlan, cancelPlan, showCommit, rollback, exportProcess,
     loadMap, searchMap, buildMap,
   } = useCodeStore()
   const browseFs = useVFSStore((s) => s.browseFs)
@@ -395,7 +395,11 @@ export function CodePage() {
                 <div className="mb-2 flex items-center gap-2 text-sm text-amber-200/90"><ClipboardList size={15} /> Plan ready — edit if needed, then build.</div>
                 <textarea value={planDraft} onChange={(e) => setPlanDraft(e.target.value)} rows={8}
                   className="mb-2 w-full resize-y rounded bg-zinc-900 px-3 py-2 font-mono text-[13px] text-zinc-200 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600" />
-                <div className="flex justify-end">
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => cancelPlan()} disabled={sending}
+                    className="flex h-9 items-center gap-1.5 rounded px-3 text-sm font-medium text-zinc-400 ring-1 ring-zinc-700 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
+                    <Trash2 size={15} /> Discard
+                  </button>
                   <button onClick={() => approvePlan(planDraft)} disabled={sending}
                     className="flex h-9 items-center gap-1.5 rounded bg-amber-400 px-3 text-sm font-medium text-zinc-900 hover:bg-amber-300 disabled:opacity-40">
                     {sending ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Approve & Build

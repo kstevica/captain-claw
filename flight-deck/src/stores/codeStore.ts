@@ -179,6 +179,13 @@ async function apiApprove(project: string, session: string, plan?: string): Prom
   if (!res.ok) throw new Error((await res.text()) || 'approve failed')
 }
 
+async function apiCancelPlan(project: string, session: string): Promise<void> {
+  const res = await _authedFetch('/fd/code/plan/cancel', {
+    method: 'POST', body: JSON.stringify({ project, session }),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'cancel failed')
+}
+
 async function apiDiff(p: string, s: string, refA = '', refB = ''): Promise<string> {
   const qs = new URLSearchParams({ ref_a: refA, ref_b: refB }).toString()
   const res = await _authedFetch(`${sbase(p, s)}/diff?${qs}`)
@@ -259,6 +266,7 @@ interface CodeStore {
   selectSession: (project: string, session: string) => Promise<void>
   send: (text: string) => Promise<void>
   approvePlan: (plan?: string) => Promise<void>
+  cancelPlan: () => Promise<void>
   diff: (refA?: string, refB?: string) => Promise<string>
   showCommit: (sha: string) => Promise<string>
   rollback: (ref: string) => Promise<void>
@@ -385,6 +393,18 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
       set({ error: e instanceof Error ? e.message : 'approve failed' })
     } finally {
       set({ sending: false })
+    }
+  },
+
+  cancelPlan: async () => {
+    const { activeProject: p, activeSession: s } = get()
+    if (!p || !s) return
+    try {
+      await apiCancelPlan(p, s)
+      const chat = await apiGetChat(p, s)
+      set({ messages: chat.messages, status: _statusOf(chat.state) })
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'cancel failed' })
     }
   },
 
