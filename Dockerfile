@@ -9,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml .
 COPY captain_claw/ captain_claw/
-COPY skills/ skills/
 
 RUN pip install --no-cache-dir --timeout=120 .
 
