@@ -408,7 +408,24 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   },
   buildMap: async () => {
     const { activeProject: p, activeSession: s } = get()
-    if (p && s) await apiMapBuild(p, s)
+    if (!p || !s) return
+    // The build runs in a background task on the server; poll progress +
+    // state until it finishes (same pattern as approvePlan) so the UI shows
+    // live cartographer progress and the caller can reload the map after.
+    set({ sending: true, error: null, progress: [], status: 'running' })
+    try {
+      await apiMapBuild(p, s)
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1000))
+        const [prog, chat] = await Promise.all([apiProgress(p, s), apiGetChat(p, s)])
+        set({ progress: prog.events || [], status: _statusOf(chat.state) })
+        if (_statusOf(chat.state) !== 'running' && !prog.active) break
+      }
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'map build failed' })
+    } finally {
+      set({ sending: false, status: 'idle' })
+    }
   },
 
   rollback: async (ref) => {

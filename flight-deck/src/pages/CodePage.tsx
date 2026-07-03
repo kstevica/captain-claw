@@ -69,7 +69,10 @@ export function CodePage() {
   }
   const onRebuildMap = async () => {
     setMapBusy(true)
-    try { await buildMap() } finally { setMapBusy(false) }
+    try {
+      await buildMap()
+      setMap(await loadMap())   // reload the freshly-written overview/models/ui
+    } finally { setMapBusy(false) }
   }
 
   const activeProj = projects.find((p) => p.name === activeProject)
@@ -273,6 +276,16 @@ export function CodePage() {
                     {mapBusy ? <Loader2 size={13} className="animate-spin" /> : <Map size={13} />} Rebuild map
                   </button>
                 </div>
+                {mapBusy && (
+                  <div className="mb-3 space-y-1 rounded border border-zinc-800 bg-zinc-900/40 p-3">
+                    {progress.slice(-8).map((e) => (
+                      <div key={e.i} className="truncate text-[11px] text-zinc-500">
+                        {e.stage === 'phase' ? <span className="text-zinc-300">▸ {e.message}</span> : <span>{e.message}</span>}
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-1.5 text-xs text-zinc-400"><Loader2 size={12} className="animate-spin" /> mapping the codebase…</div>
+                  </div>
+                )}
                 <input value={mapQ} onChange={(e) => onMapSearch(e.target.value)}
                   placeholder="Search symbols, files, models…"
                   className="mb-3 w-full rounded bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600" />

@@ -1061,9 +1061,14 @@ async def map_build(project: str, session: str, request: Request,
     registry = _load_registry()
     tiers_map, env_vars = await _load_owner_tiers(db, uid)
 
+    # Flip to running SYNCHRONOUSLY before returning so the client can poll
+    # /progress immediately without racing the background task's startup
+    # (otherwise the first poll can read idle+inactive and stop at once).
+    _progress_start(pkey)
+    _write_state(sdir, {"status": "running"})
+    _phase(pkey, "Mapping the codebase")
+
     async def _bg():
-        _progress_start(pkey)
-        _write_state(sdir, {"status": "running"})
         try:
             await _run_cartographer(request, user, pkey, repo, by_id, tiers_map, env_vars, registry)
         except Exception as e:  # noqa: BLE001
