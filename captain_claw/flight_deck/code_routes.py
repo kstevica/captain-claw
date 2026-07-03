@@ -112,11 +112,12 @@ def _usage_reset(pkey: str) -> None:
     _TURN_USAGE[pkey] = {"prompt": 0, "completion": 0, "runs": 0}
 
 
-def _usage_add(pkey: str, pt: int, ct: int) -> None:
+def _usage_add(pkey: str, pt: int, ct: int, runs: int = 0) -> None:
+    """Accumulate token DELTAS (not raw broadcasts) + optional dispatch count."""
     u = _TURN_USAGE.setdefault(pkey, {"prompt": 0, "completion": 0, "runs": 0})
     u["prompt"] += int(pt or 0)
     u["completion"] += int(ct or 0)
-    u["runs"] += 1
+    u["runs"] += runs
 
 
 def _fmt_tok(n: int) -> str:
@@ -677,8 +678,20 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
             _progress(pkey, "action", f"{role} → {act.get('tool')}{detail}",
                       agent=role, tool=act.get("tool"), detail=act.get("detail", ""))
 
+    # turn_usage broadcasts carry the dispatch's RUNNING CUMULATIVE counts
+    # (172K → 196K → 223K …), so the turn accumulator must add only the
+    # delta since the previous broadcast — summing the raw values counted a
+    # ~2M-token turn as 11.4M. The progress line keeps showing the live
+    # cumulative number (that's what a human wants to watch climb).
+    _u_last = {"pt": 0, "ct": 0}
+
     def _on_usage(pt: int, ct: int, tt: int) -> None:
-        _usage_add(pkey, pt, ct)
+        dpt, dct = pt - _u_last["pt"], ct - _u_last["ct"]
+        if dpt < 0 or dct < 0:
+            # Counter reset mid-dispatch (new internal turn) — take raw.
+            dpt, dct = pt, ct
+        _u_last["pt"], _u_last["ct"] = pt, ct
+        _usage_add(pkey, dpt, dct)
         _progress(pkey, "usage", f"{role} · {pt:,}→{ct:,} tok",
                   agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
@@ -700,6 +713,7 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
         arch, tier, tcfg, request, user, name_suffix=suffix,
         env_vars=list(env_vars or []) + code_env, workspace_path=str(repo),
     )
+    _usage_add(pkey, 0, 0, runs=1)   # one dispatch = one "agent run"
     try:
         d = await _dispatch_one(
             port, token, prompt, _DISPATCH_TIMEOUT, on_action=_on_action,
