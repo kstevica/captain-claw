@@ -535,6 +535,19 @@ def _codemap_preamble(repo: Path) -> str:
         return ""
 
 
+_ESCALATE_MARK = "ESCALATE"
+_ESCALATE_RE = re.compile(r"(?mi)^\s*ESCALATE\s*[:\-]\s*(.+)$")
+_ESCALATE_DIRECTIVE = (
+    "\n\nSCOPE CHECK: you were routed as a QUICK edit. If, once you look, this is "
+    "actually substantial — many files, an architectural or cross-cutting change, or "
+    "something you cannot finish cleanly in a focused edit — do NOT half-do it and "
+    "burn your budget. STOP and reply with a single line `ESCALATE: <one-sentence "
+    "reason>` (optionally list the files/areas involved). That hands the task to the "
+    "full plan→build→review pipeline. Only escalate when it's genuinely bigger than a "
+    "quick edit; for a normal small fix, just do it."
+)
+
+
 def _exec_prompt(intent: str) -> str:
     return (
         "You are working inside a real project directory — it IS your workspace and "
@@ -543,8 +556,31 @@ def _exec_prompt(intent: str) -> str:
         "verify. Do NOT use any `vfs:` prefix — just work in the directory you're in.\n\n"
         f"Task:\n{intent}\n\n"
         "When finished, briefly summarize what you created/changed and how you "
-        "verified it actually runs." + _REPORTS_DIRECTIVE
+        "verified it actually runs." + _ESCALATE_DIRECTIVE + _REPORTS_DIRECTIVE
     )
+
+
+def _should_escalate(d: dict | None) -> tuple[bool, str]:
+    """Decide whether a small-path run should be promoted to the full pipeline.
+
+    Escalate when the agent explicitly asked (``ESCALATE: reason``), the run
+    errored, or it ran out of its iteration budget before finishing — all mean
+    a lone quick-edit agent couldn't land the change and a plan→build→review
+    pass is warranted. Returns (escalate, human_reason).
+    """
+    if not d:
+        return True, "the quick-edit agent returned no result."
+    out = (d.get("output") or "").strip()
+    m = _ESCALATE_RE.search(out)
+    if m:
+        return True, m.group(1).strip()[:300]
+    if not d.get("ok"):
+        return True, f"the quick edit failed: {d.get('error', 'unknown error')}"
+    low = out.lower()
+    if ("iteration budget" in low or "wasn't able to fully complete" in low
+            or "unable to complete this request" in low or "couldn't fully complete" in low):
+        return True, "the quick-edit agent ran out of its iteration budget before finishing."
+    return False, ""
 
 
 def _git_prompt(intent: str) -> str:
@@ -1186,22 +1222,41 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
             prompt = hist + (_git_prompt(intent) if is_git else _exec_prompt(intent))
             d = await _run_agent(request, user, pkey, repo, executor, prompt,
                                  by_id, tiers_map, env_vars)
-            if is_git:
-                # The git agent runs commits/pushes itself — don't wrap another
-                # commit; just report where HEAD landed.
-                head = await code_git.git_log(repo, 1)
-                sha = head[0]["sha"] if head else None
+
+            # ── Escalation: a non-git quick edit that proved too big is promoted
+            # to the full plan→build→review pipeline (agent said ESCALATE, the run
+            # failed, or it exhausted its budget). We commit whatever partial work
+            # exists so the planner sees the real state, then FALL THROUGH to the
+            # planning branch below instead of returning.
+            escalate, why = (False, "") if is_git else _should_escalate(d)
+            if escalate:
+                await code_git.git_commit(
+                    repo, f"[edit] {executor} (partial, escalating): {route.get('title', intent)[:50]}")
+                await _update_map(repo, tiers_map, registry)
+                _append_chat(sdir, "assistant",
+                             f"This is bigger than a quick edit — escalating to a full plan. "
+                             f"Reason: {why}", kind="note", archetype=executor)
+                _progress(pkey, "route", f"escalated small → big ({executor})", size="big")
+                route = {**route, "size": "big",
+                         "planner": "architect" if "architect" in by_id else route["planner"]}
+                hist = _history_preamble(sdir)  # refresh so the planner sees the escalation reason
+                # fall through ↓ to the planning branch
             else:
-                sha = await code_git.git_commit(repo, f"[edit] {executor}: {route.get('title', intent)[:60]}")
-            if not is_git:
-                await _update_map(repo, tiers_map, registry)   # keep the map fresh
-            out = (d.get("output") or "").strip() or "(no output)"
-            if not d.get("ok"):
-                out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
-            assistant = _append_chat(sdir, "assistant", out, archetype=executor,
-                                     size="small", ok=bool(d.get("ok")), commit=sha or "", route=route)
-            _write_state(sdir, {"status": "idle", "last_route": route})
-            return {"message": assistant, "route": route, "commit": sha}
+                if is_git:
+                    # The git agent runs commits/pushes itself — don't wrap another
+                    # commit; just report where HEAD landed.
+                    head = await code_git.git_log(repo, 1)
+                    sha = head[0]["sha"] if head else None
+                else:
+                    sha = await code_git.git_commit(repo, f"[edit] {executor}: {route.get('title', intent)[:60]}")
+                    await _update_map(repo, tiers_map, registry)   # keep the map fresh
+                out = (d.get("output") or "").strip() or "(no output)"
+                if not d.get("ok"):
+                    out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
+                assistant = _append_chat(sdir, "assistant", out, archetype=executor,
+                                         size="small", ok=bool(d.get("ok")), commit=sha or "", route=route)
+                _write_state(sdir, {"status": "idle", "last_route": route})
+                return {"message": assistant, "route": route, "commit": sha}
 
         planner = route["planner"]
         _phase(pkey, f"Planning ({planner})")
