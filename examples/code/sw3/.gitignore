@@ -1,0 +1,14 @@
+.code/
+.codemap/
+.captain-claw/
+saved/
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.DS_Store
+dist/
+build/
+.pytest_cache/

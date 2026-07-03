@@ -1,0 +1,12 @@
+{
+  "status": "idle",
+  "last_route": {
+    "size": "small",
+    "planner": "light-planner",
+    "small_archetype": "debugger",
+    "domain": "game",
+    "difficulty": "moderate",
+    "title": "Fix peasant building placement",
+    "why": "Single focused bug fix about peasant positioning during and after building construction; no new feature, should be handled by debugger archetype."
+  }
+}

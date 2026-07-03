@@ -1,0 +1,37 @@
+[
+  {
+    "table": "TERRAIN",
+    "description": "5 terrain types covering the 64\u00d764 tile map. Each tile is 32\u00d732px. WATER is impassable; TREE is walkable and a resource node; GOLD is a resource node.",
+    "schema": "TERRAIN = { GRASS:0, DIRT:1, WATER:2, TREE:3, GOLD:4 }\nmap.tiles: Terrain[][] (64\u00d764)\nColors (game / minimap):\n  GRASS #4a8c2a / #3a7a20\n  DIRT  #b8a060 / #a89050\n  WATER #3060a0 / #2050a0\n  TREE  #2a5a18 / #1a4a10\n  GOLD  #8a7a30 / #c8a020"
+  },
+  {
+    "table": "UNIT_DEFS",
+    "description": "4 unit types, keyed by string. Units are flat JS objects created by createUnit(). Shared fields: id, type, owner, x, y, w, h, hp, maxHp, state, speed, attackDamage, attackRange, attackCooldown, attackTimer, targetId, moveTarget, path, isBuilding=false, faceDir, canGather, canBuild, food, size, ranged, carryAmount, carryType, gatheringNode, gatheringTimer, buildTarget.",
+    "schema": "peasant: cost={gold:50}, hp=40, speed=140, atk=5, range=24, food=1, size=16, canGather=true, canBuild=true\nfootman: cost={gold:100,wood:30}, hp=60, speed=120, atk=10, range=24, food=2, size=18, melee\narcher:  cost={gold:120,wood:40}, hp=45, speed=120, atk=8, range=140, food=2, size=16, ranged\nknight:  cost={gold:150,wood:60}, hp=80, speed=200, atk=12, range=24, food=2, size=22, fast cavalry"
+  },
+  {
+    "table": "BUILDING_DEFS",
+    "description": "7 building types, keyed by string. Buildings are flat JS objects created by createBuilding(). Extends entity shared fields plus: progress (0-1), produces[], queue[], queueTimer, queueTotal, rallyPoint, dropoff flags (dropoff, dropoff_gold, dropoff_wood), provides[], blocking.",
+    "schema": "town_hall:   cost={gold:200,wood:100}, size=96\u00d796, hp=800, buildTime=10s, trains=peasant, dropoff=gold+wood, provides=food+5\nbarracks:    cost={gold:150,wood:50},  size=80\u00d780, hp=500, buildTime=6s,  trains=footman+archer\nstable:      cost={gold:100,wood:100}, size=80\u00d780, hp=400, buildTime=6s,  trains=knight\nlumber_mill: cost={gold:100,wood:50},  size=64\u00d764, hp=350, buildTime=5s,  dropoff=wood\nrefinery:    cost={gold:100,wood:50},  size=64\u00d764, hp=350, buildTime=5s,  dropoff=gold\nwatch_tower: cost={gold:50,wood:50},   size=48\u00d748, hp=300, buildTime=4s,  auto-attack (cosmetic only)\nwall:        cost={gold:20,wood:10},   size=32\u00d732, hp=200, buildTime=2s,  blocking barrier"
+  },
+  {
+    "table": "game State Object",
+    "description": "Single global state object (const game = {...}) holding all mutable game state.",
+    "schema": "entities: Map<string, Entity>               \u2014 all units + buildings\nresources: { gold:200, wood:150, food:3, maxFood:5, resourcesEarned:{gold:0,wood:0} }\nselectedIds: Set<string>                       \u2014 currently selected entity IDs\nmap: { tiles: Terrain[][] }                    \u2014 64\u00d764 tile grid\ncamera: { x, y, targetX, targetY, zoom }      \u2014 viewport state\nui: { mode, buildingType, attackMode }         \u2014 UI mode (default/build/attack)\nmouse: { sx, sy, worldX, worldY, button, drag, currentTarget }\nselectionBox: { x1,y1,x2,y2 } | null          \u2014 rubber-band selection rect\nghostBuilding: Building | null                 \u2014 placement preview\nparticles: Particle[]                          \u2014 visual particle effects\nfloatingTexts: FloatingText[]                  \u2014 damage/heal floating numbers\nautoBuildCooldown: {}                          \u2014 prevents duplicate auto-build per resource type\nnextId: 0, time: 0"
+  },
+  {
+    "table": "Entity States",
+    "description": "Entities use a state-machine pattern via the 'state' string field.",
+    "schema": "idle        \u2014 standing by\nmoving      \u2014 pathing toward moveTarget\nattacking   \u2014 engaged with targetId (pursuit + cooldown)\ngathering   \u2014 moving to/from resource node\nbuilding    \u2014 peasant constructing a building\nconstructing \u2014 building being built (progress < 1)\nwalking     \u2014 legacy/fallback\nState transitions driven by updateEntity() per-frame logic."
+  },
+  {
+    "table": "Combat Model",
+    "description": "Simple attack system: units select nearest enemy in range, pursue, and attack on cooldown.",
+    "schema": "attackDamage: number (5-12)\nattackRange: number in px (24 melee / 140 archer)\nattackCooldown: 1.0s (global)\nattackTimer: counts down, when \u2264 0 unit can attack again\ntargetId: string | null \u2014 current enemy target\nattackTarget: {x,y} | null \u2014 attack-move destination\nAttack-move mode (A key): auto-engage enemies along path\nNo armor, no damage types, no splash, no friendly fire"
+  },
+  {
+    "table": "Economy Model",
+    "description": "Resource flow: gather \u2192 carry \u2192 return \u2192 deposit.",
+    "schema": "Resources: gold (mined from GOLD tiles), wood (chopped from TREE tiles)\ncarryAmount: 10 per trip (hardcoded)\ncarryType: 'gold' | 'wood' | null\nGathering cycle: move to resource \u2192 gatherTimer (~1s animation) \u2192 set carry \u2192 move to dropoff \u2192 deposit \u2192 loop\nAuto-build dropoff: if no dropof building exists when a peasant returns with resources, the game auto-builds a refinery (gold) or lumber_mill (wood) at a valid nearby site, deducts cost, assigns the peasant to construct it, and retries on failure every ~2s."
+  }
+]
