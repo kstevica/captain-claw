@@ -98,6 +98,11 @@ _REPORTS_DIRECTIVE = (
     "\n\nIf you produce a written report, findings document, or summary file, save it "
     "as Markdown under a `.reports/` folder in the project root (create it if needed). "
     "NEVER write reports to `saved/` — that folder is untracked and won't be kept."
+    "\n\nFILE SAFETY: to change an EXISTING file, use the `edit` tool "
+    "(old_string → new_string) — never `write`, which replaces the ENTIRE file. "
+    "Reserve `write` for brand-new files. A write that would shrink an existing "
+    "file is refused; if you genuinely need a full rewrite, read the file first "
+    "and pass overwrite=true."
 )
 
 

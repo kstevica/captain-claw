@@ -63,6 +63,15 @@ class WriteTool(Tool):
                 "type": "boolean",
                 "description": "Append to file instead of overwriting",
             },
+            "overwrite": {
+                "type": "boolean",
+                "description": (
+                    "Explicitly allow replacing an existing file with much "
+                    "shorter content. Without this, a write that would shrink "
+                    "an existing file by more than half is refused — use the "
+                    "edit tool for targeted changes instead."
+                ),
+            },
         },
         "required": ["path", "content"],
     }
@@ -153,14 +162,17 @@ class WriteTool(Tool):
             fallback = (saved_root / "tmp" / session_id / safe_parts[-1]).resolve()
             return fallback
 
-    async def execute(self, path: str, content: str, append: bool = False, **kwargs: Any) -> ToolResult:
+    async def execute(self, path: str, content: str, append: bool = False,
+                      overwrite: bool = False, **kwargs: Any) -> ToolResult:
         """Write content to a file.
-        
+
         Args:
             path: Path to file
             content: Content to write
             append: Whether to append instead of overwrite
-        
+            overwrite: Explicitly allow a destructive shrink-rewrite of an
+                existing file (see the shrink guard below)
+
         Returns:
             ToolResult with status
         """
@@ -278,6 +290,43 @@ class WriteTool(Tool):
                                 f"targeted changes."
                             ),
                             error="deliverable_overwrite_refused",
+                        )
+                    # ── Shrink guard ──────────────────────────────────
+                    # Refuse ANY write that would replace a substantial
+                    # existing file with drastically shorter content,
+                    # regardless of what the content looks like. This is
+                    # the failure mode where a model intends "two targeted
+                    # fixes" but emits only a fragment of the file —
+                    # silently destroying the rest (a 1815-line game was
+                    # once replaced by 14 lines this way). `edit` is the
+                    # right tool for changes; `overwrite=true` is the
+                    # explicit, auditable escape hatch for an intentional
+                    # full rewrite.
+                    if (
+                        not overwrite
+                        and _prev_size >= 1024
+                        and new_size < _prev_size // 2
+                    ):
+                        log.warning(
+                            "WriteTool refused shrink overwrite",
+                            path=str(file_path),
+                            prev_size=_prev_size,
+                            new_size=new_size,
+                        )
+                        return ToolResult(
+                            success=False,
+                            content=(
+                                f"❌ Refused to overwrite {path}: the existing file has "
+                                f"{_prev_lines} lines ({_prev_size} bytes) but your new "
+                                f"content is only {new_size} bytes — writing it would "
+                                f"DESTROY most of the file. The write tool replaces the "
+                                f"ENTIRE file; it is not for partial changes. For targeted "
+                                f"changes, use the `edit` tool (old_string → new_string). "
+                                f"If you truly intend to replace the whole file with this "
+                                f"shorter version, read the current file first, then call "
+                                f"write again with overwrite=true."
+                            ),
+                            error="shrink_overwrite_refused",
                         )
                     _overwrite_info = (
                         f"⚠️ Overwrote existing file (was {_prev_lines} lines, "
