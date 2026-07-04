@@ -481,7 +481,7 @@ export function CodePage() {
                 )
               })}
 
-              {sending && (
+              {(sending || status === 'running') && (
                 <div className="mb-4 flex gap-3">
                   <div className="mt-0.5 shrink-0 text-zinc-500"><Bot size={16} /></div>
                   <div className="min-w-0 flex-1 space-y-1">
