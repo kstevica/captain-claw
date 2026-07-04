@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.0-purple)](release-notes/RELEASE_NOTES_0.7.0.md)
+[![Version](https://img.shields.io/badge/version-0.7.1-purple)](release-notes/RELEASE_NOTES_0.7.1.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](#quick-start)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#multi-model-support)
 
@@ -66,6 +66,16 @@ Captain Claw is **MIT licensed and free forever** — your data stays on your ma
 </p>
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
+
+## What's New in 0.7.1
+
+**Quick Chat, guided setup, and a tidier Flight Deck.** A focused UX release; fully additive, backward compatible with 0.7.0.
+
+- **Quick Chat** — a new Workspace page: pick an archetype and start talking immediately. The agent spawns **hidden** from the Agent Desktop, you chat with it through the normal chat panel, and one **Promote to desktop** button reveals it. Chat opens only after a readiness probe, so no more "Connection failed" flash on a cold agent.
+- **Library setup wizard** — one model (provider / model / key / base URL) + context presets (input 128k–1M, output 16k–256k) applied across **every tier** of a named tier set. Auto-opens on a fresh install; finishing it drops you onto Quick Chat.
+- **Reorganized sidebar** into meaningful sections, a **tabbed Library** (Model Tiers / Archetypes) with redesigned tier cards, and **light-theme contrast fixes** across Code and Library.
+
+See [RELEASE_NOTES_0.7.1.md](release-notes/RELEASE_NOTES_0.7.1.md).
 
 ## What's New in 0.7.0
 
