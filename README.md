@@ -16,7 +16,7 @@
 
 <p align="center"><strong>6 orchestration modes</strong> &nbsp;·&nbsp; <strong>48 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>31 ready-made specialists</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong></p>
 
-An open-source AI agent platform that **thinks, remembers, and acts**. It connects to OpenAI, Anthropic, Google Gemini, DeepSeek, Ollama, and OpenRouter (plus "Sign in with ChatGPT" — no API key), and gives you a rich workspace for research, document and video understanding, browser automation, and multi-agent orchestration — backed by persistent cross-session memory and autonomous "dream cycle" cognition.
+A **self-hosted framework for orchestrating fleets of specialist AI agents** — from **ensemble reasoning** (six orchestration modes) to a **full agentic coding pipeline** (plan → independent review → ship). Model-agnostic and local-friendly: connect OpenAI, Anthropic, Google Gemini, DeepSeek, Ollama, or OpenRouter (plus "Sign in with ChatGPT" — no API key), or run 100% local with Ollama. Backed by 48 built-in tools per agent, persistent cross-session memory, and autonomous "dream cycle" cognition.
 
 ### 💻 NEW: Code — an engineering department, not a coding assistant
 

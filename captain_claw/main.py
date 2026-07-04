@@ -45,7 +45,7 @@ def _build_runtime_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="captain-claw",
         add_help=False,
-        description="Captain Claw - A powerful console-based AI agent",
+        description="Captain Claw: self-hosted framework for orchestrating fleets of specialist AI agents — ensemble reasoning and a full agentic coding pipeline, model-agnostic and local-friendly",
     )
     parser.add_argument("-c", "--config", default="", help="Path to config file")
     parser.add_argument("-m", "--model", default="", help="Override model")
@@ -463,7 +463,7 @@ if __name__ == "__main__":
             version()
             raise typer.Exit()
 
-    cli = typer.Typer(help="Captain Claw - A powerful console-based AI agent")
+    cli = typer.Typer(help="Captain Claw: self-hosted framework for orchestrating fleets of specialist AI agents — ensemble reasoning and a full agentic coding pipeline, model-agnostic and local-friendly")
 
     @cli.callback(invoke_without_command=True)
     def _cli_root(
@@ -475,7 +475,7 @@ if __name__ == "__main__":
             is_eager=True,
         ),
     ) -> None:
-        """Captain Claw - A powerful console-based AI agent."""
+        """Captain Claw: self-hosted framework for orchestrating fleets of specialist AI agents — ensemble reasoning and a full agentic coding pipeline, model-agnostic and local-friendly."""
 
     @cli.command()
     def run(
