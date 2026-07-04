@@ -314,6 +314,20 @@ def _strip_reasoning_artifacts(text: str) -> str:
         return text
     cleaned = _THINK_BLOCK_RE.sub("", text)
     cleaned = _THINK_OPEN_RE.sub("", cleaned)
+    # Orphan CLOSING tag: some chat templates (Ollama with glm/kimi thinking
+    # variants) consume the opening <think> themselves, so the content
+    # arrives as "…leaked reasoning…</think>the real answer". Everything
+    # before the last closing tag is reasoning — keep only what follows.
+    _orphan = re.search(
+        r"<\s*/\s*(?:think|thinking|reasoning|reflection)\s*>(?!.*<\s*/\s*(?:think|thinking|reasoning|reflection)\s*>)",
+        cleaned, flags=re.IGNORECASE | re.DOTALL)
+    if _orphan:
+        _after = cleaned[_orphan.end():].lstrip()
+        if _after:
+            cleaned = _after
+        else:
+            # Tag at the very end — the "answer" is the pre-tag text.
+            cleaned = cleaned[:_orphan.start()]
     cleaned = cleaned.lstrip()
     if cleaned:
         return cleaned

@@ -328,8 +328,15 @@ class WriteTool(Tool):
                     # right tool for changes; `overwrite=true` is the
                     # explicit, auditable escape hatch for an intentional
                     # full rewrite.
+                    # Plans and reports are regenerable process docs, not
+                    # deliverables — rewriting one shorter is legitimate, and
+                    # refusing it derails weak models into plan bookkeeping
+                    # instead of building (SW10 run).
+                    _doc_dirs = {".plans", ".reports"}
+                    _is_process_doc = any(p in _doc_dirs for p in file_path.parts)
                     if (
                         not overwrite
+                        and not _is_process_doc
                         and _prev_size >= 1024
                         and new_size < _prev_size // 2
                     ):

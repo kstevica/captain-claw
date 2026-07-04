@@ -791,6 +791,10 @@ def _build_prompt(intent: str, plan_rel: str = "plan.md") -> str:
         "implement it fully: create/edit files with plain relative paths, install deps and "
         "run/verify via your shell. Follow the plan; if you must deviate, say why. Do NOT "
         "use any `vfs:` prefix.\n\n"
+        "IMPORTANT: files exist ONLY when created through write/edit TOOL CALLS. Code "
+        "shown as text in your reply does not exist and counts as zero progress — this "
+        "turn is judged by the files you actually change. Do not spend the turn on plan "
+        "bookkeeping; the plan is already saved.\n\n"
         f"Original request for context:\n{intent}\n\n"
         "When finished, summarize what you built and how you verified it runs." + _REPORTS_DIRECTIVE
     )
@@ -941,6 +945,45 @@ async def _triage_reviews(reviews: list[dict], intent: str,
     return raw
 
 
+# ── build/fix output verification (weak-model insurance) ────────────
+# Weak models narrate ("I'll create the file now.") and end the turn with
+# zero tool calls — the SW10 run burned a build + 3 fix rounds + 9 reviewer
+# dispatches on a repo that stayed empty. The gate is deterministic: a
+# build/fix turn that changes NOTHING in git is not accepted; it's retried
+# with a blunt corrective, then aborted honestly.
+_BUILD_RETRIES = 2
+_FIX_RETRIES = 1
+
+_FILE_TOOLS = {"write", "edit", "file_write", "file_edit"}
+
+
+def _acted(d: dict | None) -> bool:
+    """Did the dispatch make any file-mutating tool call at all?"""
+    for a in (d or {}).get("actions") or []:
+        if str(a.get("tool", "")).lower() in _FILE_TOOLS:
+            return True
+    return False
+
+
+def _no_change_corrective(attempt: int, acted: bool) -> str:
+    detail = (
+        "Your tool calls did not result in any committed file changes."
+        if acted else
+        "You made NO write/edit tool calls at all — you only described what "
+        "you would do."
+    )
+    return (
+        f"=== CORRECTIVE — attempt {attempt + 1} ===\n"
+        f"Your previous attempt produced ZERO file changes in the repository. "
+        f"{detail} Text is NOT work: this turn is judged ONLY by files "
+        "created or modified through the write/edit tools. Do NOT restate or "
+        "re-save the plan, do NOT discuss whether files exist, do NOT ask "
+        "questions. CREATE THE FILES NOW with write tool calls, then verify "
+        "with your shell.\n"
+        "=== end corrective ===\n\n"
+    )
+
+
 _BACKLOG_REPORT = "backlog"
 
 
@@ -998,19 +1041,60 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         last_fix_sha: str | None = None
         if seed_fix:
             _phase(pkey, "Fixing (backlog)")
-            fd = await _run_agent(request, user, pkey, repo, "debugger",
-                                  _fix_prompt(intent, seed_fix), by_id, tiers_map, env_vars)
-            last_fix_sha = await code_git.git_commit(repo, "[fix backlog] debugger")
+            fd = None
+            for attempt in range(_FIX_RETRIES + 1):
+                fp = (_no_change_corrective(attempt, _acted(fd)) if attempt else "") \
+                    + _fix_prompt(intent, seed_fix)
+                fd = await _run_agent(request, user, pkey, repo, "debugger",
+                                      fp, by_id, tiers_map, env_vars)
+                if _cancelled(pkey):
+                    _finish_stopped()
+                    return
+                last_fix_sha = await code_git.git_commit(repo, "[fix backlog] debugger")
+                if last_fix_sha:
+                    break
+                _progress(pkey, "note", f"backlog fix produced no file changes (attempt {attempt + 1})")
             _append_chat(sdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
                          kind="fix", archetype="debugger", ok=bool(fd.get("ok")),
                          commit=last_fix_sha or "")
+            if not last_fix_sha:
+                _append_chat(sdir, "assistant",
+                             "❌ Backlog fix aborted: the fixer produced no file changes after "
+                             f"{_FIX_RETRIES + 1} attempts. The backlog is unchanged — a stronger "
+                             "model on the coding tier usually resolves this.", kind="note", ok=False)
+                _write_state(sdir, {"status": "idle"})
+                return
         else:
             _phase(pkey, "Building")
-            d = await _run_agent(request, user, pkey, repo, "code-implementer",
-                                 _build_prompt(intent, plan_file), by_id, tiers_map, env_vars)
-            sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
+            d = None
+            sha = None
+            for attempt in range(_BUILD_RETRIES + 1):
+                bp = (_no_change_corrective(attempt, _acted(d)) if attempt else "") \
+                    + _build_prompt(intent, plan_file)
+                d = await _run_agent(request, user, pkey, repo, "code-implementer",
+                                     bp, by_id, tiers_map, env_vars)
+                if _cancelled(pkey):
+                    _finish_stopped()
+                    return
+                sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
+                if sha:
+                    break
+                _progress(pkey, "note", f"build produced no file changes — retrying ({attempt + 1}/{_BUILD_RETRIES})")
+                _append_chat(sdir, "assistant",
+                             f"⚠️ The builder produced no file changes (attempt {attempt + 1}) — "
+                             "retrying with a corrective instruction.", kind="note")
             _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
                          kind="build", archetype="code-implementer", ok=bool(d.get("ok")), commit=sha or "")
+            if not sha:
+                _u = _usage_summary(pkey)
+                _append_chat(sdir, "assistant",
+                             "❌ Build aborted: the implementer produced no file changes after "
+                             f"{_BUILD_RETRIES + 1} attempts — skipping review (nothing to review). "
+                             "This usually means the coding-tier model isn't making tool calls "
+                             "reliably; try a stronger model on the coding tier."
+                             + (f" _{_u}._" if _u else ""), kind="note", ok=False)
+                _write_state(sdir, {"status": "idle"})
+                return
 
         if _cancelled(pkey):
             _finish_stopped()
@@ -1075,14 +1159,34 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                 return
             _phase(pkey, f"Fixing (round {rnd + 1})")
             fixer = triage["fixer"]
-            fd = await _run_agent(request, user, pkey, repo, fixer,
-                                  _fix_prompt(intent, triage.get("fix_instructions", "")),
-                                  by_id, tiers_map, env_vars)
-            fsha = await code_git.git_commit(repo, f"[fix r{rnd + 1}] {fixer}")
+            fd = None
+            fsha = None
+            for attempt in range(_FIX_RETRIES + 1):
+                fp = (_no_change_corrective(attempt, _acted(fd)) if attempt else "") \
+                    + _fix_prompt(intent, triage.get("fix_instructions", ""))
+                fd = await _run_agent(request, user, pkey, repo, fixer,
+                                      fp, by_id, tiers_map, env_vars)
+                if _cancelled(pkey):
+                    _finish_stopped()
+                    return
+                fsha = await code_git.git_commit(repo, f"[fix r{rnd + 1}] {fixer}")
+                if fsha:
+                    break
+                _progress(pkey, "note", f"fix r{rnd + 1} produced no file changes (attempt {attempt + 1})")
             last_fix_sha = fsha or last_fix_sha
             _append_chat(sdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
                          kind="fix", round=rnd + 1, archetype=fixer,
                          ok=bool(fd.get("ok")), commit=fsha or "")
+            if not fsha:
+                # The fixer isn't landing changes — re-reviewing the same tree
+                # would just repeat the findings. Preserve them and stop.
+                rel = _write_backlog(repo, triage)
+                _append_chat(sdir, "assistant",
+                             f"❌ Fix round {rnd + 1} produced no file changes after "
+                             f"{_FIX_RETRIES + 1} attempts — stopping. Open findings saved to "
+                             f"`{rel}`; say **continue fixing** to retry (a stronger coding-tier "
+                             "model usually resolves this).", kind="note", ok=False)
+                break
 
         # The repo just changed substantially — (re)build the code map so future
         # sessions/tasks can query it instead of re-reading everything.
@@ -1558,6 +1662,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         planner = route["planner"]
         _phase(pkey, f"Planning ({planner})")
         plan_rel = _new_plan_rel(repo, route.get("title", intent))
+        _plan_t0 = time.time()
         d = await _run_agent(request, user, pkey, repo, planner,
                              hist + _plan_prompt(intent, plan_rel), by_id, tiers_map, env_vars)
         if _cancelled(pkey):
@@ -1565,14 +1670,25 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
             _write_state(sdir, {"status": "idle"})
             return {"message": assistant, "route": route, "commit": None}
         # Land the plan at plan_rel no matter what the planner did: it may have
-        # written the requested path, fallen back to the legacy plan.md, or only
-        # returned the plan as chat text. Never let a new plan clobber an old one.
+        # written the requested path, a slightly different .plans/ name, the
+        # legacy plan.md, or only returned the plan as chat text. Never let a
+        # new plan clobber an old one.
         plan_abs = repo / plan_rel
         if not plan_abs.is_file():
             legacy = repo / "plan.md"
             if legacy.is_file():
                 plan_abs.write_text(legacy.read_text())
                 legacy.unlink()  # don't leave a clobbering plan.md around
+        if not plan_abs.is_file():
+            # Weak planners write to a near-miss filename and then claim
+            # failure (SW10). Adopt the newest .plans/*.md written during
+            # this dispatch instead of trusting the narration.
+            fresh = [p for p in (repo / _PLANS_DIRNAME).glob("*.md")
+                     if p.stat().st_mtime >= _plan_t0 - 2]
+            if fresh:
+                adopted = max(fresh, key=lambda p: p.stat().st_mtime)
+                plan_rel = str(adopted.relative_to(repo))
+                plan_abs = adopted
         plan_text = plan_abs.read_text() if plan_abs.is_file() else (d.get("output") or "").strip()
         if not plan_abs.is_file() and plan_text:
             plan_abs.write_text(plan_text)   # persist chat-only plans so build can read them
@@ -1582,6 +1698,10 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         assistant = _append_chat(sdir, "assistant", plan_text or "(planner produced no plan)",
                                  kind="plan", archetype=planner, ok=bool(d.get("ok")), commit=sha or "",
                                  route=route, usage=_usage_summary(pkey))
+        # Orchestrator ground truth in the chat history: weak planners
+        # sometimes claim the plan "was not written" even though it's on
+        # disk — this note outranks that narration for the builder.
+        _append_chat(sdir, "assistant", f"_(plan confirmed on disk at `{plan_rel}`)_", kind="note")
         _write_state(sdir, {"status": "awaiting_plan", "intent": intent,
                             "route": route, "plan_file": plan_rel})
         return {"message": assistant, "route": route, "commit": sha,
