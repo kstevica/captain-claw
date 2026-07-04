@@ -14,6 +14,7 @@ The public routes are included before the SPA catch-all, so ``/vfs`` and
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import html as _html
@@ -71,6 +72,26 @@ async def list_hosting(user: dict = Depends(get_current_user)):
     mine = [_view(n, e) for n, e in reg.items() if e.get("owner") == user["id"]]
     mine.sort(key=lambda x: x["name"])
     return {"entries": mine}
+
+
+_SKIP_DIRS = {"node_modules", ".git", ".code", ".codemap", ".captain-claw", "__pycache__", ".venv"}
+
+
+@router.get("/fd/hosting/folders")
+async def list_folders(project: str, user: dict = Depends(get_current_user)):
+    """List the subfolders of a VFS project (relative paths; '' = project root)."""
+    base = vh.entry_dir({"owner": user["id"], "project": project, "subdir": ""})
+    if base is None:
+        raise HTTPException(404, "project not found")
+    out: list[str] = []
+    for root, dnames, _files in os.walk(base):
+        # Prune noisy/heavy dirs in place so we don't descend into them.
+        dnames[:] = sorted(d for d in dnames if d not in _SKIP_DIRS and not d.startswith("."))
+        rel = os.path.relpath(root, base)
+        out.append("" if rel == "." else rel.replace(os.sep, "/"))
+        if len(out) > 800:
+            break
+    return {"folders": sorted(set(out), key=lambda p: (p != "", p))}
 
 
 @router.post("/fd/hosting")

@@ -4265,6 +4265,26 @@ Quick Chat (sidebar: **Workspace → Quick chat**) is the fastest path from "whi
 
 Each active quick agent shows a live status (starting → warming up → ready) and one prominent **Promote to desktop** button that reveals it on the Agent Desktop canvas (with **View** / **Hide** afterward), plus **Stop & remove**. Spawns go through the standard process path (`/fd/spawn-process`); the hidden/visible flag is a local desktop preference — no backend changes.
 
+### Hosting (NEW in 0.7.2)
+
+Hosting (sidebar: **Workspace → Hosting**) publishes a VFS folder at a public, globally-unique name — either a **static site** or a **running app** — routed through Flight Deck. Publishing requires login (owner-gated); *serving* is public. Manage it on the page: publish, **edit**, **Start/Stop** (apps), **Open**, **Unpublish**. Registry lives in `fd-data/.vfs-hosting.json`.
+
+- **Static site → `/vfs/<name>/…`** — files are served straight from the VFS folder (optionally a subfolder like `dist`). A folder with an `index.html` serves it (with SPA fallback for extension-less routes); a folder *without* one gets a browsable **directory autoindex**. A built SPA must be built with its **base path set to `/vfs/<name>/`** (e.g. Vite `base`) so its assets resolve under the prefix.
+- **Built app → `/vfs-apps/<name>/…`** — Flight Deck runs your **start command** as a managed subprocess (`cwd` = the VFS folder) and reverse-proxies **HTTP (all methods) + WebSocket** to it. Manual Start/Stop.
+
+**The path-prefix contract (important).** Because apps/sites are served under a path prefix, **root-absolute URLs break** — a browser request to `/api` goes to the Flight Deck root, not your app. On start, FD injects these env vars into the app process:
+
+| Env var | Value | Use |
+|---|---|---|
+| `PORT` | assigned free port | bind it (on `127.0.0.1`) — don't hardcode |
+| `HOST` / `HOSTNAME` | `127.0.0.1` | bind address |
+| `FD_BASE_PATH` | `/vfs-apps/<name>/` | prefix for every root-absolute asset/API URL |
+| `FD_VFS_APP` | `<name>` | the published name |
+
+So a client call should be `fetch(\`${FD_BASE_PATH}api/x\`)` (or a bundler base derived from `FD_BASE_PATH`), never `fetch("/api")`. Apps built with the **Code** module get this baked in automatically — its plan/build prompts require base-path awareness and the code-reviewer flags root-absolute URLs and hardcoded ports as findings.
+
+Endpoints: management under `/fd/hosting/*` (list / publish `POST` / edit `PUT` / `start` / `stop` / unpublish `DELETE`); public serving at `/vfs/<name>/…` and `/vfs-apps/<name>/…` (registered before the SPA catch-all).
+
 ### Basna (NEW in 0.5.7)
 
 Basna (sidebar: **Basna**) is a **network-source ensemble** — a one-shot, selective alternative to Council. You describe a task; Basna routes it to the smallest set of specialist archetypes, runs them in parallel, and merges their answers weighted by learned reliability.

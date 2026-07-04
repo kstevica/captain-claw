@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.1-purple)](release-notes/RELEASE_NOTES_0.7.1.md)
+[![Version](https://img.shields.io/badge/version-0.7.2-purple)](release-notes/RELEASE_NOTES_0.7.2.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](#quick-start)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#multi-model-support)
 
@@ -66,6 +66,15 @@ Captain Claw is **MIT licensed and free forever** — your data stays on your ma
 </p>
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
+
+## What's New in 0.7.2
+
+**VFS Hosting — serve sites and apps straight from your VFS.** Additive; backward compatible with 0.7.1 (needs a Flight Deck restart).
+
+- **Publish a VFS folder** at a public name: a **static site** at `/vfs/<name>` (with `index.html`/SPA fallback and a directory autoindex), or a **built app** at `/vfs-apps/<name>` — Flight Deck runs its start command as a managed process and reverse-proxies **HTTP + WebSocket** to it. Publish, edit, Start/Stop, and Unpublish from the new **Hosting** page, with a folder selector for the subfolder to serve.
+- **Base-path–aware by construction.** Apps get `PORT` / `FD_BASE_PATH` injected, and the **Code** module now builds web apps that work behind the `/vfs-apps/<name>/` prefix automatically — its reviewer flags root-absolute URLs and hardcoded ports.
+
+See [RELEASE_NOTES_0.7.2.md](release-notes/RELEASE_NOTES_0.7.2.md).
 
 ## What's New in 0.7.1
 

@@ -826,7 +826,12 @@ _REVIEW_PROMPTS = {
         "Review the CURRENT state of this repository (your workspace) for correctness bugs, "
         "edge cases, error handling, and regressions against the task. Read the files and use "
         "read-only shell (git diff, grep) — do not edit. Report findings ranked by severity "
-        "(blocking / major / minor) with file:line and a concrete fix."
+        "(blocking / major / minor) with file:line and a concrete fix.\n"
+        "If this is a web app/server, also flag HOSTING-PORTABILITY bugs (these break when "
+        "served behind a `/vfs-apps/<name>/` or `/vfs/<name>/` path prefix): root-absolute "
+        "asset/API URLs not prefixed with `FD_BASE_PATH` (e.g. `fetch(\"/api\")`, "
+        "`src=\"/main.js\"`, hardcoded bundler base), and servers that hardcode a port instead "
+        "of binding the `PORT` env var on 127.0.0.1."
     ),
     "security-reviewer": (
         "Security-review the CURRENT state of this repository (your workspace): injection, "

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Globe, Plus, Trash2, Play, Square, ExternalLink, Loader2, X,
   AlertTriangle, RefreshCw, FileCode2, Server, Info, Pencil,
@@ -38,6 +38,7 @@ export function HostingPage() {
   const [kind, setKind] = useState<'static' | 'app'>('static')
   const [project, setProject] = useState('')
   const [subdir, setSubdir] = useState('')
+  const [folders, setFolders] = useState<string[]>([''])
   const [startCmd, setStartCmd] = useState('')
   const [formErr, setFormErr] = useState('')
   const [publishing, setPublishing] = useState(false)
@@ -63,6 +64,25 @@ export function HostingPage() {
       setLoading(false)
     }
   }
+
+  const loadFolders = async (proj: string) => {
+    if (!proj) { setFolders(['']); return }
+    try {
+      const r = await req(`/fd/hosting/folders?project=${encodeURIComponent(proj)}`)
+      const d = r.ok ? await r.json() : {}
+      setFolders(d.folders?.length ? d.folders : [''])
+    } catch { setFolders(['']) }
+  }
+
+  // Refresh the folder list whenever the form is open on a project.
+  useEffect(() => { if (showForm && project) loadFolders(project) }, [showForm, project])
+
+  // Always offer the root + the currently-selected subdir (so an edit's value shows).
+  const folderOptions = useMemo(() => {
+    const s = new Set<string>(folders)
+    s.add(''); s.add(subdir)
+    return [...s].sort((a, b) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b)))
+  }, [folders, subdir])
 
   useEffect(() => { load() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -181,7 +201,7 @@ export function HostingPage() {
             </div>
             <div>
               <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">VFS project</label>
-              <select value={project} onChange={(e) => setProject(e.target.value)}
+              <select value={project} onChange={(e) => { setProject(e.target.value); setSubdir('') }}
                 className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none">
                 {projects.length === 0 && <option value="">(no projects)</option>}
                 {projects.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -189,10 +209,14 @@ export function HostingPage() {
             </div>
             <div>
               <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">
-                Subfolder <span className="font-normal normal-case text-zinc-600">— optional (e.g. dist)</span>
+                Folder <span className="font-normal normal-case text-zinc-600">— which folder to serve</span>
               </label>
-              <input value={subdir} onChange={(e) => setSubdir(e.target.value)} placeholder="dist"
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none" />
+              <select value={subdir} onChange={(e) => setSubdir(e.target.value)}
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none">
+                {folderOptions.map((f) => (
+                  <option key={f || '__root'} value={f}>{f === '' ? '/ (project root)' : f}</option>
+                ))}
+              </select>
             </div>
             {kind === 'app' && (
               <div>
@@ -206,8 +230,8 @@ export function HostingPage() {
           <div className="mt-3 flex items-start gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-[11px] text-zinc-500">
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-600" />
             {kind === 'static'
-              ? <span>A built SPA must set its base path to <code className="text-zinc-400">/vfs/{name || '<name>'}/</code> (e.g. Vite <code className="text-zinc-400">base</code>) so its assets resolve.</span>
-              : <span>The app must bind the <code className="text-zinc-400">PORT</code> env var Flight Deck assigns, on <code className="text-zinc-400">127.0.0.1</code>. Set its base path to <code className="text-zinc-400">/vfs-apps/{name || '<name>'}/</code> for assets/routing.</span>}
+              ? <span>A built SPA must set its base path to <code className="text-zinc-400">/vfs/{name || '<name>'}/</code> (e.g. Vite <code className="text-zinc-400">base</code>) at build time so its assets resolve.</span>
+              : <span>The app must bind the <code className="text-zinc-400">PORT</code> env var (on <code className="text-zinc-400">127.0.0.1</code>) and prefix root-absolute asset/API URLs with the <code className="text-zinc-400">FD_BASE_PATH</code> env var (<code className="text-zinc-400">/vfs-apps/{name || '<name>'}/</code>) — a bare <code className="text-zinc-400">/api</code> hits the Flight Deck root, not your app.</span>}
           </div>
 
           {formErr && <p className="mt-2 text-[11px] text-red-400">{formErr}</p>}
