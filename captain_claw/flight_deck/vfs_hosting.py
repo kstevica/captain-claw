@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import time
+from collections import deque
 from pathlib import Path
 
 from captain_claw.vfs import resolve_under
@@ -31,6 +32,11 @@ _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # In-memory Popen handles for running apps (name -> Popen). Survives within one
 # server process; the on-disk registry is the source of truth across restarts.
 _procs: dict[str, subprocess.Popen] = {}
+
+# In-memory recent visits + running totals for static sites (per name). Reset on
+# server restart — cheap, no per-request disk writes on a public path.
+_VISITS: dict[str, deque] = {}
+_VISIT_COUNTS: dict[str, int] = {}
 
 
 def valid_name(name: str) -> bool:
@@ -197,6 +203,30 @@ def stop_app(name: str) -> tuple[bool, str]:
         reg[name] = ent
         save_registry(reg)
     return True, "stopped"
+
+
+def read_app_log(name: str, tail: int = 300) -> str:
+    """Return the last ``tail`` lines of an app's captured stdout/stderr log."""
+    f = _data_dir() / "vfs-apps-logs" / f"{name}.log"
+    if not f.is_file():
+        return ""
+    try:
+        return "\n".join(f.read_text(errors="replace").splitlines()[-tail:])
+    except OSError:
+        return ""
+
+
+def record_visit(name: str, ip: str, path: str, ua: str) -> None:
+    dq = _VISITS.get(name)
+    if dq is None:
+        dq = deque(maxlen=100)
+        _VISITS[name] = dq
+    dq.appendleft({"ip": ip, "path": path, "ua": ua, "at": int(time.time())})
+    _VISIT_COUNTS[name] = _VISIT_COUNTS.get(name, 0) + 1
+
+
+def get_visits(name: str) -> dict:
+    return {"count": _VISIT_COUNTS.get(name, 0), "visits": list(_VISITS.get(name, []))}
 
 
 def reconcile(name: str, entry: dict) -> dict:

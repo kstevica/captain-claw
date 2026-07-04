@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Globe, Plus, Trash2, Play, Square, ExternalLink, Loader2, X,
-  AlertTriangle, RefreshCw, FileCode2, Server, Info, Pencil,
+  AlertTriangle, RefreshCw, FileCode2, Server, Info, Pencil, Terminal, Activity,
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 
@@ -32,6 +32,7 @@ export function HostingPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
 
   const [showForm, setShowForm] = useState(false)
   const [name, setName] = useState('')
@@ -255,7 +256,8 @@ export function HostingPage() {
       ) : (
         <div className="space-y-2">
           {entries.map((e) => (
-            <div key={e.name} className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
+            <div key={e.name} className="rounded-lg border border-zinc-800 bg-zinc-900/50">
+            <div className="flex flex-wrap items-center gap-3 p-3">
               <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${e.kind === 'app' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
                 {e.kind === 'app' ? <Server className="h-4 w-4" /> : <FileCode2 className="h-4 w-4" />}
               </span>
@@ -274,6 +276,11 @@ export function HostingPage() {
                 </div>
               </div>
               <div className="flex items-center gap-1.5">
+                <button onClick={() => setExpanded(expanded === e.name ? null : e.name)}
+                  title={e.kind === 'app' ? 'Console logs' : 'Visits'}
+                  className={`rounded-lg border p-1.5 ${expanded === e.name ? 'border-violet-500/40 text-violet-300' : 'border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'}`}>
+                  {e.kind === 'app' ? <Terminal className="h-4 w-4" /> : <Activity className="h-4 w-4" />}
+                </button>
                 {e.kind === 'app' && (
                   e.running
                     ? <button onClick={() => act(e.name, 'stop')} disabled={busy === e.name}
@@ -299,7 +306,96 @@ export function HostingPage() {
                 </button>
               </div>
             </div>
+            {expanded === e.name && (
+              <div className="border-t border-zinc-800 p-3">
+                {e.kind === 'app' ? <AppLogs name={e.name} /> : <SiteVisits name={e.name} />}
+              </div>
+            )}
+            </div>
           ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function fmtTime(epoch: number): string {
+  try { return new Date(epoch * 1000).toLocaleString() } catch { return '' }
+}
+
+// Live tail of a hosting app's captured stdout/stderr.
+function AppLogs({ name }: { name: string }) {
+  const [log, setLog] = useState('')
+  const [loading, setLoading] = useState(true)
+  const preRef = useRef<HTMLPreElement>(null)
+
+  useEffect(() => {
+    let active = true
+    const fetchLog = async () => {
+      try {
+        const r = await req(`/fd/hosting/${encodeURIComponent(name)}/logs`)
+        if (r.ok && active) setLog((await r.json()).log || '')
+      } catch { /* ignore */ } finally { if (active) setLoading(false) }
+    }
+    fetchLog()
+    const t = setInterval(fetchLog, 2500)
+    return () => { active = false; clearInterval(t) }
+  }, [name])
+
+  useEffect(() => { if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight }, [log])
+
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+        <Terminal className="h-3 w-3" /> Console
+      </div>
+      <pre ref={preRef} className="max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950 p-2.5 font-mono text-[11px] leading-relaxed text-zinc-300">
+        {log || (loading ? 'Loading…' : 'No output yet — start the app to capture its console.')}
+      </pre>
+    </div>
+  )
+}
+
+interface Visit { ip: string; path: string; ua: string; at: number }
+
+// Recent visits + running total for a published static site.
+function SiteVisits({ name }: { name: string }) {
+  const [data, setData] = useState<{ count: number; visits: Visit[] }>({ count: 0, visits: [] })
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let active = true
+    const fetchVisits = async () => {
+      try {
+        const r = await req(`/fd/hosting/${encodeURIComponent(name)}/visits`)
+        if (r.ok && active) setData(await r.json())
+      } catch { /* ignore */ } finally { if (active) setLoading(false) }
+    }
+    fetchVisits()
+    const t = setInterval(fetchVisits, 5000)
+    return () => { active = false; clearInterval(t) }
+  }, [name])
+
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+        <Activity className="h-3 w-3" /> Visits · {data.count} total
+      </div>
+      {data.visits.length === 0 ? (
+        <p className="text-[11px] text-zinc-600">{loading ? 'Loading…' : 'No visits yet.'}</p>
+      ) : (
+        <div className="max-h-64 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950">
+          <table className="w-full text-[11px]">
+            <tbody>
+              {data.visits.map((v, i) => (
+                <tr key={i} className="border-b border-zinc-800/60 last:border-0" title={v.ua}>
+                  <td className="whitespace-nowrap px-2.5 py-1 font-mono text-zinc-500">{fmtTime(v.at)}</td>
+                  <td className="whitespace-nowrap px-2.5 py-1 font-mono text-zinc-300">{v.ip || '—'}</td>
+                  <td className="truncate px-2.5 py-1 font-mono text-zinc-500">{v.path}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

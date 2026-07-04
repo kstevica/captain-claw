@@ -201,6 +201,20 @@ async def stop(name: str, user: dict = Depends(get_current_user)):
     return {"ok": ok, "message": msg}
 
 
+@router.get("/fd/hosting/{name}/logs")
+async def app_logs(name: str, user: dict = Depends(get_current_user)):
+    """Captured stdout/stderr for a hosting app (owner-only)."""
+    _owned_entry(name, user)
+    return {"log": vh.read_app_log(name)}
+
+
+@router.get("/fd/hosting/{name}/visits")
+async def site_visits(name: str, user: dict = Depends(get_current_user)):
+    """Recent visits + running total for a published site (owner-only)."""
+    _owned_entry(name, user)
+    return vh.get_visits(name)
+
+
 # ── Public static serving ─────────────────────────────────────────────────
 
 def _dir_listing(name: str, rel_path: str, directory) -> HTMLResponse:
@@ -230,10 +244,14 @@ def _dir_listing(name: str, rel_path: str, directory) -> HTMLResponse:
     return HTMLResponse(body)
 
 
-def _serve_static(name: str, path: str) -> Response:
+def _serve_static(name: str, path: str, request: Request) -> Response:
     ent = vh.load_registry().get(name)
     if not ent or ent.get("kind") != "static":
         raise HTTPException(404, "not found")
+    # Record the visit (IP honoring a proxy's X-Forwarded-For, path, user-agent).
+    xff = request.headers.get("x-forwarded-for", "")
+    ip = xff.split(",")[0].strip() if xff else (request.client.host if request.client else "")
+    vh.record_visit(name, ip, "/" + path, request.headers.get("user-agent", ""))
     target = vh.resolve_static_file(ent, path)
     if target is not None and target.is_dir():
         idx = target / "index.html"
@@ -255,13 +273,13 @@ def _serve_static(name: str, path: str) -> Response:
 
 
 @router.get("/vfs/{name}")
-async def serve_static_root(name: str):
-    return _serve_static(name, "")
+async def serve_static_root(name: str, request: Request):
+    return _serve_static(name, "", request)
 
 
 @router.get("/vfs/{name}/{path:path}")
-async def serve_static_path(name: str, path: str):
-    return _serve_static(name, path)
+async def serve_static_path(name: str, path: str, request: Request):
+    return _serve_static(name, path, request)
 
 
 # ── Public app reverse-proxy (HTTP) ───────────────────────────────────────
