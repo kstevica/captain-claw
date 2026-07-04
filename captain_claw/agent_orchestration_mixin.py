@@ -462,6 +462,37 @@ _CODE_COMMAND_DIRECTIVE = (
 )
 
 
+PUBLISH_COMMAND_HELP = (
+    "🌐 *Publish* — put a VFS folder on the web and get a public URL.\n\n"
+    "Usage:\n"
+    "  `/publish <folder> as \"<name>\"` — publish a site/app\n"
+    "  `/publish that as \"weather\"` — I'll figure out which folder from our chat\n\n"
+    "Static files serve at `/vfs/<name>/`; a runnable app (with a start command) "
+    "runs and is proxied at `/vfs-apps/<name>/`.\n\n"
+    "Example:\n"
+    "  `/publish the weather app as \"weather\"`"
+)
+
+# Injected in place of a `/publish <args>` message: the MODEL resolves WHICH VFS
+# folder to serve (usually one just built in a coding session) and whether it's
+# static files or a runnable app, then calls the `hosting` tool — or asks the
+# user to clarify when it can't tell what to publish.
+_PUBLISH_COMMAND_DIRECTIVE = (
+    "[/publish command] The user wants to publish something to the web. Their "
+    "request: \"{args}\".\n\n"
+    "From that plus this conversation, work out (a) the URL slug/name (lowercase "
+    "letters, digits, dashes — derive it from the quoted name or the request), "
+    "(b) which VFS project/folder holds the files (usually the one just built in "
+    "a coding session here — reuse that project name), and (c) whether it is a "
+    "STATIC site (plain files / a single index.html — the common case) or an APP "
+    "that needs a server process (then you must supply a `start_cmd`). Then call "
+    "the `hosting` tool with action='publish', passing `name`, `kind`, `project` "
+    "(and `subdir`/`start_cmd` if needed). Relay the returned public URL to the "
+    "user. If you cannot tell what to publish or which folder, do NOT call the "
+    "tool — ask the user to name the folder/project. Reply in the user's language."
+)
+
+
 def _detect_basna_run(user_input: str) -> str | None:
     """If the message is a 'run a Basna' command, return the task to run, else None."""
     if not user_input:
@@ -575,6 +606,24 @@ class AgentOrchestrationMixin:
                 self._add_session_message(role="assistant", content=CODE_COMMAND_HELP)
                 return CODE_COMMAND_HELP
             user_input = _CODE_COMMAND_DIRECTIVE.format(args=_args)
+            # fall through to the normal model turn below
+
+        # `/publish` slash command — same shape as `/code`: the request usually
+        # references the conversation ("/publish that as 'weather'"), so the
+        # MODEL resolves which VFS folder + kind and calls the `hosting` tool.
+        if _st.lower() == "/publish" or _st.lower().startswith("/publish "):
+            _args = _st[len("/publish"):].strip()
+            _tools = getattr(self, "tools", None)
+            if _tools is None or not _tools.has_tool("hosting"):
+                _reply = "The hosting tool isn't available on this agent."
+                self._add_session_message(role="user", content=user_input)
+                self._add_session_message(role="assistant", content=_reply)
+                return _reply
+            if not _args:
+                self._add_session_message(role="user", content=user_input)
+                self._add_session_message(role="assistant", content=PUBLISH_COMMAND_HELP)
+                return PUBLISH_COMMAND_HELP
+            user_input = _PUBLISH_COMMAND_DIRECTIVE.format(args=_args)
             # fall through to the normal model turn below
 
         # Deterministic Basna relay: when the user explicitly asks to run/execute
