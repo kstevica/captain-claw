@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   FolderTree,
   Folder,
@@ -13,6 +13,7 @@ import {
   X,
   ArrowLeft,
   HardDrive,
+  Upload,
 } from 'lucide-react'
 import { useVFSStore, type VFSEntry } from '../../stores/vfsStore'
 import { VFSFileViewer } from './VFSFileViewer'
@@ -50,6 +51,8 @@ export function VFSBrowser() {
   const s = useVFSStore()
   const [creating, setCreating] = useState(false)
   const [folderName, setFolderName] = useState('')
+  const [creatingProject, setCreatingProject] = useState(false)
+  const [projectName, setProjectName] = useState('')
   const [linking, setLinking] = useState(false)
   const [linkName, setLinkName] = useState('')
   const [linkPath, setLinkPath] = useState('')
@@ -65,6 +68,16 @@ export function VFSBrowser() {
       setLinkErr(e instanceof Error ? e.message : 'link failed')
     }
   }
+
+  const onCreateProject = async () => {
+    if (!projectName.trim()) return
+    await s.newProject(projectName)
+    setProjectName(''); setCreatingProject(false)
+  }
+
+  // File upload into the current directory (in-project view).
+  const uploadInputRef = useRef<HTMLInputElement | null>(null)
+  const [dragging, setDragging] = useState(false)
 
   // Server-side folder picker (FD runs on the user's machine).
   const [fsOpen, setFsOpen] = useState(false)
@@ -100,7 +113,13 @@ export function VFSBrowser() {
           </div>
           <div className="flex items-center gap-1">
             <button
-              onClick={() => setLinking((v) => !v)}
+              onClick={() => { setCreatingProject((v) => !v); setLinking(false) }}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <FolderPlus className="h-3.5 w-3.5" /> New project
+            </button>
+            <button
+              onClick={() => { setLinking((v) => !v); setCreatingProject(false) }}
               className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
             >
               <Link2 className="h-3.5 w-3.5" /> Link folder
@@ -113,6 +132,31 @@ export function VFSBrowser() {
             </button>
           </div>
         </div>
+        {creatingProject && (
+          <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/60 px-4 py-2">
+            <input
+              autoFocus
+              value={projectName}
+              onChange={(e) => setProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') onCreateProject()
+                else if (e.key === 'Escape') { setCreatingProject(false); setProjectName('') }
+              }}
+              placeholder="project name"
+              className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-violet-600"
+            />
+            <button
+              onClick={onCreateProject}
+              disabled={!projectName.trim()}
+              className="rounded bg-violet-600 px-2 py-1 text-xs text-white hover:bg-violet-500 disabled:opacity-40"
+            >
+              Create
+            </button>
+            <button onClick={() => { setCreatingProject(false); setProjectName('') }} className="rounded p-1 text-zinc-400 hover:text-zinc-200">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
         {linking && (
           <div className="border-b border-zinc-800 bg-zinc-950/60 px-4 py-3">
             <div className="mb-2 text-xs font-medium text-zinc-300">Link an existing local folder into the VFS</div>
@@ -292,6 +336,16 @@ export function VFSBrowser() {
           <button onClick={() => setCreating(true)} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
             <FolderPlus className="h-3.5 w-3.5" /> New folder
           </button>
+          <button onClick={() => uploadInputRef.current?.click()} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+            <Upload className="h-3.5 w-3.5" /> Upload
+          </button>
+          <input
+            ref={uploadInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => { if (e.target.files?.length) s.uploadFiles(e.target.files); e.target.value = '' }}
+          />
           <button onClick={() => s.refresh()} className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" title="Refresh">
             <RefreshCw className={`h-3.5 w-3.5 ${s.loading ? 'animate-spin' : ''}`} />
           </button>
@@ -333,7 +387,23 @@ export function VFSBrowser() {
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1">
+      <div
+        className="relative flex min-h-0 flex-1"
+        onDragOver={(e) => { e.preventDefault(); if (!dragging) setDragging(true) }}
+        onDragLeave={(e) => { if (e.currentTarget === e.target) setDragging(false) }}
+        onDrop={(e) => {
+          e.preventDefault()
+          setDragging(false)
+          if (e.dataTransfer.files?.length) s.uploadFiles(e.dataTransfer.files)
+        }}
+      >
+        {dragging && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center border-2 border-dashed border-violet-500 bg-violet-500/10">
+            <div className="flex items-center gap-2 text-sm font-medium text-violet-200">
+              <Upload className="h-4 w-4" /> Drop files to upload{s.path ? ` to ${s.path}` : ''}
+            </div>
+          </div>
+        )}
         {/* entries */}
         <div className="flex-1 overflow-auto">
           {s.error && <div className="m-3 rounded bg-red-950/50 px-3 py-2 text-xs text-red-300">{s.error}</div>}

@@ -102,6 +102,8 @@ interface VFSStore {
   downloadProject: (name: string) => Promise<void>
   deleteEntry: (entry: VFSEntry) => Promise<void>
   newFolder: (name: string) => Promise<void>
+  newProject: (name: string) => Promise<void>
+  uploadFiles: (files: File[] | FileList) => Promise<void>
   deleteProject: (name: string) => Promise<void>
   addLink: (name: string, path: string, mode: string) => Promise<void>
   browseFs: (path: string) => Promise<FsListing>
@@ -273,6 +275,56 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
       body: JSON.stringify({ project, path }),
     })
     if (res.ok) await get().refresh()
+  },
+
+  newProject: async (name) => {
+    const project = name.trim()
+    if (!project) return
+    set({ error: null })
+    // A project is just a top-level directory: mkdir with an empty inner path
+    // creates the project root.
+    const res = await _authedFetch('/fd/vfs/mkdir', {
+      method: 'POST',
+      body: JSON.stringify({ project, path: '' }),
+    })
+    if (!res.ok) {
+      set({ error: await res.text() })
+      return
+    }
+    await get().loadProjects()
+    await get().openProject(project)
+  },
+
+  uploadFiles: async (files) => {
+    const project = get().project
+    const list = Array.from(files)
+    if (!project || list.length === 0) return
+    set({ loading: true, error: null })
+    try {
+      const form = new FormData()
+      form.append('project', project)
+      form.append('path', get().path)
+      for (const f of list) form.append('files', f)
+      // Multipart body — do NOT set Content-Type; the browser adds the boundary.
+      const { token, authEnabled } = useAuthStore.getState()
+      const headers: Record<string, string> = {}
+      if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+      let res = await fetch('/fd/vfs/upload', { method: 'POST', headers, body: form, credentials: 'include' })
+      if (res.status === 401 && authEnabled && (await refreshAccessToken())) {
+        const t2 = useAuthStore.getState().token
+        res = await fetch('/fd/vfs/upload', {
+          method: 'POST',
+          headers: t2 ? { Authorization: `Bearer ${t2}` } : {},
+          body: form,
+          credentials: 'include',
+        })
+      }
+      if (!res.ok) throw new Error(await res.text())
+      set({ loading: false })
+      await get().refresh()
+    } catch (e) {
+      set({ error: String(e), loading: false })
+    }
   },
 
   deleteProject: async (name) => {
