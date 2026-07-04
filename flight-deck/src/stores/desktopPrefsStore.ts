@@ -8,6 +8,8 @@ interface DesktopPrefsStore {
   /** Agent ids (docker c.id, `proc-<slug>`, or local a.id) hidden from the Agent Desktop canvas. */
   hiddenAgentIds: string[]
   toggleAgentHidden: (id: string) => void
+  /** Deterministically hide (true) or reveal (false) an agent — avoids toggle double-flips. */
+  setAgentHidden: (id: string, hidden: boolean) => void
   isAgentHidden: (id: string) => boolean
   showAllAgents: () => void
 }
@@ -38,6 +40,14 @@ export const useDesktopPrefsStore = create<DesktopPrefsStore>((set, get) => ({
     const hiddenAgentIds = cur.includes(id)
       ? cur.filter((x) => x !== id)
       : [...cur, id]
+    save(hiddenAgentIds)
+    set({ hiddenAgentIds })
+  },
+
+  setAgentHidden: (id, hidden) => {
+    const cur = get().hiddenAgentIds
+    if (hidden === cur.includes(id)) return
+    const hiddenAgentIds = hidden ? [...cur, id] : cur.filter((x) => x !== id)
     save(hiddenAgentIds)
     set({ hiddenAgentIds })
   },

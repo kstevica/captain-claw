@@ -9,6 +9,7 @@ import { PinnedFiles } from './components/common/PinnedFiles'
 import { SharedClipboard } from './components/common/SharedClipboard'
 import { ShortcutsOverlay, useKeyboardShortcuts } from './components/common/KeyboardShortcuts'
 import { DesktopPage } from './pages/DesktopPage'
+import { QuickChatPage } from './pages/QuickChatPage'
 import { OperationsPage } from './pages/OperationsPage'
 import { WorkflowPage } from './pages/WorkflowPage'
 import { SpawnerPage } from './pages/SpawnerPage'
@@ -300,6 +301,7 @@ function AppContent() {
   const mainContent = (
     <>
       {view === 'desktop' && <DesktopPage />}
+      {view === 'quick-chat' && <QuickChatPage />}
       {view === 'prompt-builder' && <PromptBuilderPage />}
       {view === 'today' && <TodayPage />}
       {view === 'operations' && <OperationsPage />}

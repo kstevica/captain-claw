@@ -7,6 +7,7 @@ import {
   Settings,
   Check,
   MessageSquare,
+  MessagesSquare,
   BarChart3,
   Shield,
   Wand2,
@@ -39,29 +40,72 @@ import { botportWS } from '../../services/ws'
 import { StatusBadge } from '../common/StatusBadge'
 import type { ViewMode } from '../../types'
 
-const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean }[] = [
-  { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
-  { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
-  { id: 'forge', icon: Wand2, label: 'Agent Forge' },
-  { id: 'library', icon: Library, label: 'Library' },
-  { id: 'council', icon: Users, label: 'Council' },
-  { id: 'basna', icon: Network, label: 'Basna' },
-  { id: 'code', icon: Code2, label: 'Code' },
-  { id: 'dubina', icon: Mountain, label: 'Frontier Horizon' },
-  { id: 'vfs', icon: FolderTree, label: 'VFS' },
-  { id: 'agent-folders', icon: HardDrive, label: 'Agent Folders', adminOnly: true },
-  { id: 'flows', icon: Workflow, label: 'Flows' },
-  { id: 'observatory', icon: Brain, label: 'Observatory' },
-  { id: 'autonomous-work', icon: Cpu, label: 'Autonomous Work' },
-  { id: 'today', icon: CalendarDays, label: 'Today' },
-  { id: 'scheduler', icon: AlarmClock, label: 'Scheduler' },
-  { id: 'skills', icon: Sparkles, label: 'Skills' },
-  { id: 'prompt-builder', icon: FileText, label: 'Prompt Builder' },
-  { id: 'games', icon: Gamepad2, label: 'Games' },
-  { id: 'gpu-cloud', icon: Cloud, label: 'GPU Cloud' },
-  { id: 'connections', icon: Plug, label: 'Connections' },
-  { id: 'operations', icon: BarChart3, label: 'Stats' },
-  { id: 'admin', icon: Shield, label: 'Admin', adminOnly: true },
+type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean }
+
+const navSections: { title: string; items: NavItem[] }[] = [
+  {
+    title: 'Workspace',
+    items: [
+      { id: 'quick-chat', icon: MessagesSquare, label: 'Quick chat' },
+      { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
+      { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
+      { id: 'code', icon: Code2, label: 'Code' },
+      { id: 'vfs', icon: FolderTree, label: 'VFS' },
+    ],
+  },
+  {
+    title: 'Build',
+    items: [
+      { id: 'forge', icon: Wand2, label: 'Agent Forge' },
+      { id: 'skills', icon: Sparkles, label: 'Skills' },
+      { id: 'library', icon: Library, label: 'Library' },
+    ],
+  },
+  {
+    title: 'Multi-Agent',
+    items: [
+      { id: 'council', icon: Users, label: 'Council' },
+      { id: 'basna', icon: Network, label: 'Basna' },
+    ],
+  },
+  {
+    title: 'Automation',
+    items: [
+      { id: 'flows', icon: Workflow, label: 'Flows' },
+      { id: 'autonomous-work', icon: Cpu, label: 'Autonomous Work' },
+      { id: 'scheduler', icon: AlarmClock, label: 'Scheduler' },
+    ],
+  },
+  {
+    title: 'Knowledge',
+    items: [
+      { id: 'observatory', icon: Brain, label: 'Observatory' },
+    ],
+  },
+  {
+    title: 'Experimental',
+    items: [
+      { id: 'dubina', icon: Mountain, label: 'Frontier Horizon' },
+      { id: 'prompt-builder', icon: FileText, label: 'Prompt Builder' },
+    ],
+  },
+  {
+    title: 'System',
+    items: [
+      { id: 'today', icon: CalendarDays, label: 'Today' },
+      { id: 'agent-folders', icon: HardDrive, label: 'Agent Folders', adminOnly: true },
+      { id: 'connections', icon: Plug, label: 'Connections' },
+      { id: 'gpu-cloud', icon: Cloud, label: 'GPU Cloud' },
+      { id: 'operations', icon: BarChart3, label: 'Stats' },
+      { id: 'admin', icon: Shield, label: 'Admin', adminOnly: true },
+    ],
+  },
+  {
+    title: 'Play',
+    items: [
+      { id: 'games', icon: Gamepad2, label: 'Games' },
+    ],
+  },
 ]
 
 export function Sidebar() {
@@ -158,29 +202,45 @@ export function Sidebar() {
       )}
 
       {/* Nav */}
-      <nav className="flex flex-col gap-0.5 p-2">
-        {navItems.filter((item) => {
-          if (item.adminOnly) return authEnabled && authUser?.role === 'admin'
-          return true
-        }).map(({ id, icon: Icon, label }) => (
-          <button
-            key={id}
-            onClick={() => setView(id)}
-            className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors ${
-              view === id
-                ? 'bg-zinc-800 text-zinc-100'
-                : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
-            }`}
-          >
-            <span className="relative shrink-0">
-              <Icon className="h-4 w-4" />
-              {((id === 'forge' && !onboardingCompleted.forge) || (id === 'council' && !onboardingCompleted.council)) && (
-                <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-violet-500 animate-pulse" />
+      <nav className="flex flex-col p-2">
+        {navSections.map((section, sectionIndex) => {
+          const items = section.items.filter((item) => {
+            if (item.adminOnly) return authEnabled && authUser?.role === 'admin'
+            return true
+          })
+          if (items.length === 0) return null
+          return (
+            <div key={section.title} className="flex flex-col gap-0.5">
+              {sidebarOpen ? (
+                <span className={`px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-600 ${sectionIndex === 0 ? 'pt-1' : 'pt-3'}`}>
+                  {section.title}
+                </span>
+              ) : (
+                sectionIndex > 0 && <span className="mx-2 my-1.5 border-t border-zinc-800/70" />
               )}
-            </span>
-            {sidebarOpen && label}
-          </button>
-        ))}
+              {items.map(({ id, icon: Icon, label }) => (
+                <button
+                  key={id}
+                  onClick={() => setView(id)}
+                  title={!sidebarOpen ? label : undefined}
+                  className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors ${
+                    view === id
+                      ? 'bg-zinc-800 text-zinc-100'
+                      : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
+                  }`}
+                >
+                  <span className="relative shrink-0">
+                    <Icon className="h-4 w-4" />
+                    {((id === 'forge' && !onboardingCompleted.forge) || (id === 'council' && !onboardingCompleted.council)) && (
+                      <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-violet-500 animate-pulse" />
+                    )}
+                  </span>
+                  {sidebarOpen && label}
+                </button>
+              ))}
+            </div>
+          )
+        })}
       </nav>
 
 

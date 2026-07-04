@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
   Library, Gauge, Trash2, Plus, Crown, Loader2, Check, AlertTriangle, Rocket,
-  Layers, Copy, Pencil, Sparkles, X,
+  Layers, Copy, Pencil, Sparkles, X, KeyRound,
 } from 'lucide-react'
 import { useProcessStore } from '../stores/processStore'
 import { spawnProcess, type SpawnConfig } from '../services/docker'
@@ -37,6 +37,8 @@ export function LibraryPage() {
   const [saving, setSaving] = useState(false)
   const [genPrompt, setGenPrompt] = useState('')
   const [generating, setGenerating] = useState(false)
+
+  const [tab, setTab] = useState<'tiers' | 'archetypes'>('tiers')
 
   const blankDraft = (): ArchetypeInput => ({
     archetype_id: '', role: '', family: 'Custom', description: '',
@@ -208,8 +210,30 @@ export function LibraryPage() {
         </p>
       </div>
 
+      {/* ── Tabs ── */}
+      <div className="mb-4 flex gap-1 border-b border-zinc-800">
+        {([['tiers', 'Model Tiers', Gauge], ['archetypes', 'Archetypes', Library]] as const).map(([k, label, Icon]) => (
+          <button
+            key={k}
+            onClick={() => setTab(k)}
+            className={`-mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
+              tab === k
+                ? 'border-violet-400 text-zinc-100'
+                : 'border-transparent text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+            {k === 'archetypes' && registry && (
+              <span className="text-[11px] font-normal text-zinc-500">({registry.archetypes.length})</span>
+            )}
+          </button>
+        ))}
+      </div>
+
       <div className="space-y-4">
         {/* ── Model Tiers ── */}
+        {tab === 'tiers' && (
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-3">
           <div className="flex items-center gap-2">
             <Gauge className="h-4 w-4 text-cyan-400" />
@@ -220,11 +244,13 @@ export function LibraryPage() {
           </p>
 
           {/* ── Tier sets: pick the active profile, or manage them ── */}
-          <div className="rounded-lg border border-violet-500/20 bg-violet-500/[0.04] p-3 space-y-2">
+          <div className="rounded-lg border border-zinc-800 border-l-2 border-l-violet-500/60 bg-violet-500/[0.04] p-4 space-y-3">
             <div className="flex items-center gap-2">
-              <Layers className="h-4 w-4 text-violet-400 shrink-0" />
-              <span className="text-sm font-medium text-zinc-200">Tier Sets</span>
-              <span className="text-[11px] text-zinc-500 truncate">— the active set drives Forge, Basna &amp; spawns</span>
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-violet-500/10 text-violet-400">
+                <Layers className="h-3.5 w-3.5" />
+              </span>
+              <span className="text-sm font-semibold text-zinc-200">Tier Sets</span>
+              <span className="truncate text-[11px] text-zinc-500">the active set drives Forge, Basna &amp; spawns</span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <select
@@ -298,15 +324,20 @@ export function LibraryPage() {
                 if (!tc) return null
                 const def = registry?.tiers[t]
                 return (
-                  <div key={t} className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3 space-y-2">
+                  <div key={t} className="rounded-lg border border-zinc-800 border-l-2 border-l-cyan-500/60 bg-zinc-950/40 p-4 space-y-3.5">
+                    {/* Tier header */}
                     <div className="flex items-center gap-2">
-                      <Gauge className="h-3.5 w-3.5 text-cyan-400 shrink-0" />
-                      <span className="text-sm font-medium text-zinc-200">{def?.label || t}</span>
-                      {def?.use && <span className="text-[11px] text-zinc-500 truncate">— {def.use}</span>}
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-cyan-500/10 text-cyan-400">
+                        <Gauge className="h-3.5 w-3.5" />
+                      </span>
+                      <span className="text-sm font-semibold text-zinc-200">{def?.label || t}</span>
+                      {def?.use && <span className="truncate text-[11px] text-zinc-500">{def.use}</span>}
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[10px] font-medium text-zinc-500 mb-1">Provider</label>
+
+                    {/* Identity — provider + model */}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+                      <div className="sm:col-span-4">
+                        <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Provider</label>
                         <select
                           value={tc.provider}
                           onChange={(e) => updateTier(t, { provider: e.target.value })}
@@ -315,8 +346,8 @@ export function LibraryPage() {
                           {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
                         </select>
                       </div>
-                      <div>
-                        <label className="block text-[10px] font-medium text-zinc-500 mb-1">Model</label>
+                      <div className="sm:col-span-8">
+                        <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Model</label>
                         <input
                           value={tc.model}
                           onChange={(e) => updateTier(t, { model: e.target.value })}
@@ -325,42 +356,58 @@ export function LibraryPage() {
                         />
                       </div>
                     </div>
-                    <div>
-                      <label className="block text-[10px] font-medium text-zinc-500 mb-1">API Key</label>
-                      <input
-                        type="password"
-                        value={tc.api_key}
-                        onChange={(e) => updateTier(t, { api_key: e.target.value })}
-                        className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-                        placeholder="sk-… (leave blank to use server env key)"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      <div className="sm:col-span-2">
-                        <label className="block text-[10px] font-medium text-zinc-500 mb-1">Base URL</label>
-                        <input
-                          value={tc.base_url}
-                          onChange={(e) => updateTier(t, { base_url: e.target.value })}
-                          className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-                          placeholder="optional"
-                        />
-                      </div>
+
+                    {/* Capacity — context window */}
+                    <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-[10px] font-medium text-zinc-500 mb-1">Input ctx</label>
+                        <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+                          Input context <span className="font-normal normal-case text-zinc-600">tokens</span>
+                        </label>
                         <input
                           type="number"
                           value={tc.input_ctx}
                           onChange={(e) => updateTier(t, { input_ctx: Number(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                          className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm tabular-nums text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                          placeholder="0"
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] font-medium text-zinc-500 mb-1">Output ctx</label>
+                        <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+                          Output context <span className="font-normal normal-case text-zinc-600">tokens</span>
+                        </label>
                         <input
                           type="number"
                           value={tc.output_ctx}
                           onChange={(e) => updateTier(t, { output_ctx: Number(e.target.value) || 0 })}
+                          className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm tabular-nums text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                          placeholder="0"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Connection — credentials (usually server-provided) */}
+                    <div className="grid grid-cols-1 gap-3 border-t border-zinc-800/70 pt-3 sm:grid-cols-2">
+                      <div>
+                        <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+                          API Key <span className="font-normal normal-case text-zinc-600">— optional</span>
+                        </label>
+                        <input
+                          type="password"
+                          value={tc.api_key}
+                          onChange={(e) => updateTier(t, { api_key: e.target.value })}
                           className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                          placeholder="sk-… (blank = server env key)"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+                          Base URL <span className="font-normal normal-case text-zinc-600">— optional</span>
+                        </label>
+                        <input
+                          value={tc.base_url}
+                          onChange={(e) => updateTier(t, { base_url: e.target.value })}
+                          className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                          placeholder="default endpoint"
                         />
                       </div>
                     </div>
@@ -371,8 +418,14 @@ export function LibraryPage() {
           )}
 
           {/* Additional API Keys / Environment Variables */}
-          <div>
-            <label className="block text-[11px] font-medium text-zinc-500 mb-1">Additional API Keys — part of this set, passed to agents it spawns</label>
+          <div className="rounded-lg border border-zinc-800 border-l-2 border-l-amber-500/60 bg-zinc-950/40 p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-amber-500/10 text-amber-400">
+                <KeyRound className="h-3.5 w-3.5" />
+              </span>
+              <span className="text-sm font-semibold text-zinc-200">Additional API Keys</span>
+              <span className="truncate text-[11px] text-zinc-500">passed to every agent this set spawns</span>
+            </div>
             <div className="space-y-2">
               {envVars.map((ev, i) => (
                 <div key={i} className="flex items-center gap-2">
@@ -406,8 +459,10 @@ export function LibraryPage() {
             </div>
           </div>
         </div>
+        )}
 
         {/* ── Archetype gallery ── */}
+        {tab === 'archetypes' && (
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4">
           <div className="flex items-center gap-2 mb-3">
             <Library className="h-4 w-4 text-violet-400" />
@@ -492,6 +547,7 @@ export function LibraryPage() {
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* ── Archetype editor modal ── */}
