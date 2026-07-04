@@ -200,7 +200,14 @@ class ReadToolConfig(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    max_file_bytes: int = 200_000  # 200 KB
+    # Absolute refusal size — a memory/sanity guard, NOT the context guard.
+    # Context is protected by max_full_read_chars below, which truncates
+    # oversized output with a continuation hint instead of erroring.
+    max_file_bytes: int = 10_000_000  # 10 MB
+    # Max characters served by one read call (~4 chars/token → ~20k tokens,
+    # matching Claude Code's practical split). Bigger output is cut at a line
+    # boundary with an explicit "continue with offset=N" hint.
+    max_full_read_chars: int = 80_000
     extra_dirs: list[str] = Field(default_factory=list, alias="extraDirs")
     gdrive_folders: list[GDriveFolderEntry] = Field(
         default_factory=list, alias="gdriveFolders"

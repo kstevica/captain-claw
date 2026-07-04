@@ -21,7 +21,10 @@ class ReadTool(Tool):
         "header. To read just part of a large file, pass offset (1-indexed start line) "
         "and limit (number of lines) — ALWAYS prefer this over shell `sed`/`head`/"
         "`tail`, which bypass the size/binary guards and duplicate-read detection. "
-        "Omit offset and limit to read the whole file."
+        "Omit offset and limit to read the whole file. Very large files are served "
+        "in pages: output is capped per call and cut at a line boundary, with a "
+        "header telling you the exact offset to continue from — page through only "
+        "the parts you need instead of re-requesting the whole file."
     )
     timeout_seconds = 10.0  # local file read — 10 s is ample
     parameters = {
@@ -201,7 +204,12 @@ class ReadTool(Tool):
             if file_size > max_size:
                 return ToolResult(
                     success=False,
-                    error=f"File too large: {file_size} bytes (max {max_size})",
+                    error=(
+                        f"File too large: {file_size} bytes (max {max_size}). This is "
+                        "almost certainly a log/data/generated file, not source. Use "
+                        "shell `grep -n` to find the relevant region, or `sed -n 'a,bp'` "
+                        "to extract a specific line range."
+                    ),
                 )
 
             # ── Duplicate full-read short-circuit (code agents) ──────
@@ -244,29 +252,56 @@ class ReadTool(Tool):
                     ),
                 )
 
-            # Register the served full read for the duplicate short-circuit.
-            if _full_read and _dedup_on:
-                _served[_key] = (_stat.st_mtime_ns, file_size,
-                                 content.count("\n") + 1)
-
             # Apply offset and limit
             all_lines = content.splitlines()
+            total_lines = len(all_lines)
             start_line = max(1, int(offset)) if offset is not None else 1
             selected_lines = all_lines[start_line - 1 :]
             if limit is not None:
                 selected_lines = selected_lines[: max(0, int(limit))]
 
+            # ── Context guard: one call never dumps more than the char budget ──
+            # Oversized output is cut at a line boundary with an explicit
+            # continuation offset, so the agent pages through big files instead
+            # of blowing its context on a single read.
+            max_chars = get_config().tools.read.max_full_read_chars
+            truncated = False
+            if sum(len(ln) + 1 for ln in selected_lines) > max_chars:
+                truncated = True
+                kept: list[str] = []
+                used = 0
+                for ln in selected_lines:
+                    cost = len(ln) + 1
+                    if used + cost > max_chars:
+                        if not kept:
+                            # A single monster line (e.g. minified JS) — serve a
+                            # mid-line cut rather than nothing.
+                            kept.append(ln[:max_chars] + " …[line cut at budget]")
+                        break
+                    kept.append(ln)
+                    used += cost
+                selected_lines = kept
+
+            # Register the served full read for the duplicate short-circuit —
+            # only when the file was ACTUALLY served in full: a truncated read
+            # must not make a later re-read claim "you already have all of it".
+            if _full_read and _dedup_on and not truncated:
+                _served[_key] = (_stat.st_mtime_ns, file_size,
+                                 content.count("\n") + 1)
+
             content = "\n".join(selected_lines)
 
             # Add metadata
+            end_line = start_line + len(selected_lines) - 1 if selected_lines else start_line - 1
             info = f"[{file_path} {len(content)} chars]"
-            if offset is not None or limit is not None:
-                if selected_lines:
-                    end_line = start_line + len(selected_lines) - 1
-                else:
-                    end_line = start_line - 1
+            if truncated:
+                info += (
+                    f" [lines {start_line}-{end_line} of {total_lines} — TRUNCATED at "
+                    f"~{max_chars} chars. Continue with offset={end_line + 1}]"
+                )
+            elif offset is not None or limit is not None:
                 info += f" [lines {start_line}-{end_line}]"
-            
+
             return ToolResult(
                 success=True,
                 content=f"{info}\n{content}",

@@ -393,6 +393,7 @@ def _build_schema() -> list[dict[str, Any]]:
                     "title": "Read Tool",
                     "fields": [
                         _field("tools.read.max_file_bytes", "Max file size (bytes)", type="number"),
+                        _field("tools.read.max_full_read_chars", "Max chars per read call (pages beyond)", type="number"),
                     ],
                 },
                 {
