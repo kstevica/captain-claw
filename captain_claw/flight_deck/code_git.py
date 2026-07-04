@@ -32,6 +32,7 @@ _GITIGNORE = """\
 .code/
 .codemap/
 .captain-claw/
+.uploads/
 saved/
 node_modules/
 __pycache__/
@@ -48,7 +49,7 @@ build/
 # Runtime artifacts an agent litters into ANY workspace (incl. linked real
 # repos). Written to .git/info/exclude — a LOCAL ignore that never modifies the
 # repo's own tracked .gitignore, so linking a real project stays non-invasive.
-_LOCAL_EXCLUDES = ["saved/", ".code/", ".codemap/", ".captain-claw/", ".DS_Store"]
+_LOCAL_EXCLUDES = ["saved/", ".code/", ".codemap/", ".captain-claw/", ".uploads/", ".DS_Store"]
 
 
 async def _ensure_excludes(project_dir: Path | str) -> None:
@@ -58,9 +59,14 @@ async def _ensure_excludes(project_dir: Path | str) -> None:
     ex = info / "exclude"
     try:
         cur = ex.read_text() if ex.exists() else ""
-        if "captain-claw runtime" in cur:
+        have = {ln.strip() for ln in cur.splitlines()}
+        # Append only the excludes not already present, so adding a new entry to
+        # _LOCAL_EXCLUDES later propagates to repos seeded by an earlier version.
+        missing = [e for e in _LOCAL_EXCLUDES if e not in have]
+        if not missing:
             return
-        block = "\n# captain-claw runtime artifacts\n" + "\n".join(_LOCAL_EXCLUDES) + "\n"
+        header = "" if "captain-claw runtime" in cur else "\n# captain-claw runtime artifacts\n"
+        block = header + "\n".join(missing) + "\n"
         ex.write_text((cur.rstrip() + "\n" if cur.strip() else "") + block)
     except OSError:
         pass

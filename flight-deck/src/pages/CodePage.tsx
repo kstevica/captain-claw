@@ -3,11 +3,32 @@ import {
   Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2,
   ShieldAlert, Wrench, RotateCcw, X, Download, ChevronRight, ChevronDown, Link2, Lock,
   MessageSquarePlus, FolderPlus, FolderTree, Trash2, Map, Square, Eraser,
+  Paperclip, XCircle, FileText, Image as ImageIcon,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useCodeStore } from '../stores/codeStore'
 import { useVFSStore } from '../stores/vfsStore'
+import { useAuthStore } from '../stores/authStore'
+
+interface CodeAttachment {
+  id: string
+  name: string
+  size: number
+  type: string
+  status: 'uploading' | 'uploaded' | 'error'
+  path?: string
+  error?: string
+  preview?: string
+}
+
+let _attachSeq = 0
+const nextAttachId = () => `att-${Date.now()}-${++_attachSeq}`
+
+function bearerHeaders(): Record<string, string> {
+  const { token, authEnabled } = useAuthStore.getState()
+  return authEnabled && token ? { Authorization: `Bearer ${token}` } : {}
+}
 
 const SEV_COLOR: Record<string, string> = {
   blocking: 'text-red-400', major: 'text-amber-400', minor: 'text-zinc-400',
@@ -53,6 +74,9 @@ export function CodePage() {
     busy: boolean
   }>(null)
   const [input, setInput] = useState('')
+  const [attachments, setAttachments] = useState<CodeAttachment[]>([])
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [planDraft, setPlanDraft] = useState('')
   const [diff, setDiff] = useState<{ sha: string; text: string } | null>(null)
   // Folder browser (for linking)
@@ -90,7 +114,7 @@ export function CodePage() {
   const activeFolders = activeProj?.folders || []
 
   const toggle = (name: string) =>
-    setCollapsed((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n })
+    setCollapsed((s) => { const n = new Set(s); if (n.has(name)) n.delete(name); else n.add(name); return n })
 
   const openDiff = async (sha: string) => {
     setDiff({ sha, text: 'Loading…' })
@@ -100,10 +124,47 @@ export function CodePage() {
     if (!window.confirm(`Roll back to "${message}"?\nThis discards everything after this commit.`)) return
     await rollback(sha); setDiff(null)
   }
+  // Upload pasted/attached files into the session folder's .uploads/ dir so the
+  // agent (whose cwd is that folder) can read them via a plain relative path.
+  const addFiles = (files: FileList | File[]) => {
+    if (!activeSess) return
+    const proj = activeProject, folder = activeSess.folder
+    Array.from(files).forEach((file) => {
+      const id = nextAttachId()
+      const att: CodeAttachment = { id, name: file.name, size: file.size, type: file.type, status: 'uploading' }
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader()
+        reader.onload = (e) => setAttachments((p) => p.map((a) => a.id === id ? { ...a, preview: e.target?.result as string } : a))
+        reader.readAsDataURL(file)
+      }
+      setAttachments((p) => [...p, att])
+      const form = new FormData()
+      form.append('project', proj); form.append('folder', folder); form.append('file', file)
+      fetch('/fd/code/upload', { method: 'POST', headers: bearerHeaders(), body: form, credentials: 'include' })
+        .then(async (r) => { if (!r.ok) throw new Error((await r.text()) || 'upload failed'); return r.json() })
+        .then((d) => setAttachments((p) => p.map((a) => a.id === id ? { ...a, status: 'uploaded', path: d.path } : a)))
+        .catch((e) => setAttachments((p) => p.map((a) => a.id === id ? { ...a, status: 'error', error: String(e) } : a)))
+    })
+  }
+  const removeAttachment = (id: string) => setAttachments((p) => p.filter((a) => a.id !== id))
+  const onPaste = (e: React.ClipboardEvent) => {
+    const files: File[] = []
+    for (const it of Array.from(e.clipboardData?.items || [])) {
+      if (it.kind === 'file') { const f = it.getAsFile(); if (f) files.push(f) }
+    }
+    if (files.length) { e.preventDefault(); addFiles(files) }
+  }
+
   const onSend = async () => {
     const text = input.trim()
-    if (!text || sending) return
-    setInput(''); await send(text)
+    const uploaded = attachments.filter((a) => a.status === 'uploaded' && a.path)
+    if ((!text && uploaded.length === 0) || sending) return
+    let msg = text
+    if (uploaded.length) {
+      const refs = uploaded.map((a) => `- ${a.path}`).join('\n')
+      msg = (text ? `${text}\n\n` : '') + `Attached files (in the repo, read them):\n${refs}`
+    }
+    setInput(''); setAttachments([]); await send(msg)
   }
   const openModal = (project = '') => {
     const p = projects.find((x) => x.name === project) || projects.find((x) => x.name === activeProject)
@@ -456,14 +517,41 @@ export function CodePage() {
                 </div>
               </div>
             ) : (
-              <div className="border-t border-zinc-800 p-3">
+              <div className={`border-t border-zinc-800 p-3 ${dragOver ? 'ring-1 ring-inset ring-violet-500/40' : ''}`}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+                onDragLeave={(e) => { e.preventDefault(); setDragOver(false) }}
+                onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files) }}>
+                {attachments.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-1.5">
+                    {attachments.map((a) => (
+                      <div key={a.id} title={a.error || a.path}
+                        className={`flex items-center gap-1 rounded-md border px-1.5 py-1 text-[10px] ${
+                          a.status === 'error' ? 'border-red-800 bg-red-950/30 text-red-400'
+                          : a.status === 'uploading' ? 'border-violet-800/50 bg-violet-950/20 text-violet-300'
+                          : 'border-zinc-700 bg-zinc-800/50 text-zinc-300'}`}>
+                        {a.preview ? <img src={a.preview} alt="" className="h-4 w-4 rounded object-cover" />
+                          : a.type.startsWith('image/') ? <ImageIcon size={12} /> : <FileText size={12} />}
+                        <span className="max-w-[120px] truncate">{a.name}</span>
+                        {a.status === 'uploading' && <Loader2 size={10} className="animate-spin" />}
+                        <button onClick={() => removeAttachment(a.id)} className="text-zinc-500 hover:text-zinc-200"><XCircle size={12} /></button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="flex items-end gap-2">
+                  <button onClick={() => fileInputRef.current?.click()} disabled={status === 'running'}
+                    title="Attach file" className="flex h-10 items-center rounded px-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-40">
+                    <Paperclip size={16} />
+                  </button>
+                  <input ref={fileInputRef} type="file" multiple className="hidden"
+                    onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = '' }} />
                   <textarea value={input} onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend() } }}
-                    placeholder={status === 'running' ? 'Build in progress…' : 'Build, edit, or fix something…  (Enter to send, Shift+Enter for newline)'}
+                    onPaste={onPaste}
+                    placeholder={status === 'running' ? 'Build in progress…' : 'Build, edit, or fix something…  (Enter to send, Shift+Enter for newline; paste or attach files)'}
                     rows={2} disabled={status === 'running'}
                     className="min-w-0 flex-1 resize-none rounded bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none ring-1 ring-zinc-700 focus:ring-zinc-500 disabled:opacity-50" />
-                  <button onClick={onSend} disabled={sending || status === 'running' || !input.trim()}
+                  <button onClick={onSend} disabled={sending || status === 'running' || (!input.trim() && !attachments.some((a) => a.status === 'uploaded')) || attachments.some((a) => a.status === 'uploading')}
                     className="flex h-10 items-center gap-1.5 rounded bg-zinc-100 px-3 text-sm font-medium text-zinc-900 hover:bg-zinc-200 disabled:opacity-40">
                     {sending ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
                   </button>

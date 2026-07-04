@@ -25,7 +25,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from captain_claw.flight_deck.archetypes import merged_archetypes
@@ -1580,6 +1580,41 @@ async def map_build(project: str, session: str, request: Request,
 
 
 # ── the main message + approve flow ──────────────────────────────────
+
+def _safe_upload_name(name: str) -> str:
+    """Filesystem-safe basename for an uploaded/pasted file."""
+    base = Path(name or "file").name
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "-", base).strip("-.") or "file"
+    return cleaned[:120]
+
+
+@router.post("/upload")
+async def upload_file(
+    project: str = Form(...),
+    folder: str = Form(...),
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    """Store a pasted/attached file in the folder's `.uploads/` dir (the agent's
+    workspace), returning its repo-relative path so the message can reference it."""
+    uid = user["id"]
+    repo = _folder_repo(uid, project, folder)  # 404 if the folder is gone
+    updir = repo / ".uploads"
+    updir.mkdir(parents=True, exist_ok=True)
+    name = _safe_upload_name(file.filename or "file")
+    dest = updir / name
+    # Don't clobber an existing upload of the same name.
+    if dest.exists():
+        base, dot, ext = name.rpartition(".")
+        stem, suffix = (base, "." + ext) if dot else (name, "")
+        i = 1
+        while dest.exists() and i < 1000:
+            dest = updir / f"{stem}-{i}{suffix}"
+            i += 1
+    data = await file.read()
+    dest.write_bytes(data)
+    return {"path": f".uploads/{dest.name}", "name": dest.name, "size": len(data)}
+
 
 @router.post("/message")
 async def message(body: MessageReq, request: Request, user: dict = Depends(get_current_user)):
