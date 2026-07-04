@@ -12,7 +12,7 @@ import mimetypes
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -37,6 +37,10 @@ router = APIRouter(prefix="/fd/vfs", tags=["vfs"])
 
 # Files larger than this aren't inlined for preview — download instead.
 _PREVIEW_MAX_BYTES = 1_000_000
+
+# Per-file ceiling for uploads into the VFS — generous for docs/images, small
+# enough to avoid an accidental denial-of-disk.
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
 # ── path resolution ──────────────────────────────────────────────────
@@ -410,6 +414,39 @@ async def make_dir(body: MkdirBody, user: dict = Depends(get_current_user)):
     target = _resolve(user["id"], body.project, body.path)
     target.mkdir(parents=True, exist_ok=True)
     return {"ok": True}
+
+
+@router.post("/upload")
+async def upload_files(
+    project: str = Form(...),
+    path: str = Form(""),
+    files: list[UploadFile] = File(...),
+    user: dict = Depends(get_current_user),
+):
+    """Upload one or more files into ``project/path`` (a directory).
+
+    Each file is stored under its basename — any directory component in the
+    client-supplied filename is stripped, so a malicious name can't escape the
+    target folder. The destination directory is created if missing.
+    """
+    _assert_writable(user["id"], project)
+    dest_dir = _resolve(user["id"], project, path)
+    if dest_dir.exists() and not dest_dir.is_dir():
+        raise HTTPException(400, "target path is not a directory")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    saved: list[dict] = []
+    for f in files:
+        name = safe_name(Path(f.filename or "").name, fallback="upload")
+        content = await f.read()
+        if len(content) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"'{name}' exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit")
+        rel = f"{path}/{name}" if path else name
+        target = _resolve(user["id"], project, rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        saved.append({"name": name, "size": len(content)})
+    return {"ok": True, "files": saved}
 
 
 @router.post("/rename")
