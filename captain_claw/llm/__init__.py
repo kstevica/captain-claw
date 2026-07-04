@@ -1594,6 +1594,36 @@ class ChatGPTResponsesProvider(LLMProvider):
             await self._codex_auth.close()
 
 
+# Model families served via Ollama (local or Ollama cloud) that support —
+# and materially benefit from — native thinking. Sending `think: false`
+# to these EXPLICITLY DISABLES their reasoning, which is why "DeepSeek via
+# API reasons well but via Ollama it's bad": the API serves the reasoner
+# natively while our request was switching it off.
+_OLLAMA_THINKING_MODEL_RE = re.compile(
+    r"(?i)deepseek|reasoner|qwq|qwen3|glm|kimi|gpt-oss|magistral|cogito|"
+    r"exaone-deep|smallthinker|phi-?4.*reason|-r1\b|r1[:\-]|thinking"
+)
+
+
+def _resolve_ollama_think(raw: bool | str | None, model: str) -> bool | str:
+    """Decide the `think` value for an Ollama request.
+
+    Precedence: CLAW_OLLAMA_THINK env (1/0 or low/medium/high) → explicit
+    constructor value → auto-detect by model family. Auto-on for known
+    thinking families; a model that rejects it falls back at request time.
+    """
+    env = os.getenv("CLAW_OLLAMA_THINK", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    if env in ("low", "medium", "high"):
+        return env
+    if raw is not None:
+        return raw
+    return bool(_OLLAMA_THINKING_MODEL_RE.search(model or ""))
+
+
 class OllamaProvider(LLMProvider):
     """Direct Ollama API provider."""
 
@@ -1606,7 +1636,7 @@ class OllamaProvider(LLMProvider):
         num_ctx: int = 160000,
         api_key: str | None = None,
         tokens_per_minute: int = 0,
-        think: bool = False,
+        think: bool | str | None = None,
     ):
         self.provider = "ollama"
         self.model = model
@@ -1615,7 +1645,9 @@ class OllamaProvider(LLMProvider):
         self.max_tokens = max_tokens
         self.num_ctx = max(1, int(num_ctx))
         self.api_key = api_key
-        self.think = bool(think)
+        self.think = _resolve_ollama_think(think, model)
+        if self.think:
+            log.info("Ollama thinking enabled", model=model, think=self.think)
         self.client = httpx.AsyncClient(timeout=120.0, follow_redirects=True)
         self.rate_limiter = TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
 
@@ -1654,9 +1686,10 @@ class OllamaProvider(LLMProvider):
             "model": self.model,
             "messages": ollama_messages,
             "stream": False,
-            "think": self.think,
             "options": options,
         }
+        if self.think:
+            body["think"] = self.think
         if ollama_tools:
             body["tools"] = ollama_tools
 
@@ -1675,6 +1708,15 @@ class OllamaProvider(LLMProvider):
             try:
                 response = await self.client.post(url, json=body, headers=headers)
                 if not response.is_success:
+                    # Model doesn't support thinking → retry once without it
+                    # (auto-detection is a heuristic; this is the safety net).
+                    if (body.get("think") and response.status_code == 400
+                            and "think" in response.text.lower()):
+                        log.warning("Ollama model rejected think — retrying without",
+                                    model=self.model)
+                        self.think = False
+                        body.pop("think", None)
+                        continue
                     raise LLMAPIError(
                         f"Ollama API error {response.status_code}: {response.text}",
                         status_code=response.status_code,
@@ -1801,9 +1843,10 @@ class OllamaProvider(LLMProvider):
             "model": self.model,
             "messages": ollama_messages,
             "stream": True,
-            "think": self.think,
             "options": options,
         }
+        if self.think:
+            body["think"] = self.think
         if ollama_tools:
             body["tools"] = ollama_tools
 
@@ -1821,6 +1864,13 @@ class OllamaProvider(LLMProvider):
                 async with self.client.stream("POST", url, json=body, headers=headers) as response:
                     if not response.is_success:
                         error_text = await response.atext()
+                        if (body.get("think") and response.status_code == 400
+                                and "think" in error_text.lower()):
+                            log.warning("Ollama model rejected think — retrying without",
+                                        model=self.model)
+                            self.think = False
+                            body.pop("think", None)
+                            continue
                         raise LLMAPIError(
                             f"Ollama API error {response.status_code}: {error_text}",
                             status_code=response.status_code,
@@ -3593,6 +3643,7 @@ def create_provider(
     num_ctx: int = 160000,
     tokens_per_minute: int = 0,
     extra_headers: dict[str, str] | None = None,
+    think: bool | str | None = None,
 ) -> LLMProvider:
     """Create an LLM provider.
 
@@ -3621,6 +3672,7 @@ def create_provider(
             num_ctx=num_ctx,
             api_key=api_key,
             tokens_per_minute=tokens_per_minute,
+            think=think,
         )
 
     # ChatGPT Responses API path — activated when the OpenAI provider
