@@ -226,6 +226,16 @@ export function backfillTierMap(tiers: TierMap, registry: ArchetypeRegistry): Ti
   return changed ? out : tiers
 }
 
+// A set is "unconfigured" if no tier carries user credentials — i.e. it's still
+// the untouched registry seed. Used to decide whether to auto-open the setup
+// wizard on a fresh install, and whether that wizard replaces the lone seed set
+// instead of stacking a second one.
+export function isSetUnconfigured(s: TierSet): boolean {
+  const tiers = Object.values(s.tiers)
+  if (tiers.length === 0) return true
+  return tiers.every((t) => !t.api_key?.trim() && !t.base_url?.trim())
+}
+
 // Build a brand-new set seeded from the registry defaults (carrying the legacy
 // single-model key/provider forward), with empty additional API keys.
 export function freshSet(
@@ -266,6 +276,10 @@ export interface TierConfigState {
   refreshRegistry: () => void
   bootstrapped: boolean
   updateTier: (key: string, patch: Partial<TierConfig>) => void
+  // Create a fully-configured set where every tier shares one model + context
+  // (the setup wizard). Replaces the lone untouched seed set on a fresh install
+  // rather than stacking a second one. Returns the resulting set id.
+  setupSet: (name: string, apply: Partial<TierConfig>) => string
   // Multi-set management (Library page).
   sets: TierSet[]
   activeSetId: string
@@ -390,6 +404,26 @@ export function useTierConfig(): TierConfigState {
     setSets((prev) => [...prev, s]); setActiveSetId(s.id)
     return s.id
   }
+  // Wizard: one model + context applied to every tier. On a fresh install the
+  // only set is the untouched auto-seed, so overwrite it in place; otherwise add.
+  const setupSet = (name: string, apply: Partial<TierConfig>): string => {
+    const template = freshSet(registry, loadLegacyConfig(), name)
+    let baseTiers = template.tiers
+    if (Object.keys(baseTiers).length === 0) {
+      baseTiers = Object.fromEntries(TIER_ORDER.map((t) => [t, {
+        provider: '', model: '', api_key: '', base_url: '', input_ctx: 200000, output_ctx: 32768,
+      }]))
+    }
+    const tiers: TierMap = Object.fromEntries(
+      Object.entries(baseTiers).map(([k, v]) => [k, { ...v, ...apply }]),
+    )
+    const replace = sets.length === 1 && isSetUnconfigured(sets[0])
+    const id = replace ? sets[0].id : template.id
+    const newSet: TierSet = { ...template, id, name, tiers }
+    setSets((prev) => (replace ? prev.map((s) => (s.id === id ? newSet : s)) : [...prev, newSet]))
+    setActiveSetId(id)
+    return id
+  }
   const duplicateSet = (id: string): string => {
     const src = sets.find((s) => s.id === id) || activeSet
     if (!src) return ''
@@ -407,7 +441,7 @@ export function useTierConfig(): TierConfigState {
   }
 
   return {
-    tiers, setTiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, bootstrapped, updateTier,
+    tiers, setTiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, bootstrapped, updateTier, setupSet,
     sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet,
   }
 }

@@ -1,12 +1,13 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Library, Gauge, Trash2, Plus, Crown, Loader2, Check, AlertTriangle, Rocket,
-  Layers, Copy, Pencil, Sparkles, X, KeyRound,
+  Layers, Copy, Pencil, Sparkles, X, KeyRound, Wand2,
 } from 'lucide-react'
 import { useProcessStore } from '../stores/processStore'
+import { useUIStore } from '../stores/uiStore'
 import { spawnProcess, type SpawnConfig } from '../services/docker'
 import {
-  useTierConfig, PROVIDERS, TIER_ORDER, type Archetype,
+  useTierConfig, PROVIDERS, TIER_ORDER, isSetUnconfigured, type Archetype,
 } from '../services/tierConfig'
 import {
   createArchetype, updateArchetype, deleteArchetype, generateArchetype,
@@ -19,14 +20,36 @@ const COGNITIVE_MODES = [
   'neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian',
 ]
 
+// Auto-open the setup wizard once per browser/user until they complete or dismiss it.
+const WIZARD_SEEN_KEY = 'fd:tier-wizard-seen'
+
+// Context-window presets offered by the wizard (tokens, power-of-2 based —
+// k = 1024, M = 1024²). Defaults: 256k in, 32k out.
+const INPUT_CTX_OPTS = [128, 160, 256, 400, 512, 1024].map((k) => k * 1024)
+const OUTPUT_CTX_OPTS = [16, 32, 64, 128, 256].map((k) => k * 1024)
+
+function fmtCtx(n: number): string {
+  return n >= 1024 * 1024 ? `${Math.round(n / (1024 * 1024))}M` : `${Math.round(n / 1024)}k`
+}
+
+interface WizardValues {
+  name: string
+  provider: string
+  model: string
+  apiKey: string
+  baseUrl: string
+  inputCtx: number
+  outputCtx: number
+}
+
 function slugify(s: string): string {
   return s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
 }
 
 export function LibraryPage() {
   const {
-    tiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, updateTier,
-    sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet,
+    tiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, updateTier, setupSet,
+    sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet, bootstrapped,
   } = useTierConfig()
 
   // Archetype editor: null = closed; otherwise the draft being edited. `editingId`
@@ -39,6 +62,33 @@ export function LibraryPage() {
   const [generating, setGenerating] = useState(false)
 
   const [tab, setTab] = useState<'tiers' | 'archetypes'>('tiers')
+
+  // ── Setup wizard: one model → all tiers. Auto-opens once on a fresh install. ──
+  const setView = useUIStore((s) => s.setView)
+  const [wizardOpen, setWizardOpen] = useState(false)
+  // True when the wizard opened by itself on first launch (vs the manual button).
+  // A first-launch completion sends the user straight on to Quick chat.
+  const [wizardFirstLaunch, setWizardFirstLaunch] = useState(false)
+  useEffect(() => {
+    if (!bootstrapped || !registry) return
+    if (localStorage.getItem(WIZARD_SEEN_KEY)) return
+    const unconfigured = sets.length === 0 || (sets.length === 1 && isSetUnconfigured(sets[0]))
+    if (unconfigured) { setWizardFirstLaunch(true); setWizardOpen(true) }
+  }, [bootstrapped, registry, sets])
+
+  const openWizard = () => { setWizardFirstLaunch(false); setWizardOpen(true) }
+  const closeWizard = () => { localStorage.setItem(WIZARD_SEEN_KEY, '1'); setWizardOpen(false) }
+  const submitWizard = (v: WizardValues) => {
+    setupSet(v.name.trim() || 'My models', {
+      provider: v.provider, model: v.model.trim(), api_key: v.apiKey,
+      base_url: v.baseUrl.trim(), input_ctx: v.inputCtx, output_ctx: v.outputCtx,
+    })
+    localStorage.setItem(WIZARD_SEEN_KEY, '1')
+    setWizardOpen(false)
+    // On first launch, saving tiers means setup is done — move on to Quick chat.
+    if (wizardFirstLaunch) setView('quick-chat')
+    else setTab('tiers')
+  }
 
   const blankDraft = (): ArchetypeInput => ({
     archetype_id: '', role: '', family: 'Custom', description: '',
@@ -251,6 +301,13 @@ export function LibraryPage() {
               </span>
               <span className="text-sm font-semibold text-zinc-200">Tier Sets</span>
               <span className="truncate text-[11px] text-zinc-500">the active set drives Forge, Basna &amp; spawns</span>
+              <button
+                onClick={openWizard}
+                title="Set up a tier set from one model"
+                className="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-violet-500/40 bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-500/20 dark:text-violet-200"
+              >
+                <Wand2 className="h-3.5 w-3.5" /> Setup wizard
+              </button>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <select
@@ -550,6 +607,9 @@ export function LibraryPage() {
         )}
       </div>
 
+      {/* ── Tier setup wizard ── */}
+      {wizardOpen && <TierSetupWizard onSubmit={submitWizard} onClose={closeWizard} />}
+
       {/* ── Archetype editor modal ── */}
       {editor && (
         <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-4" onClick={closeEditor}>
@@ -733,6 +793,123 @@ export function LibraryPage() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// A row of context-window preset chips; the selected value is highlighted.
+function CtxRow({ opts, value, onChange }: { opts: number[]; value: number; onChange: (n: number) => void }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {opts.map((n) => (
+        <button
+          key={n}
+          type="button"
+          onClick={() => onChange(n)}
+          className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium tabular-nums transition-colors ${
+            value === n
+              ? 'border-violet-500/50 bg-violet-500/15 text-violet-700 dark:text-violet-200'
+              : 'border-zinc-700 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
+          }`}
+        >
+          {fmtCtx(n)}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ── Setup wizard: collect one model + context and apply it to every tier. ──
+function TierSetupWizard({ onSubmit, onClose }: {
+  onSubmit: (v: WizardValues) => void
+  onClose: () => void
+}) {
+  const [name, setName] = useState('My models')
+  const [provider, setProvider] = useState(PROVIDERS[0])
+  const [model, setModel] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [baseUrl, setBaseUrl] = useState('')
+  const [inputCtx, setInputCtx] = useState(256 * 1024)
+  const [outputCtx, setOutputCtx] = useState(32 * 1024)
+
+  const valid = name.trim().length > 0 && model.trim().length > 0
+  const submit = () => {
+    if (!valid) return
+    onSubmit({ name, provider, model, apiKey, baseUrl, inputCtx, outputCtx })
+  }
+
+  const inputCls = 'w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none'
+  const labelCls = 'mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-4" onClick={onClose}>
+      <div className="my-8 w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-3">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-violet-500/10 text-violet-400">
+            <Wand2 className="h-3.5 w-3.5" />
+          </span>
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-200">Set up your models</h3>
+            <p className="text-[11px] text-zinc-500">One model powers every tier — fine-tune per tier later.</p>
+          </div>
+          <button onClick={onClose} className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-4 p-4">
+          <div>
+            <label className={labelCls}>Tier set name</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. All Anthropic, Local Ollama" className={inputCls} autoFocus />
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div>
+              <label className={labelCls}>Provider</label>
+              <select value={provider} onChange={(e) => setProvider(e.target.value)} className={inputCls}>
+                {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div className="sm:col-span-2">
+              <label className={labelCls}>Model</label>
+              <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="model id" className={inputCls} />
+            </div>
+          </div>
+
+          <div>
+            <label className={labelCls}>API Key <span className="font-normal normal-case text-zinc-600">— optional, blank = server env key</span></label>
+            <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-…" className={inputCls} />
+          </div>
+
+          <div>
+            <label className={labelCls}>Base URL <span className="font-normal normal-case text-zinc-600">— optional</span></label>
+            <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="default endpoint" className={inputCls} />
+          </div>
+
+          <div>
+            <label className={labelCls}>Input context</label>
+            <CtxRow opts={INPUT_CTX_OPTS} value={inputCtx} onChange={setInputCtx} />
+          </div>
+
+          <div>
+            <label className={labelCls}>Output context</label>
+            <CtxRow opts={OUTPUT_CTX_OPTS} value={outputCtx} onChange={setOutputCtx} />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-4 py-3">
+          <button onClick={onClose} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-300 hover:text-zinc-100">
+            Skip
+          </button>
+          <button
+            onClick={submit}
+            disabled={!valid}
+            className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50"
+          >
+            <Check className="h-3.5 w-3.5" /> Create tier set
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
