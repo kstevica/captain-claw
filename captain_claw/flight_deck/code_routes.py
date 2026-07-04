@@ -912,9 +912,32 @@ async def _triage_reviews(reviews: list[dict], intent: str,
         return {"needs_fix": False, "fixer": "code-implementer",
                 "summary": "Review complete (triage unavailable — not auto-fixing).",
                 "fix_instructions": "", "findings": []}
+    # Normalize EVERY field the loop consumes — models sometimes return
+    # fix_instructions/summary as a JSON array (or findings as bare strings)
+    # despite the schema, and downstream code does string ops on them
+    # ("can only concatenate list to list" killed a real build loop).
+    def _as_text(v) -> str:
+        if isinstance(v, (list, tuple)):
+            return "\n".join(_as_text(x) for x in v if x is not None)
+        if isinstance(v, dict):
+            return json.dumps(v)
+        return str(v).strip() if v is not None else ""
+
     raw["needs_fix"] = bool(raw.get("needs_fix"))
     if raw.get("fixer") not in ("debugger", "code-implementer"):
         raw["fixer"] = "code-implementer"
+    raw["summary"] = _as_text(raw.get("summary")) or "Review complete."
+    raw["fix_instructions"] = _as_text(raw.get("fix_instructions"))
+    findings_raw = raw.get("findings")
+    findings: list[dict] = []
+    for f in (findings_raw if isinstance(findings_raw, list) else []):
+        if isinstance(f, dict):
+            findings.append({"title": _as_text(f.get("title")),
+                             "severity": _as_text(f.get("severity")) or "?",
+                             "file": _as_text(f.get("file"))})
+        elif f:
+            findings.append({"title": _as_text(f), "severity": "?", "file": ""})
+    raw["findings"] = findings
     return raw
 
 
