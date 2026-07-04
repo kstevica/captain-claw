@@ -434,6 +434,33 @@ BASNA_COMMAND_HELP = (
     "It runs in the background; you'll get the answer when it's ready."
 )
 
+CODE_COMMAND_HELP = (
+    "💻 *Code* — an autonomous coding session (plan → build → independent "
+    "review → fix, every phase a git commit).\n\n"
+    "Usage:\n"
+    "  `/code <what to build or fix>` — start a coding session\n"
+    "  `/code what we talked about` — I'll derive the task from this conversation\n\n"
+    "Example:\n"
+    "  `/code a CLI tool that renames photos by their EXIF date`\n\n"
+    "It runs in the background; you'll get the result here when it finishes."
+)
+
+# Injected in place of a `/code <args>` message: the MODEL resolves the concrete
+# task from the conversation (so "/code what we talked about" works) and calls
+# the `code` tool — or asks the user to clarify when it's too vague to act on.
+_CODE_COMMAND_DIRECTIVE = (
+    "[/code command] The user wants to start an autonomous coding session. Their "
+    "request: \"{args}\".\n\n"
+    "Derive a CONCRETE, self-contained coding task from that request plus this "
+    "conversation's context, then call the `code` tool with action='start': put "
+    "the task in `task` and the relevant background (decisions, constraints, "
+    "snippets, file names) in `context`. If this conversation already has a "
+    "matching coding project or session, pass `project` (and `session_id` to "
+    "continue it). If the request is too vague to state a concrete buildable "
+    "task even with the conversation context, do NOT call the tool — ask the "
+    "user to be more specific about what to build. Reply in the user's language."
+)
+
 
 def _detect_basna_run(user_input: str) -> str | None:
     """If the message is a 'run a Basna' command, return the task to run, else None."""
@@ -528,6 +555,27 @@ class AgentOrchestrationMixin:
             self._add_session_message(role="user", content=user_input)
             self._add_session_message(role="assistant", content=_reply)
             return _reply
+
+        # `/code` slash command — works on every channel that funnels through
+        # complete() (web, WhatsApp, Telegram, API). Unlike /basna's verbatim
+        # relay, the task often references the conversation ("/code what we
+        # talked about"), so the MODEL resolves it: we rewrite the input into a
+        # directive and run a normal turn — the model calls the `code` tool with
+        # a concrete task+context, or asks the user to clarify.
+        if _st.lower() == "/code" or _st.lower().startswith("/code "):
+            _args = _st[len("/code"):].strip()
+            _tools = getattr(self, "tools", None)
+            if _tools is None or not _tools.has_tool("code"):
+                _reply = "The code tool isn't available on this agent."
+                self._add_session_message(role="user", content=user_input)
+                self._add_session_message(role="assistant", content=_reply)
+                return _reply
+            if not _args:
+                self._add_session_message(role="user", content=user_input)
+                self._add_session_message(role="assistant", content=CODE_COMMAND_HELP)
+                return CODE_COMMAND_HELP
+            user_input = _CODE_COMMAND_DIRECTIVE.format(args=_args)
+            # fall through to the normal model turn below
 
         # Deterministic Basna relay: when the user explicitly asks to run/execute
         # a Basna, hand the task straight to the `basna` tool rather than relying

@@ -638,6 +638,11 @@ async def execute_telegram_command(
         if cmd in ("/basna",):
             return await user_agent.run_basna_command(args.strip())
 
+        if cmd in ("/code",):
+            # Fall through to the normal agent turn — complete() rewrites /code
+            # into the code-tool directive (the task may need conversation context).
+            return None
+
         if cmd in ("/orchestrate",):
             return None
 

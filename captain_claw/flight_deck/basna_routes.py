@@ -621,47 +621,16 @@ async def _notify_source_agent(
 ) -> None:
     """Deliver a Basna completion back to the originating agent (delegate-style).
 
-    Opens a WebSocket to the agent's port (auth resolved server-side) and sends a
-    `notification` with `trigger_response`, carrying origin channel info so the
-    agent's reply lands where the user asked. Best-effort; logs on failure.
+    Thin wrapper over the shared :func:`notify_source_agent` (also used by
+    agent-initiated Code sessions) with Basna-specific wording.
     """
-    import websockets
-
-    from captain_claw.flight_deck.server import _resolve_agent_auth
-    if not source_port:
-        return
-    auth = _resolve_agent_auth(int(source_port))
-    params = f"?token={auth}" if auth else ""
-    url = f"ws://{source_host or 'localhost'}:{source_port}/ws{params}"
-    verb = "finished successfully" if ok else "ran into an error"
-    callback_msg = (
-        f"[Basna run '{title}' {verb}] This is the RESULT of the autonomous Basna "
-        f"run you started (session {session_id}). Relay it to the user now, "
-        f"concisely, in their language. Do NOT start another Basna and do NOT say "
-        f"you are still waiting — you already have the outcome below:\n\n{summary}"
+    from captain_claw.flight_deck.agent_notify import notify_source_agent
+    await notify_source_agent(
+        source_host=source_host, source_port=source_port, origin=origin,
+        kind="Basna run", title=title, run_ref=f"session {session_id}",
+        ok=ok, summary=summary,
+        no_restart_hint="Do NOT start another Basna and ",
     )
-    payload: dict = {"type": "notification", "content": callback_msg, "trigger_response": True}
-    if origin.get("platform") and origin["platform"] != "web":
-        payload["origin_platform"] = origin["platform"]
-        payload["origin_user_id"] = origin.get("user_id", "")
-        payload["origin_chat_id"] = origin.get("chat_id", 0)
-    try:
-        async with websockets.connect(url, open_timeout=10, close_timeout=5) as ws:
-            welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-            if welcome.get("type") != "welcome":
-                return
-            while True:  # skip the session replay before our message
-                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                if msg.get("type") == "replay_done":
-                    break
-            await ws.send(json.dumps(payload))
-            try:
-                await asyncio.wait_for(ws.recv(), timeout=30)
-            except TimeoutError:
-                pass
-    except Exception as exc:
-        log.warning("Basna completion delivery failed",
-                    session_id=session_id, port=source_port, error=str(exc))
 
 
 async def _run_and_notify(

@@ -23,6 +23,7 @@ export interface CodeSession {
   status: string     // idle | running | awaiting_plan
   last_message?: string
   created?: number
+  source?: string    // 'user' | 'agent' (started by an agent via the code tool)
 }
 
 // A project groups folders + sessions.
@@ -295,6 +296,44 @@ function _statusOf(state: Record<string, unknown>): string {
   return (state?.status as string) || 'idle'
 }
 
+// Live-follow: a run started elsewhere (e.g. an agent's `code` tool from chat,
+// WhatsApp, Telegram) writes progress + chat under the same project/session
+// keys the UI reads. `selectSession` only snapshots once, so such a run would
+// look frozen. This follows a live session until it settles, updating messages/
+// progress/commits — identical to the `send` loop, but triggered by selection.
+// A monotonic token cancels a stale follower the moment another session is
+// selected; it also yields while `sending` (the send/approve loop owns polling).
+let _followToken = 0
+
+async function _followRun(
+  get: () => CodeStore,
+  set: (partial: Partial<CodeStore>) => void,
+  project: string,
+  session: string,
+  token: number,
+): Promise<void> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  for (;;) {
+    if (token !== _followToken) return
+    const st = get()
+    if (st.activeProject !== project || st.activeSession !== session) return
+    if (st.sending) { await sleep(1500); continue }   // send/approve loop owns polling
+    let prog: { events: CodeProgressEvent[]; active: boolean }
+    let chat: { messages: CodeMessage[]; state: Record<string, unknown> }
+    try {
+      [prog, chat] = await Promise.all([apiProgress(project, session), apiGetChat(project, session)])
+    } catch { await sleep(2000); continue }
+    if (token !== _followToken) return
+    const status = _statusOf(chat.state)
+    set({ progress: prog.events || [], messages: chat.messages, status })
+    if (status !== 'running' && !prog.active) {
+      try { set({ commits: await apiLog(project, session) }) } catch { /* ignore */ }
+      return
+    }
+    await sleep(1500)
+  }
+}
+
 export const useCodeStore = create<CodeStore>((set, get) => ({
   projects: [],
   activeProject: '',
@@ -361,9 +400,18 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   },
 
   selectSession: async (project, session) => {
+    const token = ++_followToken   // supersede any in-flight follower
     set({ activeProject: project, activeSession: session, messages: [], commits: [], progress: [], status: 'idle' })
     const [chat, commits] = await Promise.all([apiGetChat(project, session), apiLog(project, session)])
-    set({ messages: chat.messages, commits, status: _statusOf(chat.state) })
+    if (token !== _followToken) return   // user already switched away
+    const status = _statusOf(chat.state)
+    set({ messages: chat.messages, commits, status })
+    // If the run is live (e.g. started by an agent from chat), follow it until
+    // it settles so status + messages stream in, just like a Code-started run.
+    const prog = await apiProgress(project, session).catch(() => ({ events: [], active: false }))
+    if (token !== _followToken) return
+    set({ progress: prog.events || [] })
+    if (status === 'running' || prog.active) void _followRun(get, set, project, session, token)
   },
 
   send: async (text) => {

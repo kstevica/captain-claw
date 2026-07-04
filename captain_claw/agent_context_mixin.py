@@ -2373,6 +2373,11 @@ class AgentContextMixin:
         # outside a Vatra run, so registration cost is negligible.
         from captain_claw.tools.vatra import VatraTool
         self.tools.register(VatraTool())
+        # Code studio access — always registered; starts/reads autonomous coding
+        # sessions (clear error when FD_URL is unavailable; the tool itself
+        # refuses recursion from coding/ensemble workers).
+        from captain_claw.tools.code_session import CodeSessionTool
+        self.tools.register(CodeSessionTool())
         # Code-app authoring — always registered; calls return a clear error
         # if FD_URL isn't available, so registration cost is negligible.
         from captain_claw.tools.app_runner import AppRunnerTool

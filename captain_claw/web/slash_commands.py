@@ -329,6 +329,16 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/basna",):
             result = await server.agent.run_basna_command(args.strip())
 
+        elif cmd in ("/code",):
+            # Needs a MODEL turn — the task may reference the conversation
+            # ("/code what we talked about"), so route into the normal chat
+            # pipeline; agent.complete() rewrites /code into the code-tool
+            # directive (or asks the user to clarify). The chat handler sends
+            # its own replies, so return without emitting a command_result.
+            from captain_claw.web.chat_handler import handle_chat
+            await handle_chat(server, ws, raw.strip())
+            return
+
         elif cmd in ("/screenshot",):
             result = await _handle_screenshot_command(server, ws, args.strip())
 

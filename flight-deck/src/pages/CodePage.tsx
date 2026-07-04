@@ -290,6 +290,9 @@ export function CodePage() {
                           <span className="flex items-center gap-1 truncate font-medium">
                             {s.status === 'running' && <Loader2 size={11} className="shrink-0 animate-spin text-amber-400" />}
                             {s.title}
+                            {s.source === 'agent' && (
+                              <span className="shrink-0 rounded border border-violet-500/25 bg-violet-500/15 px-1 py-px text-[9px] font-medium text-violet-700 dark:text-violet-300">agent</span>
+                            )}
                           </span>
                           <span className="truncate text-[11px] text-zinc-500">{s.folder} · {s.messages} msgs</span>
                         </button>
@@ -460,13 +463,9 @@ export function CodePage() {
                           {m.ok === false && <span className="text-red-400">failed</span>}
                         </div>
                       )}
-                      {m.role === 'user' ? (
-                        <div className="whitespace-pre-wrap break-words text-sm text-zinc-200">{m.text}</div>
-                      ) : (
-                        <div className={`fd-markdown break-words text-sm text-zinc-200 ${m.kind === 'plan' ? 'rounded border border-zinc-800 bg-zinc-900/40 p-3' : ''}`}>
-                          <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
-                        </div>
-                      )}
+                      <div className={`fd-markdown break-words text-sm text-zinc-200 ${m.role === 'assistant' && m.kind === 'plan' ? 'rounded border border-zinc-800 bg-zinc-900/40 p-3' : ''}`}>
+                        <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
+                      </div>
                       {!!m.findings?.length && (
                         <ul className="mt-1.5 space-y-0.5">
                           {m.findings.map((f, i) => (

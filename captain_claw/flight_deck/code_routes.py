@@ -471,6 +471,7 @@ def _project_tree(user_id: str, project: str) -> dict:
             "id": s.get("id"), "title": s.get("title", "Session"), "folder": s.get("folder", ""),
             "messages": len(chat), "status": _read_state(sdir).get("status", "idle"),
             "last_message": (chat[-1]["text"][:120] if chat else ""), "created": s.get("created", 0),
+            "source": s.get("source", "user"),
         })
     return {"name": project, "folders": folders_out, "sessions": sessions_out}
 
@@ -696,7 +697,9 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
     """Spawn one archetype anchored at ``repo``, dispatch ``prompt``, dispose."""
     src = by_id[archetype_id]
     # Every code agent gets the codemap tool (query the repo's blackboard).
-    tools = list(src.get("tools") or [])
+    # The `code` tool is stripped — a coding-run agent must never start a child
+    # coding session (the tool itself double-checks via CLAW_CODE_AGENT).
+    tools = [t for t in (src.get("tools") or []) if t != "code"]
     if "codemap" not in tools:
         tools = tools + ["codemap"]
     arch = {**src, "tools": tools}
@@ -1863,3 +1866,287 @@ async def cancel_plan(body: CancelReq, user: dict = Depends(get_current_user)):
                              kind="note")
     _write_state(sdir, {"status": "idle"})
     return {"status": "idle", "message": assistant}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Agent-initiated coding sessions — the `code` tool's server surface.
+#
+# A chat agent (any channel: web / WhatsApp / Telegram / glasses) starts a
+# coding session on behalf of its owner. The run executes autonomously —
+# plans are AUTO-APPROVED (visible in the session chat) — and the outcome is
+# delivered back to the originating agent via the shared notifier, which
+# carries the origin channel so the relay reply lands where the user asked.
+# ═══════════════════════════════════════════════════════════════════════════
+
+import types as _types
+
+# Live agent-initiated runs per owner (session pkeys) + start timestamps for
+# the run-rate breaker. In-memory: a FD restart clears them, which is fine —
+# the breaker guards runaway bursts, not long-term quotas.
+_agent_code_active: dict[str, set] = {}
+_agent_code_tasks: set = set()
+_MAX_AGENT_CODE_RUNS_PER_OWNER = 3
+_agent_code_starts: dict[str, list] = {}
+_AGENT_CODE_WINDOW_SECONDS = 1800.0
+_MAX_AGENT_CODE_PER_WINDOW = 6
+
+
+def _resolve_agent_caller(web_auth: str, source_port: int, owner_hint: str) -> str:
+    """Owner for an agent-tool request: auth token → port → env hint (or 403)."""
+    from captain_claw.flight_deck.server import (
+        _resolve_agent_owner,
+        _resolve_agent_owner_by_auth,
+    )
+    owner = ""
+    if web_auth:
+        owner = _resolve_agent_owner_by_auth(web_auth) or ""
+    if not owner and source_port:
+        owner = _resolve_agent_owner(int(source_port)) or ""
+    owner = owner or (owner_hint or "").strip()
+    if not owner:
+        raise HTTPException(403, "could not resolve calling agent's owner")
+    return owner
+
+
+def _stub_request(user_id: str):
+    """Background-safe Request stand-in (matches dubina's pattern): the spawn
+    path only reads ``request.state.user_id``."""
+    return _types.SimpleNamespace(state=_types.SimpleNamespace(user_id=user_id))
+
+
+def _ensure_project(uid: str, name: str) -> str:
+    """Create the project if missing (idempotent); return its safe name."""
+    pname = safe_name(name, fallback="")
+    if not pname:
+        raise HTTPException(400, "invalid project name")
+    proj = _proj_dir(uid, pname)
+    if not (proj / ".code" / "project.json").is_file():
+        proj.mkdir(parents=True, exist_ok=True)
+        _write_project(uid, pname, {"folders": []})
+        _write_sessions(uid, pname, [])
+    return pname
+
+
+async def _ensure_folder(uid: str, project: str, name: str) -> str:
+    """Create a VFS folder (fresh git repo) in the project if missing."""
+    folder = safe_name(name, fallback="")
+    if not folder:
+        raise HTTPException(400, "invalid folder name")
+    data = _read_project(uid, project)
+    if not any(f.get("name") == folder for f in data["folders"]):
+        repo = (_proj_dir(uid, project) / folder).resolve()
+        repo.mkdir(parents=True, exist_ok=True)
+        await code_git.git_init(repo)
+        data["folders"].append({"name": folder, "kind": "vfs"})
+        _write_project(uid, project, data)
+    return folder
+
+
+def _ensure_session(uid: str, project: str, folder: str, title: str, origin_kind: str) -> dict:
+    """Create a new session in the project/folder, badged as agent-started."""
+    sessions = _read_sessions(uid, project)
+    sid = uuid.uuid4().hex[:8]
+    sess = {"id": sid, "title": title.strip() or f"Session {len(sessions) + 1}",
+            "folder": folder, "created": time.time(), "status": "idle",
+            "source": "agent", "origin": origin_kind or "web"}
+    sessions.append(sess)
+    _write_sessions(uid, project, sessions)
+    _session_dir(uid, project, sid)
+    return sess
+
+
+class CodeAgentReq(BaseModel):
+    """Identity every agent-tool request carries (mirrors Basna's _AgentReq)."""
+    web_auth: str = ""
+    source_port: int = 0
+    owner_id: str = ""
+
+
+class CodeAgentStartReq(CodeAgentReq):
+    task: str = ""
+    context: str = ""
+    title: str = ""
+    project: str = ""
+    folder: str = ""
+    session_id: str = ""
+    source_host: str = "localhost"
+    origin_platform: str = "web"
+    origin_user_id: str = ""
+    origin_chat_id: int = 0
+    origin_kind: str = ""
+    origin_address: str = ""
+
+
+class CodeAgentSessionReq(CodeAgentReq):
+    project: str = ""
+    session_id: str = ""
+
+
+async def _agent_code_run(owner: str, project: str, session_id: str, intent: str,
+                          source_host: str, source_port: int, origin: dict,
+                          title: str) -> None:
+    """Run one agent-initiated coding turn end-to-end, then notify the agent.
+
+    Plans are auto-approved: when the router sizes the job big, message()'s
+    planning phase ends in `awaiting_plan` — we append a visible approval line
+    and AWAIT the build loop directly (not create_task) so completion is known.
+    """
+    from captain_claw.flight_deck.agent_notify import notify_source_agent
+    pkey = f"{project}/{session_id}"
+    ok, summary = False, ""
+    try:
+        user = await get_db().get_user_by_id(owner) or {"id": owner}
+        req = _stub_request(owner)
+        out = await message(MessageReq(project=project, session=session_id, text=intent),
+                            req, user)  # type: ignore[arg-type]
+
+        if out.get("status") == "awaiting_plan":
+            _sess, repo, sdir, _pk = _sctx(owner, project, session_id)
+            state = _read_state(sdir)
+            plan_file = state.get("plan_file") or "plan.md"
+            db = get_db()
+            archetypes = await merged_archetypes(db, owner)
+            by_id = {a["id"]: a for a in archetypes}
+            registry = _load_registry()
+            tiers_map, env_vars = await _load_owner_tiers(db, owner)
+            _append_chat(sdir, "user",
+                         "✓ Plan auto-approved (agent-initiated run) — building.",
+                         kind="approval")
+            await _run_build_loop(req, user, pkey, repo, sdir, intent, by_id,
+                                  tiers_map, env_vars, registry, plan_file=plan_file)
+        elif out.get("status") == "running":
+            # Backlog-continuation branch runs as its own background task —
+            # poll the session state until it settles (bounded).
+            _sess, _repo, sdir, _pk = _sctx(owner, project, session_id)
+            deadline = time.time() + 2 * 3600
+            while time.time() < deadline:
+                await asyncio.sleep(10)
+                if _read_state(sdir).get("status") != "running":
+                    break
+
+        # Outcome = the session's last assistant message.
+        _sess, _repo, sdir, _pk = _sctx(owner, project, session_id)
+        msgs = [m for m in _read_chat(sdir) if m.get("role") == "assistant"]
+        summary = (msgs[-1].get("content", "") if msgs else "").strip() or "(no output)"
+        ok = _read_state(sdir).get("status") != "error"
+    except Exception as exc:  # noqa: BLE001 — deliver the failure to the agent
+        log.warning("agent code run failed", project=project, session=session_id, error=str(exc))
+        summary = f"The coding session failed: {exc}"
+        ok = False
+    finally:
+        _agent_code_active.get(owner, set()).discard(pkey)
+
+    await notify_source_agent(
+        source_host=source_host, source_port=source_port, origin=origin,
+        kind="coding session", title=title,
+        run_ref=f"project '{project}', session {session_id}",
+        ok=ok, summary=summary[:8000],
+        no_restart_hint="Do NOT start another coding session for this and ",
+    )
+
+
+@router.post("/agent/start")
+async def agent_code_start(body: CodeAgentStartReq):
+    """Start (or continue) a coding session on behalf of the calling agent's owner."""
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+    task = (body.task or "").strip()
+    if not task:
+        raise HTTPException(400, "task is required")
+
+    active = _agent_code_active.setdefault(owner, set())
+    if len(active) >= _MAX_AGENT_CODE_RUNS_PER_OWNER:
+        return {"status": "rejected",
+                "reason": f"You already have {len(active)} coding run(s) in progress "
+                          f"(limit {_MAX_AGENT_CODE_RUNS_PER_OWNER}). Wait for one to finish."}
+    now_mono = time.monotonic()
+    starts = _agent_code_starts.setdefault(owner, [])
+    starts[:] = [s for s in starts if now_mono - s < _AGENT_CODE_WINDOW_SECONDS]
+    if len(starts) >= _MAX_AGENT_CODE_PER_WINDOW:
+        log.warning("agent code run-rate breaker tripped", owner=owner, recent=len(starts))
+        return {"status": "rejected",
+                "reason": f"Run-rate limit hit ({_MAX_AGENT_CODE_PER_WINDOW} coding runs / "
+                          f"{int(_AGENT_CODE_WINDOW_SECONDS / 60)} min) — cooling down."}
+    starts.append(now_mono)
+
+    title = (body.title or "").strip() or task[:60]
+
+    # Resolve / create the workspace.
+    if body.session_id:
+        # Continue an existing session — project required alongside.
+        project = safe_name(body.project, fallback="")
+        if not project or not _sget(owner, project, body.session_id):
+            raise HTTPException(404, "session to continue was not found (give project + session_id)")
+        session_id = body.session_id
+    else:
+        default_slug = safe_name("-".join(task.lower().split()[:5]), fallback="") or f"code-{uuid.uuid4().hex[:6]}"
+        project = _ensure_project(owner, body.project or default_slug)
+        folder = await _ensure_folder(owner, project, body.folder or project)
+        sess = _ensure_session(owner, project, folder, title, body.origin_kind or body.origin_platform)
+        session_id = sess["id"]
+
+    intent = task
+    ctx = (body.context or "").strip()
+    if ctx:
+        intent = (f"{task}\n\n--- Context from the requesting conversation "
+                  f"(background only — the task above is what to build) ---\n{ctx}")
+
+    origin = {"platform": body.origin_platform, "user_id": body.origin_user_id,
+              "chat_id": body.origin_chat_id,
+              "kind": body.origin_kind, "address": body.origin_address}
+    pkey = f"{project}/{session_id}"
+    active.add(pkey)
+    t = asyncio.create_task(_agent_code_run(
+        owner, project, session_id, intent, body.source_host, body.source_port,
+        origin, title))
+    _agent_code_tasks.add(t)
+    t.add_done_callback(_agent_code_tasks.discard)
+
+    return {"status": "running", "project": project, "session_id": session_id, "title": title}
+
+
+@router.post("/agent/list")
+async def agent_code_list(body: CodeAgentReq):
+    """The owner's coding projects/folders/sessions — for finding what to continue."""
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+    _ensure_links_project(owner)
+    out = []
+    for name in _discover_projects(owner):
+        _ensure_migrated(owner, name)
+        tree = _project_tree(owner, name)
+        out.append({
+            "project": name,
+            "folders": [f.get("name") for f in tree.get("folders", [])],
+            "sessions": [{"id": s.get("id"), "title": s.get("title"),
+                          "folder": s.get("folder"), "status": s.get("status"),
+                          "source": s.get("source", "user")}
+                         for s in tree.get("sessions", [])],
+        })
+    return {"projects": out}
+
+
+@router.post("/agent/status")
+async def agent_code_status(body: CodeAgentSessionReq):
+    """Live state of one session: status + recent progress + last commits."""
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+    _sess, repo, sdir, _pk = _sctx(owner, body.project, body.session_id)
+    state = _read_state(sdir)
+    commits = await code_git.git_log(repo, limit=5)
+    msgs = _read_chat(sdir)
+    return {"status": state.get("status", "idle"),
+            "title": _sess.get("title", ""),
+            "messages": len(msgs),
+            "last_commits": commits,
+            "last_message": (msgs[-1].get("content", "")[:2000] if msgs else "")}
+
+
+@router.post("/agent/result")
+async def agent_code_result(body: CodeAgentSessionReq):
+    """Final outcome of a session: last assistant message + commit list."""
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+    _sess, repo, sdir, _pk = _sctx(owner, body.project, body.session_id)
+    msgs = [m for m in _read_chat(sdir) if m.get("role") == "assistant"]
+    commits = await code_git.git_log(repo, limit=10)
+    return {"status": _read_state(sdir).get("status", "idle"),
+            "title": _sess.get("title", ""),
+            "result": (msgs[-1].get("content", "") if msgs else ""),
+            "commits": commits}
