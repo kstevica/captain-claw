@@ -215,6 +215,162 @@ async def site_visits(name: str, user: dict = Depends(get_current_user)):
     return vh.get_visits(name)
 
 
+# ── Agent surface (owner resolved by identity, not a login session) ────────
+#
+# The chat-agent sibling of the Hosting page: an agent that has just built a
+# site/app in a VFS folder can publish it and get back a public URL, the same
+# way the `code` tool starts a coding session. These calls are synchronous —
+# publish/start/stop return in-line (no fire-and-forget), so the agent relays
+# the URL immediately. Owner comes from the request identity (auth token →
+# source port → env hint), mirroring the Code and Basna agent routes.
+
+class _AgentReq(BaseModel):
+    web_auth: str = ""
+    source_port: int = 0
+    owner_id: str = ""
+
+
+class AgentPublishReq(_AgentReq):
+    name: str
+    kind: str = "static"          # "static" | "app"
+    project: str
+    subdir: str = ""
+    start_cmd: str = ""
+    auto_start: bool = True       # apps: bring up the process as part of publish
+
+
+class AgentNameReq(_AgentReq):
+    name: str
+
+
+def _agent_owner(body: _AgentReq) -> str:
+    from captain_claw.flight_deck.code_routes import _resolve_agent_caller
+    return _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+
+
+def _agent_owned(name: str, owner: str) -> dict:
+    ent = vh.load_registry().get(name)
+    if not ent:
+        raise HTTPException(404, f"No published site/app named '{name}'.")
+    if ent.get("owner") != owner:
+        raise HTTPException(403, f"'{name}' is published by someone else.")
+    return ent
+
+
+def _abs_url(request: Request, path: str) -> str:
+    """Best-effort absolute public URL (honors a reverse proxy's forwarded host)."""
+    base = str(request.base_url).rstrip("/")
+    return f"{base}{path}"
+
+
+@router.post("/fd/hosting/agent/publish")
+async def agent_publish(body: AgentPublishReq, request: Request):
+    """Publish (or, if the caller already owns the name, re-publish) a VFS folder.
+
+    Static → served at /vfs/<name>/. App → reverse-proxied at /vfs-apps/<name>/;
+    started immediately when ``auto_start`` (the default).
+    """
+    owner = _agent_owner(body)
+    name = (body.name or "").strip().lower()
+    if not vh.valid_name(name):
+        raise HTTPException(400, "Name must be 1–63 chars: lowercase letters, digits, dashes.")
+    if body.kind not in ("static", "app"):
+        raise HTTPException(400, "kind must be 'static' or 'app'")
+    if not body.project.strip():
+        raise HTTPException(400, "project is required")
+    if body.kind == "app" and not body.start_cmd.strip():
+        raise HTTPException(400, "a start command is required for apps")
+
+    reg = vh.load_registry()
+    existing = reg.get(name)
+    if existing and existing.get("owner") != owner:
+        raise HTTPException(409, f"The name '{name}' is already taken by another user.")
+
+    entry = {
+        "kind": body.kind,
+        "owner": owner,
+        "project": body.project.strip(),
+        "subdir": body.subdir.strip().strip("/"),
+        "start_cmd": body.start_cmd.strip(),
+    }
+    if vh.entry_dir(entry) is None:
+        raise HTTPException(404, "That VFS folder doesn't exist.")
+
+    # Re-publish over an owned entry: stop any running app so it restarts clean.
+    if existing and existing.get("kind") == "app":
+        vh.stop_app(name)
+    reg[name] = entry
+    vh.save_registry(reg)
+
+    started, start_msg = False, ""
+    if body.kind == "app" and body.auto_start:
+        started, start_msg = vh.start_app(name)
+
+    view = _view(name, vh.load_registry().get(name, entry))
+    view["updated"] = bool(existing)
+    view["started"] = started
+    view["message"] = start_msg
+    view["url_abs"] = _abs_url(request, view["url"])
+    if body.kind == "app" and body.auto_start and not started:
+        view["log"] = vh.read_app_log(name, tail=40)
+    return view
+
+
+@router.post("/fd/hosting/agent/list")
+async def agent_list(body: _AgentReq):
+    owner = _agent_owner(body)
+    reg = vh.load_registry()
+    mine = [_view(n, e) for n, e in reg.items() if e.get("owner") == owner]
+    mine.sort(key=lambda x: x["name"])
+    return {"entries": mine}
+
+
+@router.post("/fd/hosting/agent/start")
+async def agent_start(body: AgentNameReq, request: Request):
+    owner = _agent_owner(body)
+    ent = _agent_owned(body.name, owner)
+    if ent.get("kind") != "app":
+        raise HTTPException(400, f"'{body.name}' is a static site — nothing to start.")
+    ok, msg = vh.start_app(body.name)
+    view = _view(body.name, vh.load_registry().get(body.name, ent))
+    view.update({"started": ok, "message": msg, "url_abs": _abs_url(request, view["url"])})
+    if not ok:
+        view["log"] = vh.read_app_log(body.name, tail=40)
+    return view
+
+
+@router.post("/fd/hosting/agent/stop")
+async def agent_stop(body: AgentNameReq):
+    owner = _agent_owner(body)
+    _agent_owned(body.name, owner)
+    ok, msg = vh.stop_app(body.name)
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/fd/hosting/agent/unpublish")
+async def agent_unpublish(body: AgentNameReq):
+    owner = _agent_owner(body)
+    ent = _agent_owned(body.name, owner)
+    if ent.get("kind") == "app":
+        vh.stop_app(body.name)
+    reg = vh.load_registry()
+    reg.pop(body.name, None)
+    vh.save_registry(reg)
+    return {"ok": True}
+
+
+@router.post("/fd/hosting/agent/status")
+async def agent_status(body: AgentNameReq, request: Request):
+    owner = _agent_owner(body)
+    ent = _agent_owned(body.name, owner)
+    view = _view(body.name, ent)
+    view["url_abs"] = _abs_url(request, view["url"])
+    if ent.get("kind") == "app":
+        view["log"] = vh.read_app_log(body.name, tail=40)
+    view["visits"] = vh.get_visits(body.name)
+    return view
+
+
 # ── Public static serving ─────────────────────────────────────────────────
 
 def _dir_listing(name: str, rel_path: str, directory) -> HTMLResponse:

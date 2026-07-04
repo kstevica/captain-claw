@@ -2378,6 +2378,11 @@ class AgentContextMixin:
         # refuses recursion from coding/ensemble workers).
         from captain_claw.tools.code_session import CodeSessionTool
         self.tools.register(CodeSessionTool())
+        # VFS Hosting — always registered; publishes a VFS folder as a static
+        # site or a running app and returns a public URL (clear error when
+        # FD_URL / owner is unavailable, so registration cost is negligible).
+        from captain_claw.tools.hosting import HostingTool
+        self.tools.register(HostingTool())
         # Code-app authoring — always registered; calls return a clear error
         # if FD_URL isn't available, so registration cost is negligible.
         from captain_claw.tools.app_runner import AppRunnerTool
