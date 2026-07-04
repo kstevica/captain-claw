@@ -10,6 +10,7 @@ import { SharedClipboard } from './components/common/SharedClipboard'
 import { ShortcutsOverlay, useKeyboardShortcuts } from './components/common/KeyboardShortcuts'
 import { DesktopPage } from './pages/DesktopPage'
 import { QuickChatPage } from './pages/QuickChatPage'
+import { HostingPage } from './pages/HostingPage'
 import { OperationsPage } from './pages/OperationsPage'
 import { WorkflowPage } from './pages/WorkflowPage'
 import { SpawnerPage } from './pages/SpawnerPage'
@@ -320,6 +321,7 @@ function AppContent() {
       {view === 'code' && <CodePage />}
       {view === 'dubina' && <DubinaPage />}
       {view === 'vfs' && <VFSPage />}
+      {view === 'hosting' && <HostingPage />}
       {view === 'agent-folders' && <AgentFoldersPage />}
       {view === 'connections' && <ConnectionsPage />}
       {view === 'gpu-cloud' && <GPUCloudPage />}

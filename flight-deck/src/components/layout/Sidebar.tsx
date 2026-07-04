@@ -28,6 +28,7 @@ import {
   Mountain,
   HardDrive,
   Code2,
+  Globe,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -51,6 +52,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
       { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
       { id: 'code', icon: Code2, label: 'Code' },
       { id: 'vfs', icon: FolderTree, label: 'VFS' },
+      { id: 'hosting', icon: Globe, label: 'Hosting' },
     ],
   },
   {

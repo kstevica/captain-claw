@@ -619,6 +619,27 @@ _ESCALATE_DIRECTIVE = (
     "quick edit; for a normal small fix, just do it."
 )
 
+# Web apps built here are often published via Flight Deck Hosting, which serves
+# them behind a PATH PREFIX (`/vfs-apps/<name>/` for a running app, `/vfs/<name>/`
+# for a static build). Root-absolute URLs break under a prefix — the browser
+# sends `/api` to the host root, not the app. Bake in base-path awareness so it
+# works both standalone and behind the proxy.
+_HOSTING_DIRECTIVE = (
+    "\n\nWEB HOSTING — if you build a web app, server, or static site (anything a "
+    "browser loads), make it BASE-PATH AWARE so it also works when served behind a "
+    "path prefix (Flight Deck Hosting serves apps at `/vfs-apps/<name>/` and static "
+    "builds at `/vfs/<name>/`):\n"
+    "- A server MUST bind the `PORT` env var (fallback to a default) on 127.0.0.1 — "
+    "not a hardcoded port only.\n"
+    "- Derive the public base from the `FD_BASE_PATH` env var (fallback `\"/\"`), and "
+    "PREFIX every root-absolute asset/API URL with it — e.g. `fetch(`${FD_BASE_PATH}api/x`)`, "
+    "script/link/img `src`/`href`. NEVER hardcode a root-absolute path like `/api` or "
+    "`/greet`; under a prefix that hits the host root and fails.\n"
+    "- For bundlers (Vite/CRA/Next/etc.), set the base/public path from `FD_BASE_PATH` "
+    "(e.g. Vite `base`, `PUBLIC_URL`, Next `basePath`).\n"
+    "- Prefer relative URLs where practical. The result must still run at `/` standalone."
+)
+
 
 def _exec_prompt(intent: str) -> str:
     return (
@@ -628,7 +649,7 @@ def _exec_prompt(intent: str) -> str:
         "verify. Do NOT use any `vfs:` prefix — just work in the directory you're in.\n\n"
         f"Task:\n{intent}\n\n"
         "When finished, briefly summarize what you created/changed and how you "
-        "verified it actually runs." + _ESCALATE_DIRECTIVE + _REPORTS_DIRECTIVE
+        "verified it actually runs." + _ESCALATE_DIRECTIVE + _HOSTING_DIRECTIVE + _REPORTS_DIRECTIVE
     )
 
 
@@ -780,7 +801,7 @@ def _plan_prompt(intent: str, plan_rel: str = "plan.md") -> str:
         "In the plan, reference every project file as a plain REPO-RELATIVE path "
         "(`index.html`, `src/game.js`) — never under `saved/` (untracked scratch), "
         "never with a `vfs:` prefix, never absolute.\n\n"
-        f"Task:\n{intent}"
+        f"Task:\n{intent}" + _HOSTING_DIRECTIVE
     )
 
 
@@ -796,7 +817,7 @@ def _build_prompt(intent: str, plan_rel: str = "plan.md") -> str:
         "turn is judged by the files you actually change. Do not spend the turn on plan "
         "bookkeeping; the plan is already saved.\n\n"
         f"Original request for context:\n{intent}\n\n"
-        "When finished, summarize what you built and how you verified it runs." + _REPORTS_DIRECTIVE
+        "When finished, summarize what you built and how you verified it runs." + _HOSTING_DIRECTIVE + _REPORTS_DIRECTIVE
     )
 
 
