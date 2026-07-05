@@ -119,9 +119,12 @@ export const LEVERS: Lever[] = [
     blurb: 'Commit each round’s state of the research folder to git — diffs, rollback, provenance. Zero model tokens.' },
 ]
 
+// Non-zinc accent colors don't auto-invert with the theme, so give each badge a
+// light-theme base + an explicit dark: override (dark text on light bg in light
+// mode, light text on dark bg in dark mode).
 export const COST_STYLE: Record<CostBadge, string> = {
-  free: 'border-emerald-700/50 bg-emerald-900/30 text-emerald-300',
-  saver: 'border-sky-700/50 bg-sky-900/30 text-sky-300',
-  cheap: 'border-amber-700/40 bg-amber-900/20 text-amber-300',
-  paid: 'border-rose-700/50 bg-rose-900/30 text-rose-300',
+  free: 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700/50 dark:bg-emerald-900/30 dark:text-emerald-300',
+  saver: 'border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-700/50 dark:bg-sky-900/30 dark:text-sky-300',
+  cheap: 'border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-300',
+  paid: 'border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-700/50 dark:bg-rose-900/30 dark:text-rose-300',
 }

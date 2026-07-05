@@ -4,7 +4,7 @@ import { LEVERS, COST_STYLE, applyPreset, setFlag } from '../services/quality'
 import type { QualityProfile, Scope, BoolFlag } from '../services/quality'
 
 const PRESET_STYLE: Record<string, string> = {
-  off: 'bg-zinc-600 text-white',
+  off: 'bg-slate-500 text-white',   // fixed neutral (zinc + text-white washes out in light theme)
   balanced: 'bg-sky-600 text-white',
   thorough: 'bg-amber-500 text-zinc-950',
 }
@@ -78,22 +78,22 @@ export function QualityControls({
 
       {/* advanced: individual levers */}
       {open && (
-        <div className="space-y-1.5 border-t border-zinc-800 px-3 py-2.5">
+        <div className="space-y-3 border-t border-zinc-800 px-3 py-3">
           {levers.map((l) => {
             const on = value[l.flag as BoolFlag]
             return (
               <div key={l.flag}>
-                <div className="flex items-start gap-2.5">
-                  <Switch on={on} onClick={() => onChange(setFlag(value, l.flag, !on))} />
+                <div className="flex items-start gap-3.5">
+                  <div className="pt-0.5"><Switch on={on} onClick={() => onChange(setFlag(value, l.flag, !on))} /></div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-2">
                       <span className="text-xs font-medium text-zinc-200">{l.label}</span>
                       <span className={`rounded border px-1 py-px text-[9px] font-semibold uppercase ${COST_STYLE[l.cost]}`}>
                         {l.cost}
                       </span>
                       <span className="text-[9px] font-mono text-zinc-600">{l.code}</span>
                     </div>
-                    <p className="mt-0.5 text-[11px] leading-snug text-zinc-500">{l.blurb}</p>
+                    <p className="mt-1 text-[11px] leading-snug text-zinc-500">{l.blurb}</p>
                     {/* deep_build sample count */}
                     {l.flag === 'deep_build' && on && (
                       <label className="mt-1.5 flex items-center gap-2 text-[11px] text-zinc-400">
