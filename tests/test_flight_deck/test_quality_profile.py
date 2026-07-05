@@ -40,7 +40,8 @@ def test_balanced_enables_only_the_free_or_saving_levers():
     p = QualityProfile.from_dict({"profile": "balanced"})
     assert p.test_gate and p.acted_gate
     assert p.research_map and p.worker_escalate
-    # Paid / not-yet-wired levers stay off in balanced.
+    assert p.delta_rounds and p.critic_triage  # free savers
+    # Paid levers stay off in balanced.
     assert not p.coverage_check
     assert not p.git_snapshots
 
@@ -49,14 +50,13 @@ def test_thorough_enables_the_wired_paid_levers():
     p = QualityProfile.from_dict({"profile": "thorough"})
     assert p.coverage_check and p.git_snapshots
     assert p.test_gate and p.acted_gate  # still inherits balanced's set
+    assert p.delta_rounds and p.critic_triage
 
 
-def test_no_preset_enables_the_expensive_or_reserved_levers():
-    # deep_build (paid) must be explicit; delta_rounds (R4) is not wired yet.
-    # Neither may be switched on silently by a preset.
+def test_deep_build_is_the_only_lever_no_preset_enables():
+    # deep_build (paid) must be explicit; every other wired flag can be preset-on.
     for name in ("off", "balanced", "thorough"):
         p = QualityProfile.from_dict({"profile": name})
-        assert not p.delta_rounds, name
         assert not p.deep_build, name
 
 

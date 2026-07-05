@@ -936,7 +936,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     res = await run_horizon_closer(
                         question=q, answer=r["output"], critic_provider=cp,
                         revise_provider=rp, critics=_hcfg.critics,
-                        on_event=_closer_on_event(sid, r.get("role", "slice"), "verify"))
+                        on_event=_closer_on_event(sid, r.get("role", "slice"), "verify"),
+                        triage_findings=quality.critic_triage)  # R3
                     if res["revised"]:
                         r["output"] = res["answer"]
                         _progress(sid, "verify",
@@ -974,7 +975,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 rp, _ = _provider_call(cc, temperature=0.3, default_max=8192, cap=32768)
             closed = await run_horizon_closer(
                 question=intent, answer=truth, critic_provider=cp, revise_provider=rp,
-                critics=_hcfg.critics, on_event=_closer_on_event(sid, "Closer", "verify"))
+                critics=_hcfg.critics, on_event=_closer_on_event(sid, "Closer", "verify"),
+                triage_findings=quality.critic_triage)  # R3
             if closed["revised"]:
                 truth = closed["answer"]
                 _progress(sid, "verify", "Closer revised the deliverable")

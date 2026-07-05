@@ -50,18 +50,19 @@ log = get_logger(__name__)
 #  * ``deep_build`` (C3) IS wired, but it is the one genuinely expensive lever (N
 #    build attempts), so no preset enables it — it must be turned on explicitly
 #    (ideally with a ``token_budget``) so a preset can never surprise-spend.
-#  * ``delta_rounds`` (R4) is reserved: the flag exists and is honoured wherever
-#    wired, but nothing reads it yet, so no preset switches it on.
 _PRESETS: dict[str, set[str]] = {
     "off": set(),
     "balanced": {
         "acted_gate",       # R2 — retry a worker that wrote nothing (saver)
         "test_gate",        # C1 — run repo tests, feed failures to triage (free)
         "research_map",     # R1 — index research folders, cut re-reads (saver on chains)
+        "delta_rounds",     # R4 — continuation rounds inline less prior text (saver)
+        "critic_triage",    # R3 — actionable closer revisions (free, opt-in path)
         "worker_escalate",  # R5 — an overwhelmed worker escalates instead of emitting junk
     },
     "thorough": {
-        "acted_gate", "test_gate", "research_map", "worker_escalate",
+        "acted_gate", "test_gate", "research_map", "delta_rounds", "critic_triage",
+        "worker_escalate",
         "coverage_check",   # C5 — judge final state vs the approved plan (one LLM call)
         "git_snapshots",    # R6 — git init + per-round commits for research folders (free)
     },
@@ -85,7 +86,8 @@ class QualityProfile:
     # ── Research-side levers (Basna / Vatra) ──
     acted_gate: bool = False       # R2: one corrective retry when a worker wrote nothing
     research_map: bool = False     # R1: FTS index + cartographer pass over the VFS folder
-    delta_rounds: bool = False     # R4: continuation rounds review only the new r{N}- files
+    delta_rounds: bool = False     # R4: continuation rounds inline less prior text (search instead)
+    critic_triage: bool = False    # R3: closer distils critic findings into an ordered checklist
     worker_escalate: bool = False  # R5: worker can flag ESCALATE → higher-tier re-dispatch
     git_snapshots: bool = False    # R6: git init the research folder + commit each round
 
@@ -108,7 +110,8 @@ class QualityProfile:
         on = _PRESETS[profile]
         bool_flags = {
             "test_gate", "deep_build", "coverage_check", "acted_gate",
-            "research_map", "delta_rounds", "worker_escalate", "git_snapshots",
+            "research_map", "delta_rounds", "critic_triage", "worker_escalate",
+            "git_snapshots",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -132,7 +135,8 @@ class QualityProfile:
 
     _BOOL_FLAGS = (
         "test_gate", "deep_build", "coverage_check", "acted_gate",
-        "research_map", "delta_rounds", "worker_escalate", "git_snapshots",
+        "research_map", "delta_rounds", "critic_triage", "worker_escalate",
+        "git_snapshots",
     )
 
     @property

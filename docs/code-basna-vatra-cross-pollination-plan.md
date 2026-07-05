@@ -37,16 +37,23 @@ failures are pre-existing and unrelated.
   extra attempts are budget-gated. `_deep_build` in `code_routes.py`. Not enabled
   by any preset — it's the one genuinely expensive lever, so it must be turned on
   explicitly (ideally with a `token_budget`).
+- **R3 critic-triage** (`critic_triage`) — the Horizon closer distils critic
+  objections into a deduped, numbered fix checklist before its one revision
+  (Code's triage shape), so the revision is targeted instead of a blob.
+  `_triage_feedback` + `triage_findings` param in `horizon_worker.py`; wired into
+  the Basna/Vatra closer calls. Deterministic, no extra model call.
+- **R4 delta rounds** (`delta_rounds`) — a continuation round inlines only a short
+  preview of the prior synthesis and spills the full text to a workspace file +
+  the Research Map, so a long chain's per-round cost stops growing with the
+  accumulated text. `_delta_seed` in `basna_routes._continue_run`; the profile is
+  inherited across the whole chain.
+- **C6 follow-up passes** — one-click `harden` / `cover` / `simplify` on a finished
+  result via `POST /fd/code/followup {project, session, kind}`. Reuses the build
+  loop's seeded-fix path (so the review/fix loop + C1 test gate still verify),
+  with a kind-appropriate archetype (debugger / qa-engineer / simplifier).
 
-**Reserved (flag defined, not yet wired — a dedicated pass; the two starred are
-where "don't break current behaviour" is at real risk, so they belong in their
-own carefully-tested change):**
-- **R4 delta rounds** (`delta_rounds`) — continuation critics/closer see only the
-  new `r{N}-` files. (R1 already delivers most of the continuation token savings.)
-- **R3 critic-triage** — turn horizon-closer critic findings into per-owner ordered
-  fixes (Code's triage shape) instead of one blanket revision.
-- **C6 continuation lineage** — root/parent/round bookkeeping + one-click
-  harden/cover/simplify follow-ups (needs endpoints + frontend).
+**Reserved (a dedicated pass; both are where "don't break current behaviour" is at
+real risk, so they belong in their own carefully-tested change):**
 - **★ C4 parallel Vatra build** — planner emits dependency-scoped steps; independent
   steps build in parallel waves via Vatra ask/wait/board. Major Code build-path
   change; gate behind a flag so the default path is untouched.

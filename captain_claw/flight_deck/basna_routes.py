@@ -852,6 +852,29 @@ _CONTINUE_HEADERS = {
     ),
 }
 
+_TRUTH_CHARS = 16_000          # default: inline up to this much prior synthesis
+_TRUTH_CHARS_DELTA = 2_500     # R4 delta rounds: inline only a short preview
+
+
+def _delta_seed(truth: str, delta_rounds: bool) -> tuple[int, bool, str]:
+    """R4: decide how much of the prior synthesis to INLINE into a continuation.
+
+    With ``delta_rounds`` on, inline only a short preview and always spill the full
+    text to a workspace file — the worker reads it (or searches the Research Map,
+    R1) on demand rather than carrying the whole prior conclusion in-context every
+    round. That is what stops a long continuation chain's per-round token cost from
+    growing with the accumulated text. Returns
+    ``(preview_len, write_full_file, extra_directive)``. With the flag off this is
+    exactly the previous behaviour."""
+    if delta_rounds:
+        return _TRUTH_CHARS_DELTA, True, (
+            "\n\nDELTA ROUND: only a short PREVIEW of the prior conclusion is inlined "
+            "above — the complete prior synthesis is in your workspace file and the "
+            "shared folder is indexed. Read/search for detail on demand instead of "
+            "assuming the whole prior text is in front of you; spend your effort on the "
+            "NEW work for this round.\n")
+    return _TRUTH_CHARS, len(truth) > _TRUTH_CHARS, ""
+
 
 async def _continue_run(
     owner: str, parent_session_id: str, user: dict, *,
@@ -924,9 +947,12 @@ async def _continue_run(
                 "do not redo settled work.")
 
     parent_title = (parent.get("title") or parent.get("intent") or "")[:50]
-    _TRUTH_CHARS = 16_000
     _PRIOR_FILE = "prior-synthesis.md"
-    big = len(truth) > _TRUTH_CHARS
+    # R4: with delta_rounds on (inherited from the parent's quality profile), inline
+    # only a short preview and lean on the workspace file + Research Map for detail.
+    parent_quality_raw = parent_cfg.get("quality")
+    _delta = QualityProfile.from_dict(parent_quality_raw).delta_rounds
+    preview_len, big, delta_directive = _delta_seed(truth, _delta)
     file_note = (
         f"\nThe COMPLETE prior synthesis is in your workspace as `{_PRIOR_FILE}` — "
         "read it for full context first.\n"
@@ -936,8 +962,9 @@ async def _continue_run(
         f"{_CONTINUE_HEADERS[kind]}\n\n"
         + obj_block
         + f"PRIOR SYNTHESIS{' (preview — full text in the workspace file)' if big else ''}:\n"
-        f"{truth[:_TRUTH_CHARS]}\n"
+        f"{truth[:preview_len]}\n"
         + file_note
+        + delta_directive
         + focus
         + tail
         + _vfs_manifest(owner, vfs_project)
@@ -964,12 +991,13 @@ async def _continue_run(
         user,
     )
     sid = route["session_id"]
-    update_kwargs: dict[str, Any] = {
-        "config": json.dumps({
-            "kind": kind, "parent_session_id": parent_session_id,
-            "root_session_id": root_sid, "round": round_no, "vfs_project": vfs_project,
-        }),
+    _child_cfg = {
+        "kind": kind, "parent_session_id": parent_session_id,
+        "root_session_id": root_sid, "round": round_no, "vfs_project": vfs_project,
     }
+    if parent_quality_raw:  # inherit the chain's quality profile across rounds
+        _child_cfg["quality"] = parent_quality_raw
+    update_kwargs: dict[str, Any] = {"config": json.dumps(_child_cfg)}
     if big:
         # Write the full synthesis as an input file; execute_route copies every
         # non-generated session file into each worker's workspace.
@@ -2440,6 +2468,7 @@ async def execute_route(
                 question=sess["intent"], answer=agg["truth"],
                 critic_provider=cp, revise_provider=rp, critics=horizon_cfg.critics,
                 on_event=_closer_on_event(sid, "Closer", "merge"),
+                triage_findings=quality.critic_triage,  # R3
             )
             if closed["revised"]:
                 agg["truth"] = closed["answer"]

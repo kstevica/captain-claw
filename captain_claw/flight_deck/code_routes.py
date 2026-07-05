@@ -1203,7 +1203,8 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                           intent: str, by_id: dict, tiers_map: dict,
                           env_vars: list, registry: dict, plan_file: str = "plan.md",
                           seed_fix: str = "", quality: QualityProfile | None = None,
-                          domain: str = "general", planner_id: str = "") -> None:
+                          domain: str = "general", planner_id: str = "",
+                          seed_fixer: str = "debugger", seed_label: str = "fix backlog") -> None:
     """Big-job pipeline: build → review fan-out → capped fix loop (background).
 
     ``seed_fix``: backlog continuation — skip the build, apply the seeded fix
@@ -1235,29 +1236,33 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
     try:
         last_fix_sha: str | None = None
         if seed_fix:
-            _phase(pkey, "Fixing (backlog)")
+            # Seeded pass: backlog continuation OR a C6 follow-up (harden/cover/
+            # simplify). ``seed_fixer`` picks the archetype; the shared review/fix
+            # loop below (incl. the C1 test gate) then verifies the result.
+            _sfixer = seed_fixer if seed_fixer in by_id else "debugger"
+            _phase(pkey, f"Fixing ({seed_label})")
             fd = None
             for attempt in range(_FIX_RETRIES + 1):
                 fp = (_no_change_corrective(attempt, _acted(fd)) if attempt else "") \
                     + _fix_prompt(intent, seed_fix)
-                fd = await _run_agent(request, user, pkey, repo, "debugger",
+                fd = await _run_agent(request, user, pkey, repo, _sfixer,
                                       fp, by_id, tiers_map, env_vars)
                 if _cancelled(pkey):
                     _finish_stopped()
                     return
-                last_fix_sha = await code_git.git_commit(repo, "[fix backlog] debugger")
+                last_fix_sha = await code_git.git_commit(repo, f"[{seed_label}] {_sfixer}")
                 if last_fix_sha:
-                    fixers_ran.add("debugger")
+                    fixers_ran.add(_sfixer)
                     break
-                _progress(pkey, "note", f"backlog fix produced no file changes (attempt {attempt + 1})")
-            _append_chat(sdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
-                         kind="fix", archetype="debugger", ok=bool(fd.get("ok")),
+                _progress(pkey, "note", f"{seed_label} produced no file changes (attempt {attempt + 1})")
+            _append_chat(sdir, "assistant", (fd.get("output") or "(pass produced no summary)").strip(),
+                         kind="fix", archetype=_sfixer, ok=bool(fd.get("ok")),
                          commit=last_fix_sha or "")
             if not last_fix_sha:
                 _append_chat(sdir, "assistant",
-                             "❌ Backlog fix aborted: the fixer produced no file changes after "
-                             f"{_FIX_RETRIES + 1} attempts. The backlog is unchanged — a stronger "
-                             "model on the coding tier usually resolves this.", kind="note", ok=False)
+                             f"❌ {seed_label.capitalize()} pass aborted: the agent produced no file "
+                             f"changes after {_FIX_RETRIES + 1} attempts — a stronger model on the "
+                             "coding tier usually resolves this.", kind="note", ok=False)
                 _write_state(sdir, {"status": "idle"})
                 return
         elif quality.deep_build:
@@ -1563,6 +1568,37 @@ class ApproveReq(BaseModel):
 class CancelReq(BaseModel):
     project: str
     session: str
+
+
+class FollowupReq(BaseModel):
+    project: str
+    session: str
+    kind: str  # harden | cover | simplify
+
+
+# C6: one-click follow-up passes on a finished result. Each reuses the seeded
+# fix path of the build loop (so the C1 test gate + review/fix still apply),
+# just with a kind-appropriate archetype and instruction.
+_FOLLOWUP_KINDS: dict[str, dict] = {
+    "harden": {
+        "fixer": "debugger", "label": "harden", "intent": "Security hardening pass",
+        "seed": ("Harden this repository against security issues. Audit for injection, "
+                 "auth/authz gaps, secrets in code, unsafe input handling, and unsafe "
+                 "dependencies, and FIX every real issue you find. Keep behaviour intact."),
+    },
+    "cover": {
+        "fixer": "qa-engineer", "label": "cover", "intent": "Test-coverage pass",
+        "seed": ("Improve this repository's automated test coverage. Add tests for the core "
+                 "paths and important edge cases, and make sure the suite runs and passes. "
+                 "Do not change product behaviour."),
+    },
+    "simplify": {
+        "fixer": "simplifier", "label": "simplify", "intent": "Simplification pass",
+        "seed": ("Simplify and clean up this repository WITHOUT changing behaviour: remove "
+                 "dead code and duplication, clarify names, and reduce complexity. Keep all "
+                 "existing functionality (and any tests) passing."),
+    },
+}
 
 
 class RollbackReq(BaseModel):
@@ -2077,6 +2113,33 @@ async def approve_plan(body: ApproveReq, request: Request, user: dict = Depends(
         plan_file=plan_file, quality=_load_quality(uid, body.project),
         domain=str(_route.get("domain") or "general"), planner_id=str(_route.get("planner") or "")))
     return {"status": "running"}
+
+
+@router.post("/followup")
+async def followup(body: FollowupReq, request: Request, user: dict = Depends(get_current_user)):
+    """C6: run a one-click follow-up pass (harden / cover / simplify) on the
+    session's current result. Reuses the build loop's seeded-fix path so the
+    review/fix loop and the C1 test gate still verify the change."""
+    spec = _FOLLOWUP_KINDS.get(body.kind)
+    if not spec:
+        raise HTTPException(400, f"unknown follow-up kind: {body.kind}")
+    uid = user["id"]
+    sess, repo, sdir, pkey = _sctx(uid, body.project, body.session)
+    if _read_state(sdir).get("status") == "running":
+        raise HTTPException(409, "a run is already in progress for this session")
+    await code_git.git_init(repo)
+    db = get_db()
+    archetypes = await merged_archetypes(db, uid)
+    by_id = {a["id"]: a for a in archetypes}
+    registry = _load_registry()
+    tiers_map, env_vars = await _load_owner_tiers(db, uid)
+    _append_chat(sdir, "user", f"▶ Follow-up: {spec['intent']}", kind="approval")
+    _write_state(sdir, {"status": "running"})
+    asyncio.create_task(_run_build_loop(
+        request, user, pkey, repo, sdir, spec["intent"], by_id, tiers_map, env_vars,
+        registry, seed_fix=spec["seed"], quality=_load_quality(uid, body.project),
+        seed_fixer=spec["fixer"], seed_label=spec["label"], domain=body.kind))
+    return {"status": "running", "kind": body.kind}
 
 
 @router.post("/projects/{project}/sessions/{session}/stop")
