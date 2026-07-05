@@ -70,7 +70,17 @@ from captain_claw.flight_deck.basna_routes import (
     _tier_creds,
     _vfs_manifest,
 )
+from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck.horizon_worker import HorizonConfig, run_horizon_closer
+from captain_claw.flight_deck.quality_profile import (
+    ACTED_CORRECTIVE,
+    ESCALATE_CORRECTIVE,
+    ESCALATE_DIRECTIVE,
+    QualityProfile,
+    TokenBudget,
+    escalate_reason,
+    worker_produced_nothing,
+)
 from captain_claw.logging import get_logger
 from captain_claw.vfs import resolve_under as _vfs_resolve_under
 
@@ -123,6 +133,14 @@ def _vfs_project(sid: str) -> str:
     a fresh run derives the folder from its own session id.
     """
     return _run_vfs_project.get(sid) or f"vatra-{sid[:8]}"
+
+
+def _augment_tools(tools: list[str], research_dir: Path | None) -> list[str]:
+    """Add the `researchmap` tool when the Research Map is armed for this run."""
+    tools = list(tools or [])
+    if research_dir is not None and "researchmap" not in tools:
+        tools = tools + ["researchmap"]
+    return tools
 
 
 def _vfs_directive(project: str) -> str:
@@ -486,6 +504,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     except json.JSONDecodeError:
         cfg = {}
     max_agents = int(cfg.get("max_agents") or 6)
+    # Opt-in quality profile (request override → session config → all-off).
+    quality = QualityProfile.from_dict(
+        body.quality if body.quality is not None else cfg.get("quality"))
+    # R7 cost ceiling for the opt-in retries (acted-gate/escalate). 0 → unbounded.
+    _budget = TokenBudget(quality.token_budget)
+    _retry_est = int(body.agent_max_tokens or 8192)
 
     session_files = _parse_files(sess)
     input_files = [f for f in session_files if f.get("kind") != "generated"]
@@ -537,6 +561,30 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     shared_context = route.get("shared_context", "")
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
 
+    # R1 Research Map (opt-in): index the shared folder so owners AND the reporter
+    # can search prior rounds' material instead of re-reading it (and the reporter
+    # can pull past its inline slice cap). Free; best-effort.
+    vfs_dir: Path | None = None
+    if quality.research_map or quality.git_snapshots:
+        try:
+            from captain_claw.flight_deck.vfs_routes import _user_root
+            vfs_dir = _user_root(user["id"]) / vfs_project
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra vfs dir resolve failed", error=str(e))
+            vfs_dir = None
+    research_dir: Path | None = None
+    if quality.research_map and vfs_dir is not None and vfs_dir.exists():
+        try:
+            research_dir = vfs_dir
+            st = research_map.reindex(research_dir)
+            if st.get("chunks"):
+                _progress(sid, "note",
+                          f"research map: {st['files']} files · {st['chunks']} sections indexed")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra research map index failed", error=str(e))
+            research_dir = None
+    research_pre = research_map.preamble(research_dir) if research_dir else ""
+
     spawned: list[dict] = []   # {subtask, slug, port, auth}
     results: list[dict] = []   # {id, owner, role, output, ok, latency_ms, actions}
     generated_files: list[dict] = []
@@ -560,7 +608,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 name=f"vatra-{sid8}-{run_tag}-{st['id']}-{arch['id']}",
                 description=f"Vatra subtask · {arch.get('role', '')}",
                 cognitive_mode=arch.get("cognitive_mode", "neutra"),
-                tools=arch.get("tools") or [], tier=tier, tiers=tiers,
+                tools=_augment_tools(arch.get("tools") or [], research_dir),
+                tier=tier, tiers=tiers,
                 api_key=body.api_key, env_vars=body.env_vars,
                 extra_env=_vatra_env(sid, st["id"], arch["id"], 0),
             )
@@ -648,13 +697,40 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
-            prompt = _build_subtask_prompt(role, intent, st, [f["name"] for f in input_files],
-                                           subtasks, shared_context, team_prep=intro_digest,
-                                           vfs_project=vfs_project)
+            prompt = research_pre + _build_subtask_prompt(
+                role, intent, st, [f["name"] for f in input_files],
+                subtasks, shared_context, team_prep=intro_digest,
+                vfs_project=vfs_project)
+            if quality.worker_escalate:
+                prompt += ESCALATE_DIRECTIVE
             d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
                 agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
+            # R2 acted-gate (opt-in): an owner that produced no text and wrote no
+            # file wasted its slot — retry once with a corrective on the same agent.
+            if (quality.acted_gate and d.get("ok") and worker_produced_nothing(d)
+                    and _budget.can_afford(_retry_est)):
+                _budget.add(_retry_est)
+                _progress(sid, "note", f"{label} produced nothing — one corrective retry")
+                d2 = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
+                    sp["port"], sp["auth"], ACTED_CORRECTIVE.strip(), body.dispatch_timeout,
+                    on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
+                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
+                if d2.get("ok") and not worker_produced_nothing(d2):
+                    d = d2
+            # R5 escalate (opt-in): focused-retry an owner that flagged ESCALATE.
+            if (quality.worker_escalate and d.get("ok") and escalate_reason(d.get("output"))
+                    and _budget.can_afford(_retry_est)):
+                _budget.add(_retry_est)
+                _progress(sid, "note", f"{label} escalated — one focused retry")
+                d2 = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
+                    sp["port"], sp["auth"], ESCALATE_CORRECTIVE.strip(), body.dispatch_timeout,
+                    on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
+                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
+                if d2.get("ok") and not escalate_reason(d2.get("output")) \
+                        and not worker_produced_nothing(d2):
+                    d = d2
             mark = "✓" if d["ok"] else "✗"
             extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
             _progress(sid, "dispatch",
@@ -725,6 +801,21 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 "output": d["output"], "ok": d["ok"],
                 "latency_ms": d["latency_ms"], "actions": d.get("actions", []),
             })
+        # R1: re-index the shared folder so the reporter can search everything the
+        # team just wrote — the fix for "the blackboard doesn't fit one context".
+        if research_dir is not None:
+            try:
+                research_map.reindex(research_dir)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Vatra research map post-index failed", error=str(e))
+        # R6 git snapshots (opt-in): commit the round's shared-folder state.
+        if quality.git_snapshots and vfs_dir is not None:
+            try:
+                from captain_claw.flight_deck import code_git
+                await code_git.git_init(vfs_dir)
+                await code_git.git_commit(vfs_dir, f"[vatra r{cfg.get('round', 1)}] {intent[:60]}")
+            except Exception as e:  # noqa: BLE001
+                log.warning("Vatra git snapshot failed", error=str(e))
 
         # 3b) Owners are done — tell the coordinator to drain remaining asks and stop.
         stop_event.set()
@@ -864,7 +955,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         tiers=body.tiers, api_key=body.api_key, env_vars=body.env_vars,
         dispatch_timeout=body.dispatch_timeout, input_names=input_names,
         dest_dir=dest_dir, seen_gen=seen_gen, answered_asks=answered,
-        shared_context=shared_context,
+        shared_context=shared_context, research_dir=research_dir,
     )
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
@@ -1260,7 +1351,8 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                         tiers, api_key, env_vars, dispatch_timeout, input_names,
                         dest_dir: Path, seen_gen: set[str],
                         answered_asks: list[dict] | None = None,
-                        shared_context: str = "") -> tuple[str, list[dict]]:
+                        shared_context: str = "",
+                        research_dir: Path | None = None) -> tuple[str, list[dict]]:
     """Spawn a dedicated reporter, feed it the slices (plus any answered cross-agent
     asks), and capture the assembled deliverable. Falls back to a labeled
     concatenation if the reporter fails."""
@@ -1292,7 +1384,8 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         request, user, name=f"vatra-{sid8}-{run_tag}-reporter",
         description=f"Vatra reporter · {role}",
         cognitive_mode=arch.get("cognitive_mode", "neutra"),
-        tools=arch.get("tools") or [], tier=arch.get("tier", "reason"),
+        tools=_augment_tools(arch.get("tools") or [], research_dir),
+        tier=arch.get("tier", "reason"),
         tiers=tiers, api_key=api_key, env_vars=env_vars,
         # Bind the reporter to the same shared VFS project so it reads the
         # team's files from (and writes the assembled deliverable to) one folder.
@@ -1320,6 +1413,11 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         inline = slices_full[:_SLICES_INLINE_CHARS] + ("\n\n…(full text in vatra-slices.md)" if big else "")
         template = (_INSTRUCTIONS_DIR / "vatra" / "reporter.md").read_text()
         prompt = template.replace("{intent}", intent).replace("{slices}", inline)
+        # R1: when the Research Map is armed, tell the reporter it can search the
+        # WHOLE folder (not just the inlined slice) so a big blackboard that
+        # doesn't fit its context is still fully covered.
+        if research_dir is not None and big:
+            prompt = research_map.preamble(research_dir) + prompt
         if shared_context.strip():
             prompt += ("\n\n## Shared conventions the pieces were built against\n"
                        "Keep the final deliverable fully consistent with these (the pieces should "

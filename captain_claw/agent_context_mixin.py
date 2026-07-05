@@ -2173,6 +2173,7 @@ class AgentContextMixin:
         "desktop_action": ["desktop_action"],
         "cron": ["cron"],
         "codemap": ["codemap"],
+        "researchmap": ["researchmap"],
     }
 
     def _register_default_tools(self) -> None:
@@ -2180,6 +2181,7 @@ class AgentContextMixin:
         from captain_claw.tools import (
             BrowserTool,
             CodeMapTool,
+            ResearchMapTool,
             PinchTabTool,
             DocxExtractTool,
             EditTool,
@@ -2247,6 +2249,8 @@ class AgentContextMixin:
                 self.tools.register(GrepTool())
             elif tool_name == "codemap":
                 self.tools.register(CodeMapTool())
+            elif tool_name == "researchmap":
+                self.tools.register(ResearchMapTool())
             elif tool_name == "web_fetch":
                 self.tools.register(WebFetchTool())
                 self.tools.register(WebGetTool())

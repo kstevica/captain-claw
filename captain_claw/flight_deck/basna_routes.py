@@ -42,6 +42,16 @@ from captain_claw.flight_deck.horizon_worker import (
     run_horizon_closer,
     run_worker_horizon,
 )
+from captain_claw.flight_deck import research_map
+from captain_claw.flight_deck.quality_profile import (
+    ACTED_CORRECTIVE,
+    ESCALATE_CORRECTIVE,
+    ESCALATE_DIRECTIVE,
+    QualityProfile,
+    TokenBudget,
+    escalate_reason,
+    worker_produced_nothing,
+)
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -1803,6 +1813,9 @@ class ExecuteRequest(BaseModel):
     # run's own session id (basna-<sid8>). A continuation round sets this to the ROOT
     # run's folder so all rounds in a chain read/write the SAME accumulated data.
     vfs_project: str = ""
+    # Opt-in cross-pollination quality/cost profile (see quality_profile.py). None →
+    # fall back to the session config's `quality` block → all-off (today's behaviour).
+    quality: dict | None = None
 
 
 async def _spawn_horizon_member(
@@ -2062,6 +2075,45 @@ async def execute_route(
         except Exception as e:  # noqa: BLE001 — no critic model → agreement-only
             log.warning("Basna horizon critic provider unavailable", error=str(e))
 
+    # Opt-in quality profile (from the request or the session config). Default
+    # is all-off, so this changes nothing unless a run explicitly opts in.
+    try:
+        _sess_cfg = json.loads(sess.get("config") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        _sess_cfg = {}
+    quality = QualityProfile.from_dict(
+        body.quality if body.quality is not None else _sess_cfg.get("quality"))
+    # R7 cost ceiling for the OPT-IN levers (acted-gate/escalate retries). The
+    # base run is never refused; only the extra paid work these features add is
+    # bounded, so the profile can never blow the token budget. 0 → unbounded.
+    _budget = TokenBudget(quality.token_budget)
+    _retry_est = int(body.agent_max_tokens or 8192)
+
+    # Resolve the shared folder on disk once (needed by R1 research map and R6 git
+    # snapshots). Both are opt-in; neither touches a run that didn't ask for them.
+    vfs_dir: Path | None = None
+    if quality.research_map or quality.git_snapshots:
+        try:
+            from captain_claw.flight_deck.vfs_routes import _user_root
+            vfs_dir = _user_root(user["id"]) / vfs_project
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna vfs dir resolve failed", error=str(e))
+            vfs_dir = None
+    # R1 Research Map: index the folder now so workers (esp. on a continuation
+    # round) can search prior findings instead of re-reading. Free (no tokens).
+    research_dir: Path | None = None
+    if quality.research_map and vfs_dir is not None and vfs_dir.exists():
+        try:
+            research_dir = vfs_dir
+            st = research_map.reindex(research_dir)
+            if st.get("chunks"):
+                _progress(sid, "note",
+                          f"research map: {st['files']} files · {st['chunks']} sections indexed")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna research map index failed", error=str(e))
+            research_dir = None
+    research_pre = research_map.preamble(research_dir) if research_dir else ""
+
     spawned: list[dict] = []  # {sel, arch, slug, port, auth}
     results: list[dict] = []
     try:
@@ -2092,6 +2144,9 @@ async def execute_route(
                 _worker_tools = [
                     t for t in (arch.get("tools") or AgentConfig().tools) if t != "basna"
                 ]
+                # R1: give workers the researchmap tool when the map is armed.
+                if research_dir is not None and "researchmap" not in _worker_tools:
+                    _worker_tools = _worker_tools + ["researchmap"]
                 base = dict(
                     name=f"basna-{sid8}-{run_tag}-{arch['id']}",
                     description=f"Basna ephemeral · {sel.get('role') or arch.get('role', '')}",
@@ -2179,14 +2234,49 @@ async def execute_route(
                              if str(f.get("mime", "")).startswith("image/")]
                 doc_paths = [str(ws / f["name"]) for f in input_files
                              if not str(f.get("mime", "")).startswith("image/")]
+                base_prompt = research_pre + _build_dispatch_prompt(
+                    role, sess["intent"], merge_kind,
+                    [f["name"] for f in input_files], extra=sel.get("extra", ""))
+                if quality.worker_escalate:
+                    base_prompt += ESCALATE_DIRECTIVE
                 d = await _dispatch_one(
-                    sp["port"], sp["auth"],
-                    _build_dispatch_prompt(role, sess["intent"], merge_kind,
-                                           [f["name"] for f in input_files], extra=sel.get("extra", "")),
+                    sp["port"], sp["auth"], base_prompt,
                     body.dispatch_timeout, on_action=_on_action,
                     fleet_instructions=fleet, agent_name=role,
                     file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
                 )
+                # R2 acted-gate (opt-in): a worker that returned no text and wrote
+                # no file is a wasted slot — retry it once with a blunt corrective.
+                if (quality.acted_gate and d.get("ok") and worker_produced_nothing(d)
+                        and _budget.can_afford(_retry_est)):
+                    _budget.add(_retry_est)
+                    _progress(sid, "note",
+                              f"{role} produced nothing — one corrective retry")
+                    # Same stateful agent — the corrective alone is enough (it
+                    # still has the task in context); don't re-send the full prompt.
+                    d2 = await _dispatch_one(
+                        sp["port"], sp["auth"], ACTED_CORRECTIVE.strip(),
+                        body.dispatch_timeout, on_action=_on_action,
+                        fleet_instructions=fleet, agent_name=role,
+                        file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
+                    )
+                    # Keep the retry only if it actually produced something.
+                    if d2.get("ok") and not worker_produced_nothing(d2):
+                        d = d2
+                # R5 escalate (opt-in): a worker that flagged ESCALATE gets one
+                # focused-retry push instead of the merge absorbing a bare flag.
+                if (quality.worker_escalate and d.get("ok") and escalate_reason(d.get("output"))
+                        and _budget.can_afford(_retry_est)):
+                    _budget.add(_retry_est)
+                    _progress(sid, "note", f"{role} escalated — one focused retry")
+                    d2 = await _dispatch_one(
+                        sp["port"], sp["auth"], ESCALATE_CORRECTIVE.strip(),
+                        body.dispatch_timeout, on_action=_on_action,
+                        fleet_instructions=fleet, agent_name=role,
+                        file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage)
+                    if d2.get("ok") and not escalate_reason(d2.get("output")) \
+                            and not worker_produced_nothing(d2):
+                        d = d2
                 mark = "✓" if d["ok"] else "✗"
                 extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
                 _progress(sid, "dispatch",
@@ -2197,6 +2287,23 @@ async def execute_route(
             _phase(sid, "Generating")
             _progress(sid, "generate", f"{len(spawned)} agent(s) working the task…")
             dispatched = await asyncio.gather(*[_dispatch_tracked(sp) for sp in spawned])
+            # R1: re-index so a later round (or the merge's own reads) sees what the
+            # workers just wrote into the shared folder. Free; best-effort.
+            if research_dir is not None:
+                try:
+                    research_map.reindex(research_dir)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Basna research map post-index failed", error=str(e))
+            # R6 git snapshots (opt-in): commit this round's state of the shared
+            # folder for diffs/rollback/provenance. Reuses Code's git helper; free.
+            if quality.git_snapshots and vfs_dir is not None:
+                try:
+                    from captain_claw.flight_deck import code_git
+                    _rnd = _sess_cfg.get("round", 1)
+                    await code_git.git_init(vfs_dir)
+                    await code_git.git_commit(vfs_dir, f"[basna r{_rnd}] {sess['intent'][:60]}")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Basna git snapshot failed", error=str(e))
             for sp, d in zip(spawned, dispatched):
                 results.append({
                     "archetype_id": sp["arch"]["id"],
