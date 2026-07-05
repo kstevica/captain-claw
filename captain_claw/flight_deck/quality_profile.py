@@ -299,6 +299,29 @@ JUDGMENT_LEDGER_DIRECTIVE = (
 )
 
 
+# ── Honesty guard: unconfirmable specifics stay unconfirmed ────────────
+# The failure mode that a "be thorough" push creates: a model rewarded for
+# completeness states a specific it cannot support — a named individual, a
+# role-holder, an origin, an exact figure or attribution — as established fact.
+# The careful-model behaviour is to keep such a claim qualified. This is a free,
+# prompt-only guard that ships WITH the judgment ledger (R11), because it is the
+# same discipline pointed the other way: the ledger stops hedging-by-omission;
+# this stops asserting-by-invention. Deliberately domain-agnostic — it names a
+# CLASS of specific (any named office-holder), never a particular field.
+
+UNVERIFIED_GUARD_DIRECTIVE = (
+    "\n\nDO NOT ASSERT THE UNCONFIRMABLE: state a specific as established fact ONLY "
+    "when you can support it from a source or the given inputs. For any load-bearing "
+    "specific you cannot confirm — a named individual or role-holder (e.g. a person "
+    "presented as an appointed officer), an origin or affiliation, an exact "
+    "date/figure/identifier, or a specific attribution — either qualify it honestly "
+    "(\"unconfirmed\", \"not independently verified\", \"reportedly\", or attributed to "
+    "whoever claims it) or leave it out. Completeness never justifies inventing a "
+    "specific: if no source names the holder of a role, write that the role is "
+    "unconfirmed rather than supplying a name."
+)
+
+
 # ── R10: source corpus directive (paired with the web_fetch behaviour) ─
 SOURCE_CORPUS_DIRECTIVE = (
     "\n\nSOURCES: this run keeps a shared source corpus. When you `web_fetch` a "

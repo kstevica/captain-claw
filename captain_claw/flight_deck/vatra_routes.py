@@ -79,6 +79,7 @@ from captain_claw.flight_deck.quality_profile import (
     ESCALATE_DIRECTIVE,
     JUDGMENT_LEDGER_DIRECTIVE,
     SOURCE_CORPUS_DIRECTIVE,
+    UNVERIFIED_GUARD_DIRECTIVE,
     QualityProfile,
     TokenBudget,
     escalate_reason,
@@ -592,6 +593,14 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         except Exception as e:  # noqa: BLE001 — rubric is best-effort
             log.warning("Vatra rubric derivation failed", error=str(e))
 
+    # R11 honesty guard (opt-in, prompt-only, free): ships with the judgment
+    # ledger. Injected via shared_context so it binds every owner AND the reporter
+    # — the reporter especially, since a fabricated specific lands in the FINAL
+    # deliverable. This is the prevention half of R8's cure (assert nothing you
+    # can't support); R8's fact-checker is the detection half behind it.
+    if quality.judgment_ledger:
+        shared_context = (shared_context + UNVERIFIED_GUARD_DIRECTIVE).strip()
+
     # R1 Research Map (opt-in): index the shared folder so owners AND the reporter
     # can search prior rounds' material instead of re-reading it (and the reporter
     # can pull past its inline slice cap). Free; best-effort.
@@ -1031,11 +1040,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     if quality.claim_check and (truth or "").strip() and _budget.can_afford(2 * _retry_est):
         _budget.add(2 * _retry_est)
         try:
-            truth, _cc_findings = await _claim_check(
+            truth, cc_doc = await _claim_check(
                 request, user, sid, sid8, run_tag, intent=intent, deliverable=truth,
                 arch_by_id=arch_by_id, tiers=body.tiers, api_key=body.api_key,
                 env_vars=body.env_vars, dispatch_timeout=body.dispatch_timeout,
                 quality=quality, research_dir=research_dir)
+            if cc_doc:
+                generated_files.append(cc_doc)
         except Exception as e:  # noqa: BLE001 — claim check is best-effort
             log.warning("Vatra claim check errored", error=str(e))
 
@@ -1543,17 +1554,20 @@ _FACTCHECK_ARCHETYPES = ("fact-checker", "deep-researcher", "market-scanner")
 async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_tag: str, *,
                        intent: str, deliverable: str, arch_by_id: dict, tiers,
                        api_key, env_vars, dispatch_timeout, quality,
-                       research_dir) -> tuple[str, list[dict]]:
+                       research_dir) -> tuple[str, dict | None]:
     """Spawn a web-tool fact-checker, verify the deliverable's load-bearing claims,
-    and revise it to fix any that are verified WRONG. Returns (deliverable, findings).
-    Best-effort: on any failure the original deliverable is returned unchanged."""
+    revise it to fix any verified WRONG and hedge any unconfirmable specific it
+    asserted as fact, and write a standalone audit ledger. Returns
+    ``(deliverable, audit_doc)`` — the (possibly revised) text and a generated-file
+    descriptor for the ledger (or ``None``). Best-effort: on any failure the
+    original deliverable is returned unchanged."""
     from captain_claw.flight_deck import research_verify as rv
     if not (deliverable or "").strip():
-        return deliverable, []
+        return deliverable, None
     checker = next((arch_by_id[a] for a in _FACTCHECK_ARCHETYPES if a in arch_by_id), None) \
         or next(iter(arch_by_id.values()), None)
     if not checker:
-        return deliverable, []
+        return deliverable, None
     role = checker.get("role") or checker["id"]
     tools = list(dict.fromkeys(
         (checker.get("tools") or []) + ["web_search", "web_fetch", "researchmap", "read"]))
@@ -1570,7 +1584,7 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
         corpus=quality.source_corpus)
     if not sp["ok"]:
         _progress(sid, "verify", f"Fact-checker spawn failed ({sp['message']})", ok=False)
-        return deliverable, []
+        return deliverable, None
 
     def _on_action(act: dict) -> None:
         detail = act.get("detail", "")
@@ -1586,6 +1600,7 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
 
     _track_worker(sid, sp["slug"], add=True)
     findings: list[dict] = []
+    text, revised_applied = deliverable, False
     try:
         prompt = rv.claim_check_prompt(deliverable, intent, quality.claim_check_max,
                                        corpus_hint=research_dir is not None)
@@ -1598,31 +1613,42 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
         for f in rv.refuted(findings):
             _progress(sid, "narration", f"{role} (refuted): {f['claim']} → {f['correction']}",
                       agent=role, tool="narration", detail=f["correction"])
+        for f in rv.unconfirmed(findings):
+            _progress(sid, "narration", f"{role} (unconfirmed): {f['claim']} → hedged",
+                      agent=role, tool="narration", detail=f["hedge"])
         fix = rv.fix_instructions(findings)
-        if not fix:
-            return deliverable, findings
-        _progress(sid, "verify", "Revising the deliverable to fix the verified errors…", agent=role)
-        revise_prompt = (
-            "Now output the FULL corrected deliverable. Apply EXACTLY these corrections and "
-            "change nothing else — keep all other content, structure and formatting identical:\n\n"
-            f"{fix}\n\nOutput the complete corrected document only, no preamble.")
-        d2 = await _dispatch_one(sp["port"], sp["auth"], revise_prompt, dispatch_timeout,
-                                 on_action=_on_action,
-                                 fleet_instructions=checker.get("fleet_instructions", ""),
-                                 agent_name=role, on_usage=_on_usage)
-        revised = (d2.get("output") or "").strip()
-        collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
-        if collapsed:
-            _progress(sid, "verify", "Kept the original (correction pass collapsed)", agent=role, ok=False)
-            return deliverable, findings
-        _progress(sid, "verify", f"Deliverable corrected: {len(rv.refuted(findings))} fix(es) applied", agent=role)
-        return revised, findings
+        if fix:
+            _progress(sid, "verify", "Revising the deliverable to correct/hedge the flagged claims…", agent=role)
+            revise_prompt = (
+                "Now output the FULL corrected deliverable. Apply EXACTLY these changes and "
+                "change nothing else — keep all other content, structure and formatting identical:\n\n"
+                f"{fix}\n\nOutput the complete corrected document only, no preamble.")
+            d2 = await _dispatch_one(sp["port"], sp["auth"], revise_prompt, dispatch_timeout,
+                                     on_action=_on_action,
+                                     fleet_instructions=checker.get("fleet_instructions", ""),
+                                     agent_name=role, on_usage=_on_usage)
+            revised = (d2.get("output") or "").strip()
+            collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
+            if collapsed:
+                _progress(sid, "verify", "Kept the original (correction pass collapsed)", agent=role, ok=False)
+            else:
+                text, revised_applied = revised, True
+                _progress(sid, "verify",
+                          f"Deliverable corrected: {len(rv.refuted(findings))} fix(es) + "
+                          f"{len(rv.unconfirmed(findings))} hedge(s) applied", agent=role)
     except Exception as e:  # noqa: BLE001
         log.warning("Vatra claim check failed", error=str(e))
-        return deliverable, findings
     finally:
         _teardown([sp["slug"]])
         _track_worker(sid, sp["slug"], add=False)
+    # Non-destructive audit ledger: every checked claim, its verdict and the action
+    # taken — written even when nothing was auto-changed, so unconfirmable specifics
+    # stay visible instead of only appearing in the one-line log tally.
+    doc = rv.write_audit(_session_files_dir(sid), findings, question=intent,
+                         revised=revised_applied)
+    if doc:
+        _progress(sid, "verify", f"Fact-check report saved · {doc['name']}", agent=role)
+    return text, doc
 
 
 # ── Coordinator: route blackboard asks to helpers (non-blocking) ─────

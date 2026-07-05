@@ -133,9 +133,9 @@ export const LEVERS: Lever[] = [
   { flag: 'source_corpus', code: 'R10', scope: 'research', cost: 'saver', label: 'Source corpus',
     blurb: 'web_fetch saves each full page to the shared folder (indexed) and returns a head + pointer — depth without context blow-up; every stage can re-read sources.' },
   { flag: 'judgment_ledger', code: 'R11', scope: 'research', cost: 'free', label: 'Judgment ledger',
-    blurb: 'Each specialist must enumerate + resolve its hardest judgment calls explicitly, so weak models make the boundary calls instead of hedging. Prompt-only.' },
+    blurb: 'Each specialist enumerates + resolves its hardest judgment calls explicitly (so weak models make the boundary calls instead of hedging), and must not assert an unconfirmable specific — a named office-holder, an origin, an exact figure — as fact. Prompt-only.' },
   { flag: 'claim_check', code: 'R8', scope: 'research', cost: 'paid', label: 'Claim check',
-    blurb: 'A web-tool fact-checker verifies the deliverable’s citations, dates, versions and figures against real sources and corrects the wrong ones. The ground-truth back-edge.' },
+    blurb: 'A web-tool fact-checker verifies the deliverable’s citations, dates, versions, figures and named entities against real sources — corrects the wrong ones, hedges any specific it asserted but couldn’t confirm (the fabricated-name trap), and saves a standalone fact-check report. The ground-truth back-edge.' },
 ]
 
 // Non-zinc accent colors don't auto-invert with the theme, so give each badge a

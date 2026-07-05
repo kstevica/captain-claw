@@ -50,6 +50,7 @@ from captain_claw.flight_deck.quality_profile import (
     ESCALATE_DIRECTIVE,
     JUDGMENT_LEDGER_DIRECTIVE,
     SOURCE_CORPUS_DIRECTIVE,
+    UNVERIFIED_GUARD_DIRECTIVE,
     QualityProfile,
     TokenBudget,
     escalate_reason,
@@ -2037,18 +2038,21 @@ _FACTCHECK_ARCHETYPES = ("fact-checker", "deep-researcher", "market-scanner")
 
 async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
                        intent: str, deliverable: str, arch_by_id: dict, body,
-                       quality, research_dir) -> str:
+                       quality, research_dir) -> tuple[str, dict | None]:
     """Spawn a web-tool fact-checker, verify the merged answer's load-bearing claims,
-    and correct any that are verified wrong. Returns the (possibly revised) answer.
-    Best-effort; on any failure the original answer is returned unchanged."""
+    correct any that are verified wrong AND hedge any unconfirmable specific it
+    asserted as fact. Returns ``(answer, audit_doc)`` where ``answer`` is the
+    (possibly revised) text and ``audit_doc`` is a generated-file descriptor for the
+    standalone fact-check ledger (or ``None``). Best-effort; on any failure the
+    original answer is returned unchanged."""
     from captain_claw.flight_deck import research_verify as rv
     from captain_claw.flight_deck.server import _do_stop_process
     if not (deliverable or "").strip():
-        return deliverable
+        return deliverable, None
     src = next((arch_by_id[a] for a in _FACTCHECK_ARCHETYPES if a in arch_by_id), None) \
         or next(iter(arch_by_id.values()), None)
     if not src:
-        return deliverable
+        return deliverable, None
     role = src.get("role") or src["id"]
     tools = list(dict.fromkeys(
         (src.get("tools") or []) + ["web_search", "web_fetch", "researchmap", "read"]))
@@ -2079,8 +2083,10 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
             name_suffix="factcheck", extra_env=corpus_env)
     except Exception as e:  # noqa: BLE001
         _progress(sid, "verify", f"Fact-checker spawn failed ({e})", ok=False)
-        return deliverable
+        return deliverable, None
     _run_workers.setdefault(sid, []).append(slug)
+    findings: list[dict] = []
+    text, revised_applied = deliverable, False
     try:
         prompt = rv.claim_check_prompt(deliverable, intent, quality.claim_check_max,
                                        corpus_hint=research_dir is not None)
@@ -2093,33 +2099,44 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
         for f in rv.refuted(findings):
             _progress(sid, "narration", f"{role} (refuted): {f['claim']} → {f['correction']}",
                       agent=role, tool="narration", detail=f["correction"])
+        for f in rv.unconfirmed(findings):
+            _progress(sid, "narration", f"{role} (unconfirmed): {f['claim']} → hedged",
+                      agent=role, tool="narration", detail=f["hedge"])
         fix = rv.fix_instructions(findings)
-        if not fix:
-            return deliverable
-        _progress(sid, "verify", "Revising the answer to fix the verified errors…", agent=role)
-        d2 = await _dispatch_one(
-            port, token,
-            ("Now output the FULL corrected answer. Apply EXACTLY these corrections and "
-             "change nothing else — keep everything else identical:\n\n" + fix +
-             "\n\nOutput the complete corrected answer only."),
-            body.dispatch_timeout, on_action=_on_action,
-            fleet_instructions=arch.get("fleet_instructions", ""),
-            agent_name=role, on_usage=_on_usage)
-        revised = (d2.get("output") or "").strip()
-        collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
-        if collapsed:
-            _progress(sid, "verify", "Kept the original (correction pass collapsed)", agent=role, ok=False)
-            return deliverable
-        _progress(sid, "verify", f"Answer corrected: {len(rv.refuted(findings))} fix(es) applied", agent=role)
-        return revised
+        if fix:
+            _progress(sid, "verify", "Revising the answer to correct/hedge the flagged claims…", agent=role)
+            d2 = await _dispatch_one(
+                port, token,
+                ("Now output the FULL corrected answer. Apply EXACTLY these changes and "
+                 "change nothing else — keep everything else identical:\n\n" + fix +
+                 "\n\nOutput the complete corrected answer only."),
+                body.dispatch_timeout, on_action=_on_action,
+                fleet_instructions=arch.get("fleet_instructions", ""),
+                agent_name=role, on_usage=_on_usage)
+            revised = (d2.get("output") or "").strip()
+            collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
+            if collapsed:
+                _progress(sid, "verify", "Kept the original (correction pass collapsed)", agent=role, ok=False)
+            else:
+                text, revised_applied = revised, True
+                _progress(sid, "verify",
+                          f"Answer corrected: {len(rv.refuted(findings))} fix(es) + "
+                          f"{len(rv.unconfirmed(findings))} hedge(s) applied", agent=role)
     except Exception as e:  # noqa: BLE001
         log.warning("Basna claim check failed", error=str(e))
-        return deliverable
     finally:
         try:
             await _do_stop_process(slug)
         except Exception:  # noqa: BLE001
             pass
+    # Non-destructive audit ledger: WHAT was checked and HOW it was resolved —
+    # written even when nothing was auto-changed, so unconfirmable specifics stay
+    # visible rather than vanishing into the log tally.
+    doc = rv.write_audit(_session_files_dir(sid), findings, question=intent,
+                         revised=revised_applied)
+    if doc:
+        _progress(sid, "files", f"Fact-check report saved · {doc['name']}")
+    return text, doc
 
 
 @router.post("/execute")
@@ -2394,7 +2411,7 @@ async def execute_route(
                 if quality.worker_escalate:
                     base_prompt += ESCALATE_DIRECTIVE
                 if quality.judgment_ledger:
-                    base_prompt += JUDGMENT_LEDGER_DIRECTIVE
+                    base_prompt += JUDGMENT_LEDGER_DIRECTIVE + UNVERIFIED_GUARD_DIRECTIVE
                 if quality.source_corpus:
                     base_prompt += SOURCE_CORPUS_DIRECTIVE
                 d = await _dispatch_one(
@@ -2617,13 +2634,15 @@ async def execute_route(
     if quality.claim_check and (agg.get("truth") or "").strip() and _budget.can_afford(2 * _retry_est):
         _budget.add(2 * _retry_est)
         try:
-            new_truth = await _claim_check(
+            new_truth, cc_doc = await _claim_check(
                 request, user, sid, sid8, run_tag, intent=sess["intent"],
                 deliverable=agg["truth"], arch_by_id=arch_by_id, body=body,
                 quality=quality, research_dir=research_dir)
             if new_truth and new_truth != agg["truth"]:
                 agg["truth"] = new_truth
                 agg["method"] = f"{agg.get('method', 'merge')}+factchecked"
+            if cc_doc:
+                generated_files.append(cc_doc)
         except Exception as e:  # noqa: BLE001
             log.warning("Basna claim check errored", error=str(e))
 
