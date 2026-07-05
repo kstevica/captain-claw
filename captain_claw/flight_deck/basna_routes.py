@@ -2729,10 +2729,14 @@ def _closer_on_event(sid: str, label: str, stage_name: str = "merge"):
             _progress(sid, stage_name, f"{label}: verifying with {e.get('total')} critic(s)…",
                       agent=label)
         elif st == "critic":
-            mark = "refuted" if e.get("refuted") else "held"
-            _progress(sid, stage_name,
-                      f"{label}: critic {int(e.get('index', 0)) + 1}/{e.get('total')} "
-                      f"({e.get('mode', '')}) {mark}", agent=label)
+            refuted = bool(e.get("refuted"))
+            msg = (f"{label}: critic {int(e.get('index', 0)) + 1}/{e.get('total')} "
+                   f"({e.get('mode', '')}) {'refuted' if refuted else 'held'}")
+            reason = str(e.get("reason") or "").strip()
+            # Surface WHY a critic refuted (the substance), not just the verdict.
+            if refuted and reason:
+                msg += f" — {reason[:220]}"
+            _progress(sid, stage_name, msg, agent=label)
         elif st == "verify":
             _progress(sid, stage_name, f"{label}: {e.get('survived')}/{e.get('total')} critics held",
                       agent=label)
@@ -2740,7 +2744,13 @@ def _closer_on_event(sid: str, label: str, stage_name: str = "merge"):
             ph = "revising" if e.get("phase") == "revise" else "verifying"
             _progress(sid, stage_name, f"{label}: still {ph}… ({e.get('elapsed')}s)", agent=label)
         elif st == "revise":
-            _progress(sid, stage_name, f"{label}: revising…", agent=label)
+            _progress(sid, stage_name, f"{label}: revised the answer", agent=label)
+            # Emit the revised OUTPUT as a narration line so the deep pass's result
+            # is visible, not just the fact that it ran.
+            prev = str(e.get("preview") or "").strip()
+            if prev:
+                _progress(sid, "narration", f"{label} (revised): {prev}…",
+                          agent=label, tool="narration", detail=prev)
         elif st == "revise_rejected":
             _progress(sid, stage_name, f"{label}: kept original (revision was unusable)",
                       agent=label, ok=False)

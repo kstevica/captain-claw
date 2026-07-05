@@ -373,7 +373,8 @@ async def run_horizon_closer(
             r = CriticVerdict(refuted=False, reason="")
         if on_event is not None:
             on_event({"stage": "critic", "index": i, "total": total,
-                      "mode": mode, "refuted": r.refuted})
+                      "mode": mode, "refuted": r.refuted,
+                      "reason": (r.reason or "").strip()})
         return r
 
     results = await _with_heartbeat(
@@ -408,6 +409,7 @@ async def run_horizon_closer(
         return {"answer": answer, "revised": False, "survived": survived,
                 "total": total, "feedback": feedback}
     if on_event is not None:
-        on_event({"stage": "revise", "survived": survived, "total": total})
+        on_event({"stage": "revise", "survived": survived, "total": total,
+                  "preview": revised.strip()[:280]})
     return {"answer": revised, "revised": True,
             "survived": survived, "total": total, "feedback": feedback}
