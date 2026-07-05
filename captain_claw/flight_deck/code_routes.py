@@ -33,7 +33,7 @@ from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck import code_git
 from captain_claw.flight_deck import code_map
 from captain_claw.flight_deck import code_verify
-from captain_claw.flight_deck.quality_profile import QualityProfile
+from captain_claw.flight_deck.quality_profile import QualityProfile, TokenBudget
 from captain_claw.flight_deck.basna_routes import (
     _PROGRESS,
     _build_catalog,
@@ -1134,6 +1134,71 @@ async def _fix_commit_diff(repo: Path, fsha: str | None, cap: int = 12000) -> st
     return patch
 
 
+_DEEP_BUILD_EST = 20000  # rough per-attempt output-token estimate for budget accounting
+
+
+async def _deep_build(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
+                      intent: str, by_id: dict, tiers_map: dict, env_vars: list,
+                      plan_file: str, quality: QualityProfile,
+                      budget: TokenBudget) -> tuple[dict | None, str | None]:
+    """C3 deep build (opt-in): up to N independent build attempts, each verified by
+    the test gate, keep the FIRST that passes its tests (else the last).
+
+    Isolation is by git checkpoint — reset to the pre-build HEAD between failed
+    attempts — so no repo copies and no merge-back (safe, cheap). Extra attempts
+    are budget-gated, so this can never blow the token ceiling. Returns
+    ``(last_dispatch, winning_sha)``; the caller continues into the review/fix loop
+    exactly as for a normal build (the winner may still be imperfect — the loop
+    then hardens it)."""
+    n = max(1, quality.deep_build_samples)
+    head = await code_git.git_log(repo, 1)
+    base = head[0]["sha"] if head else None
+    d: dict | None = None
+    last_sha: str | None = None
+    for i in range(n):
+        _phase(pkey, f"Deep build (attempt {i + 1}/{n})")
+        sha: str | None = None
+        for attempt in range(_BUILD_RETRIES + 1):
+            bp = (_no_change_corrective(attempt, _acted(d)) if attempt else "") \
+                + _build_prompt(intent, plan_file)
+            d = await _run_agent(request, user, pkey, repo, "code-implementer",
+                                 bp, by_id, tiers_map, env_vars)
+            if _cancelled(pkey):
+                return d, last_sha
+            sha = await code_git.git_commit(repo, f"[build] code-implementer (deep {i + 1}/{n})")
+            if sha:
+                break
+        more_attempts = i < n - 1 and budget.can_afford(_DEEP_BUILD_EST)
+        if not sha:
+            # Produced nothing this attempt. Try again if we can; else give up.
+            if more_attempts:
+                budget.add(_DEEP_BUILD_EST)
+                continue
+            return d, last_sha
+        last_sha = sha
+        tcmd = code_verify.detect_test_command(repo, quality.test_command)
+        if not tcmd:
+            # No verifier to compare N attempts — a first real build is the winner.
+            _progress(pkey, "note", "deep build: no test command — keeping first build")
+            return d, sha
+        tres = await code_verify.run_tests(repo, tcmd)
+        passed = bool(tres.get("ok"))
+        _progress(pkey, "note",
+                  f"deep build attempt {i + 1}/{n}: " + ("✓ tests pass" if passed else "✗ tests fail"))
+        if passed:
+            return d, sha
+        # Failed. Discard and retry only if budget + attempts remain; else keep it
+        # so the normal review/fix loop can harden it.
+        if more_attempts:
+            budget.add(_DEEP_BUILD_EST)
+            if base:
+                await code_git.git_reset(repo, base)
+            last_sha = None
+            continue
+        return d, sha
+    return d, last_sha
+
+
 async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                           intent: str, by_id: dict, tiers_map: dict,
                           env_vars: list, registry: dict, plan_file: str = "plan.md",
@@ -1149,6 +1214,9 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
     planner that produced the plan, so their outcomes are recorded at the end.
     """
     quality = quality or QualityProfile()
+    # One token ceiling for the run's opt-in extra work (C3 deep-build attempts).
+    # 0 → unbounded (today's behaviour). The base build/review/fix is never gated.
+    budget = TokenBudget(quality.token_budget)
     # C2 outcome tracking (recorded once in ``finally``, unless the user cancels).
     did_build = False
     fixers_ran: set[str] = set()
@@ -1190,6 +1258,27 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                              "❌ Backlog fix aborted: the fixer produced no file changes after "
                              f"{_FIX_RETRIES + 1} attempts. The backlog is unchanged — a stronger "
                              "model on the coding tier usually resolves this.", kind="note", ok=False)
+                _write_state(sdir, {"status": "idle"})
+                return
+        elif quality.deep_build:
+            # C3: best-of-N verified build. did_build set so C2 still records the
+            # builder's outcome; the winner (or last attempt) flows into review.
+            _phase(pkey, "Deep building")
+            did_build = True
+            d, sha = await _deep_build(request, user, pkey, repo, sdir, intent, by_id,
+                                       tiers_map, env_vars, plan_file, quality, budget)
+            if _cancelled(pkey):
+                _finish_stopped()
+                return
+            _build_out = ((d.get("output") if d else "") or "").strip()
+            _append_chat(sdir, "assistant", _build_out or "(build produced no summary)",
+                         kind="build", archetype="code-implementer",
+                         ok=bool(d and d.get("ok")), commit=sha or "")
+            if not sha:
+                _append_chat(sdir, "assistant",
+                             f"❌ Deep build aborted: no file changes after {quality.deep_build_samples} "
+                             "attempt(s) — skipping review. Try a stronger coding-tier model.",
+                             kind="note", ok=False)
                 _write_state(sdir, {"status": "idle"})
                 return
         else:

@@ -30,13 +30,17 @@ failures are pre-existing and unrelated.
 - **R5 worker escalate** — `ESCALATE:` flag → one focused-retry (budget-gated).
 - **R6 git snapshots** — per-round `git` commits of the research folder.
 - **R7 budget parity** — `TokenBudget` caps the opt-in retries in Basna/Vatra.
+- **C3 deep-build** (`deep_build`, explicit opt-in) — best-of-N verified build:
+  up to N build attempts, each verified by the C1 test gate, keep the first that
+  passes (else the last, for the fix loop to harden). Isolation is by git
+  checkpoint (reset between failed attempts — no repo copies, no merge-back);
+  extra attempts are budget-gated. `_deep_build` in `code_routes.py`. Not enabled
+  by any preset — it's the one genuinely expensive lever, so it must be turned on
+  explicitly (ideally with a `token_budget`).
 
 **Reserved (flag defined, not yet wired — a dedicated pass; the two starred are
 where "don't break current behaviour" is at real risk, so they belong in their
 own carefully-tested change):**
-- **C3 deep-build** (`deep_build`) — Dubina ladder over the Code build with the C1
-  verifier as ground truth. Integration point: wrap the build dispatch in
-  `_run_build_loop` the way Basna wraps workers in `run_worker_horizon`.
 - **R4 delta rounds** (`delta_rounds`) — continuation critics/closer see only the
   new `r{N}-` files. (R1 already delivers most of the continuation token savings.)
 - **R3 critic-triage** — turn horizon-closer critic findings into per-owner ordered

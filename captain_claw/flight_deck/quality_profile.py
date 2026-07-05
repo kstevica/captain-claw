@@ -46,10 +46,12 @@ log = get_logger(__name__)
 
 # Which flags each preset turns ON. "off" is the empty set (all defaults False).
 # A preset only enables flags whose feature is actually WIRED, so turning on a
-# preset does exactly what it advertises. ``delta_rounds`` (R4) and ``deep_build``
-# (C3) are reserved: the flags exist and are honoured wherever wired, but no
-# preset switches them on until their feature lands, so they can't become silent
-# no-ops.
+# preset does exactly what it advertises.
+#  * ``deep_build`` (C3) IS wired, but it is the one genuinely expensive lever (N
+#    build attempts), so no preset enables it — it must be turned on explicitly
+#    (ideally with a ``token_budget``) so a preset can never surprise-spend.
+#  * ``delta_rounds`` (R4) is reserved: the flag exists and is honoured wherever
+#    wired, but nothing reads it yet, so no preset switches it on.
 _PRESETS: dict[str, set[str]] = {
     "off": set(),
     "balanced": {

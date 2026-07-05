@@ -51,12 +51,22 @@ def test_thorough_enables_the_wired_paid_levers():
     assert p.test_gate and p.acted_gate  # still inherits balanced's set
 
 
-def test_reserved_flags_are_off_in_every_preset():
-    # R4/C3 are reserved: no preset may silently enable a no-op.
+def test_no_preset_enables_the_expensive_or_reserved_levers():
+    # deep_build (paid) must be explicit; delta_rounds (R4) is not wired yet.
+    # Neither may be switched on silently by a preset.
     for name in ("off", "balanced", "thorough"):
         p = QualityProfile.from_dict({"profile": name})
         assert not p.delta_rounds, name
         assert not p.deep_build, name
+
+
+def test_deep_build_is_explicit_opt_in_with_knobs():
+    p = QualityProfile.from_dict(
+        {"profile": "thorough", "deep_build": True, "deep_build_samples": 3,
+         "token_budget": 500_000})
+    assert p.deep_build
+    assert p.deep_build_samples == 3
+    assert p.token_budget == 500_000
 
 
 def test_explicit_flag_overrides_preset_both_ways():
