@@ -9,6 +9,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis } from '../stores/basnaStore'
 import { VatraTeamPlan, VatraBlackboard } from '../components/VatraDelegation'
+import { QualityControls } from '../components/QualityControls'
 import { useTierConfig, TIER_ORDER, PROVIDERS } from '../services/tierConfig'
 
 const HELP_MD = `
@@ -554,7 +555,7 @@ export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, addFiles, removeFile, downloadFile, fetchFileText,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
     updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
@@ -1012,6 +1013,9 @@ export function BasnaPage() {
                     </div>
                   )}
                 </div>
+
+                {/* Quality levers (opt-in cross-pollination) */}
+                <QualityControls scope="research" value={quality} onChange={setQuality} />
 
                 {/* Tuning (router tier + team size) */}
                 {tuning && (

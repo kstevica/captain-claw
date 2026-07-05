@@ -2111,6 +2111,14 @@ async def execute_route(
         _sess_cfg = {}
     quality = QualityProfile.from_dict(
         body.quality if body.quality is not None else _sess_cfg.get("quality"))
+    # Persist the run's quality onto the session so a continuation round (R4 and
+    # the whole chain) inherits the same profile. Only when explicitly provided.
+    if body.quality is not None and _sess_cfg.get("quality") != body.quality:
+        _sess_cfg["quality"] = body.quality
+        try:
+            await db.update_basna_session(sid, user["id"], config=json.dumps(_sess_cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna quality persist failed", error=str(e))
     # R7 cost ceiling for the OPT-IN levers (acted-gate/escalate retries). The
     # base run is never refused; only the extra paid work these features add is
     # bounded, so the profile can never blow the token budget. 0 → unbounded.

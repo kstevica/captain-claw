@@ -507,6 +507,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # Opt-in quality profile (request override → session config → all-off).
     quality = QualityProfile.from_dict(
         body.quality if body.quality is not None else cfg.get("quality"))
+    # Persist the run's quality onto the session so a continuation inherits it.
+    if body.quality is not None and cfg.get("quality") != body.quality:
+        cfg["quality"] = body.quality
+        try:
+            await db.update_basna_session(body.session_id, user["id"], config=json.dumps(cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra quality persist failed", error=str(e))
     # R7 cost ceiling for the opt-in retries (acted-gate/escalate). 0 → unbounded.
     _budget = TokenBudget(quality.token_budget)
     _retry_est = int(body.agent_max_tokens or 8192)

@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { useAuthStore, refreshAccessToken } from './authStore'
 import type { TierMap, EnvVar } from '../services/tierConfig'
+import { defaultProfile, fromResponse, toRequest } from '../services/quality'
+import type { QualityProfile } from '../services/quality'
 
 // ── Types (mirror captain_claw/flight_deck/basna_routes.py) ──────────
 
@@ -388,6 +390,14 @@ export function parseAnalysis(s?: string): BasnaAnalysis | null {
 
 const _ROUTER_TIER_LS = 'basna.routerTier'
 const _DEEP_LS = 'basna.deep'
+const _QUALITY_LS = 'basna.quality'
+
+function _loadQuality(): QualityProfile {
+  try {
+    const raw = typeof localStorage !== 'undefined' && localStorage.getItem(_QUALITY_LS)
+    return raw ? fromResponse(JSON.parse(raw)) : defaultProfile()
+  } catch { return defaultProfile() }
+}
 
 // ── Store ────────────────────────────────────────────────────────────
 
@@ -415,8 +425,10 @@ interface BasnaStore {
   planSteps: number    // max steps in the plan
   planComplex: boolean // simple = one model per step; complex = a full Basna/Vatra per step
   planDag: boolean     // planner emits a DAG; independent steps run in parallel waves
+  quality: QualityProfile  // opt-in cross-pollination levers (all-off == current behaviour)
 
   setRouterTier: (t: string) => void
+  setQuality: (q: QualityProfile) => void
   setMaxAgents: (n: number) => void
   setDeep: (v: boolean) => void
   setDeepSamples: (n: number) => void
@@ -473,10 +485,15 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   planSteps: 5,
   planComplex: false,
   planDag: false,
+  quality: _loadQuality(),
 
   setRouterTier: (t) => {
     try { localStorage.setItem(_ROUTER_TIER_LS, t) } catch { /* ignore */ }
     set({ routerTier: t })
+  },
+  setQuality: (q) => {
+    try { localStorage.setItem(_QUALITY_LS, JSON.stringify(q)) } catch { /* ignore */ }
+    set({ quality: q })
   },
   setMaxAgents: (n) => set({ maxAgents: Math.max(1, Math.min(10, n)) }),
   setDeep: (v) => {
@@ -639,7 +656,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // Deep mode in Vatra = Horizon depth: verify + revise EACH specialist's slice
       // (worker, blackboard-safe — no spawn pools) AND the final assembled deliverable.
       const horizon = get().deep ? { worker: true, close: true } : undefined
-      await apiVatraExecute({ session_id: sid, tiers, env_vars, ...(horizon ? { horizon } : {}) })
+      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       if (s) set({ activeSession: s })
       await get().loadSessions()
@@ -713,7 +730,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // Deep / Horizon mode: drive each worker through the self-consistency vote +
       // critics + fix loop, then verify-and-revise the merged answer (the closer).
       const horizon = get().deep ? { samples: get().deepSamples, close: true } : undefined
-      const res = await apiExecute({ session_id: sid, tiers, env_vars, ...(horizon ? { horizon } : {}) })
+      const res = await apiExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       const runs = await apiListRuns(sid)
       // Refresh attachments from the updated session so files the agents
