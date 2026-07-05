@@ -43,6 +43,7 @@ from captain_claw.flight_deck.horizon_worker import (
     run_worker_horizon,
 )
 from captain_claw.flight_deck import research_map
+from captain_claw.flight_deck import research_brief
 from captain_claw.flight_deck import research_rubric
 from captain_claw.flight_deck.quality_profile import (
     ACTED_CORRECTIVE,
@@ -278,6 +279,12 @@ class RouteRequest(BaseModel):
     # User-fixed team: when non-empty, the router MUST use exactly these archetypes
     # (all of them, no others) instead of choosing the team itself.
     archetype_ids: list[str] = []
+    # R12 intent brief: opt-in quality profile (only `intent_brief` is read here).
+    quality: dict = Field(default_factory=dict)
+    # R12: a user-edited brief to route on. When set, the router uses it verbatim
+    # (no re-derivation) and selects the team against it — this is the "edit the
+    # brief, re-route on it" path. Empty → derive one iff quality.intent_brief.
+    brief: str = ""
 
 
 class CreateSessionRequest(BaseModel):
@@ -1141,6 +1148,30 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
     model = body.model or fast.get("model", "")
     base_url = body.base_url or fast.get("base_url", "")
 
+    # R12 intent brief (opt-in): clarify the task into a structured brief BEFORE the
+    # router runs, so the TEAM is selected against the clarified task, not the terse
+    # one. A user-edited brief (body.brief) is used verbatim — the "edit the brief,
+    # re-route on it" path; otherwise one is derived when quality.intent_brief is set.
+    # brief_task keeps the original intent authoritative, so this can never drift the
+    # task. brief == "" reproduces today's routing exactly.
+    quality = QualityProfile.from_dict(body.quality)
+    brief = research_brief.parse_brief(body.brief) if body.brief.strip() else ""
+    if not brief and quality.intent_brief:
+        try:
+            from captain_claw.llm import Message, create_provider
+            bprov = create_provider(
+                provider=provider, model=model,
+                api_key=body.api_key or None, base_url=base_url or None,
+                temperature=0.2, max_tokens=body.max_tokens)
+            bresp = await bprov.complete(
+                messages=[Message(role="user", content=research_brief.derive_brief_prompt(intent))],
+                temperature=0.2, max_tokens=body.max_tokens)
+            brief = research_brief.parse_brief(bresp.content or "")
+        except Exception as e:  # noqa: BLE001 — brief is best-effort; fall back to raw intent
+            log.warning("Basna intent-brief derivation failed; routing on raw intent", error=str(e))
+            brief = ""
+    task_for_routing = research_brief.brief_task(intent, brief)
+
     system_prompt_file = _INSTRUCTIONS_DIR / "basna" / "router.md"
     if not system_prompt_file.is_file():
         raise HTTPException(500, "Basna router prompt not found")
@@ -1150,7 +1181,7 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         forced_list = "\n".join(
             f"- {a}: {archetypes_by_id[a].get('role', '')}" for a in forced_ids)
         user_prompt = (
-            f"Task: {intent}\n\n"
+            f"Task: {task_for_routing}\n\n"
             f"The team is FIXED by the user — you MUST use EXACTLY these archetypes, ALL of "
             f"them and NO others, in `selected`:\n{forced_list}\n\n"
             f"For each, write a `why` that instructs it specifically for THIS task (how it should "
@@ -1158,7 +1189,7 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         )
     else:
         user_prompt = (
-            f"Task: {intent}\n\n"
+            f"Task: {task_for_routing}\n\n"
             f"max_agents: {body.max_agents}. Select the smallest archetype set that "
             f"handles this task well, scaled to its difficulty."
         )
@@ -1231,6 +1262,7 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         )
     route["source"] = source
     route["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    route["brief"] = brief  # R12: persisted with the route; execute dispatches on it, UI edits it
 
     # Resolve a session title: explicit user title > the router LLM's title >
     # a cheap heuristic from the task. Computed once, applied below.
@@ -1915,7 +1947,7 @@ async def _spawn_horizon_member(
 async def _dispatch_horizon_workers(
     plan: list[tuple[dict, dict]], sess: dict, merge_kind: str, hcfg: HorizonConfig,
     body, request, user, sid: str, sid8: str, run_tag: str, input_files: list[dict],
-    *, critic_provider,
+    *, critic_provider, effective_intent: str = "",
 ) -> list[dict]:
     """Dispatch each routed worker through the Horizon engine instead of one-shot.
 
@@ -1945,7 +1977,7 @@ async def _dispatch_horizon_workers(
         fleet = sel.get("fleet_instructions") or arch.get("fleet_instructions", "")
         tier = sel["tier"]
         prompt = _build_dispatch_prompt(
-            role, sess["intent"], merge_kind,
+            role, effective_intent or sess["intent"], merge_kind,
             [f["name"] for f in input_files], extra=sel.get("extra", ""))
 
         def _on_action(act: dict) -> None:
@@ -2232,6 +2264,11 @@ async def execute_route(
             await db.update_basna_session(sid, user["id"], config=json.dumps(_sess_cfg))
         except Exception as e:  # noqa: BLE001
             log.warning("Basna quality persist failed", error=str(e))
+    # R12: the task workers actually build against — the raw intent, carrying the
+    # (reviewed/edited) brief the router selected the team on. brief == "" → this is
+    # exactly sess["intent"], so nothing changes when the lever is off. Verification
+    # stages (closer, claim-check) still use the RAW intent as ground truth.
+    effective_intent = research_brief.brief_task(sess["intent"], route.get("brief"))
     # R7 cost ceiling for the OPT-IN levers (acted-gate/escalate retries). The
     # base run is never refused; only the extra paid work these features add is
     # bounded, so the profile can never blow the token budget. 0 → unbounded.
@@ -2274,7 +2311,7 @@ async def execute_route(
                 from captain_claw.llm import Message
                 _r = await prov.complete(
                     [Message(role="user",
-                             content=research_rubric.derive_rubric_prompt(sess["intent"]))])
+                             content=research_rubric.derive_rubric_prompt(effective_intent))])
                 items = research_rubric.parse_rubric(_r.content or "")
                 if items:
                     rubric_pre = research_rubric.rubric_directive(items)
@@ -2288,7 +2325,8 @@ async def execute_route(
         if horizon_cfg is not None and horizon_cfg.worker:
             results = await _dispatch_horizon_workers(
                 plan, sess, merge_kind, horizon_cfg, body, request, user,
-                sid, sid8, run_tag, input_files, critic_provider=critic_provider)
+                sid, sid8, run_tag, input_files, critic_provider=critic_provider,
+                effective_intent=effective_intent)
         else:
             _phase(sid, "Spawning")
             _progress(sid, "spawn", f"Spawning {len(plan)} agent(s)…")
@@ -2406,7 +2444,7 @@ async def execute_route(
                 doc_paths = [str(ws / f["name"]) for f in input_files
                              if not str(f.get("mime", "")).startswith("image/")]
                 base_prompt = research_pre + _build_dispatch_prompt(
-                    role, sess["intent"], merge_kind,
+                    role, effective_intent, merge_kind,
                     [f["name"] for f in input_files], extra=sel.get("extra", "")) + rubric_pre
                 if quality.worker_escalate:
                     base_prompt += ESCALATE_DIRECTIVE

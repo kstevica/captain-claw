@@ -68,6 +68,7 @@ _PRESETS: dict[str, set[str]] = {
         "git_snapshots",    # R6 — git init + per-round commits for research folders (free)
         "source_corpus",    # R10 — save + index full fetched pages (depth without context blowup)
         "rubric_contract",  # R9 — derive a completeness checklist + score coverage against it
+        "intent_brief",     # R12 — clarify the task into an editable brief before routing (one LLM call)
     },
     # claim_check (R8) is the paid research lever (spawns a web-tool verifier + a
     # revision), like deep_build on the code side — no preset enables it; turn it
@@ -100,6 +101,7 @@ class QualityProfile:
     source_corpus: bool = False    # R10: web_fetch saves full page text to the VFS, returns head+ptr
     claim_check: bool = False      # R8: tool-enabled fact-checker verifies the deliverable's claims
     rubric_contract: bool = False  # R9: derive a completeness checklist + score coverage against it
+    intent_brief: bool = False     # R12: clarify the task into an editable brief before routing
 
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
@@ -123,7 +125,7 @@ class QualityProfile:
             "test_gate", "deep_build", "coverage_check", "acted_gate",
             "research_map", "delta_rounds", "critic_triage", "worker_escalate",
             "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
-            "rubric_contract",
+            "rubric_contract", "intent_brief",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -150,7 +152,7 @@ class QualityProfile:
         "test_gate", "deep_build", "coverage_check", "acted_gate",
         "research_map", "delta_rounds", "critic_triage", "worker_escalate",
         "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
-        "rubric_contract",
+        "rubric_contract", "intent_brief",
     )
 
     @property

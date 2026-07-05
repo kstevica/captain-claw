@@ -46,6 +46,7 @@ def test_balanced_enables_only_the_free_or_saving_levers():
     assert not p.coverage_check
     assert not p.git_snapshots
     assert not p.source_corpus and not p.rubric_contract
+    assert not p.intent_brief  # R12 costs a routing-time call → thorough, not balanced
 
 
 def test_thorough_enables_the_wired_paid_levers():
@@ -54,6 +55,7 @@ def test_thorough_enables_the_wired_paid_levers():
     assert p.test_gate and p.acted_gate  # still inherits balanced's set
     assert p.delta_rounds and p.critic_triage and p.judgment_ledger
     assert p.source_corpus and p.rubric_contract  # R10, R9
+    assert p.intent_brief  # R12
 
 
 def test_paid_levers_are_never_preset_enabled():

@@ -140,6 +140,56 @@ function Badge({ children, className = '' }: { children: React.ReactNode; classN
   )
 }
 
+/**
+ * R12 intent brief: the clarified, editable task the team was routed on. Editing
+ * it and re-routing re-selects the team against the new brief. The original
+ * request always governs — this is a faithful clarification, never a rewrite of
+ * the goal. Shown only when the intent_brief lever produced a brief.
+ */
+function BriefEditor({ brief, busy, onReroute }: {
+  brief: string; busy: boolean; onReroute: (edited: string) => void
+}) {
+  const [draft, setDraft] = useState(brief)
+  const [open, setOpen] = useState(true)
+  useEffect(() => { setDraft(brief) }, [brief])
+  const changed = draft.trim() !== brief.trim()
+  return (
+    <div className="rounded-lg border border-amber-300/70 bg-amber-50/70 p-4 dark:border-amber-700/40 dark:bg-amber-900/10">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <Sparkles className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+        <span className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Task brief</span>
+        <span className="text-[11px] text-zinc-500">the team was selected from this — edit &amp; re-route to re-pick it</span>
+        <button onClick={() => setOpen((o) => !o)} className="ml-auto text-[11px] text-zinc-500 hover:text-zinc-300">
+          {open ? 'Hide' : 'Show'}
+        </button>
+      </div>
+      {open && (
+        <>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={Math.min(18, Math.max(6, draft.split('\n').length + 1))}
+            spellCheck={false}
+            className="w-full resize-y rounded-md border border-zinc-300 bg-white/70 p-2.5 font-mono text-[11px] leading-relaxed text-zinc-800 focus:border-amber-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950/60 dark:text-zinc-200"
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => onReroute(draft)}
+              disabled={busy || !draft.trim()}
+              className="flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-40"
+            >
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              Re-route on this brief
+            </button>
+            {changed && <span className="text-[11px] text-amber-600 dark:text-amber-400">edited — re-route to apply</span>}
+            <span className="ml-auto text-[10px] text-zinc-500">the original request always governs on conflict</span>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function WeightBar({ value }: { value: number }) {
   return (
     <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
@@ -1163,6 +1213,17 @@ export function BasnaPage() {
                 </div>
               )}
             </div>
+
+            {/* R12 intent brief — editable, above both the Basna route plan and the
+                Vatra team plan. Re-routing on an edited brief re-selects the team. */}
+            {routePlan?.brief && (
+              <BriefEditor
+                brief={routePlan.brief}
+                busy={routing || planning}
+                onReroute={(edited) =>
+                  (effectiveMode === 'vatra' ? planVatra : route)(intent, tiers, title, team, edited)}
+              />
+            )}
 
             {/* Route plan (Basna only — Vatra uses the collaboration panel below) */}
             {routePlan && !vatraMode && (

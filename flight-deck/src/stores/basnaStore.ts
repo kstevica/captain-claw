@@ -97,6 +97,7 @@ export interface RoutePlan {
   mode?: 'basna' | 'vatra'
   subtasks?: VatraSubtask[]
   shared_context?: string   // the team contract every piece must follow
+  brief?: string            // R12: the clarified, editable task brief the team was routed on
 }
 
 export async function apiListVatraAsks(sessionId: string): Promise<VatraAsk[]> {
@@ -447,8 +448,8 @@ interface BasnaStore {
   selectSession: (id: string) => Promise<void>
   newSession: () => void
   updateSelected: (index: number, patch: Partial<RouteSelected>) => void
-  route: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[]) => Promise<void>
-  planVatra: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[]) => Promise<void>
+  route: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
+  planVatra: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   runVatra: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   fillGaps: (id: string) => Promise<void>
   saveTitle: (title: string) => Promise<void>
@@ -596,7 +597,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     set({ routePlan: { ...plan, selected } })
   },
 
-  route: async (intent, tiers, title = '', archetypeIds = []) => {
+  route: async (intent, tiers, title = '', archetypeIds = [], brief = '') => {
     set({ routing: true, error: null })
     try {
       const sid = get().activeSession?.id
@@ -610,6 +611,9 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         max_agents: get().maxAgents,
         ...(title.trim() ? { title: title.trim() } : {}),
         ...(archetypeIds.length ? { archetype_ids: archetypeIds } : {}),
+        // R12: opt-in intent brief. A user-edited brief re-routes the team on it.
+        quality: toRequest(get().quality),
+        ...(brief.trim() ? { brief } : {}),
         ...creds,
         ...(sid ? { session_id: sid } : {}),
       })
@@ -626,7 +630,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   // Vatra prepare step (mirrors Basna's Route): the Lead decomposes the task into
   // owned pieces, persisted as a routed session — nothing is spawned yet. The team
   // plan then shows in the collaboration panel for review before Run.
-  planVatra: async (intent, tiers, title = '', archetypeIds = []) => {
+  planVatra: async (intent, tiers, title = '', archetypeIds = [], brief = '') => {
     if (!intent.trim()) return
     set({ planning: true, error: null })
     try {
@@ -635,6 +639,9 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         router_tier: get().routerTier,
         ...(title.trim() ? { title: title.trim() } : {}),
         ...(archetypeIds.length ? { archetype_ids: archetypeIds } : {}),
+        // R12: opt-in intent brief. A user-edited brief re-plans the team on it.
+        quality: toRequest(get().quality),
+        ...(brief.trim() ? { brief } : {}),
       })
       await get().loadSessions()
       await get().selectSession(session_id)

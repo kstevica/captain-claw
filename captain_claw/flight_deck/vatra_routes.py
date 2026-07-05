@@ -70,6 +70,7 @@ from captain_claw.flight_deck.basna_routes import (
     _tier_creds,
     _vfs_manifest,
 )
+from captain_claw.flight_deck import research_brief
 from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck import research_rubric
 from captain_claw.flight_deck.horizon_worker import HorizonConfig, run_horizon_closer
@@ -573,6 +574,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     subtasks = route["subtasks"]
     shared_context = route.get("shared_context", "")
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
+    # R12: the task owners build against — raw intent carrying the (reviewed/edited)
+    # brief the Lead decomposed on. brief == "" → exactly the raw intent, so an off
+    # brief changes nothing. (The /start path plans inline with no brief → raw intent.)
+    effective_intent = research_brief.brief_task(intent, route.get("brief"))
 
     # R9 rubric contract (opt-in): derive the completeness checklist ONCE, with the
     # reason tier, from the standard the task names — then inject it into every
@@ -740,7 +745,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
             prompt = research_pre + _build_subtask_prompt(
-                role, intent, st, [f["name"] for f in input_files],
+                role, effective_intent, st, [f["name"] for f in input_files],
                 subtasks, shared_context, team_prep=intro_digest,
                 vfs_project=vfs_project)
             if quality.worker_escalate:
@@ -2016,6 +2021,12 @@ class VatraStartRequest(BaseModel):
     router_tier: str = "reason"
     # Deep / Horizon closer (verify + revise the assembled deliverable). None → off.
     horizon: dict | None = None
+    # R12 intent brief: opt-in quality profile (only `intent_brief` is read here).
+    quality: dict = Field(default_factory=dict)
+    # R12: a user-edited brief to decompose on. When set, the Lead plans against it
+    # verbatim (no re-derivation) — the "edit the brief, re-plan on it" path. Empty →
+    # derive one iff quality.intent_brief.
+    brief: str = ""
 
 
 class VatraExecuteRequest(BaseModel):
@@ -2047,8 +2058,27 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
     # The Lead's decomposition is a reasoning task — run it on the user-selected
     # tier (default reasoning), not the fast tier.
     creds = _resolve_creds(registry, body.tiers, body.api_key, body.router_tier or "reason")
+    # R12 intent brief (opt-in): clarify the task into a structured brief BEFORE the
+    # Lead decomposes, so the TEAM + subtasks are planned against the clarified task.
+    # A user-edited brief (body.brief) is used verbatim — the "edit the brief, re-plan
+    # on it" path; else derive one when quality.intent_brief is set. brief_task keeps
+    # the original intent authoritative. brief == "" reproduces today's planning.
+    quality = QualityProfile.from_dict(body.quality)
+    brief = research_brief.parse_brief(body.brief) if body.brief.strip() else ""
+    if not brief and quality.intent_brief:
+        try:
+            prov, mt = _provider_call(creds, temperature=0.2, default_max=1500, cap=4096)
+            from captain_claw.llm import Message
+            bresp = await prov.complete(
+                [Message(role="user", content=research_brief.derive_brief_prompt(intent))],
+                temperature=0.2, max_tokens=mt)
+            brief = research_brief.parse_brief(bresp.content or "")
+        except Exception as e:  # noqa: BLE001 — brief is best-effort; fall back to raw intent
+            log.warning("Vatra intent-brief derivation failed; planning on raw intent", error=str(e))
+            brief = ""
+    task_for_planning = research_brief.brief_task(intent, brief)
     try:
-        route = await _build_plan(db, user["id"], intent, body.max_agents, creds,
+        route = await _build_plan(db, user["id"], task_for_planning, body.max_agents, creds,
                                   force_ids=body.archetype_ids or None)
     except HTTPException:
         await db.delete_basna_session(sid, user["id"])
@@ -2056,6 +2086,7 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
     except Exception as e:
         await db.delete_basna_session(sid, user["id"])
         raise HTTPException(502, f"Vatra Lead failed: {e}")
+    route["brief"] = brief  # R12: persisted with the plan; execute dispatches on it, UI edits it
     await db.update_basna_session(
         sid, user["id"], domain=route["domain"], route=json.dumps(route), status="routed")
     return {"session_id": sid, "title": title, **route}

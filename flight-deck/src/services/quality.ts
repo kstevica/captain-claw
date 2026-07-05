@@ -19,6 +19,7 @@ export type QualityProfile = {
   source_corpus: boolean
   claim_check: boolean
   rubric_contract: boolean
+  intent_brief: boolean
   claim_check_max: number
   // Shared
   token_budget: number
@@ -27,7 +28,7 @@ export type QualityProfile = {
 export const BOOL_FLAGS = [
   'test_gate', 'deep_build', 'coverage_check', 'acted_gate', 'research_map',
   'delta_rounds', 'critic_triage', 'worker_escalate', 'git_snapshots',
-  'judgment_ledger', 'source_corpus', 'claim_check', 'rubric_contract',
+  'judgment_ledger', 'source_corpus', 'claim_check', 'rubric_contract', 'intent_brief',
 ] as const
 export type BoolFlag = (typeof BOOL_FLAGS)[number]
 
@@ -38,6 +39,7 @@ export function defaultProfile(): QualityProfile {
     acted_gate: false, research_map: false, delta_rounds: false, critic_triage: false,
     worker_escalate: false, git_snapshots: false,
     judgment_ledger: false, source_corpus: false, claim_check: false, rubric_contract: false,
+    intent_brief: false,
     claim_check_max: 8,
     token_budget: 0,
   }
@@ -51,7 +53,7 @@ const PRESETS: Record<'off' | 'balanced' | 'thorough', BoolFlag[]> = {
     'worker_escalate', 'judgment_ledger'],
   thorough: ['acted_gate', 'test_gate', 'research_map', 'delta_rounds', 'critic_triage',
     'worker_escalate', 'judgment_ledger', 'coverage_check', 'git_snapshots',
-    'source_corpus', 'rubric_contract'],
+    'source_corpus', 'rubric_contract', 'intent_brief'],
 }
 
 export function applyPreset(p: 'off' | 'balanced' | 'thorough', prev: QualityProfile): QualityProfile {
@@ -116,6 +118,8 @@ export const LEVERS: Lever[] = [
   { flag: 'deep_build', code: 'C3', scope: 'code', cost: 'paid', label: 'Deep build',
     blurb: 'Best-of-N verified builds: try N times, keep the first that passes its tests. Uses more tokens — set a budget.' },
   // Research
+  { flag: 'intent_brief', code: 'R12', scope: 'research', cost: 'cheap', label: 'Intent brief',
+    blurb: 'Before routing, clarify the task into one structured brief — shown for you to edit — and select the team against it. The original request always governs. Keeps weak workers on-scope (often pays for itself).' },
   { flag: 'research_map', code: 'R1', scope: 'research', cost: 'saver', label: 'Research map',
     blurb: 'Index the shared folder so agents (and the reporter) search prior findings instead of re-reading. Saves tokens on chains.' },
   { flag: 'acted_gate', code: 'R2', scope: 'research', cost: 'saver', label: 'Acted gate',
