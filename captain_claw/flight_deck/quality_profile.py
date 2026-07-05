@@ -59,13 +59,19 @@ _PRESETS: dict[str, set[str]] = {
         "delta_rounds",     # R4 — continuation rounds inline less prior text (saver)
         "critic_triage",    # R3 — actionable closer revisions (free, opt-in path)
         "worker_escalate",  # R5 — an overwhelmed worker escalates instead of emitting junk
+        "judgment_ledger",  # R11 — force explicit hard-call resolution (free, prompt-only)
     },
     "thorough": {
         "acted_gate", "test_gate", "research_map", "delta_rounds", "critic_triage",
-        "worker_escalate",
+        "worker_escalate", "judgment_ledger",
         "coverage_check",   # C5 — judge final state vs the approved plan (one LLM call)
         "git_snapshots",    # R6 — git init + per-round commits for research folders (free)
+        "source_corpus",    # R10 — save + index full fetched pages (depth without context blowup)
+        "rubric_contract",  # R9 — derive a completeness checklist + score coverage against it
     },
+    # claim_check (R8) is the paid research lever (spawns a web-tool verifier + a
+    # revision), like deep_build on the code side — no preset enables it; turn it
+    # on explicitly, ideally with a token_budget.
 }
 
 _VALID_PROFILES = frozenset(_PRESETS)
@@ -90,12 +96,17 @@ class QualityProfile:
     critic_triage: bool = False    # R3: closer distils critic findings into an ordered checklist
     worker_escalate: bool = False  # R5: worker can flag ESCALATE → higher-tier re-dispatch
     git_snapshots: bool = False    # R6: git init the research folder + commit each round
+    judgment_ledger: bool = False  # R11: force explicit enumeration+resolution of the hard calls
+    source_corpus: bool = False    # R10: web_fetch saves full page text to the VFS, returns head+ptr
+    claim_check: bool = False      # R8: tool-enabled fact-checker verifies the deliverable's claims
+    rubric_contract: bool = False  # R9: derive a completeness checklist + score coverage against it
 
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     deep_build_samples: int = 2    # C3 pool size — kept small on purpose
     deep_build_fix_attempts: int = 1
     escalate_max: int = 2          # R5: cap re-dispatch escalations per run
+    claim_check_max: int = 8       # R8: how many top claims the fact-checker live-verifies
 
     @classmethod
     def from_dict(cls, d: dict | None) -> QualityProfile:
@@ -111,7 +122,8 @@ class QualityProfile:
         bool_flags = {
             "test_gate", "deep_build", "coverage_check", "acted_gate",
             "research_map", "delta_rounds", "critic_triage", "worker_escalate",
-            "git_snapshots",
+            "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
+            "rubric_contract",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -131,12 +143,14 @@ class QualityProfile:
         kw["deep_build_samples"] = max(1, _int("deep_build_samples", 2))
         kw["deep_build_fix_attempts"] = max(0, _int("deep_build_fix_attempts", 1))
         kw["escalate_max"] = max(0, _int("escalate_max", 2))
+        kw["claim_check_max"] = max(1, _int("claim_check_max", 8))
         return cls(**kw)
 
     _BOOL_FLAGS = (
         "test_gate", "deep_build", "coverage_check", "acted_gate",
         "research_map", "delta_rounds", "critic_triage", "worker_escalate",
-        "git_snapshots",
+        "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
+        "rubric_contract",
     )
 
     @property
@@ -265,3 +279,31 @@ def escalate_reason(output: str | None) -> str | None:
     """The reason from an `ESCALATE: ...` line in a worker's output, or None."""
     m = _ESCALATE_RE.search(output or "")
     return m.group(1).strip()[:300] if m else None
+
+
+# ── R11: judgment ledger ──────────────────────────────────────────────
+# Weak models CAN make the hard boundary calls a strong model makes — they just
+# don't volunteer them. Forcing each specialist to enumerate and resolve the
+# hardest judgment calls in its scope is what turns implicit hedging into
+# explicit, defensible determinations (the Fable-vs-Vatra gap was mostly this).
+# Free — it's a prompt directive; the Deep critics then attack the ledger.
+
+JUDGMENT_LEDGER_DIRECTIVE = (
+    "\n\nHARD CALLS: end your contribution with a short **Judgment calls** section. "
+    "List the 2–5 genuinely difficult or contestable decisions in your scope — "
+    "boundary questions, close classifications, which of several plausible options "
+    "applies, gaps where the evidence is thin — and for EACH state the call you made "
+    "and one line of reasoning. Do not hide these in prose; make the determinations "
+    "explicit so they can be checked. If a call is genuinely uncertain, say so and "
+    "give your best-supported answer rather than omitting it."
+)
+
+
+# ── R10: source corpus directive (paired with the web_fetch behaviour) ─
+SOURCE_CORPUS_DIRECTIVE = (
+    "\n\nSOURCES: this run keeps a shared source corpus. When you `web_fetch` a "
+    "primary source, its FULL text is saved to `vfs:<project>/sources/` and you get "
+    "a preview + pointer — read or `researchmap`-search the saved file for the rest "
+    "rather than re-fetching. Fetch full pages one at a time for anything you will "
+    "actually rely on or cite; use batch fetch only to triage many links quickly."
+)

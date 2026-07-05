@@ -41,23 +41,34 @@ def test_balanced_enables_only_the_free_or_saving_levers():
     assert p.test_gate and p.acted_gate
     assert p.research_map and p.worker_escalate
     assert p.delta_rounds and p.critic_triage  # free savers
-    # Paid levers stay off in balanced.
+    assert p.judgment_ledger                    # R11, free
+    # Paid / heavier levers stay off in balanced.
     assert not p.coverage_check
     assert not p.git_snapshots
+    assert not p.source_corpus and not p.rubric_contract
 
 
 def test_thorough_enables_the_wired_paid_levers():
     p = QualityProfile.from_dict({"profile": "thorough"})
     assert p.coverage_check and p.git_snapshots
     assert p.test_gate and p.acted_gate  # still inherits balanced's set
-    assert p.delta_rounds and p.critic_triage
+    assert p.delta_rounds and p.critic_triage and p.judgment_ledger
+    assert p.source_corpus and p.rubric_contract  # R10, R9
 
 
-def test_deep_build_is_the_only_lever_no_preset_enables():
-    # deep_build (paid) must be explicit; every other wired flag can be preset-on.
+def test_paid_levers_are_never_preset_enabled():
+    # deep_build (code) and claim_check (research) must be explicit opt-ins.
     for name in ("off", "balanced", "thorough"):
         p = QualityProfile.from_dict({"profile": name})
         assert not p.deep_build, name
+        assert not p.claim_check, name
+
+
+def test_claim_check_is_explicit_with_its_knob():
+    p = QualityProfile.from_dict(
+        {"profile": "thorough", "claim_check": True, "claim_check_max": 12,
+         "token_budget": 400_000})
+    assert p.claim_check and p.claim_check_max == 12 and p.token_budget == 400_000
 
 
 def test_deep_build_is_explicit_opt_in_with_knobs():

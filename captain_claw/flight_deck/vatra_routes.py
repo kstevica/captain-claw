@@ -71,11 +71,14 @@ from captain_claw.flight_deck.basna_routes import (
     _vfs_manifest,
 )
 from captain_claw.flight_deck import research_map
+from captain_claw.flight_deck import research_rubric
 from captain_claw.flight_deck.horizon_worker import HorizonConfig, run_horizon_closer
 from captain_claw.flight_deck.quality_profile import (
     ACTED_CORRECTIVE,
     ESCALATE_CORRECTIVE,
     ESCALATE_DIRECTIVE,
+    JUDGMENT_LEDGER_DIRECTIVE,
+    SOURCE_CORPUS_DIRECTIVE,
     QualityProfile,
     TokenBudget,
     escalate_reason,
@@ -375,6 +378,7 @@ async def _spawn_worker(request: Request, user: dict, *, name: str, description:
                         cognitive_mode: str, tools: list[str], tier: str,
                         tiers: dict | None, api_key: str, env_vars: list[dict] | None,
                         extra_env: list[dict] | None = None,
+                        corpus: bool = False,
                         ) -> dict:
     """Spawn one ephemeral agent and resolve its web port. Returns
     {ok, slug, port, auth, message}. Strips the run-starting `basna` tool and
@@ -397,7 +401,8 @@ async def _spawn_worker(request: Request, user: dict, *, name: str, description:
     base = dict(
         name=name, description=description,
         cognitive_mode=cognitive_mode or "neutra", tools=worker_tools,
-        env_vars=(env_vars or []) + (extra_env or []) + [{"key": _WORKER_MARKER, "value": "1"}],
+        env_vars=(env_vars or []) + (extra_env or []) + [{"key": _WORKER_MARKER, "value": "1"}]
+        + ([{"key": "CLAW_SOURCE_CORPUS", "value": "1"}] if corpus else []),  # R10
         web_enabled=True, web_port=0,
     )
     if model:
@@ -568,6 +573,25 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     shared_context = route.get("shared_context", "")
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
 
+    # R9 rubric contract (opt-in): derive the completeness checklist ONCE, with the
+    # reason tier, from the standard the task names — then inject it into every
+    # owner + the reporter as the definition of "complete" (via shared_context).
+    rubric_items: list[str] = []
+    if quality.rubric_contract:
+        try:
+            cc = _creds("reason")
+            if cc.get("model"):
+                prov, _ = _provider_call(cc, temperature=0.2, default_max=1500, cap=4096)
+                from captain_claw.llm import Message
+                _r = await prov.complete(
+                    [Message(role="user", content=research_rubric.derive_rubric_prompt(intent))])
+                rubric_items = research_rubric.parse_rubric(_r.content or "")
+                if rubric_items:
+                    shared_context = (shared_context + research_rubric.rubric_directive(rubric_items)).strip()
+                    _progress(sid, "route", f"Completeness rubric: {len(rubric_items)} required items")
+        except Exception as e:  # noqa: BLE001 — rubric is best-effort
+            log.warning("Vatra rubric derivation failed", error=str(e))
+
     # R1 Research Map (opt-in): index the shared folder so owners AND the reporter
     # can search prior rounds' material instead of re-reading it (and the reporter
     # can pull past its inline slice cap). Free; best-effort.
@@ -619,6 +643,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 tier=tier, tiers=tiers,
                 api_key=body.api_key, env_vars=body.env_vars,
                 extra_env=_vatra_env(sid, st["id"], arch["id"], 0),
+                corpus=quality.source_corpus,  # R10
             )
             if not sp["ok"]:
                 _progress(sid, "spawn", f"{arch.get('role') or arch['id']}: unusable — {sp['message']}", ok=False)
@@ -654,7 +679,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             request, user, sid, sid8, run_tag, intent, domain,
             archetypes=archetypes, arch_by_id=arch_by_id, tiers=tiers,
             api_key=body.api_key, env_vars=body.env_vars,
-            dispatch_timeout=body.dispatch_timeout, stop_event=stop_event))
+            dispatch_timeout=body.dispatch_timeout, stop_event=stop_event,
+            corpus=quality.source_corpus))  # R10
 
         # 3) Dispatch each owner its self-contained brief, in parallel.
         # Count how many pieces each archetype owns so we can disambiguate the live
@@ -710,6 +736,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 vfs_project=vfs_project)
             if quality.worker_escalate:
                 prompt += ESCALATE_DIRECTIVE
+            if quality.judgment_ledger:
+                prompt += JUDGMENT_LEDGER_DIRECTIVE
+            if quality.source_corpus:
+                prompt += SOURCE_CORPUS_DIRECTIVE
             d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
@@ -964,6 +994,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         dispatch_timeout=body.dispatch_timeout, input_names=input_names,
         dest_dir=dest_dir, seen_gen=seen_gen, answered_asks=answered,
         shared_context=shared_context, research_dir=research_dir,
+        corpus=quality.source_corpus,  # R10
     )
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
@@ -992,6 +1023,21 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                           f"Closer: deliverable held ({closed['survived']}/{closed['total']})")
         except Exception as e:  # noqa: BLE001 — closer is best-effort
             log.warning("Vatra horizon closer failed", error=str(e))
+
+    # 5c) R8 grounded claim verification (opt-in, paid): a web-tool fact-checker
+    # verifies the deliverable's load-bearing claims against real sources and
+    # corrects the ones that are verified wrong — the ground-truth back-edge the
+    # (tool-less) closer cannot provide. Budget-gated.
+    if quality.claim_check and (truth or "").strip() and _budget.can_afford(2 * _retry_est):
+        _budget.add(2 * _retry_est)
+        try:
+            truth, _cc_findings = await _claim_check(
+                request, user, sid, sid8, run_tag, intent=intent, deliverable=truth,
+                arch_by_id=arch_by_id, tiers=body.tiers, api_key=body.api_key,
+                env_vars=body.env_vars, dispatch_timeout=body.dispatch_timeout,
+                quality=quality, research_dir=research_dir)
+        except Exception as e:  # noqa: BLE001 — claim check is best-effort
+            log.warning("Vatra claim check errored", error=str(e))
 
     # 6) Persist one run per owner (success backfilled by the learning step below).
     run_ids = await db.add_basna_runs(sid, user["id"], [{
@@ -1042,6 +1088,31 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     except Exception as e:
         log.warning("Vatra coverage check failed", error=str(e))
         _progress(sid, "learn", "Coverage check skipped", ok=False)
+
+    # R9: score the deliverable field-by-field against the derived rubric and fold any
+    # missing/thin required items into the gaps — so a fill-gaps round can close them.
+    if rubric_items and (truth or "").strip():
+        try:
+            cc = _creds("reason")
+            if cc.get("model"):
+                prov, _ = _provider_call(cc, temperature=0.1, default_max=1500, cap=4096)
+                from captain_claw.llm import Message
+                _c = await asyncio.wait_for(prov.complete(
+                    [Message(role="user",
+                             content=research_rubric.coverage_prompt(intent, rubric_items, truth))]), 120)
+                cov2 = research_rubric.parse_coverage(_c.content or "")
+                extra = ([{"item": m, "severity": "major", "note": "required by the standard, not covered"}
+                          for m in cov2["missing"]]
+                         + [{"item": t, "severity": "minor", "note": "covered only partially"}
+                            for t in cov2["thin"]])
+                if extra:
+                    analysis.setdefault("gaps", [])
+                    analysis["gaps"] = (analysis.get("gaps") or []) + extra
+                    await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
+                    _progress(sid, "learn",
+                              f"Rubric coverage: {len(cov2['missing'])} missing · {len(cov2['thin'])} thin")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra rubric coverage failed", error=str(e))
 
     _phase(sid, "Done")
     _progress_done(sid)
@@ -1361,7 +1432,8 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                         dest_dir: Path, seen_gen: set[str],
                         answered_asks: list[dict] | None = None,
                         shared_context: str = "",
-                        research_dir: Path | None = None) -> tuple[str, list[dict]]:
+                        research_dir: Path | None = None,
+                        corpus: bool = False) -> tuple[str, list[dict]]:
     """Spawn a dedicated reporter, feed it the slices (plus any answered cross-agent
     asks), and capture the assembled deliverable. Falls back to a labeled
     concatenation if the reporter fails."""
@@ -1399,6 +1471,7 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         # Bind the reporter to the same shared VFS project so it reads the
         # team's files from (and writes the assembled deliverable to) one folder.
         extra_env=_vatra_env(sid, "reporter", reporter_id, 0),
+        corpus=corpus,  # R10
     )
     if not sp["ok"]:
         _progress(sid, "report", f"Reporter spawn failed — using raw assembly ({sp['message']})", ok=False)
@@ -1462,13 +1535,103 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         _track_worker(sid, sp["slug"], add=False)
 
 
+# ── R8: grounded claim verification ──────────────────────────────────
+
+_FACTCHECK_ARCHETYPES = ("fact-checker", "deep-researcher", "market-scanner")
+
+
+async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_tag: str, *,
+                       intent: str, deliverable: str, arch_by_id: dict, tiers,
+                       api_key, env_vars, dispatch_timeout, quality,
+                       research_dir) -> tuple[str, list[dict]]:
+    """Spawn a web-tool fact-checker, verify the deliverable's load-bearing claims,
+    and revise it to fix any that are verified WRONG. Returns (deliverable, findings).
+    Best-effort: on any failure the original deliverable is returned unchanged."""
+    from captain_claw.flight_deck import research_verify as rv
+    if not (deliverable or "").strip():
+        return deliverable, []
+    checker = next((arch_by_id[a] for a in _FACTCHECK_ARCHETYPES if a in arch_by_id), None) \
+        or next(iter(arch_by_id.values()), None)
+    if not checker:
+        return deliverable, []
+    role = checker.get("role") or checker["id"]
+    tools = list(dict.fromkeys(
+        (checker.get("tools") or []) + ["web_search", "web_fetch", "researchmap", "read"]))
+
+    _phase(sid, "Fact-checking")
+    _progress(sid, "verify", f"Fact-checker ({role}) verifying the deliverable's claims…", agent=role)
+    sp = await _spawn_worker(
+        request, user, name=f"vatra-{sid8}-{run_tag}-factcheck-{checker['id']}",
+        description=f"Vatra fact-checker · {role}",
+        cognitive_mode=checker.get("cognitive_mode", "phrygian"),  # adversarial lens
+        tools=tools, tier=checker.get("tier", "reason"), tiers=tiers,
+        api_key=api_key, env_vars=env_vars,
+        extra_env=_vatra_env(sid, "factcheck", checker["id"], 0),
+        corpus=quality.source_corpus)
+    if not sp["ok"]:
+        _progress(sid, "verify", f"Fact-checker spawn failed ({sp['message']})", ok=False)
+        return deliverable, []
+
+    def _on_action(act: dict) -> None:
+        detail = act.get("detail", "")
+        if act["tool"] == "narration":
+            _progress(sid, "narration", f"{role}: {detail}", agent=role, tool="narration", detail=detail)
+        else:
+            suffix = f": {detail}" if detail else ""
+            _progress(sid, "action", f"{role} → {act['tool']}{suffix}", agent=role, tool=act["tool"], detail=detail)
+
+    def _on_usage(pt: int, ct: int, tt: int) -> None:
+        _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok", agent=role,
+                  prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
+    _track_worker(sid, sp["slug"], add=True)
+    findings: list[dict] = []
+    try:
+        prompt = rv.claim_check_prompt(deliverable, intent, quality.claim_check_max,
+                                       corpus_hint=research_dir is not None)
+        d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
+                                on_action=_on_action,
+                                fleet_instructions=checker.get("fleet_instructions", ""),
+                                agent_name=role, on_usage=_on_usage)
+        findings = rv.parse_findings(d.get("output") or "")
+        _progress(sid, "verify", f"Fact-checker: {rv.summary_line(findings)}", agent=role)
+        for f in rv.refuted(findings):
+            _progress(sid, "narration", f"{role} (refuted): {f['claim']} → {f['correction']}",
+                      agent=role, tool="narration", detail=f["correction"])
+        fix = rv.fix_instructions(findings)
+        if not fix:
+            return deliverable, findings
+        _progress(sid, "verify", "Revising the deliverable to fix the verified errors…", agent=role)
+        revise_prompt = (
+            "Now output the FULL corrected deliverable. Apply EXACTLY these corrections and "
+            "change nothing else — keep all other content, structure and formatting identical:\n\n"
+            f"{fix}\n\nOutput the complete corrected document only, no preamble.")
+        d2 = await _dispatch_one(sp["port"], sp["auth"], revise_prompt, dispatch_timeout,
+                                 on_action=_on_action,
+                                 fleet_instructions=checker.get("fleet_instructions", ""),
+                                 agent_name=role, on_usage=_on_usage)
+        revised = (d2.get("output") or "").strip()
+        collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
+        if collapsed:
+            _progress(sid, "verify", "Kept the original (correction pass collapsed)", agent=role, ok=False)
+            return deliverable, findings
+        _progress(sid, "verify", f"Deliverable corrected: {len(rv.refuted(findings))} fix(es) applied", agent=role)
+        return revised, findings
+    except Exception as e:  # noqa: BLE001
+        log.warning("Vatra claim check failed", error=str(e))
+        return deliverable, findings
+    finally:
+        _teardown([sp["slug"]])
+        _track_worker(sid, sp["slug"], add=False)
+
+
 # ── Coordinator: route blackboard asks to helpers (non-blocking) ─────
 
 async def _coordinate_asks(request: Request, user: dict, sid: str, sid8: str,
                            run_tag: str, intent: str, domain: str, *,
                            archetypes: list[dict], arch_by_id: dict, tiers,
                            api_key, env_vars, dispatch_timeout,
-                           stop_event: asyncio.Event) -> int:
+                           stop_event: asyncio.Event, corpus: bool = False) -> int:
     """Watch the blackboard and fulfil open asks with fresh helpers, concurrently
     with the owners' work. Runs until ``stop_event`` is set AND nothing is open or
     in flight. Returns the number of asks answered. Budget/depth/cycle guards are
@@ -1485,7 +1648,8 @@ async def _coordinate_asks(request: Request, user: dict, sid: str, sid8: str,
             ok = await _fulfill_ask(
                 request, user, sid, sid8, run_tag, intent, ask,
                 archetypes=archetypes, arch_by_id=arch_by_id, tiers=tiers,
-                api_key=api_key, env_vars=env_vars, dispatch_timeout=dispatch_timeout)
+                api_key=api_key, env_vars=env_vars, dispatch_timeout=dispatch_timeout,
+                corpus=corpus)
             if ok:
                 answered += 1
 
@@ -1514,7 +1678,7 @@ async def _coordinate_asks(request: Request, user: dict, sid: str, sid8: str,
 async def _fulfill_ask(request: Request, user: dict, sid: str, sid8: str, run_tag: str,
                        intent: str, ask: dict, *, archetypes: list[dict],
                        arch_by_id: dict, tiers, api_key, env_vars,
-                       dispatch_timeout) -> bool:
+                       dispatch_timeout, corpus: bool = False) -> bool:
     """Spawn one fresh helper to answer a single ask, write the answer back, tear
     it down. Returns True if an answer was recorded."""
     db = get_db()
@@ -1532,6 +1696,7 @@ async def _fulfill_ask(request: Request, user: dict, sid: str, sid8: str, run_ta
         tools=arch.get("tools") or [], tier=arch.get("tier", "balanced"),
         tiers=tiers, api_key=api_key, env_vars=env_vars,
         extra_env=_vatra_env(sid, f"help:{ask['id']}", arch["id"], depth),
+        corpus=corpus,  # R10
     )
     if not sp["ok"]:
         await db.drop_vatra_ask(ask["id"], note=f"helper spawn failed: {sp['message']}")

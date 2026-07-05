@@ -52,6 +52,26 @@ failures are pre-existing and unrelated.
   loop's seeded-fix path (so the review/fix loop + C1 test gate still verify),
   with a kind-appropriate archetype (debugger / qa-engineer / simplifier).
 
+**Research-quality levers (added after the ROPA / Fable comparison — close the
+gap between weak-model ensembles and a strong single model):**
+- **R8 claim check** (`claim_check`, explicit opt-in) — after the deliverable, a
+  web-tool fact-checker (`research_verify.py`) extracts its load-bearing claims
+  (citations, versions, dates, figures), live-verifies the top N against real
+  sources + the run's corpus, and corrects the ones proven wrong. C1 for research
+  — the ground truth the tool-less closer can't reach. Budget-gated.
+- **R9 rubric contract** (`rubric_contract`) — derive the completeness checklist
+  ONCE (reason tier, from the standard the task names) and inject it into every
+  worker + the reporter as the definition of "complete"; the coverage judge scores
+  field-by-field against it. `research_rubric.py`. Fixes the "which fields count"
+  scope loss.
+- **R10 source corpus** (`source_corpus`) — `web_fetch` in a research run saves the
+  FULL page to `vfs:<project>/sources/` (indexed by the Research Map) and returns a
+  head + pointer: depth without any one worker's context blowing up; the reporter
+  and R8 checker can re-read every source. Applied to the readable-text fetch tool.
+- **R11 judgment ledger** (`judgment_ledger`) — each specialist must enumerate and
+  resolve its hardest judgment calls explicitly, turning weak-model hedging into
+  Fable-style determinations. Prompt-only; the Deep critics then attack the ledger.
+
 **Reserved (a dedicated pass; both are where "don't break current behaviour" is at
 real risk, so they belong in their own carefully-tested change):**
 - **★ C4 parallel Vatra build** — planner emits dependency-scoped steps; independent

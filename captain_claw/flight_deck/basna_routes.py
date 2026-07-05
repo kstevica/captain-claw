@@ -43,10 +43,13 @@ from captain_claw.flight_deck.horizon_worker import (
     run_worker_horizon,
 )
 from captain_claw.flight_deck import research_map
+from captain_claw.flight_deck import research_rubric
 from captain_claw.flight_deck.quality_profile import (
     ACTED_CORRECTIVE,
     ESCALATE_CORRECTIVE,
     ESCALATE_DIRECTIVE,
+    JUDGMENT_LEDGER_DIRECTIVE,
+    SOURCE_CORPUS_DIRECTIVE,
     QualityProfile,
     TokenBudget,
     escalate_reason,
@@ -1849,6 +1852,7 @@ class ExecuteRequest(BaseModel):
 async def _spawn_horizon_member(
     arch: dict, sel: dict, body, request, user, *,
     sid8: str, run_tag: str, input_files: list[dict], src_dir: Path, name_suffix: str,
+    extra_env: list[dict] | None = None,
 ) -> tuple[int, str, str]:
     """Spawn one Basna-correct ephemeral worker for a Horizon pool → (port, token, slug).
 
@@ -1881,7 +1885,7 @@ async def _spawn_horizon_member(
              "value": getattr(body, "vfs_project", "") or f"basna-{sid8}"},
             {"key": "CLAW_AGENT_LABEL",
              "value": sel.get("role") or arch.get("role") or arch["id"]},
-        ],
+        ] + (extra_env or []),
         web_enabled=True, web_port=0,
     )
     if model:
@@ -2026,6 +2030,98 @@ async def _dispatch_horizon_workers(
     return results
 
 
+# ── R8: grounded claim verification (Basna) ──────────────────────────
+
+_FACTCHECK_ARCHETYPES = ("fact-checker", "deep-researcher", "market-scanner")
+
+
+async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
+                       intent: str, deliverable: str, arch_by_id: dict, body,
+                       quality, research_dir) -> str:
+    """Spawn a web-tool fact-checker, verify the merged answer's load-bearing claims,
+    and correct any that are verified wrong. Returns the (possibly revised) answer.
+    Best-effort; on any failure the original answer is returned unchanged."""
+    from captain_claw.flight_deck import research_verify as rv
+    from captain_claw.flight_deck.server import _do_stop_process
+    if not (deliverable or "").strip():
+        return deliverable
+    src = next((arch_by_id[a] for a in _FACTCHECK_ARCHETYPES if a in arch_by_id), None) \
+        or next(iter(arch_by_id.values()), None)
+    if not src:
+        return deliverable
+    role = src.get("role") or src["id"]
+    tools = list(dict.fromkeys(
+        (src.get("tools") or []) + ["web_search", "web_fetch", "researchmap", "read"]))
+    arch = {**src, "tools": tools}
+    sel = {"tier": src.get("tier", "reason"), "role": role,
+           "cognitive_mode": src.get("cognitive_mode", "phrygian")}
+    corpus_env = [{"key": "CLAW_SOURCE_CORPUS", "value": "1"}] if quality.source_corpus else []
+
+    def _on_action(act: dict) -> None:
+        if act.get("tool") == "narration":
+            _progress(sid, "narration", f"{role}: {act.get('detail', '')}",
+                      agent=role, tool="narration", detail=act.get("detail", ""))
+        else:
+            detail = f": {act['detail']}" if act.get("detail") else ""
+            _progress(sid, "action", f"{role} → {act.get('tool')}{detail}",
+                      agent=role, tool=act.get("tool"), detail=act.get("detail", ""))
+
+    def _on_usage(pt, ct, tt):
+        _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok", agent=role,
+                  prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
+    _phase(sid, "Fact-checking")
+    _progress(sid, "verify", f"Fact-checker ({role}) verifying the answer's claims…", agent=role)
+    try:
+        port, token, slug = await _spawn_horizon_member(
+            arch, sel, body, request, user, sid8=sid8, run_tag=run_tag,
+            input_files=[], src_dir=_session_files_dir(sid),
+            name_suffix="factcheck", extra_env=corpus_env)
+    except Exception as e:  # noqa: BLE001
+        _progress(sid, "verify", f"Fact-checker spawn failed ({e})", ok=False)
+        return deliverable
+    _run_workers.setdefault(sid, []).append(slug)
+    try:
+        prompt = rv.claim_check_prompt(deliverable, intent, quality.claim_check_max,
+                                       corpus_hint=research_dir is not None)
+        d = await _dispatch_one(port, token, prompt, body.dispatch_timeout,
+                                on_action=_on_action,
+                                fleet_instructions=arch.get("fleet_instructions", ""),
+                                agent_name=role, on_usage=_on_usage)
+        findings = rv.parse_findings(d.get("output") or "")
+        _progress(sid, "verify", f"Fact-checker: {rv.summary_line(findings)}", agent=role)
+        for f in rv.refuted(findings):
+            _progress(sid, "narration", f"{role} (refuted): {f['claim']} → {f['correction']}",
+                      agent=role, tool="narration", detail=f["correction"])
+        fix = rv.fix_instructions(findings)
+        if not fix:
+            return deliverable
+        _progress(sid, "verify", "Revising the answer to fix the verified errors…", agent=role)
+        d2 = await _dispatch_one(
+            port, token,
+            ("Now output the FULL corrected answer. Apply EXACTLY these corrections and "
+             "change nothing else — keep everything else identical:\n\n" + fix +
+             "\n\nOutput the complete corrected answer only."),
+            body.dispatch_timeout, on_action=_on_action,
+            fleet_instructions=arch.get("fleet_instructions", ""),
+            agent_name=role, on_usage=_on_usage)
+        revised = (d2.get("output") or "").strip()
+        collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
+        if collapsed:
+            _progress(sid, "verify", "Kept the original (correction pass collapsed)", agent=role, ok=False)
+            return deliverable
+        _progress(sid, "verify", f"Answer corrected: {len(rv.refuted(findings))} fix(es) applied", agent=role)
+        return revised
+    except Exception as e:  # noqa: BLE001
+        log.warning("Basna claim check failed", error=str(e))
+        return deliverable
+    finally:
+        try:
+            await _do_stop_process(slug)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @router.post("/execute")
 async def execute_route(
     body: ExecuteRequest, request: Request, user: dict = Depends(get_current_user),
@@ -2150,6 +2246,25 @@ async def execute_route(
             research_dir = None
     research_pre = research_map.preamble(research_dir) if research_dir else ""
 
+    # R9 rubric contract (opt-in): derive the completeness checklist once (reason
+    # tier) and inject it into every worker's prompt as the definition of "complete".
+    rubric_pre = ""
+    if quality.rubric_contract:
+        try:
+            cc = _resolve_merge_creds(body, registry, "reason")
+            if cc.get("model"):
+                prov, _ = _provider_call(cc, temperature=0.2, default_max=1500, cap=4096)
+                from captain_claw.llm import Message
+                _r = await prov.complete(
+                    [Message(role="user",
+                             content=research_rubric.derive_rubric_prompt(sess["intent"]))])
+                items = research_rubric.parse_rubric(_r.content or "")
+                if items:
+                    rubric_pre = research_rubric.rubric_directive(items)
+                    _progress(sid, "route", f"Completeness rubric: {len(items)} required items")
+        except Exception as e:  # noqa: BLE001 — rubric is best-effort
+            log.warning("Basna rubric derivation failed", error=str(e))
+
     spawned: list[dict] = []  # {sel, arch, slug, port, auth}
     results: list[dict] = []
     try:
@@ -2196,7 +2311,10 @@ async def execute_route(
                         # Authorship label for files this worker writes to the VFS.
                         {"key": "CLAW_AGENT_LABEL",
                          "value": sel.get("role") or arch.get("role") or arch["id"]},
-                    ],
+                    ] + (  # R10: turn on the source corpus for this worker's fetches
+                        [{"key": "CLAW_SOURCE_CORPUS", "value": "1"}]
+                        if quality.source_corpus else []
+                    ),
                     web_enabled=True, web_port=0,
                 )
                 if model:
@@ -2272,9 +2390,13 @@ async def execute_route(
                              if not str(f.get("mime", "")).startswith("image/")]
                 base_prompt = research_pre + _build_dispatch_prompt(
                     role, sess["intent"], merge_kind,
-                    [f["name"] for f in input_files], extra=sel.get("extra", ""))
+                    [f["name"] for f in input_files], extra=sel.get("extra", "")) + rubric_pre
                 if quality.worker_escalate:
                     base_prompt += ESCALATE_DIRECTIVE
+                if quality.judgment_ledger:
+                    base_prompt += JUDGMENT_LEDGER_DIRECTIVE
+                if quality.source_corpus:
+                    base_prompt += SOURCE_CORPUS_DIRECTIVE
                 d = await _dispatch_one(
                     sp["port"], sp["auth"], base_prompt,
                     body.dispatch_timeout, on_action=_on_action,
@@ -2487,6 +2609,23 @@ async def execute_route(
                           f"Closer: answer held ({closed['survived']}/{closed['total']})")
         except Exception as e:  # noqa: BLE001 — closer is best-effort
             log.warning("Basna horizon closer failed", error=str(e))
+
+    # 5d) R8 grounded claim verification (opt-in, paid): a web-tool fact-checker
+    # verifies the merged answer's load-bearing claims against real sources and
+    # corrects the ones verified wrong — the ground truth the tool-less closer
+    # can't reach. Budget-gated.
+    if quality.claim_check and (agg.get("truth") or "").strip() and _budget.can_afford(2 * _retry_est):
+        _budget.add(2 * _retry_est)
+        try:
+            new_truth = await _claim_check(
+                request, user, sid, sid8, run_tag, intent=sess["intent"],
+                deliverable=agg["truth"], arch_by_id=arch_by_id, body=body,
+                quality=quality, research_dir=research_dir)
+            if new_truth and new_truth != agg["truth"]:
+                agg["truth"] = new_truth
+                agg["method"] = f"{agg.get('method', 'merge')}+factchecked"
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna claim check errored", error=str(e))
 
     # 6) Close the learning loop: score each run against the truth and fold the
     # outcome into per-archetype reliability, so the next route's prior_weight

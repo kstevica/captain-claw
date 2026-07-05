@@ -15,6 +15,11 @@ export type QualityProfile = {
   critic_triage: boolean
   worker_escalate: boolean
   git_snapshots: boolean
+  judgment_ledger: boolean
+  source_corpus: boolean
+  claim_check: boolean
+  rubric_contract: boolean
+  claim_check_max: number
   // Shared
   token_budget: number
 }
@@ -22,6 +27,7 @@ export type QualityProfile = {
 export const BOOL_FLAGS = [
   'test_gate', 'deep_build', 'coverage_check', 'acted_gate', 'research_map',
   'delta_rounds', 'critic_triage', 'worker_escalate', 'git_snapshots',
+  'judgment_ledger', 'source_corpus', 'claim_check', 'rubric_contract',
 ] as const
 export type BoolFlag = (typeof BOOL_FLAGS)[number]
 
@@ -31,17 +37,21 @@ export function defaultProfile(): QualityProfile {
     test_gate: false, deep_build: false, coverage_check: false, deep_build_samples: 2,
     acted_gate: false, research_map: false, delta_rounds: false, critic_triage: false,
     worker_escalate: false, git_snapshots: false,
+    judgment_ledger: false, source_corpus: false, claim_check: false, rubric_contract: false,
+    claim_check_max: 8,
     token_budget: 0,
   }
 }
 
-// Preset → flags ON. Mirrors the backend _PRESETS exactly. deep_build is never in
-// a preset (the one genuinely expensive lever — explicit opt-in only).
+// Preset → flags ON. Mirrors the backend _PRESETS exactly. deep_build and
+// claim_check are the paid levers — never in a preset (explicit opt-in only).
 const PRESETS: Record<'off' | 'balanced' | 'thorough', BoolFlag[]> = {
   off: [],
-  balanced: ['acted_gate', 'test_gate', 'research_map', 'delta_rounds', 'critic_triage', 'worker_escalate'],
+  balanced: ['acted_gate', 'test_gate', 'research_map', 'delta_rounds', 'critic_triage',
+    'worker_escalate', 'judgment_ledger'],
   thorough: ['acted_gate', 'test_gate', 'research_map', 'delta_rounds', 'critic_triage',
-    'worker_escalate', 'coverage_check', 'git_snapshots'],
+    'worker_escalate', 'judgment_ledger', 'coverage_check', 'git_snapshots',
+    'source_corpus', 'rubric_contract'],
 }
 
 export function applyPreset(p: 'off' | 'balanced' | 'thorough', prev: QualityProfile): QualityProfile {
@@ -71,6 +81,7 @@ export function toRequest(q: QualityProfile): Record<string, unknown> {
   const out: Record<string, unknown> = { profile: q.profile === 'custom' ? 'off' : q.profile }
   for (const f of BOOL_FLAGS) out[f] = q[f]
   out.deep_build_samples = q.deep_build_samples
+  out.claim_check_max = q.claim_check_max
   out.token_budget = q.token_budget
   return out
 }
@@ -117,6 +128,14 @@ export const LEVERS: Lever[] = [
     blurb: 'A worker that flags ESCALATE gets one focused retry instead of the merge absorbing a bare flag.' },
   { flag: 'git_snapshots', code: 'R6', scope: 'research', cost: 'free', label: 'Git snapshots',
     blurb: 'Commit each round’s state of the research folder to git — diffs, rollback, provenance. Zero model tokens.' },
+  { flag: 'rubric_contract', code: 'R9', scope: 'research', cost: 'cheap', label: 'Rubric contract',
+    blurb: 'Derive the completeness checklist once (from the standard the task names) and hold every specialist + the reporter to it. Fixes “which fields count”.' },
+  { flag: 'source_corpus', code: 'R10', scope: 'research', cost: 'saver', label: 'Source corpus',
+    blurb: 'web_fetch saves each full page to the shared folder (indexed) and returns a head + pointer — depth without context blow-up; every stage can re-read sources.' },
+  { flag: 'judgment_ledger', code: 'R11', scope: 'research', cost: 'free', label: 'Judgment ledger',
+    blurb: 'Each specialist must enumerate + resolve its hardest judgment calls explicitly, so weak models make the boundary calls instead of hedging. Prompt-only.' },
+  { flag: 'claim_check', code: 'R8', scope: 'research', cost: 'paid', label: 'Claim check',
+    blurb: 'A web-tool fact-checker verifies the deliverable’s citations, dates, versions and figures against real sources and corrects the wrong ones. The ground-truth back-edge.' },
 ]
 
 // Non-zinc accent colors don't auto-invert with the theme, so give each badge a
