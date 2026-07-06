@@ -9,6 +9,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useCodeStore } from '../stores/codeStore'
 import { QualityControls } from '../components/QualityControls'
+import { CostCard, deriveCost } from '../components/CostCard'
 import { useVFSStore } from '../stores/vfsStore'
 import { useAuthStore } from '../stores/authStore'
 
@@ -52,6 +53,7 @@ export function CodePage() {
     quality, qualitySaving, saveQuality, followup,
   } = useCodeStore()
   const browseFs = useVFSStore((s) => s.browseFs)
+  const codeCost = deriveCost(progress)  // run cost from the terminal `cost` event
 
   const [tab, setTab] = useState<'chat' | 'map'>('chat')
   const [map, setMap] = useState<import('../stores/codeStore').CodeMap | null>(null)
@@ -496,6 +498,8 @@ export function CodePage() {
                   </div>
                 </div>
               )}
+              {/* Run cost — dollars + effective $/hour vs a human wage. */}
+              {codeCost && <div className="mb-4"><CostCard cost={codeCost} /></div>}
               <div ref={chatEnd} />
             </div>
 

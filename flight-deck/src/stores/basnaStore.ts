@@ -413,15 +413,6 @@ export function parseAnalysis(s?: string): BasnaAnalysis | null {
 const _ROUTER_TIER_LS = 'basna.routerTier'
 const _DEEP_LS = 'basna.deep'
 const _QUALITY_LS = 'basna.quality'
-const _WAGE_LS = 'basna.wagePerHour'
-
-function _loadWage(): number {
-  try {
-    const raw = typeof localStorage !== 'undefined' && localStorage.getItem(_WAGE_LS)
-    const n = raw ? Number(raw) : NaN
-    return Number.isFinite(n) && n >= 0 ? n : 0
-  } catch { return 0 }
-}
 
 function _loadQuality(): QualityProfile {
   try {
@@ -457,11 +448,9 @@ interface BasnaStore {
   planComplex: boolean // simple = one model per step; complex = a full Basna/Vatra per step
   planDag: boolean     // planner emits a DAG; independent steps run in parallel waves
   quality: QualityProfile  // opt-in cross-pollination levers (all-off == current behaviour)
-  wagePerHour: number  // user's human hourly wage, for the run-cost comparison (0 = off)
 
   setRouterTier: (t: string) => void
   setQuality: (q: QualityProfile) => void
-  setWage: (n: number) => void
   setMaxAgents: (n: number) => void
   setDeep: (v: boolean) => void
   setDeepSamples: (n: number) => void
@@ -519,7 +508,6 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   planComplex: false,
   planDag: false,
   quality: _loadQuality(),
-  wagePerHour: _loadWage(),
 
   setRouterTier: (t) => {
     try { localStorage.setItem(_ROUTER_TIER_LS, t) } catch { /* ignore */ }
@@ -528,11 +516,6 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   setQuality: (q) => {
     try { localStorage.setItem(_QUALITY_LS, JSON.stringify(q)) } catch { /* ignore */ }
     set({ quality: q })
-  },
-  setWage: (n) => {
-    const v = Number.isFinite(n) && n >= 0 ? n : 0
-    try { localStorage.setItem(_WAGE_LS, String(v)) } catch { /* ignore */ }
-    set({ wagePerHour: v })
   },
   setMaxAgents: (n) => set({ maxAgents: Math.max(1, Math.min(10, n)) }),
   setDeep: (v) => {

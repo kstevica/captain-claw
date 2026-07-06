@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { useAuthStore, refreshAccessToken } from './authStore'
 import { defaultProfile, fromResponse, toRequest } from '../services/quality'
 import type { QualityProfile } from '../services/quality'
+import type { RunCost } from './basnaStore'
 
 // ── Types (mirror captain_claw/flight_deck/code_routes.py) ───────────
 
@@ -78,6 +79,7 @@ export interface CodeProgressEvent {
   prompt_tokens?: number
   completion_tokens?: number
   total_tokens?: number
+  cost?: RunCost   // run cost block on the terminal `cost` event
 }
 
 // ── API helpers ──────────────────────────────────────────────────────
