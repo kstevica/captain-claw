@@ -545,16 +545,12 @@ function fmtTok(n?: number): string {
   return String(n)
 }
 
-interface LiveAgent { role: string; actions: ProgressEvent[]; usage?: ProgressEvent; done?: boolean; ok?: boolean }
+interface LiveAgent { role: string; actions: ProgressEvent[]; usage?: ProgressEvent; done?: boolean; ok?: boolean; group?: string }
 
-// Live per-agent panels built from the streaming progress events while the run
-// is in flight — each agent's tool calls and running LLM token usage, before the
-// final persisted runs (with output + feedback) take over at the end.
-function LiveAgentsPanel({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: string) => void }) {
+// One live agent card — its status, running token usage, and streaming activity.
+function LiveAgentCard({ a, onSkip }: { a: LiveAgent; onSkip?: (role: string) => void }) {
   return (
-    <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
-      {agents.map((a) => (
-        <div key={a.role} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
               {a.done
@@ -597,7 +593,47 @@ function LiveAgentsPanel({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (ro
             {a.actions.length === 0 && <div className="text-[11px] text-zinc-600">working…</div>}
           </div>
         </div>
-      ))}
+  )
+}
+
+// A responsive grid of live agent cards.
+function LiveAgentGrid({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: string) => void }) {
+  return (
+    <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+      {agents.map((a) => <LiveAgentCard key={a.role} a={a} onSkip={onSkip} />)}
+    </div>
+  )
+}
+
+// Live per-agent panels built from the streaming progress events while the run is
+// in flight. In Vatra grouped mode (owners carry an execution-phase letter) the
+// cards are sectioned by phase A→B→C→D so the pipeline is visible as it advances;
+// otherwise a flat grid — today's layout, unchanged.
+function LiveAgentsPanel({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: string) => void }) {
+  const letters = useMemo(
+    () => [...new Set(agents.map((a) => a.group).filter(Boolean) as string[])].sort(),
+    [agents],
+  )
+  if (letters.length === 0) return <LiveAgentGrid agents={agents} onSkip={onSkip} />
+  return (
+    <div className="space-y-3">
+      {letters.map((letter) => {
+        const inGroup = agents.filter((a) => a.group === letter)
+        const working = inGroup.some((a) => !a.done)
+        return (
+          <div key={letter}>
+            <div className="mb-1.5 flex items-center gap-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded bg-sky-500/15 text-[11px] font-bold text-sky-300">{letter}</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Group {letter}</span>
+              <span className="text-[10px] text-zinc-600">{inGroup.length} agent(s)</span>
+              {working
+                ? <Loader2 className="h-3 w-3 animate-spin text-sky-400" />
+                : <Check className="h-3 w-3 text-emerald-500" />}
+            </div>
+            <LiveAgentGrid agents={inGroup} onSkip={onSkip} />
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -742,6 +778,7 @@ export function BasnaPage() {
       if (!ev.agent) continue
       let a = byRole.get(ev.agent)
       if (!a) { a = { role: ev.agent, actions: [] }; byRole.set(ev.agent, a); order.push(ev.agent) }
+      if (ev.group) a.group = ev.group  // Vatra grouped mode: the owner's phase letter
       // Any fresh activity after a dispatch (e.g. the Vatra review round) flips the
       // card back to "working" so the spinner returns; the next dispatch marks done.
       if (ev.stage === 'usage') { a.usage = ev; a.done = false }

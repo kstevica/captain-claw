@@ -183,6 +183,7 @@ export interface ProgressEvent {
   agent?: string  // role/name of the agent this event belongs to
   tool?: string   // tool name on action/narration events
   detail?: string // tool-arg summary on action/narration events
+  group?: string  // Vatra grouped mode: this owner's execution-phase letter (A..D)
   // Live cumulative token counts on `usage` events.
   prompt_tokens?: number
   completion_tokens?: number

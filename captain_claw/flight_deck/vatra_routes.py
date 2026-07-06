@@ -748,22 +748,23 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             return f"{role} · {sp['subtask']['title']}" if owner_counts.get(arch["id"], 1) > 1 else role
 
         def _owner_callbacks(label: str, owner: str, subtask: str):
+            gx = _gx(subtask)  # grouped mode: tag this owner's events with its phase letter
             def _on_action(act: dict) -> None:
                 detail = act.get("detail", "")
                 if act["tool"] == "narration":
                     _progress(sid, "narration", f"{label}: {detail}", agent=label,
-                              tool="narration", detail=detail)
+                              tool="narration", detail=detail, **gx)
                     # Stream the agent's narration onto the shared board so teammates
                     # can see what it's thinking/doing in real time.
                     _board_post_bg(sid, owner, subtask, "narration", "", detail)
                 else:
                     suffix = f": {detail}" if detail else ""
                     _progress(sid, "action", f"{label} → {act['tool']}{suffix}",
-                              agent=label, tool=act["tool"], detail=detail)
+                              agent=label, tool=act["tool"], detail=detail, **gx)
 
             def _on_usage(pt: int, ct: int, tt: int) -> None:
                 _progress(sid, "usage", f"{label} · {pt:,}→{ct:,} tok",
-                          agent=label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+                          agent=label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt, **gx)
             return _on_action, _on_usage
 
         # Set by the intro round below (a digest of every specialist's prep), then
@@ -775,6 +776,18 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         # may ask the Lead to have an earlier teammate provide missing data. Filled
         # in the grouped block below; read (closure) in _dispatch_owner.
         _later_phase_subtasks: set[str] = set()
+
+        # Grouped mode: subtask id → its execution-group letter ("A".."D"), filled in
+        # the grouped block. Threaded onto that owner's progress events so the live
+        # panel can section the working agents by phase. Stays empty in flat mode, so
+        # `_gx` adds nothing and non-grouped runs emit byte-for-byte the same events.
+        _owner_group: dict[str, str] = {}
+
+        def _gx(subtask_id: str) -> dict:
+            """`group=<letter>` kwargs for a per-owner progress event (only in grouped
+            mode where the owner has a letter; `{}` otherwise)."""
+            g = _owner_group.get(subtask_id)
+            return {"group": g} if g else {}
 
         async def _dispatch_owner(sp: dict) -> dict:
             arch, st = sp["arch"], sp["subtask"]
@@ -828,7 +841,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
             _progress(sid, "dispatch",
                       f"{label} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}",
-                      ok=d["ok"], agent=label)
+                      ok=d["ok"], agent=label, **_gx(st["id"]))
             # Post the finished piece to the shared board so teammates still working
             # (and the next round) can read and build on it.
             out = (d.get("output") or "").strip()
@@ -905,6 +918,9 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             first_phase = phases[0] if phases else None
             _later_phase_subtasks.update(
                 sp["subtask"]["id"] for sp in spawned if owner_group[id(sp)] != first_phase)
+            # Tag each owner's live-panel events with its phase letter (read by `_gx`).
+            _owner_group.update({
+                sp["subtask"]["id"]: vatra_groups.group_label(owner_group[id(sp)]) for sp in spawned})
             results_by_id: dict[str, dict] = {}  # subtask id → its result (updated on re-run)
 
             async def _redispatch_owner(sp: dict, instruction: str, tag: str) -> dict:
@@ -917,7 +933,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     agent_name=label, on_usage=on_usage))
                 _progress(sid, "dispatch",
                           f"{label} ({tag}) {'✓' if d['ok'] else '✗'} · {len(d['actions'])} action(s)",
-                          ok=d["ok"], agent=label)
+                          ok=d["ok"], agent=label, **_gx(sp["subtask"]["id"]))
                 out = (d.get("output") or "").strip()
                 r = results_by_id.get(sp["subtask"]["id"])
                 if r is not None and out:

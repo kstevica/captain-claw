@@ -3,7 +3,12 @@ rule, and phase ordering."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import captain_claw
 from captain_claw.flight_deck import vatra_groups as g
+
+_LEAD_MD = Path(captain_claw.__file__).resolve().parent / "instructions" / "vatra" / "lead.md"
 
 
 # ── presets ──────────────────────────────────────────────────────────
@@ -110,3 +115,33 @@ def test_clarify_prompt_names_requester_request_and_roster():
 def test_request_directive_and_cap_exist():
     assert "REQUEST:" in g.REQUEST_DIRECTIVE
     assert g.CLARIFY_CAP == 2
+
+
+# ── live-panel phase letters (Increment 3) ───────────────────────────
+
+def test_owner_group_letters_for_a_mixed_roster():
+    # The exact computation execute_vatra runs inline to tag each owner's live-panel
+    # events: effective_group (floor raised by any Lead push) → group_label.
+    roster = [
+        ({"id": "s1"}, {"id": "deep-researcher", "family": "Research"}),            # A (floor)
+        ({"id": "s2"}, {"id": "data-analyst", "role": "Data Analyst"}),             # B (middle)
+        ({"id": "s3", "group": "D"}, {"id": "editor-writer", "role": "Editor"}),    # B pushed → D
+        ({"id": "s4"}, {"id": "report-builder", "role": "Report Builder"}),         # C (floor)
+        ({"id": "s5", "group": "A"}, {"id": "report-builder", "role": "Report"}),   # can't go below C
+    ]
+    letters = {st["id"]: g.group_label(g.effective_group(st, arch)) for st, arch in roster}
+    assert letters == {"s1": "A", "s2": "B", "s3": "D", "s4": "C", "s5": "C"}
+    # The phases that actually run are the DISTINCT letters, ascending.
+    ords = [g.effective_group(st, arch) for st, arch in roster]
+    assert [g.group_label(o) for o in g.order_groups(ords)] == ["A", "B", "C", "D"]
+
+
+# ── Lead prompt teaches the optional group field (Increment 3) ───────
+
+def test_lead_prompt_teaches_the_optional_group_field():
+    text = _LEAD_MD.read_text(encoding="utf-8")
+    lo = text.lower()
+    assert "group" in lo                       # the field is documented
+    assert "optional" in lo                     # framed as optional, not mandatory
+    assert '"a"' in lo and '"d"' in lo          # names the A..D letter scale
+    assert "later" in lo                        # the push-later-only rule

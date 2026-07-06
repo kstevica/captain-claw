@@ -57,8 +57,10 @@ two phases, A then C). Within a group, owners run in parallel, subject to the
    builders last." Fully back-compatible (off by default).
 2. **Clarification loop:** REQUEST marker + Lead approve/deny + targeted re-run +
    global cap.
-3. **Polish:** per-run group display in the live panel; optional Lead group
-   assignment in lead.md; docs.
+3. **Polish (SHIPPED):** per-phase display in the live panel — grouped runs
+   section the "Agents working" cards by phase A→B→C→D (each owner's progress
+   events carry a `group` letter; flat mode is unchanged). The Lead is taught the
+   optional push-later-only `group` field in `lead.md`. Docs + tests.
 
 ## Safety
 Off by default; when off, `execute_vatra` takes exactly today's path. Grouped mode
