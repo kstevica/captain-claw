@@ -106,7 +106,20 @@ _DEFAULT_REPORTER = "editor-writer"
 # always also written to its workspace as a file it can read on demand.
 _SLICES_INLINE_CHARS = 12_000
 _MAX_TEXT_FALLBACK_BYTES = 256 * 1024
-_DECOMPOSE_TIMEOUT = 120  # seconds for the Lead LLM call
+# The Lead's plan is the single heaviest planning call (a full decomposition +
+# shared contract, up to a large token cap). Generous so a slow LOCAL model can
+# finish it — cloud models return in a few seconds regardless.
+_DECOMPOSE_TIMEOUT = 300  # seconds for the Lead LLM call
+
+
+def _lead_error_msg(e: Exception) -> str:
+    """A readable reason for a Lead-decompose failure. A bare TimeoutError
+    stringifies to '' (the mysterious 'Vatra Lead failed:' with no detail), so
+    name it and make it actionable."""
+    if isinstance(e, TimeoutError):  # asyncio.TimeoutError is TimeoutError on 3.11+
+        return (f"the Lead timed out after {_DECOMPOSE_TIMEOUT}s — the planning model is too "
+                "slow for this. Try a faster Router tier, fewer Max agents, or a shorter task.")
+    return str(e).strip() or type(e).__name__
 
 # ── Phase 2 delegation budget (the termination guarantees) ───────────
 _MAX_ASKS = 12          # total asks a single run may ever create (hard ceiling)
@@ -576,8 +589,9 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             raise
         except Exception as e:
             await db.update_basna_session(sid, user["id"], status="error")
-            _progress(sid, "route", f"Lead decomposition failed: {str(e)[:200]}", ok=False)
-            raise HTTPException(502, f"Vatra Lead failed: {e}")
+            _msg = _lead_error_msg(e)
+            _progress(sid, "route", f"Lead decomposition failed: {_msg[:200]}", ok=False)
+            raise HTTPException(502, f"Vatra Lead failed: {_msg}")
         await db.update_basna_session(
             sid, user["id"], domain=route["domain"], route=json.dumps(route),
             config=json.dumps({**cfg, "mode": "vatra"}))
@@ -2269,7 +2283,7 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
         raise
     except Exception as e:
         await db.delete_basna_session(sid, user["id"])
-        raise HTTPException(502, f"Vatra Lead failed: {e}")
+        raise HTTPException(502, f"Vatra Lead failed: {_lead_error_msg(e)}")
     route["brief"] = brief  # R12: persisted with the plan; execute dispatches on it, UI edits it
     await db.update_basna_session(
         sid, user["id"], domain=route["domain"], route=json.dumps(route), status="routed")
