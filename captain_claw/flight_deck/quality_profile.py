@@ -330,5 +330,11 @@ SOURCE_CORPUS_DIRECTIVE = (
     "primary source, its FULL text is saved to `vfs:<project>/sources/` and you get "
     "a preview + pointer — read or `researchmap`-search the saved file for the rest "
     "rather than re-fetching. Fetch full pages one at a time for anything you will "
-    "actually rely on or cite; use batch fetch only to triage many links quickly."
+    "actually rely on or cite; use batch fetch only to triage many links quickly.\n"
+    "CONTEXT DISCIPLINE: to read a web page ALWAYS use `web_fetch` — it offloads the "
+    "full page to the corpus and returns only a lean preview, keeping your context "
+    "small. Do NOT pull web content into your context with `shell` (curl / wget): "
+    "piping raw page HTML into the conversation bloats your context fast and can "
+    "overflow the model, losing the whole turn. Use `shell` for local files and "
+    "commands, not to download web pages."
 )

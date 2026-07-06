@@ -1772,7 +1772,7 @@ async def _send_chat_and_collect(
     port: int, token: str, prompt: str, timeout: float, on_action=None,
     fleet_instructions: str = "", agent_name: str = "",
     file_paths: list[str] | None = None, image_paths: list[str] | None = None,
-    on_usage=None, usage_sink: dict | None = None,
+    on_usage=None, usage_sink: dict | None = None, error_sink: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Connect to an agent's /ws, send one chat, return (final reply, actions).
 
@@ -1867,7 +1867,15 @@ async def _send_chat_and_collect(
             # every client, including this reconnected one.
             if "busy" in m.lower():
                 return False
-            raise RuntimeError(m or "agent error")
+            # The agent's LLM call failed mid-turn (e.g. context-length overflow or
+            # OOM on a local model). Do NOT raise — that would throw away every
+            # action + partial answer it produced. Record the error, flag it for
+            # the caller (so the dispatch reads ✗ with the real reason), and end
+            # the turn, preserving the work done so far.
+            if error_sink is not None:
+                error_sink["message"] = m or "agent error"
+            _record("error", (m or "agent error")[:200])
+            return True
         return False
 
     # The retry loop covers two cases: the agent's web server may still be booting
@@ -1942,7 +1950,11 @@ async def _send_chat_and_collect(
             await asyncio.sleep(0.5 * (attempt + 1))
     if sent and (answer.strip() or actions):
         return answer.strip(), actions
-    raise RuntimeError(f"could not reach agent on port {port}: {last_err}")
+    # Genuinely unreachable and nothing collected — surface it as a dispatch error
+    # (caller marks ✗ with this message) rather than raising and losing the slot.
+    if error_sink is not None:
+        error_sink["message"] = f"could not reach agent on port {port}: {last_err}"
+    return answer.strip(), actions
 
 
 def _finalize_usage(sink: dict) -> dict:
@@ -1996,17 +2008,24 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
                         image_paths: list[str] | None = None, on_usage=None) -> dict:
     started = time.monotonic()
     sink: dict = {}
+    err: dict = {}
     try:
         out, actions = await _send_chat_and_collect(
             port, token, prompt, timeout, on_action=on_action,
             fleet_instructions=fleet_instructions, agent_name=agent_name,
             file_paths=file_paths, image_paths=image_paths, on_usage=on_usage,
-            usage_sink=sink)
+            usage_sink=sink, error_sink=err)
         usage = _finalize_usage(sink)
         _record_run_usage(sink.get("model", ""), usage)  # count toward the active run's cost
-        return {"ok": True, "output": out, "actions": actions,
-                "latency_ms": int((time.monotonic() - started) * 1000),
-                "usage": usage, "model": sink.get("model", "")}
+        # An agent-side error (e.g. context overflow) no longer raises: it's flagged
+        # here, so the dispatch reads ✗ WITH the real reason and KEEPS the work done.
+        emsg = err.get("message", "")
+        result = {"ok": not emsg, "output": out, "actions": actions,
+                  "latency_ms": int((time.monotonic() - started) * 1000),
+                  "usage": usage, "model": sink.get("model", "")}
+        if emsg:
+            result["error"] = emsg
+        return result
     except Exception as e:
         log.warning("Basna dispatch failed", error=str(e))
         usage = _finalize_usage(sink)

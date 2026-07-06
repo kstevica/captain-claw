@@ -818,14 +818,17 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 label = _owner_label(sp)
                 on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
                 prompt = _build_intro_prompt(role, st, shared_context, vfs_project=vfs_project)
+                if quality.source_corpus:
+                    prompt += SOURCE_CORPUS_DIRECTIVE  # context discipline: intro does the heavy fetching
                 d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
                     agent_name=label, on_usage=on_usage))
                 mark = "✓" if d["ok"] else "✗"
+                ierr = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
                 _progress(sid, "dispatch",
                           f"{label} (intro) {mark} · {len(d['actions'])} action(s) "
-                          f"({d['latency_ms'] / 1000:.1f}s)", ok=d["ok"], agent=label)
+                          f"({d['latency_ms'] / 1000:.1f}s){ierr}", ok=d["ok"], agent=label)
                 out = (d.get("output") or "").strip()
                 if out:
                     try:
@@ -918,9 +921,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                         # A dispatch event marks the card done again (the live panel
                         # shows a spinner while it's working this round, then ✓).
                         mark = "✓" if d["ok"] else "✗"
+                        rerr = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
                         _progress(sid, "dispatch",
                                   f"{label} (review) {mark} · {len(d['actions'])} action(s) "
-                                  f"({d['latency_ms'] / 1000:.1f}s)", ok=d["ok"], agent=label)
+                                  f"({d['latency_ms'] / 1000:.1f}s){rerr}", ok=d["ok"], agent=label)
                         # Post the revised piece to the board too, so the final shared
                         # memory reflects what each agent produced this round.
                         out2 = (d.get("output") or "").strip()
