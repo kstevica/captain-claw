@@ -2079,6 +2079,9 @@ class ExecuteRequest(BaseModel):
     # Mainly for local models: a low value keeps concurrent prefills from exhausting
     # the serving box's memory. Gated in _dispatch_one via a per-run semaphore.
     max_parallel: int = Field(default=0, ge=0, le=16)
+    # Vatra only: run owners in ordered execution groups (A→B→C→D, barrier between)
+    # instead of all-at-once. Opt-in; default False = today's intro→main→review flow.
+    execution_groups: bool = False
     # Deep / Horizon mode (opt-in): when set, each worker is driven through the
     # Frontier-Horizon engine (N-sample self-consistency vote + diverse-lens critics
     # + fix loop) instead of a single one-shot dispatch. Keys: samples, fix_attempts,

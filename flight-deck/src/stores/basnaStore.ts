@@ -414,6 +414,7 @@ const _ROUTER_TIER_LS = 'basna.routerTier'
 const _DEEP_LS = 'basna.deep'
 const _QUALITY_LS = 'basna.quality'
 const _MAX_PARALLEL_LS = 'basna.maxParallel'
+const _EXEC_GROUPS_LS = 'basna.executionGroups'
 
 function _loadMaxParallel(): number {
   try {
@@ -421,6 +422,12 @@ function _loadMaxParallel(): number {
     const n = raw ? Number(raw) : NaN
     return Number.isFinite(n) && n >= 0 && n <= 16 ? n : 0
   } catch { return 0 }
+}
+
+function _loadExecGroups(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(_EXEC_GROUPS_LS) === '1'
+  } catch { return false }
 }
 
 function _loadQuality(): QualityProfile {
@@ -451,6 +458,7 @@ interface BasnaStore {
   routerTier: string   // which Library tier selects the archetypes (the router)
   maxAgents: number
   maxParallel: number  // cap on concurrent agent turns (0 = unlimited; mainly for local models)
+  executionGroups: boolean  // Vatra: run owners in ordered phases A→B→C→D (opt-in)
   deep: boolean        // Deep / Horizon mode: each worker runs the self-consistency
   deepSamples: number  // vote + critics + fix loop (frontier-grade depth) instead of one shot
   planMode: boolean    // Plan-Horizon (Lever C): decompose → verify each step → re-plan
@@ -463,6 +471,7 @@ interface BasnaStore {
   setQuality: (q: QualityProfile) => void
   setMaxAgents: (n: number) => void
   setMaxParallel: (n: number) => void
+  setExecutionGroups: (v: boolean) => void
   setDeep: (v: boolean) => void
   setDeepSamples: (n: number) => void
   setPlanMode: (v: boolean) => void
@@ -513,6 +522,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   routerTier: (typeof localStorage !== 'undefined' && localStorage.getItem(_ROUTER_TIER_LS)) || 'reason',
   maxAgents: 6,
   maxParallel: _loadMaxParallel(),
+  executionGroups: _loadExecGroups(),
   deep: (typeof localStorage !== 'undefined' && localStorage.getItem(_DEEP_LS) === '1') || false,
   deepSamples: 3,
   planMode: false,
@@ -534,6 +544,10 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     const v = Math.max(0, Math.min(16, Math.floor(Number.isFinite(n) ? n : 0)))
     try { localStorage.setItem(_MAX_PARALLEL_LS, String(v)) } catch { /* ignore */ }
     set({ maxParallel: v })
+  },
+  setExecutionGroups: (v) => {
+    try { localStorage.setItem(_EXEC_GROUPS_LS, v ? '1' : '0') } catch { /* ignore */ }
+    set({ executionGroups: v })
   },
   setDeep: (v) => {
     try { localStorage.setItem(_DEEP_LS, v ? '1' : '0') } catch { /* ignore */ }
@@ -701,7 +715,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // Deep mode in Vatra = Horizon depth: verify + revise EACH specialist's slice
       // (worker, blackboard-safe — no spawn pools) AND the final assembled deliverable.
       const horizon = get().deep ? { worker: true, close: true } : undefined
-      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, ...(horizon ? { horizon } : {}) })
+      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, execution_groups: get().executionGroups, ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       if (s) set({ activeSession: s })
       await get().loadSessions()

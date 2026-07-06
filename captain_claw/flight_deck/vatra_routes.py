@@ -77,6 +77,7 @@ from captain_claw.flight_deck.basna_routes import (
 from captain_claw.flight_deck import research_brief
 from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck import research_rubric
+from captain_claw.flight_deck import vatra_groups
 from captain_claw.flight_deck.horizon_worker import HorizonConfig, run_horizon_closer
 from captain_claw.flight_deck.quality_profile import (
     ACTED_CORRECTIVE,
@@ -259,6 +260,9 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
             "owner_archetype_id": owner,
             "brief": brief,
             "depends_on": [str(d).strip() for d in deps if isinstance(d, (str, int))],
+            # Optional Lead-assigned execution group ('A'..'D'); clamped to the
+            # archetype's preset floor at run time (grouped mode only).
+            "group": s.get("group"),
         })
     # Keep only dependency refs that point at a real sibling (drop self + danglers).
     valid_ids = {s["id"] for s in subtasks}
@@ -588,6 +592,9 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     _run_gate.set(_make_gate(getattr(body, "max_parallel", 0), len(subtasks)))
     if getattr(body, "max_parallel", 0) and body.max_parallel < len(subtasks):
         _progress(sid, "route", f"Max {body.max_parallel} agent(s) in parallel")
+    # Execution groups (opt-in): run owners in ordered phases A→B→C→D (barrier
+    # between) instead of all-at-once. Off → today's intro→main→review flow.
+    grouped = bool(getattr(body, "execution_groups", False))
     # R12: the task owners build against — raw intent carrying the (reviewed/edited)
     # brief the Lead decomposed on. brief == "" → exactly the raw intent, so an off
     # brief changes nothing. (The /start path plans inline with no brief → raw intent.)
@@ -816,7 +823,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         # (groundwork: key facts, sources, outline) and posts it to the shared board.
         # This is a barrier: the main round starts only once ALL intros finish, so the
         # board is already populated and the main round is collaborative, not blind.
-        if bool(cfg.get("intro_round", True)) and len(spawned) >= 2:
+        if not grouped and bool(cfg.get("intro_round", True)) and len(spawned) >= 2:
             _phase(sid, "Intro round")
             _progress(sid, "intro", "Intro round — each specialist preparing groundwork…")
 
@@ -857,18 +864,47 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     log.warning("Vatra intro digest failed", error=str(e))
             _progress(sid, "intro", f"Intro round done — {len(prep)} specialist(s) prepared; starting the build")
 
-        # 3) Main round — each owner produces its full piece (now able to build on the
-        # team's prep via the injected intro digest + the shared board).
-        _phase(sid, "Main round")
-        _progress(sid, "main", f"{len(spawned)} specialist(s) producing their pieces…")
-        dispatched = await asyncio.gather(*[_dispatch_owner(sp) for sp in spawned])
-        for sp, d in zip(spawned, dispatched):
-            results.append({
+        # 3) Main round — each owner produces its full piece.
+        def _result_of(sp: dict, d: dict) -> dict:
+            return {
                 "id": sp["subtask"]["id"], "owner": sp["arch"]["id"],
                 "role": sp["arch"].get("role", ""), "title": sp["subtask"]["title"],
                 "output": d["output"], "ok": d["ok"],
                 "latency_ms": d["latency_ms"], "actions": d.get("actions", []),
-            })
+            }
+
+        if grouped:
+            # Ordered phases: assign each owner its group (archetype floor, raised by
+            # any Lead override), then run the DISTINCT groups ascending with a barrier
+            # between them — so a later group already has everything earlier groups
+            # posted. Within a group, owners run in parallel (Max-parallel gate applies).
+            owner_group = {
+                id(sp): vatra_groups.effective_group(sp["subtask"], sp["arch"]) for sp in spawned}
+            phases = vatra_groups.order_groups(owner_group.values())
+            _phase(sid, "Grouped run")
+            _progress(sid, "main",
+                      f"Grouped execution · {len(phases)} phase(s): "
+                      f"{', '.join(vatra_groups.group_label(p) for p in phases)}")
+            for p in phases:
+                grp = [sp for sp in spawned if owner_group[id(sp)] == p]
+                letter = vatra_groups.group_label(p)
+                _phase(sid, f"Group {letter}")
+                _progress(sid, "main",
+                          f"Group {letter} — {len(grp)} agent(s): "
+                          f"{', '.join(_owner_label(sp) for sp in grp)}")
+                ds = await asyncio.gather(*[_dispatch_owner(sp) for sp in grp])
+                results.extend(_result_of(sp, d) for sp, d in zip(grp, ds))
+                # Re-index so the NEXT group can search this group's writes.
+                if research_dir is not None:
+                    try:
+                        research_map.reindex(research_dir)
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("Vatra group reindex failed", error=str(e))
+        else:
+            _phase(sid, "Main round")
+            _progress(sid, "main", f"{len(spawned)} specialist(s) producing their pieces…")
+            dispatched = await asyncio.gather(*[_dispatch_owner(sp) for sp in spawned])
+            results.extend(_result_of(sp, d) for sp, d in zip(spawned, dispatched))
         # R1: re-index the shared folder so the reporter can search everything the
         # team just wrote — the fix for "the blackboard doesn't fit one context".
         if research_dir is not None:
@@ -900,7 +936,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         # align, and fill gaps now that they can see the whole team's work. This is
         # where the real collaboration happens: in round 1 owners are blind to each
         # other; here each one revises against the full picture before assembly.
-        if bool(cfg.get("review_round", True)):
+        if not grouped and bool(cfg.get("review_round", True)):
             r1 = [(i, sp) for i, sp in enumerate(spawned)
                   if (results[i].get("ok") or results[i].get("produced_file"))
                   and (results[i].get("output") or "").strip()]
@@ -959,13 +995,17 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                               f"Review round done — {changed}/{len(r1)} piece(s) revised")
 
         # 4) Capture owner-generated files + backfill empty replies from artifacts.
-        for i, sp in enumerate(spawned):
+        # Map by subtask id (not spawn position) — grouped mode builds `results` in
+        # phase order, so positional indexing would misalign.
+        _results_by_id = {r["id"]: r for r in results}
+        for sp in spawned:
             role = sp["arch"].get("role") or sp["arch"]["id"]
             files, text = _capture_generated(sp["slug"], input_names, dest_dir, role, seen_gen)
             generated_files.extend(files)
-            if not (results[i].get("output") or "").strip() and text:
-                results[i]["output"] = text
-                results[i]["produced_file"] = True
+            r = _results_by_id.get(sp["subtask"]["id"])
+            if r is not None and not (r.get("output") or "").strip() and text:
+                r["output"] = text
+                r["produced_file"] = True
     finally:
         _teardown([sp["slug"] for sp in spawned])
         _run_workers.pop(sid, None)
@@ -2086,6 +2126,8 @@ class VatraExecuteRequest(BaseModel):
     horizon: dict | None = None
     # Max agent turns to run at once (0 = unlimited). Mainly for local models.
     max_parallel: int = Field(default=0, ge=0, le=16)
+    # Ordered execution groups (A→B→C→D) instead of all-at-once. Opt-in.
+    execution_groups: bool = False
 
 
 @router.post("/route")
@@ -2154,7 +2196,8 @@ async def execute_vatra_ui(body: VatraExecuteRequest, request: Request,
     exec_req = ExecuteRequest(
         session_id=body.session_id, tiers=body.tiers or None,
         env_vars=body.env_vars or None, api_key=body.api_key or "",
-        horizon=body.horizon or None, max_parallel=body.max_parallel or 0)
+        horizon=body.horizon or None, max_parallel=body.max_parallel or 0,
+        execution_groups=bool(body.execution_groups))
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)
