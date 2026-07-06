@@ -1911,7 +1911,19 @@ async def agent_wait(body: _VatraWaitReq):
     project = _vfs_project(body.session_id)
     wait = max(0, min(_MAX_WAIT_S, int(body.wait or 0)))
     deadline = time.monotonic() + wait
+    # The tool sends `owner` = the archetype id (e.g. "deep-researcher"); the live
+    # panel groups by the owner's DISPLAY role (e.g. "Deep Researcher", via
+    # _owner_label). Resolve the role so these wait events attach to the real owner
+    # card instead of forming a phantom card that never gets a dispatch-done marker
+    # (which shows as an extra agent stuck spinning). Best-effort; fall back to the id.
     who = body.owner or "agent"
+    try:
+        _archs = await merged_archetypes(db, owner_id)
+        _role = next((a.get("role") for a in _archs if a.get("id") == body.owner), "")
+        if _role:
+            who = _role
+    except Exception as e:  # noqa: BLE001 — label resolution is cosmetic
+        log.debug("Vatra wait label resolve failed", error=str(e))
     target = path or f"posts matching {query!r}"
     _progress(body.session_id, "wait", f"⏳ {who} waiting on {target} (≤{wait}s)…", agent=who)
     while True:
