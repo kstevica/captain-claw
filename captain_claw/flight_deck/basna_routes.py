@@ -1520,6 +1520,24 @@ def _resolve_merge_creds(body, registry: dict, tier: str) -> dict:
 _run_sid: contextvars.ContextVar[str] = contextvars.ContextVar("basna_run_sid", default="")
 _RUN_USAGE: dict[str, list[dict]] = {}
 
+# Max-parallel-agents gate (mainly for local models). A per-run semaphore held in
+# a contextvar — set once at execute entry, propagates into every gathered child —
+# so `_dispatch_one` runs at most N agent turns concurrently WITHOUT any call-site
+# threading. None = unlimited (today's full fan-out); cloud runs are unaffected.
+# On a memory-capped local server (e.g. oMLX) this keeps concurrent prefills from
+# blowing past the box's memory limit.
+_run_gate: contextvars.ContextVar["asyncio.Semaphore | None"] = contextvars.ContextVar(
+    "basna_run_gate", default=None)
+
+
+def _make_gate(max_parallel: int, team_size: int) -> "asyncio.Semaphore | None":
+    """A dispatch concurrency limiter, or None when there's nothing to gate
+    (unlimited, or the cap is >= the team so every agent can run at once)."""
+    n = int(max_parallel or 0)
+    if n <= 0 or n >= max(1, int(team_size or 0)):
+        return None
+    return asyncio.Semaphore(n)
+
 
 def _record_run_usage(model: str, usage: dict | None) -> None:
     """Append one usage dict (5-field) to the active run — for provider/dispatch spend."""
@@ -2006,6 +2024,11 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
                         fleet_instructions: str = "", agent_name: str = "",
                         file_paths: list[str] | None = None,
                         image_paths: list[str] | None = None, on_usage=None) -> dict:
+    # Max-parallel gate: wait for a dispatch slot before doing any work. Started is
+    # taken AFTER acquiring, so latency measures the turn, not the queue wait.
+    gate = _run_gate.get()
+    if gate is not None:
+        await gate.acquire()
     started = time.monotonic()
     sink: dict = {}
     err: dict = {}
@@ -2033,6 +2056,9 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
         return {"ok": False, "output": "", "actions": [], "error": str(e),
                 "latency_ms": int((time.monotonic() - started) * 1000),
                 "usage": usage, "model": sink.get("model", "")}
+    finally:
+        if gate is not None:
+            gate.release()
 
 
 class ExecuteRequest(BaseModel):
@@ -2049,6 +2075,10 @@ class ExecuteRequest(BaseModel):
     api_key: str = ""
     agent_max_tokens: int = Field(default=8192, ge=512, le=32768)
     dispatch_timeout: float = Field(default=600.0, ge=10.0, le=3600.0)
+    # Max agent turns to run concurrently (0 = unlimited / today's full fan-out).
+    # Mainly for local models: a low value keeps concurrent prefills from exhausting
+    # the serving box's memory. Gated in _dispatch_one via a per-run semaphore.
+    max_parallel: int = Field(default=0, ge=0, le=16)
     # Deep / Horizon mode (opt-in): when set, each worker is driven through the
     # Frontier-Horizon engine (N-sample self-consistency vote + diverse-lens critics
     # + fix loop) instead of a single one-shot dispatch. Keys: samples, fix_attempts,
@@ -2414,6 +2444,9 @@ async def execute_route(
     vfs_project = body.vfs_project or f"basna-{sid8}"
     run_tag = format(int(time.time()), "x")[-6:]  # unique per run → no slug collisions on re-run
     plan = [(s, arch_by_id[s["archetype_id"]]) for s in selected if s["archetype_id"] in arch_by_id]
+    _run_gate.set(_make_gate(body.max_parallel, len(plan)))  # cap concurrent dispatches (local models)
+    if body.max_parallel and body.max_parallel < len(plan):
+        _progress(sid, "route", f"Max {body.max_parallel} agent(s) in parallel")
     _phase(sid, "Routing")
     _progress(sid, "route", f"Selected {len(plan)} archetype(s) · {domain} / {merge_kind}")
 

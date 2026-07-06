@@ -413,6 +413,15 @@ export function parseAnalysis(s?: string): BasnaAnalysis | null {
 const _ROUTER_TIER_LS = 'basna.routerTier'
 const _DEEP_LS = 'basna.deep'
 const _QUALITY_LS = 'basna.quality'
+const _MAX_PARALLEL_LS = 'basna.maxParallel'
+
+function _loadMaxParallel(): number {
+  try {
+    const raw = typeof localStorage !== 'undefined' && localStorage.getItem(_MAX_PARALLEL_LS)
+    const n = raw ? Number(raw) : NaN
+    return Number.isFinite(n) && n >= 0 && n <= 16 ? n : 0
+  } catch { return 0 }
+}
 
 function _loadQuality(): QualityProfile {
   try {
@@ -441,6 +450,7 @@ interface BasnaStore {
 
   routerTier: string   // which Library tier selects the archetypes (the router)
   maxAgents: number
+  maxParallel: number  // cap on concurrent agent turns (0 = unlimited; mainly for local models)
   deep: boolean        // Deep / Horizon mode: each worker runs the self-consistency
   deepSamples: number  // vote + critics + fix loop (frontier-grade depth) instead of one shot
   planMode: boolean    // Plan-Horizon (Lever C): decompose → verify each step → re-plan
@@ -452,6 +462,7 @@ interface BasnaStore {
   setRouterTier: (t: string) => void
   setQuality: (q: QualityProfile) => void
   setMaxAgents: (n: number) => void
+  setMaxParallel: (n: number) => void
   setDeep: (v: boolean) => void
   setDeepSamples: (n: number) => void
   setPlanMode: (v: boolean) => void
@@ -501,6 +512,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
 
   routerTier: (typeof localStorage !== 'undefined' && localStorage.getItem(_ROUTER_TIER_LS)) || 'reason',
   maxAgents: 6,
+  maxParallel: _loadMaxParallel(),
   deep: (typeof localStorage !== 'undefined' && localStorage.getItem(_DEEP_LS) === '1') || false,
   deepSamples: 3,
   planMode: false,
@@ -518,6 +530,11 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     set({ quality: q })
   },
   setMaxAgents: (n) => set({ maxAgents: Math.max(1, Math.min(10, n)) }),
+  setMaxParallel: (n) => {
+    const v = Math.max(0, Math.min(16, Math.floor(Number.isFinite(n) ? n : 0)))
+    try { localStorage.setItem(_MAX_PARALLEL_LS, String(v)) } catch { /* ignore */ }
+    set({ maxParallel: v })
+  },
   setDeep: (v) => {
     try { localStorage.setItem(_DEEP_LS, v ? '1' : '0') } catch { /* ignore */ }
     set({ deep: v, ...(v ? { planMode: false } : {}) })  // Deep and Plan are distinct run paths
@@ -684,7 +701,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // Deep mode in Vatra = Horizon depth: verify + revise EACH specialist's slice
       // (worker, blackboard-safe — no spawn pools) AND the final assembled deliverable.
       const horizon = get().deep ? { worker: true, close: true } : undefined
-      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), ...(horizon ? { horizon } : {}) })
+      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       if (s) set({ activeSession: s })
       await get().loadSessions()
@@ -758,7 +775,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // Deep / Horizon mode: drive each worker through the self-consistency vote +
       // critics + fix loop, then verify-and-revise the merged answer (the closer).
       const horizon = get().deep ? { samples: get().deepSamples, close: true } : undefined
-      const res = await apiExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), ...(horizon ? { horizon } : {}) })
+      const res = await apiExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       const runs = await apiListRuns(sid)
       // Refresh attachments from the updated session so files the agents

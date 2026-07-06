@@ -606,7 +606,7 @@ export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
     updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
@@ -1096,6 +1096,15 @@ export function BasnaPage() {
                         disabled={team.length > 0}
                         title={team.length > 0 ? 'Ignored — the team is fixed by your selection' : 'Team size cap'}
                         className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none disabled:opacity-40"
+                      />
+                    </label>
+                    <label className="flex items-center gap-2 text-zinc-400">
+                      Max parallel
+                      <input
+                        type="number" min={0} max={16} value={maxParallel}
+                        onChange={(e) => setMaxParallel(Number(e.target.value))}
+                        title="How many agents run their turn at once. 0 = all at once. Lower it (e.g. 2) for local models to avoid running the serving box out of memory."
+                        className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
                       />
                     </label>
                   </div>

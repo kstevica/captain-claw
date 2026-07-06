@@ -63,9 +63,11 @@ from captain_claw.flight_deck.basna_routes import (
     _progress_done,
     _progress_start,
     _provider_call,
+    _make_gate,
     _resolve_owner,
     _round_filename_rule,
     _RUN_USAGE,
+    _run_gate,
     _run_sid,
     _run_workers,
     _session_files_dir,
@@ -580,6 +582,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     subtasks = route["subtasks"]
     shared_context = route.get("shared_context", "")
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
+    # Cap concurrent agent turns (mainly for local models — keeps parallel prefills
+    # from exhausting the serving box's memory). 0 = unlimited. Propagates into every
+    # gathered round via the contextvar; every _dispatch_one obeys it.
+    _run_gate.set(_make_gate(getattr(body, "max_parallel", 0), len(subtasks)))
+    if getattr(body, "max_parallel", 0) and body.max_parallel < len(subtasks):
+        _progress(sid, "route", f"Max {body.max_parallel} agent(s) in parallel")
     # R12: the task owners build against — raw intent carrying the (reviewed/edited)
     # brief the Lead decomposed on. brief == "" → exactly the raw intent, so an off
     # brief changes nothing. (The /start path plans inline with no brief → raw intent.)
@@ -2064,6 +2072,8 @@ class VatraExecuteRequest(BaseModel):
     # Deep / Horizon: Vatra honors the closer (verify+revise the deliverable). Keys:
     # close, critics[], critic_tier. Per-owner pools (worker) are deferred. None → off.
     horizon: dict | None = None
+    # Max agent turns to run at once (0 = unlimited). Mainly for local models.
+    max_parallel: int = Field(default=0, ge=0, le=16)
 
 
 @router.post("/route")
@@ -2132,7 +2142,7 @@ async def execute_vatra_ui(body: VatraExecuteRequest, request: Request,
     exec_req = ExecuteRequest(
         session_id=body.session_id, tiers=body.tiers or None,
         env_vars=body.env_vars or None, api_key=body.api_key or "",
-        horizon=body.horizon or None)
+        horizon=body.horizon or None, max_parallel=body.max_parallel or 0)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)
