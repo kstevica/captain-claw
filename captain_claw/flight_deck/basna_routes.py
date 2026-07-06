@@ -1693,11 +1693,39 @@ def _summarize_tool_args(args) -> str:
     return ""
 
 
+_USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens",
+                 "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def _absorb_usage(sink: dict, msg: dict, u: dict | None = None) -> None:
+    """Fold an agent's turn_usage/usage broadcast into a per-dispatch sink.
+
+    turn_usage carries RUNNING CUMULATIVE counts for the turn, so we keep the max
+    seen for each field (robust to out-of-order/duplicate frames). Captures the
+    cache split the live on_usage(pt,ct,tt) callback drops, plus the model name —
+    this is what makes a dispatch's cost computable. Best-effort; never raises."""
+    src = u or msg
+    _alt = {"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens"}
+    for key in _USAGE_FIELDS:
+        v = src.get(key)
+        if v is None and key in _alt:
+            v = src.get(_alt[key])
+        if v is None:
+            continue
+        try:
+            sink[key] = max(int(sink.get(key, 0) or 0), int(v or 0))
+        except (TypeError, ValueError):
+            pass
+    model = src.get("model") or msg.get("model")
+    if model:
+        sink["model"] = str(model)
+
+
 async def _send_chat_and_collect(
     port: int, token: str, prompt: str, timeout: float, on_action=None,
     fleet_instructions: str = "", agent_name: str = "",
     file_paths: list[str] | None = None, image_paths: list[str] | None = None,
-    on_usage=None,
+    on_usage=None, usage_sink: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Connect to an agent's /ws, send one chat, return (final reply, actions).
 
@@ -1753,6 +1781,8 @@ async def _send_chat_and_collect(
             # Live, running cumulative token counts emitted after each internal
             # LLM call within the turn. Surfaced live (not persisted as an action)
             # so the UI shows usage climbing instead of one number at the end.
+            if usage_sink is not None:
+                _absorb_usage(usage_sink, msg)  # capture cache split + model for costing
             if on_usage:
                 try:
                     on_usage(int(msg.get("prompt_tokens", 0) or 0),
@@ -1764,6 +1794,8 @@ async def _send_chat_and_collect(
             # End-of-turn LLM summary — model + final token counts (recorded once
             # as an action so it's preserved in the run's persisted activity).
             u = msg.get("last") or msg.get("usage") or msg
+            if usage_sink is not None:
+                _absorb_usage(usage_sink, msg, u)  # final counts + model name
             model = u.get("model") or msg.get("model") or ""
             it = u.get("input_tokens") or u.get("prompt_tokens")
             ot = u.get("output_tokens") or u.get("completion_tokens")
@@ -1866,22 +1898,71 @@ async def _send_chat_and_collect(
     raise RuntimeError(f"could not reach agent on port {port}: {last_err}")
 
 
+def _finalize_usage(sink: dict) -> dict:
+    """Normalise a usage sink into the 5-field shape, backfilling total."""
+    u = {k: int(sink.get(k, 0) or 0) for k in _USAGE_FIELDS}
+    if u["total_tokens"] <= 0:
+        u["total_tokens"] = u["prompt_tokens"] + u["completion_tokens"]
+    return u
+
+
+def _fmt_dur(seconds: float | int | None) -> str:
+    s = int(seconds or 0)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    return f"{s // 3600}h {(s % 3600) // 60}m"
+
+
+def _fmt_usd(v: float | None) -> str:
+    if v is None:
+        return "—"
+    if v >= 1:
+        return f"${v:,.2f}"
+    if v >= 0.01:
+        return f"${v:.3f}"
+    return f"${v:.5f}"
+
+
+def _cost_message(cost: dict) -> str:
+    """The one-line human summary for the `cost` progress event."""
+    tok = cost.get("tokens", {}) or {}
+    total_tok = int(tok.get("prompt_tokens", 0) or 0) + int(tok.get("completion_tokens", 0) or 0)
+    parts: list[str] = []
+    if cost.get("priced"):
+        parts.append(_fmt_usd(cost.get("usd")))
+    parts.append(f"{total_tok:,} tok")
+    cr = int(tok.get("cache_read_input_tokens", 0) or 0)
+    if cr:
+        parts.append(f"{cr:,} cached")
+    if cost.get("elapsed_seconds"):
+        parts.append(_fmt_dur(cost["elapsed_seconds"]))
+    if cost.get("hourly_usd"):
+        parts.append(f"≈ {_fmt_usd(cost['hourly_usd'])}/hr")
+    return ("Run cost: " if cost.get("priced") else "Run usage: ") + " · ".join(parts)
+
+
 async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_action=None,
                         fleet_instructions: str = "", agent_name: str = "",
                         file_paths: list[str] | None = None,
                         image_paths: list[str] | None = None, on_usage=None) -> dict:
     started = time.monotonic()
+    sink: dict = {}
     try:
         out, actions = await _send_chat_and_collect(
             port, token, prompt, timeout, on_action=on_action,
             fleet_instructions=fleet_instructions, agent_name=agent_name,
-            file_paths=file_paths, image_paths=image_paths, on_usage=on_usage)
+            file_paths=file_paths, image_paths=image_paths, on_usage=on_usage,
+            usage_sink=sink)
         return {"ok": True, "output": out, "actions": actions,
-                "latency_ms": int((time.monotonic() - started) * 1000)}
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "usage": _finalize_usage(sink), "model": sink.get("model", "")}
     except Exception as e:
         log.warning("Basna dispatch failed", error=str(e))
         return {"ok": False, "output": "", "actions": [], "error": str(e),
-                "latency_ms": int((time.monotonic() - started) * 1000)}
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "usage": _finalize_usage(sink), "model": sink.get("model", "")}
 
 
 class ExecuteRequest(BaseModel):
@@ -2253,6 +2334,7 @@ async def execute_route(
 
     sid = body.session_id
     _progress_start(sid)
+    _run_started = time.monotonic()  # run wall-clock, for the $/hour cost figure
     sid8 = sid[:8]
     # One shared VFS folder for the whole run. A continuation round inherits the
     # ROOT run's folder (body.vfs_project) so every round in a chain accumulates into
@@ -2551,10 +2633,10 @@ async def execute_route(
                 results.append({
                     "archetype_id": sp["arch"]["id"],
                     "role": sp["sel"].get("role") or sp["arch"].get("role", ""),
-                    "tier": sp["sel"]["tier"], "provider": "", "model": "",
+                    "tier": sp["sel"]["tier"], "provider": "", "model": d.get("model", ""),
                     "weight": float(sp["sel"].get("prior_weight", 0.7)),
                     "output": d["output"], "ok": d["ok"], "latency_ms": d["latency_ms"],
-                    "actions": d.get("actions", []),
+                    "actions": d.get("actions", []), "usage": d.get("usage", {}),
                 })
     finally:
         # 3a) Capture any files the agents generated, BEFORE teardown deletes their
@@ -2743,6 +2825,18 @@ async def execute_route(
         files=json.dumps(list(files_by_name.values())),
         analysis=json.dumps(analysis or {}),
     )
+    # Run cost: roll per-agent model spend (tokens + cache split) into a dollar
+    # cost + effective $/hour, emitted as a `cost` progress event so the UI shows
+    # it live and on reload (persisted with the progress log below). Best-effort.
+    run_cost: dict | None = None
+    try:
+        from captain_claw.flight_deck import pricing
+        run_cost = pricing.summarize(
+            [{"model": r.get("model", ""), "usage": r.get("usage") or {}} for r in results],
+            elapsed_seconds=time.monotonic() - _run_started)
+        _progress(sid, "cost", _cost_message(run_cost), cost=run_cost)
+    except Exception as e:  # noqa: BLE001 — cost is best-effort, never blocks the result
+        log.warning("Basna cost summary failed", error=str(e))
     _phase(sid, "Done")
     _progress(sid, "done", f"Done · {len(results)} agent(s), {len(learned)} learned")
     _progress_done(sid)
@@ -2763,6 +2857,7 @@ async def execute_route(
                     "success": scores.get(r["archetype_id"])} for i, r in enumerate(results)],
         "learned": learned,
         "spawned": len(spawned), "dispatched": len(results),
+        "cost": run_cost,
     }
 
 

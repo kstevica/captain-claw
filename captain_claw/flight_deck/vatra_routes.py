@@ -204,6 +204,21 @@ def _is_skipped(sid: str, label: str) -> bool:
     return label in _skip_agents.get(sid, ())
 
 
+# Per-run model spend: every dispatch's {model, usage} appended here (keyed by
+# sid), rolled into the run's cost + $/hour at the end. Ephemeral, popped per run.
+_RUN_USAGE: dict[str, list[dict]] = {}
+
+
+def _track_usage(sid: str, d: dict | None) -> None:
+    """Record one dispatch's token/cache usage + model for the run's cost total."""
+    if not d:
+        return
+    u = d.get("usage") or {}
+    if not any(int(u.get(k, 0) or 0) for k in u):
+        return  # nothing billable (skip/empty) — don't clutter the breakdown
+    _RUN_USAGE.setdefault(sid, []).append({"model": d.get("model", ""), "usage": u})
+
+
 async def _dispatch_skippable(sid: str, label: str, factory) -> dict:
     """Run an agent dispatch; if the user marks this agent (label) to skip, cancel
     its turn and return a skipped result instead of waiting for it. `factory` is a
@@ -213,7 +228,9 @@ async def _dispatch_skippable(sid: str, label: str, factory) -> dict:
         while True:
             done, _ = await asyncio.wait({task}, timeout=1.0)
             if task in done:
-                return task.result()
+                d = task.result()
+                _track_usage(sid, d)  # capture owner dispatch spend (intro/main/review/retries)
+                return d
             if _is_skipped(sid, label):
                 task.cancel()
                 try:
@@ -497,6 +514,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     intent = (sess.get("intent") or "").strip()
     if not intent:
         raise HTTPException(400, "session has no intent")
+    _run_started = time.monotonic()  # run wall-clock, for the $/hour cost figure
+    _RUN_USAGE[body.session_id] = []  # reset the per-run model-spend accumulator
 
     archetypes = await merged_archetypes(db, user["id"])
     arch_by_id = {a["id"]: a for a in archetypes}
@@ -956,6 +975,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
 
     usable = [r for r in results if (r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip()]
     if not usable:
+        _RUN_USAGE.pop(sid, None)  # release the per-run accumulator on early exit
         await db.update_basna_session(sid, user["id"], status="error")
         _progress(sid, "done", "No subtask produced usable output", ok=False)
         _progress_done(sid)
@@ -1130,6 +1150,21 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         except Exception as e:  # noqa: BLE001
             log.warning("Vatra rubric coverage failed", error=str(e))
 
+    # Run cost: roll the whole run's model spend (owners across all rounds +
+    # reporter + ask-helpers + fact-checker) into a dollar cost + effective $/hour,
+    # emitted as a `cost` progress event (persisted below). Best-effort.
+    run_cost: dict | None = None
+    try:
+        from captain_claw.flight_deck import pricing
+        from captain_claw.flight_deck.basna_routes import _cost_message
+        run_cost = pricing.summarize(_RUN_USAGE.get(sid, []),
+                                     elapsed_seconds=time.monotonic() - _run_started)
+        _progress(sid, "cost", _cost_message(run_cost), cost=run_cost)
+    except Exception as e:  # noqa: BLE001 — cost is best-effort
+        log.warning("Vatra cost summary failed", error=str(e))
+    finally:
+        _RUN_USAGE.pop(sid, None)
+
     _phase(sid, "Done")
     _progress_done(sid)
     await db.update_basna_session(
@@ -1140,7 +1175,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             "truth": truth, "confidence": confidence, "analysis": analysis,
             "subtasks": [{"id": r["id"], "owner": r["owner"], "role": r["role"],
                           "ok": r["ok"], "latency_ms": r["latency_ms"]} for r in results],
-            "learned": learned, "spawned": len(spawned), "dispatched": len(results)}
+            "learned": learned, "spawned": len(spawned), "dispatched": len(results),
+            "cost": run_cost}
 
 
 async def _llm_coverage_gaps(intent: str, subtasks: list[dict], truth: str,
@@ -1538,6 +1574,7 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
                                 on_action=_on_action, fleet_instructions=arch.get("fleet_instructions", ""),
                                 agent_name=role, on_usage=_on_usage)
+        _track_usage(sid, d)  # reporter model spend counts toward the run cost
         out = (d.get("output") or "").strip()
         files, text = _capture_generated(sp["slug"], input_names | {"vatra-slices.md"},
                                          dest_dir, role, seen_gen)
@@ -1613,6 +1650,7 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
                                 on_action=_on_action,
                                 fleet_instructions=checker.get("fleet_instructions", ""),
                                 agent_name=role, on_usage=_on_usage)
+        _track_usage(sid, d)  # fact-checker spend
         findings = rv.parse_findings(d.get("output") or "")
         _progress(sid, "verify", f"Fact-checker: {rv.summary_line(findings)}", agent=role)
         for f in rv.refuted(findings):
@@ -1632,6 +1670,7 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
                                      on_action=_on_action,
                                      fleet_instructions=checker.get("fleet_instructions", ""),
                                      agent_name=role, on_usage=_on_usage)
+            _track_usage(sid, d2)  # fact-check revision spend
             revised = (d2.get("output") or "").strip()
             collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
             if collapsed:
@@ -1745,6 +1784,7 @@ async def _fulfill_ask(request: Request, user: dict, sid: str, sid8: str, run_ta
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
                                 fleet_instructions=arch.get("fleet_instructions", ""),
                                 agent_name=helper_label, on_usage=_on_usage)
+        _track_usage(sid, d)  # ask-helper spend
         out = (d.get("output") or "").strip()
         if out:
             await db.answer_vatra_ask(ask["id"], out, arch["id"])

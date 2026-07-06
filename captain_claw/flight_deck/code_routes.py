@@ -127,15 +127,39 @@ _TURN_USAGE: dict[str, dict] = {}
 
 
 def _usage_reset(pkey: str) -> None:
-    _TURN_USAGE[pkey] = {"prompt": 0, "completion": 0, "runs": 0}
+    _TURN_USAGE[pkey] = {"prompt": 0, "completion": 0, "runs": 0,
+                         "usages": [], "started": time.monotonic()}
 
 
 def _usage_add(pkey: str, pt: int, ct: int, runs: int = 0) -> None:
     """Accumulate token DELTAS (not raw broadcasts) + optional dispatch count."""
-    u = _TURN_USAGE.setdefault(pkey, {"prompt": 0, "completion": 0, "runs": 0})
+    u = _TURN_USAGE.setdefault(pkey, {"prompt": 0, "completion": 0, "runs": 0,
+                                      "usages": [], "started": time.monotonic()})
     u["prompt"] += int(pt or 0)
     u["completion"] += int(ct or 0)
     u["runs"] += runs
+
+
+def _usage_track(pkey: str, d: dict | None) -> None:
+    """Record one dispatch's full usage (incl. cache split) + model, for costing."""
+    if not d:
+        return
+    usage = d.get("usage") or {}
+    if not any(int(usage.get(k, 0) or 0) for k in usage):
+        return
+    u = _TURN_USAGE.setdefault(pkey, {"prompt": 0, "completion": 0, "runs": 0,
+                                      "usages": [], "started": time.monotonic()})
+    u.setdefault("usages", []).append({"model": d.get("model", ""), "usage": usage})
+
+
+def _run_cost(pkey: str) -> dict | None:
+    """The run's cost block (tokens + $ + effective $/hour), or None if untracked."""
+    u = _TURN_USAGE.get(pkey)
+    if not u:
+        return None
+    from captain_claw.flight_deck import pricing
+    elapsed = time.monotonic() - u.get("started", time.monotonic())
+    return pricing.summarize(u.get("usages", []), elapsed_seconds=elapsed)
 
 
 def _fmt_tok(n: int) -> str:
@@ -150,8 +174,15 @@ def _usage_summary(pkey: str) -> str:
     u = _TURN_USAGE.get(pkey)
     if not u or not u["runs"]:
         return ""
-    return (f"{u['runs']} agent run{'s' if u['runs'] != 1 else ''} · "
+    line = (f"{u['runs']} agent run{'s' if u['runs'] != 1 else ''} · "
             f"{_fmt_tok(u['prompt'])} in → {_fmt_tok(u['completion'])} out tokens")
+    cost = _run_cost(pkey)
+    if cost and cost.get("priced"):
+        from captain_claw.flight_deck.basna_routes import _fmt_usd
+        line += f" · {_fmt_usd(cost['usd'])}"
+        if cost.get("hourly_usd"):
+            line += f" · ≈ {_fmt_usd(cost['hourly_usd'])}/hr"
+    return line
 
 
 _REPORTS_DIRNAME = ".reports"
@@ -820,6 +851,7 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
             await stop_archetype_agent(slug)
         except Exception as e:  # noqa: BLE001
             log.warning("code: failed to stop agent", slug=slug, error=str(e))
+    _usage_track(pkey, d)  # capture this dispatch's tokens + cache + model for cost
     if _cancelled(pkey):
         return {**d, "ok": False, "error": "stopped by user", "cancelled": True}
     return d
