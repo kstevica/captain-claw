@@ -9,6 +9,14 @@ const PRESET_STYLE: Record<string, string> = {
   thorough: 'bg-amber-500 text-zinc-950',
 }
 
+// Display labels. The underlying preset value stays 'off' (load-bearing across the
+// backend + preset logic); only the shown text is "Basic".
+const PRESET_LABEL: Record<string, string> = {
+  off: 'Basic',
+  balanced: 'Balanced',
+  thorough: 'Thorough',
+}
+
 function Switch({ on, onClick, disabled }: { on: boolean; onClick: () => void; disabled?: boolean }) {
   return (
     <button
@@ -58,7 +66,7 @@ export function QualityControls({
                 className={`rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors ${
                   sel ? PRESET_STYLE[p] : 'text-zinc-400 hover:text-zinc-200'}`}
               >
-                {p}
+                {PRESET_LABEL[p]}
               </button>
             )
           })}
