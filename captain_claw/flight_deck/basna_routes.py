@@ -807,6 +807,49 @@ async def agent_start(body: AgentStartReq):
 
 # ── Continuation: a follow-up run that carries a finished run forward ──
 
+# Non-hidden folders that are machinery/noise, never prior work to read. Hidden
+# paths (any part starting with ".": .git, .code, .researchmap, .vfs-meta.jsonl …)
+# are always skipped, so this only needs the non-dot ones.
+_MANIFEST_NOISE_DIRS = {"node_modules", "__pycache__", "saved"}
+
+
+def _manifest_body(root: Path, project: str, *, limit: int = 40) -> str:
+    """Build the continuation manifest from a folder root (pure — testable).
+
+    Lists prior *deliverables* only: skips hidden/internal trees (``.git`` — which
+    R6 git-snapshots creates — ``.code``, dotfiles, ``node_modules`` …) and
+    collapses the R10 ``sources/`` corpus into a single pointer instead of dumping
+    every saved page. Returns "" when there's nothing worth reading.
+    """
+    names: list[str] = []
+    n_sources = 0
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        parts = p.relative_to(root).parts
+        if any(part.startswith(".") or part in _MANIFEST_NOISE_DIRS for part in parts):
+            continue  # .git/**, .code, .vfs-meta.jsonl, node_modules, …
+        if parts and parts[0] == "sources":
+            n_sources += 1  # R10 corpus — count, don't itemise (searchable via researchmap)
+            continue
+        if len(names) < limit:
+            names.append(p.relative_to(root).as_posix())
+    if not names and not n_sources:
+        return ""
+    listing = "\n".join(f"- vfs:{project}/{n}" for n in names)
+    if n_sources:
+        listing += (
+            (f"\n- (+ {n_sources} saved source page(s) in `vfs:{project}/sources/` — "
+             "search them with the `researchmap` tool)") if names else
+            (f"- {n_sources} saved source page(s) in `vfs:{project}/sources/` — "
+             "search them with the `researchmap` tool"))
+    return (
+        f"\n\nThe shared folder `vfs:{project}/` already holds the prior round(s)' "
+        "work — READ what's relevant from it before adding anything, and build on it:\n"
+        f"{listing}\n"
+    )
+
+
 def _vfs_manifest(owner: str, project: str, *, limit: int = 40) -> str:
     """A short listing of files already in the shared VFS folder, so a continuation
     prompt can tell the next round to read prior work instead of recreating it.
@@ -818,20 +861,7 @@ def _vfs_manifest(owner: str, project: str, *, limit: int = 40) -> str:
         root = None
     if not root or not root.is_dir():
         return ""
-    names: list[str] = []
-    for p in sorted(root.rglob("*")):
-        if len(names) >= limit:
-            break
-        if p.is_file() and p.name != ".vfs-meta.jsonl":
-            names.append(p.relative_to(root).as_posix())
-    if not names:
-        return ""
-    listing = "\n".join(f"- vfs:{project}/{n}" for n in names)
-    return (
-        f"\n\nThe shared folder `vfs:{project}/` already holds the prior round(s)' "
-        "work — READ what's relevant from it before adding anything, and build on it:\n"
-        f"{listing}\n"
-    )
+    return _manifest_body(root, project, limit=limit)
 
 
 def _round_filename_rule(project: str, round_no: int) -> str:
