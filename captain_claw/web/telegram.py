@@ -988,9 +988,11 @@ async def _tg_process_with_typing(
                     "content": response,
                 })
 
-                # Extract and send suggested next steps as inline keyboard.
+                # Extract and send suggested next steps as inline keyboard —
+                # skip for FD-spawned orchestrated workers (Basna/Vatra/Council/Code).
                 from captain_claw.config import get_config
-                if get_config().ui.next_steps:
+                from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+                if get_config().ui.next_steps and not _is_fd_spawned_worker():
                     try:
                         steps = await extract_next_steps(user_agent.provider, response)
                         if steps and server._telegram_bridge:

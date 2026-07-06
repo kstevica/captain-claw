@@ -329,9 +329,12 @@ async def run_prompt_in_active_session(
             if after_turn:
                 await after_turn(turn_start_idx, prompt_text, assistant_text)
 
-            # Extract suggested next steps (skip for cron jobs and when disabled).
+            # Extract suggested next steps (skip for cron jobs, FD-spawned
+            # orchestrated workers, and when disabled).
             ctx.last_next_steps = []
-            if not cron_job_id and assistant_text.strip() and get_config().ui.next_steps:
+            from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+            if (not cron_job_id and assistant_text.strip()
+                    and get_config().ui.next_steps and not _is_fd_spawned_worker()):
                 try:
                     from captain_claw.next_steps import extract_next_steps, next_steps_to_dicts
                     steps = await extract_next_steps(agent.provider, assistant_text)
