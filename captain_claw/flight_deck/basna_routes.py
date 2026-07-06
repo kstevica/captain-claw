@@ -14,6 +14,7 @@ the count to difficulty. Spawn / dispatch / weighted-merge land in later phases.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import mimetypes
 import shutil
@@ -1508,15 +1509,61 @@ def _resolve_merge_creds(body, registry: dict, tier: str) -> dict:
     return _tier_creds(registry, tier, body.api_key)
 
 
+# ── Run-wide model-spend accumulator (shared by Basna + Vatra) ────────
+# Every model call in a run — agent dispatches AND the auxiliary provider calls
+# (merge synthesizer/conflict, LLM judges, the Horizon closer's critics + revision,
+# rubric derivation, coverage, Vatra's Lead/digest/holistic) — records {model,
+# usage} here, keyed by session id, so the run's cost is complete rather than an
+# undercount. `_run_sid` is a contextvar set once at execute entry; it propagates
+# into every gathered child task, so a provider built deep inside the run knows
+# which run it belongs to WITHOUT threading the sid through every call site.
+_run_sid: contextvars.ContextVar[str] = contextvars.ContextVar("basna_run_sid", default="")
+_RUN_USAGE: dict[str, list[dict]] = {}
+
+
+def _record_run_usage(model: str, usage: dict | None) -> None:
+    """Append one usage dict (5-field) to the active run — for provider/dispatch spend."""
+    sid = _run_sid.get()
+    u = usage or {}
+    if not sid or not any(int(u.get(k, 0) or 0) for k in _USAGE_FIELDS):
+        return
+    _RUN_USAGE.setdefault(sid, []).append(
+        {"model": model or "", "usage": {k: int(u.get(k, 0) or 0) for k in _USAGE_FIELDS}})
+
+
+class _UsageRecordingProvider:
+    """Wraps a provider so every ``.complete()`` records its usage into the active
+    run. Transparent for every other attribute/method."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def complete(self, *args, **kwargs):
+        resp = await self._inner.complete(*args, **kwargs)
+        try:
+            _record_run_usage(getattr(resp, "model", "") or "", getattr(resp, "usage", None))
+        except Exception:  # noqa: BLE001 — accounting must never break a completion
+            pass
+        return resp
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def _provider_call(creds: dict, *, temperature: float, default_max: int, cap: int) -> tuple:
     """Build (create_provider, max_tokens) from merge creds — honoring the tier's
     output_ctx so a long synthesis isn't truncated by a hardcoded cap. Pops the
-    non-provider `output_ctx` key before constructing the provider."""
+    non-provider `output_ctx` key before constructing the provider. When called
+    inside a run (``_run_sid`` set), the provider is wrapped so its token spend is
+    counted toward the run's cost."""
     from captain_claw.llm import create_provider
     c = {k: v for k, v in creds.items() if k != "output_ctx"}
     out = int(creds.get("output_ctx") or 0)
     max_tokens = min(max(out or default_max, default_max), cap)
-    return create_provider(temperature=temperature, max_tokens=max_tokens, **c), max_tokens
+    prov = create_provider(temperature=temperature, max_tokens=max_tokens, **c)
+    if _run_sid.get():
+        prov = _UsageRecordingProvider(prov)
+    return prov, max_tokens
 
 
 async def _llm_conflict(good: list[dict], creds: dict) -> bool:
@@ -1955,14 +2002,18 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
             fleet_instructions=fleet_instructions, agent_name=agent_name,
             file_paths=file_paths, image_paths=image_paths, on_usage=on_usage,
             usage_sink=sink)
+        usage = _finalize_usage(sink)
+        _record_run_usage(sink.get("model", ""), usage)  # count toward the active run's cost
         return {"ok": True, "output": out, "actions": actions,
                 "latency_ms": int((time.monotonic() - started) * 1000),
-                "usage": _finalize_usage(sink), "model": sink.get("model", "")}
+                "usage": usage, "model": sink.get("model", "")}
     except Exception as e:
         log.warning("Basna dispatch failed", error=str(e))
+        usage = _finalize_usage(sink)
+        _record_run_usage(sink.get("model", ""), usage)  # partial spend still counts
         return {"ok": False, "output": "", "actions": [], "error": str(e),
                 "latency_ms": int((time.monotonic() - started) * 1000),
-                "usage": _finalize_usage(sink), "model": sink.get("model", "")}
+                "usage": usage, "model": sink.get("model", "")}
 
 
 class ExecuteRequest(BaseModel):
@@ -2335,6 +2386,8 @@ async def execute_route(
     sid = body.session_id
     _progress_start(sid)
     _run_started = time.monotonic()  # run wall-clock, for the $/hour cost figure
+    _run_sid.set(sid)                # bind cost accounting to this run (propagates to children)
+    _RUN_USAGE[sid] = []             # every model call in this run records here
     sid8 = sid[:8]
     # One shared VFS folder for the whole run. A continuation round inherits the
     # ROOT run's folder (body.vfs_project) so every round in a chain accumulates into
@@ -2831,12 +2884,16 @@ async def execute_route(
     run_cost: dict | None = None
     try:
         from captain_claw.flight_deck import pricing
-        run_cost = pricing.summarize(
-            [{"model": r.get("model", ""), "usage": r.get("usage") or {}} for r in results],
-            elapsed_seconds=time.monotonic() - _run_started)
+        # Everything the run spent — worker dispatches, the merge synthesizer, the
+        # Horizon closer's critics + revision, claim-check, rubric — recorded in
+        # _RUN_USAGE via _dispatch_one + the wrapped providers.
+        run_cost = pricing.summarize(_RUN_USAGE.get(sid, []),
+                                     elapsed_seconds=time.monotonic() - _run_started)
         _progress(sid, "cost", _cost_message(run_cost), cost=run_cost)
     except Exception as e:  # noqa: BLE001 — cost is best-effort, never blocks the result
         log.warning("Basna cost summary failed", error=str(e))
+    finally:
+        _RUN_USAGE.pop(sid, None)
     _phase(sid, "Done")
     _progress(sid, "done", f"Done · {len(results)} agent(s), {len(learned)} learned")
     _progress_done(sid)

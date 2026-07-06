@@ -65,6 +65,8 @@ from captain_claw.flight_deck.basna_routes import (
     _provider_call,
     _resolve_owner,
     _round_filename_rule,
+    _RUN_USAGE,
+    _run_sid,
     _run_workers,
     _session_files_dir,
     _tier_creds,
@@ -204,33 +206,17 @@ def _is_skipped(sid: str, label: str) -> bool:
     return label in _skip_agents.get(sid, ())
 
 
-# Per-run model spend: every dispatch's {model, usage} appended here (keyed by
-# sid), rolled into the run's cost + $/hour at the end. Ephemeral, popped per run.
-_RUN_USAGE: dict[str, list[dict]] = {}
-
-
-def _track_usage(sid: str, d: dict | None) -> None:
-    """Record one dispatch's token/cache usage + model for the run's cost total."""
-    if not d:
-        return
-    u = d.get("usage") or {}
-    if not any(int(u.get(k, 0) or 0) for k in u):
-        return  # nothing billable (skip/empty) — don't clutter the breakdown
-    _RUN_USAGE.setdefault(sid, []).append({"model": d.get("model", ""), "usage": u})
-
-
 async def _dispatch_skippable(sid: str, label: str, factory) -> dict:
     """Run an agent dispatch; if the user marks this agent (label) to skip, cancel
     its turn and return a skipped result instead of waiting for it. `factory` is a
-    no-arg callable returning the `_dispatch_one` coroutine."""
+    no-arg callable returning the `_dispatch_one` coroutine. Token spend is recorded
+    inside `_dispatch_one` (via the run contextvar), so no explicit tracking here."""
     task = asyncio.create_task(factory())
     try:
         while True:
             done, _ = await asyncio.wait({task}, timeout=1.0)
             if task in done:
-                d = task.result()
-                _track_usage(sid, d)  # capture owner dispatch spend (intro/main/review/retries)
-                return d
+                return task.result()
             if _is_skipped(sid, label):
                 task.cancel()
                 try:
@@ -515,7 +501,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     if not intent:
         raise HTTPException(400, "session has no intent")
     _run_started = time.monotonic()  # run wall-clock, for the $/hour cost figure
-    _RUN_USAGE[body.session_id] = []  # reset the per-run model-spend accumulator
+    _run_sid.set(body.session_id)     # bind cost accounting to this run (propagates to children)
+    _RUN_USAGE[body.session_id] = []  # every model call in this run records here
 
     archetypes = await merged_archetypes(db, user["id"])
     arch_by_id = {a["id"]: a for a in archetypes}
@@ -1574,7 +1561,6 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
                                 on_action=_on_action, fleet_instructions=arch.get("fleet_instructions", ""),
                                 agent_name=role, on_usage=_on_usage)
-        _track_usage(sid, d)  # reporter model spend counts toward the run cost
         out = (d.get("output") or "").strip()
         files, text = _capture_generated(sp["slug"], input_names | {"vatra-slices.md"},
                                          dest_dir, role, seen_gen)
@@ -1650,7 +1636,6 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
                                 on_action=_on_action,
                                 fleet_instructions=checker.get("fleet_instructions", ""),
                                 agent_name=role, on_usage=_on_usage)
-        _track_usage(sid, d)  # fact-checker spend
         findings = rv.parse_findings(d.get("output") or "")
         _progress(sid, "verify", f"Fact-checker: {rv.summary_line(findings)}", agent=role)
         for f in rv.refuted(findings):
@@ -1670,7 +1655,6 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
                                      on_action=_on_action,
                                      fleet_instructions=checker.get("fleet_instructions", ""),
                                      agent_name=role, on_usage=_on_usage)
-            _track_usage(sid, d2)  # fact-check revision spend
             revised = (d2.get("output") or "").strip()
             collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
             if collapsed:
@@ -1784,7 +1768,6 @@ async def _fulfill_ask(request: Request, user: dict, sid: str, sid8: str, run_ta
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
                                 fleet_instructions=arch.get("fleet_instructions", ""),
                                 agent_name=helper_label, on_usage=_on_usage)
-        _track_usage(sid, d)  # ask-helper spend
         out = (d.get("output") or "").strip()
         if out:
             await db.answer_vatra_ask(ask["id"], out, arch["id"])
