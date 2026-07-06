@@ -14,6 +14,12 @@ Pure + data-only so it's fully unit-testable — no I/O, no model calls.
 
 from __future__ import annotations
 
+import json
+import re
+
+# Default cap on approved clarification loop-backs per run (global ceiling).
+CLARIFY_CAP = 2
+
 # Ordinals: A=1 (earliest) … D=4 (latest). We run the DISTINCT groups a team
 # actually uses, ascending — so {A, C} is two phases (A then C), not four.
 _LETTERS = ("A", "B", "C", "D")
@@ -96,3 +102,74 @@ def clamp_lead_group(subtask_group, floor: int) -> int | None:
 def order_groups(ordinals) -> list[int]:
     """The distinct groups a team uses, ascending — the phases to run in order."""
     return sorted({int(o) for o in ordinals})
+
+
+# ── Clarification loop (later-phase owner asks an earlier one for more) ──
+
+# Injected into an owner that runs AFTER the first phase: it may ask the Lead to
+# have an earlier-phase teammate provide missing data. Bounded by CLARIFY_CAP.
+REQUEST_DIRECTIVE = (
+    "\n\nBLOCKED ON A TEAMMATE? You run in a LATER phase — the earlier specialists' "
+    "work is already on the shared board (search it first with the `vatra` tool). If "
+    "you are genuinely blocked because a specific earlier teammate's output is missing "
+    "or unclear, and you cannot do your part well without it, end your reply with ONE "
+    "final line:\n"
+    "REQUEST: <that teammate's role> — <exactly what you need>\n"
+    "The Lead decides whether to have them provide it — this is limited, so use it only "
+    "for real blockers, never nice-to-haves. Otherwise just do your part with the board."
+)
+
+_REQUEST_RE = re.compile(r"(?mi)^\s*REQUEST\s*[:\-]\s*(.+?)\s*$")
+
+
+def parse_request(output: str | None) -> str | None:
+    """The text after a `REQUEST:` line in an owner's output, or None."""
+    m = _REQUEST_RE.search(output or "")
+    if not m:
+        return None
+    text = m.group(1).strip()
+    return text[:400] or None
+
+
+def clarify_prompt(requester_role: str, request_text: str, roster: list[dict]) -> str:
+    """Ask the Lead whether to interrupt an earlier teammate for a blocked owner."""
+    listed = "\n".join(
+        f"- id={o.get('id', '')} · {o.get('role', '')} — {str(o.get('title', ''))[:80]}"
+        for o in roster) or "(none)"
+    return (
+        "You are the Lead of a team running in ordered phases. A specialist in a LATER "
+        "phase is blocked and wants to interrupt an EARLIER-phase teammate for more data "
+        "or clarification. Decide whether that is warranted.\n\n"
+        f"Requester: {requester_role}\n"
+        f"Its request: {request_text}\n\n"
+        "Earlier-phase teammates who could provide it:\n"
+        f"{listed}\n\n"
+        "Approve ONLY if this is a genuine blocker AND one listed teammate can provide it. "
+        "DENY vague asks, nice-to-haves, or anything the requester could get itself from the "
+        "shared board. Reply with ONLY this JSON — no prose:\n"
+        '{"approve": true|false, "provider": "<the id of the teammate to ask, or empty>", '
+        '"instruction": "<one concrete sentence telling that teammate exactly what to produce '
+        'and post to the board>"}'
+    )
+
+
+def parse_clarify(output: str | None) -> dict:
+    """Parse the Lead's decision. Defaults to DENY on any parse trouble."""
+    deny = {"approve": False, "provider": "", "instruction": ""}
+    if not output:
+        return deny
+    text = output.strip()
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return deny
+    try:
+        raw = json.loads(m.group(0))
+    except (ValueError, TypeError):
+        return deny
+    if not isinstance(raw, dict):
+        return deny
+    return {
+        "approve": bool(raw.get("approve")),
+        "provider": str(raw.get("provider") or "").strip(),
+        "instruction": str(raw.get("instruction") or "").strip()[:600],
+    }

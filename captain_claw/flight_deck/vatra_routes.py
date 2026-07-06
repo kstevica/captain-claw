@@ -757,6 +757,11 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         # collaborative instead of blind. Read at dispatch time (closure).
         intro_digest = ""
 
+        # Grouped mode: subtask ids of owners that run AFTER the first phase — they
+        # may ask the Lead to have an earlier teammate provide missing data. Filled
+        # in the grouped block below; read (closure) in _dispatch_owner.
+        _later_phase_subtasks: set[str] = set()
+
         async def _dispatch_owner(sp: dict) -> dict:
             arch, st = sp["arch"], sp["subtask"]
             role = arch.get("role") or arch["id"]
@@ -775,6 +780,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 prompt += JUDGMENT_LEDGER_DIRECTIVE
             if quality.source_corpus:
                 prompt += SOURCE_CORPUS_DIRECTIVE
+            if st["id"] in _later_phase_subtasks:  # grouped: may request from an earlier phase
+                prompt += vatra_groups.REQUEST_DIRECTIVE
             d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
@@ -881,10 +888,48 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             owner_group = {
                 id(sp): vatra_groups.effective_group(sp["subtask"], sp["arch"]) for sp in spawned}
             phases = vatra_groups.order_groups(owner_group.values())
+            first_phase = phases[0] if phases else None
+            _later_phase_subtasks.update(
+                sp["subtask"]["id"] for sp in spawned if owner_group[id(sp)] != first_phase)
+            results_by_id: dict[str, dict] = {}  # subtask id → its result (updated on re-run)
+
+            async def _redispatch_owner(sp: dict, instruction: str, tag: str) -> dict:
+                arch = sp["arch"]
+                label = _owner_label(sp)
+                on_action, on_usage = _owner_callbacks(label, arch["id"], sp["subtask"]["id"])
+                d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
+                    sp["port"], sp["auth"], instruction, body.dispatch_timeout,
+                    on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
+                    agent_name=label, on_usage=on_usage))
+                _progress(sid, "dispatch",
+                          f"{label} ({tag}) {'✓' if d['ok'] else '✗'} · {len(d['actions'])} action(s)",
+                          ok=d["ok"], agent=label)
+                out = (d.get("output") or "").strip()
+                r = results_by_id.get(sp["subtask"]["id"])
+                if r is not None and out:
+                    r["output"], r["ok"] = out, d["ok"]
+                    r["actions"] = r.get("actions", []) + d.get("actions", [])
+                return d
+
+            async def _lead_clarify(requester_role: str, request_text: str, roster: list) -> dict:
+                try:
+                    prov, mt = _provider_call(_creds("reason"), temperature=0.2, default_max=400, cap=1024)
+                    from captain_claw.llm import Message
+                    resp = await prov.complete(
+                        [Message(role="user",
+                                 content=vatra_groups.clarify_prompt(requester_role, request_text, roster))],
+                        temperature=0.2, max_tokens=mt)
+                    return vatra_groups.parse_clarify(resp.content or "")
+                except Exception as e:  # noqa: BLE001 — clarify is best-effort; default deny
+                    log.warning("Vatra clarify decision failed", error=str(e))
+                    return {"approve": False, "provider": "", "instruction": ""}
+
             _phase(sid, "Grouped run")
             _progress(sid, "main",
                       f"Grouped execution · {len(phases)} phase(s): "
                       f"{', '.join(vatra_groups.group_label(p) for p in phases)}")
+            completed: list[dict] = []   # earlier-phase owners — the roster + providers
+            loop_backs, cap = 0, vatra_groups.CLARIFY_CAP
             for p in phases:
                 grp = [sp for sp in spawned if owner_group[id(sp)] == p]
                 letter = vatra_groups.group_label(p)
@@ -893,13 +938,61 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                           f"Group {letter} — {len(grp)} agent(s): "
                           f"{', '.join(_owner_label(sp) for sp in grp)}")
                 ds = await asyncio.gather(*[_dispatch_owner(sp) for sp in grp])
-                results.extend(_result_of(sp, d) for sp, d in zip(grp, ds))
-                # Re-index so the NEXT group can search this group's writes.
+                for sp, d in zip(grp, ds):
+                    r = _result_of(sp, d)
+                    results.append(r)
+                    results_by_id[sp["subtask"]["id"]] = r
                 if research_dir is not None:
                     try:
                         research_map.reindex(research_dir)
                     except Exception as e:  # noqa: BLE001
                         log.debug("Vatra group reindex failed", error=str(e))
+
+                # Clarification loop: a blocked owner in this phase may ask an EARLIER
+                # teammate for more. The Lead approves/denies; on approval, re-run only
+                # the named provider, then the requester. Bounded by `cap` loop-backs
+                # per run (total).
+                if completed and loop_backs < cap:
+                    roster = [{"id": s["arch"]["id"], "role": s["arch"].get("role", ""),
+                               "title": s["subtask"]["title"]} for s in completed]
+                    for sp, d in zip(grp, ds):
+                        if loop_backs >= cap:
+                            break
+                        req = vatra_groups.parse_request(d.get("output"))
+                        if not req:
+                            continue
+                        who = _owner_label(sp)
+                        _progress(sid, "clarify", f"{who} requests: {req[:160]}", agent=who)
+                        decision = await _lead_clarify(sp["arch"].get("role", ""), req, roster)
+                        provider = next((s for s in completed
+                                         if s["arch"]["id"] == decision.get("provider")), None)
+                        if not (decision.get("approve") and provider):
+                            _progress(sid, "clarify",
+                                      f"Lead denied {who}'s request"
+                                      if not decision.get("approve")
+                                      else f"{who}: approved but no matching teammate",
+                                      agent=who, ok=False)
+                            continue
+                        loop_backs += 1
+                        _progress(sid, "clarify",
+                                  f"Lead → {_owner_label(provider)}: {decision['instruction'][:140]} "
+                                  f"(loop-back {loop_backs}/{cap})", agent=_owner_label(provider))
+                        await _redispatch_owner(
+                            provider,
+                            f"A teammate is blocked and needs this from you now: "
+                            f"{decision['instruction']}\n\nProduce it and post it to the shared "
+                            "board via the `vatra` tool. Keep it focused.", "clarify")
+                        if research_dir is not None:
+                            try:
+                                research_map.reindex(research_dir)
+                            except Exception as e:  # noqa: BLE001
+                                log.debug("Vatra clarify reindex failed", error=str(e))
+                        await _redispatch_owner(
+                            sp,
+                            f"{_owner_label(provider)} has now provided what you asked for — search "
+                            "the shared board with the `vatra` tool, then finish your part "
+                            "incorporating it. Output your full piece.", "clarify")
+                completed.extend(grp)
         else:
             _phase(sid, "Main round")
             _progress(sid, "main", f"{len(spawned)} specialist(s) producing their pieces…")
