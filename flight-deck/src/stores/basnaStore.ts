@@ -206,7 +206,8 @@ export interface RunCost {
   usd: number | null
   priced: boolean
   per_model: Record<string, { usd: number; prompt_tokens: number; completion_tokens: number; cache_read_input_tokens: number; priced: boolean; calls: number }>
-  elapsed_seconds: number | null
+  elapsed_seconds: number | null   // real wall-clock time of the run
+  agent_seconds: number | null     // Σ of every model call's duration (> wall-clock when parallel)
   hourly_usd: number | null
 }
 

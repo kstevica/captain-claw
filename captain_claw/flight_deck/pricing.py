@@ -134,20 +134,24 @@ def hourly_rate(usd: float | None, elapsed_seconds: float | None) -> float | Non
 def summarize(agents: list[dict], elapsed_seconds: float | None = None) -> dict:
     """Roll a run's per-agent usage into one cost block for the UI.
 
-    ``agents`` is a list of ``{model, usage, price?}`` (``price`` is an optional
-    per-agent rate override). Returns aggregate tokens, total ``usd`` (``None`` if
-    NOTHING could be priced), a per-model breakdown, the run ``elapsed_seconds`` and
-    the effective ``hourly_usd``. The human-wage comparison is applied client-side
-    from a user-set wage, so it isn't baked in here.
+    ``agents`` is a list of ``{model, usage, seconds?, price?}`` (``seconds`` is the
+    call's wall-duration, ``price`` an optional per-agent rate override). Returns
+    aggregate tokens, total ``usd`` (``None`` if NOTHING could be priced), a per-model
+    breakdown, the run ``elapsed_seconds`` (real wall-clock), ``agent_seconds`` (the
+    SUM of every model call's duration — exceeds wall-clock when agents run in
+    parallel), and the effective ``hourly_usd``. The human-wage comparison is applied
+    client-side from a user-set wage, so it isn't baked in here.
     """
     totals = {k: 0 for k in _TOKEN_KEYS}
     per_model: dict[str, dict] = {}
     usd = 0.0
     any_priced = False
+    agent_seconds = 0.0
     for a in agents or []:
         u = a.get("usage") or {}
         for k in _TOKEN_KEYS:
             totals[k] += int(u.get(k, 0) or 0)
+        agent_seconds += float(a.get("seconds", 0) or 0)
         c = cost_from_usage(a.get("model", ""), u, a.get("price"))
         mid = a.get("model") or "?"
         pm = per_model.setdefault(mid, {
@@ -168,6 +172,7 @@ def summarize(agents: list[dict], elapsed_seconds: float | None = None) -> dict:
         "priced": any_priced,
         "per_model": per_model,
         "elapsed_seconds": round(elapsed_seconds, 2) if elapsed_seconds else None,
+        "agent_seconds": round(agent_seconds, 2) if agent_seconds else None,
         "hourly_usd": hourly_rate(usd if any_priced else None, elapsed_seconds),
     }
     return out

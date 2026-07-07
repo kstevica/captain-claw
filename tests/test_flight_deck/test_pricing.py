@@ -96,6 +96,24 @@ def test_summarize_aggregates_tokens_cost_and_hourly():
     assert s["per_model"]["claude-opus-4-8"]["usd"] == 5.0
 
 
+def test_summarize_sums_agent_seconds_across_parallel_calls():
+    # Two agents each ran ~90s of model time; the run's wall-clock was only 100s
+    # because they overlapped — so agent-time (180s) exceeds wall-clock (parallelism).
+    agents = [
+        {"model": "claude-opus-4-8", "usage": {"prompt_tokens": 10}, "seconds": 90.0},
+        {"model": "claude-opus-4-8", "usage": {"prompt_tokens": 10}, "seconds": 90.5},
+    ]
+    s = pricing.summarize(agents, elapsed_seconds=100)
+    assert s["agent_seconds"] == 180.5      # Σ of per-call durations
+    assert s["elapsed_seconds"] == 100      # real wall-clock
+    assert s["agent_seconds"] > s["elapsed_seconds"]  # the parallelism signal
+
+
+def test_summarize_agent_seconds_none_without_durations():
+    s = pricing.summarize([{"model": "claude-opus-4-8", "usage": {"prompt_tokens": 5}}], elapsed_seconds=10)
+    assert s["agent_seconds"] is None       # no `seconds` recorded → omitted, not 0
+
+
 def test_summarize_unpriced_when_no_model_known():
     s = pricing.summarize([{"model": "mystery", "usage": {"prompt_tokens": 999}}], elapsed_seconds=60)
     assert s["priced"] is False

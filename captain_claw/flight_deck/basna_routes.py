@@ -1539,27 +1539,32 @@ def _make_gate(max_parallel: int, team_size: int) -> "asyncio.Semaphore | None":
     return asyncio.Semaphore(n)
 
 
-def _record_run_usage(model: str, usage: dict | None) -> None:
-    """Append one usage dict (5-field) to the active run — for provider/dispatch spend."""
+def _record_run_usage(model: str, usage: dict | None, duration_seconds: float = 0.0) -> None:
+    """Append one usage dict (5-field) + its wall-duration to the active run — for
+    provider/dispatch spend. Durations sum to `agent_seconds` (total compute), which
+    exceeds the run's wall-clock when agents run in parallel."""
     sid = _run_sid.get()
     u = usage or {}
     if not sid or not any(int(u.get(k, 0) or 0) for k in _USAGE_FIELDS):
         return
     _RUN_USAGE.setdefault(sid, []).append(
-        {"model": model or "", "usage": {k: int(u.get(k, 0) or 0) for k in _USAGE_FIELDS}})
+        {"model": model or "", "usage": {k: int(u.get(k, 0) or 0) for k in _USAGE_FIELDS},
+         "seconds": round(float(duration_seconds or 0.0), 3)})
 
 
 class _UsageRecordingProvider:
-    """Wraps a provider so every ``.complete()`` records its usage into the active
-    run. Transparent for every other attribute/method."""
+    """Wraps a provider so every ``.complete()`` records its usage + duration into the
+    active run. Transparent for every other attribute/method."""
 
     def __init__(self, inner):
         self._inner = inner
 
     async def complete(self, *args, **kwargs):
+        _t0 = time.monotonic()
         resp = await self._inner.complete(*args, **kwargs)
         try:
-            _record_run_usage(getattr(resp, "model", "") or "", getattr(resp, "usage", None))
+            _record_run_usage(getattr(resp, "model", "") or "", getattr(resp, "usage", None),
+                              time.monotonic() - _t0)
         except Exception:  # noqa: BLE001 — accounting must never break a completion
             pass
         return resp
@@ -2039,7 +2044,7 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
             file_paths=file_paths, image_paths=image_paths, on_usage=on_usage,
             usage_sink=sink, error_sink=err)
         usage = _finalize_usage(sink)
-        _record_run_usage(sink.get("model", ""), usage)  # count toward the active run's cost
+        _record_run_usage(sink.get("model", ""), usage, time.monotonic() - started)  # cost + agent-time
         # An agent-side error (e.g. context overflow) no longer raises: it's flagged
         # here, so the dispatch reads ✗ WITH the real reason and KEEPS the work done.
         emsg = err.get("message", "")
@@ -2052,7 +2057,7 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
     except Exception as e:
         log.warning("Basna dispatch failed", error=str(e))
         usage = _finalize_usage(sink)
-        _record_run_usage(sink.get("model", ""), usage)  # partial spend still counts
+        _record_run_usage(sink.get("model", ""), usage, time.monotonic() - started)  # partial spend still counts
         return {"ok": False, "output": "", "actions": [], "error": str(e),
                 "latency_ms": int((time.monotonic() - started) * 1000),
                 "usage": usage, "model": sink.get("model", "")}

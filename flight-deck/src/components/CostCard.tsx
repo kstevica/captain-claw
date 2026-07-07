@@ -70,6 +70,15 @@ export function CostCard({ cost }: { cost: RunCost }) {
   }
   const tok = cost.tokens
   const totalTok = (tok.prompt_tokens || 0) + (tok.completion_tokens || 0)
+  // Token split: fresh input (incl. cache writes) · reused from cache · generated output.
+  const inputTok = (tok.prompt_tokens || 0) + (tok.cache_creation_input_tokens || 0)
+  const cachedTok = tok.cache_read_input_tokens || 0
+  const outputTok = tok.completion_tokens || 0
+  // Time: real wall-clock vs total agent-time (Σ of every model call — larger when
+  // agents run in parallel); their ratio is the effective parallelism.
+  const wall = cost.elapsed_seconds
+  const agentT = cost.agent_seconds
+  const parallel = wall && agentT && wall > 0 ? agentT / wall : null
   const hourly = cost.hourly_usd
   const ratio = wage > 0 && hourly && hourly > 0 ? wage / hourly : null
   return (
@@ -83,10 +92,17 @@ export function CostCard({ cost }: { cost: RunCost }) {
           <span className="text-2xl font-bold tabular-nums text-zinc-900 dark:text-zinc-50">{cost.priced ? fmtUsd(cost.usd) : '—'}</span>
           {!cost.priced && <span className="text-[10px] text-zinc-500">unpriced model</span>}
         </div>
-        <Stat label="time" value={fmtDur(cost.elapsed_seconds)} />
-        <Stat label="tokens" value={fmtTok(totalTok)} />
-        {tok.cache_read_input_tokens > 0 && <Stat label="cached" value={fmtTok(tok.cache_read_input_tokens)} />}
+        <Stat label="wall-clock" value={fmtDur(wall)} />
+        {agentT != null && <Stat label="agent-time" value={fmtDur(agentT)} />}
+        {parallel != null && parallel > 1.05 && <Stat label="parallel" value={`${parallel.toFixed(1)}×`} />}
         {hourly != null && <Stat label="per hour" value={`${fmtUsd(hourly)}/hr`} accent />}
+      </div>
+      {/* Token split — input (fresh) · cached (reused) · output (generated). */}
+      <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2">
+        <Stat label="input" value={fmtTok(inputTok)} />
+        {cachedTok > 0 && <Stat label="cached" value={fmtTok(cachedTok)} />}
+        <Stat label="output" value={fmtTok(outputTok)} />
+        <Stat label="total tokens" value={fmtTok(totalTok)} />
       </div>
       {/* Wage comparison — the whole point: is this cheaper than a person? */}
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-emerald-300/30 pt-2.5 dark:border-emerald-800/30">
