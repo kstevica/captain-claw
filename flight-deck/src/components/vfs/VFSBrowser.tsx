@@ -1,9 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   FolderTree,
   Folder,
   FileText,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Search,
   RefreshCw,
   Download,
   Trash2,
@@ -15,7 +18,7 @@ import {
   HardDrive,
   Upload,
 } from 'lucide-react'
-import { useVFSStore, type VFSEntry } from '../../stores/vfsStore'
+import { useVFSStore, type VFSEntry, type VFSProject } from '../../stores/vfsStore'
 import { VFSFileViewer } from './VFSFileViewer'
 
 function fmtBytes(n: number): string {
@@ -47,6 +50,26 @@ const KIND_BADGE: Record<string, string> = {
   link: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
 }
 
+// Project-list filter chips. A "run folder" is one a multi-agent run auto-created
+// (kind basna/vatra/council); a "project" is a plain user/agent folder (no kind).
+type KindFilter = 'all' | 'project' | 'basna' | 'vatra' | 'council' | 'link'
+type SortBy = 'recent' | 'name' | 'size'
+const CHIPS: { key: KindFilter; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'project', label: 'Projects' },
+  { key: 'vatra', label: 'Vatra' },
+  { key: 'basna', label: 'Basna' },
+  { key: 'council', label: 'Council' },
+  { key: 'link', label: 'Linked' },
+]
+
+const _isRun = (p: VFSProject) => p.kind === 'basna' || p.kind === 'vatra' || p.kind === 'council'
+// A raw run folder = an agent run with no human title (just its hash id). These are
+// folded away by default so named projects and titled runs lead the list.
+const _isRawRun = (p: VFSProject) => _isRun(p) && !p.title
+const _matchesKind = (p: VFSProject, k: KindFilter) =>
+  k === 'all' ? true : k === 'project' ? !p.kind : p.kind === k
+
 export function VFSBrowser() {
   const s = useVFSStore()
   const [creating, setCreating] = useState(false)
@@ -58,6 +81,18 @@ export function VFSBrowser() {
   const [linkPath, setLinkPath] = useState('')
   const [linkMode, setLinkMode] = useState('rw')
   const [linkErr, setLinkErr] = useState('')
+
+  // Project-list controls: search, kind filter, sort, and folded run folders.
+  const [query, setQuery] = useState('')
+  const [kindFilter, setKindFilter] = useState<KindFilter>('all')
+  const [sortBy, setSortBy] = useState<SortBy>(() => {
+    try { return (localStorage.getItem('vfs.sortBy') as SortBy) || 'recent' } catch { return 'recent' }
+  })
+  const [showRuns, setShowRuns] = useState(false)
+  const onSort = (v: SortBy) => {
+    setSortBy(v)
+    try { localStorage.setItem('vfs.sortBy', v) } catch { /* ignore */ }
+  }
 
   const onAddLink = async () => {
     setLinkErr('')
@@ -102,8 +137,35 @@ export function VFSBrowser() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Kind counts for the chips (from the full list, so they don't jitter while filtering).
+  const counts = useMemo(() => {
+    const c: Record<KindFilter, number> = { all: s.projects.length, project: 0, basna: 0, vatra: 0, council: 0, link: 0 }
+    for (const p of s.projects) {
+      if (!p.kind) c.project++
+      else if (p.kind === 'basna' || p.kind === 'vatra' || p.kind === 'council' || p.kind === 'link') c[p.kind]++
+    }
+    return c
+  }, [s.projects])
+
+  // Search + kind filter + sort. Default sort is most-recent so fresh runs lead.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const list = s.projects.filter((p) =>
+      _matchesKind(p, kindFilter)
+      && (!q || p.name.toLowerCase().includes(q) || (p.title || '').toLowerCase().includes(q)))
+    return list.sort((a, b) => {
+      if (sortBy === 'name') return (a.title || a.name).localeCompare(b.title || b.name)
+      if (sortBy === 'size') return b.bytes - a.bytes
+      return (b.mtime || 0) - (a.mtime || 0)
+    })
+  }, [s.projects, query, kindFilter, sortBy])
+
   // ── Project list view ──────────────────────────────────────────────
   if (!s.project) {
+    // Fold the raw (untitled) run folders unless the user is narrowing or expands them.
+    const noNarrow = kindFilter === 'all' && !query.trim()
+    const rawRuns = noNarrow ? filtered.filter(_isRawRun) : []
+    const shown = noNarrow && !showRuns ? filtered.filter((p) => !_isRawRun(p)) : filtered
     return (
       <div className="flex h-full flex-col">
         <div className="flex h-12 items-center justify-between border-b border-zinc-800 px-4">
@@ -240,6 +302,47 @@ export function VFSBrowser() {
             </div>
           </div>
         )}
+        {s.projects.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 bg-zinc-950/40 px-4 py-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search projects…"
+                className="w-52 rounded bg-zinc-900 py-1 pl-7 pr-2 text-xs text-zinc-100 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-1">
+              {CHIPS.filter((c) => c.key === 'all' || counts[c.key] > 0).map((c) => (
+                <button
+                  key={c.key}
+                  onClick={() => setKindFilter(c.key)}
+                  className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                    kindFilter === c.key
+                      ? 'bg-violet-600 text-white'
+                      : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                  }`}
+                >
+                  {c.label}
+                  <span className={`ml-1 tabular-nums ${kindFilter === c.key ? 'text-violet-200' : 'text-zinc-600'}`}>
+                    {counts[c.key]}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <select
+              value={sortBy}
+              onChange={(e) => onSort(e.target.value as SortBy)}
+              className="ml-auto rounded bg-zinc-900 px-2 py-1 text-xs text-zinc-300 outline-none ring-1 ring-zinc-800 focus:ring-zinc-600"
+              title="Sort projects"
+            >
+              <option value="recent">Recent</option>
+              <option value="name">Name</option>
+              <option value="size">Size</option>
+            </select>
+          </div>
+        )}
         <div className="flex-1 overflow-auto p-4">
           {s.error && <div className="mb-3 rounded bg-red-950/50 px-3 py-2 text-xs text-red-300">{s.error}</div>}
           {s.projects.length === 0 && !s.loading && (
@@ -250,7 +353,7 @@ export function VFSBrowser() {
             </div>
           )}
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {s.projects.map((p) => (
+            {shown.map((p) => (
               <div
                 key={p.name}
                 className="group flex flex-col gap-1 rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 hover:border-violet-700/60"
@@ -300,6 +403,19 @@ export function VFSBrowser() {
               </div>
             ))}
           </div>
+          {shown.length === 0 && rawRuns.length === 0 && s.projects.length > 0 && (
+            <div className="mt-12 text-center text-sm text-zinc-600">No projects match.</div>
+          )}
+          {rawRuns.length > 0 && (
+            <button
+              onClick={() => setShowRuns((v) => !v)}
+              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-zinc-800 py-2 text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+            >
+              {showRuns
+                ? <><ChevronUp className="h-3.5 w-3.5" /> Hide agent run folders</>
+                : <><ChevronDown className="h-3.5 w-3.5" /> Show {rawRuns.length} agent run folder{rawRuns.length !== 1 ? 's' : ''}</>}
+            </button>
+          )}
         </div>
       </div>
     )
