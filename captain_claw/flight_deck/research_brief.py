@@ -49,6 +49,28 @@ def derive_brief_prompt(intent: str) -> str:
     )
 
 
+def derive_brief_with_files_prompt(intent: str, file_names: list[str] | None) -> str:
+    """Brief prompt for an agent that ALSO has the user's attached files in hand.
+
+    Extends :func:`derive_brief_prompt` with an instruction to open and read the
+    attachments and fold their substance into the brief — so the team plans against
+    what the files actually contain, not just their names. Domain-agnostic: it says
+    "reflect the files", never what the files are about.
+    """
+    listed = ", ".join(f for f in (file_names or []) if f) or "the attached file(s)"
+    return (
+        derive_brief_prompt(intent)
+        + "\n\n## Attached files\n"
+        + f"The user attached these file(s) to the task: {listed}. They are provided to "
+        "you directly — OPEN and read them before writing the brief. Fold what they hold "
+        "into it: what data or content each file contains, how it relates to the task, and "
+        "what the team must actually DO with it. If the task's specifics live in the files "
+        "(a dataset to analyse, a document to work from, an image to build against), the "
+        "brief must make that explicit so no downstream worker treats the files as optional "
+        "context. Do not invent file contents you cannot see; describe only what is there."
+    )
+
+
 def parse_brief(output: str) -> str:
     """Clean the model's brief: strip code fences, trim, cap length. May return ""."""
     if not output:

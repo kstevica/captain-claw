@@ -711,6 +711,18 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     const sid = get().activeSession?.id
     if (!sid) return
     set({ error: null })
+    // Upload any attachments not yet on the server before the run — Basna's execute
+    // does this; Vatra must too, or the run never sees the attached files.
+    const pending = get().attachments.filter((a) => !a.uploaded && a.file)
+    if (pending.length) {
+      try {
+        const res = await apiUploadFiles(sid, pending.map((a) => a.file as File))
+        set({ attachments: (res.files || []).map((f) => ({ ...f, uploaded: true })) })
+      } catch (e) {
+        set({ error: e instanceof Error ? e.message : 'file upload failed' })
+        return
+      }
+    }
     try {
       const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
       // Deep mode in Vatra = Horizon depth: verify + revise EACH specialist's slice

@@ -473,6 +473,64 @@ def _teardown(slugs: list[str]) -> None:
     _save_process_registry(reg)
 
 
+def _save_inputs_to_vfs(user_id: str, vfs_project: str, src_dir: Path,
+                        input_files: list[dict]) -> int:
+    """Copy the user's attached input files into the run's shared VFS folder so they
+    live in the corpus (browsable, and indexed by the research map) — not only in each
+    worker's throwaway workspace. Best-effort; returns the count copied."""
+    n = 0
+    try:
+        from captain_claw.flight_deck.vfs_routes import _user_root
+        dst = _user_root(user_id) / vfs_project
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in input_files:
+            src = src_dir / f["name"]
+            if src.is_file():
+                try:
+                    shutil.copy2(src, dst / f["name"])
+                    n += 1
+                except OSError as e:
+                    log.warning("Vatra input→VFS copy failed", file=f["name"], error=str(e))
+    except Exception as e:  # noqa: BLE001 — never block a run on the corpus copy
+        log.warning("Vatra input→VFS setup failed", error=str(e))
+    return n
+
+
+async def _examine_files_brief(
+    request: Request, user: dict, *, name: str, intent: str,
+    input_files: list[dict], src_dir: Path, tiers: dict | None, api_key: str,
+    env_vars: list[dict] | None, timeout: float,
+) -> str:
+    """Spawn a short-lived agent that OPENS the attached files and restates the task as
+    a file-aware brief. Best-effort — returns "" on any failure so the caller falls back
+    to the plan/text brief. Reuses the worker spawn + `_dispatch_one` plumbing, so the
+    examiner's tokens are cost-accounted like any other agent (via the run contextvar).
+    Emits only progress-log lines (no `agent=` events), so it never forms a phantom card."""
+    sp = await _spawn_worker(
+        request, user, name=name, description="Examine attached files",
+        cognitive_mode="neutra", tools=["read", "ls"], tier="reason", tiers=tiers,
+        api_key=api_key, env_vars=env_vars)
+    if not sp["ok"]:
+        return ""
+    try:
+        from captain_claw.flight_deck.server import DATA_DIR
+        ws = DATA_DIR / sp["slug"] / "data" / "workspace"
+        for f in input_files:
+            try:
+                shutil.copy2(src_dir / f["name"], ws / f["name"])
+            except OSError:
+                pass
+        img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
+        doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
+        prompt = research_brief.derive_brief_with_files_prompt(
+            intent, [f["name"] for f in input_files])
+        d = await _dispatch_one(sp["port"], sp["auth"], prompt, timeout,
+                                agent_name="File examiner", file_paths=doc, image_paths=img)
+        return research_brief.parse_brief(d.get("output") or "") if d.get("ok") else ""
+    finally:
+        _teardown([sp["slug"]])
+
+
 def _capture_generated(slug: str, exclude: set[str], dest_dir: Path,
                        agent_role: str, seen: set[str]) -> tuple[list[dict], str]:
     """Copy files an agent generated into the session dir (before teardown) and
@@ -600,6 +658,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     subtasks = route["subtasks"]
     shared_context = route.get("shared_context", "")
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
+    # Persist the user's attachments into the run's shared VFS folder so they're part
+    # of the corpus (browsable, and indexed by the research map below), not only copied
+    # into each worker's throwaway workspace.
+    if input_files:
+        _n_vfs = _save_inputs_to_vfs(user["id"], vfs_project, _session_files_dir(sid), input_files)
+        if _n_vfs:
+            _progress(sid, "note", f"{_n_vfs} attached file(s) saved to vfs:{vfs_project}/")
     # Cap concurrent agent turns (mainly for local models — keeps parallel prefills
     # from exhausting the serving box's memory). 0 = unlimited. Propagates into every
     # gathered round via the contextvar; every _dispatch_one obeys it.
@@ -613,6 +678,27 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # brief the Lead decomposed on. brief == "" → exactly the raw intent, so an off
     # brief changes nothing. (The /start path plans inline with no brief → raw intent.)
     effective_intent = research_brief.brief_task(intent, route.get("brief"))
+
+    # Run-time file-aware brief (opt-in): when the user attached files AND the intent-
+    # brief feature is on, spawn a short-lived agent to OPEN the files and restate the
+    # task, so EVERY worker builds against a brief that reflects the attachments — not
+    # just their file names. Best-effort; falls back to the plan/text brief on failure.
+    if quality.intent_brief and input_files:
+        _phase(sid, "Examining files")
+        _progress(sid, "route", f"Examining {len(input_files)} attached file(s) to brief the team…")
+        try:
+            _fb = await _examine_files_brief(
+                request, user, name=f"vatra-{sid8}-{run_tag}-brief",
+                intent=intent, input_files=input_files, src_dir=_session_files_dir(sid),
+                tiers=body.tiers or None, api_key=body.api_key, env_vars=body.env_vars,
+                timeout=body.dispatch_timeout)
+            if _fb:
+                effective_intent = research_brief.brief_task(intent, _fb)
+                _progress(sid, "route", "File-aware brief ready — the team will build against it")
+            else:
+                _progress(sid, "route", "File exam yielded no brief; using the plan brief", ok=False)
+        except Exception as e:  # noqa: BLE001 — best-effort, never blocks the run
+            log.warning("Vatra file-aware brief failed", error=str(e))
 
     # R9 rubric contract (opt-in): derive the completeness checklist ONCE, with the
     # reason tier, from the standard the task names — then inject it into every

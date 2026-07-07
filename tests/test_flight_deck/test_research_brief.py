@@ -57,3 +57,24 @@ def test_derive_prompt_forbids_scope_change_and_carries_the_task():
     assert "scope" in p.lower()
     # It must not answer the task.
     assert "do not answer" in p.lower() or "not a reinterpretation" in p.lower()
+
+
+# ── the file-aware derive prompt (run-time file examiner) ────────────
+
+def test_file_aware_prompt_extends_the_base_and_names_the_files():
+    p = rb.derive_brief_with_files_prompt("analyse the numbers", ["q3.csv", "notes.pdf"])
+    # It is a superset of the plain brief prompt (same faithfulness rules).
+    assert "analyse the numbers" in p
+    assert "no new goals" in p.lower() or "add no new" in p.lower()
+    # It names the attached files and tells the agent to open + fold them in.
+    assert "q3.csv" in p and "notes.pdf" in p
+    assert "open" in p.lower() and "attached" in p.lower()
+    # Domain-agnostic + anti-fabrication: never invent file contents.
+    assert "invent" in p.lower() or "only what is there" in p.lower()
+
+
+def test_file_aware_prompt_handles_no_names():
+    p = rb.derive_brief_with_files_prompt("do X", [])
+    assert "attached file" in p.lower()          # generic fallback phrasing
+    p2 = rb.derive_brief_with_files_prompt("do X", None)  # type: ignore[arg-type]
+    assert "attached file" in p2.lower()
