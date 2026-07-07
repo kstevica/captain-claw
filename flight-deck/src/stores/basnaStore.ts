@@ -628,7 +628,27 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         set({ activeSession: fresh, routePlan: parseRoute(fresh.route),
               runs: await apiListRuns(fresh.id).catch(() => []),
               attachments: parseFiles(fresh.files) })
-        if (fresh.status === 'done') set({ progress: parseProgress(fresh.progress) })
+        if (fresh.status === 'done' || fresh.status === 'error') {
+          set({ progress: parseProgress(fresh.progress) })
+          // The terminal `cost` event is persisted a beat AFTER status flips to done
+          // (post-completion learning + cost summary), and this run-monitor interval
+          // tears down once nothing is running — so self-schedule a few re-fetches
+          // until the cost event lands, or the cost card never appears without a reopen.
+          if (!parseProgress(fresh.progress).some((e) => e.stage === 'cost')) {
+            let tries = 0
+            const grabCost = async () => {
+              tries += 1
+              const s2 = await apiGetSession(a.id).catch(() => null)
+              const evs = s2 ? parseProgress(s2.progress) : []
+              if (evs.some((e) => e.stage === 'cost')) {
+                set((st) => (st.activeSession?.id === a.id ? { progress: evs } : {}))
+              } else if (tries < 6) {
+                setTimeout(grabCost, 3000)
+              }
+            }
+            setTimeout(grabCost, 2500)
+          }
+        }
       }
     }
   },

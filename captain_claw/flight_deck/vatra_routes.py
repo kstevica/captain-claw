@@ -1338,10 +1338,14 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     files_by_name = {f["name"]: f for f in session_files}
     for g in generated_files:
         files_by_name[g["name"]] = g
+    _progress(sid, "done", f"Done · {len(usable)}/{len(results)} subtask(s) assembled")
+    # Persist the run log alongside the `done` flip so the UI shows it immediately —
+    # the client stops polling once the run is done, and the FINAL persist (with the
+    # learning + cost events) lands ~seconds later at the bottom of this function.
     await db.update_basna_session(
         sid, user["id"], status="done", truth=truth, confidence=confidence,
-        files=json.dumps(list(files_by_name.values())))
-    _progress(sid, "done", f"Done · {len(usable)}/{len(results)} subtask(s) assembled")
+        files=json.dumps(list(files_by_name.values())),
+        progress=json.dumps((_PROGRESS.get(sid) or {}).get("events", [])))
 
     # 7) Learn (best-effort, post-completion): score owners (slice used + sound),
     # ask-answerers, and the Lead + reporter (holistic), folding outcomes into
