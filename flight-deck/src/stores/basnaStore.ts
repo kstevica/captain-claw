@@ -696,6 +696,15 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         quality: toRequest(get().quality),
         ...(brief.trim() ? { brief } : {}),
       })
+      // Persist pending attachments onto the freshly-created session BEFORE
+      // selectSession reloads its files — otherwise Plan drops them (the new session
+      // has none yet) and the run never sees the attachments. The run reads the
+      // session's files for upload + VFS save + the file-aware brief.
+      const pending = get().attachments.filter((a) => !a.uploaded && a.file)
+      if (pending.length) {
+        try { await apiUploadFiles(session_id, pending.map((a) => a.file as File)) }
+        catch (e) { set({ error: e instanceof Error ? e.message : 'file upload failed' }) }
+      }
       await get().loadSessions()
       await get().selectSession(session_id)
     } catch (e) {
