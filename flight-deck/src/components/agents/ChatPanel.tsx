@@ -45,6 +45,7 @@ import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
 import TraceTimeline from '../observability/TraceTimeline'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
+import { AgentFilesPanel } from './AgentFilesPanel'
 import type { ChatMessage, TokenUsage } from '../../services/agentChat'
 
 interface Attachment {
@@ -61,6 +62,125 @@ interface Attachment {
 
 let attachId = 0
 function nextAttachId() { return `attach-${Date.now()}-${++attachId}` }
+
+// Build the outgoing message text, appending references to any uploaded files
+// so the agent can locate them. Images use the "[Attached image: …]" marker
+// that routes them to the vision tool instead of `read`.
+function appendAttachmentRefs(text: string, uploadedFiles: Attachment[]): string {
+  if (uploadedFiles.length === 0) return text
+  const hasImage = uploadedFiles.some((a) => a.type.startsWith('image/'))
+  const fileRefs = uploadedFiles.map((a) =>
+    a.type.startsWith('image/')
+      ? `[Attached image: ${a.uploadedPath}]`
+      : `[Attached file: ${a.name} → ${a.uploadedPath}]`,
+  ).join('\n')
+  const hint = hasImage
+    ? '\n(To view the image(s), call the image_vision tool with the path. Do NOT use read on an image.)'
+    : ''
+  return text ? `${text}\n\n${fileRefs}${hint}` : `${fileRefs}${hint}`
+}
+
+// Shared file-attachment state + handlers for the chat and queue inputs.
+// Files upload immediately on add; callers read `attachments` (filtering to
+// status==='uploaded') and bake refs into the outgoing text via
+// appendAttachmentRefs.
+function useFileAttachments(conn: ReturnType<typeof useAgentConnection>) {
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+
+  const uploadAttachment = useCallback(async (att: Attachment) => {
+    if (!conn) return
+    setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, status: 'uploading' } : a))
+    try {
+      const result = await uploadFileToAgent(conn.host, conn.port, conn.auth, att.file)
+      setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, status: 'uploaded', uploadedPath: result.path } : a))
+    } catch (err) {
+      setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, status: 'error', error: String(err) } : a))
+    }
+  }, [conn])
+
+  const addFiles = useCallback((files: FileList | File[]) => {
+    const newAttachments: Attachment[] = Array.from(files).map((file) => {
+      const att: Attachment = {
+        id: nextAttachId(),
+        file,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        status: 'pending',
+      }
+      // Generate preview for images
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, preview: e.target?.result as string } : a))
+        }
+        reader.readAsDataURL(file)
+      }
+      return att
+    })
+    setAttachments((prev) => [...prev, ...newAttachments])
+    newAttachments.forEach((att) => uploadAttachment(att))
+  }, [uploadAttachment])
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id))
+  }, [])
+
+  const clearAttachments = useCallback(() => setAttachments([]), [])
+
+  // Paste event on a textarea. Returns true if clipboard files were extracted
+  // (caller should NOT also handle text); false → let the default text paste run.
+  const handlePasteEvent = useCallback((e: React.ClipboardEvent): boolean => {
+    const items = e.clipboardData.items
+    const files: File[] = []
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (item.kind === 'file') {
+        const file = item.getAsFile()
+        if (file) files.push(file)
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault()
+      addFiles(files)
+      return true
+    }
+    return false
+  }, [addFiles])
+
+  // Clipboard-button paste via the async Clipboard API. Files → addFiles;
+  // otherwise the text is handed to onText for the caller to insert.
+  const pasteFromClipboard = useCallback(async (onText: (text: string) => void) => {
+    try {
+      const items = await navigator.clipboard.read()
+      const files: File[] = []
+      for (const item of items) {
+        for (const type of item.types) {
+          if (type.startsWith('image/') || type === 'application/octet-stream') {
+            const blob = await item.getType(type)
+            const ext = type.split('/')[1] || 'png'
+            const file = new File([blob], `clipboard-${Date.now()}.${ext}`, { type })
+            files.push(file)
+          }
+        }
+      }
+      if (files.length > 0) {
+        addFiles(files)
+      } else {
+        const text = await navigator.clipboard.readText()
+        if (text) onText(text)
+      }
+    } catch {
+      // Fallback to text
+      try {
+        const text = await navigator.clipboard.readText()
+        if (text) onText(text)
+      } catch { /* clipboard not available */ }
+    }
+  }, [addFiles])
+
+  return { attachments, addFiles, removeAttachment, clearAttachments, handlePasteEvent, pasteFromClipboard }
+}
 
 export function ChatPanel() {
   const {
@@ -300,7 +420,7 @@ export function ChatPanel() {
         /* Chat content (optionally with queue panel on the left in fullscreen) */
         <div className="flex flex-1 overflow-hidden">
           {chatFullscreen && (
-            <QueuePanel containerId={session.containerId} />
+            <QueueSidebar containerId={session.containerId} />
           )}
           <ChatContent
             session={session}
@@ -367,11 +487,11 @@ function ChatContent({
   onCancel: () => void
 }) {
   const [input, setInput] = useState('')
-  const [attachments, setAttachments] = useState<Attachment[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const conn = useAgentConnection(session.containerId)
+  const { attachments, addFiles, removeAttachment, clearAttachments, handlePasteEvent, pasteFromClipboard } = useFileAttachments(conn)
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -382,68 +502,6 @@ function ChatContent({
   useEffect(() => {
     inputRef.current?.focus()
   }, [session.containerId])
-
-  // Upload a file attachment to the agent
-  const uploadAttachment = useCallback(async (att: Attachment) => {
-    if (!conn) return
-    setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, status: 'uploading' } : a))
-    try {
-      const result = await uploadFileToAgent(conn.host, conn.port, conn.auth, att.file)
-      setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, status: 'uploaded', uploadedPath: result.path } : a))
-    } catch (err) {
-      setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, status: 'error', error: String(err) } : a))
-    }
-  }, [conn])
-
-  // Add files as attachments
-  const addFiles = useCallback((files: FileList | File[]) => {
-    const newAttachments: Attachment[] = Array.from(files).map((file) => {
-      const att: Attachment = {
-        id: nextAttachId(),
-        file,
-        name: file.name,
-        size: file.size,
-        type: file.type,
-        status: 'pending',
-      }
-      // Generate preview for images
-      if (file.type.startsWith('image/')) {
-        const reader = new FileReader()
-        reader.onload = (e) => {
-          setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, preview: e.target?.result as string } : a))
-        }
-        reader.readAsDataURL(file)
-      }
-      return att
-    })
-    setAttachments((prev) => [...prev, ...newAttachments])
-    // Auto-upload each
-    newAttachments.forEach((att) => uploadAttachment(att))
-  }, [uploadAttachment])
-
-  // Handle paste (clipboard images/files and text)
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
-    const items = e.clipboardData.items
-    const files: File[] = []
-    let hasFiles = false
-
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i]
-      if (item.kind === 'file') {
-        const file = item.getAsFile()
-        if (file) {
-          files.push(file)
-          hasFiles = true
-        }
-      }
-    }
-
-    if (hasFiles) {
-      e.preventDefault()
-      addFiles(files)
-    }
-    // If no files, let the default paste handle text
-  }, [addFiles])
 
   // Handle drag-and-drop on the chat area
   const [dragOver, setDragOver] = useState(false)
@@ -469,35 +527,16 @@ function ChatContent({
     }
   }, [addFiles])
 
-  const removeAttachment = useCallback((id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id))
-  }, [])
-
   const handleSend = () => {
     const text = input.trim()
     const uploadedFiles = attachments.filter((a) => a.status === 'uploaded' && a.uploadedPath)
     const hasContent = text || uploadedFiles.length > 0
     if (!hasContent || !session.connected) return
 
-    // Build message with file references. Images get the "[Attached image: …]"
-    // marker so the agent routes them to its vision tool instead of read.
-    let content = text
-    if (uploadedFiles.length > 0) {
-      const hasImage = uploadedFiles.some((a) => a.type.startsWith('image/'))
-      const fileRefs = uploadedFiles.map((a) =>
-        a.type.startsWith('image/')
-          ? `[Attached image: ${a.uploadedPath}]`
-          : `[Attached file: ${a.name} → ${a.uploadedPath}]`,
-      ).join('\n')
-      const hint = hasImage
-        ? '\n(To view the image(s), call the image_vision tool with the path. Do NOT use read on an image.)'
-        : ''
-      content = content ? `${content}\n\n${fileRefs}${hint}` : `${fileRefs}${hint}`
-    }
-
+    const content = appendAttachmentRefs(text, uploadedFiles)
     onSend(content)
     setInput('')
-    setAttachments([])
+    clearAttachments()
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -507,41 +546,10 @@ function ChatContent({
     }
   }
 
-  const pasteFromClipboard = useCallback(async () => {
-    try {
-      const items = await navigator.clipboard.read()
-      const files: File[] = []
-      for (const item of items) {
-        for (const type of item.types) {
-          if (type.startsWith('image/') || type === 'application/octet-stream') {
-            const blob = await item.getType(type)
-            const ext = type.split('/')[1] || 'png'
-            const file = new File([blob], `clipboard-${Date.now()}.${ext}`, { type })
-            files.push(file)
-          }
-        }
-      }
-      if (files.length > 0) {
-        addFiles(files)
-      } else {
-        // Fallback: paste as text
-        const text = await navigator.clipboard.readText()
-        if (text) {
-          setInput((prev) => prev + text)
-          inputRef.current?.focus()
-        }
-      }
-    } catch {
-      // Fallback to text
-      try {
-        const text = await navigator.clipboard.readText()
-        if (text) {
-          setInput((prev) => prev + text)
-          inputRef.current?.focus()
-        }
-      } catch { /* clipboard not available */ }
-    }
-  }, [addFiles])
+  const handlePasteText = useCallback((text: string) => {
+    setInput((prev) => prev + text)
+    inputRef.current?.focus()
+  }, [])
 
   // Keep the full transcript — every tool call is shown. The intermediary
   // activity (tools + narration) is grouped into a collapsible panel that
@@ -656,7 +664,7 @@ function ChatContent({
               <Paperclip className="h-4 w-4" />
             </button>
             <button
-              onClick={pasteFromClipboard}
+              onClick={() => pasteFromClipboard(handlePasteText)}
               disabled={!session.connected}
               className="flex h-[38px] items-center rounded-lg px-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-40"
               title="Paste from clipboard"
@@ -681,7 +689,7 @@ function ChatContent({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
+            onPaste={handlePasteEvent}
             placeholder={session.connected ? 'Message, paste image, or drop files...' : 'Connecting...'}
             disabled={!session.connected}
             rows={1}
@@ -787,6 +795,73 @@ function NextStepsBar({
   )
 }
 
+// Drag-to-resize with localStorage persistence. axis 'x' → width (col-resize),
+// axis 'y' → height (row-resize). The handle is positioned so a positive drag
+// (right / down) grows the tracked size.
+function usePersistedSize(key: string, def: number, min: number, max: number, axis: 'x' | 'y') {
+  const [size, setSize] = useState<number>(() => {
+    const v = Number(localStorage.getItem(key))
+    return v >= min && v <= max ? v : def
+  })
+  const onResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startPos = axis === 'x' ? e.clientX : e.clientY
+    const startSize = size
+    document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize'
+    document.body.style.userSelect = 'none'
+    const onMove = (ev: MouseEvent) => {
+      const pos = axis === 'x' ? ev.clientX : ev.clientY
+      setSize(Math.min(max, Math.max(min, startSize + (pos - startPos))))
+    }
+    const onUp = () => {
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      setSize((s) => { localStorage.setItem(key, String(Math.round(s))); return s })
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+  return { size, onResizeStart }
+}
+
+// The chat's left sidebar: an agent files view on top, the run queue on the
+// bottom, with a draggable divider between them and a draggable right edge for
+// the whole column. Both sizes persist to localStorage.
+function QueueSidebar({ containerId }: { containerId: string }) {
+  const width = usePersistedSize('fd:queue-sidebar-width', 288, 220, 640, 'x')
+  const filesH = usePersistedSize('fd:queue-sidebar-files-height', 260, 96, 900, 'y')
+
+  return (
+    <aside
+      className="relative flex shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/40"
+      style={{ width: width.size }}
+    >
+      {/* Top: files */}
+      <div className="min-h-0 shrink-0 overflow-hidden" style={{ height: filesH.size }}>
+        <AgentFilesPanel containerId={containerId} />
+      </div>
+      {/* Vertical divider (drag to resize files vs queue) */}
+      <div
+        onMouseDown={filesH.onResizeStart}
+        title="Drag to resize"
+        className="h-1 shrink-0 cursor-row-resize border-y border-zinc-800 bg-zinc-900 transition-colors hover:bg-violet-500/40"
+      />
+      {/* Bottom: queue */}
+      <div className="min-h-0 flex-1">
+        <QueuePanel containerId={containerId} />
+      </div>
+      {/* Right edge (drag to resize the whole column) */}
+      <div
+        onMouseDown={width.onResizeStart}
+        title="Drag to resize"
+        className="absolute right-0 top-0 z-20 h-full w-1.5 cursor-col-resize transition-colors hover:bg-violet-500/30 active:bg-violet-500/40"
+      />
+    </aside>
+  )
+}
+
 function QueuePanel({ containerId }: { containerId: string }) {
   const session = useChatStore((s) => s.sessions.get(containerId))
   const enqueue = useChatStore((s) => s.enqueueQueueMessage)
@@ -795,7 +870,16 @@ function QueuePanel({ containerId }: { containerId: string }) {
   const toggleAuto = useChatStore((s) => s.toggleQueueAutoMode)
   const clearQueue = useChatStore((s) => s.clearQueue)
   const [draft, setDraft] = useState('')
+  const [dragOver, setDragOver] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const conn = useAgentConnection(containerId)
+  const { attachments, addFiles, removeAttachment, clearAttachments, handlePasteEvent, pasteFromClipboard } = useFileAttachments(conn)
+
+  const pasteText = useCallback((text: string) => {
+    setDraft((prev) => prev + text)
+    taRef.current?.focus()
+  }, [])
 
   if (!session) return null
   const queue = session.queue
@@ -803,12 +887,17 @@ function QueuePanel({ containerId }: { containerId: string }) {
   const pendingCount = queue.filter((q) => q.status === 'pending').length
   const dispatchedCount = queue.filter((q) => q.status === 'dispatched').length
   const doneCount = queue.filter((q) => q.status === 'done').length
+  const pendingUploads = attachments.filter((a) => a.status === 'uploading').length
+  const uploadedFiles = attachments.filter((a) => a.status === 'uploaded' && a.uploadedPath)
+  const canAdd = (draft.trim() || uploadedFiles.length > 0) && pendingUploads === 0
 
   const handleAdd = () => {
     const text = draft.trim()
-    if (!text) return
-    enqueue(containerId, text)
+    if (!text && uploadedFiles.length === 0) return
+    if (pendingUploads > 0) return
+    enqueue(containerId, appendAttachmentRefs(text, uploadedFiles))
     setDraft('')
+    clearAttachments()
     taRef.current?.focus()
   }
 
@@ -819,8 +908,15 @@ function QueuePanel({ containerId }: { containerId: string }) {
     }
   }
 
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(false)
+    if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files)
+  }
+
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/40">
+    <div className="flex h-full min-h-0 flex-col">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
         <div className="flex items-center gap-2">
@@ -837,7 +933,7 @@ function QueuePanel({ containerId }: { containerId: string }) {
           title={auto ? 'Auto-progress: ON — items marked done when agent replies' : 'Auto-progress: OFF — mark items done manually'}
           className={`rounded-md border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors ${
             auto
-              ? 'border-emerald-500/40 bg-emerald-500/20 text-emerald-200'
+              ? 'border-emerald-500/40 bg-emerald-500/20 text-emerald-700 dark:text-emerald-200'
               : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600'
           }`}
         >
@@ -883,28 +979,73 @@ function QueuePanel({ containerId }: { containerId: string }) {
       )}
 
       {/* Input */}
-      <div className="border-t border-zinc-800 p-2">
+      <div
+        className={`border-t border-zinc-800 p-2 ${dragOver ? 'bg-violet-500/10 ring-1 ring-inset ring-violet-500/50' : ''}`}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true) }}
+        onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(false) }}
+        onDrop={handleDrop}
+      >
+        {/* Attachment chips */}
+        {attachments.length > 0 && (
+          <div className="mb-1.5 flex flex-wrap gap-1.5">
+            {attachments.map((att) => (
+              <AttachmentChip key={att.id} attachment={att} onRemove={removeAttachment} />
+            ))}
+          </div>
+        )}
         <textarea
           ref={taRef}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={handleKey}
+          onPaste={handlePasteEvent}
           rows={2}
-          placeholder="Queue a message…"
+          placeholder="Queue a message, paste image, or drop files…"
           className="w-full resize-none rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
         />
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files && e.target.files.length > 0) {
+              addFiles(e.target.files)
+              e.target.value = ''
+            }
+          }}
+        />
         <div className="mt-1.5 flex items-center justify-between">
-          <span className="text-[10px] text-zinc-500">Enter to add · Shift+Enter newline</span>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!conn}
+              className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-40"
+              title="Attach file"
+            >
+              <Paperclip className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => pasteFromClipboard(pasteText)}
+              disabled={!conn}
+              className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-40"
+              title="Paste from clipboard"
+            >
+              <Clipboard className="h-3.5 w-3.5" />
+            </button>
+          </div>
           <button
             onClick={handleAdd}
-            disabled={!draft.trim()}
-            className="rounded-md bg-violet-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+            disabled={!canAdd}
+            className="flex items-center gap-1 rounded-md bg-violet-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+            title={pendingUploads > 0 ? 'Waiting for uploads…' : 'Add to queue'}
           >
+            {pendingUploads > 0 && <Loader2 className="h-3 w-3 animate-spin" />}
             Add
           </button>
         </div>
       </div>
-    </aside>
+    </div>
   )
 }
 
@@ -942,7 +1083,7 @@ function QueueItemRow({
         <span
           className={`flex-1 whitespace-pre-wrap break-words ${
             isDone ? 'line-through' : ''
-          } ${isDispatched ? 'text-violet-200' : 'text-zinc-300'}`}
+          } ${isDispatched ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-300'}`}
         >
           {item.content.length > 240 ? item.content.slice(0, 240) + '…' : item.content}
         </span>
