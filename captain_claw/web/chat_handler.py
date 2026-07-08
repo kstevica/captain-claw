@@ -648,8 +648,12 @@ async def _run_agent(
                 "model": model_label,
             })
 
-            # Extract and broadcast suggested next steps.
-            if get_config().ui.next_steps:
+            # Extract and broadcast suggested next steps — skip for FD-spawned
+            # workers (Basna/Vatra/Council/Code): they're orchestrated, headless,
+            # and have no interactive user to offer follow-ups to (each call is
+            # also an extra LLM round-trip we don't want to spend per worker turn).
+            from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+            if get_config().ui.next_steps and not _is_fd_spawned_worker():
                 try:
                     steps = await extract_next_steps(agent.provider, response)
                     if steps:

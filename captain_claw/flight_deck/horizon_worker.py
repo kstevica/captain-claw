@@ -270,6 +270,32 @@ _REVISE_SYSTEM = (
 )
 
 
+def _triage_feedback(reasons: list[str]) -> str:
+    """R3: distil raw critic objections into a deduped, ordered fix checklist.
+
+    The closer otherwise pipes the objections in as one ``a | b | c`` blob; a
+    numbered checklist of distinct issues is far more actionable for the revision
+    (this is Code's triage shape applied to critic findings). Deterministic and
+    free — no model call. Also makes a cleaner findings ledger for the caller."""
+    seen: set[str] = set()
+    items: list[str] = []
+    for r in reasons:
+        r = (r or "").strip()
+        if not r:
+            continue
+        key = r.lower()[:120]
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(r)
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return "Fix each of these distinct objections:\n" + "\n".join(
+        f"{i}. {r}" for i, r in enumerate(items, 1))
+
+
 async def _revise(question: str, answer: str, feedback: str, provider: LLMProvider) -> str:
     from captain_claw.llm import Message
     user = (f"## Task\n{question}\n\n## Draft answer\n{answer}\n\n"
@@ -313,6 +339,7 @@ async def run_horizon_closer(
     critic_timeout: float = 120.0,
     revise_timeout: float = 300.0,
     on_event: Callable[[dict], None] | None = None,
+    triage_findings: bool = False,
 ) -> dict:
     """Adversarially verify a final answer; revise once if a majority refute it.
 
@@ -346,7 +373,8 @@ async def run_horizon_closer(
             r = CriticVerdict(refuted=False, reason="")
         if on_event is not None:
             on_event({"stage": "critic", "index": i, "total": total,
-                      "mode": mode, "refuted": r.refuted})
+                      "mode": mode, "refuted": r.refuted,
+                      "reason": (r.reason or "").strip()})
         return r
 
     results = await _with_heartbeat(
@@ -360,7 +388,10 @@ async def run_horizon_closer(
     if survived * 2 > total:
         return {"answer": answer, "revised": False, "survived": survived,
                 "total": total, "feedback": ""}
-    feedback = " | ".join(r.reason for r in results if r.refuted)
+    refuted_reasons = [r.reason for r in results if r.refuted]
+    # R3 (opt-in): an ordered, deduped checklist revises more precisely than a blob.
+    feedback = (_triage_feedback(refuted_reasons) if triage_findings
+                else " | ".join(refuted_reasons))
     try:
         revised = await asyncio.wait_for(
             _with_heartbeat(
@@ -378,6 +409,7 @@ async def run_horizon_closer(
         return {"answer": answer, "revised": False, "survived": survived,
                 "total": total, "feedback": feedback}
     if on_event is not None:
-        on_event({"stage": "revise", "survived": survived, "total": total})
+        on_event({"stage": "revise", "survived": survived, "total": total,
+                  "preview": revised.strip()[:280]})
     return {"answer": revised, "revised": True,
             "survived": survived, "total": total, "feedback": feedback}

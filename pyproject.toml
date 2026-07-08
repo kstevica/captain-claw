@@ -1,6 +1,6 @@
 [project]
 name = "captain-claw"
-version = "0.7.2"
+version = "0.7.3"
 description = "Self-hosted framework for orchestrating fleets of specialist AI agents — ensemble reasoning and a full agentic coding pipeline, model-agnostic and local-friendly"
 readme = "README.md"
 requires-python = ">=3.11"

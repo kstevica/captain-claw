@@ -32,6 +32,8 @@ from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck import code_git
 from captain_claw.flight_deck import code_map
+from captain_claw.flight_deck import code_verify
+from captain_claw.flight_deck.quality_profile import QualityProfile, TokenBudget
 from captain_claw.flight_deck.basna_routes import (
     _PROGRESS,
     _build_catalog,
@@ -125,15 +127,56 @@ _TURN_USAGE: dict[str, dict] = {}
 
 
 def _usage_reset(pkey: str) -> None:
-    _TURN_USAGE[pkey] = {"prompt": 0, "completion": 0, "runs": 0}
+    _TURN_USAGE[pkey] = {"prompt": 0, "completion": 0, "runs": 0,
+                         "usages": [], "started": time.monotonic()}
 
 
 def _usage_add(pkey: str, pt: int, ct: int, runs: int = 0) -> None:
     """Accumulate token DELTAS (not raw broadcasts) + optional dispatch count."""
-    u = _TURN_USAGE.setdefault(pkey, {"prompt": 0, "completion": 0, "runs": 0})
+    u = _TURN_USAGE.setdefault(pkey, {"prompt": 0, "completion": 0, "runs": 0,
+                                      "usages": [], "started": time.monotonic()})
     u["prompt"] += int(pt or 0)
     u["completion"] += int(ct or 0)
     u["runs"] += runs
+
+
+def _usage_track(pkey: str, d: dict | None) -> None:
+    """Record one dispatch's full usage (incl. cache split) + model, for costing."""
+    if not d:
+        return
+    usage = d.get("usage") or {}
+    if not any(int(usage.get(k, 0) or 0) for k in usage):
+        return
+    u = _TURN_USAGE.setdefault(pkey, {"prompt": 0, "completion": 0, "runs": 0,
+                                      "usages": [], "started": time.monotonic()})
+    u.setdefault("usages", []).append({"model": d.get("model", ""), "usage": usage})
+
+
+def _run_cost(pkey: str) -> dict | None:
+    """The run's cost block (tokens + $ + effective $/hour), or None if untracked."""
+    u = _TURN_USAGE.get(pkey)
+    if not u:
+        return None
+    from captain_claw.flight_deck import pricing
+    elapsed = time.monotonic() - u.get("started", time.monotonic())
+    return pricing.summarize(u.get("usages", []), elapsed_seconds=elapsed)
+
+
+def _emit_cost(pkey: str) -> dict | None:
+    """Emit the run's cost as a `cost` progress event (for the Code cost card),
+    once per run at completion. Skips runs with no model spend. Best-effort."""
+    u = _TURN_USAGE.get(pkey)
+    if not u or not u.get("usages"):
+        return None
+    cost = _run_cost(pkey)
+    if not cost:
+        return None
+    try:
+        from captain_claw.flight_deck.basna_routes import _cost_message
+        _progress(pkey, "cost", _cost_message(cost), cost=cost)
+    except Exception as e:  # noqa: BLE001 — cost is best-effort
+        log.warning("code cost emit failed", error=str(e))
+    return cost
 
 
 def _fmt_tok(n: int) -> str:
@@ -148,8 +191,15 @@ def _usage_summary(pkey: str) -> str:
     u = _TURN_USAGE.get(pkey)
     if not u or not u["runs"]:
         return ""
-    return (f"{u['runs']} agent run{'s' if u['runs'] != 1 else ''} · "
+    line = (f"{u['runs']} agent run{'s' if u['runs'] != 1 else ''} · "
             f"{_fmt_tok(u['prompt'])} in → {_fmt_tok(u['completion'])} out tokens")
+    cost = _run_cost(pkey)
+    if cost and cost.get("priced"):
+        from captain_claw.flight_deck.basna_routes import _fmt_usd
+        line += f" · {_fmt_usd(cost['usd'])}"
+        if cost.get("hourly_usd"):
+            line += f" · ≈ {_fmt_usd(cost['hourly_usd'])}/hr"
+    return line
 
 
 _REPORTS_DIRNAME = ".reports"
@@ -203,6 +253,48 @@ def _read_project(user_id: str, project: str) -> dict:
 
 def _write_project(user_id: str, project: str, data: dict) -> None:
     (_proj_code(user_id, project) / "project.json").write_text(json.dumps(data, indent=2))
+
+
+def _load_quality(user_id: str, project: str) -> QualityProfile:
+    """The project's opt-in quality/cost profile (``quality`` key in project.json).
+
+    Absent → all features off == today's behaviour. This is the single switch
+    that keeps every cross-pollination lever from touching a run nobody opted in."""
+    return QualityProfile.from_dict(_read_project(user_id, project).get("quality"))
+
+
+# ── C2: reliability learning (shared archetype_reliability store) ──────
+# Code records per-run outcomes for the archetypes it dispatches, keyed by
+# (user, archetype, domain) exactly like Basna/Vatra. The router then reads
+# these learned weights so it picks the planner/builder/fixer that has actually
+# worked for this user in this domain. Success is DERIVED from signals the loop
+# already computes (triage verdict + the test gate) — no extra LLM call, so this
+# adds zero model tokens. Coding archetype ids are disjoint from the research
+# ones, so this never perturbs Basna/Vatra's learned weights.
+
+async def _load_reliability(db, user_id: str) -> dict[str, list[dict]]:
+    """Group learned weights by archetype id for ``_build_catalog``. Never raises."""
+    try:
+        rows = await db.get_archetype_reliability(user_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("code: reliability load failed", error=str(e))
+        return {}
+    grouped: dict[str, list[dict]] = {}
+    for r in rows:
+        grouped.setdefault(r["archetype_id"], []).append(r)
+    return grouped
+
+
+async def _record_outcomes(user_id: str, domain: str, outcomes: dict[str, bool]) -> None:
+    """Persist one outcome per archetype (deduped) for this run. Best-effort."""
+    if not outcomes:
+        return
+    db = get_db()
+    for aid, success in outcomes.items():
+        try:
+            await db.record_archetype_outcome(user_id, aid, domain or "general", bool(success))
+        except Exception as e:  # noqa: BLE001
+            log.warning("code: reliability record failed", archetype=aid, error=str(e))
 
 
 def _folder_meta(user_id: str, project: str, folder: str) -> dict | None:
@@ -533,10 +625,13 @@ def _resolve_tcfg(tiers_map: dict, tier: str) -> dict:
 
 
 async def _classify(intent: str, context: str, archetypes: list[dict],
-                    tiers_map: dict, registry: dict) -> dict:
+                    tiers_map: dict, registry: dict,
+                    reliability: dict | None = None) -> dict:
     by_id = {a["id"]: a for a in archetypes}
     sys_file = _INSTRUCTIONS_DIR / "code" / "router.md"
-    system_prompt = sys_file.read_text() + "\n\n" + _build_catalog(archetypes, {})
+    # Learned per-archetype weights (C2) steer the pick toward what has worked;
+    # empty (the default) → seed hints only, i.e. today's routing.
+    system_prompt = sys_file.read_text() + "\n\n" + _build_catalog(archetypes, reliability or {})
     fast = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
     raw: dict | None = None
     try:
@@ -773,6 +868,7 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
             await stop_archetype_agent(slug)
         except Exception as e:  # noqa: BLE001
             log.warning("code: failed to stop agent", slug=slug, error=str(e))
+    _usage_track(pkey, d)  # capture this dispatch's tokens + cache + model for cost
     if _cancelled(pkey):
         return {**d, "ok": False, "error": "stopped by user", "cancelled": True}
     return d
@@ -1013,6 +1109,47 @@ def _no_change_corrective(attempt: int, acted: bool) -> str:
     )
 
 
+async def _coverage_gaps(repo: Path, plan_file: str, intent: str,
+                         tiers_map: dict, registry: dict) -> list[str]:
+    """C5: judge the approved plan against the built repo — which plan items look
+    unimplemented or untested? One reason-tier LLM call; returns gap lines (or [])."""
+    plan_abs = repo / plan_file
+    plan_text = plan_abs.read_text() if plan_abs.is_file() else ""
+    if not plan_text.strip():
+        return []
+    try:
+        tree = "\n".join(sorted(
+            p.relative_to(repo).as_posix() for p in repo.rglob("*")
+            if p.is_file() and not any(part.startswith(".") for part in p.relative_to(repo).parts))[:400])
+    except Exception:  # noqa: BLE001
+        tree = ""
+    tier = _resolve_tcfg(tiers_map, "reason") or registry.get("tiers", {}).get("reason", {})
+    try:
+        from captain_claw.llm import Message, create_provider
+        prov = create_provider(
+            provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
+            api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+            temperature=0.1, max_tokens=1200)
+        resp = await prov.complete(messages=[
+            Message(role="system", content=(
+                "You verify implementation coverage. Given a PLAN and the repo's FILE "
+                "LIST, list concrete plan items that appear UNIMPLEMENTED or UNTESTED. "
+                "Be strict but do not invent scope beyond the plan. Reply with JSON "
+                '{"gaps": ["<short actionable item>", ...]} — empty if fully covered.')),
+            Message(role="user", content=f"Task:\n{intent}\n\n## Plan\n{plan_text[:8000]}\n\n"
+                    f"## Files in the repo\n{tree}")],
+            temperature=0.1, max_tokens=1200)
+        content = resp.content.strip()
+        if content.startswith("```"):
+            content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
+        data = json.loads(content)
+        gaps = data.get("gaps") if isinstance(data, dict) else None
+        return [str(g).strip() for g in gaps if str(g).strip()] if isinstance(gaps, list) else []
+    except Exception as e:  # noqa: BLE001
+        log.warning("coverage check failed", error=str(e))
+        return []
+
+
 _BACKLOG_REPORT = "backlog"
 
 
@@ -1046,15 +1183,94 @@ async def _fix_commit_diff(repo: Path, fsha: str | None, cap: int = 12000) -> st
     return patch
 
 
+_DEEP_BUILD_EST = 20000  # rough per-attempt output-token estimate for budget accounting
+
+
+async def _deep_build(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
+                      intent: str, by_id: dict, tiers_map: dict, env_vars: list,
+                      plan_file: str, quality: QualityProfile,
+                      budget: TokenBudget) -> tuple[dict | None, str | None]:
+    """C3 deep build (opt-in): up to N independent build attempts, each verified by
+    the test gate, keep the FIRST that passes its tests (else the last).
+
+    Isolation is by git checkpoint — reset to the pre-build HEAD between failed
+    attempts — so no repo copies and no merge-back (safe, cheap). Extra attempts
+    are budget-gated, so this can never blow the token ceiling. Returns
+    ``(last_dispatch, winning_sha)``; the caller continues into the review/fix loop
+    exactly as for a normal build (the winner may still be imperfect — the loop
+    then hardens it)."""
+    n = max(1, quality.deep_build_samples)
+    head = await code_git.git_log(repo, 1)
+    base = head[0]["sha"] if head else None
+    d: dict | None = None
+    last_sha: str | None = None
+    for i in range(n):
+        _phase(pkey, f"Deep build (attempt {i + 1}/{n})")
+        sha: str | None = None
+        for attempt in range(_BUILD_RETRIES + 1):
+            bp = (_no_change_corrective(attempt, _acted(d)) if attempt else "") \
+                + _build_prompt(intent, plan_file)
+            d = await _run_agent(request, user, pkey, repo, "code-implementer",
+                                 bp, by_id, tiers_map, env_vars)
+            if _cancelled(pkey):
+                return d, last_sha
+            sha = await code_git.git_commit(repo, f"[build] code-implementer (deep {i + 1}/{n})")
+            if sha:
+                break
+        more_attempts = i < n - 1 and budget.can_afford(_DEEP_BUILD_EST)
+        if not sha:
+            # Produced nothing this attempt. Try again if we can; else give up.
+            if more_attempts:
+                budget.add(_DEEP_BUILD_EST)
+                continue
+            return d, last_sha
+        last_sha = sha
+        tcmd = code_verify.detect_test_command(repo, quality.test_command)
+        if not tcmd:
+            # No verifier to compare N attempts — a first real build is the winner.
+            _progress(pkey, "note", "deep build: no test command — keeping first build")
+            return d, sha
+        tres = await code_verify.run_tests(repo, tcmd)
+        passed = bool(tres.get("ok"))
+        _progress(pkey, "note",
+                  f"deep build attempt {i + 1}/{n}: " + ("✓ tests pass" if passed else "✗ tests fail"))
+        if passed:
+            return d, sha
+        # Failed. Discard and retry only if budget + attempts remain; else keep it
+        # so the normal review/fix loop can harden it.
+        if more_attempts:
+            budget.add(_DEEP_BUILD_EST)
+            if base:
+                await code_git.git_reset(repo, base)
+            last_sha = None
+            continue
+        return d, sha
+    return d, last_sha
+
+
 async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                           intent: str, by_id: dict, tiers_map: dict,
                           env_vars: list, registry: dict, plan_file: str = "plan.md",
-                          seed_fix: str = "") -> None:
+                          seed_fix: str = "", quality: QualityProfile | None = None,
+                          domain: str = "general", planner_id: str = "",
+                          seed_fixer: str = "debugger", seed_label: str = "fix backlog") -> None:
     """Big-job pipeline: build → review fan-out → capped fix loop (background).
 
     ``seed_fix``: backlog continuation — skip the build, apply the seeded fix
     instructions first, then run delta review rounds on the fix diff.
+    ``quality``: opt-in feature profile; default (``None``) is all-off — the
+    exact pre-cross-pollination behaviour.
+    ``domain``/``planner_id``: C2 reliability learning — the run's domain and the
+    planner that produced the plan, so their outcomes are recorded at the end.
     """
+    quality = quality or QualityProfile()
+    # One token ceiling for the run's opt-in extra work (C3 deep-build attempts).
+    # 0 → unbounded (today's behaviour). The base build/review/fix is never gated.
+    budget = TokenBudget(quality.token_budget)
+    # C2 outcome tracking (recorded once in ``finally``, unless the user cancels).
+    did_build = False
+    fixers_ran: set[str] = set()
+    final_clean = False
     _progress_start(pkey)
     _usage_reset(pkey)
     _cancel_clear(pkey)
@@ -1069,32 +1285,59 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
     try:
         last_fix_sha: str | None = None
         if seed_fix:
-            _phase(pkey, "Fixing (backlog)")
+            # Seeded pass: backlog continuation OR a C6 follow-up (harden/cover/
+            # simplify). ``seed_fixer`` picks the archetype; the shared review/fix
+            # loop below (incl. the C1 test gate) then verifies the result.
+            _sfixer = seed_fixer if seed_fixer in by_id else "debugger"
+            _phase(pkey, f"Fixing ({seed_label})")
             fd = None
             for attempt in range(_FIX_RETRIES + 1):
                 fp = (_no_change_corrective(attempt, _acted(fd)) if attempt else "") \
                     + _fix_prompt(intent, seed_fix)
-                fd = await _run_agent(request, user, pkey, repo, "debugger",
+                fd = await _run_agent(request, user, pkey, repo, _sfixer,
                                       fp, by_id, tiers_map, env_vars)
                 if _cancelled(pkey):
                     _finish_stopped()
                     return
-                last_fix_sha = await code_git.git_commit(repo, "[fix backlog] debugger")
+                last_fix_sha = await code_git.git_commit(repo, f"[{seed_label}] {_sfixer}")
                 if last_fix_sha:
+                    fixers_ran.add(_sfixer)
                     break
-                _progress(pkey, "note", f"backlog fix produced no file changes (attempt {attempt + 1})")
-            _append_chat(sdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
-                         kind="fix", archetype="debugger", ok=bool(fd.get("ok")),
+                _progress(pkey, "note", f"{seed_label} produced no file changes (attempt {attempt + 1})")
+            _append_chat(sdir, "assistant", (fd.get("output") or "(pass produced no summary)").strip(),
+                         kind="fix", archetype=_sfixer, ok=bool(fd.get("ok")),
                          commit=last_fix_sha or "")
             if not last_fix_sha:
                 _append_chat(sdir, "assistant",
-                             "❌ Backlog fix aborted: the fixer produced no file changes after "
-                             f"{_FIX_RETRIES + 1} attempts. The backlog is unchanged — a stronger "
-                             "model on the coding tier usually resolves this.", kind="note", ok=False)
+                             f"❌ {seed_label.capitalize()} pass aborted: the agent produced no file "
+                             f"changes after {_FIX_RETRIES + 1} attempts — a stronger model on the "
+                             "coding tier usually resolves this.", kind="note", ok=False)
+                _write_state(sdir, {"status": "idle"})
+                return
+        elif quality.deep_build:
+            # C3: best-of-N verified build. did_build set so C2 still records the
+            # builder's outcome; the winner (or last attempt) flows into review.
+            _phase(pkey, "Deep building")
+            did_build = True
+            d, sha = await _deep_build(request, user, pkey, repo, sdir, intent, by_id,
+                                       tiers_map, env_vars, plan_file, quality, budget)
+            if _cancelled(pkey):
+                _finish_stopped()
+                return
+            _build_out = ((d.get("output") if d else "") or "").strip()
+            _append_chat(sdir, "assistant", _build_out or "(build produced no summary)",
+                         kind="build", archetype="code-implementer",
+                         ok=bool(d and d.get("ok")), commit=sha or "")
+            if not sha:
+                _append_chat(sdir, "assistant",
+                             f"❌ Deep build aborted: no file changes after {quality.deep_build_samples} "
+                             "attempt(s) — skipping review. Try a stronger coding-tier model.",
+                             kind="note", ok=False)
                 _write_state(sdir, {"status": "idle"})
                 return
         else:
             _phase(pkey, "Building")
+            did_build = True   # C2: a build was attempted; final_clean decides win/loss
             d = None
             sha = None
             for attempt in range(_BUILD_RETRIES + 1):
@@ -1129,6 +1372,14 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             _finish_stopped()
             return
 
+        # C1 test gate (opt-in): detect the repo's test command once, now that
+        # the builder has had a chance to create test files. Empty command →
+        # the gate no-ops silently. Costs zero model tokens.
+        test_cmd = (code_verify.detect_test_command(repo, quality.test_command)
+                    if quality.test_gate else "")
+        if test_cmd:
+            _progress(pkey, "note", f"test gate armed: {test_cmd}")
+
         prior_findings: list = []
         prior_fix_instructions: str = seed_fix
         for rnd in range(_MAX_FIX_ROUNDS + 1):
@@ -1162,6 +1413,23 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                 if out.strip():
                     _write_report(repo, f"review-r{rnd}-{rv}", f"# {role} — review r{rnd}\n\n{out}")
 
+            # C1: run the repo's tests on the current committed state and hand a
+            # failure to triage as a ground-truth, blocking finding. Zero model
+            # tokens; a pass injects nothing (no manufactured work). A failure
+            # keeps triage.needs_fix true, so it also flows into C2's success
+            # signal for free.
+            if test_cmd:
+                _phase(pkey, "Running tests")
+                tres = await code_verify.run_tests(repo, test_cmd)
+                _progress(pkey, "note",
+                          ("✓ tests passed" if tres.get("ok") else "✗ tests failing")
+                          + f" · {test_cmd}")
+                entry = code_verify.as_review_entry(tres)
+                if entry:
+                    reviews = [entry] + reviews
+                    _write_report(repo, f"review-r{rnd}-tests",
+                                  f"# Test Runner — r{rnd}\n\n{entry['output']}")
+
             triage = await _triage_reviews(reviews, intent, tiers_map, registry)
             review_summary = triage.get("summary", "Review complete.")
             _write_report(repo, f"review-r{rnd}-summary", f"# Review summary — r{rnd}\n\n{review_summary}")
@@ -1173,6 +1441,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
 
             if not triage["needs_fix"]:
                 # Clean pass — a stale backlog from an earlier capped run is done.
+                final_clean = True   # C2: the run reached a verified-clean state
                 _backlog_path(repo).unlink(missing_ok=True)
                 break
             if rnd == _MAX_FIX_ROUNDS:
@@ -1200,6 +1469,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                     return
                 fsha = await code_git.git_commit(repo, f"[fix r{rnd + 1}] {fixer}")
                 if fsha:
+                    fixers_ran.add(fixer)
                     break
                 _progress(pkey, "note", f"fix r{rnd + 1} produced no file changes (attempt {attempt + 1})")
             last_fix_sha = fsha or last_fix_sha
@@ -1217,6 +1487,21 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                              "model usually resolves this).", kind="note", ok=False)
                 break
 
+        # C5 coverage check (opt-in): compare the approved plan against what got
+        # built; anything unimplemented/untested is appended to the backlog so
+        # "continue fixing" also closes scope gaps, not just review findings.
+        if quality.coverage_check and not seed_fix and not _cancelled(pkey):
+            gaps = await _coverage_gaps(repo, plan_file, intent, tiers_map, registry)
+            if gaps:
+                bl = _backlog_path(repo)
+                existing = bl.read_text() if bl.is_file() else ""
+                block = "\n\n## Coverage gaps (plan vs build)\n" + "\n".join(f"- {g}" for g in gaps)
+                _write_report(repo, _BACKLOG_REPORT, (existing or "# Fix backlog") + block)
+                _append_chat(sdir, "assistant",
+                             f"Coverage check found {len(gaps)} plan item(s) not fully "
+                             "addressed — added to the backlog. Say **continue fixing** to close them.",
+                             kind="note")
+
         # The repo just changed substantially — (re)build the code map so future
         # sessions/tasks can query it instead of re-reading everything.
         if not _cancelled(pkey):
@@ -1233,7 +1518,24 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         _append_chat(sdir, "assistant", f"⚠️ Build loop failed: {e}", kind="note", ok=False)
         _write_state(sdir, {"status": "idle"})
     finally:
+        # C2: record per-archetype outcomes for this run (planner, builder,
+        # fixers) keyed by domain. Success = the run reached a verified-clean
+        # review (which the test gate feeds into). Skipped on user cancel — a
+        # stopped run isn't the archetype's fault. Token-free; never raises.
+        if not _cancelled(pkey):
+            outcomes: dict[str, bool] = {}
+            if did_build:
+                outcomes["code-implementer"] = final_clean
+            if planner_id:
+                outcomes[planner_id] = final_clean
+            for fx in fixers_ran:
+                outcomes[fx] = final_clean
+            try:
+                await _record_outcomes(user["id"], domain, outcomes)
+            except Exception as e:  # noqa: BLE001
+                log.warning("code: outcome recording failed", error=str(e))
         _persist_trace(pkey, sdir, f"Build → review → fix: {intent[:80]}")
+        _emit_cost(pkey)  # run cost card
         _progress_done(pkey)
 
 
@@ -1318,6 +1620,37 @@ class CancelReq(BaseModel):
     session: str
 
 
+class FollowupReq(BaseModel):
+    project: str
+    session: str
+    kind: str  # harden | cover | simplify
+
+
+# C6: one-click follow-up passes on a finished result. Each reuses the seeded
+# fix path of the build loop (so the C1 test gate + review/fix still apply),
+# just with a kind-appropriate archetype and instruction.
+_FOLLOWUP_KINDS: dict[str, dict] = {
+    "harden": {
+        "fixer": "debugger", "label": "harden", "intent": "Security hardening pass",
+        "seed": ("Harden this repository against security issues. Audit for injection, "
+                 "auth/authz gaps, secrets in code, unsafe input handling, and unsafe "
+                 "dependencies, and FIX every real issue you find. Keep behaviour intact."),
+    },
+    "cover": {
+        "fixer": "qa-engineer", "label": "cover", "intent": "Test-coverage pass",
+        "seed": ("Improve this repository's automated test coverage. Add tests for the core "
+                 "paths and important edge cases, and make sure the suite runs and passes. "
+                 "Do not change product behaviour."),
+    },
+    "simplify": {
+        "fixer": "simplifier", "label": "simplify", "intent": "Simplification pass",
+        "seed": ("Simplify and clean up this repository WITHOUT changing behaviour: remove "
+                 "dead code and duplication, clarify names, and reduce complexity. Keep all "
+                 "existing functionality (and any tests) passing."),
+    },
+}
+
+
 class RollbackReq(BaseModel):
     ref: str
 
@@ -1349,6 +1682,26 @@ async def create_project(body: CreateProjectReq, user: dict = Depends(get_curren
     _write_project(user["id"], name, {"folders": []})
     _write_sessions(user["id"], name, [])
     return {"project": _project_tree(user["id"], name)}
+
+
+@router.get("/projects/{project}/quality")
+async def get_quality(project: str, user: dict = Depends(get_current_user)):
+    """The project's opt-in quality/cost profile. Empty == today's behaviour."""
+    p = _load_quality(user["id"], project)
+    return {"quality": p.to_dict(), "profiles": ["off", "balanced", "thorough"]}
+
+
+@router.put("/projects/{project}/quality")
+async def set_quality(project: str, body: dict, user: dict = Depends(get_current_user)):
+    """Set the project's quality profile. Persists the parsed (validated) form so
+    an unknown profile or bad knob can never reach the run loop."""
+    uid = user["id"]
+    _proj_dir(uid, project)  # 400s on an invalid project name
+    parsed = QualityProfile.from_dict(body.get("quality") if "quality" in body else body)
+    data = _read_project(uid, project)
+    data["quality"] = parsed.to_dict()
+    _write_project(uid, project, data)
+    return {"quality": parsed.to_dict()}
 
 
 @router.post("/projects/{project}/folders")
@@ -1576,6 +1929,7 @@ async def map_build(project: str, session: str, request: Request,
             log.warning("map build failed", error=str(e))
         finally:
             _write_state(sdir, {"status": "idle"})
+            _emit_cost(pkey)  # run cost card
             _progress_done(pkey)
 
     asyncio.create_task(_bg())
@@ -1645,7 +1999,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         _write_state(sdir, {"status": "running"})
         asyncio.create_task(_run_build_loop(
             request, user, pkey, repo, sdir, intent, by_id, tiers_map,
-            env_vars, registry, seed_fix=seed))
+            env_vars, registry, seed_fix=seed, quality=_load_quality(uid, body.project)))
         return {"status": "running"}
 
     _progress_start(pkey)
@@ -1669,8 +2023,10 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         _phase(pkey, "Routing")
         prior = _read_chat(sdir)[-8:]
         context = "\n".join(f"{m['role']}: {m['text'][:200]}" for m in prior[:-1])
-        route = await _classify(intent, context, archetypes, tiers_map, registry)
+        reliability = await _load_reliability(db, uid)  # C2: learned weights → router
+        route = await _classify(intent, context, archetypes, tiers_map, registry, reliability)
         _progress(pkey, "route", f"size={route['size']} · {route.get('why', '')}", size=route["size"])
+        domain = str(route.get("domain") or "general")
 
         hist = _history_preamble(sdir)
         if route["size"] == "small":
@@ -1720,6 +2076,10 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
                     out += f"\n\n_{_u}._"
                 assistant = _append_chat(sdir, "assistant", out, archetype=executor,
                                          size="small", ok=bool(d.get("ok")), commit=sha or "", route=route)
+                # C2: the quick-edit archetype's outcome — landed a commit and
+                # didn't error → a win; else a loss. Token-free.
+                await _record_outcomes(uid, domain,
+                                       {executor: bool(d.get("ok")) and (is_git or bool(sha))})
                 _write_state(sdir, {"status": "idle", "last_route": route})
                 return {"message": assistant, "route": route, "commit": sha}
 
@@ -1773,6 +2133,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
     finally:
         _sz = (locals().get("route") or {}).get("size", "")
         _persist_trace(pkey, sdir, f"{_sz + ': ' if _sz else ''}{intent[:80]}")
+        _emit_cost(pkey)  # run cost card
         _progress_done(pkey)
 
 
@@ -1797,11 +2158,40 @@ async def approve_plan(body: ApproveReq, request: Request, user: dict = Depends(
     registry = _load_registry()
     tiers_map, env_vars = await _load_owner_tiers(db, uid)
 
+    _route = state.get("route") or {}
     _append_chat(sdir, "user", "✓ Plan approved — building.", kind="approval")
     asyncio.create_task(_run_build_loop(
         request, user, pkey, repo, sdir, intent, by_id, tiers_map, env_vars, registry,
-        plan_file=plan_file))
+        plan_file=plan_file, quality=_load_quality(uid, body.project),
+        domain=str(_route.get("domain") or "general"), planner_id=str(_route.get("planner") or "")))
     return {"status": "running"}
+
+
+@router.post("/followup")
+async def followup(body: FollowupReq, request: Request, user: dict = Depends(get_current_user)):
+    """C6: run a one-click follow-up pass (harden / cover / simplify) on the
+    session's current result. Reuses the build loop's seeded-fix path so the
+    review/fix loop and the C1 test gate still verify the change."""
+    spec = _FOLLOWUP_KINDS.get(body.kind)
+    if not spec:
+        raise HTTPException(400, f"unknown follow-up kind: {body.kind}")
+    uid = user["id"]
+    sess, repo, sdir, pkey = _sctx(uid, body.project, body.session)
+    if _read_state(sdir).get("status") == "running":
+        raise HTTPException(409, "a run is already in progress for this session")
+    await code_git.git_init(repo)
+    db = get_db()
+    archetypes = await merged_archetypes(db, uid)
+    by_id = {a["id"]: a for a in archetypes}
+    registry = _load_registry()
+    tiers_map, env_vars = await _load_owner_tiers(db, uid)
+    _append_chat(sdir, "user", f"▶ Follow-up: {spec['intent']}", kind="approval")
+    _write_state(sdir, {"status": "running"})
+    asyncio.create_task(_run_build_loop(
+        request, user, pkey, repo, sdir, spec["intent"], by_id, tiers_map, env_vars,
+        registry, seed_fix=spec["seed"], quality=_load_quality(uid, body.project),
+        seed_fixer=spec["fixer"], seed_label=spec["label"], domain=body.kind))
+    return {"status": "running", "kind": body.kind}
 
 
 @router.post("/projects/{project}/sessions/{session}/stop")
@@ -2012,8 +2402,12 @@ async def _agent_code_run(owner: str, project: str, session_id: str, intent: str
             _append_chat(sdir, "user",
                          "✓ Plan auto-approved (agent-initiated run) — building.",
                          kind="approval")
+            _route = state.get("route") or {}
             await _run_build_loop(req, user, pkey, repo, sdir, intent, by_id,
-                                  tiers_map, env_vars, registry, plan_file=plan_file)
+                                  tiers_map, env_vars, registry, plan_file=plan_file,
+                                  quality=_load_quality(owner, project),
+                                  domain=str(_route.get("domain") or "general"),
+                                  planner_id=str(_route.get("planner") or ""))
         elif out.get("status") == "running":
             # Backlog-continuation branch runs as its own background task —
             # poll the session state until it settles (bounded).

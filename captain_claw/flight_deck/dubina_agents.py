@@ -59,12 +59,17 @@ class DispatchProvider:
 async def _real_send(port: int, token: str, prompt: str, timeout: float,
                      fleet_instructions: str = "", agent_name: str = "",
                      on_action=None, on_usage=None) -> str:
-    from captain_claw.flight_deck.basna_routes import _send_chat_and_collect
+    import time as _time
+    from captain_claw.flight_deck.basna_routes import _record_run_usage, _send_chat_and_collect
+    sink: dict = {}
+    _t0 = _time.monotonic()
     reply, _actions = await _send_chat_and_collect(
         port, token, prompt, timeout,
         fleet_instructions=fleet_instructions, agent_name=agent_name,
-        on_action=on_action, on_usage=on_usage,
+        on_action=on_action, on_usage=on_usage, usage_sink=sink,
     )
+    # Count this rollout's spend + duration toward the active run (Deep-mode samples).
+    _record_run_usage(sink.get("model", ""), sink, _time.monotonic() - _t0)
     return reply
 
 

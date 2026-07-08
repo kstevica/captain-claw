@@ -1,5 +1,8 @@
 import { create } from 'zustand'
 import { useAuthStore, refreshAccessToken } from './authStore'
+import { defaultProfile, fromResponse, toRequest } from '../services/quality'
+import type { QualityProfile } from '../services/quality'
+import type { RunCost } from './basnaStore'
 
 // ── Types (mirror captain_claw/flight_deck/code_routes.py) ───────────
 
@@ -76,6 +79,7 @@ export interface CodeProgressEvent {
   prompt_tokens?: number
   completion_tokens?: number
   total_tokens?: number
+  cost?: RunCost   // run cost block on the terminal `cost` event
 }
 
 // ── API helpers ──────────────────────────────────────────────────────
@@ -189,6 +193,27 @@ async function apiCancelPlan(project: string, session: string): Promise<void> {
   if (!res.ok) throw new Error((await res.text()) || 'cancel failed')
 }
 
+async function apiGetQuality(project: string): Promise<QualityProfile> {
+  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/quality`)
+  if (!res.ok) return defaultProfile()
+  const d = await res.json()
+  return fromResponse(d.quality)
+}
+
+async function apiSetQuality(project: string, quality: QualityProfile): Promise<void> {
+  const res = await _authedFetch(`/fd/code/projects/${enc(project)}/quality`, {
+    method: 'PUT', body: JSON.stringify({ quality: toRequest(quality) }),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'save quality failed')
+}
+
+async function apiFollowup(project: string, session: string, kind: string): Promise<void> {
+  const res = await _authedFetch('/fd/code/followup', {
+    method: 'POST', body: JSON.stringify({ project, session, kind }),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'follow-up failed')
+}
+
 async function apiStop(project: string, session: string): Promise<void> {
   const res = await _authedFetch(`${sbase(project, session)}/stop`, { method: 'POST' })
   if (!res.ok) throw new Error((await res.text()) || 'stop failed')
@@ -269,7 +294,12 @@ interface CodeStore {
   sending: boolean
   loading: boolean
   error: string | null
+  quality: QualityProfile      // per-project opt-in levers (all-off == current behaviour)
+  qualitySaving: boolean
 
+  loadQuality: (project: string) => Promise<void>
+  saveQuality: (quality: QualityProfile) => Promise<void>
+  followup: (kind: string) => Promise<void>
   loadProjects: () => Promise<void>
   createProject: (name: string) => Promise<void>
   addFolder: (project: string, folder: string) => Promise<void>
@@ -345,6 +375,30 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   sending: false,
   loading: false,
   error: null,
+  quality: defaultProfile(),
+  qualitySaving: false,
+
+  loadQuality: async (project) => {
+    try { set({ quality: await apiGetQuality(project) }) }
+    catch { set({ quality: defaultProfile() }) }
+  },
+
+  saveQuality: async (quality) => {
+    const project = get().activeProject
+    set({ quality, qualitySaving: true })  // optimistic
+    if (!project) { set({ qualitySaving: false }); return }
+    try { await apiSetQuality(project, quality) }
+    catch (e) { set({ error: e instanceof Error ? e.message : 'save quality failed' }) }
+    finally { set({ qualitySaving: false }) }
+  },
+
+  followup: async (kind) => {
+    const { activeProject, activeSession } = get()
+    if (!activeProject || !activeSession) return
+    set({ error: null, status: 'running' })
+    try { await apiFollowup(activeProject, activeSession, kind) }
+    catch (e) { set({ error: e instanceof Error ? e.message : 'follow-up failed', status: 'idle' }) }
+  },
 
   loadProjects: async () => {
     set({ loading: true })
@@ -402,6 +456,7 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   selectSession: async (project, session) => {
     const token = ++_followToken   // supersede any in-flight follower
     set({ activeProject: project, activeSession: session, messages: [], commits: [], progress: [], status: 'idle' })
+    void get().loadQuality(project)   // per-project quality levers
     const [chat, commits] = await Promise.all([apiGetChat(project, session), apiLog(project, session)])
     if (token !== _followToken) return   // user already switched away
     const status = _statusOf(chat.state)

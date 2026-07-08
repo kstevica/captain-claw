@@ -14,6 +14,7 @@ the count to difficulty. Spawn / dispatch / weighted-merge land in later phases.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import mimetypes
 import shutil
@@ -41,6 +42,21 @@ from captain_claw.flight_deck.horizon_worker import (
     HorizonConfig,
     run_horizon_closer,
     run_worker_horizon,
+)
+from captain_claw.flight_deck import research_map
+from captain_claw.flight_deck import research_brief
+from captain_claw.flight_deck import research_rubric
+from captain_claw.flight_deck.quality_profile import (
+    ACTED_CORRECTIVE,
+    ESCALATE_CORRECTIVE,
+    ESCALATE_DIRECTIVE,
+    JUDGMENT_LEDGER_DIRECTIVE,
+    SOURCE_CORPUS_DIRECTIVE,
+    UNVERIFIED_GUARD_DIRECTIVE,
+    QualityProfile,
+    TokenBudget,
+    escalate_reason,
+    worker_produced_nothing,
 )
 from captain_claw.logging import get_logger
 
@@ -264,6 +280,12 @@ class RouteRequest(BaseModel):
     # User-fixed team: when non-empty, the router MUST use exactly these archetypes
     # (all of them, no others) instead of choosing the team itself.
     archetype_ids: list[str] = []
+    # R12 intent brief: opt-in quality profile (only `intent_brief` is read here).
+    quality: dict = Field(default_factory=dict)
+    # R12: a user-edited brief to route on. When set, the router uses it verbatim
+    # (no re-derivation) and selects the team against it — this is the "edit the
+    # brief, re-route on it" path. Empty → derive one iff quality.intent_brief.
+    brief: str = ""
 
 
 class CreateSessionRequest(BaseModel):
@@ -786,6 +808,49 @@ async def agent_start(body: AgentStartReq):
 
 # ── Continuation: a follow-up run that carries a finished run forward ──
 
+# Non-hidden folders that are machinery/noise, never prior work to read. Hidden
+# paths (any part starting with ".": .git, .code, .researchmap, .vfs-meta.jsonl …)
+# are always skipped, so this only needs the non-dot ones.
+_MANIFEST_NOISE_DIRS = {"node_modules", "__pycache__", "saved"}
+
+
+def _manifest_body(root: Path, project: str, *, limit: int = 40) -> str:
+    """Build the continuation manifest from a folder root (pure — testable).
+
+    Lists prior *deliverables* only: skips hidden/internal trees (``.git`` — which
+    R6 git-snapshots creates — ``.code``, dotfiles, ``node_modules`` …) and
+    collapses the R10 ``sources/`` corpus into a single pointer instead of dumping
+    every saved page. Returns "" when there's nothing worth reading.
+    """
+    names: list[str] = []
+    n_sources = 0
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        parts = p.relative_to(root).parts
+        if any(part.startswith(".") or part in _MANIFEST_NOISE_DIRS for part in parts):
+            continue  # .git/**, .code, .vfs-meta.jsonl, node_modules, …
+        if parts and parts[0] == "sources":
+            n_sources += 1  # R10 corpus — count, don't itemise (searchable via researchmap)
+            continue
+        if len(names) < limit:
+            names.append(p.relative_to(root).as_posix())
+    if not names and not n_sources:
+        return ""
+    listing = "\n".join(f"- vfs:{project}/{n}" for n in names)
+    if n_sources:
+        listing += (
+            (f"\n- (+ {n_sources} saved source page(s) in `vfs:{project}/sources/` — "
+             "search them with the `researchmap` tool)") if names else
+            (f"- {n_sources} saved source page(s) in `vfs:{project}/sources/` — "
+             "search them with the `researchmap` tool"))
+    return (
+        f"\n\nThe shared folder `vfs:{project}/` already holds the prior round(s)' "
+        "work — READ what's relevant from it before adding anything, and build on it:\n"
+        f"{listing}\n"
+    )
+
+
 def _vfs_manifest(owner: str, project: str, *, limit: int = 40) -> str:
     """A short listing of files already in the shared VFS folder, so a continuation
     prompt can tell the next round to read prior work instead of recreating it.
@@ -797,20 +862,7 @@ def _vfs_manifest(owner: str, project: str, *, limit: int = 40) -> str:
         root = None
     if not root or not root.is_dir():
         return ""
-    names: list[str] = []
-    for p in sorted(root.rglob("*")):
-        if len(names) >= limit:
-            break
-        if p.is_file() and p.name != ".vfs-meta.jsonl":
-            names.append(p.relative_to(root).as_posix())
-    if not names:
-        return ""
-    listing = "\n".join(f"- vfs:{project}/{n}" for n in names)
-    return (
-        f"\n\nThe shared folder `vfs:{project}/` already holds the prior round(s)' "
-        "work — READ what's relevant from it before adding anything, and build on it:\n"
-        f"{listing}\n"
-    )
+    return _manifest_body(root, project, limit=limit)
 
 
 def _round_filename_rule(project: str, round_no: int) -> str:
@@ -841,6 +893,29 @@ _CONTINUE_HEADERS = {
         "instruction below, keeping what already works."
     ),
 }
+
+_TRUTH_CHARS = 16_000          # default: inline up to this much prior synthesis
+_TRUTH_CHARS_DELTA = 2_500     # R4 delta rounds: inline only a short preview
+
+
+def _delta_seed(truth: str, delta_rounds: bool) -> tuple[int, bool, str]:
+    """R4: decide how much of the prior synthesis to INLINE into a continuation.
+
+    With ``delta_rounds`` on, inline only a short preview and always spill the full
+    text to a workspace file — the worker reads it (or searches the Research Map,
+    R1) on demand rather than carrying the whole prior conclusion in-context every
+    round. That is what stops a long continuation chain's per-round token cost from
+    growing with the accumulated text. Returns
+    ``(preview_len, write_full_file, extra_directive)``. With the flag off this is
+    exactly the previous behaviour."""
+    if delta_rounds:
+        return _TRUTH_CHARS_DELTA, True, (
+            "\n\nDELTA ROUND: only a short PREVIEW of the prior conclusion is inlined "
+            "above — the complete prior synthesis is in your workspace file and the "
+            "shared folder is indexed. Read/search for detail on demand instead of "
+            "assuming the whole prior text is in front of you; spend your effort on the "
+            "NEW work for this round.\n")
+    return _TRUTH_CHARS, len(truth) > _TRUTH_CHARS, ""
 
 
 async def _continue_run(
@@ -914,9 +989,12 @@ async def _continue_run(
                 "do not redo settled work.")
 
     parent_title = (parent.get("title") or parent.get("intent") or "")[:50]
-    _TRUTH_CHARS = 16_000
     _PRIOR_FILE = "prior-synthesis.md"
-    big = len(truth) > _TRUTH_CHARS
+    # R4: with delta_rounds on (inherited from the parent's quality profile), inline
+    # only a short preview and lean on the workspace file + Research Map for detail.
+    parent_quality_raw = parent_cfg.get("quality")
+    _delta = QualityProfile.from_dict(parent_quality_raw).delta_rounds
+    preview_len, big, delta_directive = _delta_seed(truth, _delta)
     file_note = (
         f"\nThe COMPLETE prior synthesis is in your workspace as `{_PRIOR_FILE}` — "
         "read it for full context first.\n"
@@ -926,8 +1004,9 @@ async def _continue_run(
         f"{_CONTINUE_HEADERS[kind]}\n\n"
         + obj_block
         + f"PRIOR SYNTHESIS{' (preview — full text in the workspace file)' if big else ''}:\n"
-        f"{truth[:_TRUTH_CHARS]}\n"
+        f"{truth[:preview_len]}\n"
         + file_note
+        + delta_directive
         + focus
         + tail
         + _vfs_manifest(owner, vfs_project)
@@ -954,12 +1033,13 @@ async def _continue_run(
         user,
     )
     sid = route["session_id"]
-    update_kwargs: dict[str, Any] = {
-        "config": json.dumps({
-            "kind": kind, "parent_session_id": parent_session_id,
-            "root_session_id": root_sid, "round": round_no, "vfs_project": vfs_project,
-        }),
+    _child_cfg = {
+        "kind": kind, "parent_session_id": parent_session_id,
+        "root_session_id": root_sid, "round": round_no, "vfs_project": vfs_project,
     }
+    if parent_quality_raw:  # inherit the chain's quality profile across rounds
+        _child_cfg["quality"] = parent_quality_raw
+    update_kwargs: dict[str, Any] = {"config": json.dumps(_child_cfg)}
     if big:
         # Write the full synthesis as an input file; execute_route copies every
         # non-generated session file into each worker's workspace.
@@ -1099,6 +1179,30 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
     model = body.model or fast.get("model", "")
     base_url = body.base_url or fast.get("base_url", "")
 
+    # R12 intent brief (opt-in): clarify the task into a structured brief BEFORE the
+    # router runs, so the TEAM is selected against the clarified task, not the terse
+    # one. A user-edited brief (body.brief) is used verbatim — the "edit the brief,
+    # re-route on it" path; otherwise one is derived when quality.intent_brief is set.
+    # brief_task keeps the original intent authoritative, so this can never drift the
+    # task. brief == "" reproduces today's routing exactly.
+    quality = QualityProfile.from_dict(body.quality)
+    brief = research_brief.parse_brief(body.brief) if body.brief.strip() else ""
+    if not brief and quality.intent_brief:
+        try:
+            from captain_claw.llm import Message, create_provider
+            bprov = create_provider(
+                provider=provider, model=model,
+                api_key=body.api_key or None, base_url=base_url or None,
+                temperature=0.2, max_tokens=body.max_tokens)
+            bresp = await bprov.complete(
+                messages=[Message(role="user", content=research_brief.derive_brief_prompt(intent))],
+                temperature=0.2, max_tokens=body.max_tokens)
+            brief = research_brief.parse_brief(bresp.content or "")
+        except Exception as e:  # noqa: BLE001 — brief is best-effort; fall back to raw intent
+            log.warning("Basna intent-brief derivation failed; routing on raw intent", error=str(e))
+            brief = ""
+    task_for_routing = research_brief.brief_task(intent, brief)
+
     system_prompt_file = _INSTRUCTIONS_DIR / "basna" / "router.md"
     if not system_prompt_file.is_file():
         raise HTTPException(500, "Basna router prompt not found")
@@ -1108,7 +1212,7 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         forced_list = "\n".join(
             f"- {a}: {archetypes_by_id[a].get('role', '')}" for a in forced_ids)
         user_prompt = (
-            f"Task: {intent}\n\n"
+            f"Task: {task_for_routing}\n\n"
             f"The team is FIXED by the user — you MUST use EXACTLY these archetypes, ALL of "
             f"them and NO others, in `selected`:\n{forced_list}\n\n"
             f"For each, write a `why` that instructs it specifically for THIS task (how it should "
@@ -1116,7 +1220,7 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         )
     else:
         user_prompt = (
-            f"Task: {intent}\n\n"
+            f"Task: {task_for_routing}\n\n"
             f"max_agents: {body.max_agents}. Select the smallest archetype set that "
             f"handles this task well, scaled to its difficulty."
         )
@@ -1189,6 +1293,7 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         )
     route["source"] = source
     route["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    route["brief"] = brief  # R12: persisted with the route; execute dispatches on it, UI edits it
 
     # Resolve a session title: explicit user title > the router LLM's title >
     # a cheap heuristic from the task. Computed once, applied below.
@@ -1404,15 +1509,84 @@ def _resolve_merge_creds(body, registry: dict, tier: str) -> dict:
     return _tier_creds(registry, tier, body.api_key)
 
 
+# ── Run-wide model-spend accumulator (shared by Basna + Vatra) ────────
+# Every model call in a run — agent dispatches AND the auxiliary provider calls
+# (merge synthesizer/conflict, LLM judges, the Horizon closer's critics + revision,
+# rubric derivation, coverage, Vatra's Lead/digest/holistic) — records {model,
+# usage} here, keyed by session id, so the run's cost is complete rather than an
+# undercount. `_run_sid` is a contextvar set once at execute entry; it propagates
+# into every gathered child task, so a provider built deep inside the run knows
+# which run it belongs to WITHOUT threading the sid through every call site.
+_run_sid: contextvars.ContextVar[str] = contextvars.ContextVar("basna_run_sid", default="")
+_RUN_USAGE: dict[str, list[dict]] = {}
+
+# Max-parallel-agents gate (mainly for local models). A per-run semaphore held in
+# a contextvar — set once at execute entry, propagates into every gathered child —
+# so `_dispatch_one` runs at most N agent turns concurrently WITHOUT any call-site
+# threading. None = unlimited (today's full fan-out); cloud runs are unaffected.
+# On a memory-capped local server (e.g. oMLX) this keeps concurrent prefills from
+# blowing past the box's memory limit.
+_run_gate: contextvars.ContextVar["asyncio.Semaphore | None"] = contextvars.ContextVar(
+    "basna_run_gate", default=None)
+
+
+def _make_gate(max_parallel: int, team_size: int) -> "asyncio.Semaphore | None":
+    """A dispatch concurrency limiter, or None when there's nothing to gate
+    (unlimited, or the cap is >= the team so every agent can run at once)."""
+    n = int(max_parallel or 0)
+    if n <= 0 or n >= max(1, int(team_size or 0)):
+        return None
+    return asyncio.Semaphore(n)
+
+
+def _record_run_usage(model: str, usage: dict | None, duration_seconds: float = 0.0) -> None:
+    """Append one usage dict (5-field) + its wall-duration to the active run — for
+    provider/dispatch spend. Durations sum to `agent_seconds` (total compute), which
+    exceeds the run's wall-clock when agents run in parallel."""
+    sid = _run_sid.get()
+    u = usage or {}
+    if not sid or not any(int(u.get(k, 0) or 0) for k in _USAGE_FIELDS):
+        return
+    _RUN_USAGE.setdefault(sid, []).append(
+        {"model": model or "", "usage": {k: int(u.get(k, 0) or 0) for k in _USAGE_FIELDS},
+         "seconds": round(float(duration_seconds or 0.0), 3)})
+
+
+class _UsageRecordingProvider:
+    """Wraps a provider so every ``.complete()`` records its usage + duration into the
+    active run. Transparent for every other attribute/method."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def complete(self, *args, **kwargs):
+        _t0 = time.monotonic()
+        resp = await self._inner.complete(*args, **kwargs)
+        try:
+            _record_run_usage(getattr(resp, "model", "") or "", getattr(resp, "usage", None),
+                              time.monotonic() - _t0)
+        except Exception:  # noqa: BLE001 — accounting must never break a completion
+            pass
+        return resp
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def _provider_call(creds: dict, *, temperature: float, default_max: int, cap: int) -> tuple:
     """Build (create_provider, max_tokens) from merge creds — honoring the tier's
     output_ctx so a long synthesis isn't truncated by a hardcoded cap. Pops the
-    non-provider `output_ctx` key before constructing the provider."""
+    non-provider `output_ctx` key before constructing the provider. When called
+    inside a run (``_run_sid`` set), the provider is wrapped so its token spend is
+    counted toward the run's cost."""
     from captain_claw.llm import create_provider
     c = {k: v for k, v in creds.items() if k != "output_ctx"}
     out = int(creds.get("output_ctx") or 0)
     max_tokens = min(max(out or default_max, default_max), cap)
-    return create_provider(temperature=temperature, max_tokens=max_tokens, **c), max_tokens
+    prov = create_provider(temperature=temperature, max_tokens=max_tokens, **c)
+    if _run_sid.get():
+        prov = _UsageRecordingProvider(prov)
+    return prov, max_tokens
 
 
 async def _llm_conflict(good: list[dict], creds: dict) -> bool:
@@ -1589,11 +1763,39 @@ def _summarize_tool_args(args) -> str:
     return ""
 
 
+_USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens",
+                 "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def _absorb_usage(sink: dict, msg: dict, u: dict | None = None) -> None:
+    """Fold an agent's turn_usage/usage broadcast into a per-dispatch sink.
+
+    turn_usage carries RUNNING CUMULATIVE counts for the turn, so we keep the max
+    seen for each field (robust to out-of-order/duplicate frames). Captures the
+    cache split the live on_usage(pt,ct,tt) callback drops, plus the model name —
+    this is what makes a dispatch's cost computable. Best-effort; never raises."""
+    src = u or msg
+    _alt = {"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens"}
+    for key in _USAGE_FIELDS:
+        v = src.get(key)
+        if v is None and key in _alt:
+            v = src.get(_alt[key])
+        if v is None:
+            continue
+        try:
+            sink[key] = max(int(sink.get(key, 0) or 0), int(v or 0))
+        except (TypeError, ValueError):
+            pass
+    model = src.get("model") or msg.get("model")
+    if model:
+        sink["model"] = str(model)
+
+
 async def _send_chat_and_collect(
     port: int, token: str, prompt: str, timeout: float, on_action=None,
     fleet_instructions: str = "", agent_name: str = "",
     file_paths: list[str] | None = None, image_paths: list[str] | None = None,
-    on_usage=None,
+    on_usage=None, usage_sink: dict | None = None, error_sink: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Connect to an agent's /ws, send one chat, return (final reply, actions).
 
@@ -1649,6 +1851,8 @@ async def _send_chat_and_collect(
             # Live, running cumulative token counts emitted after each internal
             # LLM call within the turn. Surfaced live (not persisted as an action)
             # so the UI shows usage climbing instead of one number at the end.
+            if usage_sink is not None:
+                _absorb_usage(usage_sink, msg)  # capture cache split + model for costing
             if on_usage:
                 try:
                     on_usage(int(msg.get("prompt_tokens", 0) or 0),
@@ -1660,6 +1864,8 @@ async def _send_chat_and_collect(
             # End-of-turn LLM summary — model + final token counts (recorded once
             # as an action so it's preserved in the run's persisted activity).
             u = msg.get("last") or msg.get("usage") or msg
+            if usage_sink is not None:
+                _absorb_usage(usage_sink, msg, u)  # final counts + model name
             model = u.get("model") or msg.get("model") or ""
             it = u.get("input_tokens") or u.get("prompt_tokens")
             ot = u.get("output_tokens") or u.get("completion_tokens")
@@ -1684,7 +1890,15 @@ async def _send_chat_and_collect(
             # every client, including this reconnected one.
             if "busy" in m.lower():
                 return False
-            raise RuntimeError(m or "agent error")
+            # The agent's LLM call failed mid-turn (e.g. context-length overflow or
+            # OOM on a local model). Do NOT raise — that would throw away every
+            # action + partial answer it produced. Record the error, flag it for
+            # the caller (so the dispatch reads ✗ with the real reason), and end
+            # the turn, preserving the work done so far.
+            if error_sink is not None:
+                error_sink["message"] = m or "agent error"
+            _record("error", (m or "agent error")[:200])
+            return True
         return False
 
     # The retry loop covers two cases: the agent's web server may still be booting
@@ -1759,25 +1973,97 @@ async def _send_chat_and_collect(
             await asyncio.sleep(0.5 * (attempt + 1))
     if sent and (answer.strip() or actions):
         return answer.strip(), actions
-    raise RuntimeError(f"could not reach agent on port {port}: {last_err}")
+    # Genuinely unreachable and nothing collected — surface it as a dispatch error
+    # (caller marks ✗ with this message) rather than raising and losing the slot.
+    if error_sink is not None:
+        error_sink["message"] = f"could not reach agent on port {port}: {last_err}"
+    return answer.strip(), actions
+
+
+def _finalize_usage(sink: dict) -> dict:
+    """Normalise a usage sink into the 5-field shape, backfilling total."""
+    u = {k: int(sink.get(k, 0) or 0) for k in _USAGE_FIELDS}
+    if u["total_tokens"] <= 0:
+        u["total_tokens"] = u["prompt_tokens"] + u["completion_tokens"]
+    return u
+
+
+def _fmt_dur(seconds: float | int | None) -> str:
+    s = int(seconds or 0)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    return f"{s // 3600}h {(s % 3600) // 60}m"
+
+
+def _fmt_usd(v: float | None) -> str:
+    if v is None:
+        return "—"
+    if v >= 1:
+        return f"${v:,.2f}"
+    if v >= 0.01:
+        return f"${v:.3f}"
+    return f"${v:.5f}"
+
+
+def _cost_message(cost: dict) -> str:
+    """The one-line human summary for the `cost` progress event."""
+    tok = cost.get("tokens", {}) or {}
+    total_tok = int(tok.get("prompt_tokens", 0) or 0) + int(tok.get("completion_tokens", 0) or 0)
+    parts: list[str] = []
+    if cost.get("priced"):
+        parts.append(_fmt_usd(cost.get("usd")))
+    parts.append(f"{total_tok:,} tok")
+    cr = int(tok.get("cache_read_input_tokens", 0) or 0)
+    if cr:
+        parts.append(f"{cr:,} cached")
+    if cost.get("elapsed_seconds"):
+        parts.append(_fmt_dur(cost["elapsed_seconds"]))
+    if cost.get("hourly_usd"):
+        parts.append(f"≈ {_fmt_usd(cost['hourly_usd'])}/hr")
+    return ("Run cost: " if cost.get("priced") else "Run usage: ") + " · ".join(parts)
 
 
 async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_action=None,
                         fleet_instructions: str = "", agent_name: str = "",
                         file_paths: list[str] | None = None,
                         image_paths: list[str] | None = None, on_usage=None) -> dict:
+    # Max-parallel gate: wait for a dispatch slot before doing any work. Started is
+    # taken AFTER acquiring, so latency measures the turn, not the queue wait.
+    gate = _run_gate.get()
+    if gate is not None:
+        await gate.acquire()
     started = time.monotonic()
+    sink: dict = {}
+    err: dict = {}
     try:
         out, actions = await _send_chat_and_collect(
             port, token, prompt, timeout, on_action=on_action,
             fleet_instructions=fleet_instructions, agent_name=agent_name,
-            file_paths=file_paths, image_paths=image_paths, on_usage=on_usage)
-        return {"ok": True, "output": out, "actions": actions,
-                "latency_ms": int((time.monotonic() - started) * 1000)}
+            file_paths=file_paths, image_paths=image_paths, on_usage=on_usage,
+            usage_sink=sink, error_sink=err)
+        usage = _finalize_usage(sink)
+        _record_run_usage(sink.get("model", ""), usage, time.monotonic() - started)  # cost + agent-time
+        # An agent-side error (e.g. context overflow) no longer raises: it's flagged
+        # here, so the dispatch reads ✗ WITH the real reason and KEEPS the work done.
+        emsg = err.get("message", "")
+        result = {"ok": not emsg, "output": out, "actions": actions,
+                  "latency_ms": int((time.monotonic() - started) * 1000),
+                  "usage": usage, "model": sink.get("model", "")}
+        if emsg:
+            result["error"] = emsg
+        return result
     except Exception as e:
         log.warning("Basna dispatch failed", error=str(e))
+        usage = _finalize_usage(sink)
+        _record_run_usage(sink.get("model", ""), usage, time.monotonic() - started)  # partial spend still counts
         return {"ok": False, "output": "", "actions": [], "error": str(e),
-                "latency_ms": int((time.monotonic() - started) * 1000)}
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "usage": usage, "model": sink.get("model", "")}
+    finally:
+        if gate is not None:
+            gate.release()
 
 
 class ExecuteRequest(BaseModel):
@@ -1794,6 +2080,13 @@ class ExecuteRequest(BaseModel):
     api_key: str = ""
     agent_max_tokens: int = Field(default=8192, ge=512, le=32768)
     dispatch_timeout: float = Field(default=600.0, ge=10.0, le=3600.0)
+    # Max agent turns to run concurrently (0 = unlimited / today's full fan-out).
+    # Mainly for local models: a low value keeps concurrent prefills from exhausting
+    # the serving box's memory. Gated in _dispatch_one via a per-run semaphore.
+    max_parallel: int = Field(default=0, ge=0, le=16)
+    # Vatra only: run owners in ordered execution groups (A→B→C→D, barrier between)
+    # instead of all-at-once. Opt-in; default False = today's intro→main→review flow.
+    execution_groups: bool = False
     # Deep / Horizon mode (opt-in): when set, each worker is driven through the
     # Frontier-Horizon engine (N-sample self-consistency vote + diverse-lens critics
     # + fix loop) instead of a single one-shot dispatch. Keys: samples, fix_attempts,
@@ -1803,11 +2096,15 @@ class ExecuteRequest(BaseModel):
     # run's own session id (basna-<sid8>). A continuation round sets this to the ROOT
     # run's folder so all rounds in a chain read/write the SAME accumulated data.
     vfs_project: str = ""
+    # Opt-in cross-pollination quality/cost profile (see quality_profile.py). None →
+    # fall back to the session config's `quality` block → all-off (today's behaviour).
+    quality: dict | None = None
 
 
 async def _spawn_horizon_member(
     arch: dict, sel: dict, body, request, user, *,
     sid8: str, run_tag: str, input_files: list[dict], src_dir: Path, name_suffix: str,
+    extra_env: list[dict] | None = None,
 ) -> tuple[int, str, str]:
     """Spawn one Basna-correct ephemeral worker for a Horizon pool → (port, token, slug).
 
@@ -1840,7 +2137,7 @@ async def _spawn_horizon_member(
              "value": getattr(body, "vfs_project", "") or f"basna-{sid8}"},
             {"key": "CLAW_AGENT_LABEL",
              "value": sel.get("role") or arch.get("role") or arch["id"]},
-        ],
+        ] + (extra_env or []),
         web_enabled=True, web_port=0,
     )
     if model:
@@ -1869,7 +2166,7 @@ async def _spawn_horizon_member(
 async def _dispatch_horizon_workers(
     plan: list[tuple[dict, dict]], sess: dict, merge_kind: str, hcfg: HorizonConfig,
     body, request, user, sid: str, sid8: str, run_tag: str, input_files: list[dict],
-    *, critic_provider,
+    *, critic_provider, effective_intent: str = "",
 ) -> list[dict]:
     """Dispatch each routed worker through the Horizon engine instead of one-shot.
 
@@ -1899,7 +2196,7 @@ async def _dispatch_horizon_workers(
         fleet = sel.get("fleet_instructions") or arch.get("fleet_instructions", "")
         tier = sel["tier"]
         prompt = _build_dispatch_prompt(
-            role, sess["intent"], merge_kind,
+            role, effective_intent or sess["intent"], merge_kind,
             [f["name"] for f in input_files], extra=sel.get("extra", ""))
 
         def _on_action(act: dict) -> None:
@@ -1985,6 +2282,114 @@ async def _dispatch_horizon_workers(
     return results
 
 
+# ── R8: grounded claim verification (Basna) ──────────────────────────
+
+_FACTCHECK_ARCHETYPES = ("fact-checker", "deep-researcher", "market-scanner")
+
+
+async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
+                       intent: str, deliverable: str, arch_by_id: dict, body,
+                       quality, research_dir) -> tuple[str, dict | None]:
+    """Spawn a web-tool fact-checker, verify the merged answer's load-bearing claims,
+    correct any that are verified wrong AND hedge any unconfirmable specific it
+    asserted as fact. Returns ``(answer, audit_doc)`` where ``answer`` is the
+    (possibly revised) text and ``audit_doc`` is a generated-file descriptor for the
+    standalone fact-check ledger (or ``None``). Best-effort; on any failure the
+    original answer is returned unchanged."""
+    from captain_claw.flight_deck import research_verify as rv
+    from captain_claw.flight_deck.server import _do_stop_process
+    if not (deliverable or "").strip():
+        return deliverable, None
+    src = next((arch_by_id[a] for a in _FACTCHECK_ARCHETYPES if a in arch_by_id), None) \
+        or next(iter(arch_by_id.values()), None)
+    if not src:
+        return deliverable, None
+    role = src.get("role") or src["id"]
+    tools = list(dict.fromkeys(
+        (src.get("tools") or []) + ["web_search", "web_fetch", "researchmap", "read"]))
+    arch = {**src, "tools": tools}
+    sel = {"tier": src.get("tier", "reason"), "role": role,
+           "cognitive_mode": src.get("cognitive_mode", "phrygian")}
+    corpus_env = [{"key": "CLAW_SOURCE_CORPUS", "value": "1"}] if quality.source_corpus else []
+
+    def _on_action(act: dict) -> None:
+        if act.get("tool") == "narration":
+            _progress(sid, "narration", f"{role}: {act.get('detail', '')}",
+                      agent=role, tool="narration", detail=act.get("detail", ""))
+        else:
+            detail = f": {act['detail']}" if act.get("detail") else ""
+            _progress(sid, "action", f"{role} → {act.get('tool')}{detail}",
+                      agent=role, tool=act.get("tool"), detail=act.get("detail", ""))
+
+    def _on_usage(pt, ct, tt):
+        _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok", agent=role,
+                  prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
+    _phase(sid, "Fact-checking")
+    _progress(sid, "verify", f"Fact-checker ({role}) verifying the answer's claims…", agent=role)
+    try:
+        port, token, slug = await _spawn_horizon_member(
+            arch, sel, body, request, user, sid8=sid8, run_tag=run_tag,
+            input_files=[], src_dir=_session_files_dir(sid),
+            name_suffix="factcheck", extra_env=corpus_env)
+    except Exception as e:  # noqa: BLE001
+        _progress(sid, "verify", f"Fact-checker spawn failed ({e})", ok=False)
+        return deliverable, None
+    _run_workers.setdefault(sid, []).append(slug)
+    findings: list[dict] = []
+    text, revised_applied = deliverable, False
+    try:
+        prompt = rv.claim_check_prompt(deliverable, intent, quality.claim_check_max,
+                                       corpus_hint=research_dir is not None)
+        d = await _dispatch_one(port, token, prompt, body.dispatch_timeout,
+                                on_action=_on_action,
+                                fleet_instructions=arch.get("fleet_instructions", ""),
+                                agent_name=role, on_usage=_on_usage)
+        findings = rv.parse_findings(d.get("output") or "")
+        _progress(sid, "verify", f"Fact-checker: {rv.summary_line(findings)}", agent=role)
+        for f in rv.refuted(findings):
+            _progress(sid, "narration", f"{role} (refuted): {f['claim']} → {f['correction']}",
+                      agent=role, tool="narration", detail=f["correction"])
+        for f in rv.unconfirmed(findings):
+            _progress(sid, "narration", f"{role} (unconfirmed): {f['claim']} → hedged",
+                      agent=role, tool="narration", detail=f["hedge"])
+        fix = rv.fix_instructions(findings)
+        if fix:
+            _progress(sid, "verify", "Revising the answer to correct/hedge the flagged claims…", agent=role)
+            d2 = await _dispatch_one(
+                port, token,
+                ("Now output the FULL corrected answer. Apply EXACTLY these changes and "
+                 "change nothing else — keep everything else identical:\n\n" + fix +
+                 "\n\nOutput the complete corrected answer only."),
+                body.dispatch_timeout, on_action=_on_action,
+                fleet_instructions=arch.get("fleet_instructions", ""),
+                agent_name=role, on_usage=_on_usage)
+            revised = (d2.get("output") or "").strip()
+            collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
+            if collapsed:
+                _progress(sid, "verify", "Kept the original (correction pass collapsed)", agent=role, ok=False)
+            else:
+                text, revised_applied = revised, True
+                _progress(sid, "verify",
+                          f"Answer corrected: {len(rv.refuted(findings))} fix(es) + "
+                          f"{len(rv.unconfirmed(findings))} hedge(s) applied", agent=role)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Basna claim check failed", error=str(e))
+    finally:
+        try:
+            await _do_stop_process(slug)
+        except Exception:  # noqa: BLE001
+            pass
+    # Non-destructive audit ledger: WHAT was checked and HOW it was resolved —
+    # written even when nothing was auto-changed, so unconfirmable specifics stay
+    # visible rather than vanishing into the log tally.
+    doc = rv.write_audit(_session_files_dir(sid), findings, question=intent,
+                         revised=revised_applied)
+    if doc:
+        _progress(sid, "files", f"Fact-check report saved · {doc['name']}")
+    return text, doc
+
+
 @router.post("/execute")
 async def execute_route(
     body: ExecuteRequest, request: Request, user: dict = Depends(get_current_user),
@@ -2037,6 +2442,9 @@ async def execute_route(
 
     sid = body.session_id
     _progress_start(sid)
+    _run_started = time.monotonic()  # run wall-clock, for the $/hour cost figure
+    _run_sid.set(sid)                # bind cost accounting to this run (propagates to children)
+    _RUN_USAGE[sid] = []             # every model call in this run records here
     sid8 = sid[:8]
     # One shared VFS folder for the whole run. A continuation round inherits the
     # ROOT run's folder (body.vfs_project) so every round in a chain accumulates into
@@ -2044,6 +2452,9 @@ async def execute_route(
     vfs_project = body.vfs_project or f"basna-{sid8}"
     run_tag = format(int(time.time()), "x")[-6:]  # unique per run → no slug collisions on re-run
     plan = [(s, arch_by_id[s["archetype_id"]]) for s in selected if s["archetype_id"] in arch_by_id]
+    _run_gate.set(_make_gate(body.max_parallel, len(plan)))  # cap concurrent dispatches (local models)
+    if body.max_parallel and body.max_parallel < len(plan):
+        _progress(sid, "route", f"Max {body.max_parallel} agent(s) in parallel")
     _phase(sid, "Routing")
     _progress(sid, "route", f"Selected {len(plan)} archetype(s) · {domain} / {merge_kind}")
 
@@ -2062,13 +2473,85 @@ async def execute_route(
         except Exception as e:  # noqa: BLE001 — no critic model → agreement-only
             log.warning("Basna horizon critic provider unavailable", error=str(e))
 
+    # Opt-in quality profile (from the request or the session config). Default
+    # is all-off, so this changes nothing unless a run explicitly opts in.
+    try:
+        _sess_cfg = json.loads(sess.get("config") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        _sess_cfg = {}
+    quality = QualityProfile.from_dict(
+        body.quality if body.quality is not None else _sess_cfg.get("quality"))
+    # Persist the run's quality onto the session so a continuation round (R4 and
+    # the whole chain) inherits the same profile. Only when explicitly provided.
+    if body.quality is not None and _sess_cfg.get("quality") != body.quality:
+        _sess_cfg["quality"] = body.quality
+        try:
+            await db.update_basna_session(sid, user["id"], config=json.dumps(_sess_cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna quality persist failed", error=str(e))
+    # R12: the task workers actually build against — the raw intent, carrying the
+    # (reviewed/edited) brief the router selected the team on. brief == "" → this is
+    # exactly sess["intent"], so nothing changes when the lever is off. Verification
+    # stages (closer, claim-check) still use the RAW intent as ground truth.
+    effective_intent = research_brief.brief_task(sess["intent"], route.get("brief"))
+    # R7 cost ceiling for the OPT-IN levers (acted-gate/escalate retries). The
+    # base run is never refused; only the extra paid work these features add is
+    # bounded, so the profile can never blow the token budget. 0 → unbounded.
+    _budget = TokenBudget(quality.token_budget)
+    _retry_est = int(body.agent_max_tokens or 8192)
+
+    # Resolve the shared folder on disk once (needed by R1 research map and R6 git
+    # snapshots). Both are opt-in; neither touches a run that didn't ask for them.
+    vfs_dir: Path | None = None
+    if quality.research_map or quality.git_snapshots:
+        try:
+            from captain_claw.flight_deck.vfs_routes import _user_root
+            vfs_dir = _user_root(user["id"]) / vfs_project
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna vfs dir resolve failed", error=str(e))
+            vfs_dir = None
+    # R1 Research Map: index the folder now so workers (esp. on a continuation
+    # round) can search prior findings instead of re-reading. Free (no tokens).
+    research_dir: Path | None = None
+    if quality.research_map and vfs_dir is not None and vfs_dir.exists():
+        try:
+            research_dir = vfs_dir
+            st = research_map.reindex(research_dir)
+            if st.get("chunks"):
+                _progress(sid, "note",
+                          f"research map: {st['files']} files · {st['chunks']} sections indexed")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna research map index failed", error=str(e))
+            research_dir = None
+    research_pre = research_map.preamble(research_dir) if research_dir else ""
+
+    # R9 rubric contract (opt-in): derive the completeness checklist once (reason
+    # tier) and inject it into every worker's prompt as the definition of "complete".
+    rubric_pre = ""
+    if quality.rubric_contract:
+        try:
+            cc = _resolve_merge_creds(body, registry, "reason")
+            if cc.get("model"):
+                prov, _ = _provider_call(cc, temperature=0.2, default_max=1500, cap=4096)
+                from captain_claw.llm import Message
+                _r = await prov.complete(
+                    [Message(role="user",
+                             content=research_rubric.derive_rubric_prompt(effective_intent))])
+                items = research_rubric.parse_rubric(_r.content or "")
+                if items:
+                    rubric_pre = research_rubric.rubric_directive(items)
+                    _progress(sid, "route", f"Completeness rubric: {len(items)} required items")
+        except Exception as e:  # noqa: BLE001 — rubric is best-effort
+            log.warning("Basna rubric derivation failed", error=str(e))
+
     spawned: list[dict] = []  # {sel, arch, slug, port, auth}
     results: list[dict] = []
     try:
         if horizon_cfg is not None and horizon_cfg.worker:
             results = await _dispatch_horizon_workers(
                 plan, sess, merge_kind, horizon_cfg, body, request, user,
-                sid, sid8, run_tag, input_files, critic_provider=critic_provider)
+                sid, sid8, run_tag, input_files, critic_provider=critic_provider,
+                effective_intent=effective_intent)
         else:
             _phase(sid, "Spawning")
             _progress(sid, "spawn", f"Spawning {len(plan)} agent(s)…")
@@ -2092,6 +2575,9 @@ async def execute_route(
                 _worker_tools = [
                     t for t in (arch.get("tools") or AgentConfig().tools) if t != "basna"
                 ]
+                # R1: give workers the researchmap tool when the map is armed.
+                if research_dir is not None and "researchmap" not in _worker_tools:
+                    _worker_tools = _worker_tools + ["researchmap"]
                 base = dict(
                     name=f"basna-{sid8}-{run_tag}-{arch['id']}",
                     description=f"Basna ephemeral · {sel.get('role') or arch.get('role', '')}",
@@ -2105,7 +2591,10 @@ async def execute_route(
                         # Authorship label for files this worker writes to the VFS.
                         {"key": "CLAW_AGENT_LABEL",
                          "value": sel.get("role") or arch.get("role") or arch["id"]},
-                    ],
+                    ] + (  # R10: turn on the source corpus for this worker's fetches
+                        [{"key": "CLAW_SOURCE_CORPUS", "value": "1"}]
+                        if quality.source_corpus else []
+                    ),
                     web_enabled=True, web_port=0,
                 )
                 if model:
@@ -2179,14 +2668,53 @@ async def execute_route(
                              if str(f.get("mime", "")).startswith("image/")]
                 doc_paths = [str(ws / f["name"]) for f in input_files
                              if not str(f.get("mime", "")).startswith("image/")]
+                base_prompt = research_pre + _build_dispatch_prompt(
+                    role, effective_intent, merge_kind,
+                    [f["name"] for f in input_files], extra=sel.get("extra", "")) + rubric_pre
+                if quality.worker_escalate:
+                    base_prompt += ESCALATE_DIRECTIVE
+                if quality.judgment_ledger:
+                    base_prompt += JUDGMENT_LEDGER_DIRECTIVE + UNVERIFIED_GUARD_DIRECTIVE
+                if quality.source_corpus:
+                    base_prompt += SOURCE_CORPUS_DIRECTIVE
                 d = await _dispatch_one(
-                    sp["port"], sp["auth"],
-                    _build_dispatch_prompt(role, sess["intent"], merge_kind,
-                                           [f["name"] for f in input_files], extra=sel.get("extra", "")),
+                    sp["port"], sp["auth"], base_prompt,
                     body.dispatch_timeout, on_action=_on_action,
                     fleet_instructions=fleet, agent_name=role,
                     file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
                 )
+                # R2 acted-gate (opt-in): a worker that returned no text and wrote
+                # no file is a wasted slot — retry it once with a blunt corrective.
+                if (quality.acted_gate and d.get("ok") and worker_produced_nothing(d)
+                        and _budget.can_afford(_retry_est)):
+                    _budget.add(_retry_est)
+                    _progress(sid, "note",
+                              f"{role} produced nothing — one corrective retry")
+                    # Same stateful agent — the corrective alone is enough (it
+                    # still has the task in context); don't re-send the full prompt.
+                    d2 = await _dispatch_one(
+                        sp["port"], sp["auth"], ACTED_CORRECTIVE.strip(),
+                        body.dispatch_timeout, on_action=_on_action,
+                        fleet_instructions=fleet, agent_name=role,
+                        file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
+                    )
+                    # Keep the retry only if it actually produced something.
+                    if d2.get("ok") and not worker_produced_nothing(d2):
+                        d = d2
+                # R5 escalate (opt-in): a worker that flagged ESCALATE gets one
+                # focused-retry push instead of the merge absorbing a bare flag.
+                if (quality.worker_escalate and d.get("ok") and escalate_reason(d.get("output"))
+                        and _budget.can_afford(_retry_est)):
+                    _budget.add(_retry_est)
+                    _progress(sid, "note", f"{role} escalated — one focused retry")
+                    d2 = await _dispatch_one(
+                        sp["port"], sp["auth"], ESCALATE_CORRECTIVE.strip(),
+                        body.dispatch_timeout, on_action=_on_action,
+                        fleet_instructions=fleet, agent_name=role,
+                        file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage)
+                    if d2.get("ok") and not escalate_reason(d2.get("output")) \
+                            and not worker_produced_nothing(d2):
+                        d = d2
                 mark = "✓" if d["ok"] else "✗"
                 extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
                 _progress(sid, "dispatch",
@@ -2197,14 +2725,31 @@ async def execute_route(
             _phase(sid, "Generating")
             _progress(sid, "generate", f"{len(spawned)} agent(s) working the task…")
             dispatched = await asyncio.gather(*[_dispatch_tracked(sp) for sp in spawned])
+            # R1: re-index so a later round (or the merge's own reads) sees what the
+            # workers just wrote into the shared folder. Free; best-effort.
+            if research_dir is not None:
+                try:
+                    research_map.reindex(research_dir)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Basna research map post-index failed", error=str(e))
+            # R6 git snapshots (opt-in): commit this round's state of the shared
+            # folder for diffs/rollback/provenance. Reuses Code's git helper; free.
+            if quality.git_snapshots and vfs_dir is not None:
+                try:
+                    from captain_claw.flight_deck import code_git
+                    _rnd = _sess_cfg.get("round", 1)
+                    await code_git.git_init(vfs_dir)
+                    await code_git.git_commit(vfs_dir, f"[basna r{_rnd}] {sess['intent'][:60]}")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Basna git snapshot failed", error=str(e))
             for sp, d in zip(spawned, dispatched):
                 results.append({
                     "archetype_id": sp["arch"]["id"],
                     "role": sp["sel"].get("role") or sp["arch"].get("role", ""),
-                    "tier": sp["sel"]["tier"], "provider": "", "model": "",
+                    "tier": sp["sel"]["tier"], "provider": "", "model": d.get("model", ""),
                     "weight": float(sp["sel"].get("prior_weight", 0.7)),
                     "output": d["output"], "ok": d["ok"], "latency_ms": d["latency_ms"],
-                    "actions": d.get("actions", []),
+                    "actions": d.get("actions", []), "usage": d.get("usage", {}),
                 })
     finally:
         # 3a) Capture any files the agents generated, BEFORE teardown deletes their
@@ -2333,6 +2878,7 @@ async def execute_route(
                 question=sess["intent"], answer=agg["truth"],
                 critic_provider=cp, revise_provider=rp, critics=horizon_cfg.critics,
                 on_event=_closer_on_event(sid, "Closer", "merge"),
+                triage_findings=quality.critic_triage,  # R3
             )
             if closed["revised"]:
                 agg["truth"] = closed["answer"]
@@ -2343,6 +2889,25 @@ async def execute_route(
                           f"Closer: answer held ({closed['survived']}/{closed['total']})")
         except Exception as e:  # noqa: BLE001 — closer is best-effort
             log.warning("Basna horizon closer failed", error=str(e))
+
+    # 5d) R8 grounded claim verification (opt-in, paid): a web-tool fact-checker
+    # verifies the merged answer's load-bearing claims against real sources and
+    # corrects the ones verified wrong — the ground truth the tool-less closer
+    # can't reach. Budget-gated.
+    if quality.claim_check and (agg.get("truth") or "").strip() and _budget.can_afford(2 * _retry_est):
+        _budget.add(2 * _retry_est)
+        try:
+            new_truth, cc_doc = await _claim_check(
+                request, user, sid, sid8, run_tag, intent=sess["intent"],
+                deliverable=agg["truth"], arch_by_id=arch_by_id, body=body,
+                quality=quality, research_dir=research_dir)
+            if new_truth and new_truth != agg["truth"]:
+                agg["truth"] = new_truth
+                agg["method"] = f"{agg.get('method', 'merge')}+factchecked"
+            if cc_doc:
+                generated_files.append(cc_doc)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna claim check errored", error=str(e))
 
     # 6) Close the learning loop: score each run against the truth and fold the
     # outcome into per-archetype reliability, so the next route's prior_weight
@@ -2373,6 +2938,22 @@ async def execute_route(
         files=json.dumps(list(files_by_name.values())),
         analysis=json.dumps(analysis or {}),
     )
+    # Run cost: roll per-agent model spend (tokens + cache split) into a dollar
+    # cost + effective $/hour, emitted as a `cost` progress event so the UI shows
+    # it live and on reload (persisted with the progress log below). Best-effort.
+    run_cost: dict | None = None
+    try:
+        from captain_claw.flight_deck import pricing
+        # Everything the run spent — worker dispatches, the merge synthesizer, the
+        # Horizon closer's critics + revision, claim-check, rubric — recorded in
+        # _RUN_USAGE via _dispatch_one + the wrapped providers.
+        run_cost = pricing.summarize(_RUN_USAGE.get(sid, []),
+                                     elapsed_seconds=time.monotonic() - _run_started)
+        _progress(sid, "cost", _cost_message(run_cost), cost=run_cost)
+    except Exception as e:  # noqa: BLE001 — cost is best-effort, never blocks the result
+        log.warning("Basna cost summary failed", error=str(e))
+    finally:
+        _RUN_USAGE.pop(sid, None)
     _phase(sid, "Done")
     _progress(sid, "done", f"Done · {len(results)} agent(s), {len(learned)} learned")
     _progress_done(sid)
@@ -2393,6 +2974,7 @@ async def execute_route(
                     "success": scores.get(r["archetype_id"])} for i, r in enumerate(results)],
         "learned": learned,
         "spawned": len(spawned), "dispatched": len(results),
+        "cost": run_cost,
     }
 
 
@@ -2585,10 +3167,14 @@ def _closer_on_event(sid: str, label: str, stage_name: str = "merge"):
             _progress(sid, stage_name, f"{label}: verifying with {e.get('total')} critic(s)…",
                       agent=label)
         elif st == "critic":
-            mark = "refuted" if e.get("refuted") else "held"
-            _progress(sid, stage_name,
-                      f"{label}: critic {int(e.get('index', 0)) + 1}/{e.get('total')} "
-                      f"({e.get('mode', '')}) {mark}", agent=label)
+            refuted = bool(e.get("refuted"))
+            msg = (f"{label}: critic {int(e.get('index', 0)) + 1}/{e.get('total')} "
+                   f"({e.get('mode', '')}) {'refuted' if refuted else 'held'}")
+            reason = str(e.get("reason") or "").strip()
+            # Surface WHY a critic refuted (the substance), not just the verdict.
+            if refuted and reason:
+                msg += f" — {reason[:220]}"
+            _progress(sid, stage_name, msg, agent=label)
         elif st == "verify":
             _progress(sid, stage_name, f"{label}: {e.get('survived')}/{e.get('total')} critics held",
                       agent=label)
@@ -2596,7 +3182,13 @@ def _closer_on_event(sid: str, label: str, stage_name: str = "merge"):
             ph = "revising" if e.get("phase") == "revise" else "verifying"
             _progress(sid, stage_name, f"{label}: still {ph}… ({e.get('elapsed')}s)", agent=label)
         elif st == "revise":
-            _progress(sid, stage_name, f"{label}: revising…", agent=label)
+            _progress(sid, stage_name, f"{label}: revised the answer", agent=label)
+            # Emit the revised OUTPUT as a narration line so the deep pass's result
+            # is visible, not just the fact that it ran.
+            prev = str(e.get("preview") or "").strip()
+            if prev:
+                _progress(sid, "narration", f"{label} (revised): {prev}…",
+                          agent=label, tool="narration", detail=prev)
         elif st == "revise_rejected":
             _progress(sid, stage_name, f"{label}: kept original (revision was unusable)",
                       agent=label, ok=False)

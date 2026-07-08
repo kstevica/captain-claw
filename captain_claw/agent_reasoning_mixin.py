@@ -2,11 +2,29 @@
 
 from datetime import UTC, datetime
 import json
+import os
 import re
 from typing import Any
 
 from captain_claw.config import get_config
 from captain_claw.llm import Message
+
+
+# An agent spawned by one of the Flight Deck multi-agent modes stamps a marker in
+# its environment. In those modes the orchestrator already frames each agent's
+# task (role + Lead brief / router `why` + shared contract, at reason tier, once),
+# so the agent's own generic task-rephrase is redundant overhead + a scope-drift
+# risk — we skip it for these workers.
+_FD_WORKER_MARKERS = (
+    "CLAW_BASNA_WORKER", "CLAW_VATRA_WORKER", "CLAW_COUNCIL_WORKER", "CLAW_CODE_AGENT",
+)
+
+
+def _is_fd_spawned_worker() -> bool:
+    return any(
+        str(os.environ.get(m, "")).strip().lower() in ("1", "true", "yes")
+        for m in _FD_WORKER_MARKERS
+    )
 
 
 class AgentReasoningMixin:
@@ -1122,6 +1140,13 @@ class AgentReasoningMixin:
 
         cfg = get_config().scale
         if not cfg.task_rephrase_enabled:
+            return False
+
+        # Flight Deck workers (Basna/Vatra/Council/Code) get their task pre-framed
+        # by the orchestrator, so a per-agent self-rephrase just re-does that job —
+        # worse (weaker model), N times over, and risks drifting from the Lead's
+        # scoped brief. Skip it for these; standalone agents still rephrase.
+        if _is_fd_spawned_worker():
             return False
 
         # Too short — rephrasing adds latency for no benefit.

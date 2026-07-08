@@ -8,6 +8,8 @@ import {
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useCodeStore } from '../stores/codeStore'
+import { QualityControls } from '../components/QualityControls'
+import { CostCard, deriveCost } from '../components/CostCard'
 import { useVFSStore } from '../stores/vfsStore'
 import { useAuthStore } from '../stores/authStore'
 
@@ -48,8 +50,10 @@ export function CodePage() {
     loadProjects, createProject, addFolder, linkFolder, createSession, deleteSession,
     setSessionFolder, selectSession, send, approvePlan, cancelPlan, showCommit, rollback, exportProcess,
     loadMap, searchMap, buildMap, stopRun, cleanupAgents,
+    quality, qualitySaving, saveQuality, followup,
   } = useCodeStore()
   const browseFs = useVFSStore((s) => s.browseFs)
+  const codeCost = deriveCost(progress)  // run cost from the terminal `cost` event
 
   const [tab, setTab] = useState<'chat' | 'map'>('chat')
   const [map, setMap] = useState<import('../stores/codeStore').CodeMap | null>(null)
@@ -494,6 +498,8 @@ export function CodePage() {
                   </div>
                 </div>
               )}
+              {/* Run cost — dollars + effective $/hour vs a human wage. */}
+              {codeCost && <div className="mb-4"><CostCard cost={codeCost} /></div>}
               <div ref={chatEnd} />
             </div>
 
@@ -520,6 +526,25 @@ export function CodePage() {
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
                 onDragLeave={(e) => { e.preventDefault(); setDragOver(false) }}
                 onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files) }}>
+                {/* Quality levers + one-click follow-ups (C6) */}
+                <div className="mb-2 space-y-2">
+                  <QualityControls scope="code" value={quality} onChange={saveQuality} saving={qualitySaving} />
+                  {commits.length > 0 && status !== 'running' && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Follow-up</span>
+                      {([
+                        { kind: 'harden', label: 'Harden', title: 'Security-hardening pass (debugger)' },
+                        { kind: 'cover', label: 'Add tests', title: 'Improve test coverage (qa-engineer)' },
+                        { kind: 'simplify', label: 'Simplify', title: 'Refactor & simplify, no behaviour change (simplifier)' },
+                      ]).map((f) => (
+                        <button key={f.kind} onClick={() => followup(f.kind)} title={f.title}
+                          className="rounded-md border border-zinc-700 bg-zinc-900/50 px-2 py-1 text-[11px] text-zinc-300 hover:border-zinc-600 hover:text-zinc-100">
+                          {f.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 {attachments.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-1.5">
                     {attachments.map((a) => (

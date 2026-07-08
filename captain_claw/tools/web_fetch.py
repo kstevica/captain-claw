@@ -1,8 +1,11 @@
 """Web fetch tools for retrieving web page content."""
 
 import asyncio
+import hashlib
+import os
 import re
 import shutil
+import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -14,6 +17,60 @@ from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
+
+
+# ── R10: source corpus ───────────────────────────────────────────────
+# When a research run opts into the source corpus (env CLAW_SOURCE_CORPUS set at
+# spawn), a primary fetch saves the FULL page text into the run's shared VFS
+# folder (sources/) — which the Research Map then indexes — and returns only a
+# head + a pointer. That gives depth (nothing is lost to truncation; the reporter
+# and the claim-checker can page-read every source) WITHOUT blowing up any one
+# worker's context. Off by default → identical to today's behaviour.
+
+def _corpus_enabled() -> bool:
+    return str(os.environ.get("CLAW_SOURCE_CORPUS", "")).strip().lower() in ("1", "true", "yes")
+
+
+def _slugify_url(url: str) -> str:
+    s = re.sub(r"^https?://", "", url or "")
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", s).strip("-")
+    return s[:80] or "page"
+
+
+def _save_source_to_corpus(url: str, content: str) -> str | None:
+    """Save full fetched text to ``vfs:<project>/sources/`` for the whole run to
+    reuse. Returns the ``vfs:`` pointer saved, or ``None`` if disabled / on error."""
+    if not _corpus_enabled() or not (content or "").strip():
+        return None
+    try:
+        from captain_claw import vfs
+        root = vfs.project_root(create=True)
+        sources = root / "sources"
+        sources.mkdir(parents=True, exist_ok=True)
+        h = hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:8]
+        name = f"{_slugify_url(url)}-{h}.md"
+        header = f"# Source: {url}\n\n<!-- fetched {int(time.time())} · {len(content)} chars -->\n\n"
+        (sources / name).write_text(header + content, encoding="utf-8")
+        return f"vfs:{vfs.default_project()}/sources/{name}"
+    except Exception as e:  # noqa: BLE001 — corpus is best-effort, never break a fetch
+        log.warning("web_fetch corpus save failed", url=url, error=str(e))
+        return None
+
+
+_CORPUS_HEAD_CHARS = 8000  # how much of a corpus-saved page to inline as a preview
+
+
+def _corpus_output(url: str, status_code: int, mode: str, raw_len: int,
+                   content: str, saved: str) -> str:
+    """Build the head+pointer response for a corpus-saved fetch."""
+    head = content[:_CORPUS_HEAD_CHARS]
+    out = (f"[URL: {url}]\n[Status: {status_code}]\n[Mode: {mode}]\n"
+           f"[Size: {raw_len} chars · {len(content)} text chars]\n"
+           f"[Full text saved to {saved} — search it with the `researchmap` tool "
+           f"or read the file for anything past the preview below]\n\n{head}")
+    if len(content) > _CORPUS_HEAD_CHARS:
+        out += f"\n\n... [preview only — the full {len(content)} chars are in {saved}]"
+    return out
 
 # ── Optional Playwright dependency ───────────────────────────────────
 
@@ -337,6 +394,14 @@ class WebFetchTool(Tool):
                 mode = "text"
 
             content = _extract_readable_text(raw_html, base_url=url)
+
+            # R10: in a corpus run, save the FULL text and return a head + pointer.
+            saved = _save_source_to_corpus(url, content)
+            if saved:
+                return ToolResult(
+                    success=True,
+                    content=_corpus_output(url, status_code, mode, len(raw_html), content, saved),
+                )
 
             if len(content) > effective_max_chars:
                 content = content[:effective_max_chars] + "\n... [truncated]"

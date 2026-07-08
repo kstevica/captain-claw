@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { useAuthStore, refreshAccessToken } from './authStore'
 import type { TierMap, EnvVar } from '../services/tierConfig'
+import { defaultProfile, fromResponse, toRequest } from '../services/quality'
+import type { QualityProfile } from '../services/quality'
 
 // ── Types (mirror captain_claw/flight_deck/basna_routes.py) ──────────
 
@@ -95,6 +97,7 @@ export interface RoutePlan {
   mode?: 'basna' | 'vatra'
   subtasks?: VatraSubtask[]
   shared_context?: string   // the team contract every piece must follow
+  brief?: string            // R12: the clarified, editable task brief the team was routed on
 }
 
 export async function apiListVatraAsks(sessionId: string): Promise<VatraAsk[]> {
@@ -166,6 +169,7 @@ export interface ExecuteResult {
   learned: { archetype_id: string; run_id: number; success: boolean; weight: number }[]
   spawned: number
   dispatched: number
+  cost?: RunCost | null
 }
 
 export interface ProgressEvent {
@@ -179,10 +183,32 @@ export interface ProgressEvent {
   agent?: string  // role/name of the agent this event belongs to
   tool?: string   // tool name on action/narration events
   detail?: string // tool-arg summary on action/narration events
+  group?: string  // Vatra grouped mode: this owner's execution-phase letter (A..D)
   // Live cumulative token counts on `usage` events.
   prompt_tokens?: number
   completion_tokens?: number
   total_tokens?: number
+  // Run cost block on the terminal `cost` event (and on the execute response).
+  cost?: RunCost
+}
+
+// Per-run cost accounting — tokens (incl. cache split), dollar cost, and the
+// effective $/hour that compares directly to a human wage. `usd`/`hourly_usd`
+// are null when no priced model was used (tokens still count).
+export interface RunCost {
+  tokens: {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+    cache_creation_input_tokens: number
+    cache_read_input_tokens: number
+  }
+  usd: number | null
+  priced: boolean
+  per_model: Record<string, { usd: number; prompt_tokens: number; completion_tokens: number; cache_read_input_tokens: number; priced: boolean; calls: number }>
+  elapsed_seconds: number | null   // real wall-clock time of the run
+  agent_seconds: number | null     // Σ of every model call's duration (> wall-clock when parallel)
+  hourly_usd: number | null
 }
 
 // ── API helpers ──────────────────────────────────────────────────────
@@ -388,6 +414,30 @@ export function parseAnalysis(s?: string): BasnaAnalysis | null {
 
 const _ROUTER_TIER_LS = 'basna.routerTier'
 const _DEEP_LS = 'basna.deep'
+const _QUALITY_LS = 'basna.quality'
+const _MAX_PARALLEL_LS = 'basna.maxParallel'
+const _EXEC_GROUPS_LS = 'basna.executionGroups'
+
+function _loadMaxParallel(): number {
+  try {
+    const raw = typeof localStorage !== 'undefined' && localStorage.getItem(_MAX_PARALLEL_LS)
+    const n = raw ? Number(raw) : NaN
+    return Number.isFinite(n) && n >= 0 && n <= 16 ? n : 0
+  } catch { return 0 }
+}
+
+function _loadExecGroups(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(_EXEC_GROUPS_LS) === '1'
+  } catch { return false }
+}
+
+function _loadQuality(): QualityProfile {
+  try {
+    const raw = typeof localStorage !== 'undefined' && localStorage.getItem(_QUALITY_LS)
+    return raw ? fromResponse(JSON.parse(raw)) : defaultProfile()
+  } catch { return defaultProfile() }
+}
 
 // ── Store ────────────────────────────────────────────────────────────
 
@@ -409,15 +459,21 @@ interface BasnaStore {
 
   routerTier: string   // which Library tier selects the archetypes (the router)
   maxAgents: number
+  maxParallel: number  // cap on concurrent agent turns (0 = unlimited; mainly for local models)
+  executionGroups: boolean  // Vatra: run owners in ordered phases A→B→C→D (opt-in)
   deep: boolean        // Deep / Horizon mode: each worker runs the self-consistency
   deepSamples: number  // vote + critics + fix loop (frontier-grade depth) instead of one shot
   planMode: boolean    // Plan-Horizon (Lever C): decompose → verify each step → re-plan
   planSteps: number    // max steps in the plan
   planComplex: boolean // simple = one model per step; complex = a full Basna/Vatra per step
   planDag: boolean     // planner emits a DAG; independent steps run in parallel waves
+  quality: QualityProfile  // opt-in cross-pollination levers (all-off == current behaviour)
 
   setRouterTier: (t: string) => void
+  setQuality: (q: QualityProfile) => void
   setMaxAgents: (n: number) => void
+  setMaxParallel: (n: number) => void
+  setExecutionGroups: (v: boolean) => void
   setDeep: (v: boolean) => void
   setDeepSamples: (n: number) => void
   setPlanMode: (v: boolean) => void
@@ -435,8 +491,8 @@ interface BasnaStore {
   selectSession: (id: string) => Promise<void>
   newSession: () => void
   updateSelected: (index: number, patch: Partial<RouteSelected>) => void
-  route: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[]) => Promise<void>
-  planVatra: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[]) => Promise<void>
+  route: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
+  planVatra: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   runVatra: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   fillGaps: (id: string) => Promise<void>
   saveTitle: (title: string) => Promise<void>
@@ -467,18 +523,34 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
 
   routerTier: (typeof localStorage !== 'undefined' && localStorage.getItem(_ROUTER_TIER_LS)) || 'reason',
   maxAgents: 6,
+  maxParallel: _loadMaxParallel(),
+  executionGroups: _loadExecGroups(),
   deep: (typeof localStorage !== 'undefined' && localStorage.getItem(_DEEP_LS) === '1') || false,
   deepSamples: 3,
   planMode: false,
   planSteps: 5,
   planComplex: false,
   planDag: false,
+  quality: _loadQuality(),
 
   setRouterTier: (t) => {
     try { localStorage.setItem(_ROUTER_TIER_LS, t) } catch { /* ignore */ }
     set({ routerTier: t })
   },
+  setQuality: (q) => {
+    try { localStorage.setItem(_QUALITY_LS, JSON.stringify(q)) } catch { /* ignore */ }
+    set({ quality: q })
+  },
   setMaxAgents: (n) => set({ maxAgents: Math.max(1, Math.min(10, n)) }),
+  setMaxParallel: (n) => {
+    const v = Math.max(0, Math.min(16, Math.floor(Number.isFinite(n) ? n : 0)))
+    try { localStorage.setItem(_MAX_PARALLEL_LS, String(v)) } catch { /* ignore */ }
+    set({ maxParallel: v })
+  },
+  setExecutionGroups: (v) => {
+    try { localStorage.setItem(_EXEC_GROUPS_LS, v ? '1' : '0') } catch { /* ignore */ }
+    set({ executionGroups: v })
+  },
   setDeep: (v) => {
     try { localStorage.setItem(_DEEP_LS, v ? '1' : '0') } catch { /* ignore */ }
     set({ deep: v, ...(v ? { planMode: false } : {}) })  // Deep and Plan are distinct run paths
@@ -557,7 +629,27 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         set({ activeSession: fresh, routePlan: parseRoute(fresh.route),
               runs: await apiListRuns(fresh.id).catch(() => []),
               attachments: parseFiles(fresh.files) })
-        if (fresh.status === 'done') set({ progress: parseProgress(fresh.progress) })
+        if (fresh.status === 'done' || fresh.status === 'error') {
+          set({ progress: parseProgress(fresh.progress) })
+          // The terminal `cost` event is persisted a beat AFTER status flips to done
+          // (post-completion learning + cost summary), and this run-monitor interval
+          // tears down once nothing is running — so self-schedule a few re-fetches
+          // until the cost event lands, or the cost card never appears without a reopen.
+          if (!parseProgress(fresh.progress).some((e) => e.stage === 'cost')) {
+            let tries = 0
+            const grabCost = async () => {
+              tries += 1
+              const s2 = await apiGetSession(a.id).catch(() => null)
+              const evs = s2 ? parseProgress(s2.progress) : []
+              if (evs.some((e) => e.stage === 'cost')) {
+                set((st) => (st.activeSession?.id === a.id ? { progress: evs } : {}))
+              } else if (tries < 6) {
+                setTimeout(grabCost, 3000)
+              }
+            }
+            setTimeout(grabCost, 2500)
+          }
+        }
       }
     }
   },
@@ -579,7 +671,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     set({ routePlan: { ...plan, selected } })
   },
 
-  route: async (intent, tiers, title = '', archetypeIds = []) => {
+  route: async (intent, tiers, title = '', archetypeIds = [], brief = '') => {
     set({ routing: true, error: null })
     try {
       const sid = get().activeSession?.id
@@ -593,6 +685,9 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         max_agents: get().maxAgents,
         ...(title.trim() ? { title: title.trim() } : {}),
         ...(archetypeIds.length ? { archetype_ids: archetypeIds } : {}),
+        // R12: opt-in intent brief. A user-edited brief re-routes the team on it.
+        quality: toRequest(get().quality),
+        ...(brief.trim() ? { brief } : {}),
         ...creds,
         ...(sid ? { session_id: sid } : {}),
       })
@@ -609,7 +704,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   // Vatra prepare step (mirrors Basna's Route): the Lead decomposes the task into
   // owned pieces, persisted as a routed session — nothing is spawned yet. The team
   // plan then shows in the collaboration panel for review before Run.
-  planVatra: async (intent, tiers, title = '', archetypeIds = []) => {
+  planVatra: async (intent, tiers, title = '', archetypeIds = [], brief = '') => {
     if (!intent.trim()) return
     set({ planning: true, error: null })
     try {
@@ -618,7 +713,19 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         router_tier: get().routerTier,
         ...(title.trim() ? { title: title.trim() } : {}),
         ...(archetypeIds.length ? { archetype_ids: archetypeIds } : {}),
+        // R12: opt-in intent brief. A user-edited brief re-plans the team on it.
+        quality: toRequest(get().quality),
+        ...(brief.trim() ? { brief } : {}),
       })
+      // Persist pending attachments onto the freshly-created session BEFORE
+      // selectSession reloads its files — otherwise Plan drops them (the new session
+      // has none yet) and the run never sees the attachments. The run reads the
+      // session's files for upload + VFS save + the file-aware brief.
+      const pending = get().attachments.filter((a) => !a.uploaded && a.file)
+      if (pending.length) {
+        try { await apiUploadFiles(session_id, pending.map((a) => a.file as File)) }
+        catch (e) { set({ error: e instanceof Error ? e.message : 'file upload failed' }) }
+      }
       await get().loadSessions()
       await get().selectSession(session_id)
     } catch (e) {
@@ -634,12 +741,24 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     const sid = get().activeSession?.id
     if (!sid) return
     set({ error: null })
+    // Upload any attachments not yet on the server before the run — Basna's execute
+    // does this; Vatra must too, or the run never sees the attached files.
+    const pending = get().attachments.filter((a) => !a.uploaded && a.file)
+    if (pending.length) {
+      try {
+        const res = await apiUploadFiles(sid, pending.map((a) => a.file as File))
+        set({ attachments: (res.files || []).map((f) => ({ ...f, uploaded: true })) })
+      } catch (e) {
+        set({ error: e instanceof Error ? e.message : 'file upload failed' })
+        return
+      }
+    }
     try {
       const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
       // Deep mode in Vatra = Horizon depth: verify + revise EACH specialist's slice
       // (worker, blackboard-safe — no spawn pools) AND the final assembled deliverable.
       const horizon = get().deep ? { worker: true, close: true } : undefined
-      await apiVatraExecute({ session_id: sid, tiers, env_vars, ...(horizon ? { horizon } : {}) })
+      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, execution_groups: get().executionGroups, ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       if (s) set({ activeSession: s })
       await get().loadSessions()
@@ -713,7 +832,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // Deep / Horizon mode: drive each worker through the self-consistency vote +
       // critics + fix loop, then verify-and-revise the merged answer (the closer).
       const horizon = get().deep ? { samples: get().deepSamples, close: true } : undefined
-      const res = await apiExecute({ session_id: sid, tiers, env_vars, ...(horizon ? { horizon } : {}) })
+      const res = await apiExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       const runs = await apiListRuns(sid)
       // Refresh attachments from the updated session so files the agents

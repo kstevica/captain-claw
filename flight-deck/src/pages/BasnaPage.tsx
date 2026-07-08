@@ -9,6 +9,8 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis } from '../stores/basnaStore'
 import { VatraTeamPlan, VatraBlackboard } from '../components/VatraDelegation'
+import { QualityControls } from '../components/QualityControls'
+import { CostCard, deriveCost } from '../components/CostCard'
 import { useTierConfig, TIER_ORDER, PROVIDERS } from '../services/tierConfig'
 
 const HELP_MD = `
@@ -136,6 +138,56 @@ function Badge({ children, className = '' }: { children: React.ReactNode; classN
     <span className={`rounded-full border border-zinc-700/60 bg-zinc-800/60 px-2 py-0.5 text-[11px] font-medium ${className}`}>
       {children}
     </span>
+  )
+}
+
+/**
+ * R12 intent brief: the clarified, editable task the team was routed on. Editing
+ * it and re-routing re-selects the team against the new brief. The original
+ * request always governs — this is a faithful clarification, never a rewrite of
+ * the goal. Shown only when the intent_brief lever produced a brief.
+ */
+function BriefEditor({ brief, busy, onReroute }: {
+  brief: string; busy: boolean; onReroute: (edited: string) => void
+}) {
+  const [draft, setDraft] = useState(brief)
+  const [open, setOpen] = useState(true)
+  useEffect(() => { setDraft(brief) }, [brief])
+  const changed = draft.trim() !== brief.trim()
+  return (
+    <div className="rounded-lg border border-amber-300/70 bg-amber-50/70 p-4 dark:border-amber-700/40 dark:bg-amber-900/10">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <Sparkles className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+        <span className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Task brief</span>
+        <span className="text-[11px] text-zinc-500">the team was selected from this — edit &amp; re-route to re-pick it</span>
+        <button onClick={() => setOpen((o) => !o)} className="ml-auto text-[11px] text-zinc-500 hover:text-zinc-300">
+          {open ? 'Hide' : 'Show'}
+        </button>
+      </div>
+      {open && (
+        <>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={Math.min(18, Math.max(6, draft.split('\n').length + 1))}
+            spellCheck={false}
+            className="w-full resize-y rounded-md border border-zinc-300 bg-white/70 p-2.5 font-mono text-[11px] leading-relaxed text-zinc-800 focus:border-amber-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950/60 dark:text-zinc-200"
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => onReroute(draft)}
+              disabled={busy || !draft.trim()}
+              className="flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-40"
+            >
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              Re-route on this brief
+            </button>
+            {changed && <span className="text-[11px] text-amber-600 dark:text-amber-400">edited — re-route to apply</span>}
+            <span className="ml-auto text-[10px] text-zinc-500">the original request always governs on conflict</span>
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 
@@ -493,16 +545,12 @@ function fmtTok(n?: number): string {
   return String(n)
 }
 
-interface LiveAgent { role: string; actions: ProgressEvent[]; usage?: ProgressEvent; done?: boolean; ok?: boolean }
+interface LiveAgent { role: string; actions: ProgressEvent[]; usage?: ProgressEvent; done?: boolean; ok?: boolean; group?: string }
 
-// Live per-agent panels built from the streaming progress events while the run
-// is in flight — each agent's tool calls and running LLM token usage, before the
-// final persisted runs (with output + feedback) take over at the end.
-function LiveAgentsPanel({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: string) => void }) {
+// One live agent card — its status, running token usage, and streaming activity.
+function LiveAgentCard({ a, onSkip }: { a: LiveAgent; onSkip?: (role: string) => void }) {
   return (
-    <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
-      {agents.map((a) => (
-        <div key={a.role} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
               {a.done
@@ -545,7 +593,47 @@ function LiveAgentsPanel({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (ro
             {a.actions.length === 0 && <div className="text-[11px] text-zinc-600">working…</div>}
           </div>
         </div>
-      ))}
+  )
+}
+
+// A responsive grid of live agent cards.
+function LiveAgentGrid({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: string) => void }) {
+  return (
+    <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+      {agents.map((a) => <LiveAgentCard key={a.role} a={a} onSkip={onSkip} />)}
+    </div>
+  )
+}
+
+// Live per-agent panels built from the streaming progress events while the run is
+// in flight. In Vatra grouped mode (owners carry an execution-phase letter) the
+// cards are sectioned by phase A→B→C→D so the pipeline is visible as it advances;
+// otherwise a flat grid — today's layout, unchanged.
+function LiveAgentsPanel({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: string) => void }) {
+  const letters = useMemo(
+    () => [...new Set(agents.map((a) => a.group).filter(Boolean) as string[])].sort(),
+    [agents],
+  )
+  if (letters.length === 0) return <LiveAgentGrid agents={agents} onSkip={onSkip} />
+  return (
+    <div className="space-y-3">
+      {letters.map((letter) => {
+        const inGroup = agents.filter((a) => a.group === letter)
+        const working = inGroup.some((a) => !a.done)
+        return (
+          <div key={letter}>
+            <div className="mb-1.5 flex items-center gap-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded bg-sky-500/15 text-[11px] font-bold text-sky-300">{letter}</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Group {letter}</span>
+              <span className="text-[10px] text-zinc-600">{inGroup.length} agent(s)</span>
+              {working
+                ? <Loader2 className="h-3 w-3 animate-spin text-sky-400" />
+                : <Check className="h-3 w-3 text-emerald-500" />}
+            </div>
+            <LiveAgentGrid agents={inGroup} onSkip={onSkip} />
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -554,7 +642,7 @@ export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, addFiles, removeFile, downloadFile, fetchFileText,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
     updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
@@ -671,6 +759,9 @@ export function BasnaPage() {
   const truth = lastExecute?.truth ?? activeSession?.truth ?? ''
   const confidence = lastExecute?.confidence ?? activeSession?.confidence ?? 0
   const analysis = lastExecute?.analysis ?? parseAnalysis(activeSession?.analysis)
+  // Run cost (tokens + $ + $/hour): from the terminal `cost` progress event, or
+  // the execute response. Shown once a run has finished.
+  const runCost = useMemo(() => deriveCost(progress, lastExecute?.cost), [progress, lastExecute])
   // Subject for download filenames: the run's title, else the first words of the
   // task — so analysis/truth export as "<subject>-analysis.md" / "…-compiled-truth.md".
   const subject = (activeSession?.title || '').trim()
@@ -687,6 +778,7 @@ export function BasnaPage() {
       if (!ev.agent) continue
       let a = byRole.get(ev.agent)
       if (!a) { a = { role: ev.agent, actions: [] }; byRole.set(ev.agent, a); order.push(ev.agent) }
+      if (ev.group) a.group = ev.group  // Vatra grouped mode: the owner's phase letter
       // Any fresh activity after a dispatch (e.g. the Vatra review round) flips the
       // card back to "working" so the spinner returns; the next dispatch marks done.
       if (ev.stage === 'usage') { a.usage = ev; a.done = false }
@@ -1013,6 +1105,9 @@ export function BasnaPage() {
                   )}
                 </div>
 
+                {/* Quality levers (opt-in cross-pollination) */}
+                <QualityControls scope="research" value={quality} onChange={setQuality} />
+
                 {/* Tuning (router tier + team size) */}
                 {tuning && (
                   <div className="flex flex-wrap items-center gap-5 rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2 text-xs">
@@ -1040,6 +1135,28 @@ export function BasnaPage() {
                         className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none disabled:opacity-40"
                       />
                     </label>
+                    <label className="flex items-center gap-2 text-zinc-400">
+                      Max parallel
+                      <input
+                        type="number" min={0} max={16} value={maxParallel}
+                        onChange={(e) => setMaxParallel(Number(e.target.value))}
+                        title="How many agents run their turn at once. 0 = all at once. Lower it (e.g. 2) for local models to avoid running the serving box out of memory."
+                        className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
+                      />
+                    </label>
+                    {effectiveMode === 'vatra' && (
+                      <label
+                        className="flex cursor-pointer items-center gap-1.5 text-zinc-400"
+                        title="Run owners in ordered phases A→B→C→D (research/design first, review/assembly last) with a barrier between groups, instead of all at once. Opt-in."
+                      >
+                        <input
+                          type="checkbox" checked={executionGroups}
+                          onChange={(e) => setExecutionGroups(e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-950/60 accent-violet-600"
+                        />
+                        Grouped
+                      </label>
+                    )}
                   </div>
                 )}
 
@@ -1159,6 +1276,17 @@ export function BasnaPage() {
                 </div>
               )}
             </div>
+
+            {/* R12 intent brief — editable, above both the Basna route plan and the
+                Vatra team plan. Re-routing on an edited brief re-selects the team. */}
+            {routePlan?.brief && (
+              <BriefEditor
+                brief={routePlan.brief}
+                busy={routing || planning}
+                onReroute={(edited) =>
+                  (effectiveMode === 'vatra' ? planVatra : route)(intent, tiers, title, team, edited)}
+              />
+            )}
 
             {/* Route plan (Basna only — Vatra uses the collaboration panel below) */}
             {routePlan && !vatraMode && (
@@ -1333,6 +1461,9 @@ export function BasnaPage() {
                 active={activeBusy || executing}
               />
             )}
+
+            {/* Run cost — dollars + effective $/hour vs a human wage. */}
+            {runCost && <CostCard cost={runCost} />}
 
             {/* Live progress log */}
             {(executing || progress.length > 0) && (
