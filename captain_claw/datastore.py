@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
 import xml.etree.ElementTree as ET
 import zipfile
@@ -232,6 +233,7 @@ class DatastoreManager:
 
     async def create_table(
         self, name: str, columns: list[dict[str, str]],
+        unique: list[str] | None = None,
     ) -> TableInfo:
         await self._ensure_db()
         assert self._db is not None
@@ -275,6 +277,19 @@ class DatastoreManager:
             seen.add(col_name)
             col_defs.append(f'"{col_name}" {TYPE_MAP[col_type]}')
             col_objects.append(ColumnDef(name=col_name, col_type=col_type, position=i))
+
+        # Optional UNIQUE key — the conflict target for upsert (idempotent writes,
+        # so a resumed run updates a row instead of duplicating it).
+        uniq_cols: list[str] = []
+        if unique:
+            for u in unique:
+                us = self._safe_name(u)
+                if us not in seen:
+                    raise ValueError(f"unique column '{u}' is not one of the table's columns")
+                if us not in uniq_cols:
+                    uniq_cols.append(us)
+        if uniq_cols:
+            col_defs.append("UNIQUE (" + ", ".join(f'"{u}"' for u in uniq_cols) + ")")
 
         now = self._now()
         await self._db.execute(f'CREATE TABLE "{internal}" ({", ".join(col_defs)})')
@@ -846,6 +861,93 @@ class DatastoreManager:
             )
             await self._db.commit()
         return inserted
+
+    async def _unique_columns(self, internal: str) -> list[str]:
+        """Columns of the table's UNIQUE index — the upsert conflict target, if any."""
+        assert self._db is not None
+        async with self._db.execute(f'PRAGMA index_list("{internal}")') as cur:
+            idx_rows = await cur.fetchall()
+        for idx in idx_rows:
+            # index_list row: (seq, name, unique, origin, partial)
+            name, is_unique = idx[1], idx[2]
+            origin = idx[3] if len(idx) > 3 else ""
+            if not is_unique or origin == "pk":
+                continue
+            async with self._db.execute(f'PRAGMA index_info("{name}")') as cur2:
+                info = await cur2.fetchall()
+            cols = [r[2] for r in info if r[2] and not str(r[2]).startswith("_")]
+            if cols:
+                return cols
+        return []
+
+    async def upsert_rows(
+        self, table_name: str, rows: list[dict[str, Any]],
+        key_columns: list[str] | None = None,
+    ) -> int:
+        """Insert rows, but UPDATE an existing row on the table's UNIQUE key instead
+        of duplicating it (idempotent — a resumed run re-running the same items just
+        refreshes them). Needs a unique key: create the table with unique=[...], or
+        pass key_columns. Returns the number of rows written."""
+        safe, internal = await self._resolve_table(table_name)
+        assert self._db is not None
+        await self._check_table_protected(safe)
+        cfg = get_config()
+        if not rows:
+            return 0
+
+        columns = await self._table_columns(safe)
+        col_names = {c.name for c in columns}
+
+        keys = [self._safe_name(k) for k in (key_columns or [])]
+        keys = [k for k in keys if k in col_names]
+        if not keys:
+            keys = await self._unique_columns(internal)
+        if not keys:
+            raise ValueError(
+                "upsert needs a unique key — create the table with a unique key "
+                "(create_table with unique=[\"<col>\"]) or pass key_columns.")
+
+        # Worst-case (all inserts) row-limit guard.
+        current_count = await self._row_count(internal)
+        if current_count + len(rows) > cfg.datastore.max_rows_per_table:
+            raise ValueError(
+                f"Would exceed row limit ({cfg.datastore.max_rows_per_table}). "
+                f"Current: {current_count}, upserting: {len(rows)}")
+
+        written = 0
+        for i, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"Row {i} must be a JSON object mapping column names to values, "
+                    f"got {type(row).__name__}: {row!r}")
+            filtered = {self._safe_name(k): v for k, v in row.items() if self._safe_name(k) in col_names}
+            if not filtered:
+                continue
+            for k in keys:
+                if k not in filtered:
+                    raise ValueError(f"upsert row {i} is missing key column '{k}'")
+            col_list = list(filtered.keys())
+            placeholders = ", ".join("?" for _ in col_list)
+            col_clause = ", ".join(f'"{c}"' for c in col_list)
+            conflict = ", ".join(f'"{k}"' for k in keys)
+            update_cols = [c for c in col_list if c not in keys]
+            if update_cols:
+                set_clause = ", ".join(f'"{c}" = excluded."{c}"' for c in update_cols)
+                do = f"DO UPDATE SET {set_clause}"
+            else:
+                do = "DO NOTHING"
+            await self._db.execute(
+                f'INSERT INTO "{internal}" ({col_clause}) VALUES ({placeholders}) '
+                f'ON CONFLICT ({conflict}) {do}',
+                list(filtered.values()))
+            written += 1
+
+        if written:
+            await self._db.execute(
+                "UPDATE _ds_tables SET updated_at = ? WHERE name = ?",
+                (self._now(), safe))
+            await self._db.commit()
+        return written
 
     async def update_rows(
         self, table_name: str,
@@ -1744,7 +1846,7 @@ def get_datastore_manager() -> DatastoreManager:
     return _manager
 
 
-def get_vfs_datastore_manager(project: str) -> DatastoreManager:
+def get_vfs_datastore_manager(project: str, *, create: bool = True) -> DatastoreManager | None:
     """Return a datastore manager whose DB lives INSIDE a shared VFS project
     folder (``vfs:<project>/.datastore/store.db``).
 
@@ -1752,6 +1854,10 @@ def get_vfs_datastore_manager(project: str) -> DatastoreManager:
     with the shared-datastore option on) resolves to the SAME relational store,
     so they can collaborate through tables instead of each keeping a private DB.
     Cached per project. Falls back to the global store if ``project`` is empty.
+
+    ``create=False`` is for READ-ONLY access to ANOTHER run's datastore (a
+    reference/prior-knowledge folder): it returns ``None`` when that folder has
+    no datastore, instead of creating an empty one.
     """
     key = (project or "").strip()
     if not key:
@@ -1759,7 +1865,9 @@ def get_vfs_datastore_manager(project: str) -> DatastoreManager:
     if key in _vfs_managers:
         return _vfs_managers[key]
     from captain_claw.vfs import project_root
-    db_path = project_root(key, create=True) / ".datastore" / "store.db"
+    db_path = project_root(key, create=create) / ".datastore" / "store.db"
+    if not create and not db_path.is_file():
+        return None
     mgr = DatastoreManager(db_path=db_path)
     _vfs_managers[key] = mgr
     return mgr
@@ -1770,6 +1878,20 @@ async def close_vfs_datastore_managers() -> None:
     for mgr in _vfs_managers.values():
         await mgr.close()
     _vfs_managers.clear()
+
+
+def resolve_datastore_manager(session_id: str | None = None) -> DatastoreManager:
+    """The datastore an agent's tools read/write: the shared VFS-folder store when
+    a run binds ``CLAW_DATASTORE_VFS``, else the public-computer per-session store,
+    else the global store. Used by BOTH the datastore tool and the completion-gate
+    verifier so they never disagree about which database a save landed in (a
+    mismatch made the verifier report false 'save didn't persist' failures)."""
+    vfs_project = os.environ.get("CLAW_DATASTORE_VFS", "").strip()
+    if vfs_project:
+        return get_vfs_datastore_manager(vfs_project)
+    if get_config().web.public_run == "computer" and session_id:
+        return get_session_datastore_manager(str(session_id))
+    return get_datastore_manager()
 
 
 def get_session_datastore_manager(session_id: str) -> DatastoreManager:

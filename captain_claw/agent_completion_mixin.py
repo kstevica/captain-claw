@@ -38,14 +38,12 @@ class AgentCompletionMixin:
         the expected data.  Returns a list of failed verifications,
         each with keys ``action``, ``table``, and ``reason``.
         """
-        from captain_claw.config import get_config
-        from captain_claw.datastore import get_datastore_manager, get_session_datastore_manager
+        from captain_claw.datastore import resolve_datastore_manager
 
-        cfg = get_config()
-        if cfg.web.public_run == "computer" and self.session:
-            dm = get_session_datastore_manager(str(self.session.id))
-        else:
-            dm = get_datastore_manager()
+        # Verify against the SAME store the tool wrote to — a shared VFS-folder run
+        # (CLAW_DATASTORE_VFS) writes there, not the global DB; using the wrong one
+        # made this gate report false "save didn't persist" and the agent thrashed.
+        dm = resolve_datastore_manager(str(self.session.id) if self.session else None)
         failures: list[dict[str, Any]] = []
 
         # Deduplicate: only verify the last save per table.
@@ -57,8 +55,8 @@ class AgentCompletionMixin:
             action = save["action"]
             try:
                 info = await dm.describe_table(table_name)
-                # For insert/import_file, the table must have rows.
-                if action in ("insert", "import_file") and info.row_count == 0:
+                # For insert/upsert/import_file, the table must have rows.
+                if action in ("insert", "upsert", "import_file") and info.row_count == 0:
                     failures.append({
                         "action": action,
                         "table": table_name,
@@ -345,6 +343,22 @@ class AgentCompletionMixin:
                         f"verified_tables={[s['table'] for s in ds_saves]}"
                     ),
                 )
+                # A verified BULK data write (insert/upsert/import) in "passthrough"
+                # list mode covers ALL members at once — mark them done so the list
+                # coverage gate below doesn't then block a worker that already saved
+                # its data (the create/drop thrash post-mortem). Per-item micro-loop
+                # modes mark their own done_items and are unaffected.
+                _sp = getattr(self, "_scale_progress", None)
+                _data_saved = any(
+                    s.get("action") in ("insert", "upsert", "import_file") for s in ds_saves)
+                if (
+                    _sp is not None and _data_saved and _sp.get("items")
+                    and str(_sp.get("_extraction_mode", "")).strip().lower() == "passthrough"
+                ):
+                    _sp["done_items"] = set(_sp.get("items", []))
+                    log.info(
+                        "Scale members marked done after verified bulk datastore save",
+                        members=len(_sp.get("items", [])))
 
         # ── Python worker enforcement ────────────────────────────────
         if enforce_python_worker_mode:
@@ -464,6 +478,20 @@ class AgentCompletionMixin:
                             member_count=len(members),
                         )
                         _skip_coverage = True
+
+                # When the agent saved rows to the datastore this turn (bulk
+                # insert/upsert/import), the evidence lives in the DB — not echoed
+                # member-by-member in the reply. The datastore_save_verification gate
+                # above already confirmed it persisted, so skip the member-text check
+                # (else a worker that bulk-saved gets blocked → the create/drop thrash).
+                if not _skip_coverage and any(
+                    s.get("action") in ("insert", "upsert", "import_file") for s in ds_saves
+                ):
+                    log.info(
+                        "Skipping list_member_coverage — datastore save persisted the members",
+                        member_count=len(members),
+                    )
+                    _skip_coverage = True
 
                 # When the edit tool successfully mutated files this turn,
                 # the work's evidence lives in the files on disk — never in

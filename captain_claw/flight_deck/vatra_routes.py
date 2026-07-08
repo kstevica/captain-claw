@@ -200,16 +200,44 @@ def _datastore_directive(project: str, enabled: bool) -> str:
         return ""
     return (
         "\n\n## Shared team datastore — USE IT FOR STRUCTURED DATA\n"
-        "This team shares ONE relational datastore, reachable via the `datastore` tool. "
-        "Every teammate reads and writes the SAME tables — it is the single source of "
-        "truth for structured/tabular data.\n"
-        "- Put records / rows / lists / results in the datastore, NOT in ad-hoc JSON "
-        "files or throwaway python scripts.\n"
-        "- Write: datastore(action=\"create_table\", table=\"…\", columns=[…]) then "
-        "datastore(action=\"insert\", table=\"…\", rows=[…]).\n"
-        "- Read teammates' data: datastore(action=\"list_tables\") and "
-        "datastore(action=\"query\", table=\"…\").\n"
+        "This team shares ONE relational datastore (the `datastore` tool). Every teammate "
+        "reads and writes the SAME tables — the single source of truth for structured data, "
+        "and the TRACK a later run continues from (this run may itself be continuing earlier work).\n"
+        "- BEFORE producing anything: `datastore(action=\"list_tables\")` and query the relevant "
+        "tables to see what earlier runs already did. Do ONLY the outstanding work — don't redo "
+        "rows that are already present and marked done.\n"
+        "- Put records / rows / lists / results in the datastore, NOT ad-hoc JSON files or scripts.\n"
+        "- Make writes IDEMPOTENT: create the table with a stable unique key + a `status` column "
+        "— `datastore(action=\"create_table\", table=\"…\", columns=[…], unique=[\"<id>\"])` — then "
+        "`datastore(action=\"upsert\", table=\"…\", rows=[…])` so re-running an item UPDATES its row "
+        "instead of duplicating it. Set each row's status (e.g. \"done\") so the next run can resume.\n"
+        "- Read teammates' data: `datastore(action=\"list_tables\")` and `datastore(action=\"query\", table=\"…\")`.\n"
+        f"- Ignore vfs:{project}/.history/ and vfs:{project}/.datastore/ — those are system folders "
+        "(backups + the raw DB); never read or write them directly.\n"
         f"Prose and reports still go to files under vfs:{project}/; structured data goes in the datastore."
+    )
+
+
+def _reference_directive(folders: list[str]) -> str:
+    """Tell agents about READ-ONLY reference VFS folders (prior runs' folders + any
+    the user added) to consult BEFORE web-searching. '' if none."""
+    fs = list(dict.fromkeys(f.strip() for f in (folders or []) if f and f.strip()))
+    if not fs:
+        return ""
+    listed = "\n".join(f"  - vfs:{f}/" for f in fs)
+    return (
+        "\n\n## Reference folders (READ-ONLY) — check these BEFORE a web search\n"
+        "These VFS folders may already hold relevant material from earlier work. When you "
+        "need background/context, or would otherwise run a web search, look HERE FIRST (if "
+        "they exist):\n"
+        f"{listed}\n"
+        "- Use `glob vfs:<folder>/**/*` to see what's there, then `read` the relevant files.\n"
+        "- Each folder may ALSO have a relational datastore from that run — READ it with "
+        "`datastore(action=\"list_tables\", project=\"<folder>\")` and "
+        "`datastore(action=\"query\", table=\"…\", project=\"<folder>\")`. Reuse that data "
+        "instead of recomputing it.\n"
+        "- Only web-search for what these folders don't cover. Treat them as READ-ONLY — "
+        "never write into them."
     )
 
 
@@ -320,7 +348,9 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
 async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
                          creds: dict, max_agents: int,
                          force_ids: list[str] | None = None,
-                         shared_datastore: bool = False) -> dict:
+                         shared_datastore: bool = False,
+                         state_manifest: str = "",
+                         prior_knowledge: str = "") -> dict:
     """Ask the Lead to split the task into complementary, owner-assigned subtasks.
 
     Returns a normalized plan. On any LLM/parse failure raises — the caller turns
@@ -338,13 +368,17 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
         # Lead defaults "datastore" to a JSON file and the whole team follows suit.
         system_prompt += (
             "\n\n## Shared team datastore is ENABLED for this run\n"
-            "The team shares ONE relational datastore, reachable via the `datastore` tool. "
+            "The team shares ONE relational datastore (the `datastore` tool). It is also the "
+            "TRACK a later run resumes from — and this run may itself be CONTINUING earlier work "
+            "already sitting in the folder's datastore.\n"
             "When the task involves saving / storing / persisting structured data:\n"
-            "- Plan the persistence work to write to the shared datastore via the `datastore` "
-            "tool (create_table + insert) — NOT to an ad-hoc JSON or CSV file.\n"
-            "- In `shared_context`, pin the datastore SCHEMA the team follows: the table name(s) "
-            "and columns. Every owner that produces structured data inserts into those tables.\n"
-            "- Do NOT describe 'the datastore' as a local JSON file — it is the relational store."
+            "- Plan persistence into the shared datastore (create_table + upsert) — NOT an ad-hoc "
+            "JSON or CSV file. Do NOT describe 'the datastore' as a local JSON file.\n"
+            "- In `shared_context`, pin the SCHEMA: table name(s), columns, a STABLE UNIQUE KEY, and "
+            "a `status` column. Owners UPSERT on that key (idempotent) and set status, so a re-run "
+            "updates rows instead of duplicating them and can skip already-done work.\n"
+            "- Tell owners to CHECK the datastore first (list_tables / query) and do only the "
+            "OUTSTANDING work — that is how runs continue instead of restarting."
         )
     user_prompt = (
         f"Task: {intent}\n\n"
@@ -358,6 +392,10 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
             "EACH of these archetypes, and use only these as owners:\n" + forced_list +
             "\nGive each a meaningful, complementary piece derived from the task; split the work "
             "so every one of them has a real, non-overlapping part.")
+    if state_manifest:
+        user_prompt += state_manifest
+    if prior_knowledge:
+        user_prompt += prior_knowledge
     # The plan now carries shared_context + per-piece briefs + depends_on, so it can
     # be long — a tight cap truncates the JSON and the whole route fails. Give it room.
     prov, mt = _provider_call(creds, temperature=0.2, default_max=8192, cap=16384)
@@ -400,7 +438,8 @@ def _resolve_creds(registry: dict, tiers: dict | None, api_key: str, tier: str) 
 
 async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dict,
                       force_ids: list[str] | None = None,
-                      shared_datastore: bool = False) -> dict:
+                      shared_datastore: bool = False, vfs_project: str = "",
+                      prior_knowledge: str = "") -> dict:
     """Run the Lead and shape the result into a persistable Vatra route:
     {mode, domain, rationale, subtasks, selected}. `selected` mirrors Basna's
     shape so the read-tool and list UI render the owners. `force_ids` fixes the
@@ -414,9 +453,20 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
     forced = [a for a in (force_ids or []) if a in arch_by_id]
     # A fixed team must all fit, even if larger than the requested max.
     cap = max(max_agents, len(forced)) if forced else max_agents
+    # Seed the Lead with what the target folder already holds, so it plans to
+    # CONTINUE prior work rather than restart (only when a shared datastore + an
+    # existing folder are in play).
+    state_manifest = ""
+    if shared_datastore and vfs_project:
+        try:
+            from captain_claw.flight_deck.vfs_routes import folder_state_manifest
+            state_manifest = await folder_state_manifest(user_id, vfs_project)
+        except Exception as e:  # noqa: BLE001 — best-effort seeding
+            log.debug("Vatra plan state manifest failed", error=str(e))
     plan = await asyncio.wait_for(
         _llm_decompose(intent, archetypes, reliability, creds, cap, force_ids=forced or None,
-                       shared_datastore=shared_datastore),
+                       shared_datastore=shared_datastore, state_manifest=state_manifest,
+                       prior_knowledge=prior_knowledge),
         _DECOMPOSE_TIMEOUT)
     subtasks = plan["subtasks"]
     # Guarantee every fixed-team archetype actually got a piece — if the Lead missed
@@ -438,8 +488,13 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
     selected = [{"archetype_id": s["owner_archetype_id"],
                  "role": arch_by_id[s["owner_archetype_id"]].get("role", ""),
                  "why": s["title"]} for s in subtasks]
+    # Fold prior-run knowledge into shared_context so EVERY worker (not just the
+    # Lead) sees it verbatim, alongside the conventions the Lead produced.
+    shared_context = plan.get("shared_context", "")
+    if prior_knowledge:
+        shared_context = (prior_knowledge.strip() + "\n\n" + shared_context).strip()
     return {"mode": "vatra", "domain": plan["domain"], "rationale": plan["rationale"],
-            "shared_context": plan.get("shared_context", ""),
+            "shared_context": shared_context,
             "subtasks": subtasks, "selected": selected}
 
 
@@ -699,7 +754,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             # A plan-step child can fix the team via config.force_ids.
             _force = [str(a) for a in (cfg.get("force_ids") or []) if str(a).strip()]
             route = await _build_plan(db, user["id"], intent, max_agents, _creds("reason"),
-                                      force_ids=_force or None, shared_datastore=_shared_ds)
+                                      force_ids=_force or None, shared_datastore=_shared_ds,
+                                      vfs_project=_vfs_project(sid))
         except HTTPException:
             await db.update_basna_session(sid, user["id"], status="error")
             raise
@@ -717,8 +773,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     shared_context = route.get("shared_context", "")
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
     # Protect existing files: a FRESH run reusing a non-empty folder snapshots it
-    # into .history/ before any write (continuation rounds accumulate → skip).
-    if not cfg.get("parent_session_id"):
+    # into .history/ before any write (continuation rounds accumulate → skip; a
+    # shared-datastore run is the resumable "continue in this folder" pattern →
+    # skip the full-folder backup, it accumulates by design).
+    if not cfg.get("parent_session_id") and not _shared_ds:
         try:
             from captain_claw.flight_deck.vfs_routes import snapshot_existing_project
             _snap = snapshot_existing_project(user["id"], vfs_project, f"{int(time.time())}-{sid[:8]}")
@@ -2405,6 +2463,17 @@ class VatraStartRequest(BaseModel):
     # Opt-in shared datastore: passed at PLAN time too so the Lead decomposes the task
     # to persist structured data into the shared relational store (not a JSON file).
     shared_datastore: bool = False
+    # Target VFS folder — passed at PLAN time so the Lead can be seeded with what the
+    # folder already contains (continue vs restart). Empty → auto (vatra-<sid8>).
+    vfs_project: str = ""
+    # Opt-in: seed the plan with the knowledge (report + gaps/blind spots, optionally
+    # the board) of these FINISHED prior runs — folded into the Lead prompt and the
+    # team's shared_context. Empty → no seeding.
+    knowledge_session_ids: list[str] = []
+    knowledge_include_board: bool = False
+    # Read-only reference VFS folders workers consult BEFORE web-searching. The
+    # knowledge runs' own folders are auto-added, so this is for EXTRA folders.
+    reference_folders: list[str] = []
 
 
 class VatraExecuteRequest(BaseModel):
@@ -2461,9 +2530,25 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
             brief = ""
     task_for_planning = research_brief.brief_task(intent, brief)
     try:
+        _prior = ""
+        _ref_folders = list(body.reference_folders or [])
+        if body.knowledge_session_ids:
+            from captain_claw.flight_deck.basna_routes import build_prior_knowledge, knowledge_run_folders
+            _prior = await build_prior_knowledge(
+                db, user["id"], body.knowledge_session_ids,
+                include_board=body.knowledge_include_board)
+            # Prior runs' folders are read-only reference by default.
+            _ref_folders = list(dict.fromkeys(
+                _ref_folders + await knowledge_run_folders(db, user["id"], body.knowledge_session_ids)))
         route = await _build_plan(db, user["id"], task_for_planning, body.max_agents, creds,
                                   force_ids=body.archetype_ids or None,
-                                  shared_datastore=body.shared_datastore)
+                                  shared_datastore=body.shared_datastore,
+                                  vfs_project=body.vfs_project, prior_knowledge=_prior)
+        # Fold read-only reference folders into shared_context so every worker checks
+        # them before web-searching.
+        _ref = _reference_directive(_ref_folders)
+        if _ref:
+            route["shared_context"] = (route.get("shared_context", "") + _ref).strip()
     except HTTPException:
         await db.delete_basna_session(sid, user["id"])
         raise
@@ -2519,7 +2604,8 @@ async def start_vatra(body: VatraStartRequest, request: Request,
     exec_req = ExecuteRequest(
         session_id=sid, tiers=body.tiers or None,
         env_vars=body.env_vars or None, api_key=body.api_key or "",
-        horizon=body.horizon or None, shared_datastore=body.shared_datastore)
+        horizon=body.horizon or None, shared_datastore=body.shared_datastore,
+        vfs_project=body.vfs_project or "")
     # Background task with a stub request carrying the owner (spawn_process reads
     # request.state.user_id) — the real request object isn't safe to use post-response.
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))

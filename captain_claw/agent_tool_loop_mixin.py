@@ -373,7 +373,7 @@ class AgentToolLoopMixin:
         ``create_table``, ``insert``, ``import_file``, ``update``,
         ``update_column``.
         """
-        _SAVE_ACTIONS = {"create_table", "insert", "import_file", "update", "update_column"}
+        _SAVE_ACTIONS = {"create_table", "insert", "upsert", "import_file", "update", "update_column"}
         saves: list[dict[str, Any]] = []
         if not self.session:
             return saves

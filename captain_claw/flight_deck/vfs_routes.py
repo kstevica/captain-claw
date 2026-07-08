@@ -615,16 +615,40 @@ async def vfs_datastore_export(
 
 # ── Snapshot-on-start (protect existing files from new runs) ──────────
 
+# Don't duplicate a huge folder into .history on every fresh run — the resumable /
+# continue pattern (shared datastore) accumulates on purpose, and the datastore (the
+# real ledger) is excluded from the snapshot anyway.
+_SNAPSHOT_MAX_BYTES = 100 * 1024 * 1024
+_SNAPSHOT_MAX_FILES = 2000
+
+
 def snapshot_existing_project(user_id: str, project: str, tag: str) -> int:
     """Before a FRESH run writes into an existing, non-empty VFS folder, copy its
     current contents into ``<folder>/.history/<tag>/`` so prior work is never
     overrun. Only physical (non-linked) projects are snapshotted; the datastore
-    and prior history are skipped. Returns the number of entries backed up."""
+    and prior history are skipped, and a folder over the size cap is left alone
+    (logged). Returns the number of entries backed up (0 = nothing / skipped)."""
     root = (_user_root(user_id) / safe_name(project, fallback="")).resolve()
     if not root.is_dir():
         return 0  # brand-new or linked folder → nothing to protect
     entries = [p for p in root.iterdir() if p.name not in (".history", ".datastore")]
     if not entries:
+        return 0
+    # Size guard — walk once; skip the backup if the folder is large.
+    total_bytes = 0
+    total_files = 0
+    for p in entries:
+        walk = p.rglob("*") if p.is_dir() else [p]
+        for f in walk:
+            if f.is_file():
+                total_files += 1
+                try:
+                    total_bytes += f.stat().st_size
+                except OSError:
+                    pass
+    if total_bytes > _SNAPSHOT_MAX_BYTES or total_files > _SNAPSHOT_MAX_FILES:
+        log.info("VFS snapshot skipped — folder too large",
+                 project=project, files=total_files, bytes=total_bytes)
         return 0
     dest = root / ".history" / safe_name(tag, fallback="run")
     dest.mkdir(parents=True, exist_ok=True)
@@ -639,3 +663,42 @@ def snapshot_existing_project(user_id: str, project: str, tag: str) -> int:
         except OSError as e:
             log.warning("VFS snapshot copy failed", path=str(p), error=str(e))
     return n
+
+
+async def folder_state_manifest(user_id: str, project: str) -> str:
+    """A short summary of what a VFS folder ALREADY holds — datastore tables
+    (name · rows · columns) and top-level files — to seed the Lead so it plans to
+    CONTINUE existing work instead of restarting. Empty string for a new/empty
+    folder (nothing to continue)."""
+    if not project:
+        return ""
+    lines: list[str] = []
+    db_path = _vfs_datastore_path(user_id, project)
+    if db_path.is_file():
+        try:
+            from captain_claw.datastore import get_datastore_manager_at
+            mgr = get_datastore_manager_at(db_path)
+            for t in await mgr.list_tables():
+                cols = ", ".join(c.name for c in t.columns)
+                lines.append(f"  - datastore table `{t.name}` — {t.row_count} row(s): {cols}")
+        except Exception as e:  # noqa: BLE001 — manifest is best-effort
+            log.debug("folder_state_manifest datastore read failed", error=str(e))
+    root = _project_root(user_id, project)
+    if root.is_dir():
+        try:
+            names = sorted(p.name for p in root.iterdir()
+                           if p.is_file() and not p.name.startswith("."))
+            for name in names[:30]:
+                lines.append(f"  - file `{name}`")
+            if len(names) > 30:
+                lines.append(f"  - …and {len(names) - 30} more file(s)")
+        except OSError:
+            pass
+    if not lines:
+        return ""
+    return (
+        "\n\n## This folder already contains prior work — CONTINUE it, do NOT restart\n"
+        "The shared folder/datastore already holds:\n" + "\n".join(lines) +
+        "\nPlan only the OUTSTANDING work. Owners must read/query these first and "
+        "upsert/append rather than recreate."
+    )

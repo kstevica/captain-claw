@@ -3,13 +3,16 @@ import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
   Loader2, Check, X, Wrench, Maximize2, Minimize2, Download, Paperclip, FileText, Image as ImageIcon,
   SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw, Square, CornerDownRight, Users, HelpCircle,
-  Gauge, ListChecks,
+  Gauge, ListChecks, Wand2, Brain, FolderSearch,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis, type FolderMode } from '../stores/basnaStore'
 import { VatraTeamPlan, VatraBlackboard } from '../components/VatraDelegation'
 import { QualityControls } from '../components/QualityControls'
+import { BasnaWizardModal } from '../components/agents/BasnaWizardModal'
+import { KnowledgePicker } from '../components/agents/KnowledgePicker'
+import { ReferenceFolderPicker } from '../components/agents/ReferenceFolderPicker'
 import { CostCard, deriveCost } from '../components/CostCard'
 import { useTierConfig, TIER_ORDER, PROVIDERS } from '../services/tierConfig'
 
@@ -642,7 +645,7 @@ export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
     updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
@@ -743,6 +746,26 @@ export function BasnaPage() {
     // keep the typed intent/title (the cleared selection no longer wipes them).
     if (activeSession) newSession()
   }
+  const [wizardOpen, setWizardOpen] = useState(false)
+  const [showKnowledge, setShowKnowledge] = useState(false)
+  const [showRefFolders, setShowRefFolders] = useState(false)
+  // Wizard handoff: set the task + mode, then prepare (route/plan) — the user
+  // reviews the plan and runs it via the normal panel.
+  const onWizardPrepare = ({ intent: wi, title: wt, mode }: { intent: string; title: string; mode: 'basna' | 'vatra' }) => {
+    if (!wi.trim()) return
+    newSession()
+    setIntent(wi); setTitle(wt); setTeam([])
+    setComposeMode(mode)
+    try { localStorage.setItem('basna.composeMode', mode) } catch { /* ignore */ }
+    setWizardOpen(false)
+    if (mode === 'vatra') planVatra(wi, tiers, wt, [])
+    else route(wi, tiers, wt, [])
+  }
+  // Creds for the wizard's recommend call — same tier the router uses.
+  const _rtc = tiers[routerTier]
+  const wizardCreds = _rtc?.model
+    ? { provider: _rtc.provider, model: _rtc.model, api_key: _rtc.api_key || undefined, base_url: _rtc.base_url || undefined }
+    : {}
   useEffect(() => {
     if (!anyRunning || executing) return
     const iv = setInterval(() => { pollRunning() }, 4000)
@@ -819,12 +842,27 @@ export function BasnaPage() {
           <HelpCircle className="h-3.5 w-3.5" /> Help
         </button>
         <button
+          onClick={() => setWizardOpen(true)}
+          title="Guided setup — recommends Basna vs Vatra and options for your task"
+          className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
+        >
+          <Wand2 className="h-3.5 w-3.5" /> Wizard
+        </button>
+        <button
           onClick={() => { newSession(); setIntent(''); setTitle(''); setTeam([]) }}
-          className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500"
+          className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
         >
           <Plus className="h-3.5 w-3.5" /> New
         </button>
       </div>
+      {wizardOpen && (
+        <BasnaWizardModal
+          sessions={sessions}
+          creds={wizardCreds}
+          onClose={() => setWizardOpen(false)}
+          onPrepare={onWizardPrepare}
+        />
+      )}
 
       <div className="flex flex-1 overflow-hidden">
         {/* Session list */}
@@ -1111,6 +1149,54 @@ export function BasnaPage() {
 
                 {/* Quality levers (opt-in cross-pollination) */}
                 <QualityControls scope="research" value={quality} onChange={setQuality} />
+
+                {/* Prior-run knowledge (opt-in) — seed this run with earlier reports + gaps */}
+                <div className="mt-2">
+                  <button
+                    onClick={() => setShowKnowledge((v) => !v)}
+                    className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                      knowledgeSessionIds.length > 0
+                        ? 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300'
+                        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                    }`}
+                    title="Use the knowledge (report + gaps/blind spots) of prior finished runs"
+                  >
+                    <Brain className="h-3.5 w-3.5" />
+                    {knowledgeSessionIds.length > 0 ? `Prior knowledge: ${knowledgeSessionIds.length}` : 'Use prior-run knowledge'}
+                  </button>
+                  {showKnowledge && (
+                    <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                      <KnowledgePicker
+                        sessions={sessions}
+                        selectedIds={knowledgeSessionIds}
+                        onToggle={toggleKnowledgeSession}
+                        includeBoard={knowledgeIncludeBoard}
+                        onIncludeBoard={setKnowledgeIncludeBoard}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Reference folders (read-only) — agents check these before web search */}
+                <div className="mt-2">
+                  <button
+                    onClick={() => { setShowRefFolders((v) => !v); if (projects.length === 0) loadProjects() }}
+                    className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                      referenceFolders.length > 0
+                        ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                    }`}
+                    title="Read-only VFS folders agents search before web search (prior-knowledge runs' folders are auto-included)"
+                  >
+                    <FolderSearch className="h-3.5 w-3.5" />
+                    {referenceFolders.length > 0 ? `Reference folders: ${referenceFolders.length}` : 'Reference folders (read-only)'}
+                  </button>
+                  {showRefFolders && (
+                    <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                      <ReferenceFolderPicker projects={projects} selected={referenceFolders} onToggle={toggleReferenceFolder} />
+                    </div>
+                  )}
+                </div>
 
                 {/* Tuning (router tier + team size) */}
                 {tuning && (

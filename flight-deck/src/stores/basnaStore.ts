@@ -301,6 +301,29 @@ async function apiExecute(body: Record<string, unknown>): Promise<ExecuteResult>
   return res.json()
 }
 
+// A wizard setup recommendation from POST /fd/basna/recommend.
+export interface Recommendation {
+  mode: 'basna' | 'vatra'
+  rationale: string
+  difficulty: 'trivial' | 'moderate' | 'hard'
+  max_agents: number
+  effort: 'standard' | 'deep' | 'plan'
+  quality: 'basic' | 'balanced' | 'thorough'
+  grouped: boolean
+  shared_datastore: boolean
+}
+
+export async function apiRecommend(intent: string, creds: Record<string, unknown> = {}): Promise<Recommendation> {
+  const res = await _authedFetch('/fd/basna/recommend', {
+    method: 'POST', body: JSON.stringify({ intent, ...creds }),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { detail?: string }).detail || 'recommend failed')
+  }
+  return res.json()
+}
+
 async function apiListProjects(): Promise<VfsProject[]> {
   try {
     const res = await _authedFetch('/fd/vfs/projects')
@@ -515,6 +538,9 @@ interface BasnaStore {
   existingFolder: string    // picked folder name when folderMode==='existing'
   projects: VfsProject[]    // existing VFS folders for the picker
   projectsLoading: boolean
+  knowledgeSessionIds: string[]   // prior finished runs whose knowledge seeds this run
+  knowledgeIncludeBoard: boolean  // also fold in the selected runs' shared-board notes
+  referenceFolders: string[]      // read-only VFS folders agents check before web search
   deep: boolean        // Deep / Horizon mode: each worker runs the self-consistency
   deepSamples: number  // vote + critics + fix loop (frontier-grade depth) instead of one shot
   planMode: boolean    // Plan-Horizon (Lever C): decompose → verify each step → re-plan
@@ -533,6 +559,10 @@ interface BasnaStore {
   setNewFolderName: (s: string) => void
   setExistingFolder: (s: string) => void
   loadProjects: () => Promise<void>
+  setKnowledgeSessionIds: (ids: string[]) => void
+  toggleKnowledgeSession: (id: string) => void
+  setKnowledgeIncludeBoard: (v: boolean) => void
+  toggleReferenceFolder: (name: string) => void
   setDeep: (v: boolean) => void
   setDeepSamples: (n: number) => void
   setPlanMode: (v: boolean) => void
@@ -590,6 +620,9 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   existingFolder: '',
   projects: [],
   projectsLoading: false,
+  knowledgeSessionIds: [],
+  knowledgeIncludeBoard: false,
+  referenceFolders: [],
   deep: (typeof localStorage !== 'undefined' && localStorage.getItem(_DEEP_LS) === '1') || false,
   deepSamples: 3,
   planMode: false,
@@ -628,6 +661,18 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     const projects = await apiListProjects()
     set({ projects, projectsLoading: false })
   },
+  setKnowledgeSessionIds: (ids) => set({ knowledgeSessionIds: ids }),
+  toggleKnowledgeSession: (id) => set((st) => ({
+    knowledgeSessionIds: st.knowledgeSessionIds.includes(id)
+      ? st.knowledgeSessionIds.filter((x) => x !== id)
+      : [...st.knowledgeSessionIds, id],
+  })),
+  setKnowledgeIncludeBoard: (v) => set({ knowledgeIncludeBoard: v }),
+  toggleReferenceFolder: (name) => set((st) => ({
+    referenceFolders: st.referenceFolders.includes(name)
+      ? st.referenceFolders.filter((x) => x !== name)
+      : [...st.referenceFolders, name],
+  })),
   setDeep: (v) => {
     try { localStorage.setItem(_DEEP_LS, v ? '1' : '0') } catch { /* ignore */ }
     set({ deep: v, ...(v ? { planMode: false } : {}) })  // Deep and Plan are distinct run paths
@@ -792,8 +837,12 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         ...(archetypeIds.length ? { archetype_ids: archetypeIds } : {}),
         // R12: opt-in intent brief. A user-edited brief re-plans the team on it.
         quality: toRequest(get().quality),
-        // Plan-time datastore awareness: the Lead must plan for the shared store.
+        // Plan-time datastore awareness: the Lead must plan for the shared store and
+        // be seeded with what the chosen folder already holds (continue vs restart).
         shared_datastore: get().sharedDatastore,
+        ...((): Record<string, unknown> => { const p = computeVfsProject(get()); return p ? { vfs_project: p } : {} })(),
+        ...(get().knowledgeSessionIds.length ? { knowledge_session_ids: get().knowledgeSessionIds, knowledge_include_board: get().knowledgeIncludeBoard } : {}),
+        ...(get().referenceFolders.length ? { reference_folders: get().referenceFolders } : {}),
         ...(brief.trim() ? { brief } : {}),
       })
       // Persist pending attachments onto the freshly-created session BEFORE
@@ -913,7 +962,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // critics + fix loop, then verify-and-revise the merged answer (the closer).
       const horizon = get().deep ? { samples: get().deepSamples, close: true } : undefined
       const vfsProject = computeVfsProject(get())
-      const res = await apiExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, shared_datastore: get().sharedDatastore, ...(vfsProject ? { vfs_project: vfsProject } : {}), ...(horizon ? { horizon } : {}) })
+      const res = await apiExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, shared_datastore: get().sharedDatastore, ...(vfsProject ? { vfs_project: vfsProject } : {}), ...(get().knowledgeSessionIds.length ? { knowledge_session_ids: get().knowledgeSessionIds, knowledge_include_board: get().knowledgeIncludeBoard } : {}), ...(get().referenceFolders.length ? { reference_folders: get().referenceFolders } : {}), ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       const runs = await apiListRuns(sid)
       // Refresh attachments from the updated session so files the agents

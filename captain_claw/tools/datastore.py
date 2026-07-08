@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
-from captain_claw.config import get_config
 from captain_claw.datastore import (
     ProtectedError,
-    get_datastore_manager,
-    get_session_datastore_manager,
-    get_vfs_datastore_manager,
+    resolve_datastore_manager,
 )
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
@@ -21,20 +17,10 @@ log = get_logger(__name__)
 
 
 def _resolve_datastore_manager(session_id: str | None) -> Any:
-    """Return the appropriate DatastoreManager.
-
-    A Basna/Vatra run with the shared-datastore option ON injects
-    ``CLAW_DATASTORE_VFS=<project>`` into every worker, so they all collaborate
-    on ONE relational store living in the shared VFS folder. Otherwise: in
-    public computer mode each session gets its own isolated DB; else the shared
-    global manager.
-    """
-    vfs_project = os.environ.get("CLAW_DATASTORE_VFS", "").strip()
-    if vfs_project:
-        return get_vfs_datastore_manager(vfs_project)
-    if get_config().web.public_run == "computer" and session_id:
-        return get_session_datastore_manager(session_id)
-    return get_datastore_manager()
+    """The datastore this agent's tool reads/writes — shared VFS store when a run
+    injects ``CLAW_DATASTORE_VFS``, else session/global. Delegates to the single
+    shared resolver so the completion-gate verifier checks the SAME database."""
+    return resolve_datastore_manager(session_id)
 
 
 def _parse_json_str(value: Any | None, label: str) -> Any:
@@ -111,12 +97,15 @@ class DatastoreTool(Tool):
     name = "datastore"
     description = (
         "Manage persistent relational data tables in a local database. "
-        "Create tables, insert/update/delete rows, query with filters, "
+        "Create tables, insert/upsert/update/delete rows, query with filters, "
         "run raw SELECT queries, import/export CSV or XLSX files, and "
         "manage data protection rules. "
+        "Use `upsert` (with a table created with a `unique` key) for idempotent "
+        "writes — re-running the same item updates its row instead of duplicating it, "
+        "which is what makes resumable/continued runs safe. "
         "Actions: list_tables, describe, create_table, drop_table, rename_table, "
         "add_column, rename_column, drop_column, change_column_type, "
-        "insert, update, update_column, delete, query, sql, import_file, export, "
+        "insert, upsert, update, update_column, delete, query, sql, import_file, export, "
         "protect, unprotect, list_protections."
     )
     timeout_seconds = 60.0
@@ -129,7 +118,7 @@ class DatastoreTool(Tool):
                 "enum": [
                     "list_tables", "describe", "create_table", "drop_table", "rename_table",
                     "add_column", "rename_column", "drop_column", "change_column_type",
-                    "insert", "update", "update_column", "delete",
+                    "insert", "upsert", "update", "update_column", "delete",
                     "query", "sql", "import_file", "export",
                     "protect", "unprotect", "list_protections",
                 ],
@@ -139,11 +128,35 @@ class DatastoreTool(Tool):
                 "type": "string",
                 "description": "Target table name.",
             },
+            "project": {
+                "type": "string",
+                "description": (
+                    "READ-ONLY: query ANOTHER run's datastore by its VFS folder name "
+                    "(a reference / prior-knowledge folder, e.g. \"vatra-676f1e31\"). "
+                    "Only list_tables/describe/query/sql/export accept it. Omit to "
+                    "read/write THIS run's own shared datastore."
+                ),
+            },
             "columns": {
                 "type": "string",
                 "description": (
                     'For create_table: JSON array of {"name": "col", "type": "text"}. '
                     "For query/export: comma-separated column names."
+                ),
+            },
+            "unique": {
+                "type": "string",
+                "description": (
+                    "For create_table: the column(s) forming a UNIQUE key — the conflict "
+                    "target for `upsert`. JSON array or comma-separated names "
+                    '(e.g. ["item_id"] or "item_id"). Give resumable data a stable key here.'
+                ),
+            },
+            "key": {
+                "type": "string",
+                "description": (
+                    "For upsert: the unique column(s) to match on. JSON array or "
+                    "comma-separated. Optional if the table was created with a `unique` key."
                 ),
             },
             "column": {
@@ -237,7 +250,22 @@ class DatastoreTool(Tool):
 
     async def execute(self, action: str, **kwargs: Any) -> ToolResult:
         session_id = str(kwargs.get("_session_id", "") or "").strip() or None
-        dm = _resolve_datastore_manager(session_id)
+        # `project` targets ANOTHER run's datastore, READ-ONLY (reference / prior-
+        # knowledge folders). Omitted → this run's own shared store.
+        project = str(kwargs.get("project", "") or "").strip()
+        if project:
+            _READ_ACTIONS = {"list_tables", "describe", "query", "sql", "export"}
+            if action not in _READ_ACTIONS:
+                return ToolResult(success=False, error=(
+                    f"'{action}' cannot target another folder — `project` is READ-ONLY "
+                    "(list_tables, describe, query, sql, export). Omit `project` to write "
+                    "to this run's own datastore."))
+            from captain_claw.datastore import get_vfs_datastore_manager
+            dm = get_vfs_datastore_manager(project, create=False)
+            if dm is None:
+                return ToolResult(success=True, content=f"Folder '{project}' has no datastore.")
+        else:
+            dm = _resolve_datastore_manager(session_id)
 
         # Log invocation
         _log_args = {k: v for k, v in kwargs.items() if not k.startswith("_") and v is not None}
@@ -249,7 +277,7 @@ class DatastoreTool(Tool):
             elif action == "describe":
                 result = await self._describe(dm, kwargs.get("table"))
             elif action == "create_table":
-                result = await self._create_table(dm, kwargs.get("table"), kwargs.get("columns"))
+                result = await self._create_table(dm, kwargs.get("table"), kwargs.get("columns"), kwargs.get("unique"))
             elif action == "drop_table":
                 result = await self._drop_table(dm, kwargs.get("table"))
             elif action == "rename_table":
@@ -264,6 +292,8 @@ class DatastoreTool(Tool):
                 result = await self._change_column_type(dm, kwargs)
             elif action == "insert":
                 result = await self._insert(dm, kwargs)
+            elif action == "upsert":
+                result = await self._upsert(dm, kwargs)
             elif action == "update":
                 result = await self._update(dm, kwargs)
             elif action == "update_column":
@@ -333,7 +363,8 @@ class DatastoreTool(Tool):
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod
-    async def _create_table(dm: Any, table: str | None, columns_raw: str | None) -> ToolResult:
+    async def _create_table(dm: Any, table: str | None, columns_raw: str | None,
+                            unique_raw: Any = None) -> ToolResult:
         if not table:
             return ToolResult(success=False, error="'table' is required for create_table.")
         if not columns_raw:
@@ -341,12 +372,29 @@ class DatastoreTool(Tool):
         columns = _parse_json_str(columns_raw, "columns")
         if not isinstance(columns, list):
             return ToolResult(success=False, error="'columns' must be a JSON array.")
-        info = await dm.create_table(table, columns)
+        unique = _parse_columns(unique_raw)
+        info = await dm.create_table(table, columns, unique=unique)
         col_names = ", ".join(c.name for c in info.columns)
+        uniq_note = f" · unique key: {', '.join(unique)}" if unique else ""
         return ToolResult(
             success=True,
-            content=f"Created table **{info.name}** with columns: {col_names}",
+            content=f"Created table **{info.name}** with columns: {col_names}{uniq_note}",
         )
+
+    @staticmethod
+    async def _upsert(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
+        table = kwargs.get("table")
+        rows_raw = kwargs.get("rows")
+        if not table:
+            return ToolResult(success=False, error="'table' is required.")
+        if not rows_raw:
+            return ToolResult(success=False, error="'rows' is required (JSON array).")
+        rows = _parse_json_str(rows_raw, "rows")
+        if not isinstance(rows, list):
+            return ToolResult(success=False, error="'rows' must be a JSON array of objects.")
+        key_columns = _parse_columns(kwargs.get("key"))
+        count = await dm.upsert_rows(table, rows, key_columns=key_columns)
+        return ToolResult(success=True, content=f"Upserted {count} row(s) into **{table}** (insert-or-update on the unique key).")
 
     @staticmethod
     async def _drop_table(dm: Any, table: str | None) -> ToolResult:

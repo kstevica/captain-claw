@@ -1151,6 +1151,93 @@ async def agent_continue(body: _AgentContinueReq):
 
 # ── Router endpoint ──────────────────────────────────────────────────
 
+class RecommendRequest(BaseModel):
+    intent: str
+    provider: str = ""
+    model: str = ""
+    api_key: str = ""
+    base_url: str = ""
+
+
+@router.post("/recommend")
+async def recommend_setup(body: RecommendRequest, user: dict = Depends(get_current_user)):
+    """Analyze a task and recommend Basna vs Vatra + sensible options. One small LLM
+    call — creates no session and spawns nothing. Powers the creation wizard."""
+    intent = (body.intent or "").strip()
+    if not intent:
+        raise HTTPException(400, "intent is required")
+    registry = _load_registry()
+    tiers = registry.get("tiers", {})
+    fast = tiers.get("reason", {}) or tiers.get("fast", {})
+    provider = body.provider or fast.get("provider", "anthropic")
+    model = body.model or fast.get("model", "")
+    base_url = body.base_url or fast.get("base_url", "")
+    system_prompt = (
+        "You advise on how to run a task on a multi-agent system with two modes:\n"
+        "- BASNA — independent ensemble: several specialists answer the SAME task blind, "
+        "merged by reliability. Best when you want diverse independent takes or one "
+        "well-judged answer, and the work does NOT split into interdependent pieces.\n"
+        "- VATRA — collaborative team: a Lead splits the task into owned, interdependent "
+        "pieces, teammates build on each other via a shared board + folder, and a reporter "
+        "assembles ONE deliverable. Best for multi-part deliverables (e.g. research → build "
+        "→ report), anything that produces files/artifacts, or work with dependencies.\n\n"
+        "Pick the better mode and sensible options. Return ONLY a JSON object, no prose."
+    )
+    user_prompt = (
+        f"Task: {intent}\n\n"
+        "Return exactly this JSON shape:\n"
+        "{\n"
+        '  "mode": "basna" | "vatra",\n'
+        '  "rationale": "1-2 sentences on why this mode fits",\n'
+        '  "difficulty": "trivial" | "moderate" | "hard",\n'
+        '  "max_agents": <integer 2-8>,\n'
+        '  "effort": "standard" | "deep" | "plan",\n'
+        '  "quality": "basic" | "balanced" | "thorough",\n'
+        '  "grouped": <bool — Vatra ordered phases; false for Basna>,\n'
+        '  "shared_datastore": <bool — true if the task collects/saves structured data>\n'
+        "}"
+    )
+    try:
+        from captain_claw.llm import Message, create_provider
+        prov = create_provider(provider=provider, model=model,
+                               api_key=body.api_key or None, base_url=base_url or None,
+                               temperature=0.2, max_tokens=800)
+        resp = await prov.complete(
+            messages=[Message(role="system", content=system_prompt),
+                      Message(role="user", content=user_prompt)],
+            temperature=0.2, max_tokens=800)
+        content = (resp.content or "").strip()
+        if content.startswith("```"):
+            content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
+        rec = json.loads(content)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Basna recommend failed", error=str(e))
+        raise HTTPException(502, "Could not analyze the task — try again or set options manually.")
+    mode = "vatra" if str(rec.get("mode", "")).lower().strip() == "vatra" else "basna"
+    quality = str(rec.get("quality", "balanced")).lower().strip()
+    if quality not in ("basic", "balanced", "thorough"):
+        quality = "balanced"
+    effort = str(rec.get("effort", "standard")).lower().strip()
+    if effort not in ("standard", "deep", "plan"):
+        effort = "standard"
+    difficulty = str(rec.get("difficulty", "moderate")).lower().strip()
+    try:
+        max_agents = int(rec.get("max_agents") or 4)
+    except (TypeError, ValueError):
+        max_agents = 4
+    max_agents = max(2, min(8, max_agents))
+    return {
+        "mode": mode,
+        "rationale": str(rec.get("rationale", "")).strip()[:400],
+        "difficulty": difficulty if difficulty in ("trivial", "moderate", "hard") else "moderate",
+        "max_agents": max_agents,
+        "effort": effort,
+        "quality": quality,
+        "grouped": bool(rec.get("grouped")) and mode == "vatra",
+        "shared_datastore": bool(rec.get("shared_datastore")),
+    }
+
+
 @router.post("/route")
 async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user)):
     """Classify a task and select the minimal archetype subset to handle it.
@@ -1397,6 +1484,113 @@ def _build_dispatch_prompt(role: str, intent: str, merge_kind: str,
         "You are working alone and cannot see the other members. Return only your final "
         "answer — no preamble, no meta-commentary about the ensemble."
     )
+
+
+async def build_prior_knowledge(db, user_id: str, session_ids: list[str], *,
+                                include_board: bool = False,
+                                max_per_run: int = 2500, max_runs: int = 5) -> str:
+    """Format the knowledge of N user-selected FINISHED runs (final report +
+    gaps/blind-spots, optionally board notes) into a preamble that seeds a NEW
+    run's initial instructions. Adapted from the continuation seed pattern, but
+    pulls from several chosen runs and does NOT reuse their folder. '' if empty."""
+    ids = [str(s).strip() for s in (session_ids or []) if str(s).strip()][:max_runs]
+    if not ids:
+        return ""
+    blocks: list[str] = []
+    for sid in ids:
+        sess = await db.get_basna_session(sid, user_id)
+        if not sess:
+            continue
+        truth = (sess.get("truth") or "").strip()
+        if not truth:
+            continue
+        title = (sess.get("title") or sess.get("intent") or "prior run")[:80]
+        domain = (sess.get("domain") or "").strip()
+        head = f"### {title}" + (f" · {domain}" if domain else "")
+        excerpt = truth if len(truth) <= max_per_run else truth[:max_per_run].rstrip() + " …(truncated)"
+        parts = [head, excerpt]
+        try:
+            analysis = json.loads(sess.get("analysis") or "{}")
+        except (ValueError, TypeError):
+            analysis = {}
+        notes: list[str] = []
+        for g in (analysis.get("gaps") or [])[:6]:
+            item = g.get("item") if isinstance(g, dict) else str(g)
+            if item:
+                sev = g.get("severity", "") if isinstance(g, dict) else ""
+                notes.append(f"- [{sev}] {item}" if sev else f"- {item}")
+        for b in (analysis.get("blind_spots") or [])[:6]:
+            if b:
+                notes.append(f"- {b}")
+        if notes:
+            parts.append("Known gaps / blind spots from that run:\n" + "\n".join(notes))
+        # The prior run's datastore tables — tell the team exactly what structured
+        # data is queryable (via datastore(project="<folder>")) so they reuse it.
+        folder = _session_vfs_folder(sess)
+        try:
+            from captain_claw.datastore import get_datastore_manager_at
+            from captain_claw.flight_deck.vfs_routes import _vfs_datastore_path
+            db_path = _vfs_datastore_path(user_id, folder)
+            if db_path.is_file():
+                tabs = await get_datastore_manager_at(db_path).list_tables()
+                if tabs:
+                    tlines = "\n".join(
+                        f"  - `{t.name}` ({t.row_count} rows): {', '.join(c.name for c in t.columns)}"
+                        for t in tabs)
+                    parts.append(
+                        f"Datastore in vfs:{folder}/ — READ it with "
+                        f"datastore(action=\"query\", table=\"…\", project=\"{folder}\"):\n{tlines}")
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.debug("prior-knowledge datastore summary failed", error=str(e))
+        if include_board:
+            try:
+                entries = await db.list_vatra_board(sid, kinds=["note", "output"], limit=12)
+            except Exception:  # noqa: BLE001
+                entries = []
+            board_lines = [
+                f"- {(e.get('title') or e.get('from_owner') or '').strip()}: {(e.get('content') or '').strip()[:300]}"
+                for e in entries if (e.get("content") or "").strip()
+            ]
+            if board_lines:
+                parts.append("Team board highlights:\n" + "\n".join(board_lines[:10]))
+        blocks.append("\n".join(parts))
+    if not blocks:
+        return ""
+    return (
+        "\n\n## Prior knowledge from earlier runs — build on it, don't rediscover\n"
+        "Vetted background from previous runs. Reuse what's solid, and pay special "
+        "attention to the gaps/blind spots so this run improves on them (verify anything "
+        "you rely on before treating it as fact):\n\n"
+        + "\n\n---\n\n".join(blocks)
+    )
+
+
+def _session_vfs_folder(sess: dict) -> str:
+    """The VFS folder a run wrote to — its chosen folder, else the auto name."""
+    try:
+        cfg = json.loads(sess.get("config") or "{}")
+    except (ValueError, TypeError):
+        cfg = {}
+    proj = str(cfg.get("vfs_project") or "").strip()
+    if proj:
+        return proj
+    mode = "vatra" if cfg.get("mode") == "vatra" else "basna"
+    return f"{mode}-{str(sess.get('id') or '')[:8]}"
+
+
+async def knowledge_run_folders(db, user_id: str, session_ids: list[str]) -> list[str]:
+    """The VFS folders of the given finished runs — auto-included as read-only
+    reference folders so a new run can search prior runs' FILES (not just their
+    reports). De-duplicated, order-preserving."""
+    out: list[str] = []
+    for sid in [str(s).strip() for s in (session_ids or []) if str(s).strip()]:
+        sess = await db.get_basna_session(sid, user_id)
+        if not sess:
+            continue
+        folder = _session_vfs_folder(sess)
+        if folder and folder not in out:
+            out.append(folder)
+    return out
 
 
 def _norm_text(s: str) -> set[str]:
@@ -2104,6 +2298,14 @@ class ExecuteRequest(BaseModel):
     # through tables instead of each keeping a private DB. Off → today's per-agent
     # private stores. Persisted to the session config so a continuation inherits it.
     shared_datastore: bool = False
+    # Opt-in: seed this run's workers with the knowledge (final report + gaps/blind
+    # spots, optionally the board) of these FINISHED prior runs — folded into the
+    # dispatch prompt as background. Empty → no seeding.
+    knowledge_session_ids: list[str] = []
+    knowledge_include_board: bool = False
+    # Read-only reference VFS folders workers consult BEFORE web-searching. Knowledge
+    # runs' own folders are auto-added, so this is for EXTRA folders.
+    reference_folders: list[str] = []
     # Opt-in cross-pollination quality/cost profile (see quality_profile.py). None →
     # fall back to the session config's `quality` block → all-off (today's behaviour).
     quality: dict | None = None
@@ -2516,8 +2718,10 @@ async def execute_route(
         except Exception as e:  # noqa: BLE001
             log.warning("Basna shared_datastore persist failed", error=str(e))
     # Protect existing files: a FRESH run reusing a non-empty folder snapshots it
-    # into .history/ first (continuation rounds accumulate on purpose → skip).
-    if not _sess_cfg.get("parent_session_id"):
+    # into .history/ first (continuation rounds accumulate on purpose → skip; a
+    # shared-datastore run is the resumable "continue in this folder" pattern that
+    # accumulates by design, so skip the full-folder backup there too).
+    if not _sess_cfg.get("parent_session_id") and not shared_datastore:
         try:
             from captain_claw.flight_deck.vfs_routes import snapshot_existing_project
             _snap = snapshot_existing_project(user["id"], vfs_project, f"{int(time.time())}-{sid8}")
@@ -2525,6 +2729,27 @@ async def execute_route(
                 _progress(sid, "note", f"Backed up {_snap} existing item(s) to vfs:{vfs_project}/.history/ before this run")
         except Exception as e:  # noqa: BLE001
             log.warning("Basna VFS snapshot failed", error=str(e))
+    # Opt-in: seed workers with prior finished runs' knowledge (folded into each
+    # blind agent's dispatch prompt as background).
+    _prior_knowledge = ""
+    _ref_folders = list(getattr(body, "reference_folders", None) or [])
+    if getattr(body, "knowledge_session_ids", None):
+        try:
+            _prior_knowledge = await build_prior_knowledge(
+                db, user["id"], body.knowledge_session_ids,
+                include_board=bool(getattr(body, "knowledge_include_board", False)))
+            _ref_folders = list(dict.fromkeys(
+                _ref_folders + await knowledge_run_folders(db, user["id"], body.knowledge_session_ids)))
+        except Exception as e:  # noqa: BLE001 — best-effort seeding
+            log.warning("Basna prior-knowledge build failed", error=str(e))
+    # Read-only reference-folder directive (prior runs' folders + user-added).
+    _reference_block = ""
+    if _ref_folders:
+        try:
+            from captain_claw.flight_deck.vatra_routes import _reference_directive
+            _reference_block = _reference_directive(_ref_folders)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna reference-folders build failed", error=str(e))
     # R12: the task workers actually build against — the raw intent, carrying the
     # (reviewed/edited) brief the router selected the team on. brief == "" → this is
     # exactly sess["intent"], so nothing changes when the lever is off. Verification
@@ -2708,6 +2933,10 @@ async def execute_route(
                 base_prompt = research_pre + _build_dispatch_prompt(
                     role, effective_intent, merge_kind,
                     [f["name"] for f in input_files], extra=sel.get("extra", "")) + rubric_pre
+                if _prior_knowledge:
+                    base_prompt += _prior_knowledge
+                if _reference_block:
+                    base_prompt += _reference_block
                 if shared_datastore:
                     from captain_claw.flight_deck.vatra_routes import _datastore_directive
                     base_prompt += _datastore_directive(vfs_project, True)
