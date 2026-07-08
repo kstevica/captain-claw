@@ -49,8 +49,8 @@ function loadWage(): number {
 function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
     <div className="flex flex-col">
-      <span className="text-[9px] uppercase tracking-wide text-zinc-500">{label}</span>
-      <span className={`text-sm font-semibold tabular-nums ${accent ? 'text-emerald-700 dark:text-emerald-300' : 'text-zinc-800 dark:text-zinc-100'}`}>{value}</span>
+      <span className="text-[9px] uppercase tracking-wide text-zinc-400">{label}</span>
+      <span className={`text-sm font-semibold tabular-nums ${accent ? 'text-emerald-700 dark:text-emerald-300' : 'text-zinc-100'}`}>{value}</span>
     </div>
   )
 }
@@ -89,7 +89,7 @@ export function CostCard({ cost }: { cost: RunCost }) {
           <span className="text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">Run cost</span>
         </div>
         <div className="flex items-baseline gap-1.5">
-          <span className="text-2xl font-bold tabular-nums text-zinc-900 dark:text-zinc-50">{cost.priced ? fmtUsd(cost.usd) : '—'}</span>
+          <span className="text-2xl font-bold tabular-nums text-zinc-50">{cost.priced ? fmtUsd(cost.usd) : '—'}</span>
           {!cost.priced && <span className="text-[10px] text-zinc-500">unpriced model</span>}
         </div>
         <Stat label="wall-clock" value={fmtDur(wall)} />
@@ -111,7 +111,7 @@ export function CostCard({ cost }: { cost: RunCost }) {
         <input
           type="number" min={0} step={5} value={wage || ''} placeholder="0"
           onChange={(e) => onWage(Math.max(0, Number(e.target.value)))}
-          className="w-16 rounded border border-zinc-300 bg-white/70 px-2 py-0.5 text-xs text-zinc-800 focus:border-emerald-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950/60 dark:text-zinc-200"
+          className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-0.5 text-xs text-zinc-200 focus:border-emerald-500 focus:outline-none"
         />
         <span className="text-[11px] text-zinc-500">/hr</span>
         {ratio != null && (
@@ -131,10 +131,10 @@ export function CostCard({ cost }: { cost: RunCost }) {
         <div className="mt-2 space-y-1">
           {Object.entries(cost.per_model).sort((a, b) => (b[1].usd || 0) - (a[1].usd || 0)).map(([m, pm]) => (
             <div key={m} className="flex items-center gap-2 text-[11px]">
-              <span className="truncate font-mono text-zinc-600 dark:text-zinc-400">{m || '?'}</span>
+              <span className="truncate font-mono text-zinc-400">{m || '?'}</span>
               {pm.calls > 1 && <span className="text-[9px] text-zinc-500">×{pm.calls}</span>}
               <span className="ml-auto tabular-nums text-zinc-500">{fmtTok((pm.prompt_tokens || 0) + (pm.completion_tokens || 0))} tok</span>
-              <span className="w-16 text-right font-medium tabular-nums text-zinc-800 dark:text-zinc-200">{pm.priced ? fmtUsd(pm.usd) : '—'}</span>
+              <span className="w-16 text-right font-medium tabular-nums text-zinc-200">{pm.priced ? fmtUsd(pm.usd) : '—'}</span>
             </div>
           ))}
         </div>

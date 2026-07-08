@@ -2708,6 +2708,9 @@ async def execute_route(
                 base_prompt = research_pre + _build_dispatch_prompt(
                     role, effective_intent, merge_kind,
                     [f["name"] for f in input_files], extra=sel.get("extra", "")) + rubric_pre
+                if shared_datastore:
+                    from captain_claw.flight_deck.vatra_routes import _datastore_directive
+                    base_prompt += _datastore_directive(vfs_project, True)
                 if quality.worker_escalate:
                     base_prompt += ESCALATE_DIRECTIVE
                 if quality.judgment_ledger:

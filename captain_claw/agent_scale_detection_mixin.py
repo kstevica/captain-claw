@@ -1020,6 +1020,15 @@ class AgentScaleDetectionMixin:
         """
         if getattr(self, "_skip_deferred_scale", False):
             return True
+        # A Vatra reporter (and any assemble-only spawn) sets CLAW_NO_SCALE=1.
+        # Its job is to fuse teammates' pieces into one deliverable — the "pieces"
+        # look exactly like list members whose textual evidence never lands in the
+        # reply, so the write_file/coverage gate would block a finished reporter
+        # forever (the same failure code agents hit → the reporter looped, rewriting
+        # the report until killed). One latch turns the whole pipeline off for it.
+        if os.environ.get("CLAW_NO_SCALE"):
+            self._skip_deferred_scale = True
+            return True
         if os.environ.get("CLAW_CODE_AGENT"):
             # Latch + one-time trace so process logs show why the contract
             # pipeline never fired for this agent.

@@ -192,6 +192,27 @@ def _vfs_directive(project: str) -> str:
     )
 
 
+def _datastore_directive(project: str, enabled: bool) -> str:
+    """When the run's shared datastore is on, tell workers to collaborate through
+    ONE relational store (the `datastore` tool) instead of improvising with JSON
+    files or one-off scripts. Without this they don't know a shared store exists."""
+    if not enabled or not project:
+        return ""
+    return (
+        "\n\n## Shared team datastore — USE IT FOR STRUCTURED DATA\n"
+        "This team shares ONE relational datastore, reachable via the `datastore` tool. "
+        "Every teammate reads and writes the SAME tables — it is the single source of "
+        "truth for structured/tabular data.\n"
+        "- Put records / rows / lists / results in the datastore, NOT in ad-hoc JSON "
+        "files or throwaway python scripts.\n"
+        "- Write: datastore(action=\"create_table\", table=\"…\", columns=[…]) then "
+        "datastore(action=\"insert\", table=\"…\", rows=[…]).\n"
+        "- Read teammates' data: datastore(action=\"list_tables\") and "
+        "datastore(action=\"query\", table=\"…\").\n"
+        f"Prose and reports still go to files under vfs:{project}/; structured data goes in the datastore."
+    )
+
+
 def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
     """Run-context env injected into a worker so the `vatra` tool knows where it is."""
     project = _vfs_project(sid)
@@ -298,7 +319,8 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
 
 async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
                          creds: dict, max_agents: int,
-                         force_ids: list[str] | None = None) -> dict:
+                         force_ids: list[str] | None = None,
+                         shared_datastore: bool = False) -> dict:
     """Ask the Lead to split the task into complementary, owner-assigned subtasks.
 
     Returns a normalized plan. On any LLM/parse failure raises — the caller turns
@@ -311,6 +333,19 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
         raise HTTPException(500, "Vatra lead prompt not found")
     arch_by_id = {a["id"]: a for a in archetypes}
     system_prompt = system_file.read_text() + "\n\n## Catalog\n" + _build_catalog(archetypes, reliability)
+    if shared_datastore:
+        # The team shares one relational datastore this run — plan for it, or the
+        # Lead defaults "datastore" to a JSON file and the whole team follows suit.
+        system_prompt += (
+            "\n\n## Shared team datastore is ENABLED for this run\n"
+            "The team shares ONE relational datastore, reachable via the `datastore` tool. "
+            "When the task involves saving / storing / persisting structured data:\n"
+            "- Plan the persistence work to write to the shared datastore via the `datastore` "
+            "tool (create_table + insert) — NOT to an ad-hoc JSON or CSV file.\n"
+            "- In `shared_context`, pin the datastore SCHEMA the team follows: the table name(s) "
+            "and columns. Every owner that produces structured data inserts into those tables.\n"
+            "- Do NOT describe 'the datastore' as a local JSON file — it is the relational store."
+        )
     user_prompt = (
         f"Task: {intent}\n\n"
         f"max_agents: {max_agents}. Decompose into the smallest set of complementary, "
@@ -364,7 +399,8 @@ def _resolve_creds(registry: dict, tiers: dict | None, api_key: str, tier: str) 
 
 
 async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dict,
-                      force_ids: list[str] | None = None) -> dict:
+                      force_ids: list[str] | None = None,
+                      shared_datastore: bool = False) -> dict:
     """Run the Lead and shape the result into a persistable Vatra route:
     {mode, domain, rationale, subtasks, selected}. `selected` mirrors Basna's
     shape so the read-tool and list UI render the owners. `force_ids` fixes the
@@ -379,7 +415,8 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
     # A fixed team must all fit, even if larger than the requested max.
     cap = max(max_agents, len(forced)) if forced else max_agents
     plan = await asyncio.wait_for(
-        _llm_decompose(intent, archetypes, reliability, creds, cap, force_ids=forced or None),
+        _llm_decompose(intent, archetypes, reliability, creds, cap, force_ids=forced or None,
+                       shared_datastore=shared_datastore),
         _DECOMPOSE_TIMEOUT)
     subtasks = plan["subtasks"]
     # Guarantee every fixed-team archetype actually got a piece — if the Lead missed
@@ -662,7 +699,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             # A plan-step child can fix the team via config.force_ids.
             _force = [str(a) for a in (cfg.get("force_ids") or []) if str(a).strip()]
             route = await _build_plan(db, user["id"], intent, max_agents, _creds("reason"),
-                                      force_ids=_force or None)
+                                      force_ids=_force or None, shared_datastore=_shared_ds)
         except HTTPException:
             await db.update_basna_session(sid, user["id"], status="error")
             raise
@@ -918,6 +955,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 role, effective_intent, st, [f["name"] for f in input_files],
                 subtasks, shared_context, team_prep=intro_digest,
                 vfs_project=vfs_project)
+            prompt += _datastore_directive(vfs_project, _run_shared_datastore.get(sid, False))
             if quality.worker_escalate:
                 prompt += ESCALATE_DIRECTIVE
             if quality.judgment_ledger:
@@ -984,6 +1022,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 label = _owner_label(sp)
                 on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
                 prompt = _build_intro_prompt(role, st, shared_context, vfs_project=vfs_project)
+                prompt += _datastore_directive(vfs_project, _run_shared_datastore.get(sid, False))
                 if quality.source_corpus:
                     prompt += SOURCE_CORPUS_DIRECTIVE  # context discipline: intro does the heavy fetching
                 d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
@@ -1199,6 +1238,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                         label = _owner_label(sp)
                         on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
                         prompt = _build_review_prompt(role, st, digest, shared_context, vfs_project=vfs_project)
+                        prompt += _datastore_directive(vfs_project, _run_shared_datastore.get(sid, False))
                         d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                             sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                             on_action=on_action, agent_name=label, on_usage=on_usage))
@@ -1806,7 +1846,10 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         tiers=tiers, api_key=api_key, env_vars=env_vars,
         # Bind the reporter to the same shared VFS project so it reads the
         # team's files from (and writes the assembled deliverable to) one folder.
-        extra_env=_vatra_env(sid, "reporter", reporter_id, 0),
+        # CLAW_NO_SCALE: the reporter ASSEMBLES pieces — turn off the list/scale +
+        # write-file-enforcement pipeline so it isn't blocked in an infinite rewrite
+        # loop (the pieces read as unresolved "list members").
+        extra_env=_vatra_env(sid, "reporter", reporter_id, 0) + [{"key": "CLAW_NO_SCALE", "value": "1"}],
         corpus=corpus,  # R10
     )
     if not sp["ok"]:
@@ -2359,6 +2402,9 @@ class VatraStartRequest(BaseModel):
     # verbatim (no re-derivation) — the "edit the brief, re-plan on it" path. Empty →
     # derive one iff quality.intent_brief.
     brief: str = ""
+    # Opt-in shared datastore: passed at PLAN time too so the Lead decomposes the task
+    # to persist structured data into the shared relational store (not a JSON file).
+    shared_datastore: bool = False
 
 
 class VatraExecuteRequest(BaseModel):
@@ -2388,6 +2434,7 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
     sess = await db.create_basna_session(
         user["id"], intent, title=title,
         config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents,
+                           **({"shared_datastore": True} if body.shared_datastore else {}),
                            **({"horizon": body.horizon} if body.horizon else {})}))
     sid = sess["id"]
     registry = _load_registry()
@@ -2415,7 +2462,8 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
     task_for_planning = research_brief.brief_task(intent, brief)
     try:
         route = await _build_plan(db, user["id"], task_for_planning, body.max_agents, creds,
-                                  force_ids=body.archetype_ids or None)
+                                  force_ids=body.archetype_ids or None,
+                                  shared_datastore=body.shared_datastore)
     except HTTPException:
         await db.delete_basna_session(sid, user["id"])
         raise
@@ -2465,12 +2513,13 @@ async def start_vatra(body: VatraStartRequest, request: Request,
     sess = await db.create_basna_session(
         user["id"], intent, title=title,
         config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents,
+                           **({"shared_datastore": True} if body.shared_datastore else {}),
                            **({"horizon": body.horizon} if body.horizon else {})}))
     sid = sess["id"]
     exec_req = ExecuteRequest(
         session_id=sid, tiers=body.tiers or None,
         env_vars=body.env_vars or None, api_key=body.api_key or "",
-        horizon=body.horizon or None)
+        horizon=body.horizon or None, shared_datastore=body.shared_datastore)
     # Background task with a stub request carrying the owner (spawn_process reads
     # request.state.user_id) — the real request object isn't safe to use post-response.
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))

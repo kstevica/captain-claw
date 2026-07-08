@@ -306,7 +306,9 @@ async function apiListProjects(): Promise<VfsProject[]> {
     const res = await _authedFetch('/fd/vfs/projects')
     if (!res.ok) return []
     const data = await res.json()
-    return Array.isArray(data) ? (data as VfsProject[]) : []
+    // /fd/vfs/projects returns { projects: [...] } (same shape the VFS browser reads).
+    const list = Array.isArray(data) ? data : (data?.projects ?? [])
+    return Array.isArray(list) ? (list as VfsProject[]) : []
   } catch { return [] }
 }
 
@@ -463,15 +465,19 @@ function _loadMaxParallel(): number {
 }
 
 function _loadExecGroups(): boolean {
+  // Default ON — respect an explicit saved choice, otherwise start grouped.
   try {
-    return typeof localStorage !== 'undefined' && localStorage.getItem(_EXEC_GROUPS_LS) === '1'
-  } catch { return false }
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(_EXEC_GROUPS_LS) : null
+    return raw === null ? true : raw === '1'
+  } catch { return true }
 }
 
 function _loadSharedDatastore(): boolean {
+  // Default ON — respect an explicit saved choice, otherwise start shared.
   try {
-    return typeof localStorage !== 'undefined' && localStorage.getItem(_SHARED_DS_LS) === '1'
-  } catch { return false }
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(_SHARED_DS_LS) : null
+    return raw === null ? true : raw === '1'
+  } catch { return true }
 }
 
 function _loadQuality(): QualityProfile {
@@ -786,6 +792,8 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         ...(archetypeIds.length ? { archetype_ids: archetypeIds } : {}),
         // R12: opt-in intent brief. A user-edited brief re-plans the team on it.
         quality: toRequest(get().quality),
+        // Plan-time datastore awareness: the Lead must plan for the shared store.
+        shared_datastore: get().sharedDatastore,
         ...(brief.trim() ? { brief } : {}),
       })
       // Persist pending attachments onto the freshly-created session BEFORE
