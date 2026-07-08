@@ -8,7 +8,7 @@ import remarkGfm from 'remark-gfm'
 import type { BasnaAnalysis, BasnaRun, BasnaSession, ProgressEvent, RunCost, VatraSubtask } from '../../stores/basnaStore'
 import { CostCard } from '../CostCard'
 import { VatraBlackboard } from '../VatraDelegation'
-import { ProgressFeed } from './RunWorkspace'
+import { ProgressFeed, ResizableSplit } from './RunWorkspace'
 import { RunFilesPanel, RunDatastorePanel } from './RunArtifacts'
 import {
   analysisToMarkdown, Badge, downloadMarkdown, OutputActions, slugify, WeightBar,
@@ -134,11 +134,13 @@ export function RunReport({
     const t: { id: TabId; label: string; count?: number }[] = [{ id: 'report', label: vatraMode ? 'Report' : 'Truth' }]
     if (hasAnalysis) t.push({ id: 'analysis', label: 'Analysis' })
     if (hasGaps) t.push({ id: 'gaps', label: 'Gaps', count: analysis?.gaps?.length || 0 })
+    // Vatra: the Board tab shows the log + board side by side (running-mode
+    // layout), so there's no separate Log tab. Basna: a standalone Log tab.
     if (vatraMode) t.push({ id: 'board', label: 'Board' })
     t.push({ id: 'files', label: 'Files' })
     t.push({ id: 'datastore', label: 'Datastore' })
     if (runs.length > 0) t.push({ id: 'agents', label: 'Agents', count: runs.length })
-    if (progress.length > 0) t.push({ id: 'log', label: 'Log' })
+    if (!vatraMode && progress.length > 0) t.push({ id: 'log', label: 'Log' })
     return t
   }, [vatraMode, hasAnalysis, hasGaps, runs.length, progress.length, analysis?.gaps?.length])
 
@@ -431,9 +433,14 @@ export function RunReport({
           </div>
         )}
 
-        {/* Shared board tab (Vatra) */}
+        {/* Board tab (Vatra) — log + shared board side by side, resizable, the
+            same layout as the live run. */}
         {activeTab === 'board' && (
-          <VatraBlackboard sessionId={session.id} subtasks={subtasks} active={false} />
+          <ResizableSplit
+            storageKey="basna.runSplit"
+            left={<ProgressFeed progress={progress} running={false} fill />}
+            right={<VatraBlackboard sessionId={session.id} subtasks={subtasks} active={false} />}
+          />
         )}
 
         {/* Files tab — everything the team wrote to the run's VFS folder. */}

@@ -11,7 +11,7 @@ import { FileModal, isViewable, viewModeForFile, type ViewMode } from './shared'
 // datastore tables it built. Reused live (in the run rail) and after the run
 // (as report tabs). View-only — no edit/delete here. ────────────────────────
 
-async function fdGet(path: string): Promise<Response> {
+export async function fdGet(path: string): Promise<Response> {
   const { token, authEnabled } = useAuthStore.getState()
   const headers: Record<string, string> = {}
   if (authEnabled && token) headers.Authorization = `Bearer ${token}`
@@ -23,11 +23,11 @@ async function fdGet(path: string): Promise<Response> {
   return res
 }
 
-const qp = (o: Record<string, string>) => new URLSearchParams(o).toString()
+export const qp = (o: Record<string, string>) => new URLSearchParams(o).toString()
 
 // Walk the run folder, gathering files (skipping hidden dirs like .datastore /
 // .history / .code that hold machinery, not deliverables).
-async function walkFiles(project: string, dir = '', depth = 0, acc: VFSEntry[] = []): Promise<VFSEntry[]> {
+export async function walkFiles(project: string, dir = '', depth = 0, acc: VFSEntry[] = []): Promise<VFSEntry[]> {
   if (depth > 3) return acc
   const res = await fdGet(`/vfs/list?${qp({ project, path: dir })}`)
   if (!res.ok) return acc

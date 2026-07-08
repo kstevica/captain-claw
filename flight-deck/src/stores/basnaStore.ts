@@ -550,7 +550,9 @@ interface BasnaStore {
   planComplex: boolean // simple = one model per step; complex = a full Basna/Vatra per step
   planDag: boolean     // planner emits a DAG; independent steps run in parallel waves
   quality: QualityProfile  // opt-in cross-pollination levers (all-off == current behaviour)
+  activeProjectId: string  // project bundle new runs belong to ('' = Unfiled); sent on route/plan
 
+  setActiveProjectId: (id: string) => void
   setRouterTier: (t: string) => void
   setQuality: (q: QualityProfile) => void
   setMaxAgents: (n: number) => void
@@ -635,7 +637,9 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   planComplex: false,
   planDag: false,
   quality: _loadQuality(),
+  activeProjectId: '',
 
+  setActiveProjectId: (id) => set({ activeProjectId: id }),
   setRouterTier: (t) => {
     try { localStorage.setItem(_ROUTER_TIER_LS, t) } catch { /* ignore */ }
     set({ routerTier: t })
@@ -835,6 +839,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         // R12: opt-in intent brief. A user-edited brief re-routes the team on it.
         quality: toRequest(get().quality),
         ...(brief.trim() ? { brief } : {}),
+        ...(get().activeProjectId ? { project_id: get().activeProjectId } : {}),
         ...creds,
         ...(sid ? { session_id: sid } : {}),
       })
@@ -869,6 +874,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         ...(get().knowledgeSessionIds.length ? { knowledge_session_ids: get().knowledgeSessionIds, knowledge_include_board: get().knowledgeIncludeBoard } : {}),
         ...(get().referenceFolders.length ? { reference_folders: get().referenceFolders } : {}),
         ...(brief.trim() ? { brief } : {}),
+        ...(get().activeProjectId ? { project_id: get().activeProjectId } : {}),
       })
       // Persist pending attachments onto the freshly-created session BEFORE
       // selectSession reloads its files — otherwise Plan drops them (the new session

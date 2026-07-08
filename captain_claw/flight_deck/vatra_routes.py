@@ -783,6 +783,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     domain = route["domain"]
     subtasks = route["subtasks"]
     shared_context = route.get("shared_context", "")
+    # Fold the project bundle's theme into shared_context so every worker shares it.
+    # This is the one choke point both fresh and continuation runs pass through, so
+    # continuations (which skip route_vatra) still get the project's instructions.
+    _proj_ctx = cfg.get("project_context") or ""
+    if _proj_ctx and _proj_ctx not in shared_context:
+        shared_context = (_proj_ctx + "\n\n" + shared_context).strip()
     # Per-group extra instructions the user attached in the team-plan editor
     # ({"A": "...", "B": "..."}), injected into every owner that runs in that group.
     _group_instructions = route.get("group_instructions") or {}
@@ -2490,6 +2496,9 @@ class VatraStartRequest(BaseModel):
     # Read-only reference VFS folders workers consult BEFORE web-searching. The
     # knowledge runs' own folders are auto-added, so this is for EXTRA folders.
     reference_folders: list[str] = []
+    # Project bundle this run belongs to (empty = Unfiled). The project's theme is
+    # folded into the plan/shared_context and its folder added as a reference.
+    project_id: str = ""
 
 
 class VatraExecuteRequest(BaseModel):
@@ -2545,9 +2554,19 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
             log.warning("Vatra intent-brief derivation failed; planning on raw intent", error=str(e))
             brief = ""
     task_for_planning = research_brief.brief_task(intent, brief)
+    # Project bundle: the theme (description + instructions) seeds the Lead's plan
+    # and every worker's shared_context; the project folder becomes a reference.
+    _proj_theme, _proj_folder = "", ""
+    if body.project_id.strip():
+        from captain_claw.flight_deck.basna_routes import _project_context
+        _proj_theme, _proj_folder = await _project_context(db, user["id"], body.project_id.strip())
+    if _proj_theme:
+        task_for_planning = f"{_proj_theme}\n\n---\n\n{task_for_planning}"
     try:
         _prior = ""
         _ref_folders = list(body.reference_folders or [])
+        if _proj_folder:
+            _ref_folders = list(dict.fromkeys(_ref_folders + [_proj_folder]))
         if body.knowledge_session_ids:
             from captain_claw.flight_deck.basna_routes import build_prior_knowledge, knowledge_run_folders
             _prior = await build_prior_knowledge(
@@ -2565,6 +2584,8 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
         _ref = _reference_directive(_ref_folders)
         if _ref:
             route["shared_context"] = (route.get("shared_context", "") + _ref).strip()
+        # The project theme is folded into shared_context by execute_vatra (the one
+        # choke point both fresh and continuation runs pass through) — not here.
     except HTTPException:
         await db.delete_basna_session(sid, user["id"])
         raise
@@ -2572,8 +2593,20 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
         await db.delete_basna_session(sid, user["id"])
         raise HTTPException(502, f"Vatra Lead failed: {_lead_error_msg(e)}")
     route["brief"] = brief  # R12: persisted with the plan; execute dispatches on it, UI edits it
-    await db.update_basna_session(
-        sid, user["id"], domain=route["domain"], route=json.dumps(route), status="routed")
+    # Persist the project binding on the session config so the UI groups the run
+    # and any later step can recover the bundle.
+    _cfg_extra = {}
+    if body.project_id.strip():
+        try:
+            _cfg_extra = json.loads((await db.get_basna_session(sid, user["id"]) or {}).get("config") or "{}")
+        except Exception:  # noqa: BLE001
+            _cfg_extra = {}
+        _cfg_extra["project_id"] = body.project_id.strip()
+        _cfg_extra["project_context"] = _proj_theme
+    _upd = dict(domain=route["domain"], route=json.dumps(route), status="routed")
+    if _cfg_extra:
+        _upd["config"] = json.dumps(_cfg_extra)
+    await db.update_basna_session(sid, user["id"], **_upd)
     return {"session_id": sid, "title": title, **route}
 
 
@@ -2750,6 +2783,14 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
         "parent_session_id": parent_session_id, "root_session_id": root_sid,
         "round": round_no, "vfs_project": vfs_project, "max_agents": 6,
     }
+    # Keep the whole chain in the parent's project bundle; theme re-derived so
+    # edits between rounds are picked up (execute injects it into shared_context).
+    _proj_id = parent_cfg.get("project_id") or ""
+    if _proj_id:
+        from captain_claw.flight_deck.basna_routes import _project_context
+        _ptheme, _ = await _project_context(db, owner, _proj_id)
+        cfg["project_id"] = _proj_id
+        cfg["project_context"] = _ptheme
     if _parent_shared_ds:  # keep the chain bound to the folder's shared datastore
         cfg["shared_datastore"] = True
     if cast_ids:

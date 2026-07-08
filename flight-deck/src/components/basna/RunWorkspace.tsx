@@ -186,9 +186,10 @@ function AgentRoster({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: 
   )
 }
 
-// Collapsible progress feed for the rail.
-export function ProgressFeed({ progress, running, defaultOpen = true }: {
-  progress: ProgressEvent[]; running: boolean; defaultOpen?: boolean
+// Collapsible progress feed. `fill` makes it a tall pane (side-by-side layout)
+// rather than the compact rail card.
+export function ProgressFeed({ progress, running, defaultOpen = true, fill = false }: {
+  progress: ProgressEvent[]; running: boolean; defaultOpen?: boolean; fill?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
   const ref = useRef<HTMLDivElement>(null)
@@ -217,7 +218,7 @@ export function ProgressFeed({ progress, running, defaultOpen = true }: {
         </button>
       </div>
       {open && (
-        <div ref={ref} className="mt-2 max-h-64 space-y-1 overflow-auto">
+        <div ref={ref} className={`mt-2 space-y-1 overflow-auto ${fill ? 'max-h-[62vh] min-h-[320px]' : 'max-h-64'}`}>
           {progress.slice(-40).map((ev) => (
             <div key={ev.i} className="flex items-baseline gap-1.5 text-[11px]">
               <span className="shrink-0 font-mono text-[9px] tabular-nums text-zinc-600">
@@ -278,6 +279,61 @@ function GroupStepper({ agents }: { agents: LiveAgent[] }) {
           </span>
         )
       })}
+    </div>
+  )
+}
+
+// A horizontal two-pane split with a draggable divider. The ratio persists and
+// the layout stacks vertically on narrow screens.
+export function ResizableSplit({ storageKey, left, right }: {
+  storageKey: string; left: React.ReactNode; right: React.ReactNode
+}) {
+  const [pct, setPct] = useState(() => {
+    try { const v = Number(localStorage.getItem(storageKey)); return v >= 20 && v <= 80 ? v : 50 } catch { return 50 }
+  })
+  const [wide, setWide] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches)
+  const [dragging, setDragging] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)')
+    const h = () => setWide(mq.matches)
+    mq.addEventListener('change', h)
+    return () => mq.removeEventListener('change', h)
+  }, [])
+  useEffect(() => { try { localStorage.setItem(storageKey, String(Math.round(pct))) } catch { /* ignore */ } }, [pct, storageKey])
+
+  const onDown = (e: React.MouseEvent) => {
+    e.preventDefault()
+    setDragging(true)
+    const move = (ev: MouseEvent) => {
+      const r = ref.current?.getBoundingClientRect()
+      if (!r || r.width === 0) return
+      setPct(Math.max(20, Math.min(80, ((ev.clientX - r.left) / r.width) * 100)))
+    }
+    const up = () => {
+      setDragging(false)
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+  }
+
+  if (!wide) return <div className="space-y-3">{left}{right}</div>
+  return (
+    <div ref={ref} className={`flex items-stretch ${dragging ? 'select-none' : ''}`}>
+      <div style={{ width: `${pct}%` }} className="min-w-0">{left}</div>
+      <div
+        onMouseDown={onDown}
+        title="Drag to resize"
+        className="group relative mx-1.5 w-1.5 shrink-0 cursor-col-resize"
+      >
+        <div className={`absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded ${
+          dragging ? 'bg-sky-500' : 'bg-zinc-800 group-hover:bg-sky-600/60'}`} />
+      </div>
+      <div style={{ width: `${100 - pct}%` }} className="min-w-0">{right}</div>
     </div>
   )
 }
@@ -374,24 +430,22 @@ export function RunWorkspace({
         )}
       </div>
 
-      {/* Two-column workspace: substance left, roster + feed right. */}
+      {/* Workspace: Progress ⇔ board/agents (resizable 50:50), + a rail for
+          the roster and artifacts. */}
       <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
-        <div className="min-w-0 space-y-3">
-          {vatraMode ? (
-            <VatraBlackboard sessionId={session.id} subtasks={subtasks} active={running} />
-          ) : (
-            liveAgents.length > 0
-              ? <LiveAgentsPanel agents={liveAgents} onSkip={onSkip} />
-              : (
-                <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 text-xs text-zinc-500">
-                  Spawning the team…
-                </div>
-              )
-          )}
+        <div className="min-w-0">
+          <ResizableSplit
+            storageKey="basna.runSplit"
+            left={<ProgressFeed progress={progress} running={running} fill />}
+            right={vatraMode
+              ? <VatraBlackboard sessionId={session.id} subtasks={subtasks} active={running} />
+              : (liveAgents.length > 0
+                  ? <LiveAgentsPanel agents={liveAgents} onSkip={onSkip} />
+                  : <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 text-xs text-zinc-500">Spawning the team…</div>)}
+          />
         </div>
         <div className="space-y-3">
           {vatraMode && <AgentRoster agents={liveAgents} onSkip={onSkip} />}
-          <ProgressFeed progress={progress} running={running} />
           {project && <RunFilesPanel project={project} live={running} />}
           {project && <RunDatastorePanel project={project} live={running} hideWhenEmpty />}
         </div>

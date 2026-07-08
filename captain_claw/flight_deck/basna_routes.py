@@ -286,6 +286,9 @@ class RouteRequest(BaseModel):
     # (no re-derivation) and selects the team against it — this is the "edit the
     # brief, re-route on it" path. Empty → derive one iff quality.intent_brief.
     brief: str = ""
+    # Project bundle this run belongs to (empty = Unfiled). Stored on the session;
+    # the project's theme is injected at dispatch and its folder added read-only.
+    project_id: str = ""
 
 
 class CreateSessionRequest(BaseModel):
@@ -305,6 +308,124 @@ class UpdateSessionRequest(BaseModel):
     truth: str | None = None
     confidence: float | None = None
     config: str | None = None
+
+
+# ── Project endpoints (run bundles) ──────────────────────────────────
+# A project groups runs under one theme (description + instructions injected
+# into each run) and one VFS folder (uploads, auto-added read-only as a
+# reference folder). Runs stay independent — see the run-launch injection.
+
+def _slugify(name: str, fallback: str = "project") -> str:
+    import re
+    s = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    return s[:40] or fallback
+
+
+def _project_vfs_dir(user_id: str, folder: str) -> Path:
+    from captain_claw.flight_deck.vfs_routes import _user_root
+    from captain_claw.vfs import safe_name
+    return (_user_root(user_id) / safe_name(folder, fallback="project")).resolve()
+
+
+class CreateProjectRequest(BaseModel):
+    name: str
+    description: str = ""
+    instructions: str = ""
+
+
+class UpdateProjectRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    instructions: str | None = None
+
+
+@router.get("/projects")
+async def list_projects(user: dict = Depends(get_current_user)):
+    return await get_db().list_basna_projects(user["id"])
+
+
+@router.post("/projects")
+async def create_project(body: CreateProjectRequest, user: dict = Depends(get_current_user)):
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "project name is required")
+    db = get_db()
+    # A readable, collision-proof VFS folder: <slug>-<id8>.
+    import uuid as _uuid_mod
+    folder = f"{_slugify(name)}-{_uuid_mod.uuid4().hex[:8]}"
+    _project_vfs_dir(user["id"], folder).mkdir(parents=True, exist_ok=True)
+    return await db.create_basna_project(
+        user["id"], name, folder,
+        description=(body.description or "").strip(),
+        instructions=(body.instructions or "").strip(),
+    )
+
+
+@router.get("/projects/{project_id}")
+async def get_project(project_id: str, user: dict = Depends(get_current_user)):
+    proj = await get_db().get_basna_project(project_id, user["id"])
+    if not proj:
+        raise HTTPException(404, "project not found")
+    return proj
+
+
+@router.put("/projects/{project_id}")
+async def update_project(
+    project_id: str, body: UpdateProjectRequest, user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    ok = await db.update_basna_project(project_id, user["id"], **fields)
+    if not ok:
+        raise HTTPException(404, "project not found or nothing to update")
+    return await db.get_basna_project(project_id, user["id"])
+
+
+@router.delete("/projects/{project_id}")
+async def delete_project(
+    project_id: str, delete_runs: bool = False, user: dict = Depends(get_current_user),
+):
+    """Delete a project. Its VFS folder is kept (files may be referenced
+    elsewhere). Runs are deleted only when delete_runs=true; otherwise they are
+    orphaned (project_id in config no longer resolves) and fall back to Unfiled."""
+    db = get_db()
+    proj = await db.get_basna_project(project_id, user["id"])
+    if not proj:
+        raise HTTPException(404, "project not found")
+    removed = 0
+    if delete_runs:
+        for s in await db.list_basna_sessions(user["id"]):
+            try:
+                if json.loads(s.get("config") or "{}").get("project_id") == project_id:
+                    if await db.delete_basna_session(s["id"], user["id"]):
+                        removed += 1
+                        shutil.rmtree(_session_files_dir(s["id"]), ignore_errors=True)
+            except Exception:  # noqa: BLE001
+                continue
+    await db.delete_basna_project(project_id, user["id"])
+    return {"deleted": True, "runs_deleted": removed}
+
+
+async def _project_context(db, user_id: str, project_id: str) -> tuple[str, str]:
+    """Return (theme_text, vfs_folder) for a project bundle, or ('', '') if none.
+
+    `theme_text` is the description + instructions, prepended to every worker's
+    task at dispatch; `vfs_folder` is the project's folder, added read-only as a
+    reference folder. Empty theme when the project has neither description nor
+    instructions (still returns the folder)."""
+    project_id = (project_id or "").strip()
+    if not project_id:
+        return "", ""
+    proj = await db.get_basna_project(project_id, user_id)
+    if not proj:
+        return "", ""
+    parts: list[str] = []
+    if (proj.get("description") or "").strip():
+        parts.append(proj["description"].strip())
+    if (proj.get("instructions") or "").strip():
+        parts.append("Project instructions:\n" + proj["instructions"].strip())
+    theme = f"## Project: {proj['name']}\n" + "\n\n".join(parts) if parts else ""
+    return theme, (proj.get("vfs_folder") or "")
 
 
 # ── Session endpoints ────────────────────────────────────────────────
@@ -1037,6 +1158,14 @@ async def _continue_run(
         "kind": kind, "parent_session_id": parent_session_id,
         "root_session_id": root_sid, "round": round_no, "vfs_project": vfs_project,
     }
+    # Keep the whole chain in the parent's project bundle. The theme is re-derived
+    # (not copied) so edits to the project between rounds are picked up; execute
+    # injects config.project_context at dispatch.
+    _proj_id = parent_cfg.get("project_id") or ""
+    if _proj_id:
+        _ptheme, _ = await _project_context(db, owner, _proj_id)
+        _child_cfg["project_id"] = _proj_id
+        _child_cfg["project_context"] = _ptheme
     if parent_quality_raw:  # inherit the chain's quality profile across rounds
         _child_cfg["quality"] = parent_quality_raw
     _parent_shared_ds = bool(parent_cfg.get("shared_datastore"))
@@ -1403,6 +1532,17 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         domain=route["domain"], difficulty=route["difficulty"],
         merge_kind=route["merge_kind"], route=json.dumps(route), status="routed",
     )
+    # Bind the run to its project bundle: config.project_id groups it in the UI,
+    # config.project_context is the theme dispatch injects into every worker.
+    if body.project_id.strip():
+        try:
+            _cfg = json.loads(sess.get("config") or "{}")
+        except Exception:  # noqa: BLE001
+            _cfg = {}
+        _theme, _ = await _project_context(db, user["id"], body.project_id.strip())
+        _cfg["project_id"] = body.project_id.strip()
+        _cfg["project_context"] = _theme
+        update_fields["config"] = json.dumps(_cfg)
     # Backfill the title on an existing session that has none, or honor an
     # explicit user-supplied title; never clobber a previously set title.
     if body.title.strip() or not (sess.get("title") or "").strip():
@@ -2733,6 +2873,15 @@ async def execute_route(
     # blind agent's dispatch prompt as background).
     _prior_knowledge = ""
     _ref_folders = list(getattr(body, "reference_folders", None) or [])
+    # A project run also reads its bundle's shared folder (read-only reference).
+    try:
+        _pcfg = json.loads(sess.get("config") or "{}")
+    except Exception:  # noqa: BLE001
+        _pcfg = {}
+    if _pcfg.get("project_id"):
+        _, _proj_folder = await _project_context(db, user["id"], _pcfg["project_id"])
+        if _proj_folder:
+            _ref_folders = list(dict.fromkeys(_ref_folders + [_proj_folder]))
     if getattr(body, "knowledge_session_ids", None):
         try:
             _prior_knowledge = await build_prior_knowledge(
@@ -2755,6 +2904,10 @@ async def execute_route(
     # exactly sess["intent"], so nothing changes when the lever is off. Verification
     # stages (closer, claim-check) still use the RAW intent as ground truth.
     effective_intent = research_brief.brief_task(sess["intent"], route.get("brief"))
+    # Project theme: prepend the bundle's description + instructions so every
+    # worker builds against the shared context ('' for non-project runs, a no-op).
+    if _pcfg.get("project_context"):
+        effective_intent = f"{_pcfg['project_context']}\n\n---\n\n{effective_intent}"
     # R7 cost ceiling for the OPT-IN levers (acted-gate/escalate retries). The
     # base run is never refused; only the extra paid work these features add is
     # bounded, so the profile can never blow the token budget. 0 → unbounded.

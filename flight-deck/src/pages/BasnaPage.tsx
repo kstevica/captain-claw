@@ -3,8 +3,10 @@ import {
   Network, Play, Sparkles, Check, X, Paperclip, FileText, Image as ImageIcon,
   SlidersHorizontal, ScanSearch, RefreshCw, CornerDownRight, Users, HelpCircle,
   Gauge, ListChecks, Brain, FolderSearch, Loader2, ChevronDown, ChevronRight,
+  Folder, ChevronLeft, ClipboardList,
 } from 'lucide-react'
 import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type FolderMode } from '../stores/basnaStore'
+import { useBasnaProjectStore, UNFILED_ID, type BasnaProject } from '../stores/basnaProjectStore'
 import { VatraTeamPlan } from '../components/VatraDelegation'
 import { QualityControls } from '../components/QualityControls'
 import { BasnaWizardModal } from '../components/agents/BasnaWizardModal'
@@ -19,6 +21,13 @@ import { RunsSidebar } from '../components/basna/RunsSidebar'
 import { RoutePlanEditor } from '../components/basna/RoutePlanEditor'
 import { RunWorkspace } from '../components/basna/RunWorkspace'
 import { RunReport } from '../components/basna/RunReport'
+import { ProjectPicker } from '../components/basna/ProjectPicker'
+import { ProjectDetails } from '../components/basna/ProjectDetails'
+
+// A run's project bundle id (config.project_id), '' when unfiled.
+function projectIdOf(config?: string): string {
+  try { return JSON.parse(config || '{}').project_id || '' } catch { return '' }
+}
 
 const HELP_MD = `
 # Basna, Vatra & Deep mode
@@ -231,9 +240,39 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile,
-    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
+    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
+  const {
+    projects: bundleProjects, current: currentProject, loading: bundlesLoading,
+    loadProjects: loadBundles, createProject, updateProject, deleteProject, select: selectProject,
+  } = useBasnaProjectStore()
+  const [projectTab, setProjectTab] = useState<'details' | 'run'>('run')
+  const [savingProject, setSavingProject] = useState(false)
+
+  // Load the project bundles once; the picker + scoping read from them.
+  useEffect(() => { loadBundles() }, [loadBundles])
+  // New runs launched here belong to the open project (Unfiled → no project_id).
+  useEffect(() => {
+    setActiveProjectId(currentProject && currentProject.id !== UNFILED_ID ? currentProject.id : '')
+  }, [currentProject?.id, setActiveProjectId])
+  // Default to the Run tab whenever a project is opened.
+  useEffect(() => { if (currentProject) setProjectTab('run') }, [currentProject?.id])
+  // Run count per project (+ Unfiled) for the picker cards.
+  const runCounts = useMemo(() => {
+    const c: Record<string, number> = {}
+    for (const s of sessions) {
+      const pid = projectIdOf(s.config) || UNFILED_ID
+      c[pid] = (c[pid] || 0) + 1
+    }
+    return c
+  }, [sessions])
+  // The runs shown in the sidebar — scoped to the open project (Unfiled = no id).
+  const scopedSessions = useMemo(() => {
+    if (!currentProject) return sessions
+    if (currentProject.id === UNFILED_ID) return sessions.filter((s) => !projectIdOf(s.config))
+    return sessions.filter((s) => projectIdOf(s.config) === currentProject.id)
+  }, [sessions, currentProject?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const [intent, setIntent] = useState('')
   const [title, setTitle] = useState('')
@@ -418,15 +457,86 @@ export function BasnaPage() {
     }
   }
 
+  const onDeleteProject = (p: BasnaProject) => {
+    const n = runCounts[p.id] || 0
+    const msg = n > 0
+      ? `Delete project "${p.name}"?\n\nIt has ${n} run(s). Click OK to delete the project AND its runs, or Cancel to keep everything.`
+      : `Delete project "${p.name}"?`
+    if (window.confirm(msg)) deleteProject(p.id, n > 0)
+  }
+
+  // ── Project picker: the projects-first landing (no project open yet) ──
+  if (!currentProject) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex shrink-0 items-center gap-2 border-b border-zinc-700/50 bg-zinc-900/50 px-4 py-3 md:px-6">
+          <Network className="h-5 w-5 text-sky-600 dark:text-sky-400" />
+          <div>
+            <h1 className="text-sm font-semibold text-zinc-100">Basna</h1>
+            <p className="text-[11px] text-zinc-500">Bundle runs into projects — one theme, one shared folder</p>
+          </div>
+          <button
+            onClick={() => viewFull('Basna, Vatra & Deep mode', HELP_MD)}
+            title="What are Basna, Vatra and Deep mode?"
+            className="ml-auto flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+          >
+            <HelpCircle className="h-3.5 w-3.5" /> Help
+          </button>
+        </div>
+        <div className="flex-1 overflow-auto">
+          <ProjectPicker
+            projects={bundleProjects}
+            counts={runCounts}
+            busy={bundlesLoading}
+            onSelect={selectProject}
+            onCreate={async (name, description, instructions) => {
+              const p = await createProject(name, description, instructions)
+              if (p) selectProject(p)
+            }}
+            onDelete={onDeleteProject}
+          />
+        </div>
+        {modal && <FileModal title={modal.title} content={modal.content} mode={modal.mode} onClose={() => setModal(null)} />}
+      </div>
+    )
+  }
+
+  const isUnfiled = currentProject.id === UNFILED_ID
+
   return (
     <div className="flex h-full flex-col">
-      {/* Header */}
+      {/* Header — project breadcrumb + Details/Run tabs */}
       <div className="flex shrink-0 items-center gap-2 border-b border-zinc-700/50 bg-zinc-900/50 px-4 py-3 md:px-6">
-        <Network className="h-5 w-5 text-sky-600 dark:text-sky-400" />
-        <div>
-          <h1 className="text-sm font-semibold text-zinc-100">Basna</h1>
-          <p className="text-[11px] text-zinc-500">Route → spawn the minimal team → merge by reliability</p>
-        </div>
+        <button
+          onClick={() => selectProject(null)}
+          title="All projects"
+          className="flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" /> Projects
+        </button>
+        <Folder className="h-4 w-4 shrink-0 text-sky-500/80" />
+        <span className="min-w-0 truncate text-sm font-semibold text-zinc-100" title={currentProject.name}>{currentProject.name}</span>
+        {!isUnfiled && (
+          <div className="ml-3 inline-flex rounded-lg border border-zinc-700 bg-zinc-900/50 p-0.5">
+            {([
+              { id: 'details', label: 'Details', icon: ClipboardList },
+              { id: 'run', label: 'Run', icon: Play },
+            ] as const).map((t) => {
+              const Icon = t.icon
+              const sel = projectTab === t.id
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => setProjectTab(t.id)}
+                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                    sel ? 'bg-sky-600 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+                >
+                  <Icon className="h-3.5 w-3.5" /> {t.label}
+                </button>
+              )
+            })}
+          </div>
+        )}
         <button
           onClick={() => viewFull('Basna, Vatra & Deep mode', HELP_MD)}
           title="What are Basna, Vatra and Deep mode?"
@@ -445,17 +555,37 @@ export function BasnaPage() {
       )}
 
       <div className="flex flex-1 overflow-hidden">
-        <RunsSidebar
-          sessions={sessions}
-          activeId={activeSession?.id}
-          onSelect={selectSession}
-          onDelete={onDelete}
-          onCancel={cancelSession}
-          onNew={() => { newSession(); setIntent(''); setTitle(''); setTeam([]) }}
-          onWizard={() => setWizardOpen(true)}
-        />
+        {projectTab === 'run' && (
+          <RunsSidebar
+            sessions={scopedSessions}
+            activeId={activeSession?.id}
+            onSelect={selectSession}
+            onDelete={onDelete}
+            onCancel={cancelSession}
+            onNew={() => { newSession(); setIntent(''); setTitle(''); setTeam([]) }}
+            onWizard={() => setWizardOpen(true)}
+          />
+        )}
 
-        {/* Detail */}
+        {/* Details tab — the project's theme + files. */}
+        {projectTab === 'details' && !isUnfiled && (
+          <div className="flex-1 overflow-auto p-4 md:p-6">
+            <div className="mx-auto w-[92%] max-w-[1100px]">
+              <ProjectDetails
+                project={currentProject}
+                saving={savingProject}
+                onSave={async (fields) => {
+                  setSavingProject(true)
+                  try { await updateProject(currentProject.id, fields) }
+                  finally { setSavingProject(false) }
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Detail (Run tab) */}
+        {projectTab === 'run' && (
         <div className="flex-1 overflow-auto p-4 md:p-6">
           <div className="mx-auto w-[92%] max-w-[2000px] space-y-3">
             {/* Deepen lineage — jump to the parent / child runs of this one. */}
@@ -1121,6 +1251,7 @@ export function BasnaPage() {
             )}
           </div>
         </div>
+        )}
       </div>
 
       {modal && <FileModal title={modal.title} content={modal.content} mode={modal.mode} onClose={() => setModal(null)} />}

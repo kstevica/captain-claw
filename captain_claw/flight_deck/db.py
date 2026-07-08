@@ -267,6 +267,23 @@ class FlightDeckDB:
             CREATE INDEX IF NOT EXISTS idx_vatra_board_session
                 ON vatra_board(session_id);
 
+            -- Basna/Vatra projects: a bundle of runs sharing one theme (description +
+            -- instructions injected into each run) and one read-only VFS folder
+            -- (uploads, auto-added as a reference folder). Runs stay independent —
+            -- the project just groups them and seeds their context.
+            CREATE TABLE IF NOT EXISTS basna_projects (
+                id           TEXT PRIMARY KEY,
+                user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name         TEXT NOT NULL DEFAULT '',
+                description  TEXT NOT NULL DEFAULT '',
+                instructions TEXT NOT NULL DEFAULT '',
+                vfs_folder   TEXT NOT NULL DEFAULT '',   -- the project's VFS folder
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_basna_projects_user
+                ON basna_projects(user_id);
+
             CREATE TABLE IF NOT EXISTS prompts (
                 id         TEXT PRIMARY KEY,
                 user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -975,6 +992,71 @@ class FlightDeckDB:
         cur = await self._db.execute(
             "DELETE FROM basna_sessions WHERE id = ? AND user_id = ?",
             (session_id, user_id),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    # ── Basna projects (run bundles) ─────────────────────────────────
+
+    async def create_basna_project(
+        self, user_id: str, name: str, vfs_folder: str,
+        description: str = "", instructions: str = "",
+    ) -> dict:
+        assert self._db is not None
+        now = _utcnow()
+        pid = _uuid()
+        await self._db.execute(
+            "INSERT INTO basna_projects"
+            " (id, user_id, name, description, instructions, vfs_folder, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (pid, user_id, name, description, instructions, vfs_folder, now, now),
+        )
+        await self._db.commit()
+        return {"id": pid, "user_id": user_id, "name": name, "description": description,
+                "instructions": instructions, "vfs_folder": vfs_folder,
+                "created_at": now, "updated_at": now}
+
+    async def list_basna_projects(self, user_id: str) -> list[dict]:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM basna_projects WHERE user_id = ? ORDER BY updated_at DESC",
+            (user_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_basna_project(self, project_id: str, user_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM basna_projects WHERE id = ? AND user_id = ?",
+            (project_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def update_basna_project(
+        self, project_id: str, user_id: str, **fields,
+    ) -> bool:
+        assert self._db is not None
+        allowed = {"name", "description", "instructions", "vfs_folder"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = _utcnow()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        vals = list(updates.values()) + [project_id, user_id]
+        cur = await self._db.execute(
+            f"UPDATE basna_projects SET {set_clause} WHERE id = ? AND user_id = ?", vals,
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def delete_basna_project(self, project_id: str, user_id: str) -> bool:
+        """Delete the project. Its runs are NOT deleted — the caller decides
+        whether to cascade (they carry project_id in their config JSON)."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "DELETE FROM basna_projects WHERE id = ? AND user_id = ?",
+            (project_id, user_id),
         )
         await self._db.commit()
         return cur.rowcount > 0
