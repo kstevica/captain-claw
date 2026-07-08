@@ -89,6 +89,11 @@ class DatastoreManager:
         self._db = await aiosqlite.connect(str(self.db_path))
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
+        # Tolerate concurrent writers: a folder-bound datastore shared by a
+        # Basna/Vatra run's agents can have several processes writing at once.
+        # WAL allows many readers + one writer; the busy timeout makes a blocked
+        # writer wait for the lock instead of failing with "database is locked".
+        await self._db.execute("PRAGMA busy_timeout=5000")
 
         await self._db.execute("""
             CREATE TABLE IF NOT EXISTS _ds_tables (
@@ -1714,6 +1719,21 @@ def _looks_bool(val: Any) -> bool:
 
 _manager: DatastoreManager | None = None
 _session_managers: dict[str, DatastoreManager] = {}
+_vfs_managers: dict[str, DatastoreManager] = {}
+_path_managers: dict[str, DatastoreManager] = {}
+
+
+def get_datastore_manager_at(db_path: Path | str) -> DatastoreManager:
+    """Return a datastore manager for an EXPLICIT db file path, cached by path.
+
+    Used by the Flight Deck server to read a folder-bound store under a specific
+    user's VFS root (it can't rely on the ambient env that workers use)."""
+    key = str(Path(db_path).expanduser().resolve())
+    if key in _path_managers:
+        return _path_managers[key]
+    mgr = DatastoreManager(db_path=Path(db_path))
+    _path_managers[key] = mgr
+    return mgr
 
 
 def get_datastore_manager() -> DatastoreManager:
@@ -1722,6 +1742,34 @@ def get_datastore_manager() -> DatastoreManager:
     if _manager is None:
         _manager = DatastoreManager()
     return _manager
+
+
+def get_vfs_datastore_manager(project: str) -> DatastoreManager:
+    """Return a datastore manager whose DB lives INSIDE a shared VFS project
+    folder (``vfs:<project>/.datastore/store.db``).
+
+    Every agent bound to that project (e.g. all workers in a Basna/Vatra run
+    with the shared-datastore option on) resolves to the SAME relational store,
+    so they can collaborate through tables instead of each keeping a private DB.
+    Cached per project. Falls back to the global store if ``project`` is empty.
+    """
+    key = (project or "").strip()
+    if not key:
+        return get_datastore_manager()
+    if key in _vfs_managers:
+        return _vfs_managers[key]
+    from captain_claw.vfs import project_root
+    db_path = project_root(key, create=True) / ".datastore" / "store.db"
+    mgr = DatastoreManager(db_path=db_path)
+    _vfs_managers[key] = mgr
+    return mgr
+
+
+async def close_vfs_datastore_managers() -> None:
+    """Close all VFS-folder-scoped datastore managers."""
+    for mgr in _vfs_managers.values():
+        await mgr.close()
+    _vfs_managers.clear()
 
 
 def get_session_datastore_manager(session_id: str) -> DatastoreManager:

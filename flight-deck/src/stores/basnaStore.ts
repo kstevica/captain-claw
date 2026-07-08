@@ -301,6 +301,15 @@ async function apiExecute(body: Record<string, unknown>): Promise<ExecuteResult>
   return res.json()
 }
 
+async function apiListProjects(): Promise<VfsProject[]> {
+  try {
+    const res = await _authedFetch('/fd/vfs/projects')
+    if (!res.ok) return []
+    const data = await res.json()
+    return Array.isArray(data) ? (data as VfsProject[]) : []
+  } catch { return [] }
+}
+
 async function apiProgress(id: string): Promise<{ events: ProgressEvent[]; active: boolean }> {
   const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(id)}/progress`)
   if (!res.ok) return { events: [], active: false }
@@ -417,6 +426,33 @@ const _DEEP_LS = 'basna.deep'
 const _QUALITY_LS = 'basna.quality'
 const _MAX_PARALLEL_LS = 'basna.maxParallel'
 const _EXEC_GROUPS_LS = 'basna.executionGroups'
+const _SHARED_DS_LS = 'basna.sharedDatastore'
+
+// A VFS project folder as returned by GET /fd/vfs/projects.
+export interface VfsProject {
+  name: string
+  files: number
+  bytes: number
+  mtime: number
+  kind: string       // basna | vatra | council | link | ...
+  run_id?: string
+  title?: string
+}
+
+// Where a run writes: 'new' derives a fresh folder (auto sid-name, or the typed
+// custom name), 'existing' reuses a picked VFS folder. Empty → backend auto-name.
+export type FolderMode = 'new' | 'existing'
+
+function sanitizeFolderName(name: string): string {
+  return (name || '').trim().replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+// The vfs_project string to send when starting a run. '' → backend auto-names
+// (basna-<sid8>/vatra-<sid8>); a non-empty value pins the run to that folder.
+function computeVfsProject(s: { folderMode: FolderMode; newFolderName: string; existingFolder: string }): string {
+  if (s.folderMode === 'existing') return (s.existingFolder || '').trim()
+  return sanitizeFolderName(s.newFolderName)
+}
 
 function _loadMaxParallel(): number {
   try {
@@ -429,6 +465,12 @@ function _loadMaxParallel(): number {
 function _loadExecGroups(): boolean {
   try {
     return typeof localStorage !== 'undefined' && localStorage.getItem(_EXEC_GROUPS_LS) === '1'
+  } catch { return false }
+}
+
+function _loadSharedDatastore(): boolean {
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(_SHARED_DS_LS) === '1'
   } catch { return false }
 }
 
@@ -461,6 +503,12 @@ interface BasnaStore {
   maxAgents: number
   maxParallel: number  // cap on concurrent agent turns (0 = unlimited; mainly for local models)
   executionGroups: boolean  // Vatra: run owners in ordered phases A→B→C→D (opt-in)
+  sharedDatastore: boolean  // opt-in: bind the run's agents to ONE datastore in the VFS folder
+  folderMode: FolderMode    // 'new' folder for this run, or 'existing' picked folder
+  newFolderName: string     // optional custom name when folderMode==='new' (empty → auto)
+  existingFolder: string    // picked folder name when folderMode==='existing'
+  projects: VfsProject[]    // existing VFS folders for the picker
+  projectsLoading: boolean
   deep: boolean        // Deep / Horizon mode: each worker runs the self-consistency
   deepSamples: number  // vote + critics + fix loop (frontier-grade depth) instead of one shot
   planMode: boolean    // Plan-Horizon (Lever C): decompose → verify each step → re-plan
@@ -474,6 +522,11 @@ interface BasnaStore {
   setMaxAgents: (n: number) => void
   setMaxParallel: (n: number) => void
   setExecutionGroups: (v: boolean) => void
+  setSharedDatastore: (v: boolean) => void
+  setFolderMode: (m: FolderMode) => void
+  setNewFolderName: (s: string) => void
+  setExistingFolder: (s: string) => void
+  loadProjects: () => Promise<void>
   setDeep: (v: boolean) => void
   setDeepSamples: (n: number) => void
   setPlanMode: (v: boolean) => void
@@ -525,6 +578,12 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   maxAgents: 6,
   maxParallel: _loadMaxParallel(),
   executionGroups: _loadExecGroups(),
+  sharedDatastore: _loadSharedDatastore(),
+  folderMode: 'new',
+  newFolderName: '',
+  existingFolder: '',
+  projects: [],
+  projectsLoading: false,
   deep: (typeof localStorage !== 'undefined' && localStorage.getItem(_DEEP_LS) === '1') || false,
   deepSamples: 3,
   planMode: false,
@@ -550,6 +609,18 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   setExecutionGroups: (v) => {
     try { localStorage.setItem(_EXEC_GROUPS_LS, v ? '1' : '0') } catch { /* ignore */ }
     set({ executionGroups: v })
+  },
+  setSharedDatastore: (v) => {
+    try { localStorage.setItem(_SHARED_DS_LS, v ? '1' : '0') } catch { /* ignore */ }
+    set({ sharedDatastore: v })
+  },
+  setFolderMode: (m) => set({ folderMode: m }),
+  setNewFolderName: (s) => set({ newFolderName: s }),
+  setExistingFolder: (s) => set({ existingFolder: s }),
+  loadProjects: async () => {
+    set({ projectsLoading: true })
+    const projects = await apiListProjects()
+    set({ projects, projectsLoading: false })
   },
   setDeep: (v) => {
     try { localStorage.setItem(_DEEP_LS, v ? '1' : '0') } catch { /* ignore */ }
@@ -758,7 +829,8 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // Deep mode in Vatra = Horizon depth: verify + revise EACH specialist's slice
       // (worker, blackboard-safe — no spawn pools) AND the final assembled deliverable.
       const horizon = get().deep ? { worker: true, close: true } : undefined
-      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, execution_groups: get().executionGroups, ...(horizon ? { horizon } : {}) })
+      const vfsProject = computeVfsProject(get())
+      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, execution_groups: get().executionGroups, shared_datastore: get().sharedDatastore, ...(vfsProject ? { vfs_project: vfsProject } : {}), ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       if (s) set({ activeSession: s })
       await get().loadSessions()
@@ -832,7 +904,8 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // Deep / Horizon mode: drive each worker through the self-consistency vote +
       // critics + fix loop, then verify-and-revise the merged answer (the closer).
       const horizon = get().deep ? { samples: get().deepSamples, close: true } : undefined
-      const res = await apiExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, ...(horizon ? { horizon } : {}) })
+      const vfsProject = computeVfsProject(get())
+      const res = await apiExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, shared_datastore: get().sharedDatastore, ...(vfsProject ? { vfs_project: vfsProject } : {}), ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       const runs = await apiListRuns(sid)
       // Refresh attachments from the updated session so files the agents

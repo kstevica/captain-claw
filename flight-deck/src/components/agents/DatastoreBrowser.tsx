@@ -39,14 +39,18 @@ async function fdFetch<T>(path: string): Promise<T> {
 }
 
 interface DatastoreBrowserProps {
-  host: string
-  port: number
-  auth?: string
-  agentName: string
   onClose: () => void
+  // Agent-hosted datastore (proxied to the agent's web port):
+  host?: string
+  port?: number
+  auth?: string
+  agentName?: string
+  // OR a VFS folder-bound shared datastore (vfs:<project>/.datastore):
+  vfsProject?: string
+  title?: string
 }
 
-export function DatastoreBrowser({ host, port, auth, agentName, onClose }: DatastoreBrowserProps) {
+export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, title, onClose }: DatastoreBrowserProps) {
   const [tables, setTables] = useState<TableInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -57,13 +61,19 @@ export function DatastoreBrowser({ host, port, auth, agentName, onClose }: Datas
   const [page, setPage] = useState(0)
   const pageSize = 50
 
-  const tokenQs = auth ? `&token=${encodeURIComponent(auth)}` : ''
+  // Route to the VFS folder-bound store or the agent-proxied store.
+  const isVfs = !!vfsProject
+  const base = isVfs
+    ? `/vfs/datastore/${encodeURIComponent(vfsProject as string)}`
+    : `/agent-datastore/${host}/${port}`
+  const tokenQs = !isVfs && auth ? `&token=${encodeURIComponent(auth)}` : ''
+  const heading = isVfs ? (title || (vfsProject as string)) : `Datastore — ${agentName}`
 
   const fetchTables = async () => {
     setLoading(true)
     setError('')
     try {
-      const data = await fdFetch<TableInfo[]>(`/agent-datastore/${host}/${port}/tables?_=1${tokenQs}`)
+      const data = await fdFetch<TableInfo[]>(`${base}/tables?_=1${tokenQs}`)
       setTables(data)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -72,14 +82,14 @@ export function DatastoreBrowser({ host, port, auth, agentName, onClose }: Datas
     }
   }
 
-  useEffect(() => { fetchTables() }, [host, port])
+  useEffect(() => { fetchTables() }, [host, port, vfsProject])
 
   const fetchRows = async (tableName: string, pageNum: number) => {
     setRowsLoading(true)
     setError('')
     try {
       const data = await fdFetch<QueryResult>(
-        `/agent-datastore/${host}/${port}/tables/${encodeURIComponent(tableName)}/rows?limit=${pageSize}&offset=${pageNum * pageSize}${tokenQs}`
+        `${base}/tables/${encodeURIComponent(tableName)}/rows?limit=${pageSize}&offset=${pageNum * pageSize}${tokenQs}`
       )
       setRows(data)
     } catch (e) {
@@ -106,8 +116,8 @@ export function DatastoreBrowser({ host, port, auth, agentName, onClose }: Datas
   const exportTable = (format: string) => {
     if (!selectedTable) return
     const { token: storeToken, authEnabled } = useAuthStore.getState()
-    const authQs = auth ? `&token=${encodeURIComponent(auth)}` : ''
-    const url = `/fd/agent-datastore/${host}/${port}/tables/${encodeURIComponent(selectedTable)}/export?format=${format}${authQs}`
+    const authQs = !isVfs && auth ? `&token=${encodeURIComponent(auth)}` : ''
+    const url = `/fd${base}/tables/${encodeURIComponent(selectedTable)}/export?format=${format}${authQs}`
     const a = document.createElement('a')
     a.href = url
     a.download = `${selectedTable}.${format}`
@@ -146,7 +156,7 @@ export function DatastoreBrowser({ host, port, auth, agentName, onClose }: Datas
           <div className="flex items-center gap-2.5">
             <Database className="h-4 w-4 text-emerald-400" />
             <span className="text-sm font-medium text-zinc-200">
-              Datastore — {agentName}
+              {heading}
               {selectedTable && (
                 <span className="text-zinc-500"> / {selectedTable}</span>
               )}

@@ -146,6 +146,11 @@ def _phase(sid: str, label: str, **extra) -> None:
 # Populated at the top of execute_vatra, cleared in its teardown.
 _run_vfs_project: dict[str, str] = {}
 
+# Per-run flag: when set, every worker is bound to the run's folder-scoped shared
+# datastore (vfs:<project>/.datastore). Populated at the top of execute_vatra,
+# cleared in teardown — mirrors _run_vfs_project.
+_run_shared_datastore: dict[str, bool] = {}
+
 
 def _vfs_project(sid: str) -> str:
     """The single shared VFS project folder for this run.
@@ -189,15 +194,20 @@ def _vfs_directive(project: str) -> str:
 
 def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
     """Run-context env injected into a worker so the `vatra` tool knows where it is."""
-    return [
+    project = _vfs_project(sid)
+    env = [
         {"key": "CLAW_VATRA_SESSION", "value": sid},
         {"key": "CLAW_VATRA_SUBTASK", "value": subtask},
         {"key": "CLAW_VATRA_OWNER", "value": owner},
         {"key": "CLAW_VATRA_DEPTH", "value": str(depth)},
         # Auto-bind every worker in this run to one shared VFS project so
         # they keep a common file context (vfs:<project>/...).
-        {"key": "CLAW_VFS_PROJECT", "value": _vfs_project(sid)},
+        {"key": "CLAW_VFS_PROJECT", "value": project},
     ]
+    # Opt-in: bind workers to the run's folder-scoped shared datastore too.
+    if _run_shared_datastore.get(sid):
+        env.append({"key": "CLAW_DATASTORE_VFS", "value": project})
+    return env
 
 
 def _track_worker(sid: str, slug: str, *, add: bool) -> None:
@@ -619,6 +629,17 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     _vfs_override = (cfg.get("vfs_project") or getattr(body, "vfs_project", "") or "").strip()
     if _vfs_override:
         _run_vfs_project[sid] = _vfs_override
+    # Opt-in shared datastore: request wins, else inherit the session config so a
+    # continuation round stays bound to the same folder-scoped store. Persisted.
+    _shared_ds = bool(getattr(body, "shared_datastore", False) or cfg.get("shared_datastore"))
+    if _shared_ds:
+        _run_shared_datastore[sid] = True
+        if not cfg.get("shared_datastore"):
+            cfg["shared_datastore"] = True
+            try:
+                await db.update_basna_session(body.session_id, user["id"], config=json.dumps(cfg))
+            except Exception as e:  # noqa: BLE001
+                log.warning("Vatra shared_datastore persist failed", error=str(e))
     run_tag = format(int(time.time()), "x")[-6:]
     _progress_start(sid)
     await db.update_basna_session(sid, user["id"], status="running")
@@ -658,6 +679,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     subtasks = route["subtasks"]
     shared_context = route.get("shared_context", "")
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
+    # Protect existing files: a FRESH run reusing a non-empty folder snapshots it
+    # into .history/ before any write (continuation rounds accumulate → skip).
+    if not cfg.get("parent_session_id"):
+        try:
+            from captain_claw.flight_deck.vfs_routes import snapshot_existing_project
+            _snap = snapshot_existing_project(user["id"], vfs_project, f"{int(time.time())}-{sid[:8]}")
+            if _snap:
+                _progress(sid, "note", f"Backed up {_snap} existing item(s) to vfs:{vfs_project}/.history/ before this run")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra VFS snapshot failed", error=str(e))
     # Persist the user's attachments into the run's shared VFS folder so they're part
     # of the corpus (browsable, and indexed by the research map below), not only copied
     # into each worker's throwaway workspace.
@@ -1219,6 +1250,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _teardown([sp["slug"] for sp in spawned])
         _run_workers.pop(sid, None)
         _run_vfs_project.pop(sid, None)
+        _run_shared_datastore.pop(sid, None)
         _skip_agents.pop(sid, None)
 
     usable = [r for r in results if (r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip()]
@@ -2561,11 +2593,14 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
         cast_ids = list(dict.fromkeys(cast_ids))
 
     title = f"{kind.replace('_', ' ').title()}: {parent_title}"[:80]
+    _parent_shared_ds = bool(parent_cfg.get("shared_datastore"))
     cfg: dict[str, Any] = {
         "mode": "vatra", "source": "ui", "kind": kind,
         "parent_session_id": parent_session_id, "root_session_id": root_sid,
         "round": round_no, "vfs_project": vfs_project, "max_agents": 6,
     }
+    if _parent_shared_ds:  # keep the chain bound to the folder's shared datastore
+        cfg["shared_datastore"] = True
     if cast_ids:
         cfg["force_ids"] = cast_ids
     sess = await db.create_basna_session(owner, intent, title=title, config=json.dumps(cfg))
@@ -2576,7 +2611,7 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
         "name": _PRIOR_FILE, "mime": "text/markdown", "size": len(body_bytes), "kind": "input"}]))
     exec_req = ExecuteRequest(session_id=sid, tiers=tiers or None,
                               env_vars=env_vars or None, api_key=api_key or "",
-                              vfs_project=vfs_project)
+                              vfs_project=vfs_project, shared_datastore=_parent_shared_ds)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)

@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis } from '../stores/basnaStore'
+import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis, type FolderMode } from '../stores/basnaStore'
 import { VatraTeamPlan, VatraBlackboard } from '../components/VatraDelegation'
 import { QualityControls } from '../components/QualityControls'
 import { CostCard, deriveCost } from '../components/CostCard'
@@ -642,7 +642,7 @@ export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
     updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
@@ -700,6 +700,10 @@ export function BasnaPage() {
   }, [progress.length])
 
   useEffect(() => { loadSessions() }, [loadSessions])
+  // Prefetch VFS folders once so the "Existing folder" picker is populated the
+  // moment the user opens it (a native <select> won't repaint options that
+  // arrive while it's already open).
+  useEffect(() => { loadProjects() }, [loadProjects])
   // Load a selected run's intent/title, but DON'T wipe the textarea when the
   // selection is cleared (New and mode-switch handle clearing explicitly) — this
   // lets switching modes keep what you've typed.
@@ -1157,6 +1161,71 @@ export function BasnaPage() {
                         Grouped
                       </label>
                     )}
+                    {/* Run folder — new (auto/custom name) or an existing VFS folder */}
+                    <label
+                      className="flex items-center gap-2 text-zinc-400"
+                      title="Where this run's agents read/write shared files (and the shared datastore, if on). New = a fresh folder; Existing = build on a folder from a previous run."
+                    >
+                      Folder
+                      <select
+                        value={folderMode}
+                        onChange={(e) => {
+                          const m = e.target.value as FolderMode
+                          setFolderMode(m)
+                          if (m === 'existing') loadProjects()
+                        }}
+                        className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
+                      >
+                        <option value="new">New</option>
+                        <option value="existing">Existing</option>
+                      </select>
+                      {folderMode === 'new' ? (
+                        <input
+                          value={newFolderName}
+                          onChange={(e) => setNewFolderName(e.target.value)}
+                          placeholder="auto-name"
+                          title="Leave blank to auto-name (basna-…/vatra-…), or type a folder name to reuse across runs."
+                          className="w-32 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 placeholder-zinc-600 focus:border-sky-600 focus:outline-none"
+                        />
+                      ) : (
+                        <span className="flex items-center gap-1">
+                          <select
+                            value={existingFolder}
+                            onChange={(e) => setExistingFolder(e.target.value)}
+                            className="w-44 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
+                          >
+                            <option value="">
+                              {projectsLoading ? 'Loading…' : projects.length === 0 ? 'No folders found' : '— pick folder —'}
+                            </option>
+                            {projects.map((p) => (
+                              <option key={p.name} value={p.name}>
+                                {p.name}{p.files ? ` (${p.files})` : ''}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => loadProjects()}
+                            title="Refresh folder list"
+                            className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+                          >
+                            <RefreshCw className={`h-3 w-3 ${projectsLoading ? 'animate-spin' : ''}`} />
+                          </button>
+                        </span>
+                      )}
+                    </label>
+                    {/* Shared datastore — one relational store in the folder for all agents */}
+                    <label
+                      className="flex cursor-pointer items-center gap-1.5 text-zinc-400"
+                      title="Bind every agent in this run to ONE relational datastore stored in the run's VFS folder, so they collaborate through shared tables. Off = each agent keeps a private datastore."
+                    >
+                      <input
+                        type="checkbox" checked={sharedDatastore}
+                        onChange={(e) => setSharedDatastore(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-950/60 accent-violet-600"
+                      />
+                      Shared datastore
+                    </label>
                   </div>
                 )}
 

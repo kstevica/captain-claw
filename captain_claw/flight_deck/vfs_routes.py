@@ -495,3 +495,147 @@ async def delete_project(project: str, user: dict = Depends(get_current_user)):
         raise HTTPException(404, "project not found")
     shutil.rmtree(root)
     return {"ok": True}
+
+
+# ── Shared datastore viewer ──────────────────────────────────────────
+#
+# A Basna/Vatra run with the shared-datastore option on keeps ONE SQLite store
+# at vfs:<project>/.datastore/store.db. These endpoints let the FD UI browse its
+# tables/rows/export — reusing the same DatastoreManager the agents write to.
+# Resolved under THIS user's VFS root (not the ambient env workers use).
+
+def _vfs_datastore_path(user_id: str, project: str) -> Path:
+    return _project_root(user_id, project) / ".datastore" / "store.db"
+
+
+@router.get("/datastore/{project}/tables")
+async def vfs_datastore_tables(project: str, user: dict = Depends(get_current_user)):
+    """List the tables of a folder-bound shared datastore (empty if none yet)."""
+    from captain_claw.datastore import get_datastore_manager_at
+    db_path = _vfs_datastore_path(user["id"], project)
+    if not db_path.is_file():
+        return []
+    mgr = get_datastore_manager_at(db_path)
+    tables = await mgr.list_tables()
+    return [
+        {
+            "name": t.name,
+            "columns": [{"name": c.name, "type": c.col_type, "position": c.position} for c in t.columns],
+            "row_count": t.row_count,
+            "created_at": t.created_at,
+            "updated_at": t.updated_at,
+        }
+        for t in tables
+    ]
+
+
+@router.get("/datastore/{project}/tables/{table_name}/rows")
+async def vfs_datastore_rows(
+    project: str, table_name: str,
+    limit: int = 100, offset: int = 0,
+    order_by: str = "_id", order_dir: str = "ASC",
+    user: dict = Depends(get_current_user),
+):
+    """Paginated rows from a folder-bound datastore table (rows as dicts)."""
+    from captain_claw.datastore import get_datastore_manager_at
+    db_path = _vfs_datastore_path(user["id"], project)
+    if not db_path.is_file():
+        raise HTTPException(404, "no datastore for this folder")
+    mgr = get_datastore_manager_at(db_path)
+    order_param = ["-" + order_by] if order_dir.upper() == "DESC" else [order_by]
+    try:
+        result = await mgr.query(
+            table_name=table_name, columns=None, where=None,
+            order_by=order_param, limit=min(int(limit), 500), offset=int(offset),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc))
+    cols = result.get("columns", [])
+    result["rows"] = [
+        {cols[i]: v for i, v in enumerate(row)}
+        for row in result.get("rows", [])
+        if isinstance(row, (list, tuple))
+    ]
+    return result
+
+
+@router.get("/datastore/{project}/tables/{table_name}/export")
+async def vfs_datastore_export(
+    project: str, table_name: str, format: str = "csv",
+    user: dict = Depends(get_current_user),
+):
+    """Export a folder-bound datastore table as csv/json/xlsx."""
+    import csv
+    import io
+    import os
+    import tempfile
+    from fastapi.responses import Response as FastAPIResponse
+
+    from captain_claw.config import get_config
+    from captain_claw.datastore import get_datastore_manager_at
+    if format not in ("csv", "json", "xlsx"):
+        raise HTTPException(400, f"Unsupported format: {format}")
+    db_path = _vfs_datastore_path(user["id"], project)
+    if not db_path.is_file():
+        raise HTTPException(404, "no datastore for this folder")
+    mgr = get_datastore_manager_at(db_path)
+    try:
+        result = await mgr.query(table_name, limit=get_config().datastore.max_export_rows, bypass_max=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc))
+    columns = result["columns"]
+    rows = result["rows"]
+    filename = f"{table_name}.{format}"
+    disp = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    if format == "csv":
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(columns)
+        w.writerows(rows)
+        return FastAPIResponse(content=buf.getvalue().encode("utf-8"), media_type="text/csv", headers=disp)
+    if format == "json":
+        data = [dict(zip(columns, row)) for row in rows]
+        body = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+        return FastAPIResponse(content=body.encode("utf-8"), media_type="application/json", headers=disp)
+    # xlsx
+    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+    tmp.close()
+    try:
+        mgr._write_xlsx(Path(tmp.name), columns, rows)
+        data_bytes = Path(tmp.name).read_bytes()
+        return FastAPIResponse(
+            content=data_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=disp,
+        )
+    finally:
+        if os.path.exists(tmp.name):
+            os.unlink(tmp.name)
+
+
+# ── Snapshot-on-start (protect existing files from new runs) ──────────
+
+def snapshot_existing_project(user_id: str, project: str, tag: str) -> int:
+    """Before a FRESH run writes into an existing, non-empty VFS folder, copy its
+    current contents into ``<folder>/.history/<tag>/`` so prior work is never
+    overrun. Only physical (non-linked) projects are snapshotted; the datastore
+    and prior history are skipped. Returns the number of entries backed up."""
+    root = (_user_root(user_id) / safe_name(project, fallback="")).resolve()
+    if not root.is_dir():
+        return 0  # brand-new or linked folder → nothing to protect
+    entries = [p for p in root.iterdir() if p.name not in (".history", ".datastore")]
+    if not entries:
+        return 0
+    dest = root / ".history" / safe_name(tag, fallback="run")
+    dest.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for p in entries:
+        try:
+            if p.is_dir():
+                shutil.copytree(p, dest / p.name, dirs_exist_ok=True)
+            else:
+                shutil.copy2(p, dest / p.name)
+            n += 1
+        except OSError as e:
+            log.warning("VFS snapshot copy failed", path=str(p), error=str(e))
+    return n

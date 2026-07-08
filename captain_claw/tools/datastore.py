@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from captain_claw.datastore import (
     ProtectedError,
     get_datastore_manager,
     get_session_datastore_manager,
+    get_vfs_datastore_manager,
 )
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
@@ -21,9 +23,15 @@ log = get_logger(__name__)
 def _resolve_datastore_manager(session_id: str | None) -> Any:
     """Return the appropriate DatastoreManager.
 
-    In public computer mode each session gets its own isolated DB.
-    Otherwise the shared global manager is returned.
+    A Basna/Vatra run with the shared-datastore option ON injects
+    ``CLAW_DATASTORE_VFS=<project>`` into every worker, so they all collaborate
+    on ONE relational store living in the shared VFS folder. Otherwise: in
+    public computer mode each session gets its own isolated DB; else the shared
+    global manager.
     """
+    vfs_project = os.environ.get("CLAW_DATASTORE_VFS", "").strip()
+    if vfs_project:
+        return get_vfs_datastore_manager(vfs_project)
     if get_config().web.public_run == "computer" and session_id:
         return get_session_datastore_manager(session_id)
     return get_datastore_manager()

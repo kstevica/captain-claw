@@ -17,9 +17,11 @@ import {
   ArrowLeft,
   HardDrive,
   Upload,
+  Database,
 } from 'lucide-react'
 import { useVFSStore, type VFSEntry, type VFSProject } from '../../stores/vfsStore'
 import { VFSFileViewer } from './VFSFileViewer'
+import { DatastoreBrowser } from '../agents/DatastoreBrowser'
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -82,6 +84,8 @@ export function VFSBrowser() {
   const [linkMode, setLinkMode] = useState('rw')
   const [linkErr, setLinkErr] = useState('')
 
+  // Shared-datastore viewer: the project whose vfs:<project>/.datastore is open.
+  const [dsProject, setDsProject] = useState<string | null>(null)
   // Project-list controls: search, kind filter, sort, and folded run folders.
   const [query, setQuery] = useState('')
   const [kindFilter, setKindFilter] = useState<KindFilter>('all')
@@ -379,6 +383,15 @@ export function VFSBrowser() {
                     {p.mtime ? ` · ${fmtTime(p.mtime)}` : ''}
                   </span>
                   <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                    {p.kind !== 'link' && (
+                      <button
+                        onClick={() => setDsProject(p.name)}
+                        className="hover:text-emerald-300"
+                        title="Shared datastore — browse the folder's tables"
+                      >
+                        <Database className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                     <button
                       onClick={() => s.downloadProject(p.name)}
                       className="hover:text-violet-300"
@@ -417,6 +430,9 @@ export function VFSBrowser() {
             </button>
           )}
         </div>
+        {dsProject && (
+          <DatastoreBrowser vfsProject={dsProject} title={`Datastore — ${dsProject}`} onClose={() => setDsProject(null)} />
+        )}
       </div>
     )
   }
@@ -462,11 +478,19 @@ export function VFSBrowser() {
             className="hidden"
             onChange={(e) => { if (e.target.files?.length) s.uploadFiles(e.target.files); e.target.value = '' }}
           />
+          {s.project && (
+            <button onClick={() => setDsProject(s.project)} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-emerald-300" title="Shared datastore — browse this folder's tables">
+              <Database className="h-3.5 w-3.5" /> Datastore
+            </button>
+          )}
           <button onClick={() => s.refresh()} className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" title="Refresh">
             <RefreshCw className={`h-3.5 w-3.5 ${s.loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
+      {dsProject && (
+        <DatastoreBrowser vfsProject={dsProject} title={`Datastore — ${dsProject}`} onClose={() => setDsProject(null)} />
+      )}
 
       {creating && (
         <div className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/60 px-4 py-2">

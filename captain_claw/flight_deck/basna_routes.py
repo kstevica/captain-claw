@@ -1039,6 +1039,9 @@ async def _continue_run(
     }
     if parent_quality_raw:  # inherit the chain's quality profile across rounds
         _child_cfg["quality"] = parent_quality_raw
+    _parent_shared_ds = bool(parent_cfg.get("shared_datastore"))
+    if _parent_shared_ds:  # keep the whole chain bound to the folder's shared datastore
+        _child_cfg["shared_datastore"] = True
     update_kwargs: dict[str, Any] = {"config": json.dumps(_child_cfg)}
     if big:
         # Write the full synthesis as an input file; execute_route copies every
@@ -1054,7 +1057,7 @@ async def _continue_run(
     # Pin the inherited folder so the new round's workers read/write the root folder.
     exec_req = ExecuteRequest(
         session_id=sid, tiers=tiers or None, env_vars=env_vars or None,
-        vfs_project=vfs_project,
+        vfs_project=vfs_project, shared_datastore=_parent_shared_ds,
     )
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     t = asyncio.create_task(execute_route(exec_req, stub, user))
@@ -2096,9 +2099,20 @@ class ExecuteRequest(BaseModel):
     # run's own session id (basna-<sid8>). A continuation round sets this to the ROOT
     # run's folder so all rounds in a chain read/write the SAME accumulated data.
     vfs_project: str = ""
+    # Opt-in: bind every spawned worker to ONE shared relational datastore living
+    # in this run's VFS folder (vfs:<vfs_project>/.datastore), so agents collaborate
+    # through tables instead of each keeping a private DB. Off → today's per-agent
+    # private stores. Persisted to the session config so a continuation inherits it.
+    shared_datastore: bool = False
     # Opt-in cross-pollination quality/cost profile (see quality_profile.py). None →
     # fall back to the session config's `quality` block → all-off (today's behaviour).
     quality: dict | None = None
+
+
+def _shared_ds_env(vfs_project: str, on: bool) -> list[dict]:
+    """Env entry that binds a spawned worker to the run's folder-scoped shared
+    datastore. Empty when the option is off (worker keeps its private store)."""
+    return [{"key": "CLAW_DATASTORE_VFS", "value": vfs_project}] if on and vfs_project else []
 
 
 async def _spawn_horizon_member(
@@ -2137,7 +2151,10 @@ async def _spawn_horizon_member(
              "value": getattr(body, "vfs_project", "") or f"basna-{sid8}"},
             {"key": "CLAW_AGENT_LABEL",
              "value": sel.get("role") or arch.get("role") or arch["id"]},
-        ] + (extra_env or []),
+        ] + _shared_ds_env(
+            getattr(body, "vfs_project", "") or f"basna-{sid8}",
+            getattr(body, "shared_datastore", False),
+        ) + (extra_env or []),
         web_enabled=True, web_port=0,
     )
     if model:
@@ -2489,6 +2506,25 @@ async def execute_route(
             await db.update_basna_session(sid, user["id"], config=json.dumps(_sess_cfg))
         except Exception as e:  # noqa: BLE001
             log.warning("Basna quality persist failed", error=str(e))
+    # Opt-in shared datastore: the request wins; else inherit the session config
+    # (so continuation rounds keep it). Persisted so the whole chain stays shared.
+    shared_datastore = bool(getattr(body, "shared_datastore", False) or _sess_cfg.get("shared_datastore"))
+    if shared_datastore and not _sess_cfg.get("shared_datastore"):
+        _sess_cfg["shared_datastore"] = True
+        try:
+            await db.update_basna_session(sid, user["id"], config=json.dumps(_sess_cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna shared_datastore persist failed", error=str(e))
+    # Protect existing files: a FRESH run reusing a non-empty folder snapshots it
+    # into .history/ first (continuation rounds accumulate on purpose → skip).
+    if not _sess_cfg.get("parent_session_id"):
+        try:
+            from captain_claw.flight_deck.vfs_routes import snapshot_existing_project
+            _snap = snapshot_existing_project(user["id"], vfs_project, f"{int(time.time())}-{sid8}")
+            if _snap:
+                _progress(sid, "note", f"Backed up {_snap} existing item(s) to vfs:{vfs_project}/.history/ before this run")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna VFS snapshot failed", error=str(e))
     # R12: the task workers actually build against — the raw intent, carrying the
     # (reviewed/edited) brief the router selected the team on. brief == "" → this is
     # exactly sess["intent"], so nothing changes when the lever is off. Verification
@@ -2591,7 +2627,8 @@ async def execute_route(
                         # Authorship label for files this worker writes to the VFS.
                         {"key": "CLAW_AGENT_LABEL",
                          "value": sel.get("role") or arch.get("role") or arch["id"]},
-                    ] + (  # R10: turn on the source corpus for this worker's fetches
+                    ] + _shared_ds_env(vfs_project, shared_datastore) + (  # opt-in shared datastore
+                        # R10: turn on the source corpus for this worker's fetches
                         [{"key": "CLAW_SOURCE_CORPUS", "value": "1"}]
                         if quality.source_corpus else []
                     ),
