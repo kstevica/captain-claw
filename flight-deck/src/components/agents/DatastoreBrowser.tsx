@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Database, Table2, ChevronRight, Loader2, AlertTriangle, RefreshCw, ChevronLeft, X, Download } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 
@@ -48,9 +48,12 @@ interface DatastoreBrowserProps {
   // OR a VFS folder-bound shared datastore (vfs:<project>/.datastore):
   vfsProject?: string
   title?: string
+  // Deep-link straight to one table (from the run artifacts panel). Optional —
+  // omit to open on the table list, as every existing caller does.
+  initialTable?: string
 }
 
-export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, title, onClose }: DatastoreBrowserProps) {
+export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, title, initialTable, onClose }: DatastoreBrowserProps) {
   const [tables, setTables] = useState<TableInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -83,6 +86,12 @@ export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, titl
   }
 
   useEffect(() => { fetchTables() }, [host, port, vfsProject])
+
+  // Jump straight to a requested table once, when deep-linked from elsewhere.
+  const _jumped = useRef(false)
+  useEffect(() => {
+    if (initialTable && !_jumped.current) { _jumped.current = true; openTable(initialTable) }
+  }, [initialTable])
 
   const fetchRows = async (tableName: string, pageNum: number) => {
     setRowsLoading(true)

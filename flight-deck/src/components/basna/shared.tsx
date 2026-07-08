@@ -79,6 +79,34 @@ export function parentIdOf(config?: string): string | null {
   return null
 }
 
+// The VFS folder this run OWNS — never a reference/prior folder it only read.
+// Resolution order:
+//  1. A pinned folder recorded in config (continuation rounds, future runs).
+//  2. The folder the team WROTE to. Reference folders (prior-run knowledge) and
+//     read-only links are never written, so any write/datastore target is this
+//     run's own folder — unlike reads, which routinely hit reference folders.
+//  3. The backend's deterministic auto-name `<mode>-<sid8>`.
+export function runVfsProject(
+  session: { id: string; config?: string },
+  progress?: ProgressEvent[],
+): string {
+  try {
+    const cfg = JSON.parse(session.config || '{}')
+    if (cfg && cfg.vfs_project) return String(cfg.vfs_project)
+  } catch { /* ignore */ }
+  if (progress) {
+    for (const ev of progress) {
+      // Only trust WRITE-side events — the write tool and datastore ops target
+      // this run's own folder; reads (web/glob/grep) routinely hit reference
+      // folders, so parsing those would grab the wrong folder.
+      if (ev.tool !== 'write' && ev.tool !== 'datastore') continue
+      const m = `${ev.detail || ''} ${ev.message || ''}`.match(/vfs:([A-Za-z0-9_.-]+)\//)
+      if (m) return m[1]
+    }
+  }
+  return (isVatra(session.config) ? 'vatra-' : 'basna-') + session.id.slice(0, 8)
+}
+
 export function analysisToMarkdown(a: BasnaAnalysis): string {
   const out: string[] = ['# Analysis', '']
   if (a.agreement?.length) {
@@ -223,10 +251,11 @@ export function OutputActions({ title, content, onView }: { title: string; conte
   )
 }
 
-// Compact token count: 1_234 → "1.2k", 244_461 → "244k".
+// Compact token count: 1_234 → "1.2k", 244_461 → "244k", 1_619_000 → "1.62M".
 export function fmtTok(n?: number): string {
   if (!n || n <= 0) return '0'
-  if (n >= 10000) return Math.round(n / 1000) + 'k'
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M'
+  if (n >= 10_000) return Math.round(n / 1000) + 'k'
   if (n >= 1000) return (n / 1000).toFixed(1) + 'k'
   return String(n)
 }

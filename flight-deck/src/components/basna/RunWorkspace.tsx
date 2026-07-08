@@ -6,6 +6,7 @@ import {
 import type { BasnaSession, ProgressEvent, VatraSubtask, RunCost } from '../../stores/basnaStore'
 import { VatraBlackboard } from '../VatraDelegation'
 import { downloadMarkdown, formatProgress, fmtTok, type LiveAgent } from './shared'
+import { RunFilesPanel, RunDatastorePanel } from './RunArtifacts'
 
 // ── Run workspace: live header + two-column board/agents/progress layout ────
 
@@ -282,7 +283,7 @@ function GroupStepper({ agents }: { agents: LiveAgent[] }) {
 }
 
 export function RunWorkspace({
-  session, vatraMode, running, subtasks, liveAgents, progress, currentPhase, runCost, onSkip, onStop,
+  session, vatraMode, running, subtasks, liveAgents, progress, currentPhase, runCost, project, onSkip, onStop,
 }: {
   session: BasnaSession
   vatraMode: boolean
@@ -292,6 +293,7 @@ export function RunWorkspace({
   progress: ProgressEvent[]
   currentPhase: string | null
   runCost?: RunCost | null
+  project: string
   onSkip?: (role: string) => void
   onStop: () => void
 }) {
@@ -390,6 +392,8 @@ export function RunWorkspace({
         <div className="space-y-3">
           {vatraMode && <AgentRoster agents={liveAgents} onSkip={onSkip} />}
           <ProgressFeed progress={progress} running={running} />
+          {project && <RunFilesPanel project={project} live={running} />}
+          {project && <RunDatastorePanel project={project} live={running} hideWhenEmpty />}
         </div>
       </div>
     </div>

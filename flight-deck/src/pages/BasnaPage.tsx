@@ -13,7 +13,7 @@ import { ReferenceFolderPicker } from '../components/agents/ReferenceFolderPicke
 import { deriveCost } from '../components/CostCard'
 import { useTierConfig, TIER_ORDER } from '../services/tierConfig'
 import {
-  buildLiveAgents, FileModal, isVatra, parentIdOf, viewModeForFile, type ViewMode,
+  buildLiveAgents, FileModal, isVatra, parentIdOf, runVfsProject, type ViewMode,
 } from '../components/basna/shared'
 import { RunsSidebar } from '../components/basna/RunsSidebar'
 import { RoutePlanEditor } from '../components/basna/RoutePlanEditor'
@@ -230,7 +230,7 @@ export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile,
     updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
@@ -250,11 +250,6 @@ export function BasnaPage() {
   const [deepening, setDeepening] = useState(false)
   const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
   const viewFull = (t: string, content: string) => setModal({ title: t, content, mode: 'markdown' })
-  // Preview a generated file: fetch its text and render by type (md/html/text).
-  const viewFile = async (name: string) => {
-    const text = await fetchFileText(name)
-    setModal({ title: name, content: text, mode: viewModeForFile(name) })
-  }
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
 
@@ -375,6 +370,12 @@ export function BasnaPage() {
     return null
   }, [progress])
 
+  // The VFS folder this run reads/writes — for the Files + Datastore panels.
+  const runProject = useMemo(
+    () => (activeSession ? runVfsProject(activeSession, progress) : ''),
+    [activeSession?.id, activeSession?.config, progress.length], // eslint-disable-line react-hooks/exhaustive-deps
+  )
+
   // ── The stage machine: define → plan → run → done ──────────────────────────
   const running = executing || activeBusy
   const finished = !!activeSession && (activeSession.status === 'done' || activeSession.status === 'error')
@@ -456,7 +457,7 @@ export function BasnaPage() {
 
         {/* Detail */}
         <div className="flex-1 overflow-auto p-4 md:p-6">
-          <div className="mx-auto max-w-4xl space-y-3">
+          <div className="mx-auto w-[92%] max-w-[2000px] space-y-3">
             {/* Deepen lineage — jump to the parent / child runs of this one. */}
             {activeSession && (() => {
               const pid = parentIdOf(activeSession.config)
@@ -1069,6 +1070,7 @@ export function BasnaPage() {
                 progress={progress}
                 currentPhase={currentPhase}
                 runCost={runCost}
+                project={runProject}
                 onSkip={vatraMode ? (role) => { void apiVatraSkipAgent(activeSession.id, role) } : undefined}
                 onStop={() => cancelSession(activeSession.id)}
               />
@@ -1088,16 +1090,14 @@ export function BasnaPage() {
                 method={lastExecute?.method}
                 analysis={analysis}
                 runs={runs}
-                generatedFiles={attachments.filter((a) => a.kind === 'generated')}
                 runCost={runCost}
                 subject={subject}
+                project={runProject}
                 progress={progress}
                 subtasks={routePlan?.subtasks}
                 recompiling={recompiling}
                 onRecompile={() => recompile(tiers)}
                 onView={viewFull}
-                onViewFile={(name) => { void viewFile(name) }}
-                onDownloadFile={downloadFile}
                 onFeedback={sendFeedback}
                 deepening={deepening}
                 onDeepen={async () => {

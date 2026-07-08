@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Loader2, Plus, Search, Sparkles, Square, Trash2, Users, Wand2, X, Network } from 'lucide-react'
+import { Loader2, Plus, Search, Sparkles, Square, Trash2, Users, Wand2, X, Network, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import type { BasnaSession } from '../../stores/basnaStore'
 import { agentOrigin, confColor, DIFFICULTY_COLOR, isVatra, STATUS_DOT, timeAgo } from './shared'
 
@@ -106,6 +106,13 @@ export function RunsSidebar({ sessions, activeId, onSelect, onDelete, onCancel, 
   const [query, setQuery] = useState('')
   const [mode, setMode] = useState<ModeFilter>('all')
   const [status, setStatus] = useState<StatusFilter>('all')
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem('basna.runsCollapsed') === '1' } catch { return false }
+  })
+  const toggleCollapsed = (v: boolean) => {
+    setCollapsed(v)
+    try { localStorage.setItem('basna.runsCollapsed', v ? '1' : '0') } catch { /* ignore */ }
+  }
 
   const hasAgentRuns = sessions.some((s) => agentOrigin(s.config))
   const runningCount = sessions.filter((s) => ACTIVE_STATUSES.includes(s.status)).length
@@ -168,10 +175,55 @@ export function RunsSidebar({ sessions, activeId, onSelect, onDelete, onCancel, 
     </button>
   )
 
+  // Collapsed: a thin rail with expand + new + a live-run count, reclaiming the
+  // width for the workspace (the flex-1 detail pane grows automatically).
+  if (collapsed) {
+    return (
+      <div className="flex w-11 shrink-0 flex-col items-center gap-3 border-r border-zinc-800 py-3">
+        <button
+          onClick={() => toggleCollapsed(false)}
+          title="Expand runs"
+          className="rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+        >
+          <PanelLeftOpen className="h-4 w-4" />
+        </button>
+        <button
+          onClick={onNew}
+          title="New run"
+          className="rounded-lg border border-zinc-700 p-1.5 text-zinc-300 transition-colors hover:bg-zinc-800"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+        {runningCount > 0 && (
+          <span
+            title={`${runningCount} running`}
+            className="flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-500"
+          >
+            <Loader2 className="h-2.5 w-2.5 animate-spin" />{runningCount}
+          </span>
+        )}
+        <button
+          onClick={() => toggleCollapsed(false)}
+          title="Expand runs"
+          className="mt-1 [writing-mode:vertical-rl] rotate-180 text-[10px] font-semibold uppercase tracking-wide text-zinc-600 hover:text-zinc-400"
+        >
+          Runs · {sessions.length}
+        </button>
+      </div>
+    )
+  }
+
   return (
     <div className="flex w-80 shrink-0 flex-col overflow-hidden border-r border-zinc-800 lg:w-96">
       {/* Pinned actions: start a new run from the list itself. */}
       <div className="flex items-center gap-2 border-b border-zinc-800/70 px-3 py-2.5">
+        <button
+          onClick={() => toggleCollapsed(true)}
+          title="Collapse runs"
+          className="rounded p-0.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
+        >
+          <PanelLeftClose className="h-3.5 w-3.5" />
+        </button>
         <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Runs</span>
         {visible.length > 0 && <span className="text-[10px] tabular-nums text-zinc-600">{visible.length}</span>}
         <button

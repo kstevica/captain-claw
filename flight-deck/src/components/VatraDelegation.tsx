@@ -15,6 +15,17 @@ function boardToMarkdown(entries: VatraBoardEntry[], titleFor: (id: string) => s
   return out.join('\n').trim() + '\n'
 }
 
+// Board entries carry a `created_at` ISO/DB timestamp — render it as a compact
+// wall-clock time (HH:MM:SS). Empty string if it can't be parsed.
+function fmtBoardTime(iso?: string): string {
+  if (!iso) return ''
+  // DB timestamps arrive as "YYYY-MM-DD HH:MM:SS" (UTC, no tz) — normalise so
+  // Date parses it; ISO strings pass through untouched.
+  const t = new Date(/^\d{4}-\d{2}-\d{2} /.test(iso) ? iso.replace(' ', 'T') + 'Z' : iso)
+  if (isNaN(t.getTime())) return ''
+  return t.toLocaleTimeString([], { hour12: false })
+}
+
 function downloadMarkdown(filename: string, content: string): void {
   const blob = new Blob([content], { type: 'text/markdown' })
   const url = URL.createObjectURL(blob)
@@ -318,6 +329,11 @@ export function VatraBlackboard({
                   <Chip className={kindCls}>{e.kind}</Chip>
                   <span className="truncate text-[11px] text-zinc-300">{ownerTitle(e.from_owner) || e.from_owner}</span>
                   {e.title && <span className="truncate text-[11px] text-zinc-500">· {e.title}</span>}
+                  {fmtBoardTime(e.created_at) && (
+                    <span className="ml-auto shrink-0 pl-1.5 font-mono text-[10px] tabular-nums text-zinc-600" title={e.created_at}>
+                      {fmtBoardTime(e.created_at)}
+                    </span>
+                  )}
                 </button>
                 <p className={`mt-1 pl-1 text-xs text-zinc-400 ${isOpen ? '' : 'line-clamp-2'}`}>{e.content}</p>
               </div>
