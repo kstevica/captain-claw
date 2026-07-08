@@ -95,6 +95,41 @@ function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (suc
   )
 }
 
+// Inline optional-instructions box for the one-click follow-ups. Running it empty
+// keeps the quick path; typing adds guidance appended to the gaps / blind spots.
+function OptionalInstructionBox({ placeholder, runLabel, icon: Icon, busy, onRun, onCancel }: {
+  placeholder: string
+  runLabel: string
+  icon: React.ComponentType<{ className?: string }>
+  busy: boolean
+  onRun: (instruction: string) => void
+  onCancel: () => void
+}) {
+  const [text, setText] = useState('')
+  return (
+    <div className="rounded-lg border border-violet-300/60 bg-violet-50/40 p-3 dark:border-violet-500/30 dark:bg-violet-950/10">
+      <textarea
+        autoFocus value={text} onChange={(e) => setText(e.target.value)} rows={2}
+        onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') onRun(text.trim()) }}
+        placeholder={placeholder}
+        className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950/60 p-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500 focus:outline-none"
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          onClick={() => onRun(text.trim())}
+          disabled={busy}
+          className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
+          {runLabel}
+        </button>
+        <button onClick={onCancel} disabled={busy} className="rounded-lg px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Cancel</button>
+        <span className="ml-auto text-[10px] text-zinc-600">optional — leave empty to run as-is · ⌘/Ctrl+Enter</span>
+      </div>
+    </div>
+  )
+}
+
 type TabId = 'report' | 'analysis' | 'gaps' | 'board' | 'files' | 'datastore' | 'agents' | 'log'
 
 export interface ContinueOpts { instruction: string; kind: string; sameCast: boolean }
@@ -120,8 +155,8 @@ export function RunReport({
   onRecompile: () => void
   onView: (title: string, content: string) => void
   onFeedback: (runId: number, success: boolean) => void
-  onDeepen: () => Promise<void>
-  onFillGaps: () => Promise<void>
+  onDeepen: (instruction?: string) => Promise<void>
+  onFillGaps: (instruction?: string) => Promise<void>
   deepening: boolean
   onContinue: (opts: ContinueOpts) => Promise<void>
 }) {
@@ -154,9 +189,14 @@ export function RunReport({
   const [continueSameCast, setContinueSameCast] = useState(true)
   const [continuing, setContinuing] = useState(false)
 
+  // Optional-instructions box for the one-click follow-ups (deepen / fill gaps).
+  // Clicking the action reveals a box; running with it empty keeps the quick path.
+  const [deepOpen, setDeepOpen] = useState(false)
+  const [gapsOpen, setGapsOpen] = useState(false)
+
   const deepenButton = done && truth && !!analysis?.blind_spots?.length && (
     <button
-      onClick={() => { void onDeepen() }}
+      onClick={() => setDeepOpen((o) => !o)}
       disabled={deepening}
       title="Spawn a follow-up run focused on these blind spots, seeded with this run's result"
       className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
@@ -342,6 +382,16 @@ export function RunReport({
                 <OutputActions title={`${subject} — Analysis`} content={analysisToMarkdown(analysis)} onView={onView} />
               </div>
             </div>
+            {deepOpen && (
+              <OptionalInstructionBox
+                placeholder="Optional: extra focus for the follow-up (e.g. prioritise X, cite sources). Leave empty to just investigate the blind spots."
+                runLabel="Investigate blind spots"
+                icon={ScanSearch}
+                busy={deepening}
+                onCancel={() => setDeepOpen(false)}
+                onRun={(instruction) => { setDeepOpen(false); void onDeepen(instruction) }}
+              />
+            )}
             {!!analysis.agreement?.length && (
               <div>
                 <div className="mb-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">Agreement</div>
@@ -402,7 +452,7 @@ export function RunReport({
               {!analysis.gaps?.length && <Badge className="text-emerald-700 dark:text-emerald-300">complete</Badge>}
               {done && !!analysis.gaps?.length && (
                 <button
-                  onClick={() => { void onFillGaps() }}
+                  onClick={() => setGapsOpen((o) => !o)}
                   disabled={deepening}
                   title="Spawn a follow-up Vatra that fills these gaps, seeded with this report"
                   className="ml-auto flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
@@ -412,6 +462,16 @@ export function RunReport({
                 </button>
               )}
             </div>
+            {gapsOpen && (
+              <OptionalInstructionBox
+                placeholder="Optional: extra focus for the follow-up (e.g. prioritise the major gaps, add sources). Leave empty to just fill the listed gaps."
+                runLabel="Fill the gaps"
+                icon={ScanSearch}
+                busy={deepening}
+                onCancel={() => setGapsOpen(false)}
+                onRun={(instruction) => { setGapsOpen(false); void onFillGaps(instruction) }}
+              />
+            )}
             {analysis.coverage_summary && (
               <p className="text-xs text-zinc-400">{analysis.coverage_summary}</p>
             )}

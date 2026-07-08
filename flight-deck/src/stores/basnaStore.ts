@@ -590,14 +590,14 @@ interface BasnaStore {
   route: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   planVatra: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   runVatra: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
-  fillGaps: (id: string) => Promise<void>
+  fillGaps: (id: string, instruction?: string) => Promise<void>
   saveTitle: (title: string) => Promise<void>
   execute: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   recompile: (tiers: TierMap) => Promise<void>
   sendFeedback: (runId: number, success: boolean) => Promise<void>
   deleteSession: (id: string) => Promise<void>
   cancelSession: (id: string) => Promise<void>
-  deepenSession: (id: string) => Promise<void>
+  deepenSession: (id: string, instruction?: string) => Promise<void>
   continueSession: (id: string, opts: { instruction: string; kind: string; sameCast: boolean; vatra: boolean }) => Promise<void>
 }
 
@@ -1051,8 +1051,10 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     await get().loadSessions()
   },
 
-  deepenSession: async (id) => {
-    const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(id)}/deepen`, { method: 'POST' })
+  deepenSession: async (id, instruction = '') => {
+    const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(id)}/deepen`, {
+      method: 'POST', body: JSON.stringify({ instruction }),
+    })
     if (!res.ok) throw new Error((await res.text()) || 'deepen failed')
     const data = await res.json()
     await get().loadSessions()
@@ -1061,8 +1063,10 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
 
   // Vatra analog of deepen: a follow-up run that fills this run's coverage gaps,
   // seeded with its final report.
-  fillGaps: async (id) => {
-    const res = await _authedFetch(`/fd/vatra/sessions/${encodeURIComponent(id)}/fill-gaps`, { method: 'POST' })
+  fillGaps: async (id, instruction = '') => {
+    const res = await _authedFetch(`/fd/vatra/sessions/${encodeURIComponent(id)}/fill-gaps`, {
+      method: 'POST', body: JSON.stringify({ instruction }),
+    })
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}))
       throw new Error((detail as { detail?: string }).detail || 'fill gaps failed')

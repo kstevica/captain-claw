@@ -1184,9 +1184,15 @@ async def _continue_run(
     await db.update_basna_session(sid, owner, **update_kwargs)
 
     # Pin the inherited folder so the new round's workers read/write the root folder.
+    # Auto-seed this round with the PARENT run's knowledge (final report + gaps/
+    # blind spots + datastore awareness), folded into each worker's dispatch prompt.
     exec_req = ExecuteRequest(
         session_id=sid, tiers=tiers or None, env_vars=env_vars or None,
         vfs_project=vfs_project, shared_datastore=_parent_shared_ds,
+        knowledge_session_ids=[parent_session_id],
+        # Inherit the parent round's run knobs (quality rides in _child_cfg).
+        max_parallel=int(parent_cfg.get("max_parallel") or 0),
+        horizon=parent_cfg.get("horizon") or None,
     )
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     t = asyncio.create_task(execute_route(exec_req, stub, user))
@@ -1202,15 +1208,22 @@ async def _continue_run(
             "n_agents": len(route.get("selected", [])), "round": round_no, "kind": kind}
 
 
-async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
-    """Back-compat alias: deepen = continuation focused on blind spots."""
-    return await _continue_run(owner, parent_session_id, user, kind="deepen")
+async def _deepen_run(owner: str, parent_session_id: str, user: dict, *, instruction: str = "") -> dict:
+    """Back-compat alias: deepen = continuation focused on blind spots. An optional
+    instruction is appended as extra focus alongside the blind spots."""
+    return await _continue_run(owner, parent_session_id, user, kind="deepen", instruction=instruction)
+
+
+class DeepenRequest(BaseModel):
+    instruction: str = ""  # optional extra guidance appended to the blind spots
 
 
 @router.post("/sessions/{session_id}/deepen")
-async def deepen_session(session_id: str, user: dict = Depends(get_current_user)):
+async def deepen_session(session_id: str, body: DeepenRequest | None = None,
+                         user: dict = Depends(get_current_user)):
     """UI 'Investigate blind spots' — spawn a follow-up run on this run's gaps."""
-    res = await _deepen_run(user["id"], session_id, user)
+    res = await _deepen_run(user["id"], session_id, user,
+                            instruction=(body.instruction if body else "").strip())
     return {"ok": True, **res}
 
 
@@ -2857,6 +2870,18 @@ async def execute_route(
             await db.update_basna_session(sid, user["id"], config=json.dumps(_sess_cfg))
         except Exception as e:  # noqa: BLE001
             log.warning("Basna shared_datastore persist failed", error=str(e))
+    # Persist parallelism + Deep/Horizon so a continuation round inherits them.
+    _knob_updates: dict[str, Any] = {}
+    if int(_sess_cfg.get("max_parallel") or 0) != int(getattr(body, "max_parallel", 0) or 0):
+        _knob_updates["max_parallel"] = int(getattr(body, "max_parallel", 0) or 0)
+    if getattr(body, "horizon", None) and _sess_cfg.get("horizon") != body.horizon:
+        _knob_updates["horizon"] = body.horizon
+    if _knob_updates:
+        _sess_cfg.update(_knob_updates)
+        try:
+            await db.update_basna_session(sid, user["id"], config=json.dumps(_sess_cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna run-knobs persist failed", error=str(e))
     # Protect existing files: a FRESH run reusing a non-empty folder snapshots it
     # into .history/ first (continuation rounds accumulate on purpose → skip; a
     # shared-datastore run is the resumable "continue in this folder" pattern that

@@ -3,7 +3,7 @@ import {
   Network, Play, Sparkles, Check, X, Paperclip, FileText, Image as ImageIcon,
   SlidersHorizontal, ScanSearch, RefreshCw, CornerDownRight, Users, HelpCircle,
   Gauge, ListChecks, Brain, FolderSearch, Loader2, ChevronDown, ChevronRight,
-  Folder, ChevronLeft, ClipboardList,
+  Folder, ChevronLeft, ClipboardList, Database,
 } from 'lucide-react'
 import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type FolderMode } from '../stores/basnaStore'
 import { useBasnaProjectStore, UNFILED_ID, type BasnaProject } from '../stores/basnaProjectStore'
@@ -23,6 +23,8 @@ import { RunWorkspace } from '../components/basna/RunWorkspace'
 import { RunReport } from '../components/basna/RunReport'
 import { ProjectPicker } from '../components/basna/ProjectPicker'
 import { ProjectDetails } from '../components/basna/ProjectDetails'
+import { ProjectFiles, type ProjectSource } from '../components/basna/ProjectFiles'
+import { ProjectDatastore } from '../components/basna/ProjectDatastore'
 
 // A run's project bundle id (config.project_id), '' when unfiled.
 function projectIdOf(config?: string): string {
@@ -247,7 +249,7 @@ export function BasnaPage() {
     projects: bundleProjects, current: currentProject, loading: bundlesLoading,
     loadProjects: loadBundles, createProject, updateProject, deleteProject, select: selectProject,
   } = useBasnaProjectStore()
-  const [projectTab, setProjectTab] = useState<'details' | 'run'>('run')
+  const [projectTab, setProjectTab] = useState<'details' | 'run' | 'files' | 'datastore'>('run')
   const [savingProject, setSavingProject] = useState(false)
 
   // Load the project bundles once; the picker + scoping read from them.
@@ -273,6 +275,21 @@ export function BasnaPage() {
     if (currentProject.id === UNFILED_ID) return sessions.filter((s) => !projectIdOf(s.config))
     return sessions.filter((s) => projectIdOf(s.config) === currentProject.id)
   }, [sessions, currentProject?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // File/datastore sources for the project Files + Datastore tabs: the project's
+  // shared folder plus every run's own write folder, deduped (continuation chains
+  // share the root's folder) and labelled by owner.
+  const projectSources = useMemo<ProjectSource[]>(() => {
+    if (!currentProject || currentProject.id === UNFILED_ID) return []
+    const out: ProjectSource[] = []
+    if (currentProject.vfs_folder) out.push({ label: 'Project files', folder: currentProject.vfs_folder, owner: 'project' })
+    for (const s of scopedSessions) {
+      const folder = runVfsProject(s)
+      if (folder) out.push({ label: s.title || s.intent || 'run', folder, owner: 'run' })
+    }
+    const seen = new Set<string>()
+    return out.filter((x) => (seen.has(x.folder) ? false : (seen.add(x.folder), true)))
+  }, [currentProject?.id, currentProject?.vfs_folder, scopedSessions]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const [intent, setIntent] = useState('')
   const [title, setTitle] = useState('')
@@ -521,6 +538,8 @@ export function BasnaPage() {
             {([
               { id: 'details', label: 'Details', icon: ClipboardList },
               { id: 'run', label: 'Run', icon: Play },
+              { id: 'files', label: 'Files', icon: FileText },
+              { id: 'datastore', label: 'Datastore', icon: Database },
             ] as const).map((t) => {
               const Icon = t.icon
               const sel = projectTab === t.id
@@ -567,7 +586,7 @@ export function BasnaPage() {
           />
         )}
 
-        {/* Details tab — the project's theme + files. */}
+        {/* Details tab — the project's theme. */}
         {projectTab === 'details' && !isUnfiled && (
           <div className="flex-1 overflow-auto p-4 md:p-6">
             <div className="mx-auto w-[92%] max-w-[1100px]">
@@ -580,6 +599,24 @@ export function BasnaPage() {
                   finally { setSavingProject(false) }
                 }}
               />
+            </div>
+          </div>
+        )}
+
+        {/* Files tab — the project folder + every run's folder, grouped by owner. */}
+        {projectTab === 'files' && !isUnfiled && (
+          <div className="flex-1 overflow-auto p-4 md:p-6">
+            <div className="mx-auto w-[92%] max-w-[1100px]">
+              <ProjectFiles sources={projectSources} uploadFolder={currentProject.vfs_folder} />
+            </div>
+          </div>
+        )}
+
+        {/* Datastore tab — tables across the project folder + every run, by owner. */}
+        {projectTab === 'datastore' && !isUnfiled && (
+          <div className="flex-1 overflow-auto p-4 md:p-6">
+            <div className="mx-auto w-[92%] max-w-[1100px]">
+              <ProjectDatastore sources={projectSources} />
             </div>
           </div>
         )}
@@ -889,7 +926,7 @@ export function BasnaPage() {
                   {showKnowledge && (
                     <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
                       <KnowledgePicker
-                        sessions={sessions}
+                        sessions={scopedSessions}
                         selectedIds={knowledgeSessionIds}
                         onToggle={toggleKnowledgeSession}
                         includeBoard={knowledgeIncludeBoard}
@@ -1230,15 +1267,15 @@ export function BasnaPage() {
                 onView={viewFull}
                 onFeedback={sendFeedback}
                 deepening={deepening}
-                onDeepen={async () => {
+                onDeepen={async (instruction) => {
                   setDeepening(true)
-                  try { await deepenSession(activeSession.id) }
+                  try { await deepenSession(activeSession.id, instruction) }
                   catch { /* surfaced by store error path */ }
                   finally { setDeepening(false) }
                 }}
-                onFillGaps={async () => {
+                onFillGaps={async (instruction) => {
                   setDeepening(true)
-                  try { await fillGaps(activeSession.id) }
+                  try { await fillGaps(activeSession.id, instruction) }
                   catch { /* surfaced by store error path */ }
                   finally { setDeepening(false) }
                 }}

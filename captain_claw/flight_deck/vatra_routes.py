@@ -711,13 +711,21 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # Opt-in quality profile (request override → session config → all-off).
     quality = QualityProfile.from_dict(
         body.quality if body.quality is not None else cfg.get("quality"))
-    # Persist the run's quality onto the session so a continuation inherits it.
+    # Persist the run's knobs onto the session so a continuation round inherits
+    # them (quality, grouped execution, parallelism). Batched into one write.
+    _knob_updates: dict[str, Any] = {}
     if body.quality is not None and cfg.get("quality") != body.quality:
-        cfg["quality"] = body.quality
+        _knob_updates["quality"] = body.quality
+    if bool(cfg.get("execution_groups")) != bool(getattr(body, "execution_groups", False)):
+        _knob_updates["execution_groups"] = bool(getattr(body, "execution_groups", False))
+    if int(cfg.get("max_parallel") or 0) != int(getattr(body, "max_parallel", 0) or 0):
+        _knob_updates["max_parallel"] = int(getattr(body, "max_parallel", 0) or 0)
+    if _knob_updates:
+        cfg.update(_knob_updates)
         try:
             await db.update_basna_session(body.session_id, user["id"], config=json.dumps(cfg))
         except Exception as e:  # noqa: BLE001
-            log.warning("Vatra quality persist failed", error=str(e))
+            log.warning("Vatra run-knobs persist failed", error=str(e))
     # R7 cost ceiling for the opt-in retries (acted-gate/escalate). 0 → unbounded.
     _budget = TokenBudget(quality.token_budget)
     _retry_est = int(body.agent_max_tokens or 8192)
@@ -789,6 +797,15 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     _proj_ctx = cfg.get("project_context") or ""
     if _proj_ctx and _proj_ctx not in shared_context:
         shared_context = (_proj_ctx + "\n\n" + shared_context).strip()
+    # Auto-seed continuation rounds with the prior run's knowledge (report + gaps/
+    # blind spots + datastore). Only continuations carry knowledge_session_ids in
+    # config (fresh runs fold it at plan time), so this never double-injects.
+    _seed_ids = cfg.get("knowledge_session_ids") or []
+    if _seed_ids:
+        from captain_claw.flight_deck.basna_routes import build_prior_knowledge
+        _pk = await build_prior_knowledge(db, user["id"], _seed_ids)
+        if _pk and _pk not in shared_context:
+            shared_context = (shared_context + "\n\n## Prior run knowledge\n" + _pk).strip()
     # Per-group extra instructions the user attached in the team-plan editor
     # ({"A": "...", "B": "..."}), injected into every owner that runs in that group.
     _group_instructions = route.get("group_instructions") or {}
@@ -2781,8 +2798,17 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
     cfg: dict[str, Any] = {
         "mode": "vatra", "source": "ui", "kind": kind,
         "parent_session_id": parent_session_id, "root_session_id": root_sid,
-        "round": round_no, "vfs_project": vfs_project, "max_agents": 6,
+        "round": round_no, "vfs_project": vfs_project,
+        # Inherit the parent round's team size + grouped/parallel/quality knobs so
+        # the chain runs the same way (execute_vatra reads these from config/body).
+        "max_agents": int(parent_cfg.get("max_agents") or 6),
     }
+    if parent_cfg.get("quality"):
+        cfg["quality"] = parent_cfg["quality"]
+    if parent_cfg.get("execution_groups"):
+        cfg["execution_groups"] = True
+    if int(parent_cfg.get("max_parallel") or 0):
+        cfg["max_parallel"] = int(parent_cfg["max_parallel"])
     # Keep the whole chain in the parent's project bundle; theme re-derived so
     # edits between rounds are picked up (execute injects it into shared_context).
     _proj_id = parent_cfg.get("project_id") or ""
@@ -2791,6 +2817,9 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
         _ptheme, _ = await _project_context(db, owner, _proj_id)
         cfg["project_id"] = _proj_id
         cfg["project_context"] = _ptheme
+    # Auto-seed this round with the PARENT run's knowledge (report + gaps/blind
+    # spots + datastore); execute_vatra folds it into shared_context for the team.
+    cfg["knowledge_session_ids"] = [parent_session_id]
     if _parent_shared_ds:  # keep the chain bound to the folder's shared datastore
         cfg["shared_datastore"] = True
     if cast_ids:
@@ -2803,7 +2832,12 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
         "name": _PRIOR_FILE, "mime": "text/markdown", "size": len(body_bytes), "kind": "input"}]))
     exec_req = ExecuteRequest(session_id=sid, tiers=tiers or None,
                               env_vars=env_vars or None, api_key=api_key or "",
-                              vfs_project=vfs_project, shared_datastore=_parent_shared_ds)
+                              vfs_project=vfs_project, shared_datastore=_parent_shared_ds,
+                              # Match the parent round's grouped/parallel/deep/quality run.
+                              execution_groups=bool(parent_cfg.get("execution_groups")),
+                              max_parallel=int(parent_cfg.get("max_parallel") or 0),
+                              horizon=parent_cfg.get("horizon") or None,
+                              quality=parent_cfg.get("quality") or None)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)
@@ -2812,19 +2846,28 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
 
 
 async def _fill_gaps_run(owner: str, parent_session_id: str, user: dict, *,
-                         tiers: dict | None, env_vars: list | None, api_key: str) -> dict:
-    """Back-compat alias: fill-gaps = continuation focused on coverage gaps."""
+                         tiers: dict | None, env_vars: list | None, api_key: str,
+                         instruction: str = "") -> dict:
+    """Back-compat alias: fill-gaps = continuation focused on coverage gaps. An
+    optional instruction is appended to the gap list as extra focus."""
     return await _continue_run(owner, parent_session_id, user, kind="fill_gaps",
+                               instruction=instruction,
                                tiers=tiers, env_vars=env_vars, api_key=api_key)
 
 
+class VatraFillGapsRequest(BaseModel):
+    instruction: str = ""  # optional extra guidance appended to the coverage gaps
+
+
 @router.post("/sessions/{session_id}/fill-gaps")
-async def fill_gaps(session_id: str, user: dict = Depends(get_current_user)):
+async def fill_gaps(session_id: str, body: VatraFillGapsRequest | None = None,
+                    user: dict = Depends(get_current_user)):
     """UI 'Fill the gaps' — spawn a follow-up Vatra on this run's coverage gaps,
     seeded with its final report. Returns immediately; the UI polls the new run."""
     tiers, env_vars = await _load_owner_tiers(get_db(), user["id"])
     res = await _fill_gaps_run(user["id"], session_id, user,
-                               tiers=tiers, env_vars=env_vars, api_key="")
+                               tiers=tiers, env_vars=env_vars, api_key="",
+                               instruction=(body.instruction if body else "").strip())
     return {"ok": True, **res}
 
 
