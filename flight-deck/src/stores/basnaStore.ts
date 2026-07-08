@@ -67,6 +67,7 @@ export interface VatraSubtask {
   title: string
   owner_archetype_id: string
   brief?: string
+  group?: string   // execution group A/B/C/D the user arranged this owner into (empty = auto)
 }
 
 // A cross-agent request on the Vatra blackboard.
@@ -98,6 +99,7 @@ export interface RoutePlan {
   subtasks?: VatraSubtask[]
   shared_context?: string   // the team contract every piece must follow
   brief?: string            // R12: the clarified, editable task brief the team was routed on
+  group_instructions?: Record<string, string>  // per-group extra instructions {A,B,C,D}
 }
 
 export async function apiListVatraAsks(sessionId: string): Promise<VatraAsk[]> {
@@ -580,6 +582,9 @@ interface BasnaStore {
   selectSession: (id: string) => Promise<void>
   newSession: () => void
   updateSelected: (index: number, patch: Partial<RouteSelected>) => void
+  updateSubtask: (id: string, patch: Partial<VatraSubtask>) => void
+  removeSubtask: (id: string) => void
+  setGroupInstruction: (letter: string, text: string) => void
   route: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   planVatra: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   runVatra: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
@@ -793,6 +798,26 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     set({ routePlan: { ...plan, selected } })
   },
 
+  // Vatra team-plan edits (before Run). Persisted to the session by runVatra via
+  // apiSaveRoute, so execute_vatra honors the edited briefs / groups / instructions.
+  updateSubtask: (id, patch) => {
+    const plan = get().routePlan
+    if (!plan?.subtasks) return
+    set({ routePlan: { ...plan, subtasks: plan.subtasks.map((s) => (s.id === id ? { ...s, ...patch } : s)) } })
+  },
+  removeSubtask: (id) => {
+    const plan = get().routePlan
+    if (!plan?.subtasks) return
+    set({ routePlan: { ...plan, subtasks: plan.subtasks.filter((s) => s.id !== id) } })
+  },
+  setGroupInstruction: (letter, text) => {
+    const plan = get().routePlan
+    if (!plan) return
+    const gi = { ...(plan.group_instructions || {}), [letter]: text }
+    if (!text.trim()) delete gi[letter]
+    set({ routePlan: { ...plan, group_instructions: gi } })
+  },
+
   route: async (intent, tiers, title = '', archetypeIds = [], brief = '') => {
     set({ routing: true, error: null })
     try {
@@ -880,6 +905,10 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         set({ error: e instanceof Error ? e.message : 'file upload failed' })
         return
       }
+    }
+    // Persist any team-plan edits (briefs, groups, per-group instructions) before Run.
+    if (get().routePlan) {
+      try { await apiSaveRoute(sid, get().routePlan as RoutePlan) } catch { /* ignore */ }
     }
     try {
       const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())

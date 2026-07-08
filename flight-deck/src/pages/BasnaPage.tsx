@@ -646,7 +646,7 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
+    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
@@ -1587,9 +1587,18 @@ export function BasnaPage() {
               </div>
             )}
 
-            {/* Vatra: the team plan (decomposition) — sits where the route plan would. */}
+            {/* Vatra: the team plan (decomposition) — editable before Run: arrange
+                groups, edit/remove agents, add per-group instructions. */}
             {vatraMode && activeSession && (
-              <VatraTeamPlan subtasks={routePlan?.subtasks} sharedContext={routePlan?.shared_context} />
+              <VatraTeamPlan
+                subtasks={routePlan?.subtasks}
+                sharedContext={routePlan?.shared_context}
+                editable={!activeBusy && !executing}
+                groupInstructions={routePlan?.group_instructions}
+                onUpdateSubtask={updateSubtask}
+                onRemoveSubtask={removeSubtask}
+                onSetGroupInstruction={setGroupInstruction}
+              />
             )}
 
             {/* Live per-agent panels — actions + running LLM usage as they stream.

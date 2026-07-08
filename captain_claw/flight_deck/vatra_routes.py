@@ -241,6 +241,18 @@ def _reference_directive(folders: list[str]) -> str:
     )
 
 
+def _group_instr_block(st: dict, arch: dict, group_instructions: dict) -> str:
+    """Per-group extra instructions the user attached in the team-plan editor,
+    injected into every owner that runs in that group. '' if none for its group."""
+    if not group_instructions:
+        return ""
+    letter = vatra_groups.group_label(vatra_groups.effective_group(st, arch))
+    instr = str((group_instructions or {}).get(letter) or "").strip()
+    if not instr:
+        return ""
+    return f"\n\n## Group {letter} — additional instructions for this phase\n{instr}"
+
+
 def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
     """Run-context env injected into a worker so the `vatra` tool knows where it is."""
     project = _vfs_project(sid)
@@ -771,6 +783,9 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     domain = route["domain"]
     subtasks = route["subtasks"]
     shared_context = route.get("shared_context", "")
+    # Per-group extra instructions the user attached in the team-plan editor
+    # ({"A": "...", "B": "..."}), injected into every owner that runs in that group.
+    _group_instructions = route.get("group_instructions") or {}
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
     # Protect existing files: a FRESH run reusing a non-empty folder snapshots it
     # into .history/ before any write (continuation rounds accumulate → skip; a
@@ -1013,6 +1028,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 role, effective_intent, st, [f["name"] for f in input_files],
                 subtasks, shared_context, team_prep=intro_digest,
                 vfs_project=vfs_project)
+            prompt += _group_instr_block(st, arch, _group_instructions)
             prompt += _datastore_directive(vfs_project, _run_shared_datastore.get(sid, False))
             if quality.worker_escalate:
                 prompt += ESCALATE_DIRECTIVE
