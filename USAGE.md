@@ -4285,6 +4285,29 @@ So a client call should be `fetch(\`${FD_BASE_PATH}api/x\`)` (or a bundler base 
 
 Endpoints: management under `/fd/hosting/*` (list / publish `POST` / edit `PUT` / `start` / `stop` / unpublish `DELETE`); public serving at `/vfs/<name>/…` and `/vfs-apps/<name>/…` (registered before the SPA catch-all).
 
+### Quality, cost & collaboration (NEW in 0.7.3)
+
+Three cross-mode capabilities landed in 0.7.3 for Basna, Vatra, and Code. **All are opt-in and default-off** — with Quality on **Basic**, no wage entered, and grouped mode off, runs behave exactly like 0.7.2.
+
+**Quality presets.** A **Quality** control on the Basna/Vatra and Code surfaces with four settings:
+
+- **Basic** — today's behavior; no extra levers.
+- **Balanced** / **Thorough** — progressively more scaffolding (grounding, verification, structure, retries) so a weaker or local model reaches closer to frontier output.
+- **Custom** — toggle any subset of the ~11 individual levers. The notable ones:
+  - **Intent brief** — before the team is chosen, the task is restated as one faithful, structured brief (objective / scope / deliverable / constraints). It drives **team selection** and every worker's framing, and is **editable** — review it and **Re-route on this brief**. The original request always governs on conflict.
+  - **Fact-check + honesty guard** — a tool-enabled fact-checker reviews the deliverable; unconfirmable-but-asserted specifics are **hedged**, and a non-destructive **fact-check audit ledger** is written next to the output.
+  - **Rubric contract** — the completeness checklist is derived from the standard the task names and the deliverable is scored against it (missing / thin items surfaced).
+  - **Source corpus** — `web_fetch` saves the **full** page text into the run's VFS folder and returns a lean head + pointer, keeping context small while the whole source stays searchable.
+  - **Acted-gate / escalation retries**, **research map**, and Code-only levers (**test gate**, **deep-build**, **coverage→backlog**).
+
+**Run cost card.** Every finished Basna/Vatra/Code run shows **Run cost**: the dollar cost (priced from the curated `captain_claw/instructions/model_prices.json` table, cache-aware) and an **effective $/hour** you compare to a wage you type in (persisted globally). It also shows **wall-clock** vs **agent-time** (Σ of every model call's duration) and their ratio as **parallelism** (e.g. `2.2×`), an **input / cached / output** token split, and a **By model** breakdown. Unknown models show tokens with `—` for dollars rather than a wrong number. Reprice by editing `model_prices.json`, or pass a per-tier `price` override.
+
+**Vatra execution groups (grouped mode).** A **Grouped** toggle (next to Max parallel) runs owners in **ordered phases A → B → C → D** with a barrier between them — research/design first, build/write in the middle, review/assembly last — instead of all-at-once. A later phase already sees everything earlier phases posted. Archetype presets pick each owner's phase; the Lead may push a piece **later** (never earlier) via an optional `group` field. A **bounded clarification loop** (cap 2/run) lets a later agent ask an earlier one for a missing input, gated by the Lead. The live panel **sections the working agents by phase**.
+
+**Attachments in Vatra.** Attached files are now uploaded on **Plan team** and **Run**, **saved into the run's VFS folder** (browsable + indexed), and — when the intent brief is on — read by a short-lived **file-examiner agent** that briefs the whole team before it starts, so workers act on the files' contents, not just their names.
+
+**Max parallel agents.** A **Max parallel** input (0 = unlimited) caps how many agent turns run at once — set it low (e.g. 2) for local models so parallel prefills don't exhaust the serving box's memory.
+
 ### Basna (NEW in 0.5.7)
 
 Basna (sidebar: **Basna**) is a **network-source ensemble** — a one-shot, selective alternative to Council. You describe a task; Basna routes it to the smallest set of specialist archetypes, runs them in parallel, and merges their answers weighted by learned reliability.

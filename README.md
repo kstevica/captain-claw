@@ -67,6 +67,18 @@ Captain Claw is **MIT licensed and free forever** — your data stays on your ma
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
 
+## What's New in 0.7.3
+
+**Quality profiles, run-cost accounting, and a collaborative Vatra.** Get near-frontier quality from weaker/local models, see what a run costs, and run Vatra as an ordered team. Fully additive; everything new is **off by default** (needs a Flight Deck restart).
+
+- **Quality Profiles** — one **Quality** control (presets **Basic / Balanced / Thorough / Custom**) toggling ~11 opt-in levers shared across Basna/Vatra and Code: an editable **intent brief** that picks the team, a tool-enabled **fact-checker** + honesty guard, a **rubric-from-source** completeness contract, a **source corpus** (full pages saved to VFS, lean context), acted-gate/escalation retries, and Code levers (test gate, deep-build, coverage→backlog). Off in Basic → identical to 0.7.2.
+- **Run-Cost Accounting** — every finished Basna/Vatra/Code run shows a **Run cost** card: dollars + **effective $/hour vs a wage you enter**, **wall-clock vs agent-time + parallelism** (e.g. `2.2×`), and an **input / cached / output** token split, with a per-model breakdown. Cache-aware pricing from a curated per-model table.
+- **Collaborative Vatra** — opt-in **execution groups (A→B→C→D)** run owners in ordered phases with a barrier and a bounded clarification loop (the live panel sections agents by phase); **attachments are actually used** (uploaded on Run, saved to VFS, and read by a file-examiner agent that briefs the team); plus phantom-agent and "Lead failed" fixes.
+- **Local-model resilience** — user-selectable **max parallel agents** (fit the serving box's memory), agent failures **preserve work + surface the real error**, and orchestrated workers skip redundant self-rephrase / next-steps calls.
+- **VFS** — a **searchable, recency-first** project list with type-filter chips that **folds away** cryptic auto-run folders by default.
+
+See [RELEASE_NOTES_0.7.3.md](release-notes/RELEASE_NOTES_0.7.3.md).
+
 ## What's New in 0.7.2
 
 **VFS Hosting — serve sites and apps straight from your VFS.** Additive; backward compatible with 0.7.1 (needs a Flight Deck restart).
