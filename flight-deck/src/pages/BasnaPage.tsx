@@ -243,7 +243,7 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile,
-    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
+    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, resetDraft, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
   const {
@@ -335,6 +335,23 @@ export function BasnaPage() {
   // lets switching modes keep what you've typed.
   useEffect(() => { if (activeSession) setIntent(activeSession.intent || '') }, [activeSession?.id, activeSession?.intent])
   useEffect(() => { if (activeSession) setTitle(activeSession.title || '') }, [activeSession?.id, activeSession?.title])
+
+  // Moving to a DIFFERENT project starts a clean draft — one project's team
+  // plan, selected run, reference folders, prior-knowledge picks and task text
+  // must never bleed into another. Track the last *non-null* project id so that
+  // (a) visiting the project picker and returning to the SAME project keeps the
+  // draft, and (b) a remount doesn't wipe it — only a real project→project
+  // change resets.
+  const lastProjectId = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const id = currentProject?.id
+    if (!id) return  // the picker (no project open) never wipes a draft
+    if (lastProjectId.current !== undefined && lastProjectId.current !== id) {
+      resetDraft()
+      setIntent(''); setTitle(''); setTeam([])
+    }
+    lastProjectId.current = id
+  }, [currentProject?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Live monitor: while any run (incl. agent-started) is mid-flight, poll the
   // list status + the open session's progress every few seconds; stop when idle.

@@ -588,6 +588,7 @@ interface BasnaStore {
   pollRunning: () => Promise<void>
   selectSession: (id: string) => Promise<void>
   newSession: () => void
+  resetDraft: () => void
   updateSelected: (index: number, patch: Partial<RouteSelected>) => void
   updateSubtask: (id: string, patch: Partial<VatraSubtask>) => void
   removeSubtask: (id: string) => void
@@ -799,6 +800,15 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   },
 
   newSession: () => set({ activeSession: null, routePlan: null, runs: [], lastExecute: null, progress: [], attachments: [], error: null }),
+
+  // Full draft reset — used when switching projects so one project's plan,
+  // selected run, reference folders and prior-knowledge picks never bleed into
+  // another. Clears everything newSession does PLUS the per-run setup selections.
+  resetDraft: () => set({
+    activeSession: null, routePlan: null, runs: [], lastExecute: null,
+    progress: [], attachments: [], error: null,
+    referenceFolders: [], knowledgeSessionIds: [], knowledgeIncludeBoard: false,
+  }),
 
   updateSelected: (index, patch) => {
     const plan = get().routePlan
