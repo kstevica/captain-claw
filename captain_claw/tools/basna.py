@@ -44,10 +44,11 @@ class BasnaTool(Tool):
         "browser, or read to research it; the Basna ensemble's own agents do all of that. Your only "
         "job is to hand off the task and, later, relay the result. 'start' returns immediately "
         "(fire-and-forget) and notifies you when the run finishes. "
-        "READ your owner's past/running sessions like a datastore: 'list' (browse/search), 'get' "
+        "READ your owner's past/running sessions like a datastore: 'list' or 'search' (browse, "
+        "with a `query` substring matched over each session's title/intent/compiled truth), 'get' "
         "(full detail), 'agents' (per-agent runs + tool activity), 'output' (one agent's full "
         "output), 'truth' (compiled answer), 'analysis' (agreement/differences/blind-spots), "
-        "'files' (list), 'get_file' (fetch a file). Use 'list' to find a session id."
+        "'files' (list), 'get_file' (fetch a file). Use 'list'/'search' to find a session id."
     )
     timeout_seconds = 60.0
 
@@ -56,7 +57,7 @@ class BasnaTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "deepen", "continue", "list", "get", "agents", "output", "truth", "analysis", "files", "get_file", "blackboard"],
+                "enum": ["start", "deepen", "continue", "list", "search", "get", "agents", "output", "truth", "analysis", "files", "get_file", "blackboard"],
                 "description": (
                     "'start' — launch a NEW autonomous Basna run on `task` (optional `title`, "
                     "`max_agents`); use this when the user asks to run/execute/start a Basna, and "
@@ -69,7 +70,9 @@ class BasnaTool(Tool):
                     "pass `instruction` for what to do next, `kind` ('continue' extend / 'revise' "
                     "improve / 'deepen' blind spots / 'fill_gaps' for a Vatra run), and `same_cast` "
                     "(default true = reuse the prior run's team). Works for both Basna and Vatra runs. "
-                    "'list' — your sessions (optional `query` substring, `status`, `limit`). "
+                    "'list' / 'search' — your sessions, filtered by an optional `query` substring "
+                    "(matched over each session's title, intent, and compiled truth), plus "
+                    "`status` and `limit`. ('search' is an alias for 'list'.) "
                     "'get' — full session by `session_id`. "
                     "'agents' — per-agent runs for `session_id`. "
                     "'output' — full output of one agent (`session_id` + `archetype_id`). "
@@ -104,9 +107,9 @@ class BasnaTool(Tool):
             "session_id": {"type": "string", "description": "Target session id (all read actions except 'list')."},
             "archetype_id": {"type": "string", "description": "Agent/archetype id for the 'output' action."},
             "name": {"type": "string", "description": "File name for the 'get_file' action."},
-            "query": {"type": "string", "description": "Substring filter over title/intent/truth for 'list'."},
-            "status": {"type": "string", "description": "Filter 'list' by status (routing/routed/running/done)."},
-            "limit": {"type": "integer", "description": "Max sessions for 'list' (default 50)."},
+            "query": {"type": "string", "description": "Substring filter over title/intent/truth for 'list'/'search'."},
+            "status": {"type": "string", "description": "Filter 'list'/'search' by status (routing/routed/running/done)."},
+            "limit": {"type": "integer", "description": "Max sessions for 'list'/'search' (default 50)."},
         },
         "required": ["action"],
     }
@@ -171,7 +174,9 @@ class BasnaTool(Tool):
                 return await self._deepen(fd_url, **kwargs)
             if action == "continue":
                 return await self._continue(fd_url, **kwargs)
-            if action == "list":
+            if action in ("list", "search"):
+                # 'search' is an alias — _list already filters by `query`
+                # (substring over title/intent/truth), which is what a search is.
                 return await self._list(fd_url, **kwargs)
             if action == "get":
                 return await self._get(fd_url, **kwargs)
