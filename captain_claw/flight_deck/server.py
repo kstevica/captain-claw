@@ -1532,6 +1532,13 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     # Pass owner ID so child agents can propagate ownership when spawning
     if owner_id:
         environment["FD_OWNER_ID"] = owner_id
+        # A spawned worker belongs to THIS run's owner, so it must write its VFS
+        # files under the owner's root. `vfs_user()` ranks CLAW_VFS_USER above
+        # FD_OWNER_ID, and a child inherits the FD server's whole environment — so
+        # a global CLAW_VFS_USER (a single-user leftover in the server's .env)
+        # would silently funnel EVERY user's run into that one account. Pin it to
+        # the run owner so the inherited global can never misdirect it.
+        environment["CLAW_VFS_USER"] = owner_id
 
     # Slug for port-fallback callbacks (Docker path)
     environment["FD_AGENT_SLUG"] = slug
@@ -5180,6 +5187,13 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     # Pass owner ID so child agents can propagate ownership when spawning
     if owner_id:
         environment["FD_OWNER_ID"] = owner_id
+        # A spawned worker belongs to THIS run's owner, so it must write its VFS
+        # files under the owner's root. `vfs_user()` ranks CLAW_VFS_USER above
+        # FD_OWNER_ID, and a child inherits the FD server's whole environment — so
+        # a global CLAW_VFS_USER (a single-user leftover in the server's .env)
+        # would silently funnel EVERY user's run into that one account. Pin it to
+        # the run owner so the inherited global can never misdirect it.
+        environment["CLAW_VFS_USER"] = owner_id
 
     # Slug for port-fallback callbacks: lets the agent tell FD which actual
     # port it bound to if the requested one was already in use.
