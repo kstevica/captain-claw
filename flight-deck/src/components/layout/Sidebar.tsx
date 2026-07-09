@@ -29,6 +29,7 @@ import {
   HardDrive,
   Code2,
   Globe,
+  Activity,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -100,6 +101,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
     title: 'System',
     items: [
       { id: 'today', icon: CalendarDays, label: 'Today' },
+      { id: 'system', icon: Activity, label: 'Processes' },
       { id: 'agent-folders', icon: HardDrive, label: 'Agent Folders', adminOnly: true },
       { id: 'connections', icon: Plug, label: 'Connections' },
       { id: 'gpu-cloud', icon: Cloud, label: 'GPU Cloud' },
