@@ -58,8 +58,9 @@ export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPre
     setEditing(false)
     setSaveError('')
 
-    if (group === 'image') {
-      // Images don't need text fetch
+    if (group === 'image' || group === 'audio' || group === 'video') {
+      // Binary media render straight from the URL — no text fetch (fetching a
+      // binary as text just yields garbage in the fallback code view).
       setLoading(false)
       return
     }
@@ -284,6 +285,19 @@ export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPre
             </div>
           )}
 
+          {!loading && !error && group === 'video' && (
+            <div className="flex items-center justify-center bg-black p-4 min-h-[300px]">
+              <video src={viewUrl} controls className="max-w-full max-h-[75vh] rounded-lg" />
+            </div>
+          )}
+
+          {!loading && !error && group === 'audio' && (
+            <div className="flex flex-col items-center justify-center gap-4 p-10 min-h-[200px]">
+              <span className="truncate text-sm text-zinc-400">{file.filename}</span>
+              <audio src={viewUrl} controls className="w-full max-w-lg" />
+            </div>
+          )}
+
           {!loading && !error && content !== null && group === 'html' && (
             <div className="bg-white min-h-[300px]">
               <iframe
@@ -308,7 +322,7 @@ export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPre
             </pre>
           )}
 
-          {!loading && !error && content !== null && !['html', 'markdown', 'image'].includes(group) && !(group === 'data' && file.extension === '.json') && (
+          {!loading && !error && content !== null && !['html', 'markdown', 'image', 'audio', 'video'].includes(group) && !(group === 'data' && file.extension === '.json') && (
             <div className="relative">
               {/* Line numbers + code */}
               <pre className="p-6 text-xs font-mono leading-relaxed overflow-x-auto">
