@@ -13,6 +13,7 @@ import {
   createArchetype, updateArchetype, deleteArchetype, generateArchetype,
   type ArchetypeInput,
 } from '../services/archetypes'
+import { ForgeArchetypesModal } from '../components/library/ForgeArchetypesModal'
 
 type SpawnState = 'spawning' | 'done' | 'error'
 
@@ -60,6 +61,8 @@ export function LibraryPage() {
   const [saving, setSaving] = useState(false)
   const [genPrompt, setGenPrompt] = useState('')
   const [generating, setGenerating] = useState(false)
+  // Batch "Forge archetypes" modal (instructions + documents → a reusable set).
+  const [forgeOpen, setForgeOpen] = useState(false)
 
   const [tab, setTab] = useState<'tiers' | 'archetypes'>('tiers')
 
@@ -528,9 +531,16 @@ export function LibraryPage() {
             </h2>
             <span className="text-[11px] text-zinc-500">click to spawn</span>
             <button
+              onClick={() => setForgeOpen(true)}
+              title="Forge a set of archetypes from instructions and documents"
+              className="ml-auto flex items-center gap-1 rounded-lg bg-violet-600 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
+            >
+              <Wand2 className="h-3.5 w-3.5" /> Forge archetypes
+            </button>
+            <button
               onClick={openNew}
               title="Create your own archetype"
-              className="ml-auto flex items-center gap-1 rounded-lg border border-violet-300 bg-violet-50 px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 dark:border-violet-500/30 dark:bg-violet-500/10 dark:font-normal dark:text-violet-200 dark:hover:bg-violet-500/20"
+              className="flex items-center gap-1 rounded-lg border border-violet-300 bg-violet-50 px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 dark:border-violet-500/30 dark:bg-violet-500/10 dark:font-normal dark:text-violet-200 dark:hover:bg-violet-500/20"
             >
               <Plus className="h-3.5 w-3.5" /> New archetype
             </button>
@@ -577,10 +587,15 @@ export function LibraryPage() {
                                 {a.lead && <Crown className="h-3 w-3 text-amber-400 shrink-0" />}{a.role}
                                 {isUser && <span className="rounded bg-violet-500/15 border border-violet-500/25 px-1 py-0.5 text-[9px] font-medium text-violet-700 dark:text-violet-300 shrink-0">{a.overrides ? 'custom·override' : 'custom'}</span>}
                               </span>
-                              {st === 'spawning' ? <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400 shrink-0" />
-                                : st === 'done' ? <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-                                : st === 'error' ? <AlertTriangle className="h-3.5 w-3.5 text-red-400 shrink-0" />
-                                : <Rocket className="h-3.5 w-3.5 text-zinc-600 group-hover:text-violet-400 shrink-0" />}
+                              {/* For custom archetypes the edit/delete overlay occupies this
+                                  corner on hover, so fade the spawn/status indicator out to
+                                  avoid overlap (no reflow — opacity only). */}
+                              <span className={`shrink-0 ${isUser ? 'transition-opacity group-hover:opacity-0' : ''}`}>
+                                {st === 'spawning' ? <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" />
+                                  : st === 'done' ? <Check className="h-3.5 w-3.5 text-emerald-400" />
+                                  : st === 'error' ? <AlertTriangle className="h-3.5 w-3.5 text-red-400" />
+                                  : <Rocket className="h-3.5 w-3.5 text-zinc-600 group-hover:text-violet-400" />}
+                              </span>
                             </div>
                             <p className="text-[11px] text-zinc-500 leading-snug mb-2">{a.description}</p>
                             <div className="flex items-center gap-1.5 flex-wrap">
@@ -609,6 +624,18 @@ export function LibraryPage() {
 
       {/* ── Tier setup wizard ── */}
       {wizardOpen && <TierSetupWizard onSubmit={submitWizard} onClose={closeWizard} />}
+
+      {/* ── Forge archetypes (batch, from instructions + documents) ── */}
+      {forgeOpen && (
+        <ForgeArchetypesModal
+          tiers={tiers}
+          forgeTier={forgeTier}
+          existingIds={registry?.archetypes.map((a) => a.id) || []}
+          toolPalette={knownTools}
+          onClose={() => setForgeOpen(false)}
+          onSaved={() => refreshRegistry()}
+        />
+      )}
 
       {/* ── Archetype editor modal ── */}
       {editor && (

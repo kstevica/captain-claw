@@ -29,10 +29,14 @@ DEFAULT_PLAN_LIMITS: dict[str, dict] = {
         "spawns_per_hour": 5,
     },
     "pro": {
-        "max_agents": 10,
+        # Raised from 10 → 20 so a single Agent Forge run can stand up a large
+        # 10–15 agent team without the tail agents hitting the concurrent cap.
+        # Per-user overrides (admin_routes) still apply on top of this.
+        "max_agents": 20,
         "max_storage_mb": 5000,
         "requests_per_minute": 300,
-        "spawns_per_hour": 50,
+        # A 15-agent forge is one burst; give headroom to iterate within an hour.
+        "spawns_per_hour": 100,
     },
     "enterprise": {
         "max_agents": 100,

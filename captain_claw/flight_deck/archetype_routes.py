@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck import auth as _auth
@@ -241,3 +241,181 @@ async def generate_archetype(body: GenerateRequest, user: dict = Depends(get_cur
     ))
     draft["source"] = "user"
     return draft
+
+
+@router.post("/forge")
+async def forge_archetypes(
+    instructions: str = Form(""),
+    provider: str = Form(""),
+    model: str = Form(""),
+    api_key: str = Form(""),
+    base_url: str = Form(""),
+    max_tokens: int = Form(0),
+    count: int = Form(0),
+    files: list[UploadFile] = File(default=[]),
+    user: dict = Depends(get_current_user),
+):
+    """Forge MULTIPLE archetype drafts from instructions + optional documents.
+
+    Uploaded documents (pdf/docx/xlsx/pptx/txt/md/…) are extracted to text
+    server-side and folded into the prompt as reference context. Returns a list
+    of drafts (NOT persisted); the UI reviews and saves the selected ones via
+    ``POST /fd/archetypes``. Mirrors the single ``/generate`` route but returns a
+    batch and accepts reference material.
+    """
+    instructions = (instructions or "").strip()
+
+    # ── Extract text from any uploaded documents (best-effort per file) ──
+    _MAX_PER_FILE = 40000
+    _MAX_TOTAL = 160000
+    doc_sections: list[str] = []
+    total = 0
+    if files:
+        import os
+        import tempfile
+        from captain_claw.tools.summarize_files import SummarizeFilesTool
+        for uf in files:
+            if not uf or not uf.filename:
+                continue
+            try:
+                raw = await uf.read()
+            except Exception:
+                continue
+            if not raw:
+                continue
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    delete=False, suffix=(Path(uf.filename).suffix or ".txt"),
+                ) as tmp:
+                    tmp.write(raw)
+                    tmp_path = Path(tmp.name)
+                text, err = SummarizeFilesTool._read_file_content(tmp_path)
+            except Exception as exc:
+                text, err = None, str(exc)
+            finally:
+                if tmp_path is not None:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            if not text:
+                log.info("Archetype forge: could not extract file",
+                         file=uf.filename, error=err)
+                continue
+            remaining = _MAX_TOTAL - total
+            if remaining <= 0:
+                break
+            text = text[:min(_MAX_PER_FILE, remaining)]
+            total += len(text)
+            doc_sections.append(f"### {uf.filename}\n{text}")
+
+    if not instructions and not doc_sections:
+        raise HTTPException(400, "instructions or at least one document is required")
+
+    system_prompt_file = _INSTRUCTIONS_DIR / "archetype_forge_system_prompt.md"
+    if not system_prompt_file.is_file():
+        raise HTTPException(500, "Archetype forge prompt not found")
+    system_prompt = system_prompt_file.read_text()
+
+    user_parts: list[str] = []
+    if instructions:
+        user_parts.append(f"## Instructions\n{instructions}")
+    if count and count > 0:
+        user_parts.append(f"\nDesign approximately {count} archetypes.")
+    if doc_sections:
+        user_parts.append("\n## Reference documents\n" + "\n\n".join(doc_sections))
+    user_prompt = "\n".join(user_parts).strip()
+
+    from captain_claw.llm import Message, create_provider
+
+    _FORGE_CEIL = 64000
+    forge_max_tokens = max(max_tokens if max_tokens > 0 else 32768, 8192)
+
+    def _truncated(resp) -> bool:
+        return str(getattr(resp, "finish_reason", "") or "").lower() in {"length", "max_tokens"}
+
+    async def _run(mt: int):
+        prov = create_provider(
+            provider=provider or "anthropic", model=model or "",
+            api_key=api_key or None, base_url=base_url or None,
+            temperature=0.7, max_tokens=mt,
+        )
+        return await prov.complete(
+            messages=[
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=user_prompt),
+            ],
+            temperature=0.7, max_tokens=mt,
+        )
+
+    try:
+        response = await _run(forge_max_tokens)
+        if _truncated(response) and forge_max_tokens < _FORGE_CEIL:
+            retry = min(forge_max_tokens * 2, _FORGE_CEIL)
+            try:
+                response = await _run(retry)
+                forge_max_tokens = retry
+            except Exception:
+                log.warning("Archetype forge retry failed; keeping first", exc_info=True)
+    except Exception as e:
+        log.error("Archetype forge LLM call failed", exc_info=True)
+        raise HTTPException(502, f"LLM call failed: {e}")
+
+    content = response.content.strip()
+    if content.startswith("```"):
+        content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        if _truncated(response):
+            raise HTTPException(
+                502,
+                "The archetype set was cut off before it finished (hit the output "
+                "token limit). Raise the forge tier's output budget, or ask for fewer "
+                "archetypes.",
+            )
+        raise HTTPException(502, f"LLM returned invalid JSON: {content[:500]}")
+
+    raw_list = parsed.get("archetypes") if isinstance(parsed, dict) else parsed
+    if not isinstance(raw_list, list):
+        raise HTTPException(502, "LLM did not return an 'archetypes' array")
+
+    drafts: list[dict] = []
+    seen_ids: set[str] = set()
+    for item in raw_list:
+        if not isinstance(item, dict):
+            continue
+        tier = item.get("tier", "balanced")
+        mode = item.get("cognitive_mode", "neutra")
+        try:
+            draft = _validate(ArchetypeBody(
+                archetype_id=item.get("id") or item.get("archetype_id") or item.get("role", ""),
+                role=item.get("role", ""),
+                family=item.get("family", "Custom"),
+                description=item.get("description", ""),
+                cognitive_mode=mode if mode in _VALID_MODES else "neutra",
+                tier=tier if tier in _VALID_TIERS else "balanced",
+                tools=item.get("tools", []) or [],
+                fleet_instructions=item.get("fleet_instructions", ""),
+                keywords=item.get("keywords", []) or [],
+                lead=bool(item.get("lead", False)),
+                reliability_seed=float(item.get("reliability_seed", 0.7) or 0.7),
+            ))
+        except Exception:
+            # Skip a malformed item (e.g. missing role) rather than failing the batch.
+            continue
+        # De-dupe ids within the batch so the review list has stable, distinct ids.
+        base_id = draft["id"]
+        uid, n = base_id, 2
+        while uid in seen_ids:
+            uid = f"{base_id}-{n}"
+            n += 1
+        draft["id"] = uid
+        seen_ids.add(uid)
+        draft["source"] = "user"
+        drafts.append(draft)
+
+    if not drafts:
+        raise HTTPException(502, "No valid archetypes were produced")
+    return {"archetypes": drafts}

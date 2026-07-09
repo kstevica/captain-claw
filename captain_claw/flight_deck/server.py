@@ -5655,11 +5655,14 @@ async def forge_decompose(
         raise HTTPException(500, "Forge system prompt not found")
     system_prompt = system_prompt_file.read_text()
 
-    # Inject the curated archetype catalog so the generator biases toward proven
-    # shapes (reusing their cognitive_mode, tier, and tools) instead of inventing
-    # every agent from scratch. Built from the same merged registry the gallery
-    # reads (base + this user's own archetypes), so it stays in sync; model ids
-    # are intentionally omitted (tier resolves them).
+    # Inject the curated archetype catalog so the generator bases each agent on a
+    # proven shape (inheriting its cognitive_mode, tier, tools, and SOP) instead
+    # of inventing every agent from scratch. Built from the same merged registry
+    # the gallery reads (base + this user's own archetypes), so it stays in sync;
+    # each line leads with the archetype `id` so the model can reference it, and
+    # model ids are intentionally omitted (tier resolves them). The id set is
+    # captured for post-parse validation (drop hallucinated references).
+    valid_archetype_ids: set[str] = set()
     try:
         from captain_claw.flight_deck.archetypes import merged_registry
         from captain_claw.flight_deck.auth import get_db
@@ -5668,20 +5671,25 @@ async def forge_decompose(
             tier_names = ", ".join((reg.get("tiers") or {}).keys())
             cat_lines = [
                 "\n\n## Archetype Catalog",
-                "Prefer these proven archetypes when an agent's purpose matches one — "
-                "reuse its cognitive_mode, tier, and tools as the starting point and "
-                "adapt as needed. Only invent a bespoke agent when nothing fits.",
+                "Base each agent on one of these archetypes when its purpose matches — "
+                "set the agent's `archetype` to the entry's `id` and write only a "
+                "task-specific `additional_instructions` delta. Define a `new_archetype` "
+                "only when nothing here fits.",
                 "",
             ]
             for a in reg.get("archetypes", []):
+                aid = a.get("id", "")
+                if aid:
+                    valid_archetype_ids.add(aid)
                 cat_lines.append(
-                    f"- {a['role']} [{a.get('family', '')}] — {a['description']} "
+                    f"- id: `{aid}` — {a['role']} [{a.get('family', '')}] — {a['description']} "
                     f"(mode: {a['cognitive_mode']}, tier: {a['tier']}, "
                     f"tools: {', '.join(a.get('tools', []))})"
                 )
             if tier_names:
                 cat_lines.append(
-                    f"\nAssign EVERY agent a `tier` ({tier_names}) matched to its work. "
+                    f"\nValid tiers: {tier_names}. When you set a per-agent `tier` "
+                    "override or a `new_archetype.tier`, use one of these. "
                     "Do NOT output model ids — the platform resolves tier→model."
                 )
             system_prompt += "\n".join(cat_lines)
@@ -5738,41 +5746,95 @@ async def forge_decompose(
         except Exception as exc:
             log.warning("Failed to load project context for forge", error=str(exc))
 
-    # Create an LLM provider and make the decomposition call
-    try:
-        from captain_claw.llm import create_provider, Message
-        forge_max_tokens = body.max_tokens if body.max_tokens > 0 else 32768
+    # Create an LLM provider and make the decomposition call. Long objectives and
+    # big teams (10–15 agents) can outgrow a small output budget, so we floor the
+    # cap, detect truncation (finish_reason == "length" across providers), and
+    # retry once at a bumped budget before surfacing a clear, actionable error.
+    from captain_claw.llm import create_provider, Message
+
+    def _extract_json(raw: str) -> str:
+        s = (raw or "").strip()
+        if s.startswith("```"):
+            s = "\n".join(l for l in s.split("\n") if not l.strip().startswith("```"))
+        return s.strip()
+
+    def _truncated(resp) -> bool:
+        return str(getattr(resp, "finish_reason", "") or "").lower() in {"length", "max_tokens"}
+
+    async def _run_forge(max_toks: int):
         provider = create_provider(
             provider=body.provider,
             model=body.model,
             api_key=body.api_key or None,
             base_url=body.base_url or None,
             temperature=0.7,
-            max_tokens=forge_max_tokens,
+            max_tokens=max_toks,
         )
-        response = await provider.complete(
+        return await provider.complete(
             messages=[
                 Message(role="system", content=system_prompt),
                 Message(role="user", content=user_prompt),
             ],
             temperature=0.7,
-            max_tokens=forge_max_tokens,
+            max_tokens=max_toks,
         )
+
+    # Floor the output budget: 8k+ comfortably fits a 15-agent team of short
+    # archetype deltas even when the caller's forge tier is configured low.
+    FORGE_TOKEN_FLOOR = 8192
+    FORGE_TOKEN_CEIL = 64000
+    forge_max_tokens = max(body.max_tokens if body.max_tokens > 0 else 32768, FORGE_TOKEN_FLOOR)
+
+    try:
+        response = await _run_forge(forge_max_tokens)
+        # Retry once at a larger budget if the model ran out of output room.
+        if _truncated(response) and forge_max_tokens < FORGE_TOKEN_CEIL:
+            retry_tokens = min(forge_max_tokens * 2, FORGE_TOKEN_CEIL)
+            log.warning(
+                "Forge output truncated; retrying with larger budget",
+                first=forge_max_tokens, retry=retry_tokens,
+            )
+            try:
+                response = await _run_forge(retry_tokens)
+                forge_max_tokens = retry_tokens
+            except Exception:
+                log.warning("Forge retry failed; keeping first response", exc_info=True)
     except Exception as e:
         log.error("Forge LLM call failed", exc_info=True)
         raise HTTPException(502, f"LLM call failed: {e}")
 
-    # Parse the JSON response
-    content = response.content.strip()
-    # Strip markdown fences if present
-    if content.startswith("```"):
-        lines = content.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        content = "\n".join(lines)
+    # Parse the JSON response.
+    content = _extract_json(response.content)
     try:
         result = json.loads(content)
     except json.JSONDecodeError:
+        if _truncated(response):
+            raise HTTPException(
+                502,
+                "The team design was cut off before it finished (hit the output token "
+                f"limit at {forge_max_tokens} tokens). Raise the forge tier's output "
+                "budget in the Library, or split the objective into a smaller team.",
+            )
         raise HTTPException(502, f"LLM returned invalid JSON: {content[:500]}")
+
+    # Drop hallucinated archetype references so the frontend always gets an id it
+    # can resolve — or null, meaning bespoke / build from new_archetype. Lenient:
+    # an unknown id with no new_archetype simply falls back to bespoke.
+    if valid_archetype_ids:
+        for agent in (result.get("agents") or []):
+            if not isinstance(agent, dict):
+                continue
+            aid = agent.get("archetype")
+            if aid and aid not in valid_archetype_ids:
+                log.info(
+                    "Forge dropped unknown archetype id",
+                    archetype=aid, agent=agent.get("name"),
+                )
+                agent["archetype"] = None
+            # archetype and new_archetype are mutually exclusive; prefer the
+            # resolved catalog archetype when the model emitted both.
+            if agent.get("archetype") and agent.get("new_archetype"):
+                agent["new_archetype"] = None
 
     # Tag result with project_id so spawned agents can be auto-joined.
     if body.project_id:
