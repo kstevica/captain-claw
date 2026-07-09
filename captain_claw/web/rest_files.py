@@ -33,6 +33,12 @@ _TEXT_FILENAMES: set[str] = {
 # Maximum size (bytes) for inline text preview.
 _MAX_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024  # 2 MB
 
+# Directories the workspace scan never descends into (large / noise).
+_SCAN_SKIP_DIRS: set[str] = {
+    ".git", "node_modules", ".venv", "venv", "__pycache__",
+    "dist", "build", ".datastore", ".history", ".reports",
+}
+
 
 def _is_text_file(path: Path) -> bool:
     """Determine if a file is likely text based on extension or name."""
@@ -174,6 +180,43 @@ async def _collect_files(server: WebServer) -> list[dict[str, Any]]:
             seen[physical] = _enrich(logical, physical, source)
     except Exception:
         pass  # Best-effort; in-memory data is still returned.
+
+    # 3. Filesystem scan of the agent's workspace file roots. Only the `write`
+    #    tool registers files, so anything a script/subprocess GENERATED (audio,
+    #    video, images, data dumps…) is otherwise invisible here. Bounded (skips
+    #    heavy dirs, capped) so a large workspace can't stall the listing.
+    try:
+        from captain_claw.config import get_config
+        workspace = get_config().resolved_workspace_path().resolve()
+        roots = [(workspace / "saved").resolve(), (workspace / "output").resolve()]
+        scanned = 0
+        for root in roots:
+            if not root.is_dir():
+                continue
+            stack = [root]
+            while stack and scanned < 3000:
+                d = stack.pop()
+                try:
+                    for child in d.iterdir():
+                        if child.is_dir():
+                            if child.name not in _SCAN_SKIP_DIRS:
+                                stack.append(child)
+                            continue
+                        if not child.is_file():
+                            continue
+                        phys = str(child.resolve())
+                        if phys in seen:
+                            continue
+                        scanned += 1
+                        try:
+                            logical = str(child.resolve().relative_to(workspace))
+                        except ValueError:
+                            logical = child.name
+                        seen[phys] = _enrich(logical, phys, "filesystem")
+                except OSError:
+                    pass
+    except Exception:
+        pass  # Best-effort; registered files are still returned.
 
     return sorted(seen.values(), key=lambda f: f["logical"].lower())
 

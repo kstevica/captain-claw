@@ -193,5 +193,5 @@ export function getFileTypeGroup(file: AgentFile): string {
 /** Check if file can be viewed inline in browser */
 export function isViewable(file: AgentFile): boolean {
   const group = getFileTypeGroup(file)
-  return ['html', 'markdown', 'text', 'code', 'data', 'image', 'pdf'].includes(group)
+  return ['html', 'markdown', 'text', 'code', 'data', 'image', 'pdf', 'audio', 'video'].includes(group)
 }
