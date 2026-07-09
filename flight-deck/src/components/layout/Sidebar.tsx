@@ -49,18 +49,6 @@ const navSections: { title: string; items: NavItem[] }[] = [
     items: [
       { id: 'quick-chat', icon: MessagesSquare, label: 'Quick chat' },
       { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
-      { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
-      { id: 'code', icon: Code2, label: 'Code' },
-      { id: 'vfs', icon: FolderTree, label: 'VFS' },
-      { id: 'hosting', icon: Globe, label: 'Hosting' },
-    ],
-  },
-  {
-    title: 'Build',
-    items: [
-      { id: 'forge', icon: Wand2, label: 'Agent Forge' },
-      { id: 'skills', icon: Sparkles, label: 'Skills' },
-      { id: 'library', icon: Library, label: 'Library' },
     ],
   },
   {
@@ -68,6 +56,23 @@ const navSections: { title: string; items: NavItem[] }[] = [
     items: [
       { id: 'council', icon: Users, label: 'Council' },
       { id: 'basna', icon: Network, label: 'Basna' },
+      { id: 'code', icon: Code2, label: 'Code' },
+    ],
+  },
+  {
+    title: 'Files',
+    items: [
+      { id: 'vfs', icon: FolderTree, label: 'VFS' },
+      { id: 'hosting', icon: Globe, label: 'Hosting' },
+    ],
+  },
+  {
+    title: 'Build',
+    items: [
+      { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
+      { id: 'forge', icon: Wand2, label: 'Agent Forge' },
+      { id: 'skills', icon: Sparkles, label: 'Skills' },
+      { id: 'library', icon: Library, label: 'Library' },
     ],
   },
   {
