@@ -430,10 +430,36 @@ async def _project_context(db, user_id: str, project_id: str) -> tuple[str, str]
 
 # ── Session endpoints ────────────────────────────────────────────────
 
+async def _resolve_basna(db, session_id: str, user_id: str, *, need_write: bool = False):
+    """Resolve access to a Basna session (owner or shared).
+
+    Returns ``(row, access, owner_id)``; raises 404 if invisible, 403 on a write
+    with only 'view'. ``owner_id`` is the true owner — pass it to owner-scoped db
+    methods and VFS-folder resolution so shared readers/editors work.
+    """
+    row, access = await db.basna_access(session_id, user_id)
+    if not row:
+        raise HTTPException(404, "session not found")
+    if need_write and access not in ("owner", "edit"):
+        raise HTTPException(403, "read-only access to this Basna")
+    return row, access, row["user_id"]
+
+
 @router.get("/sessions")
 async def list_sessions(user: dict = Depends(get_current_user)):
     db = get_db()
-    return await db.list_basna_sessions(user["id"])
+    own = await db.list_basna_sessions(user["id"])
+    shared_meta = await db.list_shares_for_grantee(user["id"], "basna")
+    out = list(own)
+    for s in shared_meta:
+        row, access = await db.basna_access(s["resource_id"], user["id"])
+        if row:
+            row["shared"] = True
+            row["access"] = access
+            row["owner_email"] = s.get("owner_email", "")
+            row["owner_name"] = s.get("owner_name", "")
+            out.append(row)
+    return out
 
 
 @router.post("/sessions")
@@ -448,10 +474,11 @@ async def create_session(body: CreateSessionRequest, user: dict = Depends(get_cu
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
-    sess = await db.get_basna_session(session_id, user["id"])
-    if not sess:
-        raise HTTPException(404, "session not found")
-    return sess
+    row, access, _ = await _resolve_basna(db, session_id, user["id"])
+    if access != "owner":
+        row["shared"] = True
+        row["access"] = access
+    return row
 
 
 @router.put("/sessions/{session_id}")
@@ -459,17 +486,22 @@ async def update_session(
     session_id: str, body: UpdateSessionRequest, user: dict = Depends(get_current_user),
 ):
     db = get_db()
+    _, _, owner_id = await _resolve_basna(db, session_id, user["id"], need_write=True)
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
-    ok = await db.update_basna_session(session_id, user["id"], **fields)
+    ok = await db.update_basna_session(session_id, owner_id, **fields)
     if not ok:
         raise HTTPException(404, "session not found or nothing to update")
-    return await db.get_basna_session(session_id, user["id"])
+    return await db.get_basna_session(session_id, owner_id)
 
 
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
-    ok = await db.delete_basna_session(session_id, user["id"])
+    # Only the owner may delete a Basna (not a shared editor).
+    _, access, owner_id = await _resolve_basna(db, session_id, user["id"])
+    if access != "owner":
+        raise HTTPException(403, "only the owner can delete this Basna")
+    ok = await db.delete_basna_session(session_id, owner_id)
     if not ok:
         raise HTTPException(404, "session not found")
     shutil.rmtree(_session_files_dir(session_id), ignore_errors=True)
@@ -479,10 +511,8 @@ async def delete_session(session_id: str, user: dict = Depends(get_current_user)
 @router.post("/sessions/{session_id}/cancel")
 async def cancel_session(session_id: str, user: dict = Depends(get_current_user)):
     """Hard-stop an in-flight run (UI Stop button or the arbiter's stop_run)."""
-    sess = await get_db().get_basna_session(session_id, user["id"])
-    if not sess:
-        raise HTTPException(404, "session not found")
-    res = await _cancel_basna_run(session_id, user["id"])
+    _, _, owner_id = await _resolve_basna(get_db(), session_id, user["id"], need_write=True)
+    res = await _cancel_basna_run(session_id, owner_id)
     return {"ok": True, **res}
 
 
@@ -490,10 +520,8 @@ async def cancel_session(session_id: str, user: dict = Depends(get_current_user)
 async def list_runs(session_id: str, user: dict = Depends(get_current_user)):
     """Per-agent runs for a session — powers the run-trace UI and feedback thumbs."""
     db = get_db()
-    sess = await db.get_basna_session(session_id, user["id"])
-    if not sess:
-        raise HTTPException(404, "session not found")
-    return await db.list_basna_runs(session_id, user["id"])
+    _, _, owner_id = await _resolve_basna(db, session_id, user["id"])
+    return await db.list_basna_runs(session_id, owner_id)
 
 
 @router.post("/sessions/{session_id}/files")
@@ -504,9 +532,7 @@ async def upload_files(
     """Attach files to a session. Stored on disk + recorded on the session; at
     execute they're copied into every spawned agent's workspace."""
     db = get_db()
-    sess = await db.get_basna_session(session_id, user["id"])
-    if not sess:
-        raise HTTPException(404, "session not found")
+    sess, _, owner_id = await _resolve_basna(db, session_id, user["id"], need_write=True)
     d = _session_files_dir(session_id)
     by_name = {f["name"]: f for f in _parse_files(sess)}
     for uf in files:
@@ -518,16 +544,14 @@ async def upload_files(
         by_name[name] = {"name": name, "mime": uf.content_type or "application/octet-stream",
                          "size": len(content), "kind": "input"}
     merged = list(by_name.values())
-    await db.update_basna_session(session_id, user["id"], files=json.dumps(merged))
+    await db.update_basna_session(session_id, owner_id, files=json.dumps(merged))
     return {"files": merged}
 
 
 @router.get("/sessions/{session_id}/files/{name}")
 async def download_file(session_id: str, name: str, user: dict = Depends(get_current_user)):
     db = get_db()
-    sess = await db.get_basna_session(session_id, user["id"])
-    if not sess:
-        raise HTTPException(404, "session not found")
+    await _resolve_basna(db, session_id, user["id"])
     safe = _safe_name(name)
     path = _session_files_dir(session_id) / safe
     if not path.is_file():
@@ -538,16 +562,14 @@ async def download_file(session_id: str, name: str, user: dict = Depends(get_cur
 @router.delete("/sessions/{session_id}/files/{name}")
 async def delete_file(session_id: str, name: str, user: dict = Depends(get_current_user)):
     db = get_db()
-    sess = await db.get_basna_session(session_id, user["id"])
-    if not sess:
-        raise HTTPException(404, "session not found")
+    sess, _, owner_id = await _resolve_basna(db, session_id, user["id"], need_write=True)
     safe = _safe_name(name)
     try:
         (_session_files_dir(session_id) / safe).unlink()
     except OSError:
         pass
     merged = [f for f in _parse_files(sess) if f["name"] != safe]
-    await db.update_basna_session(session_id, user["id"], files=json.dumps(merged))
+    await db.update_basna_session(session_id, owner_id, files=json.dumps(merged))
     return {"files": merged}
 
 
@@ -3869,9 +3891,7 @@ async def recompile_route(
 async def get_progress(session_id: str, user: dict = Depends(get_current_user)):
     """Live execution progress for a session, polled by the UI during /execute."""
     db = get_db()
-    sess = await db.get_basna_session(session_id, user["id"])
-    if not sess:
-        raise HTTPException(404, "session not found")
+    await _resolve_basna(db, session_id, user["id"])
     return _PROGRESS.get(session_id) or {"events": [], "active": False}
 
 

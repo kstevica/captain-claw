@@ -34,6 +34,12 @@ export interface CodeProject {
   name: string
   folders: CodeFolder[]
   sessions: CodeSession[]
+  // Present when this project was shared TO you by another user.
+  shared?: boolean
+  owner_id?: string
+  owner_email?: string
+  owner_name?: string
+  permission?: string
 }
 
 export interface CodeRoute {
@@ -153,8 +159,11 @@ async function apiSetFolder(project: string, session: string, folder: string): P
   if (!res.ok) throw new Error((await res.text()) || 'set folder failed')
 }
 
-async function apiGetChat(p: string, s: string): Promise<{ messages: CodeMessage[]; state: Record<string, unknown> }> {
-  const res = await _authedFetch(`${sbase(p, s)}/chat`)
+// Append `?owner=<id>` for a shared project (resolved under the owner's root).
+const oq = (owner: string) => (owner ? `?owner=${enc(owner)}` : '')
+
+async function apiGetChat(p: string, s: string, owner = ''): Promise<{ messages: CodeMessage[]; state: Record<string, unknown> }> {
+  const res = await _authedFetch(`${sbase(p, s)}/chat${oq(owner)}`)
   if (!res.ok) return { messages: [], state: {} }
   return res.json()
 }
@@ -165,8 +174,8 @@ async function apiProgress(p: string, s: string): Promise<{ events: CodeProgress
   return res.json()
 }
 
-async function apiLog(p: string, s: string): Promise<CodeCommit[]> {
-  const res = await _authedFetch(`${sbase(p, s)}/log`)
+async function apiLog(p: string, s: string, owner = ''): Promise<CodeCommit[]> {
+  const res = await _authedFetch(`${sbase(p, s)}/log${oq(owner)}`)
   if (!res.ok) return []
   return (await res.json()).commits || []
 }
@@ -225,15 +234,15 @@ async function apiCleanup(): Promise<number> {
   return (await res.json()).count || 0
 }
 
-async function apiDiff(p: string, s: string, refA = '', refB = ''): Promise<string> {
-  const qs = new URLSearchParams({ ref_a: refA, ref_b: refB }).toString()
+async function apiDiff(p: string, s: string, refA = '', refB = '', owner = ''): Promise<string> {
+  const qs = new URLSearchParams({ ref_a: refA, ref_b: refB, ...(owner ? { owner } : {}) }).toString()
   const res = await _authedFetch(`${sbase(p, s)}/diff?${qs}`)
   if (!res.ok) return ''
   return (await res.json()).diff || ''
 }
 
-async function apiShow(p: string, s: string, sha: string): Promise<string> {
-  const res = await _authedFetch(`${sbase(p, s)}/show?sha=${enc(sha)}`)
+async function apiShow(p: string, s: string, sha: string, owner = ''): Promise<string> {
+  const res = await _authedFetch(`${sbase(p, s)}/show?sha=${enc(sha)}${owner ? `&owner=${enc(owner)}` : ''}`)
   if (!res.ok) return ''
   return (await res.json()).diff || ''
 }
@@ -251,14 +260,14 @@ export interface CodeMap {
 }
 export interface CodeMapHit { name: string; kind: string; file: string; line: number; signature: string; summary: string }
 
-async function apiGetMap(p: string, s: string): Promise<CodeMap | null> {
-  const res = await _authedFetch(`${sbase(p, s)}/map`)
+async function apiGetMap(p: string, s: string, owner = ''): Promise<CodeMap | null> {
+  const res = await _authedFetch(`${sbase(p, s)}/map${oq(owner)}`)
   if (!res.ok) return null
   return res.json()
 }
 
-async function apiMapSearch(p: string, s: string, q: string): Promise<CodeMapHit[]> {
-  const res = await _authedFetch(`${sbase(p, s)}/map/search?q=${enc(q)}`)
+async function apiMapSearch(p: string, s: string, q: string, owner = ''): Promise<CodeMapHit[]> {
+  const res = await _authedFetch(`${sbase(p, s)}/map/search?q=${enc(q)}${owner ? `&owner=${enc(owner)}` : ''}`)
   if (!res.ok) return []
   return (await res.json()).results || []
 }
@@ -267,8 +276,8 @@ async function apiMapBuild(p: string, s: string): Promise<void> {
   await _authedFetch(`${sbase(p, s)}/map/build`, { method: 'POST' })
 }
 
-async function apiExport(p: string, s: string, title: string): Promise<void> {
-  const res = await _authedFetch(`${sbase(p, s)}/export?format=md`)
+async function apiExport(p: string, s: string, title: string, owner = ''): Promise<void> {
+  const res = await _authedFetch(`${sbase(p, s)}/export?format=md${owner ? `&owner=${enc(owner)}` : ''}`)
   if (!res.ok) return
   const blob = await res.blob()
   const url = URL.createObjectURL(blob)
@@ -287,6 +296,7 @@ interface CodeStore {
   projects: CodeProject[]
   activeProject: string
   activeSession: string
+  activeOwner: string   // owner id when the active project is shared ('' = own)
   messages: CodeMessage[]
   commits: CodeCommit[]
   progress: CodeProgressEvent[]
@@ -307,7 +317,7 @@ interface CodeStore {
   createSession: (project: string, title: string, folder: string) => Promise<void>
   deleteSession: (project: string, session: string) => Promise<void>
   setSessionFolder: (folder: string) => Promise<void>
-  selectSession: (project: string, session: string) => Promise<void>
+  selectSession: (project: string, session: string, owner?: string) => Promise<void>
   send: (text: string) => Promise<void>
   approvePlan: (plan?: string) => Promise<void>
   cancelPlan: () => Promise<void>
@@ -348,16 +358,17 @@ async function _followRun(
     const st = get()
     if (st.activeProject !== project || st.activeSession !== session) return
     if (st.sending) { await sleep(1500); continue }   // send/approve loop owns polling
+    const owner = st.activeOwner
     let prog: { events: CodeProgressEvent[]; active: boolean }
     let chat: { messages: CodeMessage[]; state: Record<string, unknown> }
     try {
-      [prog, chat] = await Promise.all([apiProgress(project, session), apiGetChat(project, session)])
+      [prog, chat] = await Promise.all([apiProgress(project, session), apiGetChat(project, session, owner)])
     } catch { await sleep(2000); continue }
     if (token !== _followToken) return
     const status = _statusOf(chat.state)
     set({ progress: prog.events || [], messages: chat.messages, status })
     if (status !== 'running' && !prog.active) {
-      try { set({ commits: await apiLog(project, session) }) } catch { /* ignore */ }
+      try { set({ commits: await apiLog(project, session, owner) }) } catch { /* ignore */ }
       return
     }
     await sleep(1500)
@@ -368,6 +379,7 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
   projects: [],
   activeProject: '',
   activeSession: '',
+  activeOwner: '',
   messages: [],
   commits: [],
   progress: [],
@@ -453,11 +465,11 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     } catch (e) { set({ error: e instanceof Error ? e.message : 'set folder failed' }) }
   },
 
-  selectSession: async (project, session) => {
+  selectSession: async (project, session, owner = '') => {
     const token = ++_followToken   // supersede any in-flight follower
-    set({ activeProject: project, activeSession: session, messages: [], commits: [], progress: [], status: 'idle' })
-    void get().loadQuality(project)   // per-project quality levers
-    const [chat, commits] = await Promise.all([apiGetChat(project, session), apiLog(project, session)])
+    set({ activeProject: project, activeSession: session, activeOwner: owner, messages: [], commits: [], progress: [], status: 'idle' })
+    if (!owner) void get().loadQuality(project)   // per-project quality levers (own projects only)
+    const [chat, commits] = await Promise.all([apiGetChat(project, session, owner), apiLog(project, session, owner)])
     if (token !== _followToken) return   // user already switched away
     const status = _statusOf(chat.state)
     set({ messages: chat.messages, commits, status })
@@ -558,23 +570,23 @@ export const useCodeStore = create<CodeStore>((set, get) => ({
     }
   },
 
-  diff: async (refA = '', refB = '') => apiDiff(get().activeProject, get().activeSession, refA, refB),
-  showCommit: async (sha) => apiShow(get().activeProject, get().activeSession, sha),
+  diff: async (refA = '', refB = '') => apiDiff(get().activeProject, get().activeSession, refA, refB, get().activeOwner),
+  showCommit: async (sha) => apiShow(get().activeProject, get().activeSession, sha, get().activeOwner),
 
   exportProcess: async () => {
     const { activeProject: p, activeSession: s, projects } = get()
     if (!p || !s) return
     const title = projects.find((x) => x.name === p)?.sessions.find((x) => x.id === s)?.title || `${p}-${s}`
-    await apiExport(p, s, `${p}-${title}`)
+    await apiExport(p, s, `${p}-${title}`, get().activeOwner)
   },
 
   loadMap: async () => {
-    const { activeProject: p, activeSession: s } = get()
-    return (p && s) ? apiGetMap(p, s) : null
+    const { activeProject: p, activeSession: s, activeOwner: o } = get()
+    return (p && s) ? apiGetMap(p, s, o) : null
   },
   searchMap: async (q) => {
-    const { activeProject: p, activeSession: s } = get()
-    return (p && s && q.trim()) ? apiMapSearch(p, s, q.trim()) : []
+    const { activeProject: p, activeSession: s, activeOwner: o } = get()
+    return (p && s && q.trim()) ? apiMapSearch(p, s, q.trim(), o) : []
   },
   buildMap: async () => {
     const { activeProject: p, activeSession: s } = get()

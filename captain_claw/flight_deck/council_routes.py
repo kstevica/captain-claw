@@ -414,10 +414,36 @@ async def teardown_council(body: TeardownRequest, user: dict = Depends(get_curre
 
 # ── Session endpoints ────────────────────────────────────────────
 
+async def _resolve_session(db, session_id: str, user_id: str, *, need_write: bool = False):
+    """Resolve access to a council session (owner or shared).
+
+    Returns ``(row, access, owner_id)``. Raises 404 if invisible, 403 if a
+    write is attempted with only 'view' access. ``owner_id`` is the true owner —
+    pass it to the owner-scoped db child methods so shared readers/editors work.
+    """
+    row, access = await db.council_access(session_id, user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Council session not found")
+    if need_write and access not in ("owner", "edit"):
+        raise HTTPException(status_code=403, detail="Read-only access to this council")
+    return row, access, row["user_id"]
+
+
 @router.get("/sessions")
 async def list_sessions(user: dict = Depends(get_current_user)):
     db = get_db()
-    return await db.list_council_sessions(user["id"])
+    own = await db.list_council_sessions(user["id"])
+    shared_meta = await db.list_shares_for_grantee(user["id"], "council")
+    out = list(own)
+    for s in shared_meta:
+        row, access = await db.council_access(s["resource_id"], user["id"])
+        if row:
+            row["shared"] = True
+            row["access"] = access
+            row["owner_email"] = s.get("owner_email", "")
+            row["owner_name"] = s.get("owner_name", "")
+            out.append(row)
+    return out
 
 
 @router.post("/sessions")
@@ -435,10 +461,11 @@ async def create_session(body: CreateSessionRequest, user: dict = Depends(get_cu
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
-    sess = await db.get_council_session(session_id, user["id"])
-    if not sess:
-        raise HTTPException(status_code=404, detail="Council session not found")
-    return sess
+    row, access, _ = await _resolve_session(db, session_id, user["id"])
+    if access != "owner":
+        row["shared"] = True
+        row["access"] = access
+    return row
 
 
 @router.put("/sessions/{session_id}")
@@ -447,10 +474,11 @@ async def update_session(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
-    ok = await db.update_council_session(session_id, user["id"], **fields)
+    ok = await db.update_council_session(session_id, owner_id, **fields)
     if not ok:
         raise HTTPException(status_code=404, detail="Council session not found")
     return {"ok": True}
@@ -459,7 +487,11 @@ async def update_session(
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
-    deleted = await db.delete_council_session(session_id, user["id"])
+    # Only the owner may delete a council session (not a shared editor).
+    _, access, owner_id = await _resolve_session(db, session_id, user["id"])
+    if access != "owner":
+        raise HTTPException(status_code=403, detail="Only the owner can delete this council")
+    deleted = await db.delete_council_session(session_id, owner_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Council session not found")
     return {"ok": True}
@@ -471,7 +503,8 @@ async def cancel_session(session_id: str, user: dict = Depends(get_current_user)
     Council uses already-running agents (nothing ephemeral to kill), so a status
     flag is the stop. The arbiter's stop_run and the UI Stop button both hit this."""
     db = get_db()
-    ok = await db.update_council_session(session_id, user["id"], status="cancelled")
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
+    ok = await db.update_council_session(session_id, owner_id, status="cancelled")
     if not ok:
         raise HTTPException(status_code=404, detail="Council session not found")
     return {"ok": True, "status": "cancelled"}
@@ -485,7 +518,8 @@ async def get_messages(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    return await db.get_council_messages(session_id, user["id"], round_num=round, limit=limit)
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"])
+    return await db.get_council_messages(session_id, owner_id, round_num=round, limit=limit)
 
 
 @router.post("/sessions/{session_id}/messages")
@@ -494,7 +528,8 @@ async def add_messages(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    ids = await db.add_council_messages(session_id, user["id"], body.messages)
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
+    ids = await db.add_council_messages(session_id, owner_id, body.messages)
     if not ids:
         raise HTTPException(status_code=404, detail="Council session not found")
     return {"ok": True, "ids": ids}
@@ -507,8 +542,9 @@ async def update_message(
 ):
     """Patch a message — used to checkpoint/finalize a streaming agent turn."""
     db = get_db()
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
-    ok = await db.update_council_message(session_id, user["id"], message_id, fields)
+    ok = await db.update_council_message(session_id, owner_id, message_id, fields)
     if not ok:
         raise HTTPException(status_code=404, detail="Message or session not found")
     return {"ok": True}
@@ -521,7 +557,8 @@ async def delete_messages(
 ):
     """Delete all messages for a round so it can be re-run (restart round)."""
     db = get_db()
-    removed = await db.delete_council_messages(session_id, user["id"], round)
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
+    removed = await db.delete_council_messages(session_id, owner_id, round)
     if removed < 0:
         raise HTTPException(status_code=404, detail="Council session not found")
     return {"ok": True, "removed": removed}
@@ -533,7 +570,8 @@ async def toggle_pin(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    ok = await db.toggle_council_pin(session_id, user["id"], message_id)
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
+    ok = await db.toggle_council_pin(session_id, owner_id, message_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Council session not found")
     return {"ok": True}
@@ -547,7 +585,8 @@ async def add_votes(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    ids = await db.add_council_votes(session_id, user["id"], body.votes)
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
+    ids = await db.add_council_votes(session_id, owner_id, body.votes)
     if not ids:
         raise HTTPException(status_code=404, detail="Council session not found")
     return {"ok": True, "ids": ids}
@@ -559,7 +598,8 @@ async def get_votes(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    return await db.get_council_votes(session_id, user["id"], round_num=round)
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"])
+    return await db.get_council_votes(session_id, owner_id, round_num=round)
 
 
 # ── Artifact endpoints ──────────────────────────────────────────
@@ -570,7 +610,8 @@ async def get_artifacts(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    return await db.get_council_artifacts(session_id, user["id"], kind=kind)
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"])
+    return await db.get_council_artifacts(session_id, owner_id, kind=kind)
 
 
 @router.post("/sessions/{session_id}/artifacts")
@@ -579,8 +620,9 @@ async def upsert_artifact(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
     art_id = await db.upsert_council_artifact(
-        session_id, user["id"],
+        session_id, owner_id,
         kind=body.kind, agent_id=body.agent_id,
         agent_name=body.agent_name, content=body.content,
     )
@@ -595,7 +637,8 @@ async def delete_artifacts(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    ok = await db.delete_council_artifacts(session_id, user["id"], kind=kind)
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
+    ok = await db.delete_council_artifacts(session_id, owner_id, kind=kind)
     if not ok:
         raise HTTPException(status_code=404, detail="Council session not found")
     return {"ok": True}

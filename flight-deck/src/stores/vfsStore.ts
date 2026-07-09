@@ -14,6 +14,11 @@ export interface VFSProject {
   link_path?: string  // external source path (linked folders only)
   mode?: string       // 'rw' | 'ro' (linked folders only)
   missing?: boolean   // linked source path no longer exists
+  shared?: boolean    // shared TO this user by another owner
+  owner_id?: string   // owner's user id (shared folders only)
+  owner_email?: string
+  owner_name?: string
+  permission?: string // 'view' | 'edit' (shared folders only)
 }
 
 export interface VFSEntry {
@@ -75,6 +80,8 @@ export const extOf = (name: string): string => {
 interface VFSStore {
   projects: VFSProject[]
   project: string | null
+  owner: string        // owner id when the active project is shared ('' = own)
+  permission: string   // '' | 'view' | 'edit' for the active shared project
   path: string
   entries: VFSEntry[]
   loading: boolean
@@ -89,7 +96,7 @@ interface VFSStore {
   saving: boolean
 
   loadProjects: () => Promise<void>
-  openProject: (name: string) => Promise<void>
+  openProject: (name: string, owner?: string, permission?: string) => Promise<void>
   closeProject: () => void
   browse: (path: string) => Promise<void>
   refresh: () => Promise<void>
@@ -115,6 +122,8 @@ export interface FsListing { path: string; parent: string; dirs: FsDir[] }
 export const useVFSStore = create<VFSStore>((set, get) => ({
   projects: [],
   project: null,
+  owner: '',
+  permission: '',
   path: '',
   entries: [],
   loading: false,
@@ -139,19 +148,19 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     }
   },
 
-  openProject: async (name) => {
-    set({ project: name, path: '', file: null, editing: false })
+  openProject: async (name, owner = '', permission = '') => {
+    set({ project: name, owner, permission, path: '', file: null, editing: false })
     await get().browse('')
   },
 
-  closeProject: () => set({ project: null, path: '', entries: [], file: null, editing: false }),
+  closeProject: () => set({ project: null, owner: '', permission: '', path: '', entries: [], file: null, editing: false }),
 
   browse: async (path) => {
     const project = get().project
     if (!project) return
     set({ loading: true, error: null })
     try {
-      const res = await _authedFetch(`/fd/vfs/list?${qp({ project, path })}`)
+      const res = await _authedFetch(`/fd/vfs/list?${qp({ project, path, ...(get().owner ? { owner: get().owner } : {}) })}`)
       if (!res.ok) throw new Error(await res.text())
       const data = await res.json()
       set({ entries: data.entries || [], path, loading: false })
@@ -181,13 +190,13 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
       if (IMAGE_EXTS.includes(extOf(entry.name))) {
         // Images: fetch bytes and hand the viewer an object URL (an <img src>
         // can't carry the bearer header that /download requires).
-        const res = await _authedFetch(`/fd/vfs/download?${qp({ project: entry.project, path: entry.path })}`)
+        const res = await _authedFetch(`/fd/vfs/download?${qp({ project: entry.project, path: entry.path, ...(get().owner ? { owner: get().owner } : {}) })}`)
         if (!res.ok) throw new Error(await res.text())
         const url = URL.createObjectURL(await res.blob())
         set({ blobUrl: url, fileLoading: false, file: { project: entry.project, path: entry.path, name: entry.name, size: entry.size, binary: true, truncated: false, text: '' } })
         return
       }
-      const res = await _authedFetch(`/fd/vfs/read?${qp({ project: entry.project, path: entry.path })}`)
+      const res = await _authedFetch(`/fd/vfs/read?${qp({ project: entry.project, path: entry.path, ...(get().owner ? { owner: get().owner } : {}) })}`)
       if (!res.ok) throw new Error(await res.text())
       const data: VFSFile = await res.json()
       set({ file: data, draft: data.text, fileLoading: false })
@@ -211,7 +220,7 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     try {
       const res = await _authedFetch('/fd/vfs/write', {
         method: 'POST',
-        body: JSON.stringify({ project: f.project, path: f.path, content: get().draft }),
+        body: JSON.stringify({ project: f.project, path: f.path, content: get().draft, owner: get().owner }),
       })
       if (!res.ok) throw new Error(await res.text())
       set({
@@ -226,7 +235,7 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
   },
 
   download: async (entry) => {
-    const res = await _authedFetch(`/fd/vfs/download?${qp({ project: entry.project, path: entry.path })}`)
+    const res = await _authedFetch(`/fd/vfs/download?${qp({ project: entry.project, path: entry.path, ...(get().owner ? { owner: get().owner } : {}) })}`)
     if (!res.ok) return
     const blob = await res.blob()
     const url = URL.createObjectURL(blob)
@@ -240,7 +249,8 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
   },
 
   downloadProject: async (name) => {
-    const res = await _authedFetch(`/fd/vfs/download-zip?${qp({ project: name })}`)
+    const o = get().project === name ? get().owner : ''
+    const res = await _authedFetch(`/fd/vfs/download-zip?${qp({ project: name, ...(o ? { owner: o } : {}) })}`)
     if (!res.ok) return
     const blob = await res.blob()
     const url = URL.createObjectURL(blob)
@@ -255,7 +265,7 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
 
   deleteEntry: async (entry) => {
     const res = await _authedFetch(
-      `/fd/vfs/entry?${qp({ project: entry.project, path: entry.path, recursive: 'true' })}`,
+      `/fd/vfs/entry?${qp({ project: entry.project, path: entry.path, recursive: 'true', ...(get().owner ? { owner: get().owner } : {}) })}`,
       { method: 'DELETE' },
     )
     if (!res.ok) {
@@ -272,7 +282,7 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     const path = get().path ? `${get().path}/${name.trim()}` : name.trim()
     const res = await _authedFetch('/fd/vfs/mkdir', {
       method: 'POST',
-      body: JSON.stringify({ project, path }),
+      body: JSON.stringify({ project, path, owner: get().owner }),
     })
     if (res.ok) await get().refresh()
   },
@@ -304,6 +314,7 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
       const form = new FormData()
       form.append('project', project)
       form.append('path', get().path)
+      if (get().owner) form.append('owner', get().owner)
       for (const f of list) form.append('files', f)
       // Multipart body — do NOT set Content-Type; the browser adds the boundary.
       const { token, authEnabled } = useAuthStore.getState()

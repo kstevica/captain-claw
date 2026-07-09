@@ -10,6 +10,8 @@ import { SynthesisView } from '../components/council/SynthesisView'
 import { TldrPanel } from '../components/council/TldrPanel'
 import { ActionPointsPanel } from '../components/council/ActionPointsPanel'
 import { SessionCard } from '../components/council/SessionCard'
+import { ShareModal } from '../components/common/ShareModal'
+import type { CouncilSessionSummary } from '../stores/councilStore'
 
 type PageState = 'list' | 'setup' | 'active'
 
@@ -30,6 +32,7 @@ export function CouncilPage() {
   } = useCouncilStore()
 
   const [pageState, setPageState] = useState<PageState>('list')
+  const [shareTarget, setShareTarget] = useState<CouncilSessionSummary | null>(null)
   const [sidebarRatio, setSidebarRatio] = useState(SIDEBAR_DEFAULT_RATIO)
   const containerRef = useRef<HTMLDivElement>(null)
   const dragging = useRef(false)
@@ -102,6 +105,14 @@ export function CouncilPage() {
 
   return (
     <div className="flex h-full flex-col">
+      {shareTarget && (
+        <ShareModal
+          resourceType="council"
+          resourceId={shareTarget.id}
+          resourceName={shareTarget.title || 'Council session'}
+          onClose={() => setShareTarget(null)}
+        />
+      )}
       {/* Header */}
       <div className="shrink-0 border-b border-zinc-700/50 bg-zinc-900/50 px-4 py-3 md:px-6">
         <div className="flex items-center gap-3">
@@ -190,6 +201,7 @@ export function CouncilPage() {
                     onOpen={handleOpen}
                     onDelete={handleDelete}
                     onCancel={cancelSession}
+                    onShare={setShareTarget}
                   />
                 ))}
               </div>

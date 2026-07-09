@@ -64,9 +64,14 @@ export interface Archetype {
   fleet_instructions: string
   keywords?: string[]
   reliability_seed?: number
-  // 'user' archetypes are editable/deletable; 'base' come from the JSON file.
-  source?: 'base' | 'user'
+  // 'user' archetypes are editable/deletable; 'base' come from the JSON file;
+  // 'shared' were shared to you by another user (use-only, tagged with owner).
+  source?: 'base' | 'user' | 'shared'
   overrides?: boolean
+  shared_owner?: string
+  shared_owner_email?: string
+  shared_owner_name?: string
+  shared_permission?: string
 }
 
 export interface ArchetypeRegistry {

@@ -314,6 +314,28 @@ class FlightDeckDB:
             );
             CREATE INDEX IF NOT EXISTS idx_user_archetypes_user
                 ON user_archetypes(user_id);
+
+            -- Cross-user resource sharing. An owner grants another FD user
+            -- access to one of their resources. `resource_type` is one of
+            -- archetype | code | basna | council | vfs; `resource_id` is the
+            -- natural key within the owner's namespace (archetype slug, Basna
+            -- or Council session id, or a VFS/Code project folder name).
+            -- `permission` is 'view' (read-only) or 'edit' (collaborate);
+            -- archetypes are always use-only regardless of permission.
+            CREATE TABLE IF NOT EXISTS resource_shares (
+                id            TEXT PRIMARY KEY,
+                resource_type TEXT NOT NULL,
+                resource_id   TEXT NOT NULL,
+                owner_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                grantee_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                permission    TEXT NOT NULL DEFAULT 'view',
+                created_at    TEXT NOT NULL,
+                UNIQUE(resource_type, resource_id, owner_id, grantee_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_shares_grantee
+                ON resource_shares(grantee_id, resource_type);
+            CREATE INDEX IF NOT EXISTS idx_resource_shares_owner
+                ON resource_shares(owner_id, resource_type, resource_id);
         """)
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
@@ -688,6 +710,32 @@ class FlightDeckDB:
             row = await cur.fetchone()
             return dict(row) if row else None
 
+    async def council_access(
+        self, session_id: str, caller_id: str,
+    ) -> tuple[dict | None, str | None]:
+        """Resolve a caller's access to a council session (owner or shared).
+
+        Returns ``(row, access)`` with access ∈ {'owner','edit','view'}, or
+        ``(None, None)`` if invisible. The row's ``user_id`` is always the true
+        owner — use it for child lookups and VFS/file resolution.
+        """
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM council_sessions WHERE id = ?", (session_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None, None
+        row = dict(row)
+        if row["user_id"] == caller_id:
+            return row, "owner"
+        share = await self.get_share_for_grantee(
+            "council", session_id, caller_id, row["user_id"],
+        )
+        if share:
+            return row, share.get("permission") or "view"
+        return None, None
+
     async def update_council_session(
         self, session_id: str, user_id: str, **fields,
     ) -> bool:
@@ -968,6 +1016,27 @@ class FlightDeckDB:
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+    async def basna_access(
+        self, session_id: str, caller_id: str,
+    ) -> tuple[dict | None, str | None]:
+        """Resolve access to a Basna session (owner or shared). See council_access."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM basna_sessions WHERE id = ?", (session_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None, None
+        row = dict(row)
+        if row["user_id"] == caller_id:
+            return row, "owner"
+        share = await self.get_share_for_grantee(
+            "basna", session_id, caller_id, row["user_id"],
+        )
+        if share:
+            return row, share.get("permission") or "view"
+        return None, None
 
     async def update_basna_session(
         self, session_id: str, user_id: str, **fields,
@@ -1490,3 +1559,115 @@ class FlightDeckDB:
         ) as cur:
             await self._db.commit()
             return (cur.rowcount or 0) > 0
+
+    # ── Resource shares (cross-user access grants) ───────────────────
+
+    async def create_share(
+        self, resource_type: str, resource_id: str, owner_id: str,
+        grantee_id: str, permission: str = "view",
+    ) -> dict | None:
+        """Grant (or re-grant, updating the permission) access to a resource."""
+        assert self._db is not None
+        now = _utcnow()
+        sid = _uuid()
+        await self._db.execute(
+            "INSERT INTO resource_shares"
+            " (id, resource_type, resource_id, owner_id, grantee_id, permission, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(resource_type, resource_id, owner_id, grantee_id)"
+            " DO UPDATE SET permission = excluded.permission",
+            (sid, resource_type, resource_id, owner_id, grantee_id, permission, now),
+        )
+        await self._db.commit()
+        return await self.get_share(resource_type, resource_id, owner_id, grantee_id)
+
+    async def get_share(
+        self, resource_type: str, resource_id: str, owner_id: str, grantee_id: str,
+    ) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM resource_shares"
+            " WHERE resource_type = ? AND resource_id = ? AND owner_id = ? AND grantee_id = ?",
+            (resource_type, resource_id, owner_id, grantee_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def get_share_for_grantee(
+        self, resource_type: str, resource_id: str, grantee_id: str,
+        owner_id: str | None = None,
+    ) -> dict | None:
+        """Access-check helper: is `resource_id` shared TO `grantee_id`?
+
+        Returns the share row (with owner_id + permission) or None. Pass
+        `owner_id` to disambiguate when a resource_id (e.g. a bare project
+        name) can collide across owners.
+        """
+        assert self._db is not None
+        q = ("SELECT * FROM resource_shares"
+             " WHERE resource_type = ? AND resource_id = ? AND grantee_id = ?")
+        params: list = [resource_type, resource_id, grantee_id]
+        if owner_id:
+            q += " AND owner_id = ?"
+            params.append(owner_id)
+        async with self._db.execute(q, tuple(params)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def delete_share(
+        self, resource_type: str, resource_id: str, owner_id: str, grantee_id: str,
+    ) -> bool:
+        assert self._db is not None
+        async with self._db.execute(
+            "DELETE FROM resource_shares"
+            " WHERE resource_type = ? AND resource_id = ? AND owner_id = ? AND grantee_id = ?",
+            (resource_type, resource_id, owner_id, grantee_id),
+        ) as cur:
+            await self._db.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def list_shares_for_resource(
+        self, resource_type: str, resource_id: str, owner_id: str,
+    ) -> list[dict]:
+        """Grants ON a resource I own — for rendering 'shared with X, Y'."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT s.*, u.email AS grantee_email, u.display_name AS grantee_name"
+            " FROM resource_shares s JOIN users u ON u.id = s.grantee_id"
+            " WHERE s.resource_type = ? AND s.resource_id = ? AND s.owner_id = ?"
+            " ORDER BY s.created_at",
+            (resource_type, resource_id, owner_id),
+        )
+        return [dict(r) for r in rows]
+
+    async def list_shares_for_grantee(
+        self, grantee_id: str, resource_type: str | None = None,
+    ) -> list[dict]:
+        """Resources shared TO me, with owner info — for badging shared lists."""
+        assert self._db is not None
+        q = ("SELECT s.*, u.email AS owner_email, u.display_name AS owner_name"
+             " FROM resource_shares s JOIN users u ON u.id = s.owner_id"
+             " WHERE s.grantee_id = ?")
+        params: list = [grantee_id]
+        if resource_type:
+            q += " AND s.resource_type = ?"
+            params.append(resource_type)
+        q += " ORDER BY s.created_at"
+        rows = await self._db.execute_fetchall(q, tuple(params))
+        return [dict(r) for r in rows]
+
+    async def list_shared_archetypes(self, grantee_id: str) -> list[dict]:
+        """User-archetype rows shared TO `grantee_id`, tagged with owner info."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT a.*, s.owner_id AS shared_owner, s.permission AS shared_permission,"
+            " u.email AS shared_owner_email, u.display_name AS shared_owner_name"
+            " FROM resource_shares s"
+            " JOIN user_archetypes a"
+            "   ON a.user_id = s.owner_id AND a.archetype_id = s.resource_id"
+            " JOIN users u ON u.id = s.owner_id"
+            " WHERE s.resource_type = 'archetype' AND s.grantee_id = ?"
+            " ORDER BY a.updated_at DESC",
+            (grantee_id,),
+        )
+        return [dict(r) for r in rows]

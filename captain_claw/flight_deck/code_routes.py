@@ -51,7 +51,7 @@ from captain_claw.flight_deck.dubina_agents import (
     spawn_archetype_agent,
     stop_archetype_agent,
 )
-from captain_claw.flight_deck.vfs_routes import _user_root
+from captain_claw.flight_deck.vfs_routes import _user_root, _eff_owner
 from captain_claw.logging import get_logger
 from captain_claw.vfs import link_target_at, read_links_at, safe_name
 
@@ -1659,7 +1659,7 @@ class RollbackReq(BaseModel):
 
 @router.get("/projects")
 async def list_projects(user: dict = Depends(get_current_user)):
-    """Full tree: each project with its folders and sessions."""
+    """Full tree: each project with its folders and sessions (own + shared)."""
     uid = user["id"]
     _ensure_links_project(uid)
     out = []
@@ -1667,7 +1667,26 @@ async def list_projects(user: dict = Depends(get_current_user)):
         _ensure_migrated(uid, name)
         out.append(_project_tree(uid, name))
     out.sort(key=lambda p: p["name"].lower())
-    return {"projects": out}
+    # Code projects shared TO this user — folders (shared as 'vfs') that carry a
+    # .code/ workspace. Built under the owner's root and tagged read/edit.
+    shared = []
+    for s in await get_db().list_shares_for_grantee(uid, "vfs"):
+        owner_id, proj = s["owner_id"], s["resource_id"]
+        if not (_proj_dir(owner_id, proj) / ".code").is_dir():
+            continue
+        try:
+            _ensure_migrated(owner_id, proj)
+            tree = _project_tree(owner_id, proj)
+        except Exception:
+            continue
+        tree["shared"] = True
+        tree["owner_id"] = owner_id
+        tree["owner_email"] = s.get("owner_email", "")
+        tree["owner_name"] = s.get("owner_name", "")
+        tree["permission"] = s["permission"]
+        shared.append(tree)
+    shared.sort(key=lambda p: p["name"].lower())
+    return {"projects": out + shared}
 
 
 @router.post("/projects")
@@ -1820,8 +1839,10 @@ def _sctx(user_id: str, project: str, session: str):
 
 
 @router.get("/projects/{project}/sessions/{session}/chat")
-async def get_chat(project: str, session: str, user: dict = Depends(get_current_user)):
-    _sess, _repo, sdir, _pk = _sctx(user["id"], project, session)
+async def get_chat(project: str, session: str, owner: str = "",
+                   user: dict = Depends(get_current_user)):
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    _sess, _repo, sdir, _pk = _sctx(oid, project, session)
     return {"messages": _read_chat(sdir), "state": _read_state(sdir)}
 
 
@@ -1832,22 +1853,27 @@ async def get_progress(project: str, session: str, user: dict = Depends(get_curr
 
 
 @router.get("/projects/{project}/sessions/{session}/log")
-async def get_log(project: str, session: str, user: dict = Depends(get_current_user)):
-    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+async def get_log(project: str, session: str, owner: str = "",
+                  user: dict = Depends(get_current_user)):
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    _sess, repo, _sdir, _pk = _sctx(oid, project, session)
     await code_git.git_init(repo)   # self-heal / init the target repo
     return {"commits": await code_git.git_log(repo)}
 
 
 @router.get("/projects/{project}/sessions/{session}/diff")
-async def get_diff(project: str, session: str, ref_a: str = "", ref_b: str = "",
+async def get_diff(project: str, session: str, ref_a: str = "", ref_b: str = "", owner: str = "",
                    user: dict = Depends(get_current_user)):
-    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    _sess, repo, _sdir, _pk = _sctx(oid, project, session)
     return {"diff": await code_git.git_diff(repo, ref_a, ref_b)}
 
 
 @router.get("/projects/{project}/sessions/{session}/show")
-async def show_commit(project: str, session: str, sha: str, user: dict = Depends(get_current_user)):
-    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+async def show_commit(project: str, session: str, sha: str, owner: str = "",
+                      user: dict = Depends(get_current_user)):
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    _sess, repo, _sdir, _pk = _sctx(oid, project, session)
     return {"diff": await code_git.git_show(repo, sha)}
 
 
@@ -1865,10 +1891,11 @@ async def rollback(project: str, session: str, body: RollbackReq,
 
 
 @router.get("/projects/{project}/sessions/{session}/export")
-async def export_process(project: str, session: str, format: str = "md",
+async def export_process(project: str, session: str, format: str = "md", owner: str = "",
                          user: dict = Depends(get_current_user)):
     from fastapi.responses import JSONResponse, PlainTextResponse
-    sess, repo, sdir, _pk = _sctx(user["id"], project, session)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    sess, repo, sdir, _pk = _sctx(oid, project, session)
     title = f"{project} / {sess.get('title', 'session')}"
     fname = safe_name(f"{project}-{sess.get('title', 'session')}", fallback="process")
     if format == "json":
@@ -1884,9 +1911,11 @@ async def export_process(project: str, session: str, format: str = "md",
 # ── code map ─────────────────────────────────────────────────────────
 
 @router.get("/projects/{project}/sessions/{session}/map")
-async def get_map(project: str, session: str, user: dict = Depends(get_current_user)):
+async def get_map(project: str, session: str, owner: str = "",
+                  user: dict = Depends(get_current_user)):
     """The session folder's Code Map — overview, models, ui, stats."""
-    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    _sess, repo, _sdir, _pk = _sctx(oid, project, session)
     return {"overview": code_map.read_overview(repo),
             "models": code_map.read_json_layer(repo, "models"),
             "ui": code_map.read_json_layer(repo, "ui"),
@@ -1894,9 +1923,10 @@ async def get_map(project: str, session: str, user: dict = Depends(get_current_u
 
 
 @router.get("/projects/{project}/sessions/{session}/map/search")
-async def map_search(project: str, session: str, q: str = "",
+async def map_search(project: str, session: str, q: str = "", owner: str = "",
                      user: dict = Depends(get_current_user)):
-    _sess, repo, _sdir, _pk = _sctx(user["id"], project, session)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    _sess, repo, _sdir, _pk = _sctx(oid, project, session)
     return {"results": code_map.search(repo, q) if q.strip() else []}
 
 

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Library, Gauge, Trash2, Plus, Crown, Loader2, Check, AlertTriangle, Rocket,
-  Layers, Copy, Pencil, Sparkles, X, KeyRound, Wand2,
+  Layers, Copy, Pencil, Sparkles, X, KeyRound, Wand2, Share2, Users,
 } from 'lucide-react'
+import { ShareModal } from '../components/common/ShareModal'
 import { useProcessStore } from '../stores/processStore'
 import { useUIStore } from '../stores/uiStore'
 import { spawnProcess, type SpawnConfig } from '../services/docker'
@@ -63,6 +64,8 @@ export function LibraryPage() {
   const [generating, setGenerating] = useState(false)
   // Batch "Forge archetypes" modal (instructions + documents → a reusable set).
   const [forgeOpen, setForgeOpen] = useState(false)
+  // Archetype being shared (owner → other FD users), null = closed.
+  const [shareTarget, setShareTarget] = useState<Archetype | null>(null)
 
   const [tab, setTab] = useState<'tiers' | 'archetypes'>('tiers')
 
@@ -561,6 +564,13 @@ export function LibraryPage() {
                           {isUser && (
                             <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                               <button
+                                onClick={(e) => { e.stopPropagation(); setShareTarget(a) }}
+                                title="Share with other users"
+                                className="rounded p-1 text-zinc-500 hover:text-violet-300 hover:bg-zinc-800"
+                              >
+                                <Share2 className="h-3 w-3" />
+                              </button>
+                              <button
                                 onClick={(e) => { e.stopPropagation(); openEdit(a) }}
                                 title="Edit archetype"
                                 className="rounded p-1 text-zinc-500 hover:text-violet-300 hover:bg-zinc-800"
@@ -586,6 +596,7 @@ export function LibraryPage() {
                               <span className="flex items-center gap-1 text-sm font-medium text-zinc-200 truncate">
                                 {a.lead && <Crown className="h-3 w-3 text-amber-400 shrink-0" />}{a.role}
                                 {isUser && <span className="rounded bg-violet-500/15 border border-violet-500/25 px-1 py-0.5 text-[9px] font-medium text-violet-700 dark:text-violet-300 shrink-0">{a.overrides ? 'custom·override' : 'custom'}</span>}
+                                {a.source === 'shared' && <span title={`Shared by ${a.shared_owner_name || a.shared_owner_email || 'another user'}`} className="flex items-center gap-0.5 rounded bg-sky-500/15 border border-sky-500/25 px-1 py-0.5 text-[9px] font-medium text-sky-700 dark:text-sky-300 shrink-0"><Users className="h-2.5 w-2.5" />shared</span>}
                               </span>
                               {/* For custom archetypes the edit/delete overlay occupies this
                                   corner on hover, so fade the spawn/status indicator out to
@@ -621,6 +632,17 @@ export function LibraryPage() {
         </div>
         )}
       </div>
+
+      {/* ── Share archetype ── */}
+      {shareTarget && (
+        <ShareModal
+          resourceType="archetype"
+          resourceId={shareTarget.id}
+          resourceName={shareTarget.role}
+          allowEdit={false}
+          onClose={() => setShareTarget(null)}
+        />
+      )}
 
       {/* ── Tier setup wizard ── */}
       {wizardOpen && <TierSetupWizard onSubmit={submitWizard} onClose={closeWizard} />}

@@ -111,6 +111,11 @@ export interface CouncilSessionSummary {
   agents: string
   created_at: string
   updated_at: string
+  // Present when this session was shared TO you by another user.
+  shared?: boolean
+  access?: 'owner' | 'edit' | 'view'
+  owner_email?: string
+  owner_name?: string
 }
 
 export interface CouncilSession {

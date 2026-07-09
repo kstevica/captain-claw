@@ -3,11 +3,12 @@ import {
   Plus, FolderGit2, Send, GitCommit, Loader2, Bot, User, ClipboardList, CheckCircle2,
   ShieldAlert, Wrench, RotateCcw, X, Download, ChevronRight, ChevronDown, Link2, Lock,
   MessageSquarePlus, FolderPlus, FolderTree, Trash2, Map, Square, Eraser,
-  Paperclip, XCircle, FileText, Image as ImageIcon,
+  Paperclip, XCircle, FileText, Image as ImageIcon, Share2, Users,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useCodeStore } from '../stores/codeStore'
+import { ShareModal } from '../components/common/ShareModal'
 import { QualityControls } from '../components/QualityControls'
 import { CostCard, deriveCost } from '../components/CostCard'
 import { useVFSStore } from '../stores/vfsStore'
@@ -64,6 +65,7 @@ export function CodePage() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [foldersFor, setFoldersFor] = useState<string>('')     // project whose folders panel is open
   const [newVfsFolder, setNewVfsFolder] = useState('')
+  const [shareProject, setShareProject] = useState<string | null>(null)
   const [cleanupMsg, setCleanupMsg] = useState('')
   // New-session modal: project → folder → session in one flow.
   const [modal, setModal] = useState<null | {
@@ -248,6 +250,14 @@ export function CodePage() {
 
   return (
     <div className="flex h-full overflow-hidden text-zinc-100">
+      {shareProject && (
+        <ShareModal
+          resourceType="vfs"
+          resourceId={shareProject}
+          resourceName={shareProject}
+          onClose={() => setShareProject(null)}
+        />
+      )}
       {/* ── Left rail: project → sessions ── */}
       <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/40">
         <div className="border-b border-zinc-800 p-3">
@@ -275,12 +285,22 @@ export function CodePage() {
                   <button onClick={() => toggle(p.name)} className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs font-semibold uppercase tracking-wide text-zinc-400">
                     {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                     <span className="truncate">{p.name}</span>
+                    {p.shared && (
+                      <span title={`Shared by ${p.owner_name || p.owner_email} · ${p.permission}`}
+                        className="flex shrink-0 items-center gap-0.5 rounded border border-sky-500/25 bg-sky-500/15 px-1 py-px text-[8px] font-medium text-sky-300"><Users size={9} />{p.permission === 'edit' ? 'edit' : 'view'}</span>
+                    )}
                     <span className="text-[10px] font-normal text-zinc-600">· {p.sessions.length}</span>
                   </button>
-                  <button onClick={() => openModal(p.name)} title="New session in this project"
-                    className="shrink-0 text-zinc-500 opacity-0 hover:text-zinc-200 group-hover/proj:opacity-100"><MessageSquarePlus size={13} /></button>
-                  <button onClick={() => setFoldersFor((f) => f === p.name ? '' : p.name)} title="Folders"
-                    className={`shrink-0 hover:text-zinc-200 ${foldersFor === p.name ? 'text-zinc-200' : 'text-zinc-500 opacity-0 group-hover/proj:opacity-100'}`}><FolderPlus size={13} /></button>
+                  {!p.shared && (
+                    <>
+                      <button onClick={() => setShareProject(p.name)} title="Share with other users"
+                        className="shrink-0 text-zinc-500 opacity-0 hover:text-sky-300 group-hover/proj:opacity-100"><Share2 size={13} /></button>
+                      <button onClick={() => openModal(p.name)} title="New session in this project"
+                        className="shrink-0 text-zinc-500 opacity-0 hover:text-zinc-200 group-hover/proj:opacity-100"><MessageSquarePlus size={13} /></button>
+                      <button onClick={() => setFoldersFor((f) => f === p.name ? '' : p.name)} title="Folders"
+                        className={`shrink-0 hover:text-zinc-200 ${foldersFor === p.name ? 'text-zinc-200' : 'text-zinc-500 opacity-0 group-hover/proj:opacity-100'}`}><FolderPlus size={13} /></button>
+                    </>
+                  )}
                 </div>
 
                 {open && (
@@ -290,7 +310,7 @@ export function CodePage() {
                       <div key={s.id}
                         className={`group/sess ml-3 mb-0.5 flex w-[calc(100%-0.75rem)] items-start gap-1 rounded px-2 py-1.5 text-sm ${
                           p.name === activeProject && s.id === activeSession ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-900'}`}>
-                        <button onClick={() => selectSession(p.name, s.id)} className="min-w-0 flex-1 text-left">
+                        <button onClick={() => selectSession(p.name, s.id, p.owner_id)} className="min-w-0 flex-1 text-left">
                           <span className="flex items-center gap-1 truncate font-medium">
                             {s.status === 'running' && <Loader2 size={11} className="shrink-0 animate-spin text-amber-400" />}
                             {s.title}
@@ -300,8 +320,10 @@ export function CodePage() {
                           </span>
                           <span className="truncate text-[11px] text-zinc-500">{s.folder} · {s.messages} msgs</span>
                         </button>
-                        <button onClick={() => { if (confirm(`Delete session "${s.title}"?`)) deleteSession(p.name, s.id) }}
-                          title="Delete session" className="shrink-0 text-zinc-600 opacity-0 hover:text-red-400 group-hover/sess:opacity-100"><Trash2 size={12} /></button>
+                        {!p.shared && (
+                          <button onClick={() => { if (confirm(`Delete session "${s.title}"?`)) deleteSession(p.name, s.id) }}
+                            title="Delete session" className="shrink-0 text-zinc-600 opacity-0 hover:text-red-400 group-hover/sess:opacity-100"><Trash2 size={12} /></button>
+                        )}
                       </div>
                     ))}
 

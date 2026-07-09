@@ -5,7 +5,8 @@ import {
   Gauge, ListChecks, Brain, FolderSearch, Loader2, ChevronDown, ChevronRight,
   Folder, ChevronLeft, ClipboardList, Database,
 } from 'lucide-react'
-import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type FolderMode } from '../stores/basnaStore'
+import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type FolderMode, type BasnaSession } from '../stores/basnaStore'
+import { ShareModal } from '../components/common/ShareModal'
 import { useBasnaProjectStore, UNFILED_ID, type BasnaProject } from '../stores/basnaProjectStore'
 import { VatraTeamPlan } from '../components/VatraDelegation'
 import { QualityControls } from '../components/QualityControls'
@@ -251,6 +252,7 @@ export function BasnaPage() {
   } = useBasnaProjectStore()
   const [projectTab, setProjectTab] = useState<'details' | 'run' | 'files' | 'datastore'>('run')
   const [savingProject, setSavingProject] = useState(false)
+  const [shareTarget, setShareTarget] = useState<BasnaSession | null>(null)
 
   // Load the project bundles once; the picker + scoping read from them.
   useEffect(() => { loadBundles() }, [loadBundles])
@@ -522,6 +524,14 @@ export function BasnaPage() {
 
   return (
     <div className="flex h-full flex-col">
+      {shareTarget && (
+        <ShareModal
+          resourceType="basna"
+          resourceId={shareTarget.id}
+          resourceName={shareTarget.title || shareTarget.intent || 'Basna run'}
+          onClose={() => setShareTarget(null)}
+        />
+      )}
       {/* Header — project breadcrumb + Details/Run tabs */}
       <div className="flex shrink-0 items-center gap-2 border-b border-zinc-700/50 bg-zinc-900/50 px-4 py-3 md:px-6">
         <button
@@ -583,6 +593,7 @@ export function BasnaPage() {
             onCancel={cancelSession}
             onNew={() => { newSession(); setIntent(''); setTitle(''); setTeam([]) }}
             onWizard={() => setWizardOpen(true)}
+            onShare={setShareTarget}
           />
         )}
 

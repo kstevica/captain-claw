@@ -113,6 +113,24 @@ def _resolve(user_id: str, project: str, path: str) -> Path:
     return target
 
 
+async def _eff_owner(caller_id: str, project: str, owner: str, *, write: bool) -> str:
+    """Resolve which user's VFS root a (project, owner) request targets.
+
+    Own project (owner empty or == caller) → caller. A shared project (owner set
+    and differing) → the owner, after verifying a folder share to the caller;
+    404 if no share, 403 if a write is attempted with only 'view' permission.
+    Folder shares are stored under type 'vfs' (a Code project is the same folder).
+    """
+    if not owner or owner == caller_id:
+        return caller_id
+    share = await get_db().get_share_for_grantee("vfs", project, caller_id, owner)
+    if not share:
+        raise HTTPException(404, "not found")
+    if write and (share.get("permission") or "view") != "edit":
+        raise HTTPException(403, "read-only shared folder")
+    return owner
+
+
 def _project_origin(name: str) -> tuple[str, str]:
     """Parse a VFS project name into ``(kind, run_id)``.
 
@@ -199,6 +217,19 @@ async def list_projects(user: dict = Depends(get_current_user)):
         out.append({"name": name, "files": files, "bytes": total, "mtime": latest,
                     "kind": "link", "run_id": "", "title": "",
                     "link_path": str(tgt), "mode": ent.get("mode", "rw")})
+    # Folders shared TO this user by other owners.
+    for s in await get_db().list_shares_for_grantee(user["id"], "vfs"):
+        oroot = _user_root(s["owner_id"])
+        proj = safe_name(s["resource_id"], fallback="")
+        pdir = oroot / proj
+        if not proj or not pdir.is_dir():
+            continue
+        files, total, latest = _stats(pdir)
+        out.append({"name": s["resource_id"], "files": files, "bytes": total, "mtime": latest,
+                    "kind": "shared", "run_id": "", "title": "",
+                    "shared": True, "owner_id": s["owner_id"],
+                    "owner_email": s.get("owner_email", ""), "owner_name": s.get("owner_name", ""),
+                    "permission": s["permission"]})
     return {"projects": out}
 
 
@@ -296,10 +327,12 @@ async def remove_link(name: str, user: dict = Depends(get_current_user)):
 
 
 @router.get("/list")
-async def list_dir(project: str, path: str = "", user: dict = Depends(get_current_user)):
+async def list_dir(project: str, path: str = "", owner: str = "",
+                   user: dict = Depends(get_current_user)):
     """List one directory level within a project."""
-    proj_root = _project_root(user["id"], project)
-    target = _resolve(user["id"], project, path)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    proj_root = _project_root(oid, project)
+    target = _resolve(oid, project, path)
     if not target.exists():
         raise HTTPException(404, "not found")
     if not target.is_dir():
@@ -320,9 +353,11 @@ async def list_dir(project: str, path: str = "", user: dict = Depends(get_curren
 
 
 @router.get("/read")
-async def read_file(project: str, path: str, user: dict = Depends(get_current_user)):
+async def read_file(project: str, path: str, owner: str = "",
+                    user: dict = Depends(get_current_user)):
     """Return a text file's contents for preview/edit (size-guarded)."""
-    target = _resolve(user["id"], project, path)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    target = _resolve(oid, project, path)
     if not target.is_file():
         raise HTTPException(404, "file not found")
     size = target.stat().st_size
@@ -339,9 +374,11 @@ async def read_file(project: str, path: str, user: dict = Depends(get_current_us
 
 
 @router.get("/download")
-async def download_file(project: str, path: str, user: dict = Depends(get_current_user)):
+async def download_file(project: str, path: str, owner: str = "",
+                        user: dict = Depends(get_current_user)):
     """Stream a file as a download."""
-    target = _resolve(user["id"], project, path)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    target = _resolve(oid, project, path)
     if not target.is_file():
         raise HTTPException(404, "file not found")
     media = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
@@ -349,7 +386,8 @@ async def download_file(project: str, path: str, user: dict = Depends(get_curren
 
 
 @router.get("/download-zip")
-async def download_zip(project: str, user: dict = Depends(get_current_user)):
+async def download_zip(project: str, owner: str = "",
+                       user: dict = Depends(get_current_user)):
     """Zip an entire project folder and stream it (zip name = project name).
 
     Skips ``.git`` (internal object store — large and not useful in a zip); keeps
@@ -359,7 +397,8 @@ async def download_zip(project: str, user: dict = Depends(get_current_user)):
     import zipfile
     from fastapi.responses import StreamingResponse
 
-    root = _project_root(user["id"], project)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    root = _project_root(oid, project)
     if not root.is_dir():
         raise HTTPException(404, "project not found")
     name = safe_name(project, fallback="project")
@@ -383,24 +422,28 @@ class WriteBody(BaseModel):
     project: str
     path: str
     content: str = ""
+    owner: str = ""  # owner id when writing into a shared folder
 
 
 class MkdirBody(BaseModel):
     project: str
     path: str
+    owner: str = ""
 
 
 class RenameBody(BaseModel):
     project: str
     path: str
     to: str  # destination relative path within the same project
+    owner: str = ""
 
 
 @router.post("/write")
 async def write_file(body: WriteBody, user: dict = Depends(get_current_user)):
     """Create or overwrite a text file (used by the in-panel editor)."""
-    _assert_writable(user["id"], body.project)
-    target = _resolve(user["id"], body.project, body.path)
+    oid = await _eff_owner(user["id"], body.project, body.owner, write=True)
+    _assert_writable(oid, body.project)
+    target = _resolve(oid, body.project, body.path)
     if target.exists() and target.is_dir():
         raise HTTPException(400, "path is a directory")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -410,8 +453,9 @@ async def write_file(body: WriteBody, user: dict = Depends(get_current_user)):
 
 @router.post("/mkdir")
 async def make_dir(body: MkdirBody, user: dict = Depends(get_current_user)):
-    _assert_writable(user["id"], body.project)
-    target = _resolve(user["id"], body.project, body.path)
+    oid = await _eff_owner(user["id"], body.project, body.owner, write=True)
+    _assert_writable(oid, body.project)
+    target = _resolve(oid, body.project, body.path)
     target.mkdir(parents=True, exist_ok=True)
     return {"ok": True}
 
@@ -420,6 +464,7 @@ async def make_dir(body: MkdirBody, user: dict = Depends(get_current_user)):
 async def upload_files(
     project: str = Form(...),
     path: str = Form(""),
+    owner: str = Form(""),
     files: list[UploadFile] = File(...),
     user: dict = Depends(get_current_user),
 ):
@@ -429,8 +474,9 @@ async def upload_files(
     client-supplied filename is stripped, so a malicious name can't escape the
     target folder. The destination directory is created if missing.
     """
-    _assert_writable(user["id"], project)
-    dest_dir = _resolve(user["id"], project, path)
+    oid = await _eff_owner(user["id"], project, owner, write=True)
+    _assert_writable(oid, project)
+    dest_dir = _resolve(oid, project, path)
     if dest_dir.exists() and not dest_dir.is_dir():
         raise HTTPException(400, "target path is not a directory")
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -442,7 +488,7 @@ async def upload_files(
         if len(content) > _MAX_UPLOAD_BYTES:
             raise HTTPException(413, f"'{name}' exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit")
         rel = f"{path}/{name}" if path else name
-        target = _resolve(user["id"], project, rel)
+        target = _resolve(oid, project, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
         saved.append({"name": name, "size": len(content)})
@@ -451,9 +497,10 @@ async def upload_files(
 
 @router.post("/rename")
 async def rename_entry(body: RenameBody, user: dict = Depends(get_current_user)):
-    _assert_writable(user["id"], body.project)
-    src = _resolve(user["id"], body.project, body.path)
-    dst = _resolve(user["id"], body.project, body.to)
+    oid = await _eff_owner(user["id"], body.project, body.owner, write=True)
+    _assert_writable(oid, body.project)
+    src = _resolve(oid, body.project, body.path)
+    dst = _resolve(oid, body.project, body.to)
     if not src.exists():
         raise HTTPException(404, "source not found")
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -462,14 +509,15 @@ async def rename_entry(body: RenameBody, user: dict = Depends(get_current_user))
 
 
 @router.delete("/entry")
-async def delete_entry(project: str, path: str, recursive: bool = False,
+async def delete_entry(project: str, path: str, recursive: bool = False, owner: str = "",
                        user: dict = Depends(get_current_user)):
-    _assert_writable(user["id"], project)
-    target = _resolve(user["id"], project, path)
+    oid = await _eff_owner(user["id"], project, owner, write=True)
+    _assert_writable(oid, project)
+    target = _resolve(oid, project, path)
     # Deleting the root of a linked folder would wipe the user's real directory.
-    if _link_entry(user["id"], project) and target.resolve() == _project_root(user["id"], project).resolve():
+    if _link_entry(oid, project) and target.resolve() == _project_root(oid, project).resolve():
         raise HTTPException(400, "refusing to delete a linked folder's root — unlink it instead")
-    if target.resolve() == _project_root(user["id"], project).resolve() and not recursive:
+    if target.resolve() == _project_root(oid, project).resolve() and not recursive:
         raise HTTPException(400, "refusing to delete a project root without recursive=true")
     if not target.exists():
         raise HTTPException(404, "not found")
@@ -509,10 +557,12 @@ def _vfs_datastore_path(user_id: str, project: str) -> Path:
 
 
 @router.get("/datastore/{project}/tables")
-async def vfs_datastore_tables(project: str, user: dict = Depends(get_current_user)):
+async def vfs_datastore_tables(project: str, owner: str = "",
+                               user: dict = Depends(get_current_user)):
     """List the tables of a folder-bound shared datastore (empty if none yet)."""
     from captain_claw.datastore import get_datastore_manager_at
-    db_path = _vfs_datastore_path(user["id"], project)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    db_path = _vfs_datastore_path(oid, project)
     if not db_path.is_file():
         return []
     mgr = get_datastore_manager_at(db_path)
@@ -534,11 +584,13 @@ async def vfs_datastore_rows(
     project: str, table_name: str,
     limit: int = 100, offset: int = 0,
     order_by: str = "_id", order_dir: str = "ASC",
+    owner: str = "",
     user: dict = Depends(get_current_user),
 ):
     """Paginated rows from a folder-bound datastore table (rows as dicts)."""
     from captain_claw.datastore import get_datastore_manager_at
-    db_path = _vfs_datastore_path(user["id"], project)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    db_path = _vfs_datastore_path(oid, project)
     if not db_path.is_file():
         raise HTTPException(404, "no datastore for this folder")
     mgr = get_datastore_manager_at(db_path)
@@ -561,7 +613,7 @@ async def vfs_datastore_rows(
 
 @router.get("/datastore/{project}/tables/{table_name}/export")
 async def vfs_datastore_export(
-    project: str, table_name: str, format: str = "csv",
+    project: str, table_name: str, format: str = "csv", owner: str = "",
     user: dict = Depends(get_current_user),
 ):
     """Export a folder-bound datastore table as csv/json/xlsx."""
@@ -575,7 +627,8 @@ async def vfs_datastore_export(
     from captain_claw.datastore import get_datastore_manager_at
     if format not in ("csv", "json", "xlsx"):
         raise HTTPException(400, f"Unsupported format: {format}")
-    db_path = _vfs_datastore_path(user["id"], project)
+    oid = await _eff_owner(user["id"], project, owner, write=False)
+    db_path = _vfs_datastore_path(oid, project)
     if not db_path.is_file():
         raise HTTPException(404, "no datastore for this folder")
     mgr = get_datastore_manager_at(db_path)

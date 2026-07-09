@@ -18,10 +18,14 @@ import {
   HardDrive,
   Upload,
   Database,
+  Share2,
+  Users,
 } from 'lucide-react'
 import { useVFSStore, type VFSEntry, type VFSProject } from '../../stores/vfsStore'
 import { VFSFileViewer } from './VFSFileViewer'
 import { DatastoreBrowser } from '../agents/DatastoreBrowser'
+import { ShareModal } from '../common/ShareModal'
+import { leaveShare } from '../../services/shares'
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -86,6 +90,7 @@ export function VFSBrowser() {
 
   // Shared-datastore viewer: the project whose vfs:<project>/.datastore is open.
   const [dsProject, setDsProject] = useState<string | null>(null)
+  const [shareProject, setShareProject] = useState<string | null>(null)
   // Project-list controls: search, kind filter, sort, and folded run folders.
   const [query, setQuery] = useState('')
   const [kindFilter, setKindFilter] = useState<KindFilter>('all')
@@ -362,12 +367,18 @@ export function VFSBrowser() {
                 key={p.name}
                 className="group flex flex-col gap-1 rounded-lg border border-zinc-800 bg-zinc-900/50 p-3 hover:border-violet-700/60"
               >
-                <button onClick={() => s.openProject(p.name)} className="flex items-center gap-2 text-left">
+                <button onClick={() => s.openProject(p.name, p.owner_id, p.permission)} className="flex items-center gap-2 text-left">
                   <Folder className="h-4 w-4 shrink-0 text-violet-400" />
                   <span className="truncate text-sm font-medium text-zinc-100">{p.title || p.name}</span>
-                  {p.kind && (
+                  {p.kind && p.kind !== 'shared' && (
                     <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-medium uppercase ${KIND_BADGE[p.kind] || 'border-zinc-700 text-zinc-400'}`}>
                       {p.kind}
+                    </span>
+                  )}
+                  {p.shared && (
+                    <span className="flex shrink-0 items-center gap-0.5 rounded border border-sky-500/25 bg-sky-500/15 px-1 py-0.5 text-[9px] font-medium text-sky-300"
+                      title={`Shared by ${p.owner_name || p.owner_email || 'another user'} · ${p.permission}`}>
+                      <Users className="h-2.5 w-2.5" />{p.permission === 'edit' ? 'edit' : 'view'}
                     </span>
                   )}
                   {p.mode === 'ro' && <Lock className="h-3 w-3 shrink-0 text-zinc-500" aria-label="read-only" />}
@@ -399,18 +410,44 @@ export function VFSBrowser() {
                     >
                       <Download className="h-3.5 w-3.5" />
                     </button>
-                    <button
-                      onClick={() => {
-                        const msg = p.kind === 'link'
-                          ? `Unlink "${p.name}"? Your real files at ${p.link_path} are NOT deleted.`
-                          : `Delete project "${p.name}" and all its files?`
-                        if (confirm(msg)) s.deleteProject(p.name)
-                      }}
-                      className="hover:text-red-400"
-                      title={p.kind === 'link' ? 'Unlink (keeps real files)' : 'Delete project'}
-                    >
-                      {p.kind === 'link' ? <Link2 className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
-                    </button>
+                    {p.shared ? (
+                      <button
+                        onClick={async () => {
+                          if (confirm(`Remove shared folder "${p.name}" from your view?`)) {
+                            await leaveShare('vfs', p.name, p.owner_id || '')
+                            s.loadProjects()
+                          }
+                        }}
+                        className="hover:text-red-400"
+                        title="Remove from my shared folders"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    ) : (
+                      <>
+                        {p.kind !== 'link' && (
+                          <button
+                            onClick={() => setShareProject(p.name)}
+                            className="hover:text-sky-300"
+                            title="Share with other users"
+                          >
+                            <Share2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <button
+                          onClick={() => {
+                            const msg = p.kind === 'link'
+                              ? `Unlink "${p.name}"? Your real files at ${p.link_path} are NOT deleted.`
+                              : `Delete project "${p.name}" and all its files?`
+                            if (confirm(msg)) s.deleteProject(p.name)
+                          }}
+                          className="hover:text-red-400"
+                          title={p.kind === 'link' ? 'Unlink (keeps real files)' : 'Delete project'}
+                        >
+                          {p.kind === 'link' ? <Link2 className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -490,6 +527,14 @@ export function VFSBrowser() {
       </div>
       {dsProject && (
         <DatastoreBrowser vfsProject={dsProject} title={`Datastore — ${dsProject}`} onClose={() => setDsProject(null)} />
+      )}
+      {shareProject && (
+        <ShareModal
+          resourceType="vfs"
+          resourceId={shareProject}
+          resourceName={shareProject}
+          onClose={() => setShareProject(null)}
+        />
       )}
 
       {creating && (

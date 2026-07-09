@@ -1,4 +1,4 @@
-import { Users, Trash2, MessageSquare, Clock, Square } from 'lucide-react'
+import { Users, Trash2, MessageSquare, Clock, Square, Share2 } from 'lucide-react'
 import type { CouncilSessionSummary } from '../../stores/councilStore'
 
 const TYPE_COLORS: Record<string, string> = {
@@ -24,9 +24,10 @@ interface SessionCardProps {
   onOpen: (id: string) => void
   onDelete: (id: string) => void
   onCancel?: (id: string) => void
+  onShare?: (session: CouncilSessionSummary) => void
 }
 
-export function SessionCard({ session, onOpen, onDelete, onCancel }: SessionCardProps) {
+export function SessionCard({ session, onOpen, onDelete, onCancel, onShare }: SessionCardProps) {
   const running = session.status === 'active' || session.status === 'synthesizing'
   const agentCount = (() => {
     try { return JSON.parse(session.agents || '[]').length } catch { return 0 }
@@ -53,14 +54,30 @@ export function SessionCard({ session, onOpen, onDelete, onCancel }: SessionCard
               <Square className="h-3.5 w-3.5 fill-current" />
             </button>
           )}
-          <button
-            onClick={(e) => { e.stopPropagation(); onDelete(session.id) }}
-            className="rounded p-1 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-red-400 group-hover:opacity-100"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
+          {!session.shared && onShare && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onShare(session) }}
+              title="Share with other users"
+              className="rounded p-1 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-sky-300 group-hover:opacity-100"
+            >
+              <Share2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {!session.shared && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(session.id) }}
+              className="rounded p-1 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-red-400 group-hover:opacity-100"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          )}
         </div>
       </div>
+      {session.shared && (
+        <span className="flex w-fit items-center gap-1 rounded border border-sky-500/25 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-300">
+          <Users className="h-2.5 w-2.5" /> shared by {session.owner_name || session.owner_email || 'another user'} · {session.access}
+        </span>
+      )}
 
       <p className="text-xs text-zinc-400 line-clamp-2">{session.topic}</p>
 

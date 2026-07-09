@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Loader2, Plus, Search, Sparkles, Square, Trash2, Users, Wand2, X, Network, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { Loader2, Plus, Search, Sparkles, Square, Trash2, Users, Wand2, X, Network, PanelLeftClose, PanelLeftOpen, Share2 } from 'lucide-react'
 import type { BasnaSession } from '../../stores/basnaStore'
 import { agentOrigin, confColor, DIFFICULTY_COLOR, isVatra, STATUS_DOT, timeAgo } from './shared'
 
@@ -10,8 +10,9 @@ type StatusFilter = 'all' | 'running' | 'done' | 'error'
 
 const ACTIVE_STATUSES = ['routing', 'routed', 'running']
 
-function SessionCard({ s, active, onOpen, onDelete, onCancel }: {
+function SessionCard({ s, active, onOpen, onDelete, onCancel, onShare }: {
   s: BasnaSession; active: boolean; onOpen: () => void; onDelete: () => void; onCancel: () => void
+  onShare?: (s: BasnaSession) => void
 }) {
   // Only show the spinner + stop control while genuinely active. 'routed' is the
   // idle prepared state (Basna routed, or a Vatra plan awaiting Run) — not running.
@@ -46,13 +47,29 @@ function SessionCard({ s, active, onOpen, onDelete, onCancel }: {
             <Square className="h-3.5 w-3.5 fill-current" />
           </button>
         )}
-        <button
-          onClick={(e) => { e.stopPropagation(); onDelete() }}
-          className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </button>
+        {!s.shared && onShare && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onShare(s) }}
+            title="Share with other users"
+            className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:text-sky-300 group-hover:opacity-100"
+          >
+            <Share2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {!s.shared && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete() }}
+            className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
+      {s.shared && (
+        <div className="mt-1 flex items-center gap-1 pl-5 text-[10px] text-sky-400" title={`Shared by ${s.owner_name || s.owner_email} · ${s.access}`}>
+          <Users className="h-2.5 w-2.5" /> shared · {s.access}
+        </div>
+      )}
       <div className="mt-1.5 flex items-center gap-1.5 pl-5 text-[10px] text-zinc-500">
         {origin && (
           <span
@@ -94,7 +111,7 @@ function dayGroup(iso?: string): string {
 
 const GROUP_ORDER = ['Today', 'Yesterday', 'This week', 'Earlier']
 
-export function RunsSidebar({ sessions, activeId, onSelect, onDelete, onCancel, onNew, onWizard }: {
+export function RunsSidebar({ sessions, activeId, onSelect, onDelete, onCancel, onNew, onWizard, onShare }: {
   sessions: BasnaSession[]
   activeId?: string
   onSelect: (id: string) => void
@@ -102,6 +119,7 @@ export function RunsSidebar({ sessions, activeId, onSelect, onDelete, onCancel, 
   onCancel: (id: string) => void
   onNew: () => void
   onWizard: () => void
+  onShare?: (s: BasnaSession) => void
 }) {
   const [query, setQuery] = useState('')
   const [mode, setMode] = useState<ModeFilter>('all')
@@ -288,6 +306,7 @@ export function RunsSidebar({ sessions, activeId, onSelect, onDelete, onCancel, 
                 onOpen={() => onSelect(s.id)}
                 onDelete={() => onDelete(s)}
                 onCancel={() => onCancel(s.id)}
+                onShare={onShare}
               />
             ))}
           </div>

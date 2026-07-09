@@ -36,13 +36,18 @@ def load_base_registry() -> dict:
     return json.loads(_REGISTRY_FILE.read_text())
 
 
-def merge_archetypes(base: list[dict], user_rows: list[dict]) -> list[dict]:
-    """Overlay a user's archetypes on top of the base list.
+def merge_archetypes(
+    base: list[dict], user_rows: list[dict],
+    shared_rows: list[dict] | None = None,
+) -> list[dict]:
+    """Overlay a user's archetypes (and ones shared to them) on the base list.
 
-    Each base entry is tagged ``source="base"``. Each user row (a DB row with a
-    JSON ``data`` blob) is tagged ``source="user"`` and either replaces a base
-    entry in place when their ``id`` matches, or is appended. Returns a new list;
-    inputs are not mutated.
+    Each base entry is tagged ``source="base"``. Each owned user row is tagged
+    ``source="user"`` and replaces a base entry in place when ids match, else is
+    appended. Rows shared *to* the user are then overlaid tagged
+    ``source="shared"`` (carrying the owner's id/email + permission) — but never
+    over the user's own archetype of the same id (owner-of-the-run always wins
+    for their own slugs). Returns a new list; inputs are not mutated.
     """
     merged: list[dict] = []
     index: dict[str, int] = {}
@@ -51,12 +56,17 @@ def merge_archetypes(base: list[dict], user_rows: list[dict]) -> list[dict]:
         index[entry.get("id", "")] = len(merged)
         merged.append(entry)
 
-    for row in user_rows:
+    def _data(row: dict) -> dict | None:
         try:
-            data = json.loads(row.get("data") or "{}")
+            return json.loads(row.get("data") or "{}")
         except json.JSONDecodeError:
-            log.warning("Skipping user archetype with invalid JSON",
+            log.warning("Skipping archetype with invalid JSON",
                         archetype_id=row.get("archetype_id"))
+            return None
+
+    for row in user_rows:
+        data = _data(row)
+        if data is None:
             continue
         aid = row.get("archetype_id") or data.get("id") or ""
         entry = {**data, "id": aid, "source": "user"}
@@ -66,7 +76,44 @@ def merge_archetypes(base: list[dict], user_rows: list[dict]) -> list[dict]:
         else:
             index[aid] = len(merged)
             merged.append(entry)
+
+    for row in shared_rows or []:
+        data = _data(row)
+        if data is None:
+            continue
+        aid = row.get("archetype_id") or data.get("id") or ""
+        # A grantee's own archetype of the same id always wins.
+        if aid in index and merged[index[aid]].get("source") == "user":
+            continue
+        entry = {
+            **data,
+            "id": aid,
+            "source": "shared",
+            "shared_owner": row.get("shared_owner"),
+            "shared_owner_email": row.get("shared_owner_email"),
+            "shared_owner_name": row.get("shared_owner_name"),
+            "shared_permission": row.get("shared_permission") or "view",
+        }
+        if aid in index:
+            entry["overrides"] = True
+            merged[index[aid]] = entry
+        else:
+            index[aid] = len(merged)
+            merged.append(entry)
     return merged
+
+
+async def _owned_and_shared(db, user_id: str) -> tuple[list[dict], list[dict]]:
+    """Fetch a user's own archetype rows plus rows shared to them (best-effort)."""
+    rows = await db.list_user_archetypes(user_id)
+    shared: list[dict] = []
+    lister = getattr(db, "list_shared_archetypes", None)
+    if lister is not None:
+        try:
+            shared = await lister(user_id)
+        except Exception:  # a share table not present shouldn't break archetypes
+            shared = []
+    return rows, shared
 
 
 async def merged_archetypes(db, user_id: str | None) -> list[dict]:
@@ -74,8 +121,8 @@ async def merged_archetypes(db, user_id: str | None) -> list[dict]:
     base = load_base_registry().get("archetypes", [])
     if not user_id:
         return [{**a, "source": "base"} for a in base]
-    rows = await db.list_user_archetypes(user_id)
-    return merge_archetypes(base, rows)
+    rows, shared = await _owned_and_shared(db, user_id)
+    return merge_archetypes(base, rows, shared)
 
 
 async def merged_registry(db, user_id: str | None) -> dict:
@@ -88,6 +135,6 @@ async def merged_registry(db, user_id: str | None) -> dict:
     if not user_id:
         registry["archetypes"] = [{**a, "source": "base"} for a in base]
         return registry
-    rows = await db.list_user_archetypes(user_id)
-    registry["archetypes"] = merge_archetypes(base, rows)
+    rows, shared = await _owned_and_shared(db, user_id)
+    registry["archetypes"] = merge_archetypes(base, rows, shared)
     return registry

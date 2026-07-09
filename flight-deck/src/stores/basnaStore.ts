@@ -23,6 +23,11 @@ export interface BasnaSession {
   analysis: string   // JSON BasnaAnalysis (cross-agent comparison)
   created_at: string
   updated_at: string
+  // Present when this run was shared TO you by another user.
+  shared?: boolean
+  access?: 'owner' | 'edit' | 'view'
+  owner_email?: string
+  owner_name?: string
 }
 
 // Cross-agent analysis surfaced above the compiled truth (Fusion-style).
