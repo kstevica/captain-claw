@@ -128,8 +128,14 @@ _MAX_HELPERS = 3        # concurrent helpers the coordinator may run at once
 _COORD_POLL_S = 1.5     # how often the coordinator polls the blackboard
 _INBOX_POLL_S = 1.0     # inbox long-poll granularity
 _WAIT_POLL_S = 1.0      # `wait` long-poll granularity
-_MAX_WAIT_S = 90        # max a single `vatra wait` may block; < dispatch timeout so it can't hang a run
+_MAX_WAIT_S = 120       # max a SINGLE `vatra wait` may block; < dispatch timeout so it can't hang a run
+_WAIT_MIN_S = 30        # floor for a single wait, so a short poll still gives the dep time to land
+_WAIT_TOTAL_BUDGET_S = 300   # total seconds ONE owner may spend waiting across retries in a run
+_WAIT_MAX_ATTEMPTS = 6       # hard cap on wait CALLS per owner — a loop backstop, belt-and-suspenders
 _WAIT_CONTENT_CAP = 20_000  # chars of a ready file handed back to the waiter
+# Per-run, per-owner wait ledger (the "stack"): session_id -> owner -> {waited, attempts}.
+# Enforces the total budget so retries can never become an infinite loop; cleared on teardown.
+_wait_ledger: dict[str, dict[str, dict[str, float]]] = {}
 
 
 def _phase(sid: str, label: str, **extra) -> None:
@@ -810,6 +816,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # ({"A": "...", "B": "..."}), injected into every owner that runs in that group.
     _group_instructions = route.get("group_instructions") or {}
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
+    _wait_ledger[sid] = {}  # fresh per-owner wait budget for this run (defensive vs same-session re-run)
     # Protect existing files: a FRESH run reusing a non-empty folder snapshots it
     # into .history/ before any write (continuation rounds accumulate → skip; a
     # shared-datastore run is the resumable "continue in this folder" pattern →
@@ -1389,6 +1396,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _run_vfs_project.pop(sid, None)
         _run_shared_datastore.pop(sid, None)
         _skip_agents.pop(sid, None)
+        _wait_ledger.pop(sid, None)
 
     usable = [r for r in results if (r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip()]
     if not usable:
@@ -2320,10 +2328,14 @@ async def agent_wait(body: _VatraWaitReq):
         and is non-empty; returns its content.
       * ``query`` — keywords: ready when a teammate's board post matches.
 
-    Bounded by ``wait`` (capped at ``_MAX_WAIT_S``, itself < the per-dispatch
-    timeout) so it can NEVER hang a run. On timeout it returns ``ready=False`` plus
-    a board digest, so the caller proceeds deliberately rather than guessing. Other
-    owners keep working while this awaits — they run as sibling coroutines."""
+    Each call is bounded by ``_MAX_WAIT_S`` (< the per-dispatch timeout), and a
+    per-owner **ledger** bounds the *total* time an owner may wait across retries
+    (``_WAIT_TOTAL_BUDGET_S`` / ``_WAIT_MAX_ATTEMPTS``). So the owner can wait
+    *longer* by retrying while the dependency is still plausibly coming, but once
+    the budget is spent the endpoint **short-circuits** to a terminal "stop
+    waiting, produce now" — retries can never become an infinite loop. On any
+    timeout it returns ``ready=False`` plus a board digest and a ``note`` telling
+    the caller whether it may wait again. Other owners keep working meanwhile."""
     owner_id = _resolve_owner(body)
     db = get_db()
     sess = await db.get_basna_session(body.session_id, owner_id)
@@ -2334,8 +2346,7 @@ async def agent_wait(body: _VatraWaitReq):
     if not path and not query:
         raise HTTPException(400, "provide path or query to wait for")
     project = _vfs_project(body.session_id)
-    wait = max(0, min(_MAX_WAIT_S, int(body.wait or 0)))
-    deadline = time.monotonic() + wait
+
     # The tool sends `owner` = the archetype id (e.g. "deep-researcher"); the live
     # panel groups by the owner's DISPLAY role (e.g. "Deep Researcher", via
     # _owner_label). Resolve the role so these wait events attach to the real owner
@@ -2349,6 +2360,34 @@ async def agent_wait(body: _VatraWaitReq):
             who = _role
     except Exception as e:  # noqa: BLE001 — label resolution is cosmetic
         log.debug("Vatra wait label resolve failed", error=str(e))
+
+    # Per-owner wait ledger — the loop backstop. Once an owner has spent its total
+    # budget or attempt cap, stop waiting entirely and tell it to proceed. Enforced
+    # here (not left to the agent), so even a stubborn retry can't loop.
+    ledger = _wait_ledger.setdefault(body.session_id, {})
+    rec = ledger.setdefault(body.owner or "agent", {"waited": 0.0, "attempts": 0})
+    remaining = _WAIT_TOTAL_BUDGET_S - rec["waited"]
+    if rec["attempts"] >= _WAIT_MAX_ATTEMPTS or remaining <= 1:
+        recent = await db.list_vatra_board(
+            body.session_id, limit=12, exclude_owner=body.owner or None)
+        _progress(
+            body.session_id, "wait",
+            f"🛑 {who} stop waiting — budget spent ({int(rec['waited'])}s / "
+            f"{int(rec['attempts'])} tries); proceeding with what's on the board",
+            agent=who, ok=False)
+        return {"ready": False, "exhausted": True,
+                "waited_total": round(rec["waited"]), "attempts": int(rec["attempts"]),
+                "board": [_board_entry(e) for e in recent],
+                "note": ("You have spent your full wait budget and the dependency has not "
+                         "arrived. Do NOT call wait again — produce your part NOW from the "
+                         "shared board, the datastore, and your own analysis.")}
+
+    # Per-call wait: floor a short request so the dep gets real time to land, capped
+    # by the single-call max AND by whatever total budget remains.
+    requested = int(body.wait) if body.wait else _MAX_WAIT_S
+    wait = int(min(_MAX_WAIT_S, remaining, max(requested, _WAIT_MIN_S)))
+    started = time.monotonic()
+    deadline = started + wait
     target = path or f"posts matching {query!r}"
     _progress(body.session_id, "wait", f"⏳ {who} waiting on {target} (≤{wait}s)…", agent=who)
     while True:
@@ -2372,12 +2411,31 @@ async def agent_wait(body: _VatraWaitReq):
                 return {"ready": True, "kind": "board",
                         "entries": [_board_entry(e) for e in rows]}
         if time.monotonic() >= deadline:
-            _progress(body.session_id, "wait", f"⌛ {who} wait timed out ({wait}s) — {target} not ready",
-                      agent=who, ok=False)
+            # Charge the actual elapsed time against this owner's total budget.
+            rec["waited"] += time.monotonic() - started
+            rec["attempts"] += 1
+            left = max(0.0, _WAIT_TOTAL_BUDGET_S - rec["waited"])
+            can_retry = left > 1 and rec["attempts"] < _WAIT_MAX_ATTEMPTS
+            _progress(
+                body.session_id, "wait",
+                f"⌛ {who} wait timed out ({wait}s) — {target} not ready"
+                + (f" · {int(left)}s budget left" if can_retry else " · budget spent"),
+                agent=who, ok=False)
             recent = await db.list_vatra_board(
                 body.session_id, limit=12, exclude_owner=body.owner or None)
+            note = (
+                f"Not ready yet. You've waited ~{int(rec['waited'])}s of a ~{_WAIT_TOTAL_BUDGET_S}s "
+                f"budget ({int(left)}s left across {_WAIT_MAX_ATTEMPTS - int(rec['attempts'])} more "
+                "attempt(s)). If your part TRULY depends on this, you may wait once more; otherwise "
+                "produce it now from the board + datastore."
+                if can_retry else
+                "Wait budget spent — do NOT wait again. Produce your part now from the board, the "
+                "datastore, and your own analysis."
+            )
             return {"ready": False, "waited": wait,
-                    "board": [_board_entry(e) for e in recent]}
+                    "waited_total": round(rec["waited"]), "attempts": int(rec["attempts"]),
+                    "budget_left_s": round(left), "can_retry": can_retry,
+                    "board": [_board_entry(e) for e in recent], "note": note}
         await asyncio.sleep(_WAIT_POLL_S)
 
 
