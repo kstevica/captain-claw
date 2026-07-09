@@ -470,6 +470,14 @@ export function VFSBrowser() {
         {dsProject && (
           <DatastoreBrowser vfsProject={dsProject} title={`Datastore — ${dsProject}`} onClose={() => setDsProject(null)} />
         )}
+        {shareProject && (
+          <ShareModal
+            resourceType="vfs"
+            resourceId={shareProject}
+            resourceName={shareProject}
+            onClose={() => setShareProject(null)}
+          />
+        )}
       </div>
     )
   }

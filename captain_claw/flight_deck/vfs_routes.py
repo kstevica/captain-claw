@@ -217,7 +217,10 @@ async def list_projects(user: dict = Depends(get_current_user)):
         out.append({"name": name, "files": files, "bytes": total, "mtime": latest,
                     "kind": "link", "run_id": "", "title": "",
                     "link_path": str(tgt), "mode": ent.get("mode", "rw")})
-    # Folders shared TO this user by other owners.
+    # Folders shared TO this user by other owners. Resolve the run's human title
+    # from the *owner's* sessions (a shared vatra-<sid8> folder should show its
+    # name, not the raw hash) — cached per owner to avoid repeat queries.
+    _title_cache: dict[str, dict[str, str]] = {}
     for s in await get_db().list_shares_for_grantee(user["id"], "vfs"):
         oroot = _user_root(s["owner_id"])
         proj = safe_name(s["resource_id"], fallback="")
@@ -225,8 +228,14 @@ async def list_projects(user: dict = Depends(get_current_user)):
         if not proj or not pdir.is_dir():
             continue
         files, total, latest = _stats(pdir)
+        _kind, run_id = _project_origin(proj)
+        title = ""
+        if run_id:
+            if s["owner_id"] not in _title_cache:
+                _title_cache[s["owner_id"]] = await _run_titles(s["owner_id"])
+            title = _title_cache[s["owner_id"]].get(run_id, "")
         out.append({"name": s["resource_id"], "files": files, "bytes": total, "mtime": latest,
-                    "kind": "shared", "run_id": "", "title": "",
+                    "kind": "shared", "run_id": run_id, "title": title,
                     "shared": True, "owner_id": s["owner_id"],
                     "owner_email": s.get("owner_email", ""), "owner_name": s.get("owner_name", ""),
                     "permission": s["permission"]})
