@@ -4,6 +4,7 @@ import {
   ShieldAlert, Wrench, RotateCcw, X, Download, ChevronRight, ChevronDown, Link2, Lock,
   MessageSquarePlus, FolderPlus, FolderTree, Trash2, Map, Square, Eraser,
   Paperclip, XCircle, FileText, Image as ImageIcon, Share2, Users,
+  PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -66,6 +67,33 @@ export function CodePage() {
   const [foldersFor, setFoldersFor] = useState<string>('')     // project whose folders panel is open
   const [newVfsFolder, setNewVfsFolder] = useState('')
   const [shareProject, setShareProject] = useState<string | null>(null)
+  // Collapsible + resizable left rail (persisted). Default a touch wider than
+  // the old fixed w-72 (288px).
+  const RAIL_MIN = 220
+  const RAIL_MAX = 620
+  const [railWidth, setRailWidth] = useState<number>(() => {
+    try { return Math.max(RAIL_MIN, Math.min(RAIL_MAX, parseInt(localStorage.getItem('code.railWidth') || '') || 340)) }
+    catch { return 340 }
+  })
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('code.railCollapsed') === '1' } catch { return false }
+  })
+  useEffect(() => { try { localStorage.setItem('code.railWidth', String(railWidth)) } catch { /* ignore */ } }, [railWidth])
+  useEffect(() => { try { localStorage.setItem('code.railCollapsed', railCollapsed ? '1' : '0') } catch { /* ignore */ } }, [railCollapsed])
+  const startRailDrag = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = railWidth
+    const onMove = (ev: MouseEvent) => setRailWidth(Math.max(RAIL_MIN, Math.min(RAIL_MAX, startW + ev.clientX - startX)))
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.userSelect = ''
+    }
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
   const [cleanupMsg, setCleanupMsg] = useState('')
   // New-session modal: project → folder → session in one flow.
   const [modal, setModal] = useState<null | {
@@ -258,14 +286,27 @@ export function CodePage() {
           onClose={() => setShareProject(null)}
         />
       )}
-      {/* ── Left rail: project → sessions ── */}
-      <aside className="flex w-72 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/40">
+      {/* ── Left rail: project → sessions (collapsible + resizable) ── */}
+      {railCollapsed ? (
+        <div className="flex w-9 shrink-0 flex-col items-center gap-2 border-r border-zinc-800 bg-zinc-950/40 py-3">
+          <button onClick={() => setRailCollapsed(false)} title="Show Code Projects"
+            className="rounded p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+            <PanelLeftOpen size={16} />
+          </button>
+          <FolderGit2 size={16} className="text-zinc-600" />
+        </div>
+      ) : (
+      <aside className="relative flex shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/40" style={{ width: railWidth }}>
         <div className="border-b border-zinc-800 p-3">
           <div className="flex items-center gap-2 text-sm font-semibold text-zinc-300">
             <FolderGit2 size={16} /> Code Projects
             <button onClick={onCleanup} title="Clean up leftover code agents (after crashes/stops)"
               className="ml-auto rounded px-1.5 py-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
               <Eraser size={14} />
+            </button>
+            <button onClick={() => setRailCollapsed(true)} title="Collapse panel"
+              className="rounded px-1.5 py-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+              <PanelLeftClose size={14} />
             </button>
           </div>
           <button onClick={() => openModal()}
@@ -357,7 +398,15 @@ export function CodePage() {
             )
           })}
         </div>
+        {/* drag-to-resize handle on the right edge */}
+        <div
+          onMouseDown={startRailDrag}
+          onDoubleClick={() => setRailWidth(340)}
+          title="Drag to resize · double-click to reset"
+          className="absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-violet-500/40"
+        />
       </aside>
+      )}
 
       {/* ── Center: chat ── */}
       <main className="flex min-w-0 flex-1 flex-col">
