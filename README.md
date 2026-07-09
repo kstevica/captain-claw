@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.2-purple)](release-notes/RELEASE_NOTES_0.7.2.md)
+[![Version](https://img.shields.io/badge/version-0.7.4-purple)](release-notes/RELEASE_NOTES_0.7.4.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](#quick-start)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#multi-model-support)
 
@@ -66,6 +66,18 @@ Captain Claw is **MIT licensed and free forever** — your data stays on your ma
 </p>
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
+
+## What's New in 0.7.4
+
+**Multi-user for real — cross-user sharing, a process monitor, and Basna projects.** Share your work with teammates, see everything the deck is running, and organize runs into projects. Additive; backward compatible with 0.7.3 (needs a Flight Deck restart — a new `resource_shares` table auto-creates).
+
+- **Cross-user resource sharing** — grant other Flight Deck users access to selected **archetypes, Code projects, Basnas, Councils, and VFS folders**, with a per-share **View or Edit** permission (archetypes are use-only). A reusable **Share** button + searchable user picker sits on each; shared items appear in the grantee's lists **badged "shared by X"**, and a shared archetype is usable everywhere — including when **Vatra/Basna assembles a team**. Backed by one generic `resource_shares` table + a `/fd/shares` API; reads/edits resolve against the owner's namespace, deletes stay owner-only, and a grantee's runs spend their **own** keys.
+- **System — a DevOps process monitor** — a new **Processes** page: every agent process the deck spawned **and its child processes** (bash/python/git…) as a collapsible tree with **live CPU/memory**, uptime and PID. You see and stop only your own; **admins** see everyone's (plus the FD server, protected) and a per-user memory rollup.
+- **Agent Forge — archetype-as-base composition** — a forged agent **inherits an archetype's SOP** and layers task instructions on top (token-resilient at 5–15 agent scale), plus a new **"Forge archetypes" from documents** flow that turns instructions + uploaded docs into a reusable **set of archetypes**.
+- **Basna & Vatra — projects & a redesigned workspace** — bundle runs under **one theme + a shared folder**, carry a finished run forward with **continuation inheritance**, and work in a **staged composer → run workspace → tabbed report** with a run wizard, prior-run knowledge, reference folders, an **editable Vatra team plan**, and a shared run **datastore** with a viewer.
+- **Tenancy correctness & polish** — spawned workers now write to the **run owner's** VFS root (no more misdirected folders on a shared deck); **agent cleanup** is scoped to the caller (admins sweep all); switching Basna projects no longer **bleeds** one project's draft into another; shared VFS folders show their **run title**; and the **Code project rail** is wider, collapsible, and drag-to-resize.
+
+See [RELEASE_NOTES_0.7.4.md](release-notes/RELEASE_NOTES_0.7.4.md).
 
 ## What's New in 0.7.3
 

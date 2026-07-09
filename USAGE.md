@@ -4308,6 +4308,28 @@ Three cross-mode capabilities landed in 0.7.3 for Basna, Vatra, and Code. **All 
 
 **Max parallel agents.** A **Max parallel** input (0 = unlimited) caps how many agent turns run at once — set it low (e.g. 2) for local models so parallel prefills don't exhaust the serving box's memory.
 
+### Multi-user sharing, a process monitor & projects (NEW in 0.7.4)
+
+**Cross-user resource sharing.** On an auth-enabled (multi-user) deck you can grant other Flight Deck users access to selected resources, with a per-share permission:
+
+- **What's shareable** — custom **archetypes** (Library), **Code projects**, **Basnas** and **Councils** (their runs/sessions), and **VFS folders**. Each has a **Share** button (a share icon on the item's card/row) that opens the **Share modal**: a searchable roster of the other users on the deck, plus a **View / Edit** toggle. Archetypes are always **use-only** (View) — sharing one just makes it appear in the grantee's library.
+- **View vs Edit** — **View** is read-only (open the run/project/folder, read files, messages, history). **Edit** adds collaboration: change files, and run/continue where the surface supports it. Deleting a shared resource is always **owner-only**.
+- **What the grantee sees** — shared items show up in their own lists **badged "shared by \<owner\>"** with the permission. A shared archetype is usable everywhere archetypes are — including when **Vatra or Basna assembles a team** (the Lead's catalog includes archetypes shared to whoever is running). A shared VFS/Code folder opens under the **owner's** namespace and shows its **run title**, not the raw `vatra-…`/`basna-…` hash.
+- **Who pays** — when a grantee runs an agent on a shared resource, it spends **their own** provider keys and limits; the share only contributes files and context, never the owner's credentials.
+- **Manage grants** — the Share modal lists who a resource is shared with (change the permission or revoke inline); a grantee can **Leave** a shared item to drop it from their view. Backed by a `/fd/shares` API and one `resource_shares` table (auto-created on first launch).
+
+**System — Processes (DevOps monitor).** A new **Processes** page under the **System** section gives a live checkup of everything the deck is running:
+
+- **The tree** — every Flight-Deck-spawned agent process **and the child processes it ran** (bash, python, git, node…), as a collapsible tree with **live CPU %, memory (RSS), uptime, and PID**, snapshotted from the OS process table.
+- **Scope** — you see and can **stop** only your own processes. **Admins** see everyone's (each root labeled with its owner), plus the Flight Deck server itself (protected from being stopped), a **per-user memory rollup**, and the total agent/process memory. Host vitals (load, memory, disk) sit across the top.
+- **Stop cleanly** — stop a single process or its whole subtree; a managed agent is stopped gracefully (registry-aware), and the same page's **Clean up leftover agents** action only sweeps your own (admins sweep all).
+
+**Agent Forge — archetype-as-base.** Forge now composes teams from archetypes: a forged agent **inherits an archetype's operating procedure** and layers task-specific instructions on top, so a large team stays consistent while each agent still gets its own brief. A **"Forge archetypes"** flow (Library) turns free-text instructions plus **uploaded documents** into a reusable **set of archetypes** you can save and share.
+
+**Basna & Vatra projects.** Group related runs under **one project** — a shared theme and a shared VFS folder — from the projects landing on the Basna page. A finished run can be carried forward with **continuation inheritance** (same folder + conclusion, optional extra instructions) instead of spawning a disconnected folder. The run screen is a **staged composer → run workspace → tabbed report** (Report / Board / Files / Datastore), with a **run wizard**, prior-run **knowledge** selection, **reference folders** agents check before web-searching (now with a filter box), an **editable Vatra team plan** (arrange groups, edit/remove agents, per-group instructions), and an opt-in shared **datastore** with a viewer. Switching between projects starts a **clean draft** — one project's plan and picks never bleed into another.
+
+**Multi-tenant note.** Spawned workers write their VFS output under the **run owner's** root (not whatever the server's `CLAW_VFS_USER` happens to be), so on a shared deck a user's run folders always land under their own account. The **Code project rail** is also wider by default, **collapsible**, and **drag-to-resize** (persisted).
+
 ### Basna (NEW in 0.5.7)
 
 Basna (sidebar: **Basna**) is a **network-source ensemble** — a one-shot, selective alternative to Council. You describe a task; Basna routes it to the smallest set of specialist archetypes, runs them in parallel, and merges their answers weighted by learned reliability.
