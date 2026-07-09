@@ -743,16 +743,18 @@ async def cleanup_agents(user: dict = Depends(get_current_user)):
     """Stop any lingering Dubina-spawned archetype agents (``dubina-*``).
 
     A safety net for orphans left behind when a run crashed before its dispose ran.
-    Scoped to the caller's own agents.
+    Scoped to the caller's own agents; an admin sweeps everyone's.
     """
     from captain_claw.flight_deck.server import _do_stop_process, _load_process_registry
     reg = _load_process_registry()
+    is_admin = user.get("role") == "admin"
     stopped: list[str] = []
     for slug, entry in list(reg.items()):
         name = entry.get("name", "") or ""
         if not (slug.startswith("dubina-") or name.startswith("dubina-")):
             continue
-        if entry.get("owner") and entry["owner"] != user["id"]:
+        # Only the caller's own agents — an admin sweeps everyone's.
+        if not (is_admin or entry.get("owner") == user["id"]):
             continue
         try:
             await _do_stop_process(slug)

@@ -2246,7 +2246,8 @@ async def stop_run(project: str, session: str, user: dict = Depends(get_current_
 async def cleanup_agents(user: dict = Depends(get_current_user)):
     """Stop + remove leftover Code-mode ephemeral agents (slug contains
     "-code-"). Normal runs dispose their agents; this sweeps up after
-    crashes, stops, and FD restarts — including their data dirs."""
+    crashes, stops, and FD restarts — including their data dirs. Scoped to the
+    caller's own agents; an admin sweeps everyone's."""
     from captain_claw.flight_deck.server import (
         DATA_DIR,
         _do_stop_process,
@@ -2254,8 +2255,13 @@ async def cleanup_agents(user: dict = Depends(get_current_user)):
         _processes,
         _save_process_registry,
     )
+    uid = user["id"]
+    is_admin = user.get("role") == "admin"
     registry = _load_process_registry()
-    victims = [slug for slug in registry if "-code-" in slug]
+    victims = [
+        slug for slug, entry in registry.items()
+        if "-code-" in slug and (is_admin or entry.get("owner") == uid)
+    ]
     removed = []
     for slug in victims:
         try:
