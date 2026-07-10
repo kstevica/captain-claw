@@ -2251,6 +2251,9 @@ class AgentContextMixin:
                 self.tools.register(CodeMapTool())
             elif tool_name == "researchmap":
                 self.tools.register(ResearchMapTool())
+            elif tool_name == "facts":
+                from captain_claw.tools.facts import FactsTool
+                self.tools.register(FactsTool())
             elif tool_name == "web_fetch":
                 self.tools.register(WebFetchTool())
                 self.tools.register(WebGetTool())

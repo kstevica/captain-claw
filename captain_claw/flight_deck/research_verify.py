@@ -46,12 +46,25 @@ AUDIT_SUFFIX = ".fact-check.md"
 
 
 def claim_check_prompt(deliverable: str, question: str, max_claims: int,
-                       corpus_hint: bool = False) -> str:
-    """Prompt a tool-enabled agent to verify the deliverable's load-bearing claims."""
+                       corpus_hint: bool = False, facts_block: str = "") -> str:
+    """Prompt a tool-enabled agent to verify the deliverable's load-bearing claims.
+
+    ``facts_block`` (optional): the run's facts-ledger dump — claimed provenance
+    for the deliverable's values, so the checker verifies against the recorded
+    source instead of re-discovering it.
+    """
     corpus = (
         "You also have this run's saved sources: use the `researchmap` tool to "
         "search them and read any `vfs:<project>/sources/` file. "
         if corpus_hint else ""
+    )
+    facts = (
+        "\n## The run's facts ledger (claimed values + provenance)\n"
+        "The deliverable was built against these recorded values. Use the "
+        "provenance column as the first place to verify each; a deliverable "
+        "value that contradicts a VERIFIED ledger entry is a strong refute "
+        "candidate.\n" + facts_block + "\n"
+        if facts_block.strip() else ""
     )
     return (
         "You are a rigorous fact-checker. Below is a research deliverable. Verify its "
@@ -85,7 +98,8 @@ def claim_check_prompt(deliverable: str, question: str, max_claims: int,
         "it) — never leave a fabricated-looking specific stated as established fact. If "
         "the deliverable ALREADY qualifies the claim, leave \"hedge\" empty.\n"
         "- Never invent a source. Be conservative. If everything checks out and nothing "
-        "needs qualifying, return [].\n\n"
+        "needs qualifying, return [].\n"
+        f"{facts}\n"
         "## Deliverable to verify\n"
         f"{deliverable}"
     )

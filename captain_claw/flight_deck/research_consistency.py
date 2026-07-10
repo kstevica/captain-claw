@@ -170,7 +170,9 @@ def parse_entries(output: str) -> dict:
 # ── Verification (pure code — no model, no network) ────────────────────
 
 def _norm(label: str) -> str:
-    return re.sub(r"\s+", " ", (label or "").strip().strip(".,:;")).casefold()
+    # Underscores normalize like spaces so snake_case ledger keys
+    # (total_budget_eur) match prose labels ("total budget eur").
+    return re.sub(r"[\s_]+", " ", (label or "").strip().strip(".,:;")).casefold()
 
 
 def _tol(a: float, b: float) -> float:

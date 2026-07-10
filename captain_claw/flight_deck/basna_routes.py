@@ -43,6 +43,7 @@ from captain_claw.flight_deck.horizon_worker import (
     run_horizon_closer,
     run_worker_horizon,
 )
+from captain_claw.flight_deck import facts_ledger
 from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck import research_brief
 from captain_claw.flight_deck import research_consistency
@@ -51,7 +52,9 @@ from captain_claw.flight_deck.quality_profile import (
     ACTED_CORRECTIVE,
     ESCALATE_CORRECTIVE,
     ESCALATE_DIRECTIVE,
+    FACTS_LEDGER_DIRECTIVE,
     JUDGMENT_LEDGER_DIRECTIVE,
+    REPORTER_FACTS_DIRECTIVE,
     REPORTER_HONESTY_DIRECTIVE,
     SOURCE_CORPUS_DIRECTIVE,
     UNVERIFIED_GUARD_DIRECTIVE,
@@ -2035,7 +2038,7 @@ async def _llm_conflict(good: list[dict], creds: dict) -> bool:
 
 async def _llm_synthesize(
     good: list[dict], domain: str, creds: dict, *,
-    honesty: bool = False, output_mode: str = "",
+    honesty: bool = False, output_mode: str = "", facts_block: str = "",
 ) -> str:
     """Reason-tier reconciliation of disagreeing answers, trusting weight."""
     from captain_claw.llm import Message
@@ -2055,6 +2058,9 @@ async def _llm_synthesize(
     # being silently absorbed into a confident pick.
     if honesty:
         system += REPORTER_HONESTY_DIRECTIVE
+    # Facts ledger: the canonical values the reconciled answer must match.
+    if facts_block.strip():
+        system += REPORTER_FACTS_DIRECTIVE + facts_block.strip()
     system += output_mode_directive(output_mode)
     prov, mt = _provider_call(creds, temperature=0.3, default_max=8192, cap=32768)
     resp = await prov.complete(messages=[
@@ -2748,7 +2754,8 @@ _FACTCHECK_ARCHETYPES = ("fact-checker", "deep-researcher", "market-scanner")
 
 async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
                        intent: str, deliverable: str, arch_by_id: dict, body,
-                       quality, research_dir) -> tuple[str, dict | None, list[dict] | None]:
+                       quality, research_dir,
+                       facts_block: str = "") -> tuple[str, dict | None, list[dict] | None]:
     """Spawn a web-tool fact-checker, verify the merged answer's load-bearing claims,
     correct any that are verified wrong AND hedge any unconfirmable specific it
     asserted as fact. Returns ``(answer, audit_doc, findings)`` where ``answer`` is
@@ -2800,7 +2807,8 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
     text, revised_applied = deliverable, False
     try:
         prompt = rv.claim_check_prompt(deliverable, intent, quality.claim_check_max,
-                                       corpus_hint=research_dir is not None)
+                                       corpus_hint=research_dir is not None,
+                                       facts_block=facts_block)
         d = await _dispatch_one(port, token, prompt, body.dispatch_timeout,
                                 on_action=_on_action,
                                 fleet_instructions=arch.get("fleet_instructions", ""),
@@ -3055,7 +3063,7 @@ async def execute_route(
     # Resolve the shared folder on disk once (needed by R1 research map and R6 git
     # snapshots). Both are opt-in; neither touches a run that didn't ask for them.
     vfs_dir: Path | None = None
-    if quality.research_map or quality.git_snapshots:
+    if quality.research_map or quality.git_snapshots or quality.facts_ledger:
         try:
             from captain_claw.flight_deck.vfs_routes import _user_root
             vfs_dir = _user_root(user["id"]) / vfs_project
@@ -3130,6 +3138,9 @@ async def execute_route(
                 # R1: give workers the researchmap tool when the map is armed.
                 if research_dir is not None and "researchmap" not in _worker_tools:
                     _worker_tools = _worker_tools + ["researchmap"]
+                # Facts ledger: the shared canonical-values tool, when armed.
+                if quality.facts_ledger and "facts" not in _worker_tools:
+                    _worker_tools = _worker_tools + ["facts"]
                 base = dict(
                     name=f"basna-{sid8}-{run_tag}-{arch['id']}",
                     description=f"Basna ephemeral · {sel.get('role') or arch.get('role', '')}",
@@ -3249,6 +3260,8 @@ async def execute_route(
                     base_prompt += ESCALATE_DIRECTIVE
                 if quality.judgment_ledger:
                     base_prompt += JUDGMENT_LEDGER_DIRECTIVE
+                if quality.facts_ledger:
+                    base_prompt += FACTS_LEDGER_DIRECTIVE
                 # Honesty guard: independent of the ledger, ON unless explicitly
                 # disabled — the anti-fabrication counterweight to "fill your slice".
                 if quality.honesty_guard:
@@ -3427,12 +3440,25 @@ async def execute_route(
     # 5) Compile the truth (weighted; LLM synthesis only on genuine conflict).
     _phase(sid, "Merging")
     _progress(sid, "merge", "Compiling the truth…")
+    # Facts ledger dump — computed once, reused by the synthesizer (canonical
+    # values), the consistency check (ledger rows) and the claim check (claimed
+    # provenance). Best-effort: an unreadable ledger never blocks the merge.
+    facts_dump = ""
+    if quality.facts_ledger and vfs_dir is not None:
+        try:
+            facts_dump = facts_ledger.dump_markdown(vfs_dir)
+            if facts_dump:
+                _progress(sid, "note",
+                          f"facts ledger: {len(facts_ledger.list_rows(vfs_dir))} value(s) recorded")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna facts ledger dump failed", error=str(e))
     agg = await _aggregate(
         results, merge_kind, domain,
         conflict_fn=lambda good: asyncio.wait_for(_llm_conflict(good, _merge_creds("fast")), _MERGE_TIMEOUT),
         synth_fn=lambda good: asyncio.wait_for(_llm_synthesize(
             good, domain, _merge_creds("reason"),
-            honesty=quality.honesty_guard, output_mode=quality.output_mode), _SYNTH_TIMEOUT),
+            honesty=quality.honesty_guard, output_mode=quality.output_mode,
+            facts_block=facts_dump), _SYNTH_TIMEOUT),
     )
     _progress(sid, "merge", f"Merged via {agg['method']} · confidence {agg['confidence']:.0%}")
 
@@ -3509,9 +3535,16 @@ async def execute_route(
                     [_Msg(role="user", content=p)], temperature=0.1, max_tokens=mt), 300)
                 return r.content or ""
 
+            _ledger_rows = None
+            if quality.facts_ledger and vfs_dir is not None:
+                try:
+                    _ledger_rows = facts_ledger.export_rows(vfs_dir) or None
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Basna ledger export failed", error=str(e))
             cres = await research_consistency.run_check(
                 agg["truth"], extract_fn=_extract_fn, revise_fn=_revise_fn,
                 max_values=quality.consistency_max_values,
+                ledger_rows=_ledger_rows,
                 on_progress=lambda m: _progress(sid, "merge", m))
             if cres["revised"]:
                 agg["truth"] = cres["text"]
@@ -3536,7 +3569,7 @@ async def execute_route(
             new_truth, cc_doc, claim_findings = await _claim_check(
                 request, user, sid, sid8, run_tag, intent=sess["intent"],
                 deliverable=agg["truth"], arch_by_id=arch_by_id, body=body,
-                quality=quality, research_dir=research_dir)
+                quality=quality, research_dir=research_dir, facts_block=facts_dump)
             if new_truth and new_truth != agg["truth"]:
                 agg["truth"] = new_truth
                 agg["method"] = f"{agg.get('method', 'merge')}+factchecked"

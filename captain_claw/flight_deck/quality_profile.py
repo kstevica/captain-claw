@@ -78,6 +78,7 @@ _PRESETS: dict[str, set[str]] = {
         "rubric_contract",  # R9 — derive a completeness checklist + score coverage against it
         "intent_brief",     # R12 — clarify the task into an editable brief before routing (one LLM call)
         "consistency_check",  # cross-section identity/arithmetic verify (one extract call + pure code)
+        "facts_ledger",     # shared canonical-values store + `facts` tool (free, no LLM)
     },
     # claim_check (R8) is the paid research lever (spawns a web-tool verifier + a
     # revision), like deep_build on the code side — no preset enables it; turn it
@@ -119,6 +120,9 @@ class QualityProfile:
     # ── Deterministic consistency (docs/vatra-quality-tightening-plan.md §2) ──
     consistency_check: bool = False  # extract figures → verify identity/arithmetic in code
 
+    # ── Shared facts ledger (plan §4 / increment 4) ──
+    facts_ledger: bool = False     # canonical key→value store + `facts` tool for all workers
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     deep_build_samples: int = 2    # C3 pool size — kept small on purpose
@@ -142,7 +146,7 @@ class QualityProfile:
             "test_gate", "deep_build", "coverage_check", "acted_gate",
             "research_map", "delta_rounds", "critic_triage", "worker_escalate",
             "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
-            "rubric_contract", "intent_brief", "consistency_check",
+            "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -180,7 +184,7 @@ class QualityProfile:
         "test_gate", "deep_build", "coverage_check", "acted_gate",
         "research_map", "delta_rounds", "critic_triage", "worker_escalate",
         "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
-        "rubric_contract", "intent_brief", "consistency_check",
+        "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
     )
 
     @property
@@ -410,6 +414,35 @@ def output_mode_directive(mode: str) -> str:
     if mode == "complete":
         return COMPLETE_MODE_DIRECTIVE
     return ""
+
+
+# ── Facts ledger directives (paired with the `facts` tool + facts_ledger.py) ─
+# Workers get the write/read discipline; the reporter/synthesizer gets the
+# "must match" rule plus the actual ledger dump (appended by the routes, since
+# only they know the folder).
+
+FACTS_LEDGER_DIRECTIVE = (
+    "\n\nFACTS LEDGER: this run keeps a shared ledger of canonical values "
+    "(tool: `facts`). Any load-bearing number, date, or identifier your piece "
+    "establishes and others may reuse → `facts` action=set with a short "
+    "snake_case key (e.g. total_budget_eur), the value, unit, status "
+    "(verified|derived|estimated|assumed|to_be_completed) and provenance (URL, "
+    "file, or 'derived from <keys>'). Any value another piece owns → `facts` "
+    "action=get (or list) — NEVER restate a teammate's number from memory. If "
+    "set reports a CONFLICT, do not overwrite: the ledger value stays canonical "
+    "until you reconcile (check the source, or flag it in your Judgment calls / "
+    "output). Ledger only load-bearing values, not trivia."
+)
+
+REPORTER_FACTS_DIRECTIVE = (
+    "\n\n## Canonical facts ledger\n"
+    "The table below is the run's shared ledger — the single source of truth "
+    "for these values. Every figure, date, and identifier in the deliverable "
+    "MUST match it. A value with status estimated/assumed is presented as such "
+    "(never as plain fact); a to_be_completed value stays a labeled "
+    "placeholder; an unresolved conflict goes to the Unresolved & assumptions "
+    "section — never silently pick a side.\n"
+)
 
 
 # ── Per-run quality metrics (persisted into the session's analysis JSON) ─

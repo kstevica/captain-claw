@@ -74,6 +74,7 @@ from captain_claw.flight_deck.basna_routes import (
     _tier_creds,
     _vfs_manifest,
 )
+from captain_claw.flight_deck import facts_ledger
 from captain_claw.flight_deck import research_brief
 from captain_claw.flight_deck import research_consistency
 from captain_claw.flight_deck import research_map
@@ -84,7 +85,9 @@ from captain_claw.flight_deck.quality_profile import (
     ACTED_CORRECTIVE,
     ESCALATE_CORRECTIVE,
     ESCALATE_DIRECTIVE,
+    FACTS_LEDGER_DIRECTIVE,
     JUDGMENT_LEDGER_DIRECTIVE,
+    REPORTER_FACTS_DIRECTIVE,
     REPORTER_HONESTY_DIRECTIVE,
     SOURCE_CORPUS_DIRECTIVE,
     UNVERIFIED_GUARD_DIRECTIVE,
@@ -173,11 +176,15 @@ def _vfs_project(sid: str) -> str:
     return _run_vfs_project.get(sid) or f"vatra-{sid[:8]}"
 
 
-def _augment_tools(tools: list[str], research_dir: Path | None) -> list[str]:
-    """Add the `researchmap` tool when the Research Map is armed for this run."""
+def _augment_tools(tools: list[str], research_dir: Path | None,
+                   facts: bool = False) -> list[str]:
+    """Add the run-scoped tools this run armed: `researchmap` when the Research
+    Map is on, `facts` when the shared facts ledger is on."""
     tools = list(tools or [])
     if research_dir is not None and "researchmap" not in tools:
         tools = tools + ["researchmap"]
+    if facts and "facts" not in tools:
+        tools = tools + ["facts"]
     return tools
 
 
@@ -936,7 +943,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # can search prior rounds' material instead of re-reading it (and the reporter
     # can pull past its inline slice cap). Free; best-effort.
     vfs_dir: Path | None = None
-    if quality.research_map or quality.git_snapshots:
+    if quality.research_map or quality.git_snapshots or quality.facts_ledger:
         try:
             from captain_claw.flight_deck.vfs_routes import _user_root
             vfs_dir = _user_root(user["id"]) / vfs_project
@@ -979,7 +986,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 name=f"vatra-{sid8}-{run_tag}-{st['id']}-{arch['id']}",
                 description=f"Vatra subtask · {arch.get('role', '')}",
                 cognitive_mode=arch.get("cognitive_mode", "neutra"),
-                tools=_augment_tools(arch.get("tools") or [], research_dir),
+                tools=_augment_tools(arch.get("tools") or [], research_dir,
+                                     facts=quality.facts_ledger),
                 tier=tier, tiers=tiers,
                 api_key=body.api_key, env_vars=body.env_vars,
                 extra_env=_vatra_env(sid, st["id"], arch["id"], 0),
@@ -1109,6 +1117,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 prompt += ESCALATE_DIRECTIVE
             if quality.judgment_ledger:
                 prompt += JUDGMENT_LEDGER_DIRECTIVE
+            if quality.facts_ledger:
+                prompt += FACTS_LEDGER_DIRECTIVE
             if quality.source_corpus:
                 prompt += SOURCE_CORPUS_DIRECTIVE
             if st["id"] in _later_phase_subtasks:  # grouped: may request from an earlier phase
@@ -1515,6 +1525,18 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # 5) Reporter assembles the slices (+ any answered asks) into one deliverable.
     _phase(sid, "Synthesizing")
     answered = await db.list_vatra_asks(sid, status="answered")
+    # Facts ledger dump — computed once, reused by the reporter prompt, the
+    # consistency check (as canonical rows) and the claim check (as claimed
+    # provenance). Best-effort: an unreadable ledger never blocks the run.
+    facts_dump = ""
+    if quality.facts_ledger and vfs_dir is not None:
+        try:
+            facts_dump = facts_ledger.dump_markdown(vfs_dir)
+            if facts_dump:
+                _progress(sid, "note",
+                          f"facts ledger: {len(facts_ledger.list_rows(vfs_dir))} value(s) recorded")
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra facts ledger dump failed", error=str(e))
     truth, reporter_files = await _run_reporter(
         request, user, sid, sid8, run_tag, intent, usable, cfg, arch_by_id,
         tiers=body.tiers, api_key=body.api_key, env_vars=body.env_vars,
@@ -1523,6 +1545,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         shared_context=shared_context, research_dir=research_dir,
         corpus=quality.source_corpus,  # R10
         honesty=quality.honesty_guard,
+        facts=quality.facts_ledger, facts_block=facts_dump,
     )
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
@@ -1578,9 +1601,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     [_Msg(role="user", content=p)], temperature=0.1, max_tokens=mt), 300)
                 return r.content or ""
 
+            _ledger_rows = None
+            if quality.facts_ledger and vfs_dir is not None:
+                try:
+                    _ledger_rows = facts_ledger.export_rows(vfs_dir) or None
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Vatra ledger export failed", error=str(e))
             cres = await research_consistency.run_check(
                 truth, extract_fn=_extract_fn, revise_fn=_revise_fn,
                 max_values=quality.consistency_max_values,
+                ledger_rows=_ledger_rows,
                 on_progress=lambda m: _progress(sid, "verify", m))
             if cres["revised"]:
                 truth = cres["text"]
@@ -1604,7 +1634,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 request, user, sid, sid8, run_tag, intent=intent, deliverable=truth,
                 arch_by_id=arch_by_id, tiers=body.tiers, api_key=body.api_key,
                 env_vars=body.env_vars, dispatch_timeout=body.dispatch_timeout,
-                quality=quality, research_dir=research_dir)
+                quality=quality, research_dir=research_dir, facts_block=facts_dump)
             if cc_doc:
                 generated_files.append(cc_doc)
         except Exception as e:  # noqa: BLE001 — claim check is best-effort
@@ -2044,7 +2074,9 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                         shared_context: str = "",
                         research_dir: Path | None = None,
                         corpus: bool = False,
-                        honesty: bool = False) -> tuple[str, list[dict]]:
+                        honesty: bool = False,
+                        facts: bool = False,
+                        facts_block: str = "") -> tuple[str, list[dict]]:
     """Spawn a dedicated reporter, feed it the slices (plus any answered cross-agent
     asks), and capture the assembled deliverable. Falls back to a labeled
     concatenation if the reporter fails."""
@@ -2076,7 +2108,7 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         request, user, name=f"vatra-{sid8}-{run_tag}-reporter",
         description=f"Vatra reporter · {role}",
         cognitive_mode=arch.get("cognitive_mode", "neutra"),
-        tools=_augment_tools(arch.get("tools") or [], research_dir),
+        tools=_augment_tools(arch.get("tools") or [], research_dir, facts=facts),
         tier=arch.get("tier", "reason"),
         tiers=tiers, api_key=api_key, env_vars=env_vars,
         # Bind the reporter to the same shared VFS project so it reads the
@@ -2125,6 +2157,10 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         # Appended at runtime so honesty_guard:false keeps reporter.md verbatim.
         if honesty:
             prompt += REPORTER_HONESTY_DIRECTIVE
+        # Facts ledger: the canonical values every figure in the deliverable
+        # must match — inlined (it's small and structured), not searched-for.
+        if facts_block.strip():
+            prompt += REPORTER_FACTS_DIRECTIVE + facts_block.strip() + "\n"
         prompt += _vfs_directive(_vfs_project(sid))
 
         def _on_action(act: dict) -> None:
@@ -2163,7 +2199,7 @@ _FACTCHECK_ARCHETYPES = ("fact-checker", "deep-researcher", "market-scanner")
 async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_tag: str, *,
                        intent: str, deliverable: str, arch_by_id: dict, tiers,
                        api_key, env_vars, dispatch_timeout, quality,
-                       research_dir) -> tuple[str, dict | None]:
+                       research_dir, facts_block: str = "") -> tuple[str, dict | None, list[dict] | None]:
     """Spawn a web-tool fact-checker, verify the deliverable's load-bearing claims,
     revise it to fix any verified WRONG and hedge any unconfirmable specific it
     asserted as fact, and write a standalone audit ledger. Returns
@@ -2213,7 +2249,8 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
     text, revised_applied = deliverable, False
     try:
         prompt = rv.claim_check_prompt(deliverable, intent, quality.claim_check_max,
-                                       corpus_hint=research_dir is not None)
+                                       corpus_hint=research_dir is not None,
+                                       facts_block=facts_block)
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
                                 on_action=_on_action,
                                 fleet_instructions=checker.get("fleet_instructions", ""),
