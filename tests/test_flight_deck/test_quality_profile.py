@@ -12,6 +12,7 @@ import math
 from captain_claw.flight_deck.quality_profile import (
     QualityProfile,
     TokenBudget,
+    build_quality_metrics,
     worker_produced_nothing,
 )
 
@@ -152,3 +153,49 @@ def test_pure_narration_is_a_noop():
 def test_missing_result_counts_as_noop():
     assert worker_produced_nothing(None) is True
     assert worker_produced_nothing({}) is True
+
+
+# ── per-run quality metrics assembly (increment 3) ───────────────────
+
+def test_metrics_empty_when_nothing_ran():
+    # A run with no levers must not persist a metrics record at all.
+    assert build_quality_metrics() == {}
+    assert build_quality_metrics(budget=TokenBudget(0)) == {}  # no spend, no reason
+
+
+def test_metrics_claim_tally_mirrors_verdict_semantics():
+    findings = [
+        {"verdict": "confirmed"},
+        {"verdict": "refuted", "correction": "the right value"},
+        {"verdict": "unverifiable", "hedge": "reportedly …"},
+        {"verdict": "unverifiable", "hedge": ""},  # already-qualified → not hedged
+    ]
+    m = build_quality_metrics(claim_findings=findings)
+    assert m == {"claims_checked": 4, "claims_confirmed": 1, "claims_refuted": 1,
+                 "claims_unverifiable": 2, "claims_hedged": 1}
+
+
+def test_metrics_distinguish_clean_run_from_no_run():
+    # Ran-and-clean records zeros; never-ran records nothing.
+    assert build_quality_metrics(claim_findings=[])["claims_checked"] == 0
+    assert "claims_checked" not in build_quality_metrics(claim_findings=None)
+
+
+def test_metrics_consistency_and_gaps_counts():
+    m = build_quality_metrics(
+        consistency={"critical": 0, "major": 1, "initial_critical": 2, "revised": True},
+        gaps=[{"severity": "major"}, {"severity": "minor"}, {"severity": "minor"}])
+    assert m["consistency_critical"] == 0
+    assert m["consistency_initial_critical"] == 2
+    assert m["consistency_revised"] is True
+    assert m["gaps_major"] == 1 and m["gaps_minor"] == 2
+
+
+def test_metrics_counters_and_budget():
+    b = TokenBudget(1000)
+    b.add(600)
+    assert b.can_afford(500) is False  # trips stopped_reason
+    m = build_quality_metrics(acted_retries=2, escalations=0, budget=b)
+    assert m["acted_retries"] == 2 and m["escalations"] == 0
+    assert m["budget_spent_tokens"] == 600
+    assert "budget reached" in m["budget_stopped_reason"]

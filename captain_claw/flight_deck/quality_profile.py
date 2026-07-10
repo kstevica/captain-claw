@@ -412,6 +412,61 @@ def output_mode_directive(mode: str) -> str:
     return ""
 
 
+# ── Per-run quality metrics (persisted into the session's analysis JSON) ─
+# Everything below is already computed somewhere during a run — claim-check
+# verdicts, consistency tallies, coverage gaps, retry counts — but nothing was
+# stored where trends can be seen. One flat record per run, assembled by both
+# engines through THIS function so the schema cannot drift between them.
+# A lever that didn't run contributes no keys: the stored record shows exactly
+# which checks a run actually had.
+
+def build_quality_metrics(
+    *,
+    claim_findings: list[dict] | None = None,
+    consistency: dict | None = None,
+    gaps: list[dict] | None = None,
+    acted_retries: int | None = None,
+    escalations: int | None = None,
+    budget: TokenBudget | None = None,
+) -> dict:
+    """The per-run quality tally for ``analysis.quality_metrics``. Pure; every
+    part optional (pass ``None`` for a lever that didn't run). Returns {} when
+    nothing ran, so callers can skip persisting an empty record."""
+    out: dict = {}
+    if claim_findings is not None:
+        n = len(claim_findings)
+        c = sum(1 for f in claim_findings if f.get("verdict") == "confirmed")
+        r = sum(1 for f in claim_findings if f.get("verdict") == "refuted")
+        # Mirrors research_verify.unconfirmed(): asserted-but-unconfirmable
+        # specifics that carried a hedge rewrite.
+        h = sum(1 for f in claim_findings
+                if f.get("verdict") == "unverifiable" and f.get("hedge"))
+        out.update(claims_checked=n, claims_confirmed=c, claims_refuted=r,
+                   claims_unverifiable=n - c - r, claims_hedged=h)
+    if consistency is not None:
+        out.update(
+            consistency_critical=int(consistency.get("critical", 0)),
+            consistency_major=int(consistency.get("major", 0)),
+            consistency_initial_critical=int(consistency.get("initial_critical", 0)),
+            consistency_revised=bool(consistency.get("revised")),
+        )
+    if gaps is not None:
+        out.update(
+            gaps_major=sum(1 for g in gaps if str(g.get("severity")) == "major"),
+            gaps_minor=sum(1 for g in gaps if str(g.get("severity")) != "major"),
+        )
+    if acted_retries is not None:
+        out["acted_retries"] = int(acted_retries)
+    if escalations is not None:
+        out["escalations"] = int(escalations)
+    if budget is not None:
+        if budget.spent() > 0:
+            out["budget_spent_tokens"] = budget.spent()
+        if budget.stopped_reason:
+            out["budget_stopped_reason"] = budget.stopped_reason
+    return out
+
+
 # ── R10: source corpus directive (paired with the web_fetch behaviour) ─
 SOURCE_CORPUS_DIRECTIVE = (
     "\n\nSOURCES: this run keeps a shared source corpus. When you `web_fetch` a "

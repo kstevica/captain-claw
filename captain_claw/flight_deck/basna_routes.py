@@ -57,6 +57,7 @@ from captain_claw.flight_deck.quality_profile import (
     UNVERIFIED_GUARD_DIRECTIVE,
     QualityProfile,
     TokenBudget,
+    build_quality_metrics,
     escalate_reason,
     output_mode_directive,
     worker_produced_nothing,
@@ -2747,21 +2748,22 @@ _FACTCHECK_ARCHETYPES = ("fact-checker", "deep-researcher", "market-scanner")
 
 async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
                        intent: str, deliverable: str, arch_by_id: dict, body,
-                       quality, research_dir) -> tuple[str, dict | None]:
+                       quality, research_dir) -> tuple[str, dict | None, list[dict] | None]:
     """Spawn a web-tool fact-checker, verify the merged answer's load-bearing claims,
     correct any that are verified wrong AND hedge any unconfirmable specific it
-    asserted as fact. Returns ``(answer, audit_doc)`` where ``answer`` is the
-    (possibly revised) text and ``audit_doc`` is a generated-file descriptor for the
-    standalone fact-check ledger (or ``None``). Best-effort; on any failure the
-    original answer is returned unchanged."""
+    asserted as fact. Returns ``(answer, audit_doc, findings)`` where ``answer`` is
+    the (possibly revised) text, ``audit_doc`` is a generated-file descriptor for the
+    standalone fact-check ledger (or ``None``), and ``findings`` is the checker's
+    verdict list (``None`` when the check never ran, for the metrics tally).
+    Best-effort; on any failure the original answer is returned unchanged."""
     from captain_claw.flight_deck import research_verify as rv
     from captain_claw.flight_deck.server import _do_stop_process
     if not (deliverable or "").strip():
-        return deliverable, None
+        return deliverable, None, None
     src = next((arch_by_id[a] for a in _FACTCHECK_ARCHETYPES if a in arch_by_id), None) \
         or next(iter(arch_by_id.values()), None)
     if not src:
-        return deliverable, None
+        return deliverable, None, None
     role = src.get("role") or src["id"]
     tools = list(dict.fromkeys(
         (src.get("tools") or []) + ["web_search", "web_fetch", "researchmap", "read"]))
@@ -2792,7 +2794,7 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
             name_suffix="factcheck", extra_env=corpus_env)
     except Exception as e:  # noqa: BLE001
         _progress(sid, "verify", f"Fact-checker spawn failed ({e})", ok=False)
-        return deliverable, None
+        return deliverable, None, None
     _run_workers.setdefault(sid, []).append(slug)
     findings: list[dict] = []
     text, revised_applied = deliverable, False
@@ -2845,7 +2847,7 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
                          revised=revised_applied)
     if doc:
         _progress(sid, "files", f"Fact-check report saved · {doc['name']}")
-    return text, doc
+    return text, doc, findings
 
 
 @router.post("/execute")
@@ -3045,6 +3047,10 @@ async def execute_route(
     # bounded, so the profile can never blow the token budget. 0 → unbounded.
     _budget = TokenBudget(quality.token_budget)
     _retry_est = int(body.agent_max_tokens or 8192)
+    # Per-run quality tallies → analysis.quality_metrics (mutable dict so the
+    # nested dispatch closures can count into it).
+    _qm_counts = {"acted": 0, "escalated": 0}
+    claim_findings: list[dict] | None = None  # set iff the R8 claim check ran
 
     # Resolve the shared folder on disk once (needed by R1 research map and R6 git
     # snapshots). Both are opt-in; neither touches a run that didn't ask for them.
@@ -3261,6 +3267,7 @@ async def execute_route(
                 if (quality.acted_gate and d.get("ok") and worker_produced_nothing(d)
                         and _budget.can_afford(_retry_est)):
                     _budget.add(_retry_est)
+                    _qm_counts["acted"] += 1
                     _progress(sid, "note",
                               f"{role} produced nothing — one corrective retry")
                     # Same stateful agent — the corrective alone is enough (it
@@ -3279,6 +3286,7 @@ async def execute_route(
                 if (quality.worker_escalate and d.get("ok") and escalate_reason(d.get("output"))
                         and _budget.can_afford(_retry_est)):
                     _budget.add(_retry_est)
+                    _qm_counts["escalated"] += 1
                     _progress(sid, "note", f"{role} escalated — one focused retry")
                     d2 = await _dispatch_one(
                         sp["port"], sp["auth"], ESCALATE_CORRECTIVE.strip(),
@@ -3525,7 +3533,7 @@ async def execute_route(
     if quality.claim_check and (agg.get("truth") or "").strip() and _budget.can_afford(2 * _retry_est):
         _budget.add(2 * _retry_est)
         try:
-            new_truth, cc_doc = await _claim_check(
+            new_truth, cc_doc, claim_findings = await _claim_check(
                 request, user, sid, sid8, run_tag, intent=sess["intent"],
                 deliverable=agg["truth"], arch_by_id=arch_by_id, body=body,
                 quality=quality, research_dir=research_dir)
@@ -3566,6 +3574,17 @@ async def execute_route(
     if consistency_summary is not None:
         analysis = analysis or {}
         analysis["consistency"] = consistency_summary
+    # One flat quality tally per run — only the levers that actually ran
+    # contribute keys, so the record doubles as "which checks this run had".
+    qm = build_quality_metrics(
+        claim_findings=claim_findings, consistency=consistency_summary,
+        gaps=(analysis or {}).get("gaps"),
+        acted_retries=_qm_counts["acted"] if quality.acted_gate else None,
+        escalations=_qm_counts["escalated"] if quality.worker_escalate else None,
+        budget=_budget)
+    if qm:
+        analysis = analysis or {}
+        analysis["quality_metrics"] = qm
     await db.update_basna_session(
         body.session_id, user["id"], status="done",
         truth=agg["truth"], confidence=agg["confidence"],

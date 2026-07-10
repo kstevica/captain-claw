@@ -90,6 +90,7 @@ from captain_claw.flight_deck.quality_profile import (
     UNVERIFIED_GUARD_DIRECTIVE,
     QualityProfile,
     TokenBudget,
+    build_quality_metrics,
     escalate_reason,
     output_mode_directive,
     worker_produced_nothing,
@@ -744,6 +745,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # R7 cost ceiling for the opt-in retries (acted-gate/escalate). 0 → unbounded.
     _budget = TokenBudget(quality.token_budget)
     _retry_est = int(body.agent_max_tokens or 8192)
+    # Per-run quality tallies → analysis.quality_metrics (mutable dict so the
+    # nested dispatch closures can count into it).
+    _qm_counts = {"acted": 0, "escalated": 0}
+    claim_findings: list[dict] | None = None  # set iff the R8 claim check ran
 
     session_files = _parse_files(sess)
     input_files = [f for f in session_files if f.get("kind") != "generated"]
@@ -1117,6 +1122,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             if (quality.acted_gate and d.get("ok") and worker_produced_nothing(d)
                     and _budget.can_afford(_retry_est)):
                 _budget.add(_retry_est)
+                _qm_counts["acted"] += 1
                 _progress(sid, "note", f"{label} produced nothing — one corrective retry")
                 d2 = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], ACTED_CORRECTIVE.strip(), body.dispatch_timeout,
@@ -1128,6 +1134,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             if (quality.worker_escalate and d.get("ok") and escalate_reason(d.get("output"))
                     and _budget.can_afford(_retry_est)):
                 _budget.add(_retry_est)
+                _qm_counts["escalated"] += 1
                 _progress(sid, "note", f"{label} escalated — one focused retry")
                 d2 = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], ESCALATE_CORRECTIVE.strip(), body.dispatch_timeout,
@@ -1593,7 +1600,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     if quality.claim_check and (truth or "").strip() and _budget.can_afford(2 * _retry_est):
         _budget.add(2 * _retry_est)
         try:
-            truth, cc_doc = await _claim_check(
+            truth, cc_doc, claim_findings = await _claim_check(
                 request, user, sid, sid8, run_tag, intent=intent, deliverable=truth,
                 arch_by_id=arch_by_id, tiers=body.tiers, api_key=body.api_key,
                 env_vars=body.env_vars, dispatch_timeout=body.dispatch_timeout,
@@ -1682,14 +1689,24 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         except Exception as e:  # noqa: BLE001
             log.warning("Vatra rubric coverage failed", error=str(e))
 
-    # Consistency tally (from 5b2) rides the same analysis JSON so the UI and
-    # follow-up rounds can see what was checked and what (if anything) remains.
+    # Consistency tally (from 5b2) + the flat per-run quality metrics ride the
+    # same analysis JSON so the UI and follow-up rounds can see what was checked
+    # and what (if anything) remains. Only levers that ran contribute keys.
     if consistency_summary is not None:
         analysis["consistency"] = consistency_summary
+    qm = build_quality_metrics(
+        claim_findings=claim_findings, consistency=consistency_summary,
+        gaps=analysis.get("gaps"),
+        acted_retries=_qm_counts["acted"] if quality.acted_gate else None,
+        escalations=_qm_counts["escalated"] if quality.worker_escalate else None,
+        budget=_budget)
+    if qm:
+        analysis["quality_metrics"] = qm
+    if consistency_summary is not None or qm:
         try:
             await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
         except Exception as e:  # noqa: BLE001
-            log.warning("Vatra consistency persist failed", error=str(e))
+            log.warning("Vatra quality metrics persist failed", error=str(e))
 
     # Run cost: roll the whole run's model spend (owners across all rounds +
     # reporter + ask-helpers + fact-checker) into a dollar cost + effective $/hour,
@@ -2150,16 +2167,17 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
     """Spawn a web-tool fact-checker, verify the deliverable's load-bearing claims,
     revise it to fix any verified WRONG and hedge any unconfirmable specific it
     asserted as fact, and write a standalone audit ledger. Returns
-    ``(deliverable, audit_doc)`` — the (possibly revised) text and a generated-file
-    descriptor for the ledger (or ``None``). Best-effort: on any failure the
-    original deliverable is returned unchanged."""
+    ``(deliverable, audit_doc, findings)`` — the (possibly revised) text, a
+    generated-file descriptor for the ledger (or ``None``), and the checker's
+    verdict list (``None`` when the check never ran, for the metrics tally).
+    Best-effort: on any failure the original deliverable is returned unchanged."""
     from captain_claw.flight_deck import research_verify as rv
     if not (deliverable or "").strip():
-        return deliverable, None
+        return deliverable, None, None
     checker = next((arch_by_id[a] for a in _FACTCHECK_ARCHETYPES if a in arch_by_id), None) \
         or next(iter(arch_by_id.values()), None)
     if not checker:
-        return deliverable, None
+        return deliverable, None, None
     role = checker.get("role") or checker["id"]
     tools = list(dict.fromkeys(
         (checker.get("tools") or []) + ["web_search", "web_fetch", "researchmap", "read"]))
@@ -2176,7 +2194,7 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
         corpus=quality.source_corpus)
     if not sp["ok"]:
         _progress(sid, "verify", f"Fact-checker spawn failed ({sp['message']})", ok=False)
-        return deliverable, None
+        return deliverable, None, None
 
     def _on_action(act: dict) -> None:
         detail = act.get("detail", "")
@@ -2240,7 +2258,7 @@ async def _claim_check(request: Request, user: dict, sid: str, sid8: str, run_ta
                          revised=revised_applied)
     if doc:
         _progress(sid, "verify", f"Fact-check report saved · {doc['name']}", agent=role)
-    return text, doc
+    return text, doc, findings
 
 
 # ── Coordinator: route blackboard asks to helpers (non-blocking) ─────
