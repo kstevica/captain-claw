@@ -57,7 +57,7 @@ class BasnaTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "deepen", "continue", "list", "search", "get", "agents", "output", "truth", "analysis", "files", "get_file", "blackboard"],
+                "enum": ["start", "deepen", "continue", "resume", "list", "search", "get", "agents", "output", "truth", "analysis", "files", "get_file", "blackboard"],
                 "description": (
                     "'start' — launch a NEW autonomous Basna run on `task` (optional `title`, "
                     "`max_agents`); use this when the user asks to run/execute/start a Basna, and "
@@ -70,6 +70,10 @@ class BasnaTool(Tool):
                     "pass `instruction` for what to do next, `kind` ('continue' extend / 'revise' "
                     "improve / 'deepen' blind spots / 'fill_gaps' for a Vatra run), and `same_cast` "
                     "(default true = reuse the prior run's team). Works for both Basna and Vatra runs. "
+                    "'resume' — resume a STALLED or cancelled run (`session_id`) from where it froze: "
+                    "agents that already finished are restored from checkpoints (no re-run, no re-spend), "
+                    "only the missing ones re-run, then it synthesizes. Use when a run was Stopped or "
+                    "got stuck; works for both Basna and Vatra, in the SAME folder + team. "
                     "'list' / 'search' — your sessions, filtered by an optional `query` substring "
                     "(matched over each session's title, intent, and compiled truth), plus "
                     "`status` and `limit`. ('search' is an alias for 'list'.) "
@@ -174,6 +178,8 @@ class BasnaTool(Tool):
                 return await self._deepen(fd_url, **kwargs)
             if action == "continue":
                 return await self._continue(fd_url, **kwargs)
+            if action == "resume":
+                return await self._resume(fd_url, **kwargs)
             if action in ("list", "search"):
                 # 'search' is an alias — _list already filters by `query`
                 # (substring over title/intent/truth), which is what a search is.
@@ -289,6 +295,27 @@ class BasnaTool(Tool):
             f"Started a deepen run **{data.get('title') or 'follow-up'}** "
             f"({data.get('n_agents', '?')} agent(s), session {data.get('session_id')}) "
             f"focused on the prior run's blind spots. I'll report back when it finishes."
+        ))
+
+    async def _resume(self, fd_url: str, **kwargs: Any) -> ToolResult:
+        """Resume a stalled/cancelled run from its checkpoints (Basna or Vatra)."""
+        for marker in ("CLAW_BASNA_WORKER", "CLAW_VATRA_WORKER"):
+            if str(os.environ.get(marker, "")).strip().lower() in ("1", "true", "yes"):
+                return ToolResult(
+                    success=False,
+                    error="Cannot resume runs from inside an ensemble run.",
+                )
+        sid = (kwargs.get("session_id") or "").strip()
+        if not sid:
+            return ToolResult(success=False, error="Provide `session_id` of the stalled run to resume.")
+        r = await self._post(fd_url, "/fd/basna/agent/resume", {"session_id": sid})
+        if isinstance(r, dict) and r.get("_error"):
+            return ToolResult(success=False, error=r["_error"])
+        data = r.json()
+        return ToolResult(success=True, content=(
+            f"Resuming run {data.get('session_id', sid)} — finished agents restored from "
+            f"checkpoints (no re-spend), only the missing ones re-run. I'll report back "
+            f"when it finishes."
         ))
 
     async def _continue(self, fd_url: str, **kwargs: Any) -> ToolResult:

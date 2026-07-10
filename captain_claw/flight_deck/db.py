@@ -267,6 +267,28 @@ class FlightDeckDB:
             CREATE INDEX IF NOT EXISTS idx_vatra_board_session
                 ON vatra_board(session_id);
 
+            -- Vatra resume checkpoint: one row per owner (subtask) capturing its
+            -- finished slice, so a stalled/cancelled run can be resumed — completed
+            -- owners are restored from here (no re-run, no re-spend) and only the
+            -- missing ones are re-dispatched. UPSERT-keyed on (session_id, subtask_id)
+            -- so a re-dispatched owner overwrites its own checkpoint idempotently.
+            CREATE TABLE IF NOT EXISTS vatra_runs (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id    TEXT NOT NULL REFERENCES basna_sessions(id) ON DELETE CASCADE,
+                subtask_id    TEXT NOT NULL DEFAULT '',
+                archetype_id  TEXT NOT NULL DEFAULT '',
+                role          TEXT NOT NULL DEFAULT '',
+                weight        REAL NOT NULL DEFAULT 0.0,
+                output        TEXT NOT NULL DEFAULT '',
+                produced_file INTEGER NOT NULL DEFAULT 0,
+                status        TEXT NOT NULL DEFAULT 'done',  -- done|failed|skipped
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                UNIQUE (session_id, subtask_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_vatra_runs_session
+                ON vatra_runs(session_id);
+
             -- Basna/Vatra projects: a bundle of runs sharing one theme (description +
             -- instructions injected into each run) and one read-only VFS folder
             -- (uploads, auto-added as a reference folder). Runs stay independent —
@@ -1314,6 +1336,44 @@ class FlightDeckDB:
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(max(1, int(limit)))
         async with self._db.execute(sql, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    # ── Vatra resume checkpoints (per-owner slice, restored on resume) ─
+
+    async def save_vatra_run(
+        self, session_id: str, subtask_id: str, archetype_id: str, role: str,
+        weight: float, output: str, produced_file: bool, status: str = "done",
+    ) -> None:
+        """Persist (UPSERT) one owner's finished slice as a resume checkpoint.
+
+        Keyed on (session_id, subtask_id) so re-dispatching the same owner (on a
+        resume, or across the main/finalize passes) overwrites its checkpoint in
+        place rather than accumulating rows. Called from the run coroutine, which
+        has already ownership-checked the session — no user_id gate here."""
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.execute(
+            "INSERT INTO vatra_runs"
+            " (session_id, subtask_id, archetype_id, role, weight, output,"
+            "  produced_file, status, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(session_id, subtask_id) DO UPDATE SET"
+            "  archetype_id = excluded.archetype_id, role = excluded.role,"
+            "  weight = excluded.weight, output = excluded.output,"
+            "  produced_file = excluded.produced_file, status = excluded.status,"
+            "  updated_at = excluded.updated_at",
+            (session_id, subtask_id, archetype_id, role, float(weight or 0.0),
+             output or "", 1 if produced_file else 0, status, now, now),
+        )
+        await self._db.commit()
+
+    async def list_vatra_runs(self, session_id: str) -> list[dict]:
+        """All resume checkpoints for a session, oldest-first."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM vatra_runs WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
     # ── Archetype reliability (learned routing weights) ──────────────

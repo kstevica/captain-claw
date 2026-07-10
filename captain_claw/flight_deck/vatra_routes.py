@@ -714,6 +714,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     except json.JSONDecodeError:
         cfg = {}
     max_agents = int(cfg.get("max_agents") or 6)
+    # Resume mode: restore already-finished owners from their durable checkpoints
+    # (no re-run, no re-spend) and re-dispatch only the missing ones. Checkpoints are
+    # loaded once the plan's subtask ids are known (below); this flag also skips the
+    # folder backup + intro/review refinement rounds so a resume just fills the gaps.
+    _resume = bool(getattr(body, "resume", False))
+    _resume_ckpt: dict[str, dict] = {}
     # Opt-in quality profile (request override → session config → all-off).
     quality = QualityProfile.from_dict(
         body.quality if body.quality is not None else cfg.get("quality"))
@@ -816,12 +822,26 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # ({"A": "...", "B": "..."}), injected into every owner that runs in that group.
     _group_instructions = route.get("group_instructions") or {}
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
+    # Resume: load the per-owner checkpoints written by the stalled run. Owners with
+    # a `done` checkpoint are restored in _dispatch_owner (skipped, no re-spend); the
+    # rest re-dispatch normally and re-checkpoint as they finish.
+    if _resume:
+        try:
+            _resume_ckpt = {r["subtask_id"]: r for r in await db.list_vatra_runs(sid)
+                            if r.get("subtask_id")}
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra resume: checkpoint load failed", error=str(e))
+        _n_done = sum(1 for r in _resume_ckpt.values() if r.get("status") == "done")
+        _n_todo = max(0, len(subtasks) - _n_done)
+        _progress(sid, "note",
+                  f"Resuming — restoring {_n_done} finished owner(s) from checkpoint, "
+                  f"re-running {_n_todo}")
     _wait_ledger[sid] = {}  # fresh per-owner wait budget for this run (defensive vs same-session re-run)
     # Protect existing files: a FRESH run reusing a non-empty folder snapshots it
     # into .history/ before any write (continuation rounds accumulate → skip; a
     # shared-datastore run is the resumable "continue in this folder" pattern →
     # skip the full-folder backup, it accumulates by design).
-    if not cfg.get("parent_session_id") and not _shared_ds:
+    if not cfg.get("parent_session_id") and not _shared_ds and not _resume:
         try:
             from captain_claw.flight_deck.vfs_routes import snapshot_existing_project
             _snap = snapshot_existing_project(user["id"], vfs_project, f"{int(time.time())}-{sid[:8]}")
@@ -1050,6 +1070,17 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             arch, st = sp["arch"], sp["subtask"]
             role = arch.get("role") or arch["id"]
             label = _owner_label(sp)
+            # Resume: this owner already finished in the stalled run — restore its
+            # slice from the checkpoint instead of spending tokens to redo it.
+            if _resume:
+                ck = _resume_ckpt.get(st["id"])
+                if ck and ck.get("status") == "done":
+                    _progress(sid, "dispatch",
+                              f"{label} ✓ · restored from checkpoint (skipped re-run)",
+                              ok=True, agent=label, **_gx(st["id"]))
+                    return {"ok": True, "output": ck.get("output", ""), "actions": [],
+                            "latency_ms": 0, "restored": True,
+                            "produced_file": bool(ck.get("produced_file"))}
             on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
@@ -1110,13 +1141,23 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                                                    st["title"], out[:_BOARD_CONTENT_CAP])
                 except Exception as e:
                     log.debug("Vatra board output write failed", error=str(e))
+            # Durable resume checkpoint — written the moment this owner finishes, so a
+            # process death mid-run still leaves it restorable. The finalize pass below
+            # re-saves it with any captured-file text merged in (idempotent UPSERT).
+            try:
+                await get_db().save_vatra_run(
+                    sid, st["id"], arch["id"], role,
+                    weight=float(seeds.get(arch["id"], 0.7)), output=out,
+                    produced_file=False, status="done" if d.get("ok") else "failed")
+            except Exception as e:
+                log.debug("Vatra checkpoint save failed", error=str(e))
             return d
 
         # 2c) Intro round — before the real work, each specialist does PREPARATION
         # (groundwork: key facts, sources, outline) and posts it to the shared board.
         # This is a barrier: the main round starts only once ALL intros finish, so the
         # board is already populated and the main round is collaborative, not blind.
-        if not grouped and bool(cfg.get("intro_round", True)) and len(spawned) >= 2:
+        if not grouped and not _resume and bool(cfg.get("intro_round", True)) and len(spawned) >= 2:
             _phase(sid, "Intro round")
             _progress(sid, "intro", "Intro round — each specialist preparing groundwork…")
 
@@ -1319,7 +1360,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         # align, and fill gaps now that they can see the whole team's work. This is
         # where the real collaboration happens: in round 1 owners are blind to each
         # other; here each one revises against the full picture before assembly.
-        if not grouped and bool(cfg.get("review_round", True)):
+        if not grouped and not _resume and bool(cfg.get("review_round", True)):
             r1 = [(i, sp) for i, sp in enumerate(spawned)
                   if (results[i].get("ok") or results[i].get("produced_file"))
                   and (results[i].get("output") or "").strip()]
@@ -1390,6 +1431,17 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             if r is not None and not (r.get("output") or "").strip() and text:
                 r["output"] = text
                 r["produced_file"] = True
+            # Refresh the resume checkpoint with the finalized slice (now that any
+            # file-only owner's captured text is merged into r["output"]).
+            if r is not None:
+                try:
+                    await get_db().save_vatra_run(
+                        sid, r["id"], r.get("owner", ""), r.get("role", ""),
+                        weight=float(seeds.get(r.get("owner", ""), 0.7)),
+                        output=r.get("output", ""), produced_file=bool(r.get("produced_file")),
+                        status="done" if (r.get("ok") or r.get("produced_file")) else "failed")
+                except Exception as e:  # noqa: BLE001
+                    log.debug("Vatra checkpoint finalize failed", error=str(e))
     finally:
         _teardown([sp["slug"] for sp in spawned])
         _run_workers.pop(sid, None)
@@ -2705,6 +2757,67 @@ async def execute_vatra_ui(body: VatraExecuteRequest, request: Request,
     _basna_agent_tasks.add(t)
     t.add_done_callback(_basna_agent_tasks.discard)
     return {"session_id": body.session_id, "status": "running"}
+
+
+async def launch_vatra_resume(
+    session_id: str, user: dict, *, tiers: dict | None = None,
+    env_vars: list | None = None, api_key: str = "", horizon: dict | None = None,
+    max_parallel: int = 0, execution_groups: bool = False,
+) -> dict:
+    """Resume a stalled/cancelled Vatra run in the background — shared by the UI
+    endpoint and the agent/tool entry.
+
+    Restores every owner that already finished (from `vatra_runs` — no re-run, no
+    re-spend), re-dispatches only the missing ones, then synthesizes. Reuses the
+    persisted plan (same cast) + the same VFS folder + blackboard; run knobs
+    (grouped, parallelism, datastore, folder) come from the session config so the
+    resumed flow matches the original. Any workers still alive are torn down first
+    so a single coroutine owns the session."""
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if (sess.get("status") or "") == "done" and (sess.get("truth") or "").strip():
+        raise HTTPException(400, "session already completed — nothing to resume")
+    try:
+        cfg = json.loads(sess.get("config") or "{}")
+    except json.JSONDecodeError:
+        cfg = {}
+    try:
+        from captain_claw.flight_deck.basna_routes import _cancel_basna_run
+        await _cancel_basna_run(session_id, user["id"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("Vatra resume: pre-cancel failed", session_id=session_id, error=str(e))
+    exec_req = ExecuteRequest(
+        session_id=session_id, tiers=tiers or None,
+        env_vars=env_vars or None, api_key=api_key or "",
+        horizon=horizon or None,
+        max_parallel=int(cfg.get("max_parallel") or max_parallel or 0),
+        execution_groups=bool(cfg.get("execution_groups") or execution_groups),
+        shared_datastore=bool(cfg.get("shared_datastore")),
+        vfs_project=cfg.get("vfs_project") or "",
+        resume=True)
+    stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
+    t = asyncio.create_task(execute_vatra(exec_req, stub, user))
+    _basna_agent_tasks.add(t)
+    _agent_run_tasks[session_id] = t
+    def _clear(_t: asyncio.Task, _sid: str = session_id) -> None:
+        _basna_agent_tasks.discard(_t)
+        _agent_run_tasks.pop(_sid, None)
+    t.add_done_callback(_clear)
+    return {"session_id": session_id, "status": "running", "resumed": True}
+
+
+@router.post("/sessions/{session_id}/resume")
+async def resume_vatra(
+    session_id: str, body: VatraExecuteRequest,
+    user: dict = Depends(get_current_user),
+):
+    """UI entry: resume a stalled/cancelled Vatra run from its durable checkpoints."""
+    return await launch_vatra_resume(
+        session_id, user, tiers=body.tiers, env_vars=body.env_vars,
+        api_key=body.api_key, horizon=body.horizon,
+        max_parallel=body.max_parallel, execution_groups=body.execution_groups)
 
 
 @router.post("/start")
