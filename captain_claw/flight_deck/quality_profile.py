@@ -14,6 +14,14 @@ budget, so nothing new runs and nothing extra is spent. That is what makes it
 impossible for these additions to regress the existing Code / Basna / Vatra
 behaviour or to inflate token spend unless a human explicitly opts in.
 
+ONE deliberate, documented exception (locked 2026-07-10, see
+docs/vatra-quality-tightening-plan.md): ``honesty_guard`` defaults to **True**.
+It is free and prompt-only — it appends the anti-fabrication directives to
+research workers, the Vatra reporter, and the Basna synthesizer. An explicit
+``{"honesty_guard": false}`` restores the pre-guard prompts byte-for-byte. It is
+independent of presets and deliberately excluded from ``any_enabled`` (which
+keeps meaning "any opt-in lever on").
+
 It rides in the same session/project ``config`` JSON as ``HorizonConfig`` (under
 a ``quality`` key), so wiring it needs no DB migration.
 
@@ -103,6 +111,10 @@ class QualityProfile:
     rubric_contract: bool = False  # R9: derive a completeness checklist + score coverage against it
     intent_brief: bool = False     # R12: clarify the task into an editable brief before routing
 
+    # ── Calibration posture (default-on guard + user-selectable mode) ──
+    honesty_guard: bool = True     # anti-fabrication directives; the ONE default-on flag
+    output_mode: str = ""          # "" (today) | "complete" | "conservative"
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     deep_build_samples: int = 2    # C3 pool size — kept small on purpose
@@ -130,6 +142,16 @@ class QualityProfile:
         kw: dict = {"profile": profile}
         for name in bool_flags:
             kw[name] = bool(d[name]) if name in d else (name in on)
+
+        # honesty_guard is the one default-ON flag: presets never touch it, only
+        # an explicit key flips it (false → pre-guard prompts, byte-for-byte).
+        kw["honesty_guard"] = bool(d["honesty_guard"]) if "honesty_guard" in d else True
+
+        mode = str(d.get("output_mode") or "").lower()
+        if mode not in ("", "complete", "conservative"):
+            log.warning("unknown output_mode; ignoring", output_mode=mode)
+            mode = ""
+        kw["output_mode"] = mode
 
         def _int(key: str, default: int) -> int:
             # Use the default only when the key is ABSENT — an explicit 0/-1 must
@@ -306,10 +328,12 @@ JUDGMENT_LEDGER_DIRECTIVE = (
 # completeness states a specific it cannot support — a named individual, a
 # role-holder, an origin, an exact figure or attribution — as established fact.
 # The careful-model behaviour is to keep such a claim qualified. This is a free,
-# prompt-only guard that ships WITH the judgment ledger (R11), because it is the
-# same discipline pointed the other way: the ledger stops hedging-by-omission;
-# this stops asserting-by-invention. Deliberately domain-agnostic — it names a
-# CLASS of specific (any named office-holder), never a particular field.
+# prompt-only guard, ON by default via ``honesty_guard`` (the pipeline's own
+# completeness pressure is always on, so the counterweight must be too; an
+# explicit ``honesty_guard: false`` restores the old prompts). It complements
+# the judgment ledger (R11): the ledger stops hedging-by-omission; this stops
+# asserting-by-invention. Deliberately domain-agnostic — it names a CLASS of
+# specific (any named office-holder), never a particular field.
 
 UNVERIFIED_GUARD_DIRECTIVE = (
     "\n\nDO NOT ASSERT THE UNCONFIRMABLE: state a specific as established fact ONLY "
@@ -320,8 +344,66 @@ UNVERIFIED_GUARD_DIRECTIVE = (
     "(\"unconfirmed\", \"not independently verified\", \"reportedly\", or attributed to "
     "whoever claims it) or leave it out. Completeness never justifies inventing a "
     "specific: if no source names the holder of a role, write that the role is "
-    "unconfirmed rather than supplying a name."
+    "unconfirmed rather than supplying a name.\n"
+    "PLACEHOLDERS & ESTIMATES: a fact only the requester can supply (their internal "
+    "data, identifiers, financials, decisions) is never guessed — write "
+    "[TO BE PROVIDED: <what>] so it is findable. Estimates are welcome but must be "
+    "labeled with their basis: \"(estimate — basis: <one line>)\". Never invent an "
+    "identifier, name, figure, or third-party entity to make a section look "
+    "finished — a correct placeholder beats a plausible fabrication."
 )
+
+# ── Reporter/synthesis honesty overlay ─────────────────────────────────
+# The assembly prompts push "resolve it and move on" ("don't narrate the
+# disagreement", "finish it — completely") — exactly the pressure that converts a
+# team's honest uncertainty into one confident wrong answer. This overlay is the
+# exception clause: resolve what the evidence resolves, and surface what it
+# doesn't in ONE labeled section instead of absorbing it silently. Appended at
+# runtime when ``honesty_guard`` is on — the template files are not edited, so
+# turning the guard off restores the original assembly prompts byte-for-byte.
+
+REPORTER_HONESTY_DIRECTIVE = (
+    "\n\nUNRESOLVED & ASSUMPTIONS: reconcile what the evidence actually resolves. "
+    "When contributions contradict each other and the evidence does NOT settle it, "
+    "or a part rests on an assumption, a labeled estimate, or a "
+    "[TO BE PROVIDED: …] placeholder, make the best-supported call in the body "
+    "text AND record it in a short final **Unresolved & assumptions** section — "
+    "the item, the call you made, and what would confirm it. Do not silently "
+    "absorb disagreements between specialists, and never pad a section with "
+    "invented specifics to look finished. If nothing is unresolved, omit the "
+    "section entirely."
+)
+
+# ── Output modes: the completeness-vs-correctness trade, user-selectable ─
+# ``output_mode`` makes the scaffold's posture explicit instead of implicit:
+# "conservative" is a review copy (fabricates nothing, reports what is unfilled),
+# "complete" is a full draft (maximal coverage, every unknown labeled). The empty
+# default emits nothing — today's behaviour.
+
+CONSERVATIVE_MODE_DIRECTIVE = (
+    "\n\nOUTPUT MODE — REVIEW COPY: correctness outranks completeness. State as "
+    "fact only what a source or the given inputs support; everything else is a "
+    "labeled estimate or a [TO BE PROVIDED: …] placeholder. Do not stretch thin "
+    "evidence to fill a section — a shorter, verifiable deliverable is the goal, "
+    "and unfilled items are reported openly, not hidden."
+)
+
+COMPLETE_MODE_DIRECTIVE = (
+    "\n\nOUTPUT MODE — FULL DRAFT: deliver the most complete draft you can. Cover "
+    "every part of the task; where a needed fact is unknown, keep momentum with a "
+    "labeled estimate (\"estimate — basis: …\") or a [TO BE PROVIDED: …] "
+    "placeholder rather than stopping — but completeness never justifies stating "
+    "an unverified specific as fact."
+)
+
+
+def output_mode_directive(mode: str) -> str:
+    """The prompt block for an ``output_mode`` value ("" → nothing, i.e. today)."""
+    if mode == "conservative":
+        return CONSERVATIVE_MODE_DIRECTIVE
+    if mode == "complete":
+        return COMPLETE_MODE_DIRECTIVE
+    return ""
 
 
 # ── R10: source corpus directive (paired with the web_fetch behaviour) ─

@@ -84,11 +84,13 @@ from captain_claw.flight_deck.quality_profile import (
     ESCALATE_CORRECTIVE,
     ESCALATE_DIRECTIVE,
     JUDGMENT_LEDGER_DIRECTIVE,
+    REPORTER_HONESTY_DIRECTIVE,
     SOURCE_CORPUS_DIRECTIVE,
     UNVERIFIED_GUARD_DIRECTIVE,
     QualityProfile,
     TokenBudget,
     escalate_reason,
+    output_mode_directive,
     worker_produced_nothing,
 )
 from captain_claw.logging import get_logger
@@ -910,13 +912,19 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         except Exception as e:  # noqa: BLE001 — rubric is best-effort
             log.warning("Vatra rubric derivation failed", error=str(e))
 
-    # R11 honesty guard (opt-in, prompt-only, free): ships with the judgment
-    # ledger. Injected via shared_context so it binds every owner AND the reporter
-    # — the reporter especially, since a fabricated specific lands in the FINAL
-    # deliverable. This is the prevention half of R8's cure (assert nothing you
-    # can't support); R8's fact-checker is the detection half behind it.
-    if quality.judgment_ledger:
+    # Honesty guard (prompt-only, free, ON by default — explicit
+    # honesty_guard:false restores the old prompts). Injected via shared_context
+    # so it binds every owner AND the reporter — the reporter especially, since a
+    # fabricated specific lands in the FINAL deliverable. This is the prevention
+    # half of R8's cure (assert nothing you can't support); R8's fact-checker is
+    # the detection half behind it.
+    if quality.honesty_guard:
         shared_context = (shared_context + UNVERIFIED_GUARD_DIRECTIVE).strip()
+    # Output mode (user-selectable completeness-vs-correctness posture): same
+    # injection point, so owners and the reporter share one posture.
+    _mode_dir = output_mode_directive(quality.output_mode)
+    if _mode_dir:
+        shared_context = (shared_context + _mode_dir).strip()
 
     # R1 Research Map (opt-in): index the shared folder so owners AND the reporter
     # can search prior rounds' material instead of re-reading it (and the reporter
@@ -1506,6 +1514,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         dest_dir=dest_dir, seen_gen=seen_gen, answered_asks=answered,
         shared_context=shared_context, research_dir=research_dir,
         corpus=quality.source_corpus,  # R10
+        honesty=quality.honesty_guard,
     )
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
@@ -1966,7 +1975,8 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                         answered_asks: list[dict] | None = None,
                         shared_context: str = "",
                         research_dir: Path | None = None,
-                        corpus: bool = False) -> tuple[str, list[dict]]:
+                        corpus: bool = False,
+                        honesty: bool = False) -> tuple[str, list[dict]]:
     """Spawn a dedicated reporter, feed it the slices (plus any answered cross-agent
     asks), and capture the assembled deliverable. Falls back to a labeled
     concatenation if the reporter fails."""
@@ -2041,6 +2051,12 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                        "Keep the final deliverable fully consistent with these (the pieces should "
                        "already follow them; enforce it if any drifted):\n"
                        f"{shared_context.strip()}\n")
+        # Honesty overlay: the exception clause to reporter.md's "resolve it and
+        # don't narrate the disagreement" — genuinely unresolved conflicts and
+        # assumptions surface in one labeled section instead of being absorbed.
+        # Appended at runtime so honesty_guard:false keeps reporter.md verbatim.
+        if honesty:
+            prompt += REPORTER_HONESTY_DIRECTIVE
         prompt += _vfs_directive(_vfs_project(sid))
 
         def _on_action(act: dict) -> None:

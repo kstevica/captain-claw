@@ -51,11 +51,13 @@ from captain_claw.flight_deck.quality_profile import (
     ESCALATE_CORRECTIVE,
     ESCALATE_DIRECTIVE,
     JUDGMENT_LEDGER_DIRECTIVE,
+    REPORTER_HONESTY_DIRECTIVE,
     SOURCE_CORPUS_DIRECTIVE,
     UNVERIFIED_GUARD_DIRECTIVE,
     QualityProfile,
     TokenBudget,
     escalate_reason,
+    output_mode_directive,
     worker_produced_nothing,
 )
 from captain_claw.logging import get_logger
@@ -2029,22 +2031,32 @@ async def _llm_conflict(good: list[dict], creds: dict) -> bool:
         return False
 
 
-async def _llm_synthesize(good: list[dict], domain: str, creds: dict) -> str:
+async def _llm_synthesize(
+    good: list[dict], domain: str, creds: dict, *,
+    honesty: bool = False, output_mode: str = "",
+) -> str:
     """Reason-tier reconciliation of disagreeing answers, trusting weight."""
     from captain_claw.llm import Message
     listing = "\n\n".join(
         f"### {r['role']} (reliability weight {r['weight']:.2f})\n{r['output'].strip()}"
         for r in good
     )
+    system = (
+        f"Independent specialists gave conflicting answers in the {domain} domain. "
+        "Reconcile them into one correct, complete answer — do not truncate or "
+        "abbreviate; if the inputs are long documents, produce the full merged "
+        "document. Weigh higher-reliability contributors more, but follow the "
+        "evidence over the weight when a lower-weighted contributor is clearly "
+        "right. State the resolved answer directly; do not narrate the disagreement.")
+    # Honesty overlay: the exception clause to "do not narrate the disagreement" —
+    # genuinely unresolved conflicts surface in one labeled section instead of
+    # being silently absorbed into a confident pick.
+    if honesty:
+        system += REPORTER_HONESTY_DIRECTIVE
+    system += output_mode_directive(output_mode)
     prov, mt = _provider_call(creds, temperature=0.3, default_max=8192, cap=32768)
     resp = await prov.complete(messages=[
-        Message(role="system", content=(
-            f"Independent specialists gave conflicting answers in the {domain} domain. "
-            "Reconcile them into one correct, complete answer — do not truncate or "
-            "abbreviate; if the inputs are long documents, produce the full merged "
-            "document. Weigh higher-reliability contributors more, but follow the "
-            "evidence over the weight when a lower-weighted contributor is clearly "
-            "right. State the resolved answer directly; do not narrate the disagreement.")),
+        Message(role="system", content=system),
         Message(role="user", content=listing),
     ], temperature=0.3, max_tokens=mt)
     return resp.content.strip()
@@ -3229,7 +3241,12 @@ async def execute_route(
                 if quality.worker_escalate:
                     base_prompt += ESCALATE_DIRECTIVE
                 if quality.judgment_ledger:
-                    base_prompt += JUDGMENT_LEDGER_DIRECTIVE + UNVERIFIED_GUARD_DIRECTIVE
+                    base_prompt += JUDGMENT_LEDGER_DIRECTIVE
+                # Honesty guard: independent of the ledger, ON unless explicitly
+                # disabled — the anti-fabrication counterweight to "fill your slice".
+                if quality.honesty_guard:
+                    base_prompt += UNVERIFIED_GUARD_DIRECTIVE
+                base_prompt += output_mode_directive(quality.output_mode)
                 if quality.source_corpus:
                     base_prompt += SOURCE_CORPUS_DIRECTIVE
                 d = await _dispatch_one(
@@ -3404,7 +3421,9 @@ async def execute_route(
     agg = await _aggregate(
         results, merge_kind, domain,
         conflict_fn=lambda good: asyncio.wait_for(_llm_conflict(good, _merge_creds("fast")), _MERGE_TIMEOUT),
-        synth_fn=lambda good: asyncio.wait_for(_llm_synthesize(good, domain, _merge_creds("reason")), _SYNTH_TIMEOUT),
+        synth_fn=lambda good: asyncio.wait_for(_llm_synthesize(
+            good, domain, _merge_creds("reason"),
+            honesty=quality.honesty_guard, output_mode=quality.output_mode), _SYNTH_TIMEOUT),
     )
     _progress(sid, "merge", f"Merged via {agg['method']} · confidence {agg['confidence']:.0%}")
 
@@ -4000,10 +4019,18 @@ async def recompile_route(
             files_out.append({"name": p.name, "mime": _guess_mime(p.name),
                               "size": p.stat().st_size, "kind": "generated"})
 
+    # The session's quality profile drives the synthesis posture here too (a
+    # recompiled merge should match what the original run would have produced).
+    try:
+        _q = QualityProfile.from_dict(json.loads(sess.get("config") or "{}").get("quality"))
+    except (TypeError, json.JSONDecodeError):
+        _q = QualityProfile.from_dict(None)
     agg = await _aggregate(
         results, merge_kind, domain,
         conflict_fn=lambda good: asyncio.wait_for(_llm_conflict(good, _merge_creds("fast")), _MERGE_TIMEOUT),
-        synth_fn=lambda good: asyncio.wait_for(_llm_synthesize(good, domain, _merge_creds("reason")), _SYNTH_TIMEOUT),
+        synth_fn=lambda good: asyncio.wait_for(_llm_synthesize(
+            good, domain, _merge_creds("reason"),
+            honesty=_q.honesty_guard, output_mode=_q.output_mode), _SYNTH_TIMEOUT),
     )
 
     # Run the analysis only if the session doesn't already have one.
