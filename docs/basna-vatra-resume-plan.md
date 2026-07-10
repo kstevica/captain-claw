@@ -88,9 +88,13 @@ synthesis). Restored owners spend zero tokens. The "$20 again" scenario doesn't 
   `ExecuteRequest.resume`; Vatra checkpoint writes + resume skip + gated
   backup/intro/review; Basna resume skip + aligned run-id save + score guard; both
   `/resume` endpoints. Verified: DB upsert idempotency + import/route registration.
-- **Phase 2 (surface).** Resume button on any non-`done` Basna/Vatra session
-  (VatraPage/BasnaPage) + store action; `resume` action on the `vatra`/`basna` tools;
-  FD bundle rebuild.
+- **Phase 2 (DONE — surface).** A "Resume" banner on any cancelled/errored
+  Basna/Vatra session (`BasnaPage`, which hosts both modes) + a `resumeSession` store
+  action (Basna inline like execute, Vatra backgrounded like runVatra; new `resuming`
+  flag). Agent/tool: a `resume` action on the `basna` tool → `POST
+  /fd/basna/agent/resume`, which routes to the Vatra or Basna resume by the run's mode
+  and backgrounds it. Vatra resume refactored to a shared `launch_vatra_resume` helper
+  used by both the UI and agent endpoints. FD bundle rebuilt + committed (tsc clean).
 
 ## Follow-ups / known limits (Phase 2+)
 
