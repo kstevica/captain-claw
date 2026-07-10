@@ -145,3 +145,119 @@ def test_lead_prompt_teaches_the_optional_group_field():
     assert "optional" in lo                     # framed as optional, not mandatory
     assert '"a"' in lo and '"d"' in lo          # names the A..D letter scale
     assert "later" in lo                        # the push-later-only rule
+
+
+# ── dependency repair (resolve_groups): deps out-rank floors + pushes ──
+# The observed failure: the Lead pushed the fact-checker (floor A) to group D
+# while the group-B data-analyst depends_on it — the analyst then waited at
+# runtime for output scheduled to be produced AFTER it.
+
+_ARCHS = {
+    "deep-researcher": {"id": "deep-researcher", "family": "Research"},
+    "fact-checker": {"id": "fact-checker", "role": "Fact Checker"},
+    "data-analyst": {"id": "data-analyst", "role": "Data Analyst"},
+    "editor-writer": {"id": "editor-writer", "role": "Editor"},
+}
+
+
+def _st(sid, owner, deps=(), group=None, title=""):
+    s = {"id": sid, "owner_archetype_id": owner, "title": title or sid,
+         "brief": "x", "depends_on": list(deps)}
+    if group is not None:
+        s["group"] = group
+    return s
+
+
+def test_repair_pulls_a_pushed_dependency_back_to_its_dependent():
+    subtasks = [
+        _st("s1", "deep-researcher"),                       # A
+        _st("s2", "fact-checker", group="D"),               # floor A, pushed D
+        _st("s3", "data-analyst", deps=["s1", "s2"]),       # B — needs s2!
+    ]
+    notes = g.resolve_groups(subtasks, _ARCHS)
+    by_id = {s["id"]: s for s in subtasks}
+    assert by_id["s2"]["group_resolved"] == "B"   # pulled D → B (joins its dependent)
+    assert by_id["s3"]["group_resolved"] == "B"
+    assert by_id["s1"]["group_resolved"] == "A"
+    assert notes and "s2" in notes[0] and "s3" in notes[0]
+    # effective_group honors the pin — even though the Lead push said D.
+    assert g.effective_group(by_id["s2"], _ARCHS["fact-checker"]) == 2
+
+
+def test_repair_cascades_down_a_dependency_chain():
+    subtasks = [
+        _st("s1", "editor-writer", group="D"),              # pushed D
+        _st("s2", "editor-writer", deps=["s1"], group="C"),  # pushed C, needs s1
+        _st("s3", "data-analyst", deps=["s2"]),             # B, needs s2
+    ]
+    g.resolve_groups(subtasks, _ARCHS)
+    got = {s["id"]: s["group_resolved"] for s in subtasks}
+    assert got == {"s1": "B", "s2": "B", "s3": "B"}
+
+
+def test_repair_is_a_noop_when_order_is_already_right():
+    subtasks = [
+        _st("s1", "deep-researcher"),
+        _st("s2", "data-analyst", deps=["s1"]),
+    ]
+    assert g.resolve_groups(subtasks, _ARCHS) == []
+    assert [s["group_resolved"] for s in subtasks] == ["A", "B"]
+
+
+def test_repair_is_idempotent_and_cycle_safe():
+    subtasks = [
+        _st("s1", "data-analyst", deps=["s2"]),
+        _st("s2", "editor-writer", deps=["s1"], group="D"),
+    ]
+    g.resolve_groups(subtasks, _ARCHS)
+    first = [s["group_resolved"] for s in subtasks]
+    g.resolve_groups(subtasks, _ARCHS)   # re-run on already-pinned plan
+    assert [s["group_resolved"] for s in subtasks] == first == ["B", "B"]
+
+
+# ── schedule awareness: worker brief block + wait-query matching ──────
+
+_SCHED = {
+    "current": 2,
+    "done": {"s1"},
+    "owners": [
+        {"subtask": "s1", "arch": "deep-researcher", "role": "Deep Researcher",
+         "title": "Form Map", "group": 1},
+        {"subtask": "s3", "arch": "data-analyst", "role": "Data Analyst",
+         "title": "Quantitative Data", "group": 2},
+        {"subtask": "s2", "arch": "fact-checker", "role": "Fact Checker",
+         "title": "Verify One-Pager", "group": 4},
+    ],
+}
+
+
+def test_schedule_block_tells_a_worker_the_three_buckets():
+    block = g.schedule_block("s3", _SCHED)
+    assert "Already FINISHED" in block and "Deep Researcher" in block
+    assert "Runs AFTER you" in block and "Fact Checker" in block
+    assert "NEVER wait for it" in block
+    assert "Data Analyst" not in block  # never lists the worker itself
+
+
+def test_schedule_block_empty_for_a_solo_roster():
+    solo = {"current": 1, "done": set(),
+            "owners": [{"subtask": "s3", "arch": "a", "role": "", "title": "", "group": 1}]}
+    assert g.schedule_block("s3", solo) == ""
+
+
+def test_match_later_owner_catches_the_observed_wait_query():
+    # The exact query from the run log that burned 90s.
+    hit = g.match_later_owner("fact-checker verified company data SignificoAI", _SCHED)
+    assert hit is not None and hit["subtask"] == "s2"
+    # Role phrasing (spaces instead of the hyphenated id) also matches.
+    assert g.match_later_owner("waiting for the Fact Checker output", _SCHED)["subtask"] == "s2"
+
+
+def test_match_later_owner_is_conservative():
+    # Finished or concurrent owners never match — a live wait on them is fine.
+    assert g.match_later_owner("deep-researcher form map", _SCHED) is None
+    assert g.match_later_owner("data-analyst numbers", _SCHED) is None
+    # Unattributable queries pass through to the normal wait.
+    assert g.match_later_owner("application form structure extracted", _SCHED) is None
+    assert g.match_later_owner("", _SCHED) is None
+    assert g.match_later_owner("fact-checker data", {}) is None

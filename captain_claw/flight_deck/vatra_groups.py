@@ -83,11 +83,56 @@ def archetype_group(arch: dict) -> int:
 
 
 def effective_group(subtask: dict, arch: dict) -> int:
-    """The group a subtask actually runs in: the archetype FLOOR, raised (never
+    """The group a subtask actually runs in.
+
+    A ``group_resolved`` pin (set once at plan normalization by
+    :func:`resolve_groups`, after dependency repair) is absolute — it may sit
+    BELOW the archetype floor, because a recorded dependency out-ranks both the
+    floor and a Lead push. Without a pin: the archetype FLOOR, raised (never
     lowered) by an optional Lead-assigned ``group`` on the subtask."""
+    pinned = _parse_group((subtask or {}).get("group_resolved"))
+    if pinned is not None:
+        return pinned
     floor = archetype_group(arch)
     lead = _parse_group((subtask or {}).get("group"))
     return max(floor, lead) if lead is not None else floor
+
+
+def resolve_groups(subtasks: list[dict], arch_by_id: dict) -> list[str]:
+    """Pin every subtask's final execution group, repairing dependency inversions.
+
+    The observed failure: the Lead pushes a piece to a late group (fact-checker
+    → D) while an EARLIER piece records ``depends_on`` it — the dependent then
+    waits at runtime for output that is scheduled to be produced after it, which
+    can never arrive. Dependencies are the ground truth about data flow, so they
+    out-rank archetype floors and Lead pushes: a violated dependency is pulled
+    into its dependent's group (same wave — the live board/wait covers a
+    same-group hand-off). Ordinals only ever move down, so this terminates even
+    on a (nonsensical) dependency cycle; the pass cap is belt-and-braces.
+
+    Mutates each subtask, setting ``group_resolved`` ('A'..'D').
+    Returns human-readable notes describing any repairs, for the run log."""
+    eff: dict[str, int] = {}
+    for s in subtasks or []:
+        arch = (arch_by_id or {}).get(str(s.get("owner_archetype_id") or ""), {})
+        s.pop("group_resolved", None)  # re-resolve from scratch (idempotent)
+        eff[s["id"]] = effective_group(s, arch)
+    notes: list[str] = []
+    for _ in range(len(subtasks or []) + 1):
+        moved = False
+        for s in subtasks or []:
+            for dep in s.get("depends_on") or []:
+                if dep in eff and eff[dep] > eff[s["id"]]:
+                    notes.append(
+                        f"{dep} pulled {group_label(eff[dep])}→{group_label(eff[s['id']])} "
+                        f"— {s['id']} depends on its output")
+                    eff[dep] = eff[s["id"]]
+                    moved = True
+        if not moved:
+            break
+    for s in subtasks or []:
+        s["group_resolved"] = group_label(eff[s["id"]])
+    return notes
 
 
 def clamp_lead_group(subtask_group, floor: int) -> int | None:
@@ -102,6 +147,76 @@ def clamp_lead_group(subtask_group, floor: int) -> int | None:
 def order_groups(ordinals) -> list[int]:
     """The distinct groups a team uses, ascending — the phases to run in order."""
     return sorted({int(o) for o in ordinals})
+
+
+# ── Schedule awareness (workers must know who has run and who hasn't) ──
+# The observed failure: a group-B worker spends its wait budget on a group-D
+# teammate's output — which cannot arrive, because D runs after B. Workers get
+# the schedule in their brief, and the wait endpoint refuses instantly when the
+# target provably hasn't started.
+
+def schedule_block(subtask_id: str, schedule: dict) -> str:
+    """The worker-facing schedule block for a grouped run: who already finished,
+    who runs WITH you, who runs AFTER you (never wait on those).
+
+    ``schedule`` = {"current": ordinal, "done": set[subtask_id],
+    "owners": [{"subtask", "arch", "role", "title", "group"}]}."""
+    owners = [o for o in (schedule or {}).get("owners") or []
+              if o.get("subtask") != subtask_id]
+    if not owners:
+        return ""
+    current = int((schedule or {}).get("current") or 0)
+    done_ids = (schedule or {}).get("done") or set()
+
+    def _name(o: dict) -> str:
+        label = o.get("role") or o.get("arch") or "teammate"
+        title = str(o.get("title") or "")[:60]
+        return f"{label} ({title})" if title else str(label)
+
+    finished = [o for o in owners if o["subtask"] in done_ids]
+    with_you = [o for o in owners
+                if o["subtask"] not in done_ids and int(o["group"]) <= current]
+    later = [o for o in owners
+             if o["subtask"] not in done_ids and int(o["group"]) > current]
+    lines = ["\n\nTEAM SCHEDULE — the team runs in ordered phases:"]
+    if finished:
+        lines.append("- Already FINISHED (their work is on the board / in the shared "
+                     "folder — search it): " + "; ".join(_name(o) for o in finished))
+    if with_you:
+        lines.append("- Running WITH you now (their in-flight artifacts arrive on the "
+                     "board — `vatra wait` works for these): "
+                     + "; ".join(_name(o) for o in with_you))
+    if later:
+        lines.append("- Runs AFTER you — group " +
+                     ", ".join(f"{group_label(int(o['group']))}: {_name(o)}" for o in later)
+                     + ". Their output does NOT exist yet and CANNOT arrive while you "
+                       "run. NEVER wait for it — produce your part with what exists and "
+                       "mark anything they would have provided or verified as "
+                       "(unverified) so a later phase can settle it.")
+    return "\n".join(lines)
+
+
+def match_later_owner(query: str, schedule: dict) -> dict | None:
+    """The not-yet-started later-phase owner a wait query is about, or None.
+
+    Heuristic by design: workers name the role they're waiting on ("fact-checker
+    verified company data …"), so we match each later owner's archetype id and
+    role as a normalized phrase against the normalized query. Conservative — no
+    match means the wait proceeds normally."""
+    if not (query or "").strip() or not schedule:
+        return None
+    q = " " + re.sub(r"[^\w]+", " ", query.casefold()).strip() + " "
+    current = int(schedule.get("current") or 0)
+    done_ids = schedule.get("done") or set()
+    for o in schedule.get("owners") or []:
+        if int(o.get("group") or 0) <= current or o.get("subtask") in done_ids:
+            continue
+        phrases = {str(o.get("arch") or ""), str(o.get("role") or "")}
+        for p in phrases:
+            p = re.sub(r"[^\w]+", " ", p.casefold()).strip()
+            if p and f" {p} " in q:
+                return o
+    return None
 
 
 # ── Clarification loop (later-phase owner asks an earlier one for more) ──

@@ -145,6 +145,10 @@ _WAIT_CONTENT_CAP = 20_000  # chars of a ready file handed back to the waiter
 # Per-run, per-owner wait ledger (the "stack"): session_id -> owner -> {waited, attempts}.
 # Enforces the total budget so retries can never become an infinite loop; cleared on teardown.
 _wait_ledger: dict[str, dict[str, dict[str, float]]] = {}
+# Live grouped-run schedule per session — published by the run loop so worker-
+# facing endpoints (wait) can answer "has that teammate even started?".
+# sid → {"current": ordinal, "done": set[subtask_id], "owners": [...]}
+_group_schedule: dict[str, dict] = {}
 
 
 def _phase(sid: str, label: str, **extra) -> None:
@@ -371,9 +375,17 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
     valid_ids = {s["id"] for s in subtasks}
     for s in subtasks:
         s["depends_on"] = [d for d in s["depends_on"] if d in valid_ids and d != s["id"]]
+    # Pin final execution groups, repairing dependency inversions (a piece whose
+    # output another piece consumes must never be scheduled after it — a recorded
+    # dependency out-ranks archetype floors AND Lead pushes). Grouped mode reads
+    # the pins; ungrouped runs ignore them. Notes surface in the run log.
+    group_repairs = vatra_groups.resolve_groups(subtasks, arch_by_id)
+    for note in group_repairs:
+        log.info("Vatra group repair", note=note)
     return {"domain": domain, "rationale": str(raw.get("rationale") or "").strip(),
             "shared_context": str(raw.get("shared_context") or "").strip(),
-            "subtasks": subtasks}
+            "subtasks": subtasks,
+            "group_repairs": group_repairs}
 
 
 async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
@@ -1148,6 +1160,11 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 subtasks, shared_context, team_prep=intro_digest,
                 vfs_project=vfs_project)
             prompt += _group_instr_block(st, arch, _group_instructions)
+            # Grouped runs: tell the worker who already ran, who runs with it, and
+            # who runs AFTER it — so it never waits on output that can't arrive.
+            _sched = _group_schedule.get(sid)
+            if _sched:
+                prompt += vatra_groups.schedule_block(st["id"], _sched)
             prompt += _datastore_directive(vfs_project, _run_shared_datastore.get(sid, False))
             if quality.worker_escalate:
                 prompt += ESCALATE_DIRECTIVE
@@ -1278,6 +1295,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             # any Lead override), then run the DISTINCT groups ascending with a barrier
             # between them — so a later group already has everything earlier groups
             # posted. Within a group, owners run in parallel (Max-parallel gate applies).
+            # Re-pin groups against the CURRENT plan first (idempotent): a prepared or
+            # hand-edited route may predate the dependency-repair pins, and a recorded
+            # dependency must never be scheduled after its dependent.
+            for note in vatra_groups.resolve_groups(
+                    [sp["subtask"] for sp in spawned],
+                    {sp["arch"]["id"]: sp["arch"] for sp in spawned}):
+                _progress(sid, "main", f"Schedule repair: {note}")
             owner_group = {
                 id(sp): vatra_groups.effective_group(sp["subtask"], sp["arch"]) for sp in spawned}
             phases = vatra_groups.order_groups(owner_group.values())
@@ -1287,6 +1311,19 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             # Tag each owner's live-panel events with its phase letter (read by `_gx`).
             _owner_group.update({
                 sp["subtask"]["id"]: vatra_groups.group_label(owner_group[id(sp)]) for sp in spawned})
+            # Publish the live schedule so worker briefs + the wait endpoint know
+            # who has run, who runs now, and who runs later (fix for a worker
+            # burning its wait budget on a later-phase teammate's output).
+            _group_schedule[sid] = {
+                "current": int(first_phase or 0),
+                "done": set(),
+                "owners": [{
+                    "subtask": sp["subtask"]["id"], "arch": sp["arch"]["id"],
+                    "role": sp["arch"].get("role", ""),
+                    "title": sp["subtask"].get("title", ""),
+                    "group": int(owner_group[id(sp)]),
+                } for sp in spawned],
+            }
             results_by_id: dict[str, dict] = {}  # subtask id → its result (updated on re-run)
 
             async def _redispatch_owner(sp: dict, instruction: str, tag: str) -> dict:
@@ -1329,6 +1366,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             for p in phases:
                 grp = [sp for sp in spawned if owner_group[id(sp)] == p]
                 letter = vatra_groups.group_label(p)
+                if sid in _group_schedule:
+                    _group_schedule[sid]["current"] = int(p)
                 _phase(sid, f"Group {letter}")
                 _progress(sid, "main",
                           f"Group {letter} — {len(grp)} agent(s): "
@@ -1389,6 +1428,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                             "the shared board with the `vatra` tool, then finish your part "
                             "incorporating it. Output your full piece.", "clarify")
                 completed.extend(grp)
+                if sid in _group_schedule:
+                    _group_schedule[sid]["done"].update(sp["subtask"]["id"] for sp in grp)
         else:
             _phase(sid, "Main round")
             _progress(sid, "main", f"{len(spawned)} specialist(s) producing their pieces…")
@@ -1514,6 +1555,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _run_shared_datastore.pop(sid, None)
         _skip_agents.pop(sid, None)
         _wait_ledger.pop(sid, None)
+        _group_schedule.pop(sid, None)
 
     usable = [r for r in results if (r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip()]
     if not usable:
@@ -2681,6 +2723,30 @@ async def agent_wait(body: _VatraWaitReq):
             who = _role
     except Exception as e:  # noqa: BLE001 — label resolution is cosmetic
         log.debug("Vatra wait label resolve failed", error=str(e))
+
+    # Schedule guard (grouped runs): waiting on a teammate that runs in a LATER
+    # phase can never succeed — its group hasn't been dispatched yet. Refuse
+    # instantly (no wait-budget charge) with marching orders, instead of letting
+    # the worker burn 90s per attempt on output that cannot arrive.
+    sched = _group_schedule.get(body.session_id)
+    if sched and query:
+        later = vatra_groups.match_later_owner(query, sched)
+        if later is not None:
+            role = later.get("role") or later.get("arch") or "that teammate"
+            letter = vatra_groups.group_label(int(later.get("group") or 0))
+            _progress(body.session_id, "wait",
+                      f"⛔ {who} tried to wait on {role} — it runs LATER (group {letter}); "
+                      "refused instantly", agent=who, ok=False)
+            recent = await db.list_vatra_board(
+                body.session_id, limit=12, exclude_owner=body.owner or None)
+            return {"ready": False, "not_scheduled": True,
+                    "board": [_board_entry(e) for e in recent],
+                    "note": (f"{role} runs in a LATER phase (group {letter}) and has not "
+                             "started — its output CANNOT arrive while you run. Do NOT wait "
+                             "for it and do NOT retry this wait. Produce your part NOW from "
+                             "the board, the shared folder and the datastore, and mark "
+                             "anything it would have provided or verified as (unverified) "
+                             "so a later phase settles it.")}
 
     # Per-owner wait ledger — the loop backstop. Once an owner has spent its total
     # budget or attempt cap, stop waiting entirely and tell it to proceed. Enforced
