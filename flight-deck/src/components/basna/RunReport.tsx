@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
   AlertTriangle, Check, CornerDownRight, Download, FileText, Loader2,
-  RefreshCw, ScanSearch, ThumbsDown, ThumbsUp, Wrench, ClipboardList, ListTree, Activity, Database,
+  RefreshCw, ScanSearch, ShieldCheck, ThumbsDown, ThumbsUp, Wrench, ClipboardList, ListTree, Activity, Database,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -130,7 +130,7 @@ function OptionalInstructionBox({ placeholder, runLabel, icon: Icon, busy, onRun
   )
 }
 
-type TabId = 'report' | 'analysis' | 'gaps' | 'board' | 'files' | 'datastore' | 'agents' | 'log'
+type TabId = 'report' | 'analysis' | 'gaps' | 'quality' | 'board' | 'files' | 'datastore' | 'agents' | 'log'
 
 export interface ContinueOpts { instruction: string; kind: string; sameCast: boolean }
 
@@ -162,6 +162,11 @@ export function RunReport({
 }) {
   const hasAnalysis = !!analysis && !!(analysis.agreement?.length || analysis.differences?.length || analysis.unique?.length || analysis.blind_spots?.length)
   const hasGaps = vatraMode && !!analysis && !!(analysis.coverage_summary || analysis.gaps?.length)
+  const hasQuality = !!analysis && !!(analysis.quality_metrics || analysis.consistency
+    || analysis.contract || analysis.quality_verdict)
+  const qualityCriticals = (analysis?.blocking?.remaining?.length || 0)
+    || (analysis?.contract?.failed_critical || 0)
+    || (analysis?.consistency?.critical || 0)
   const done = session.status === 'done'
   const failed = session.status === 'error'
 
@@ -169,6 +174,7 @@ export function RunReport({
     const t: { id: TabId; label: string; count?: number }[] = [{ id: 'report', label: vatraMode ? 'Report' : 'Truth' }]
     if (hasAnalysis) t.push({ id: 'analysis', label: 'Analysis' })
     if (hasGaps) t.push({ id: 'gaps', label: 'Gaps', count: analysis?.gaps?.length || 0 })
+    if (hasQuality) t.push({ id: 'quality', label: 'Quality', count: qualityCriticals })
     // Vatra: the Board tab shows the log + board side by side (running-mode
     // layout), so there's no separate Log tab. Basna: a standalone Log tab.
     if (vatraMode) t.push({ id: 'board', label: 'Board' })
@@ -177,7 +183,7 @@ export function RunReport({
     if (runs.length > 0) t.push({ id: 'agents', label: 'Agents', count: runs.length })
     if (!vatraMode && progress.length > 0) t.push({ id: 'log', label: 'Log' })
     return t
-  }, [vatraMode, hasAnalysis, hasGaps, runs.length, progress.length, analysis?.gaps?.length])
+  }, [vatraMode, hasAnalysis, hasGaps, hasQuality, qualityCriticals, runs.length, progress.length, analysis?.gaps?.length])
 
   const [tab, setTab] = useState<TabId>('report')
   const activeTab: TabId = tabs.some((t) => t.id === tab) ? tab : 'report'
@@ -222,6 +228,8 @@ export function RunReport({
               {t.id === 'report' && <Check className={`h-3 w-3 ${failed ? 'text-rose-400' : 'text-emerald-500'}`} />}
               {t.id === 'analysis' && <ScanSearch className="h-3 w-3 text-violet-500" />}
               {t.id === 'gaps' && <AlertTriangle className="h-3 w-3 text-amber-500" />}
+              {t.id === 'quality' && <ShieldCheck className={`h-3 w-3 ${
+                analysis?.quality_verdict === 'critical_findings_remain' ? 'text-rose-500' : 'text-emerald-500'}`} />}
               {t.id === 'board' && <ClipboardList className="h-3 w-3 text-violet-500" />}
               {t.id === 'files' && <FileText className="h-3 w-3 text-zinc-500" />}
               {t.id === 'datastore' && <Database className="h-3 w-3 text-emerald-500/80" />}
@@ -490,6 +498,134 @@ export function RunReport({
                 ))}
               </ul>
             )}
+          </div>
+        )}
+
+        {/* Quality tab — what the deterministic checks found and enforced. */}
+        {activeTab === 'quality' && analysis && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Quality checks</span>
+              {analysis.quality_verdict && (
+                <span className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
+                  analysis.quality_verdict === 'clean'
+                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-rose-500/15 text-rose-700 dark:text-rose-300'}`}>
+                  {analysis.quality_verdict === 'clean' ? 'gate: clean'
+                    : 'gate: critical findings remain'}
+                </span>
+              )}
+              {analysis.blocking && analysis.blocking.rounds > 0 && (
+                <span className="text-[11px] text-zinc-500">
+                  {analysis.blocking.rounds} fix round(s)
+                </span>
+              )}
+            </div>
+
+            {/* Metrics grid — one stat per lever that actually ran. */}
+            {!!analysis.quality_metrics && (
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                {typeof analysis.quality_metrics.claims_checked === 'number' && (
+                  <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2">
+                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Fact check</div>
+                    <div className="mt-0.5 text-sm text-zinc-200">
+                      {String(analysis.quality_metrics.claims_checked)} checked ·{' '}
+                      <span className={Number(analysis.quality_metrics.claims_refuted) > 0 ? 'text-rose-600 dark:text-rose-400' : ''}>
+                        {String(analysis.quality_metrics.claims_refuted)} refuted
+                      </span>{' '}
+                      · {String(analysis.quality_metrics.claims_hedged)} hedged
+                    </div>
+                  </div>
+                )}
+                {analysis.consistency && (
+                  <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2">
+                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Consistency</div>
+                    <div className="mt-0.5 text-sm text-zinc-200">
+                      {analysis.consistency.values_checked} values · {analysis.consistency.relations_checked} relations ·{' '}
+                      <span className={analysis.consistency.critical > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}>
+                        {analysis.consistency.critical} critical
+                      </span>
+                      {analysis.consistency.revised && (
+                        <span className="text-zinc-500"> (was {analysis.consistency.initial_critical}, fixed)</span>
+                      )}
+                    </div>
+                    {analysis.consistency.truncated && (
+                      <div className="text-[10px] text-amber-600 dark:text-amber-400">tail unchecked (truncated)</div>
+                    )}
+                  </div>
+                )}
+                {analysis.contract && (
+                  <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2">
+                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Constraints</div>
+                    <div className="mt-0.5 text-sm text-zinc-200">
+                      {analysis.contract.passed}/{analysis.contract.checked} passed ·{' '}
+                      <span className={analysis.contract.failed_critical > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}>
+                        {analysis.contract.failed_critical} critical
+                      </span>
+                      {analysis.contract.unclear > 0 && (
+                        <span className="text-zinc-500"> · {analysis.contract.unclear} unclear</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {typeof analysis.quality_metrics.budget_spent_tokens === 'number' && (
+                  <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2">
+                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Lever spend</div>
+                    <div className="mt-0.5 text-sm text-zinc-200">
+                      ~{Math.round(Number(analysis.quality_metrics.budget_spent_tokens) / 1000)}K tok
+                    </div>
+                    {!!analysis.quality_metrics.budget_stopped_reason && (
+                      <div className="text-[10px] text-amber-600 dark:text-amber-400">budget ceiling hit</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Contract failures — the rules the deliverable breaks. */}
+            {!!analysis.contract?.failed?.length && (
+              <div>
+                <div className="mb-1 text-xs font-semibold text-rose-700 dark:text-rose-300">Constraint violations</div>
+                <ul className="space-y-1.5">
+                  {analysis.contract.failed.map((f, i) => (
+                    <li key={i} className="flex items-start gap-2 text-xs text-zinc-300">
+                      <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                        f.severity === 'critical'
+                          ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                          : 'bg-amber-500/15 text-amber-700 dark:text-amber-300'}`}>
+                        {f.severity}
+                      </span>
+                      <span>
+                        <span className="text-zinc-200">{f.text}</span>
+                        <span className="text-zinc-500"> — {f.how}{f.note ? `: ${f.note}` : ''}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Blocking gate leftovers — what survived the fix rounds. */}
+            {!!analysis.blocking?.remaining?.length && (
+              <div className="rounded-md border border-rose-300 bg-rose-50 p-3 dark:border-rose-900/40 dark:bg-rose-950/20">
+                <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300">
+                  <AlertTriangle className="h-3.5 w-3.5" /> Critical findings remaining after the gate
+                </div>
+                <ul className="ml-4 list-disc space-y-1 text-sm text-rose-800 dark:text-rose-200/90">
+                  {analysis.blocking.remaining.map((f, i) => (
+                    <li key={i}>
+                      <span className="font-mono text-[11px] text-rose-600 dark:text-rose-400">[{f.source}]</span>{' '}
+                      {f.detail}
+                      {f.note ? <span className="opacity-70"> — {f.note}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <p className="text-[11px] text-zinc-600">
+              Full audit reports (consistency / fact-check) are saved next to the deliverable — see the Files tab.
+            </p>
           </div>
         )}
 

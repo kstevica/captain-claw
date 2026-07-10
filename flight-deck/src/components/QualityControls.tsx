@@ -74,6 +74,12 @@ export function QualityControls({
             <span className="rounded-md bg-violet-600 px-2.5 py-1 text-xs font-medium text-white">Custom</span>
           )}
         </div>
+        {scope === 'research' && !value.honesty_guard && (
+          <span className="rounded border border-rose-300 bg-rose-50 px-1.5 py-px text-[9px] font-semibold uppercase text-rose-700 dark:border-rose-700/50 dark:bg-rose-900/30 dark:text-rose-300"
+                title="The anti-fabrication guard is switched off for this run">
+            guard off
+          </span>
+        )}
         <button
           onClick={() => setOpen((o) => !o)}
           className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-500 hover:text-zinc-300"
@@ -87,6 +93,45 @@ export function QualityControls({
       {/* advanced: individual levers */}
       {open && (
         <div className="space-y-3 border-t border-zinc-800 px-3 py-3">
+          {/* Calibration posture (research): the default-on honesty guard + the
+              output mode. Preset-independent — pinned above the preset levers. */}
+          {scope === 'research' && (
+            <div className="space-y-2.5 rounded-md border border-zinc-800/70 bg-zinc-950/30 px-2.5 py-2">
+              <div className="flex items-start gap-3.5">
+                <div className="pt-0.5">
+                  <Switch on={value.honesty_guard}
+                          onClick={() => onChange({ ...value, honesty_guard: !value.honesty_guard })} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-zinc-200">Honesty guard</span>
+                    <span className="rounded border border-emerald-300 bg-emerald-50 px-1 py-px text-[9px] font-semibold uppercase text-emerald-700 dark:border-emerald-700/50 dark:bg-emerald-900/30 dark:text-emerald-300">
+                      default on
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-snug text-zinc-500">
+                    Anti-fabrication counterweight to the “finish it completely” pressure: unconfirmable
+                    specifics get qualified (never invented), unknowns become labeled placeholders, estimates
+                    carry their basis, and genuinely unresolved disagreements surface in an “Unresolved &amp;
+                    assumptions” section instead of being silently absorbed. Free, prompt-only; switching it
+                    off restores the previous prompts exactly.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 border-t border-zinc-800/60 pt-2">
+                <span className="text-[11px] text-zinc-400">Output mode</span>
+                <select
+                  value={value.output_mode}
+                  onChange={(e) => onChange({ ...value, output_mode: e.target.value as QualityProfile['output_mode'] })}
+                  className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-0.5 text-xs text-zinc-200 focus:border-sky-500 focus:outline-none"
+                >
+                  <option value="">Default</option>
+                  <option value="complete">Complete — full draft, every unknown labeled</option>
+                  <option value="conservative">Conservative — review copy, fabricates nothing</option>
+                </select>
+              </div>
+            </div>
+          )}
           {levers.map((l) => {
             const on = value[l.flag as BoolFlag]
             return (
@@ -120,6 +165,17 @@ export function QualityControls({
                         <input
                           type="number" min={3} max={20} value={value.claim_check_max}
                           onChange={(e) => onChange({ ...value, claim_check_max: Math.max(3, Math.min(20, Number(e.target.value))) })}
+                          className="w-14 rounded border border-rose-800/50 bg-zinc-950/60 px-2 py-0.5 text-zinc-200 focus:border-rose-500 focus:outline-none"
+                        />
+                      </label>
+                    )}
+                    {/* block_on_critical: revise-recheck rounds cap */}
+                    {l.flag === 'block_on_critical' && on && (
+                      <label className="mt-1.5 flex items-center gap-2 text-[11px] text-zinc-400">
+                        Max rounds
+                        <input
+                          type="number" min={1} max={5} value={value.block_max_rounds}
+                          onChange={(e) => onChange({ ...value, block_max_rounds: Math.max(1, Math.min(5, Number(e.target.value))) })}
                           className="w-14 rounded border border-rose-800/50 bg-zinc-950/60 px-2 py-0.5 text-zinc-200 focus:border-rose-500 focus:outline-none"
                         />
                       </label>

@@ -1,6 +1,8 @@
 // Quality/cost profile — mirrors captain_claw/flight_deck/quality_profile.py.
 // Every lever is opt-in; an all-off profile == the systems' current behaviour.
 
+export type OutputMode = '' | 'complete' | 'conservative'
+
 export type QualityProfile = {
   profile: 'off' | 'balanced' | 'thorough' | 'custom'
   // Code-side
@@ -20,7 +22,17 @@ export type QualityProfile = {
   claim_check: boolean
   rubric_contract: boolean
   intent_brief: boolean
+  consistency_check: boolean
+  facts_ledger: boolean
+  constraints_contract: boolean
+  block_on_critical: boolean
   claim_check_max: number
+  block_max_rounds: number
+  // Calibration posture — honesty_guard is the ONE default-on flag; it is
+  // preset-independent (mirrors the backend: presets never touch it, and it is
+  // excluded from preset derivation so switching it off doesn't read "custom").
+  honesty_guard: boolean
+  output_mode: OutputMode
   // Shared
   token_budget: number
 }
@@ -29,6 +41,7 @@ export const BOOL_FLAGS = [
   'test_gate', 'deep_build', 'coverage_check', 'acted_gate', 'research_map',
   'delta_rounds', 'critic_triage', 'worker_escalate', 'git_snapshots',
   'judgment_ledger', 'source_corpus', 'claim_check', 'rubric_contract', 'intent_brief',
+  'consistency_check', 'facts_ledger', 'constraints_contract', 'block_on_critical',
 ] as const
 export type BoolFlag = (typeof BOOL_FLAGS)[number]
 
@@ -40,20 +53,28 @@ export function defaultProfile(): QualityProfile {
     worker_escalate: false, git_snapshots: false,
     judgment_ledger: false, source_corpus: false, claim_check: false, rubric_contract: false,
     intent_brief: false,
+    consistency_check: false, facts_ledger: false, constraints_contract: false,
+    block_on_critical: false,
     claim_check_max: 8,
+    block_max_rounds: 2,
+    honesty_guard: true,
+    output_mode: '',
     token_budget: 0,
   }
 }
 
-// Preset → flags ON. Mirrors the backend _PRESETS exactly. deep_build and
-// claim_check are the paid levers — never in a preset (explicit opt-in only).
+// Preset → flags ON. Mirrors the backend _PRESETS exactly. deep_build,
+// claim_check and block_on_critical are the paid levers — never in a preset
+// (explicit opt-in only). honesty_guard is not preset material at all: it
+// defaults ON and only an explicit switch turns it off.
 const PRESETS: Record<'off' | 'balanced' | 'thorough', BoolFlag[]> = {
   off: [],
   balanced: ['acted_gate', 'test_gate', 'research_map', 'delta_rounds', 'critic_triage',
     'worker_escalate', 'judgment_ledger'],
   thorough: ['acted_gate', 'test_gate', 'research_map', 'delta_rounds', 'critic_triage',
     'worker_escalate', 'judgment_ledger', 'coverage_check', 'git_snapshots',
-    'source_corpus', 'rubric_contract', 'intent_brief'],
+    'source_corpus', 'rubric_contract', 'intent_brief',
+    'consistency_check', 'facts_ledger', 'constraints_contract'],
 }
 
 export function applyPreset(p: 'off' | 'balanced' | 'thorough', prev: QualityProfile): QualityProfile {
@@ -84,6 +105,9 @@ export function toRequest(q: QualityProfile): Record<string, unknown> {
   for (const f of BOOL_FLAGS) out[f] = q[f]
   out.deep_build_samples = q.deep_build_samples
   out.claim_check_max = q.claim_check_max
+  out.block_max_rounds = q.block_max_rounds
+  out.honesty_guard = q.honesty_guard
+  out.output_mode = q.output_mode
   out.token_budget = q.token_budget
   return out
 }
@@ -140,6 +164,14 @@ export const LEVERS: Lever[] = [
     blurb: 'Each specialist enumerates + resolves its hardest judgment calls explicitly (so weak models make the boundary calls instead of hedging), and must not assert an unconfirmable specific — a named office-holder, an origin, an exact figure — as fact. Prompt-only.' },
   { flag: 'claim_check', code: 'R8', scope: 'research', cost: 'paid', label: 'Claim check',
     blurb: 'A web-tool fact-checker verifies the deliverable’s citations, dates, versions, figures and named entities against real sources — corrects the wrong ones, hedges any specific it asserted but couldn’t confirm (the fabricated-name trap), and saves a standalone fact-check report. The ground-truth back-edge.' },
+  { flag: 'consistency_check', code: 'Q2', scope: 'research', cost: 'cheap', label: 'Consistency check',
+    blurb: 'Extract the deliverable’s figures once, then verify in plain code that the same quantity carries the same value everywhere and every stated sum/percentage actually computes. One targeted correction, kept only if the deterministic re-check improves. Saves a consistency report.' },
+  { flag: 'facts_ledger', code: 'Q4', scope: 'research', cost: 'free', label: 'Facts ledger',
+    blurb: 'A shared ledger of canonical values (the `facts` tool): workers record load-bearing numbers/dates/IDs with status + provenance and read teammates’ values instead of restating them. The reporter must match the ledger; a conflicting write is surfaced, never silently overwritten. Also powers the consistency + contract checks.' },
+  { flag: 'constraints_contract', code: 'Q5', scope: 'research', cost: 'cheap', label: 'Constraints contract',
+    blurb: 'Derive the task’s hard rules once (ranges, caps, required relationships) into a persisted, hand-editable .contract.json the whole chain reuses — then validate the deliverable against them, deterministically where the facts ledger has the values.' },
+  { flag: 'block_on_critical', code: 'Q6', scope: 'research', cost: 'paid', label: 'Block on critical',
+    blurb: 'The enforcement gate: critical findings from the deterministic checks block finalization — one triaged checklist, revise-and-recheck up to N rounds. A run that can’t clear keeps all its work and finishes with verdict “critical findings remain”. Pair with a token budget.' },
 ]
 
 // Non-zinc accent colors don't auto-invert with the theme, so give each badge a

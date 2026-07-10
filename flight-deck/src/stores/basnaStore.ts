@@ -40,6 +40,25 @@ export interface BasnaAnalysis {
   // for complementary pieces).
   coverage_summary?: string
   gaps?: { item: string; severity: 'major' | 'minor'; note?: string }[]
+  // Quality-tightening records (docs/vatra-quality-tightening-plan.md) — each
+  // key is present only when its lever actually ran.
+  consistency?: {
+    values_checked: number; relations_checked: number
+    initial_critical: number; initial_major: number
+    critical: number; major: number
+    revised: boolean; truncated: boolean
+  }
+  contract?: {
+    checked: number; passed: number
+    failed_critical: number; failed_major: number; unclear: number
+    failed: { id: string; text: string; severity: string; how: string; note?: string }[]
+  }
+  quality_verdict?: 'clean' | 'critical_findings_remain'
+  blocking?: {
+    verdict: string; rounds: number
+    remaining: { source: string; severity: string; detail: string; note?: string }[]
+  }
+  quality_metrics?: Record<string, number | string | boolean>
 }
 
 export interface BasnaFile { name: string; mime: string; size: number; kind?: 'input' | 'generated'; agent?: string }
