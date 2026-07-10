@@ -2484,6 +2484,10 @@ class ExecuteRequest(BaseModel):
     # Opt-in cross-pollination quality/cost profile (see quality_profile.py). None →
     # fall back to the session config's `quality` block → all-off (today's behaviour).
     quality: dict | None = None
+    # Resume a stalled/cancelled run: restore already-finished owners from their
+    # durable checkpoints (no re-run, no re-spend) and re-dispatch only the missing
+    # ones, then synthesize. Set by the /resume endpoints; false for a normal run.
+    resume: bool = False
 
 
 def _shared_ds_env(vfs_project: str, on: bool) -> list[dict]:
@@ -2852,6 +2856,27 @@ async def execute_route(
     _phase(sid, "Routing")
     _progress(sid, "route", f"Selected {len(plan)} archetype(s) · {domain} / {merge_kind}")
 
+    # Resume mode: restore agents that already answered in the stalled run (from
+    # `basna_runs` — no re-run, no re-spend) and re-dispatch only the missing ones,
+    # then merge. Keyed by (archetype_id, role); a prior run is consumed once so N
+    # agents of the same archetype restore independently. Only usable runs qualify;
+    # the rest re-dispatch. Restored results keep their prior run id so scoring
+    # updates the existing row instead of inserting a duplicate.
+    _resume = bool(getattr(body, "resume", False))
+    _resume_runs: dict[tuple[str, str], list[dict]] = {}
+    if _resume:
+        try:
+            for pr in await db.list_basna_runs(sid, user["id"]):
+                if (pr.get("output") or "").strip():
+                    _resume_runs.setdefault(
+                        (pr.get("archetype_id", ""), pr.get("role", "")), []).append(pr)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Basna resume: prior-run load failed", error=str(e))
+        _n_restore = sum(len(v) for v in _resume_runs.values())
+        _progress(sid, "route",
+                  f"Resuming — restoring {_n_restore} agent(s) from checkpoint, "
+                  f"re-running {max(0, len(plan) - _n_restore)}")
+
     # Deep / Horizon mode (opt-in): drive each worker through the Frontier-Horizon
     # engine. Critics must run on a model *different* from the worker (never self-
     # judge), so resolve a separate Library-tier critic provider here.
@@ -3109,6 +3134,20 @@ async def execute_route(
                 role = sel.get("role") or arch.get("role") or arch["id"]
                 fleet = sel.get("fleet_instructions") or arch.get("fleet_instructions", "")
 
+                # Resume: this agent already answered in the stalled run — restore its
+                # output (no re-spend). Consume one prior run for this (archetype, role);
+                # carry its run id so scoring updates that row, not a duplicate.
+                if _resume:
+                    pool = _resume_runs.get((arch["id"], role))
+                    if pool:
+                        prior = pool.pop(0)
+                        _progress(sid, "dispatch",
+                                  f"{role} ✓ · restored from checkpoint (skipped re-run)",
+                                  ok=True, agent=role)
+                        return {"ok": True, "output": prior.get("output", ""),
+                                "actions": [], "latency_ms": 0, "model": prior.get("model", ""),
+                                "usage": {}, "restored": True, "_run_id": prior.get("id")}
+
                 # Tag each event with structured fields (agent / tool / detail) so the
                 # UI can group the streaming log into live per-agent panels — not just
                 # parse the flat message string.
@@ -3219,6 +3258,9 @@ async def execute_route(
                     "weight": float(sp["sel"].get("prior_weight", 0.7)),
                     "output": d["output"], "ok": d["ok"], "latency_ms": d["latency_ms"],
                     "actions": d.get("actions", []), "usage": d.get("usage", {}),
+                    # Resume bookkeeping: a restored agent already has a basna_runs row
+                    # (reuse its id for scoring); a fresh one gets a new row below.
+                    "restored": bool(d.get("restored")), "_run_id": d.get("_run_id"),
                 })
     finally:
         # 3a) Capture any files the agents generated, BEFORE teardown deletes their
@@ -3288,14 +3330,21 @@ async def execute_route(
         _run_workers.pop(body.session_id, None)
 
     # 4) Persist one run per agent (success scored below, once the truth is known).
+    # On resume, restored agents already have their row — only insert the freshly
+    # dispatched ones, then rebuild run_ids aligned with `results` (restored → prior
+    # id) so the scoring zip below stays index-aligned and never duplicates a row.
     run_ids: list[int] = []
     if results:
-        run_ids = await db.add_basna_runs(body.session_id, user["id"], [{
+        _new = [r for r in results if not r.get("restored")]
+        _new_ids = await db.add_basna_runs(body.session_id, user["id"], [{
             "archetype_id": r["archetype_id"], "role": r["role"], "tier": r["tier"],
             "weight_at_run": r["weight"], "output": r["output"],
             "actions": json.dumps(r.get("actions", [])),
             "latency_ms": r["latency_ms"], "success": None,
-        } for r in results])
+        } for r in _new]) if _new else []
+        _new_iter = iter(_new_ids)
+        run_ids = [r.get("_run_id") if r.get("restored") else next(_new_iter, None)
+                   for r in results]
 
     # Resolve LLM creds for a tier from the Library config, falling back to the
     # registry tier defaults + env key.
@@ -3388,6 +3437,8 @@ async def execute_route(
     )
     learned: list[dict] = []
     for r, rid in zip(results, run_ids):
+        if rid is None:  # resume edge: no row to score (should not happen)
+            continue
         succ = scores.get(r["archetype_id"])
         if succ is None:  # judge couldn't decide — don't guess
             continue
@@ -3445,6 +3496,51 @@ async def execute_route(
         "spawned": len(spawned), "dispatched": len(results),
         "cost": run_cost,
     }
+
+
+@router.post("/sessions/{session_id}/resume")
+async def resume_basna(
+    session_id: str, body: ExecuteRequest, request: Request,
+    user: dict = Depends(get_current_user),
+):
+    """Resume a stalled/cancelled Basna run from its per-agent checkpoints.
+
+    Restores every agent that already answered (from `basna_runs` — no re-run, no
+    re-spend), re-dispatches only the missing ones, then merges. Reuses the persisted
+    route (same cast) + the same VFS folder. Any workers still alive from the stalled
+    run are torn down first. If every agent already finished and only the MERGE
+    stalled, this restores all of them and just re-merges (like /recompile, via the
+    normal path). Runs inline like /execute and returns the final result."""
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if (sess.get("status") or "") == "done" and (sess.get("truth") or "").strip():
+        raise HTTPException(400, "session already completed — nothing to resume")
+    try:
+        cfg = json.loads(sess.get("config") or "{}")
+    except json.JSONDecodeError:
+        cfg = {}
+    # Tear down any workers still alive from the stalled run (idempotent).
+    try:
+        _, _, owner_id = await _resolve_basna(db, session_id, user["id"], need_write=True)
+        await _cancel_basna_run(session_id, owner_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Basna resume: pre-cancel failed", session_id=session_id, error=str(e))
+    # Re-enter the normal run with resume=True; prefer persisted folder/datastore so
+    # any re-dispatched worker binds the SAME shared folder + store as the original.
+    exec_req = ExecuteRequest(
+        session_id=session_id, tiers=body.tiers, env_vars=body.env_vars,
+        api_key=body.api_key, agent_max_tokens=body.agent_max_tokens,
+        dispatch_timeout=body.dispatch_timeout, max_parallel=body.max_parallel,
+        horizon=body.horizon or None,
+        vfs_project=body.vfs_project or cfg.get("vfs_project") or "",
+        shared_datastore=bool(body.shared_datastore or cfg.get("shared_datastore")),
+        knowledge_session_ids=body.knowledge_session_ids,
+        knowledge_include_board=body.knowledge_include_board,
+        reference_folders=body.reference_folders, quality=body.quality,
+        resume=True)
+    return await execute_route(exec_req, request, user)
 
 
 # ── Plan-Horizon (Lever C): verify-gated multi-step run ───────────────
