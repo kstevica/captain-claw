@@ -45,6 +45,7 @@ from captain_claw.flight_deck.horizon_worker import (
 )
 from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck import research_brief
+from captain_claw.flight_deck import research_consistency
 from captain_claw.flight_deck import research_rubric
 from captain_claw.flight_deck.quality_profile import (
     ACTED_CORRECTIVE,
@@ -3474,6 +3475,49 @@ async def execute_route(
         except Exception as e:  # noqa: BLE001 — closer is best-effort
             log.warning("Basna horizon closer failed", error=str(e))
 
+    # 5c2) Deterministic cross-section consistency (opt-in): an LLM extracts the
+    # merged answer's figures + stated relations ONCE (no arithmetic), pure code
+    # verifies identity across sections and recomputes every asserted relation,
+    # and one targeted correction pass is kept only if the deterministic re-check
+    # confirms it improved. Runs BEFORE the claim check so internal fixes land
+    # before external verification. Budget-gated; best-effort.
+    consistency_summary: dict | None = None
+    if quality.consistency_check and (agg.get("truth") or "").strip() and _budget.can_afford(2 * _retry_est):
+        _budget.add(2 * _retry_est)
+        _progress(sid, "merge", "Consistency check: extracting the answer's figures…")
+        try:
+            from captain_claw.llm import Message as _Msg
+            _cx, _cr = _merge_creds("fast"), _merge_creds("reason")
+
+            async def _extract_fn(p: str) -> str:
+                prov, mt = _provider_call(_cx, temperature=0.0, default_max=4096, cap=8192)
+                r = await asyncio.wait_for(prov.complete(
+                    [_Msg(role="user", content=p)], temperature=0.0, max_tokens=mt), 180)
+                return r.content or ""
+
+            async def _revise_fn(p: str) -> str:
+                prov, mt = _provider_call(_cr, temperature=0.1, default_max=8192, cap=32768)
+                r = await asyncio.wait_for(prov.complete(
+                    [_Msg(role="user", content=p)], temperature=0.1, max_tokens=mt), 300)
+                return r.content or ""
+
+            cres = await research_consistency.run_check(
+                agg["truth"], extract_fn=_extract_fn, revise_fn=_revise_fn,
+                max_values=quality.consistency_max_values,
+                on_progress=lambda m: _progress(sid, "merge", m))
+            if cres["revised"]:
+                agg["truth"] = cres["text"]
+                agg["method"] = f"{agg.get('method', 'merge')}+consistent"
+            cdoc = research_consistency.write_audit(
+                _session_files_dir(sid), cres, question=sess["intent"])
+            if cdoc:
+                generated_files.append(cdoc)
+            consistency_summary = research_consistency.summarize(cres)
+            _progress(sid, "merge",
+                      f"Consistency: {research_consistency.summary_line(cres)}")
+        except Exception as e:  # noqa: BLE001 — consistency check is best-effort
+            log.warning("Basna consistency check failed", error=str(e))
+
     # 5d) R8 grounded claim verification (opt-in, paid): a web-tool fact-checker
     # verifies the merged answer's load-bearing claims against real sources and
     # corrects the ones verified wrong — the ground truth the tool-less closer
@@ -3518,6 +3562,10 @@ async def execute_route(
     files_by_name = {f["name"]: f for f in session_files}
     for g in generated_files:
         files_by_name[g["name"]] = g
+    # The consistency tally (5c2) rides the analysis JSON like coverage does.
+    if consistency_summary is not None:
+        analysis = analysis or {}
+        analysis["consistency"] = consistency_summary
     await db.update_basna_session(
         body.session_id, user["id"], status="done",
         truth=agg["truth"], confidence=agg["confidence"],

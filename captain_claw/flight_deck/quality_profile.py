@@ -77,6 +77,7 @@ _PRESETS: dict[str, set[str]] = {
         "source_corpus",    # R10 — save + index full fetched pages (depth without context blowup)
         "rubric_contract",  # R9 — derive a completeness checklist + score coverage against it
         "intent_brief",     # R12 — clarify the task into an editable brief before routing (one LLM call)
+        "consistency_check",  # cross-section identity/arithmetic verify (one extract call + pure code)
     },
     # claim_check (R8) is the paid research lever (spawns a web-tool verifier + a
     # revision), like deep_build on the code side — no preset enables it; turn it
@@ -115,12 +116,16 @@ class QualityProfile:
     honesty_guard: bool = True     # anti-fabrication directives; the ONE default-on flag
     output_mode: str = ""          # "" (today) | "complete" | "conservative"
 
+    # ── Deterministic consistency (docs/vatra-quality-tightening-plan.md §2) ──
+    consistency_check: bool = False  # extract figures → verify identity/arithmetic in code
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     deep_build_samples: int = 2    # C3 pool size — kept small on purpose
     deep_build_fix_attempts: int = 1
     escalate_max: int = 2          # R5: cap re-dispatch escalations per run
     claim_check_max: int = 8       # R8: how many top claims the fact-checker live-verifies
+    consistency_max_values: int = 40  # consistency_check: extraction cap (value occurrences)
 
     @classmethod
     def from_dict(cls, d: dict | None) -> QualityProfile:
@@ -137,7 +142,7 @@ class QualityProfile:
             "test_gate", "deep_build", "coverage_check", "acted_gate",
             "research_map", "delta_rounds", "critic_triage", "worker_escalate",
             "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
-            "rubric_contract", "intent_brief",
+            "rubric_contract", "intent_brief", "consistency_check",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -168,13 +173,14 @@ class QualityProfile:
         kw["deep_build_fix_attempts"] = max(0, _int("deep_build_fix_attempts", 1))
         kw["escalate_max"] = max(0, _int("escalate_max", 2))
         kw["claim_check_max"] = max(1, _int("claim_check_max", 8))
+        kw["consistency_max_values"] = max(1, _int("consistency_max_values", 40))
         return cls(**kw)
 
     _BOOL_FLAGS = (
         "test_gate", "deep_build", "coverage_check", "acted_gate",
         "research_map", "delta_rounds", "critic_triage", "worker_escalate",
         "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
-        "rubric_contract", "intent_brief",
+        "rubric_contract", "intent_brief", "consistency_check",
     )
 
     @property
