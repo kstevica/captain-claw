@@ -244,15 +244,39 @@ def _safe_json_loads(raw: str) -> dict[str, Any]:
         return {"raw": raw}
 
 
-async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) -> Any:
-    """Call ``acompletion``; if the model rejects ``tool_choice``, retry without it.
+def _is_temperature_deprecated_error(msg: str) -> bool:
+    """Whether *msg* (lowercased) is a "temperature not accepted" 400.
 
-    Thinking/reasoning models (e.g. DeepSeek thinking mode served via an
-    OpenAI-compatible endpoint) return HTTP 400 "does not support this
-    tool_choice". The orchestration layer forces ``tool_choice="required"`` on
-    stall retries — rather than crash the turn, we transparently drop the
-    constraint and let the model answer normally. We also flag the provider so
-    subsequent calls this session skip forcing tool_choice (one wasted call max).
+    Covers Anthropic's "``temperature`` is deprecated for this model" as well
+    as generic "temperature is not supported / unsupported" phrasings, while
+    staying narrow enough not to swallow unrelated errors that merely mention
+    the word.
+    """
+    return "temperature" in msg and (
+        "deprecat" in msg or "not support" in msg or "unsupported" in msg
+    )
+
+
+async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) -> Any:
+    """Call ``acompletion``; on a parameter-rejection 400, strip the offending
+    parameter and retry once.
+
+    Two model-specific request-shape rejections are handled transparently so a
+    turn never crashes on a parameter the model simply won't accept:
+
+    * **tool_choice** — thinking/reasoning models (e.g. DeepSeek thinking mode
+      served via an OpenAI-compatible endpoint) return HTTP 400 "does not
+      support this tool_choice". The orchestration layer forces
+      ``tool_choice="required"`` on stall retries — rather than crash the turn,
+      we drop the constraint and let the model answer normally. We also flag the
+      provider so subsequent calls this session skip forcing tool_choice.
+
+    * **temperature** — newer Anthropic models (Opus 4.8, Sonnet 5, the Fable
+      family) reject ``temperature`` outright with a 400 "``temperature`` is
+      deprecated for this model". We retry without it and remember the model
+      globally so later calls omit the parameter up front.
+
+    Each offending parameter costs at most one wasted call.
     """
     from litellm import acompletion
 
@@ -260,22 +284,35 @@ async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) ->
         return await acompletion(**kwargs)
     except Exception as e:
         msg = str(e).lower()
+        retry_kwargs = dict(kwargs)
+        stripped: list[str] = []
+
+        # Model rejects tool_choice (thinking-mode models).
         if (
             kwargs.get("tool_choice") is not None
             and "tool_choice" in msg
             and "support" in msg
         ):
+            retry_kwargs.pop("tool_choice", None)
+            stripped.append("tool_choice")
             if provider is not None:
                 try:
                     provider._tool_choice_unsupported = True
                 except Exception:
                     pass
+
+        # Model rejects temperature (Anthropic Opus 4.8 / Sonnet 5 / Fable).
+        if kwargs.get("temperature") is not None and _is_temperature_deprecated_error(msg):
+            retry_kwargs.pop("temperature", None)
+            stripped.append("temperature")
+            _remember_temperature_unsupported(kwargs.get("model", ""))
+
+        if stripped:
             log.warning(
-                "Model rejected tool_choice; retrying without it",
+                "Model rejected request parameter(s); retrying without them",
                 model=kwargs.get("model"),
+                stripped=",".join(stripped),
             )
-            retry_kwargs = dict(kwargs)
-            retry_kwargs.pop("tool_choice", None)
             return await acompletion(**retry_kwargs)
         raise
 
@@ -419,15 +456,35 @@ def _is_openai_gpt5_family(provider: str, model: str) -> bool:
     return base.startswith("gpt-5")
 
 
+# Model base-names discovered at runtime to reject ``temperature`` outright.
+# Populated by _acompletion_tolerant when a request 400s with "temperature is
+# deprecated/not supported"; consulted by _is_temperature_unsupported_model so
+# every subsequent call (even from a freshly-built provider instance) omits the
+# parameter instead of paying another failed round-trip. Newer Anthropic models
+# (Opus 4.8, Sonnet 5, …) deprecated temperature the way the Fable family did.
+_TEMPERATURE_UNSUPPORTED_MODELS: set[str] = set()
+
+
+def _remember_temperature_unsupported(model: str) -> None:
+    """Record that *model* rejects ``temperature`` so we stop sending it."""
+    base = str(model or "").split("/")[-1].lower()
+    if base:
+        _TEMPERATURE_UNSUPPORTED_MODELS.add(base)
+
+
 def _is_temperature_unsupported_model(provider: str, model: str) -> bool:
     """True for models that reject the temperature parameter entirely.
 
     Anthropic's Fable family deprecated temperature — sending it (even
     temperature=1) returns a 400 ``temperature is deprecated for this
     model``, so it must be omitted from the request, not just clamped.
+    Models discovered at runtime to reject it (see
+    :data:`_TEMPERATURE_UNSUPPORTED_MODELS`) are treated the same way.
     """
     base = str(model or "").split("/")[-1].lower()
-    return "fable" in base
+    if "fable" in base:
+        return True
+    return base in _TEMPERATURE_UNSUPPORTED_MODELS
 
 
 def _normalize_temperature_for_model(provider: str, model: str, temperature: float | None) -> float | None:
@@ -1990,8 +2047,9 @@ class LiteLLMProvider(LLMProvider):
             "timeout": 180,
         }
         # Omit temperature when the model doesn't accept it (e.g. Anthropic
-        # Fable family rejects it with a 400). _normalize_* returns None in
-        # that case.
+        # Fable/Opus 4.8/Sonnet 5 reject it with a 400 — some known up front,
+        # others learned at runtime via _remember_temperature_unsupported).
+        # _normalize_* returns None in that case.
         if resolved_temperature is not None:
             kwargs["temperature"] = resolved_temperature
         if tools:
