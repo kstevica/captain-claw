@@ -242,7 +242,7 @@ export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, resuming, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, groupedReview, setGroupedReview, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile,
     updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, resetDraft, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, resumeSession, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
@@ -1063,6 +1063,19 @@ export function BasnaPage() {
                           className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-950/60 accent-violet-600"
                         />
                         Grouped
+                      </label>
+                    )}
+                    {effectiveMode === 'vatra' && executionGroups && (
+                      <label
+                        className="flex cursor-pointer items-center gap-1.5 text-zinc-400"
+                        title="After the final group, every owner revises its piece against the whole team's work — early-group owners never see later groups' output otherwise. Adds one dispatch per owner. Opt-in."
+                      >
+                        <input
+                          type="checkbox" checked={groupedReview}
+                          onChange={(e) => setGroupedReview(e.target.checked)}
+                          className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-950/60 accent-violet-600"
+                        />
+                        Review round
                       </label>
                     )}
                     {/* Run folder — new (auto/custom name) or an existing VFS folder */}

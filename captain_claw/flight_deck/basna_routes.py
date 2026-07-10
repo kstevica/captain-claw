@@ -2586,6 +2586,11 @@ class ExecuteRequest(BaseModel):
     # Vatra only: run owners in ordered execution groups (A→B→C→D, barrier between)
     # instead of all-at-once. Opt-in; default False = today's intro→main→review flow.
     execution_groups: bool = False
+    # Vatra grouped runs only: after the FINAL group, run a review round where every
+    # owner revises its piece against the whole team's work (early-group owners never
+    # see later groups' output otherwise — schedule-repaired/pulled owners included).
+    # Opt-in; default False = grouped runs skip the review round (today's behaviour).
+    grouped_review: bool = False
     # Deep / Horizon mode (opt-in): when set, each worker is driven through the
     # Frontier-Horizon engine (N-sample self-consistency vote + diverse-lens critics
     # + fix loop) instead of a single one-shot dispatch. Keys: samples, fix_attempts,

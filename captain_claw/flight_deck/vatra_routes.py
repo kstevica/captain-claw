@@ -755,6 +755,11 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _knob_updates["quality"] = body.quality
     if bool(cfg.get("execution_groups")) != bool(getattr(body, "execution_groups", False)):
         _knob_updates["execution_groups"] = bool(getattr(body, "execution_groups", False))
+    # grouped_review is enabled by the request OR the session config (never
+    # clobbered back to off by a request that simply omits it — there may be no
+    # UI sending it yet); persisted so continuation rounds inherit it.
+    if getattr(body, "grouped_review", False) and not cfg.get("grouped_review"):
+        _knob_updates["grouped_review"] = True
     if int(cfg.get("max_parallel") or 0) != int(getattr(body, "max_parallel", 0) or 0):
         _knob_updates["max_parallel"] = int(getattr(body, "max_parallel", 0) or 0)
     if _knob_updates:
@@ -1568,19 +1573,28 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
 
         # 3c) Review round — the Lead gathers an exec-summary digest of everyone's
         # first pass and sends it back to each still-alive owner, asking them to add,
-        # align, and fill gaps now that they can see the whole team's work. This is
-        # where the real collaboration happens: in round 1 owners are blind to each
-        # other; here each one revises against the full picture before assembly.
-        if not grouped and not _resume and bool(cfg.get("review_round", True)):
-            r1 = [(i, sp) for i, sp in enumerate(spawned)
-                  if (results[i].get("ok") or results[i].get("produced_file"))
-                  and (results[i].get("output") or "").strip()]
+        # align, and fill gaps now that they can see the whole team's work. Ungrouped:
+        # on by default (round-1 owners are blind to each other). Grouped: opt-in via
+        # `grouped_review` — later groups already saw earlier output, but EARLY-group
+        # owners (schedule-repaired/pulled ones included) never see later groups' work
+        # without this top-up pass. Results are matched by SUBTASK ID, not position —
+        # grouped mode builds `results` in phase order, so positions misalign.
+        _review_on = (bool(cfg.get("grouped_review", False)) if grouped
+                      else bool(cfg.get("review_round", True)))
+        if not _resume and _review_on:
+            _res_by_id = {r["id"]: r for r in results}
+            r1 = []
+            for sp in spawned:
+                r = _res_by_id.get(sp["subtask"]["id"])
+                if r is not None and (r.get("ok") or r.get("produced_file")) \
+                        and (r.get("output") or "").strip():
+                    r1.append((sp, r))
             if len(r1) >= 2:
                 _phase(sid, "Review round")
                 _progress(sid, "review", "Lead gathering each specialist's summary…")
                 try:
                     digest = await asyncio.wait_for(
-                        _llm_team_digest(intent, [results[i] for i, _ in r1], _creds("reason")), 180)
+                        _llm_team_digest(intent, [r for _, r in r1], _creds("reason")), 180)
                 except Exception as e:
                     log.warning("Vatra team digest failed", error=str(e))
                     digest = ""
@@ -1588,7 +1602,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     _progress(sid, "review",
                               f"Review round — {len(r1)} specialist(s) revising against the team's work…")
 
-                    async def _review_owner(i: int, sp: dict) -> tuple[int, dict]:
+                    async def _review_owner(sp: dict, r: dict) -> tuple[dict, dict]:
                         arch, st = sp["arch"], sp["subtask"]
                         role = arch.get("role") or arch["id"]
                         label = _owner_label(sp)
@@ -1604,7 +1618,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                         rerr = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
                         _progress(sid, "dispatch",
                                   f"{label} (review) {mark} · {len(d['actions'])} action(s) "
-                                  f"({d['latency_ms'] / 1000:.1f}s){rerr}", ok=d["ok"], agent=label)
+                                  f"({d['latency_ms'] / 1000:.1f}s){rerr}", ok=d["ok"], agent=label,
+                                  **_gx(st["id"]))
                         # Post the revised piece to the board too, so the final shared
                         # memory reflects what each agent produced this round.
                         out2 = (d.get("output") or "").strip()
@@ -1615,17 +1630,17 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                                                                out2[:_BOARD_CONTENT_CAP])
                             except Exception as e:
                                 log.debug("Vatra board review-output write failed", error=str(e))
-                        return i, d
+                        return r, d
 
-                    revisions = await asyncio.gather(*[_review_owner(i, sp) for i, sp in r1])
+                    revisions = await asyncio.gather(*[_review_owner(sp, r) for sp, r in r1])
                     changed = 0
-                    for i, d in revisions:
+                    for r, d in revisions:
                         out = (d.get("output") or "").strip()
                         if d["ok"] and out and not _is_no_change(out):
-                            results[i]["output"] = out
-                            results[i]["ok"] = True
-                            results[i].pop("produced_file", None)
-                            results[i]["actions"] = results[i].get("actions", []) + d.get("actions", [])
+                            r["output"] = out
+                            r["ok"] = True
+                            r.pop("produced_file", None)
+                            r["actions"] = r.get("actions", []) + d.get("actions", [])
                             changed += 1
                     _progress(sid, "review",
                               f"Review round done — {changed}/{len(r1)} piece(s) revised")
@@ -3438,6 +3453,8 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
         cfg["quality"] = parent_cfg["quality"]
     if parent_cfg.get("execution_groups"):
         cfg["execution_groups"] = True
+    if parent_cfg.get("grouped_review"):
+        cfg["grouped_review"] = True
     if int(parent_cfg.get("max_parallel") or 0):
         cfg["max_parallel"] = int(parent_cfg["max_parallel"])
     # Keep the whole chain in the parent's project bundle; theme re-derived so
@@ -3466,6 +3483,7 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
                               vfs_project=vfs_project, shared_datastore=_parent_shared_ds,
                               # Match the parent round's grouped/parallel/deep/quality run.
                               execution_groups=bool(parent_cfg.get("execution_groups")),
+                              grouped_review=bool(parent_cfg.get("grouped_review")),
                               max_parallel=int(parent_cfg.get("max_parallel") or 0),
                               horizon=parent_cfg.get("horizon") or None,
                               quality=parent_cfg.get("quality") or None)

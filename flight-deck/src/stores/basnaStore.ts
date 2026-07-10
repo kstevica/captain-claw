@@ -500,6 +500,7 @@ const _DEEP_LS = 'basna.deep'
 const _QUALITY_LS = 'basna.quality'
 const _MAX_PARALLEL_LS = 'basna.maxParallel'
 const _EXEC_GROUPS_LS = 'basna.executionGroups'
+const _GROUPED_REVIEW_LS = 'basna.groupedReview'
 const _SHARED_DS_LS = 'basna.sharedDatastore'
 
 // A VFS project folder as returned by GET /fd/vfs/projects.
@@ -534,6 +535,13 @@ function _loadMaxParallel(): number {
     const n = raw ? Number(raw) : NaN
     return Number.isFinite(n) && n >= 0 && n <= 16 ? n : 0
   } catch { return 0 }
+}
+
+function _loadGroupedReview(): boolean {
+  // Default OFF — the grouped review round adds one dispatch per owner.
+  try {
+    return typeof localStorage !== 'undefined' && localStorage.getItem(_GROUPED_REVIEW_LS) === '1'
+  } catch { return false }
 }
 
 function _loadExecGroups(): boolean {
@@ -582,6 +590,7 @@ interface BasnaStore {
   maxAgents: number
   maxParallel: number  // cap on concurrent agent turns (0 = unlimited; mainly for local models)
   executionGroups: boolean  // Vatra: run owners in ordered phases A→B→C→D (opt-in)
+  groupedReview: boolean    // Vatra grouped runs: review round after the final group (opt-in)
   sharedDatastore: boolean  // opt-in: bind the run's agents to ONE datastore in the VFS folder
   folderMode: FolderMode    // 'new' folder for this run, or 'existing' picked folder
   newFolderName: string     // optional custom name when folderMode==='new' (empty → auto)
@@ -606,6 +615,7 @@ interface BasnaStore {
   setMaxAgents: (n: number) => void
   setMaxParallel: (n: number) => void
   setExecutionGroups: (v: boolean) => void
+  setGroupedReview: (v: boolean) => void
   setSharedDatastore: (v: boolean) => void
   setFolderMode: (m: FolderMode) => void
   setNewFolderName: (s: string) => void
@@ -676,6 +686,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   maxAgents: 6,
   maxParallel: _loadMaxParallel(),
   executionGroups: _loadExecGroups(),
+  groupedReview: _loadGroupedReview(),
   sharedDatastore: _loadSharedDatastore(),
   folderMode: 'new',
   newFolderName: '',
@@ -712,6 +723,10 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   setExecutionGroups: (v) => {
     try { localStorage.setItem(_EXEC_GROUPS_LS, v ? '1' : '0') } catch { /* ignore */ }
     set({ executionGroups: v })
+  },
+  setGroupedReview: (v) => {
+    try { localStorage.setItem(_GROUPED_REVIEW_LS, v ? '1' : '0') } catch { /* ignore */ }
+    set({ groupedReview: v })
   },
   setSharedDatastore: (v) => {
     try { localStorage.setItem(_SHARED_DS_LS, v ? '1' : '0') } catch { /* ignore */ }
@@ -986,7 +1001,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       // (worker, blackboard-safe — no spawn pools) AND the final assembled deliverable.
       const horizon = get().deep ? { worker: true, close: true } : undefined
       const vfsProject = computeVfsProject(get())
-      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, execution_groups: get().executionGroups, shared_datastore: get().sharedDatastore, ...(vfsProject ? { vfs_project: vfsProject } : {}), ...(horizon ? { horizon } : {}) })
+      await apiVatraExecute({ session_id: sid, tiers, env_vars, quality: toRequest(get().quality), max_parallel: get().maxParallel, execution_groups: get().executionGroups, grouped_review: get().executionGroups && get().groupedReview, shared_datastore: get().sharedDatastore, ...(vfsProject ? { vfs_project: vfsProject } : {}), ...(horizon ? { horizon } : {}) })
       const s = await apiGetSession(sid)
       if (s) set({ activeSession: s })
       await get().loadSessions()
