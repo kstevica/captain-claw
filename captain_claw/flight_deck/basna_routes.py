@@ -47,6 +47,7 @@ from captain_claw.flight_deck import facts_ledger
 from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck import research_brief
 from captain_claw.flight_deck import research_consistency
+from captain_claw.flight_deck import research_contract
 from captain_claw.flight_deck import research_rubric
 from captain_claw.flight_deck.quality_profile import (
     ACTED_CORRECTIVE,
@@ -3063,7 +3064,8 @@ async def execute_route(
     # Resolve the shared folder on disk once (needed by R1 research map and R6 git
     # snapshots). Both are opt-in; neither touches a run that didn't ask for them.
     vfs_dir: Path | None = None
-    if quality.research_map or quality.git_snapshots or quality.facts_ledger:
+    if (quality.research_map or quality.git_snapshots or quality.facts_ledger
+            or quality.constraints_contract):
         try:
             from captain_claw.flight_deck.vfs_routes import _user_root
             vfs_dir = _user_root(user["id"]) / vfs_project
@@ -3103,6 +3105,40 @@ async def execute_route(
                     _progress(sid, "route", f"Completeness rubric: {len(items)} required items")
         except Exception as e:  # noqa: BLE001 — rubric is best-effort
             log.warning("Basna rubric derivation failed", error=str(e))
+
+    # Constraints contract (opt-in): the task's hard rules, derived ONCE (reason
+    # tier) and persisted as `.contract.json` in the shared folder — a chain
+    # round or a hand-edit reuses the file instead of re-deriving. Injected into
+    # every worker's prompt; validated against the merged answer post-merge.
+    contract_pre = ""
+    contract_items: list[dict] = []
+    if quality.constraints_contract:
+        try:
+            if vfs_dir is not None:
+                contract_items = research_contract.load(vfs_dir) or []
+                if contract_items:
+                    _progress(sid, "route",
+                              f"Constraints contract: {len(contract_items)} rule(s) loaded from folder")
+            if not contract_items:
+                cc = _resolve_merge_creds(body, registry, "reason")
+                if cc.get("model"):
+                    prov, mt = _provider_call(cc, temperature=0.1, default_max=2048, cap=4096)
+                    from captain_claw.llm import Message
+                    _r = await asyncio.wait_for(prov.complete(
+                        [Message(role="user",
+                                 content=research_contract.derive_prompt(effective_intent))],
+                        temperature=0.1, max_tokens=mt), 120)
+                    contract_items = research_contract.parse_contract(_r.content or "")
+                    if contract_items:
+                        if vfs_dir is not None:
+                            research_contract.save(vfs_dir, contract_items, effective_intent)
+                        _progress(sid, "route",
+                                  f"Constraints contract: {len(contract_items)} rule(s) derived")
+            if contract_items:
+                contract_pre = research_contract.contract_directive(
+                    contract_items, ledger=quality.facts_ledger)
+        except Exception as e:  # noqa: BLE001 — contract is best-effort
+            log.warning("Basna contract derivation failed", error=str(e))
 
     spawned: list[dict] = []  # {sel, arch, slug, port, auth}
     results: list[dict] = []
@@ -3248,7 +3284,7 @@ async def execute_route(
                              if not str(f.get("mime", "")).startswith("image/")]
                 base_prompt = research_pre + _build_dispatch_prompt(
                     role, effective_intent, merge_kind,
-                    [f["name"] for f in input_files], extra=sel.get("extra", "")) + rubric_pre
+                    [f["name"] for f in input_files], extra=sel.get("extra", "")) + rubric_pre + contract_pre
                 if _prior_knowledge:
                     base_prompt += _prior_knowledge
                 if _reference_block:
@@ -3603,6 +3639,40 @@ async def execute_route(
     files_by_name = {f["name"]: f for f in session_files}
     for g in generated_files:
         files_by_name[g["name"]] = g
+    # Contract validation (opt-in): deterministic where the facts ledger has the
+    # values, one judge call for the rest. Advisory — failures are recorded into
+    # analysis.contract for follow-up rounds and, later, the blocking gate.
+    contract_summary: dict | None = None
+    if quality.constraints_contract and contract_items and (agg.get("truth") or "").strip():
+        try:
+            ledger_vals: dict = {}
+            if quality.facts_ledger and vfs_dir is not None:
+                try:
+                    ledger_vals = {r["key"]: r["value"]
+                                   for r in facts_ledger.export_rows(vfs_dir)}
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Basna ledger export for contract failed", error=str(e))
+            cres2 = research_contract.validate(contract_items, ledger_vals)
+            if cres2["unresolved"]:
+                cc = _merge_creds("reason")
+                if cc.get("model"):
+                    prov, mt = _provider_call(cc, temperature=0.1, default_max=1500, cap=4096)
+                    from captain_claw.llm import Message
+                    _j = await asyncio.wait_for(prov.complete(
+                        [Message(role="user", content=research_contract.judge_prompt(
+                            agg["truth"], cres2["unresolved"]))],
+                        temperature=0.1, max_tokens=mt), 120)
+                    research_contract.apply_judgement(
+                        cres2, research_contract.parse_judgement(_j.content or ""))
+            contract_summary = research_contract.summarize(cres2)
+            analysis = analysis or {}
+            analysis["contract"] = contract_summary
+            _progress(sid, "learn",
+                      f"Contract: {contract_summary['passed']}/{contract_summary['checked']} "
+                      f"passed · {contract_summary['failed_critical']} critical "
+                      f"failure(s) · {contract_summary['unclear']} unclear")
+        except Exception as e:  # noqa: BLE001 — contract validation is best-effort
+            log.warning("Basna contract validation failed", error=str(e))
     # The consistency tally (5c2) rides the analysis JSON like coverage does.
     if consistency_summary is not None:
         analysis = analysis or {}
@@ -3611,7 +3681,7 @@ async def execute_route(
     # contribute keys, so the record doubles as "which checks this run had".
     qm = build_quality_metrics(
         claim_findings=claim_findings, consistency=consistency_summary,
-        gaps=(analysis or {}).get("gaps"),
+        gaps=(analysis or {}).get("gaps"), contract=contract_summary,
         acted_retries=_qm_counts["acted"] if quality.acted_gate else None,
         escalations=_qm_counts["escalated"] if quality.worker_escalate else None,
         budget=_budget)

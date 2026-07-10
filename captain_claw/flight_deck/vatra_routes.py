@@ -77,6 +77,7 @@ from captain_claw.flight_deck.basna_routes import (
 from captain_claw.flight_deck import facts_ledger
 from captain_claw.flight_deck import research_brief
 from captain_claw.flight_deck import research_consistency
+from captain_claw.flight_deck import research_contract
 from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck import research_rubric
 from captain_claw.flight_deck import vatra_groups
@@ -943,7 +944,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # can search prior rounds' material instead of re-reading it (and the reporter
     # can pull past its inline slice cap). Free; best-effort.
     vfs_dir: Path | None = None
-    if quality.research_map or quality.git_snapshots or quality.facts_ledger:
+    if (quality.research_map or quality.git_snapshots or quality.facts_ledger
+            or quality.constraints_contract):
         try:
             from captain_claw.flight_deck.vfs_routes import _user_root
             vfs_dir = _user_root(user["id"]) / vfs_project
@@ -962,6 +964,39 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             log.warning("Vatra research map index failed", error=str(e))
             research_dir = None
     research_pre = research_map.preamble(research_dir) if research_dir else ""
+
+    # Constraints contract (opt-in): the task's hard rules, derived ONCE (reason
+    # tier) and persisted as `.contract.json` in the shared folder — a chain
+    # round or a hand-edit reuses the file instead of re-deriving. Injected into
+    # shared_context so every owner AND the reporter build against the same
+    # rules; validated against the deliverable after assembly.
+    contract_items: list[dict] = []
+    if quality.constraints_contract:
+        try:
+            if vfs_dir is not None:
+                contract_items = research_contract.load(vfs_dir) or []
+                if contract_items:
+                    _progress(sid, "route",
+                              f"Constraints contract: {len(contract_items)} rule(s) loaded from folder")
+            if not contract_items:
+                cc = _creds("reason")
+                if cc.get("model"):
+                    from captain_claw.llm import Message as _M
+                    prov, mt = _provider_call(cc, temperature=0.1, default_max=2048, cap=4096)
+                    _r = await asyncio.wait_for(prov.complete(
+                        [_M(role="user", content=research_contract.derive_prompt(intent))],
+                        temperature=0.1, max_tokens=mt), 120)
+                    contract_items = research_contract.parse_contract(_r.content or "")
+                    if contract_items:
+                        if vfs_dir is not None:
+                            research_contract.save(vfs_dir, contract_items, intent)
+                        _progress(sid, "route",
+                                  f"Constraints contract: {len(contract_items)} rule(s) derived")
+            if contract_items:
+                shared_context = (shared_context + research_contract.contract_directive(
+                    contract_items, ledger=quality.facts_ledger)).strip()
+        except Exception as e:  # noqa: BLE001 — contract is best-effort
+            log.warning("Vatra contract derivation failed", error=str(e))
 
     spawned: list[dict] = []   # {subtask, slug, port, auth}
     results: list[dict] = []   # {id, owner, role, output, ok, latency_ms, actions}
@@ -1719,6 +1754,49 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         except Exception as e:  # noqa: BLE001
             log.warning("Vatra rubric coverage failed", error=str(e))
 
+    # Contract validation (opt-in): deterministic where the facts ledger has the
+    # values, one judge call for the rest. Advisory in this increment — failures
+    # are recorded (analysis.contract + gaps) for follow-up rounds and, later,
+    # the blocking gate; nothing is auto-fixed here.
+    contract_summary: dict | None = None
+    if quality.constraints_contract and contract_items and (truth or "").strip():
+        try:
+            ledger_vals: dict = {}
+            if quality.facts_ledger and vfs_dir is not None:
+                try:
+                    ledger_vals = {r["key"]: r["value"]
+                                   for r in facts_ledger.export_rows(vfs_dir)}
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Vatra ledger export for contract failed", error=str(e))
+            cres2 = research_contract.validate(contract_items, ledger_vals)
+            if cres2["unresolved"]:
+                cc = _creds("reason")
+                if cc.get("model"):
+                    from captain_claw.llm import Message as _M
+                    prov, mt = _provider_call(cc, temperature=0.1, default_max=1500, cap=4096)
+                    _j = await asyncio.wait_for(prov.complete(
+                        [_M(role="user", content=research_contract.judge_prompt(
+                            truth, cres2["unresolved"]))],
+                        temperature=0.1, max_tokens=mt), 120)
+                    research_contract.apply_judgement(
+                        cres2, research_contract.parse_judgement(_j.content or ""))
+            contract_summary = research_contract.summarize(cres2)
+            analysis["contract"] = contract_summary
+            # Failures double as gaps so the existing fill-gaps round can act.
+            extra = [{"item": f["text"],
+                      "severity": "major" if f["severity"] in ("critical", "major") else "minor",
+                      "note": f"hard constraint violated ({f['how']})"
+                              + (f": {f['note']}" if f.get("note") else "")}
+                     for f in contract_summary["failed"]]
+            if extra:
+                analysis["gaps"] = (analysis.get("gaps") or []) + extra
+            _progress(sid, "learn",
+                      f"Contract: {contract_summary['passed']}/{contract_summary['checked']} "
+                      f"passed · {contract_summary['failed_critical']} critical "
+                      f"failure(s) · {contract_summary['unclear']} unclear")
+        except Exception as e:  # noqa: BLE001 — contract validation is best-effort
+            log.warning("Vatra contract validation failed", error=str(e))
+
     # Consistency tally (from 5b2) + the flat per-run quality metrics ride the
     # same analysis JSON so the UI and follow-up rounds can see what was checked
     # and what (if anything) remains. Only levers that ran contribute keys.
@@ -1726,13 +1804,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         analysis["consistency"] = consistency_summary
     qm = build_quality_metrics(
         claim_findings=claim_findings, consistency=consistency_summary,
-        gaps=analysis.get("gaps"),
+        gaps=analysis.get("gaps"), contract=contract_summary,
         acted_retries=_qm_counts["acted"] if quality.acted_gate else None,
         escalations=_qm_counts["escalated"] if quality.worker_escalate else None,
         budget=_budget)
     if qm:
         analysis["quality_metrics"] = qm
-    if consistency_summary is not None or qm:
+    if consistency_summary is not None or contract_summary is not None or qm:
         try:
             await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
         except Exception as e:  # noqa: BLE001

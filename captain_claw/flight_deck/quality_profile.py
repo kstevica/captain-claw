@@ -79,6 +79,7 @@ _PRESETS: dict[str, set[str]] = {
         "intent_brief",     # R12 — clarify the task into an editable brief before routing (one LLM call)
         "consistency_check",  # cross-section identity/arithmetic verify (one extract call + pure code)
         "facts_ledger",     # shared canonical-values store + `facts` tool (free, no LLM)
+        "constraints_contract",  # hard-rules contract: derive once, persist, validate (1-2 LLM calls)
     },
     # claim_check (R8) is the paid research lever (spawns a web-tool verifier + a
     # revision), like deep_build on the code side — no preset enables it; turn it
@@ -123,6 +124,9 @@ class QualityProfile:
     # ── Shared facts ledger (plan §4 / increment 4) ──
     facts_ledger: bool = False     # canonical key→value store + `facts` tool for all workers
 
+    # ── Constraints contract (plan §5 / increment 5) ──
+    constraints_contract: bool = False  # derive hard rules once, persist per folder, validate
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     deep_build_samples: int = 2    # C3 pool size — kept small on purpose
@@ -147,6 +151,7 @@ class QualityProfile:
             "research_map", "delta_rounds", "critic_triage", "worker_escalate",
             "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
             "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
+            "constraints_contract",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -185,6 +190,7 @@ class QualityProfile:
         "research_map", "delta_rounds", "critic_triage", "worker_escalate",
         "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
         "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
+        "constraints_contract",
     )
 
     @property
@@ -458,6 +464,7 @@ def build_quality_metrics(
     claim_findings: list[dict] | None = None,
     consistency: dict | None = None,
     gaps: list[dict] | None = None,
+    contract: dict | None = None,
     acted_retries: int | None = None,
     escalations: int | None = None,
     budget: TokenBudget | None = None,
@@ -487,6 +494,13 @@ def build_quality_metrics(
         out.update(
             gaps_major=sum(1 for g in gaps if str(g.get("severity")) == "major"),
             gaps_minor=sum(1 for g in gaps if str(g.get("severity")) != "major"),
+        )
+    if contract is not None:
+        out.update(
+            contract_checked=int(contract.get("checked", 0)),
+            contract_failed_critical=int(contract.get("failed_critical", 0)),
+            contract_failed_major=int(contract.get("failed_major", 0)),
+            contract_unclear=int(contract.get("unclear", 0)),
         )
     if acted_retries is not None:
         out["acted_retries"] = int(acted_retries)
