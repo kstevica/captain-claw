@@ -1352,6 +1352,58 @@ class AgentScaleLoopMixin:
     # Result: constant context size (~system + task + 1 item's content),
     # no message accumulation, no growing latency, no LLM confusion.
 
+    async def _persist_scale_item_for_team(
+        self,
+        item_num: int,
+        item_label: str,
+        content: str,
+        turn_usage: dict[str, int],
+        session_policy: dict[str, Any] | None = None,
+        task_policy: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist one reply-sunk scale-loop item to the run's shared VFS folder.
+
+        Only fires for ensemble workers (Basna/Vatra) with a bound shared
+        project — a standalone agent's reply loop keeps today's behaviour. This
+        is the durability fix for the deep-researcher failure mode: 11 documents
+        extracted into context, the dispatch times out during final synthesis,
+        and every extraction is lost. With this, each item lands in
+        ``vfs:<project>/extracts/`` the moment it is processed — glob/researchmap
+        find it, teammates read it, and a timeout costs only the unwritten
+        synthesis, not the ingestion. Best-effort: a failed write never fails
+        the item.
+        """
+        project = os.environ.get("CLAW_VFS_PROJECT", "").strip()
+        is_worker = bool(os.environ.get("CLAW_BASNA_WORKER")
+                         or os.environ.get("CLAW_VATRA_WORKER"))
+        if not (project and is_worker and (content or "").strip()):
+            return
+        slug = re.sub(r"[^\w]+", "-", (item_label or "").strip().casefold()).strip("-")[:60] or "item"
+        path = f"vfs:{project}/extracts/{item_num:02d}-{slug}.md"
+        try:
+            res = await self._execute_tool_with_guard(
+                name="write",
+                arguments={"path": path,
+                           "content": f"# {item_label}\n\n{content}\n",
+                           "append": False},
+                interaction_label=f"scale_persist_{item_num}",
+                turn_usage=turn_usage,
+                session_policy=session_policy,
+                task_policy=task_policy,
+            )
+            if res.success:
+                self._emit_tool_output(
+                    "scale_micro_loop",
+                    {"item": item_label, "step": "persist", "path": path},
+                    f"[{item_num}] persisted to {path}",
+                )
+            else:
+                log.warning("Scale item team-persist failed",
+                            item=item_label, path=path, error=res.error)
+        except Exception as e:  # noqa: BLE001 — durability is best-effort
+            log.warning("Scale item team-persist failed",
+                        item=item_label, path=path, error=str(e))
+
     async def _run_scale_micro_loop(
         self,
         task_description: str,
@@ -2164,6 +2216,17 @@ class AgentScaleLoopMixin:
                 _t_write_end = _time.monotonic()
                 _write_sec = round(_t_write_end - _t_write_start, 2)
                 write_path_arg = f"[{_sink_label}]"
+
+                # Write-as-you-go for ensemble workers: a reply-sunk item lives
+                # only in this agent's context, which dies wholesale if the
+                # dispatch budget runs out before the final answer. Persist each
+                # processed item to the run's shared folder so the work survives
+                # a timeout and teammates can read it while this worker goes on.
+                if _sink_label == "reply":
+                    await self._persist_scale_item_for_team(
+                        item_num, item_label, _clean, turn_usage,
+                        session_policy=session_policy, task_policy=task_policy,
+                    )
 
             else:
                 # ── file-based output strategies ──

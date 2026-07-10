@@ -101,6 +101,28 @@ _MAX_FILE_BYTES = 25 * 1024 * 1024
 _MERGE_TIMEOUT = 90    # fast-tier conflict check
 _SYNTH_TIMEOUT = 300   # reason-tier synthesis / analysis
 
+# Dispatch auto-extend: a worker that is still visibly streaming events when its
+# dispatch budget runs out gets bounded extra time instead of being cut mid-work
+# (a document-heavy researcher spends the whole budget ingesting and is killed at
+# exactly the wall during its final synthesis — everything still in context, zero
+# output). Extension requires RECENT activity, comes in slices, and never passes
+# min(3× the budget, 3600s) — a hung agent still times out.
+_EXTEND_ACTIVITY_S = 180.0  # activity window that qualifies for an extension
+_EXTEND_SLICE_S = 300.0     # each extension adds at most this much
+_EXTEND_CAP_X = 3.0         # ceiling multiplier over the configured budget
+
+
+def _extend_deadline(now: float, hard_deadline: float | None,
+                     last_activity: float) -> float | None:
+    """The extended deadline for a still-active agent at its budget wall, or
+    ``None`` when no extension is warranted (idle past the activity window, or
+    the hard ceiling reached — a hung agent still times out)."""
+    if hard_deadline is None or now >= hard_deadline:
+        return None
+    if now - last_activity > _EXTEND_ACTIVITY_S:
+        return None
+    return min(now + _EXTEND_SLICE_S, hard_deadline)
+
 
 def _safe_name(name: str) -> str:
     base = Path(name or "upload").name.strip() or "upload"
@@ -2255,7 +2277,10 @@ async def _send_chat_and_collect(
     answer = ""
     actions: list[dict] = []
     sent = False
+    started_at: float | None = None
     deadline: float | None = None
+    hard_deadline: float | None = None
+    last_activity: float = 0.0
     last_err: Exception | None = None
 
     def _record(kind: str, detail: str) -> None:
@@ -2385,11 +2410,36 @@ async def _send_chat_and_collect(
                         chat_msg["image_paths"] = image_paths
                     await ws.send(json.dumps(chat_msg))
                     sent = True
-                    deadline = asyncio.get_event_loop().time() + timeout
+                    started_at = asyncio.get_event_loop().time()
+                    deadline = started_at + timeout
+                    # Extension ceiling: 3× the configured budget, never past
+                    # 3600s and never below the budget itself.
+                    hard_deadline = started_at + min(
+                        timeout * _EXTEND_CAP_X, max(timeout, 3600.0))
+                    last_activity = started_at
 
                 while True:
-                    rem = deadline - asyncio.get_event_loop().time()
+                    now = asyncio.get_event_loop().time()
+                    rem = deadline - now
                     if rem <= 0:
+                        # Auto-extend: an agent still visibly working (events
+                        # within the activity window) when the budget runs out
+                        # gets more time in bounded slices — never past the hard
+                        # ceiling. This stops a document-heavy worker from being
+                        # cut mid-final-synthesis at exactly the configured
+                        # budget with all its work still in context (the Vatra
+                        # deep-researcher failure mode).
+                        ext = _extend_deadline(now, hard_deadline, last_activity)
+                        if ext is not None:
+                            deadline = ext
+                            base = started_at if started_at is not None else now
+                            _record("dispatch_extend",
+                                    f"time budget reached but the agent is still working — "
+                                    f"extended to {int(deadline - base)}s "
+                                    f"(cap {int((hard_deadline or deadline) - base)}s)")
+                            continue
+                        if error_sink is not None:
+                            error_sink["timed_out"] = True
                         return answer.strip(), actions  # overall budget spent
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=min(rem, 30))
@@ -2399,6 +2449,7 @@ async def _send_chat_and_collect(
                         # the overall deadline rather than tearing the turn down and
                         # re-sending it (which the agent rejects as "busy").
                         continue
+                    last_activity = asyncio.get_event_loop().time()
                     if _handle(json.loads(raw)):
                         return answer.strip(), actions
         except (ConnectionRefusedError, OSError, websockets.ConnectionClosed) as e:
@@ -2410,6 +2461,8 @@ async def _send_chat_and_collect(
             if sent and answer.strip():
                 return answer.strip(), actions
             if deadline is not None and asyncio.get_event_loop().time() >= deadline:
+                if error_sink is not None:
+                    error_sink["timed_out"] = True
                 return answer.strip(), actions
             await asyncio.sleep(0.5 * (attempt + 1))
     if sent and (answer.strip() or actions):
@@ -2494,6 +2547,11 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
                   "usage": usage, "model": sink.get("model", "")}
         if emsg:
             result["error"] = emsg
+        # A dispatch that hit its (possibly extended) time budget is flagged, not
+        # failed: partial work stays usable, but the run log must say the truth
+        # instead of a ✓ on a worker that never finished.
+        if err.get("timed_out"):
+            result["timed_out"] = True
         return result
     except Exception as e:
         log.warning("Basna dispatch failed", error=str(e))
@@ -3348,9 +3406,12 @@ async def execute_route(
                         d = d2
                 mark = "✓" if d["ok"] else "✗"
                 extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
+                if d.get("timed_out"):
+                    mark = "⏱"
+                    extra = " — hit the dispatch time budget; partial work kept" + extra
                 _progress(sid, "dispatch",
                           f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}",
-                          ok=d["ok"], agent=role)
+                          ok=d["ok"] and not d.get("timed_out"), agent=role)
                 return d
 
             _phase(sid, "Generating")

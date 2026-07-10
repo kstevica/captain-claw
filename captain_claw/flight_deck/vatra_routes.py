@@ -1191,9 +1191,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     d = d2
             mark = "✓" if d["ok"] else "✗"
             extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
+            if d.get("timed_out"):
+                mark = "⏱"
+                extra = " — hit the dispatch time budget; partial work kept" + extra
             _progress(sid, "dispatch",
                       f"{label} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}",
-                      ok=d["ok"], agent=label, **_gx(st["id"]))
+                      ok=d["ok"] and not d.get("timed_out"), agent=label, **_gx(st["id"]))
             # Post the finished piece to the shared board so teammates still working
             # (and the next round) can read and build on it.
             out = (d.get("output") or "").strip()
