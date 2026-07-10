@@ -44,6 +44,7 @@ from captain_claw.flight_deck.horizon_worker import (
     run_worker_horizon,
 )
 from captain_claw.flight_deck import facts_ledger
+from captain_claw.flight_deck import quality_findings
 from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck import research_brief
 from captain_claw.flight_deck import research_consistency
@@ -3545,6 +3546,49 @@ async def execute_route(
         except Exception as e:  # noqa: BLE001 — closer is best-effort
             log.warning("Basna horizon closer failed", error=str(e))
 
+    # Shared completion fns + contract validation for the deterministic quality
+    # passes (5c2 consistency, 5e blocking gate, final contract) — defined once
+    # so every pass verifies through the same machinery.
+    from captain_claw.llm import Message as _Msg
+    _fast_creds, _reason_creds = _merge_creds("fast"), _merge_creds("reason")
+
+    async def _fast_complete(p: str) -> str:
+        prov, mt = _provider_call(_fast_creds, temperature=0.0, default_max=4096, cap=8192)
+        r = await asyncio.wait_for(prov.complete(
+            [_Msg(role="user", content=p)], temperature=0.0, max_tokens=mt), 180)
+        return r.content or ""
+
+    async def _reason_complete(p: str) -> str:
+        prov, mt = _provider_call(_reason_creds, temperature=0.1, default_max=8192, cap=32768)
+        r = await asyncio.wait_for(prov.complete(
+            [_Msg(role="user", content=p)], temperature=0.1, max_tokens=mt), 300)
+        return r.content or ""
+
+    async def _contract_validate(text: str) -> dict | None:
+        """Contract validation: deterministic against the facts ledger, one
+        judge call for the rest. None when the contract isn't armed/derived."""
+        if not (quality.constraints_contract and contract_items and (text or "").strip()):
+            return None
+        ledger_vals: dict = {}
+        if quality.facts_ledger and vfs_dir is not None:
+            try:
+                ledger_vals = {r["key"]: r["value"]
+                               for r in facts_ledger.export_rows(vfs_dir)}
+            except Exception as e:  # noqa: BLE001
+                log.warning("Basna ledger export for contract failed", error=str(e))
+        res = research_contract.validate(contract_items, ledger_vals)
+        if res["unresolved"]:
+            cc = _merge_creds("reason")
+            if cc.get("model"):
+                prov, mt = _provider_call(cc, temperature=0.1, default_max=1500, cap=4096)
+                _j = await asyncio.wait_for(prov.complete(
+                    [_Msg(role="user", content=research_contract.judge_prompt(
+                        text, res["unresolved"]))],
+                    temperature=0.1, max_tokens=mt), 120)
+                research_contract.apply_judgement(
+                    res, research_contract.parse_judgement(_j.content or ""))
+        return res
+
     # 5c2) Deterministic cross-section consistency (opt-in): an LLM extracts the
     # merged answer's figures + stated relations ONCE (no arithmetic), pure code
     # verifies identity across sections and recomputes every asserted relation,
@@ -3552,25 +3596,12 @@ async def execute_route(
     # confirms it improved. Runs BEFORE the claim check so internal fixes land
     # before external verification. Budget-gated; best-effort.
     consistency_summary: dict | None = None
+    consistency_result: dict | None = None
+    contract_summary: dict | None = None
     if quality.consistency_check and (agg.get("truth") or "").strip() and _budget.can_afford(2 * _retry_est):
         _budget.add(2 * _retry_est)
         _progress(sid, "merge", "Consistency check: extracting the answer's figures…")
         try:
-            from captain_claw.llm import Message as _Msg
-            _cx, _cr = _merge_creds("fast"), _merge_creds("reason")
-
-            async def _extract_fn(p: str) -> str:
-                prov, mt = _provider_call(_cx, temperature=0.0, default_max=4096, cap=8192)
-                r = await asyncio.wait_for(prov.complete(
-                    [_Msg(role="user", content=p)], temperature=0.0, max_tokens=mt), 180)
-                return r.content or ""
-
-            async def _revise_fn(p: str) -> str:
-                prov, mt = _provider_call(_cr, temperature=0.1, default_max=8192, cap=32768)
-                r = await asyncio.wait_for(prov.complete(
-                    [_Msg(role="user", content=p)], temperature=0.1, max_tokens=mt), 300)
-                return r.content or ""
-
             _ledger_rows = None
             if quality.facts_ledger and vfs_dir is not None:
                 try:
@@ -3578,7 +3609,7 @@ async def execute_route(
                 except Exception as e:  # noqa: BLE001
                     log.warning("Basna ledger export failed", error=str(e))
             cres = await research_consistency.run_check(
-                agg["truth"], extract_fn=_extract_fn, revise_fn=_revise_fn,
+                agg["truth"], extract_fn=_fast_complete, revise_fn=_reason_complete,
                 max_values=quality.consistency_max_values,
                 ledger_rows=_ledger_rows,
                 on_progress=lambda m: _progress(sid, "merge", m))
@@ -3589,6 +3620,7 @@ async def execute_route(
                 _session_files_dir(sid), cres, question=sess["intent"])
             if cdoc:
                 generated_files.append(cdoc)
+            consistency_result = cres
             consistency_summary = research_consistency.summarize(cres)
             _progress(sid, "merge",
                       f"Consistency: {research_consistency.summary_line(cres)}")
@@ -3613,6 +3645,49 @@ async def execute_route(
                 generated_files.append(cc_doc)
         except Exception as e:  # noqa: BLE001
             log.warning("Basna claim check errored", error=str(e))
+
+    # 5e) Blocking gate (explicit opt-in): the enforcement pass. Collects the
+    # deterministic checks' CRITICAL findings, revises against ONE triaged
+    # checklist, and loops while the text-re-verifiable criticals persist —
+    # bounded by block_max_rounds + budget. Contract/ledger criticals ride the
+    # checklist and the verdict but never drive rounds. Work is never
+    # discarded — worst case is a completed run with a failed verdict.
+    gate_summary: dict | None = None
+    if quality.block_on_critical and (agg.get("truth") or "").strip():
+        try:
+            findings = quality_findings.from_consistency(
+                (consistency_result or {}).get("findings") or [])
+            contract_result = await _contract_validate(agg["truth"])
+            if contract_result is not None:
+                contract_summary = research_contract.summarize(contract_result)
+                findings += quality_findings.from_contract(contract_summary["failed"])
+
+            async def _consistency_recheck(text2: str) -> list[dict]:
+                entries = research_consistency.parse_entries(
+                    await _fast_complete(research_consistency.extract_prompt(
+                        text2[:research_consistency.DELIVERABLE_CAP],
+                        quality.consistency_max_values)) or "")
+                return research_consistency.verify(entries)  # text-internal only
+
+            gate = await quality_findings.run_gate(
+                agg["truth"], findings=findings, revise_fn=_reason_complete,
+                consistency_recheck_fn=(
+                    _consistency_recheck if quality.consistency_check else None),
+                max_rounds=quality.block_max_rounds,
+                budget=_budget, est=2 * _retry_est,
+                on_progress=lambda m: _progress(sid, "merge", m))
+            if gate["revised"]:
+                agg["truth"] = gate["text"]
+                agg["method"] = f"{agg.get('method', 'merge')}+gated"
+            gate_summary = {"verdict": gate["verdict"], "rounds": gate["rounds"],
+                            "remaining": gate["remaining"][:10]}
+            _progress(sid, "merge",
+                      f"Blocking gate: {gate['verdict']} after {gate['rounds']} round(s)"
+                      + (f" · {len(gate['remaining'])} critical(s) remain"
+                         if gate["remaining"] else ""),
+                      ok=gate["verdict"] == "clean")
+        except Exception as e:  # noqa: BLE001 — the gate must never lose a run
+            log.warning("Basna blocking gate failed", error=str(e))
 
     # 6) Close the learning loop: score each run against the truth and fold the
     # outcome into per-archetype reliability, so the next route's prior_weight
@@ -3641,47 +3716,36 @@ async def execute_route(
         files_by_name[g["name"]] = g
     # Contract validation (opt-in): deterministic where the facts ledger has the
     # values, one judge call for the rest. Advisory — failures are recorded into
-    # analysis.contract for follow-up rounds and, later, the blocking gate.
-    contract_summary: dict | None = None
+    # analysis.contract for follow-up rounds. When the blocking gate (5e)
+    # already validated, its result is reused instead of re-paying.
     if quality.constraints_contract and contract_items and (agg.get("truth") or "").strip():
         try:
-            ledger_vals: dict = {}
-            if quality.facts_ledger and vfs_dir is not None:
-                try:
-                    ledger_vals = {r["key"]: r["value"]
-                                   for r in facts_ledger.export_rows(vfs_dir)}
-                except Exception as e:  # noqa: BLE001
-                    log.warning("Basna ledger export for contract failed", error=str(e))
-            cres2 = research_contract.validate(contract_items, ledger_vals)
-            if cres2["unresolved"]:
-                cc = _merge_creds("reason")
-                if cc.get("model"):
-                    prov, mt = _provider_call(cc, temperature=0.1, default_max=1500, cap=4096)
-                    from captain_claw.llm import Message
-                    _j = await asyncio.wait_for(prov.complete(
-                        [Message(role="user", content=research_contract.judge_prompt(
-                            agg["truth"], cres2["unresolved"]))],
-                        temperature=0.1, max_tokens=mt), 120)
-                    research_contract.apply_judgement(
-                        cres2, research_contract.parse_judgement(_j.content or ""))
-            contract_summary = research_contract.summarize(cres2)
-            analysis = analysis or {}
-            analysis["contract"] = contract_summary
-            _progress(sid, "learn",
-                      f"Contract: {contract_summary['passed']}/{contract_summary['checked']} "
-                      f"passed · {contract_summary['failed_critical']} critical "
-                      f"failure(s) · {contract_summary['unclear']} unclear")
+            if contract_summary is None:
+                cres2 = await _contract_validate(agg["truth"])
+                if cres2 is not None:
+                    contract_summary = research_contract.summarize(cres2)
+            if contract_summary is not None:
+                analysis = analysis or {}
+                analysis["contract"] = contract_summary
+                _progress(sid, "learn",
+                          f"Contract: {contract_summary['passed']}/{contract_summary['checked']} "
+                          f"passed · {contract_summary['failed_critical']} critical "
+                          f"failure(s) · {contract_summary['unclear']} unclear")
         except Exception as e:  # noqa: BLE001 — contract validation is best-effort
             log.warning("Basna contract validation failed", error=str(e))
     # The consistency tally (5c2) rides the analysis JSON like coverage does.
     if consistency_summary is not None:
         analysis = analysis or {}
         analysis["consistency"] = consistency_summary
+    if gate_summary is not None:
+        analysis = analysis or {}
+        analysis["quality_verdict"] = gate_summary["verdict"]
+        analysis["blocking"] = gate_summary
     # One flat quality tally per run — only the levers that actually ran
     # contribute keys, so the record doubles as "which checks this run had".
     qm = build_quality_metrics(
         claim_findings=claim_findings, consistency=consistency_summary,
-        gaps=(analysis or {}).get("gaps"), contract=contract_summary,
+        gaps=(analysis or {}).get("gaps"), contract=contract_summary, gate=gate_summary,
         acted_retries=_qm_counts["acted"] if quality.acted_gate else None,
         escalations=_qm_counts["escalated"] if quality.worker_escalate else None,
         budget=_budget)

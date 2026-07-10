@@ -84,6 +84,9 @@ _PRESETS: dict[str, set[str]] = {
     # claim_check (R8) is the paid research lever (spawns a web-tool verifier + a
     # revision), like deep_build on the code side — no preset enables it; turn it
     # on explicitly, ideally with a token_budget.
+    # block_on_critical is the enforcement lever (bounded revise-until-clean loop
+    # over the deterministic checks' critical findings) — it multiplies paid
+    # passes, so no preset enables it either; pair it with a token_budget.
 }
 
 _VALID_PROFILES = frozenset(_PRESETS)
@@ -127,6 +130,9 @@ class QualityProfile:
     # ── Constraints contract (plan §5 / increment 5) ──
     constraints_contract: bool = False  # derive hard rules once, persist per folder, validate
 
+    # ── Blocking gate (plan §6 / increment 6; explicit opt-in, no preset) ──
+    block_on_critical: bool = False  # bounded revise-until-clean loop on critical findings
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     deep_build_samples: int = 2    # C3 pool size — kept small on purpose
@@ -134,6 +140,7 @@ class QualityProfile:
     escalate_max: int = 2          # R5: cap re-dispatch escalations per run
     claim_check_max: int = 8       # R8: how many top claims the fact-checker live-verifies
     consistency_max_values: int = 40  # consistency_check: extraction cap (value occurrences)
+    block_max_rounds: int = 2      # block_on_critical: revise-recheck rounds cap
 
     @classmethod
     def from_dict(cls, d: dict | None) -> QualityProfile:
@@ -151,7 +158,7 @@ class QualityProfile:
             "research_map", "delta_rounds", "critic_triage", "worker_escalate",
             "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
             "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
-            "constraints_contract",
+            "constraints_contract", "block_on_critical",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -183,6 +190,7 @@ class QualityProfile:
         kw["escalate_max"] = max(0, _int("escalate_max", 2))
         kw["claim_check_max"] = max(1, _int("claim_check_max", 8))
         kw["consistency_max_values"] = max(1, _int("consistency_max_values", 40))
+        kw["block_max_rounds"] = max(1, _int("block_max_rounds", 2))
         return cls(**kw)
 
     _BOOL_FLAGS = (
@@ -190,7 +198,7 @@ class QualityProfile:
         "research_map", "delta_rounds", "critic_triage", "worker_escalate",
         "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
         "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
-        "constraints_contract",
+        "constraints_contract", "block_on_critical",
     )
 
     @property
@@ -465,6 +473,7 @@ def build_quality_metrics(
     consistency: dict | None = None,
     gaps: list[dict] | None = None,
     contract: dict | None = None,
+    gate: dict | None = None,
     acted_retries: int | None = None,
     escalations: int | None = None,
     budget: TokenBudget | None = None,
@@ -501,6 +510,11 @@ def build_quality_metrics(
             contract_failed_critical=int(contract.get("failed_critical", 0)),
             contract_failed_major=int(contract.get("failed_major", 0)),
             contract_unclear=int(contract.get("unclear", 0)),
+        )
+    if gate is not None:
+        out.update(
+            block_rounds=int(gate.get("rounds", 0)),
+            quality_verdict=str(gate.get("verdict", "")),
         )
     if acted_retries is not None:
         out["acted_retries"] = int(acted_retries)
