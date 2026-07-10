@@ -261,3 +261,26 @@ def test_match_later_owner_is_conservative():
     assert g.match_later_owner("application form structure extracted", _SCHED) is None
     assert g.match_later_owner("", _SCHED) is None
     assert g.match_later_owner("fact-checker data", {}) is None
+
+
+# ── pull-forward decision (bounded call-forward of a later-group owner) ──
+
+def test_pull_proceeds_when_inputs_exist_and_cap_remains():
+    assert g.pull_decision(already_running=False, used=0,
+                           deps=["s1"], have={"s1"}) == "proceed"
+    assert g.pull_decision(already_running=False, used=0,
+                           deps=[], have=set()) == "proceed"
+
+
+def test_pull_joins_an_already_running_call_forward():
+    # Second waiter for the same owner just waits again — never a second dispatch.
+    assert g.pull_decision(already_running=True, used=g.PULL_CAP,
+                           deps=["missing"], have=set()) == "joined"
+
+
+def test_pull_refuses_at_cap_or_with_missing_inputs():
+    assert g.pull_decision(already_running=False, used=g.PULL_CAP,
+                           deps=[], have=set()) == "refuse"
+    # Pulling an owner whose own inputs don't exist would just move the hole.
+    assert g.pull_decision(already_running=False, used=0,
+                           deps=["s1", "s9"], have={"s1"}) == "refuse"

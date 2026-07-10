@@ -20,6 +20,29 @@ import re
 # Default cap on approved clarification loop-backs per run (global ceiling).
 CLARIFY_CAP = 2
 
+# Cap on later-group owners that may be CALLED FORWARD per run (pull-forward).
+PULL_CAP = 2
+
+
+def pull_decision(*, already_running: bool, used: int, deps: list[str] | None,
+                  have: set[str], cap: int = PULL_CAP) -> str:
+    """Whether a later-group owner may be called forward to run NOW because a
+    current-phase teammate needs its output:
+
+    * ``"joined"``  — it was already called forward; the waiter just waits again.
+    * ``"proceed"`` — start it: pulls remain and every input it depends on
+      already exists (pulling an owner whose own inputs are missing would just
+      move the hole one hop).
+    * ``"refuse"``  — cap spent or inputs missing; the waiter proceeds without it.
+    """
+    if already_running:
+        return "joined"
+    if used >= cap:
+        return "refuse"
+    if any(d not in have for d in (deps or [])):
+        return "refuse"
+    return "proceed"
+
 # Ordinals: A=1 (earliest) … D=4 (latest). We run the DISTINCT groups a team
 # actually uses, ascending — so {A, C} is two phases (A then C), not four.
 _LETTERS = ("A", "B", "C", "D")

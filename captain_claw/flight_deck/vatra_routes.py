@@ -1363,15 +1363,84 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                       f"{', '.join(vatra_groups.group_label(p) for p in phases)}")
             completed: list[dict] = []   # earlier-phase owners — the roster + providers
             loop_backs, cap = 0, vatra_groups.CLARIFY_CAP
+
+            # Pull-forward: when a current-phase worker waits on a LATER-group
+            # owner's output, the wait endpoint may CALL that owner forward —
+            # dispatch it now with its own brief (it's spawned and idle) instead
+            # of refusing and degrading the requester's piece. Bounded
+            # (PULL_CAP per run, once per owner, only when its own inputs
+            # already exist); its home phase then skips it and reuses the result.
+            pull_tasks: dict[str, asyncio.Task] = {}  # subtask id → in-flight pulled dispatch
+            pulls_used = {"n": 0}
+            sp_by_subtask = {sp["subtask"]["id"]: sp for sp in spawned}
+
+            async def _run_pulled(sp: dict) -> None:
+                label = _owner_label(sp)
+                _progress(sid, "main",
+                          f"⤴ {label} called FORWARD from group "
+                          f"{vatra_groups.group_label(owner_group[id(sp)])} — a current-phase "
+                          "teammate needs its output now",
+                          agent=label, **_gx(sp["subtask"]["id"]))
+                d = await _dispatch_owner(sp)
+                r = _result_of(sp, d)
+                results.append(r)
+                results_by_id[sp["subtask"]["id"]] = r
+                if sid in _group_schedule:
+                    _group_schedule[sid]["done"].add(sp["subtask"]["id"])
+                completed.append(sp)  # joins the clarify roster like any finished owner
+                if research_dir is not None:
+                    try:
+                        research_map.reindex(research_dir)
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("Vatra pull reindex failed", error=str(e))
+
+            def _pull_forward(subtask_id: str) -> bool:
+                """Wait-endpoint callback: dispatch a later-group owner NOW.
+                True → a pull is running (waiter should wait again for the
+                artifact); False → refused (waiter proceeds without it)."""
+                sp = sp_by_subtask.get(subtask_id)
+                if sp is None:
+                    return False
+                verdict = vatra_groups.pull_decision(
+                    already_running=subtask_id in pull_tasks,
+                    used=pulls_used["n"],
+                    deps=sp["subtask"].get("depends_on"),
+                    have=set(results_by_id))
+                if verdict == "joined":
+                    return True
+                if verdict != "proceed":
+                    return False
+                pulls_used["n"] += 1
+                pull_tasks[subtask_id] = asyncio.create_task(_run_pulled(sp))
+                return True
+
+            _group_schedule[sid]["pull"] = _pull_forward
+            _group_schedule[sid]["tasks"] = pull_tasks
+
             for p in phases:
-                grp = [sp for sp in spawned if owner_group[id(sp)] == p]
                 letter = vatra_groups.group_label(p)
                 if sid in _group_schedule:
                     _group_schedule[sid]["current"] = int(p)
+                grp_all = [sp for sp in spawned if owner_group[id(sp)] == p]
+                # Owners already CALLED FORWARD ran out of their home slot —
+                # await their in-flight dispatch here (barrier semantics hold),
+                # never dispatch them twice.
+                pulled_here = [sp for sp in grp_all
+                               if sp["subtask"]["id"] in pull_tasks]
+                grp = [sp for sp in grp_all if sp["subtask"]["id"] not in pull_tasks]
                 _phase(sid, f"Group {letter}")
                 _progress(sid, "main",
                           f"Group {letter} — {len(grp)} agent(s): "
-                          f"{', '.join(_owner_label(sp) for sp in grp)}")
+                          f"{', '.join(_owner_label(sp) for sp in grp) or '—'}"
+                          + (f" · {len(pulled_here)} ran earlier (called forward)"
+                             if pulled_here else ""))
+                for sp in pulled_here:
+                    t = pull_tasks.get(sp["subtask"]["id"])
+                    if t is not None:
+                        try:
+                            await t
+                        except Exception as e:  # noqa: BLE001 — pulled dispatch is best-effort
+                            log.warning("Vatra pulled dispatch failed", error=str(e))
                 ds = await asyncio.gather(*[_dispatch_owner(sp) for sp in grp])
                 for sp, d in zip(grp, ds):
                     r = _result_of(sp, d)
@@ -1555,7 +1624,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _run_shared_datastore.pop(sid, None)
         _skip_agents.pop(sid, None)
         _wait_ledger.pop(sid, None)
-        _group_schedule.pop(sid, None)
+        # An aborted run may leave a called-forward dispatch in flight — cancel
+        # it so no orphan task outlives its run.
+        _sched_state = _group_schedule.pop(sid, None)
+        if _sched_state:
+            for _t in (_sched_state.get("tasks") or {}).values():
+                if not _t.done():
+                    _t.cancel()
 
     usable = [r for r in results if (r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip()]
     if not usable:
@@ -2734,6 +2809,20 @@ async def agent_wait(body: _VatraWaitReq):
         if later is not None:
             role = later.get("role") or later.get("arch") or "that teammate"
             letter = vatra_groups.group_label(int(later.get("group") or 0))
+            # Pull-forward first: call the later owner to run NOW (bounded — see
+            # the run loop). If a pull is running, the waiter just waits again
+            # and picks the artifact up when it lands.
+            pull = sched.get("pull")
+            if callable(pull) and pull(later.get("subtask") or ""):
+                _progress(body.session_id, "wait",
+                          f"⤴ {who} needs {role} (group {letter}) — called forward, "
+                          "dispatching it now", agent=who)
+                return {"ready": False, "pulled_forward": True,
+                        "note": (f"{role} was scheduled in a later phase but has been "
+                                 "CALLED FORWARD and is producing its part right now. "
+                                 "Wait again with the same query to pick it up — it may "
+                                 "take a few minutes. If your wait budget runs out first, "
+                                 "proceed and mark its values as (unverified).")}
             _progress(body.session_id, "wait",
                       f"⛔ {who} tried to wait on {role} — it runs LATER (group {letter}); "
                       "refused instantly", agent=who, ok=False)
