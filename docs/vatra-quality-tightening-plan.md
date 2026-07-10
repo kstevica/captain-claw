@@ -1,5 +1,15 @@
 # Vatra/Basna Quality Tightening — Implementation Plan
 
+> Status: **ALL 7 INCREMENTS SHIPPED** (2026-07-10, commits 9d22918 → 57a406f).
+> 1 honesty guard + output modes · 2 consistency check · 3 quality metrics ·
+> 4 facts ledger · 5 constraints contract · 6 blocking gate · 7 FD surface.
+> 84 new tests; suite green (8 pre-existing unrelated failures). Backend restart
+> required on deploy. One scope refinement vs the text below: the blocking gate
+> loops ONLY on text-re-verifiable consistency criticals; contract/ledger
+> criticals ride the checklist + verdict but never drive rounds (a prose
+> revision can't fix ledger-level values). Consistency-knob name shipped as
+> `consistency_max_values` (not max_figures).
+
 Date: 2026-07-10. Findings: `docs/vatra-quality-tightening-findings.md`.
 Goal: weak-model ensemble runs that beat a strong single model on a light scaffold,
 by adding the four structural levers the DIGIT SPARK analysis showed matter most:
