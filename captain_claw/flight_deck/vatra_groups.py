@@ -25,18 +25,28 @@ PULL_CAP = 2
 
 
 def pull_decision(*, already_running: bool, used: int, deps: list[str] | None,
-                  have: set[str], cap: int = PULL_CAP) -> str:
+                  have: set[str], cap: int = PULL_CAP,
+                  max_parallel: int = 0, pulls_in_flight: int = 0) -> str:
     """Whether a later-group owner may be called forward to run NOW because a
     current-phase teammate needs its output:
 
-    * ``"joined"``  — it was already called forward; the waiter just waits again.
-    * ``"proceed"`` — start it: pulls remain and every input it depends on
+    * ``"joined"``      — it was already called forward; the waiter just waits again.
+    * ``"proceed"``     — start it: pulls remain and every input it depends on
       already exists (pulling an owner whose own inputs are missing would just
       move the hole one hop).
-    * ``"refuse"``  — cap spent or inputs missing; the waiter proceeds without it.
+    * ``"no_capacity"`` — the run's concurrency cap can't fit the pull: the
+      waiter holds a dispatch slot for as long as it waits, and each in-flight
+      pull implies another slot-holding waiter, so with
+      ``pulls_in_flight + 1 >= max_parallel`` the pulled owner could never
+      acquire a slot — the waiter would only burn its wait budget. Refuse
+      instantly instead. ``max_parallel=0`` = uncapped, never refuses on this.
+    * ``"refuse"``      — cap spent or inputs missing; the waiter proceeds
+      without it.
     """
     if already_running:
-        return "joined"
+        return "joined"  # joining costs no slot, so capacity can't block it
+    if max_parallel > 0 and pulls_in_flight + 1 >= max_parallel:
+        return "no_capacity"
     if used >= cap:
         return "refuse"
     if any(d not in have for d in (deps or [])):

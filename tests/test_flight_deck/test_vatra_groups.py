@@ -286,6 +286,36 @@ def test_pull_refuses_at_cap_or_with_missing_inputs():
                            deps=["s1", "s9"], have={"s1"}) == "refuse"
 
 
+def test_pull_refuses_when_concurrency_cap_leaves_no_slot():
+    # max_parallel=1 (local single-agent box): the waiter holds the only
+    # dispatch slot, so a pulled owner could never start — refuse instantly.
+    assert g.pull_decision(already_running=False, used=0, deps=[], have=set(),
+                           max_parallel=1) == "no_capacity"
+    # Capacity out-ranks the pull cap and missing-input checks (it's the
+    # structural impossibility; the others are policy).
+    assert g.pull_decision(already_running=False, used=g.PULL_CAP,
+                           deps=["s9"], have=set(),
+                           max_parallel=1) == "no_capacity"
+    # cap=2: the first pull fits (waiter + one other slot that will free),
+    # but a second concurrent pull would mean two slot-holding waiters.
+    assert g.pull_decision(already_running=False, used=0, deps=[], have=set(),
+                           max_parallel=2, pulls_in_flight=0) == "proceed"
+    assert g.pull_decision(already_running=False, used=1, deps=[], have=set(),
+                           max_parallel=2, pulls_in_flight=1) == "no_capacity"
+    # Uncapped (0) and roomy caps never refuse on capacity.
+    assert g.pull_decision(already_running=False, used=0, deps=[], have=set(),
+                           max_parallel=0, pulls_in_flight=5) == "proceed"
+    assert g.pull_decision(already_running=False, used=1, deps=[], have=set(),
+                           max_parallel=4, pulls_in_flight=1) == "proceed"
+
+
+def test_pull_join_wins_over_capacity():
+    # Joining an in-flight pull costs no new slot, so even at cap=1 a second
+    # waiter for the same owner joins instead of being capacity-refused.
+    assert g.pull_decision(already_running=True, used=0, deps=[], have=set(),
+                           max_parallel=1, pulls_in_flight=1) == "joined"
+
+
 # ── clarify: full roster + already-answered short-circuit ─────────────
 
 def test_parse_clarify_already_available_with_pointer():

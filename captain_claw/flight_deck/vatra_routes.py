@@ -1380,6 +1380,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             # already exist); its home phase then skips it and reuses the result.
             pull_tasks: dict[str, asyncio.Task] = {}  # subtask id → in-flight pulled dispatch
             pulls_used = {"n": 0}
+            # The dispatch gate only exists when 0 < max_parallel < team size
+            # (mirrors _make_gate). Captured here because _pull_forward runs in
+            # the wait endpoint's context, where the run's contextvars are absent.
+            _pull_slot_cap = int(getattr(body, "max_parallel", 0) or 0)
+            if _pull_slot_cap >= len(subtasks):
+                _pull_slot_cap = 0
             sp_by_subtask = {sp["subtask"]["id"]: sp for sp in spawned}
 
             async def _run_pulled(sp: dict) -> None:
@@ -1413,9 +1419,21 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     already_running=subtask_id in pull_tasks,
                     used=pulls_used["n"],
                     deps=sp["subtask"].get("depends_on"),
-                    have=set(results_by_id))
+                    have=set(results_by_id),
+                    max_parallel=_pull_slot_cap,
+                    pulls_in_flight=sum(1 for t in pull_tasks.values() if not t.done()))
                 if verdict == "joined":
                     return True
+                if verdict == "no_capacity":
+                    # The waiter holds a dispatch slot; at this cap a pulled owner
+                    # could never get one — waiting would only burn the ledger.
+                    if not pulls_used.get("cap_noted"):
+                        pulls_used["cap_noted"] = True
+                        _progress(sid, "wait",
+                                  f"⤴ pull-forward unavailable — max {_pull_slot_cap} "
+                                  "agent(s) in parallel leaves no free slot for a "
+                                  "called-forward owner while the requester waits")
+                    return False
                 if verdict != "proceed":
                     return False
                 pulls_used["n"] += 1
