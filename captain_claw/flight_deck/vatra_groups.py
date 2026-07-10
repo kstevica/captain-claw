@@ -269,23 +269,39 @@ def parse_request(output: str | None) -> str | None:
     return text[:400] or None
 
 
-def clarify_prompt(requester_role: str, request_text: str, roster: list[dict]) -> str:
-    """Ask the Lead whether to interrupt an earlier teammate for a blocked owner."""
+def clarify_prompt(requester_role: str, request_text: str, roster: list[dict],
+                   board_digest: str = "") -> str:
+    """Ask the Lead what to do about a blocked owner's request: point it at an
+    existing answer, route a finished teammate to provide it, or deny."""
     listed = "\n".join(
         f"- id={o.get('id', '')} · {o.get('role', '')} — {str(o.get('title', ''))[:80]}"
         for o in roster) or "(none)"
+    board = (
+        "\nRecent team board posts (the request may ALREADY be answered here):\n"
+        f"{board_digest}\n" if (board_digest or "").strip() else ""
+    )
     return (
-        "You are the Lead of a team running in ordered phases. A specialist in a LATER "
-        "phase is blocked and wants to interrupt an EARLIER-phase teammate for more data "
-        "or clarification. Decide whether that is warranted.\n\n"
+        "You are the Lead of a team running in ordered phases. A specialist is "
+        "blocked and wants a teammate to provide missing data or clarification. "
+        "Decide what happens.\n\n"
         f"Requester: {requester_role}\n"
-        f"Its request: {request_text}\n\n"
-        "Earlier-phase teammates who could provide it:\n"
+        f"Its request: {request_text}\n"
+        f"{board}\n"
+        "Teammates who have ALREADY FINISHED and could provide it:\n"
         f"{listed}\n\n"
-        "Approve ONLY if this is a genuine blocker AND one listed teammate can provide it. "
-        "DENY vague asks, nice-to-haves, or anything the requester could get itself from the "
-        "shared board. Reply with ONLY this JSON — no prose:\n"
-        '{"approve": true|false, "provider": "<the id of the teammate to ask, or empty>", '
+        "Decision rules, in order:\n"
+        "1. If the requested data ALREADY EXISTS in a board post above, reply "
+        "already_available=true with a pointer to it and NO provider — "
+        "re-producing existing data wastes a teammate's turn.\n"
+        "2. Otherwise approve ONLY if this is a genuine blocker AND one listed "
+        "teammate can provide it — prefer the teammate the requester NAMED when "
+        "it is on the list.\n"
+        "3. DENY vague asks, nice-to-haves, or anything the requester could get "
+        "itself from the shared board.\n"
+        "Reply with ONLY this JSON — no prose:\n"
+        '{"approve": true|false, "already_available": true|false, '
+        '"pointer": "<the board post / file that answers it, or empty>", '
+        '"provider": "<the id of the teammate to ask, or empty>", '
         '"instruction": "<one concrete sentence telling that teammate exactly what to produce '
         'and post to the board>"}'
     )
@@ -293,7 +309,8 @@ def clarify_prompt(requester_role: str, request_text: str, roster: list[dict]) -
 
 def parse_clarify(output: str | None) -> dict:
     """Parse the Lead's decision. Defaults to DENY on any parse trouble."""
-    deny = {"approve": False, "provider": "", "instruction": ""}
+    deny = {"approve": False, "already_available": False, "pointer": "",
+            "provider": "", "instruction": ""}
     if not output:
         return deny
     text = output.strip()
@@ -308,6 +325,8 @@ def parse_clarify(output: str | None) -> dict:
         return deny
     return {
         "approve": bool(raw.get("approve")),
+        "already_available": bool(raw.get("already_available")),
+        "pointer": str(raw.get("pointer") or "").strip()[:300],
         "provider": str(raw.get("provider") or "").strip(),
         "instruction": str(raw.get("instruction") or "").strip()[:600],
     }

@@ -1344,18 +1344,21 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     r["actions"] = r.get("actions", []) + d.get("actions", [])
                 return d
 
-            async def _lead_clarify(requester_role: str, request_text: str, roster: list) -> dict:
+            async def _lead_clarify(requester_role: str, request_text: str, roster: list,
+                                    board_digest: str = "") -> dict:
                 try:
                     prov, mt = _provider_call(_creds("reason"), temperature=0.2, default_max=400, cap=1024)
                     from captain_claw.llm import Message
                     resp = await prov.complete(
                         [Message(role="user",
-                                 content=vatra_groups.clarify_prompt(requester_role, request_text, roster))],
+                                 content=vatra_groups.clarify_prompt(
+                                     requester_role, request_text, roster, board_digest))],
                         temperature=0.2, max_tokens=mt)
                     return vatra_groups.parse_clarify(resp.content or "")
                 except Exception as e:  # noqa: BLE001 — clarify is best-effort; default deny
                     log.warning("Vatra clarify decision failed", error=str(e))
-                    return {"approve": False, "provider": "", "instruction": ""}
+                    return {"approve": False, "already_available": False, "pointer": "",
+                            "provider": "", "instruction": ""}
 
             _phase(sid, "Grouped run")
             _progress(sid, "main",
@@ -1452,23 +1455,56 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     except Exception as e:  # noqa: BLE001
                         log.debug("Vatra group reindex failed", error=str(e))
 
-                # Clarification loop: a blocked owner in this phase may ask an EARLIER
-                # teammate for more. The Lead approves/denies; on approval, re-run only
-                # the named provider, then the requester. Bounded by `cap` loop-backs
-                # per run (total).
-                if completed and loop_backs < cap:
-                    roster = [{"id": s["arch"]["id"], "role": s["arch"].get("role", ""),
-                               "title": s["subtask"]["title"]} for s in completed]
+                # Clarification loop: a blocked owner may ask a teammate for more.
+                # Providers = everyone already FINISHED — earlier phases AND this
+                # phase's other owners (a same-group teammate often finished
+                # minutes earlier with exactly the requested data; the old
+                # earlier-phases-only roster routed such requests to the wrong
+                # agent). The Lead first checks the board digest: an already-
+                # answered request skips the provider entirely and only the
+                # requester re-runs, pointed at the existing answer. Bounded by
+                # `cap` loop-backs per run (total).
+                if loop_backs < cap:
                     for sp, d in zip(grp, ds):
                         if loop_backs >= cap:
                             break
                         req = vatra_groups.parse_request(d.get("output"))
                         if not req:
                             continue
+                        providers = completed + [s for s in grp if s is not sp]
+                        if not providers:
+                            continue
                         who = _owner_label(sp)
                         _progress(sid, "clarify", f"{who} requests: {req[:160]}", agent=who)
-                        decision = await _lead_clarify(sp["arch"].get("role", ""), req, roster)
-                        provider = next((s for s in completed
+                        roster = [{"id": s["arch"]["id"], "role": s["arch"].get("role", ""),
+                                   "title": s["subtask"]["title"]} for s in providers]
+                        digest = ""
+                        try:
+                            _recent = await db.list_vatra_board(sid, limit=15)
+                            digest = "\n".join(
+                                f"- [{e.get('kind', '')}] {e.get('from_owner', '')}: "
+                                f"{(e.get('title') or '')[:60]} — "
+                                f"{(e.get('content') or '')[:180]}"
+                                for e in _recent)
+                        except Exception as e:  # noqa: BLE001 — digest is best-effort
+                            log.debug("Vatra clarify board digest failed", error=str(e))
+                        decision = await _lead_clarify(sp["arch"].get("role", ""), req,
+                                                       roster, digest)
+                        if decision.get("already_available"):
+                            loop_backs += 1
+                            pointer = decision.get("pointer") or "the shared board"
+                            _progress(sid, "clarify",
+                                      f"Lead: already answered — {pointer[:120]}; "
+                                      f"re-running {who} (loop-back {loop_backs}/{cap})",
+                                      agent=who)
+                            await _redispatch_owner(
+                                sp,
+                                f"What you asked for already exists: {pointer}. Read it "
+                                "(search the shared board with the `vatra` tool / read the "
+                                "file), then finish your part incorporating it. Output "
+                                "your full piece.", "clarify")
+                            continue
+                        provider = next((s for s in providers
                                          if s["arch"]["id"] == decision.get("provider")), None)
                         if not (decision.get("approve") and provider):
                             _progress(sid, "clarify",

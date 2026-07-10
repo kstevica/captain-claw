@@ -284,3 +284,28 @@ def test_pull_refuses_at_cap_or_with_missing_inputs():
     # Pulling an owner whose own inputs don't exist would just move the hole.
     assert g.pull_decision(already_running=False, used=0,
                            deps=["s1", "s9"], have={"s1"}) == "refuse"
+
+
+# ── clarify: full roster + already-answered short-circuit ─────────────
+
+def test_parse_clarify_already_available_with_pointer():
+    d = g.parse_clarify('{"approve": false, "already_available": true, '
+                        '"pointer": "market-analysis.md — TAM/SAM/SOM section", '
+                        '"provider": "", "instruction": ""}')
+    assert d["already_available"] is True and "market-analysis" in d["pointer"]
+    # Old-shape replies (no new keys) still parse — defaults off.
+    old = g.parse_clarify('{"approve": true, "provider": "x", "instruction": "y"}')
+    assert old["already_available"] is False and old["pointer"] == ""
+    assert g.parse_clarify("garbage")["already_available"] is False
+
+
+def test_clarify_prompt_carries_the_board_digest_and_rules():
+    p = g.clarify_prompt(
+        "Data Analyst", "TAM/SAM/SOM figures",
+        [{"id": "market-specialist", "role": "Market Specialist", "title": "Market"}],
+        board_digest="- [output] market-specialist: Market Analysis — TAM €500M")
+    assert "already_available" in p and "TAM €500M" in p
+    assert "prefer the teammate the requester NAMED" in p
+    assert "market-specialist" in p
+    # Without a digest the board section is omitted entirely.
+    assert "ALREADY be answered" not in g.clarify_prompt("r", "q", [])
