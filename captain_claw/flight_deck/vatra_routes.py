@@ -2759,18 +2759,20 @@ async def execute_vatra_ui(body: VatraExecuteRequest, request: Request,
     return {"session_id": body.session_id, "status": "running"}
 
 
-@router.post("/sessions/{session_id}/resume")
-async def resume_vatra(
-    session_id: str, body: VatraExecuteRequest,
-    user: dict = Depends(get_current_user),
-):
-    """Resume a stalled/cancelled Vatra run from its durable checkpoints.
+async def launch_vatra_resume(
+    session_id: str, user: dict, *, tiers: dict | None = None,
+    env_vars: list | None = None, api_key: str = "", horizon: dict | None = None,
+    max_parallel: int = 0, execution_groups: bool = False,
+) -> dict:
+    """Resume a stalled/cancelled Vatra run in the background — shared by the UI
+    endpoint and the agent/tool entry.
 
     Restores every owner that already finished (from `vatra_runs` — no re-run, no
     re-spend), re-dispatches only the missing ones, then synthesizes. Reuses the
-    persisted plan (same cast) and the same VFS folder + blackboard. Intended for a
-    run that is no longer actively progressing (Stopped, errored, or hung); any
-    workers still alive are torn down first so a single coroutine owns the session."""
+    persisted plan (same cast) + the same VFS folder + blackboard; run knobs
+    (grouped, parallelism, datastore, folder) come from the session config so the
+    resumed flow matches the original. Any workers still alive are torn down first
+    so a single coroutine owns the session."""
     db = get_db()
     sess = await db.get_basna_session(session_id, user["id"])
     if not sess:
@@ -2781,22 +2783,17 @@ async def resume_vatra(
         cfg = json.loads(sess.get("config") or "{}")
     except json.JSONDecodeError:
         cfg = {}
-    # Tear down any workers still alive from the stalled run (idempotent) so the
-    # resumed coroutine is the only one touching this session's registry.
     try:
         from captain_claw.flight_deck.basna_routes import _cancel_basna_run
         await _cancel_basna_run(session_id, user["id"])
     except Exception as e:  # noqa: BLE001
         log.warning("Vatra resume: pre-cancel failed", session_id=session_id, error=str(e))
-    # Reconstruct the run knobs from config (the original run persisted them) so the
-    # resume re-enters the SAME flow — grouped vs flat, parallelism, shared datastore,
-    # folder — rather than falling back to defaults the caller didn't repeat.
     exec_req = ExecuteRequest(
-        session_id=session_id, tiers=body.tiers or None,
-        env_vars=body.env_vars or None, api_key=body.api_key or "",
-        horizon=body.horizon or None,
-        max_parallel=int(cfg.get("max_parallel") or body.max_parallel or 0),
-        execution_groups=bool(cfg.get("execution_groups") or body.execution_groups),
+        session_id=session_id, tiers=tiers or None,
+        env_vars=env_vars or None, api_key=api_key or "",
+        horizon=horizon or None,
+        max_parallel=int(cfg.get("max_parallel") or max_parallel or 0),
+        execution_groups=bool(cfg.get("execution_groups") or execution_groups),
         shared_datastore=bool(cfg.get("shared_datastore")),
         vfs_project=cfg.get("vfs_project") or "",
         resume=True)
@@ -2809,6 +2806,18 @@ async def resume_vatra(
         _agent_run_tasks.pop(_sid, None)
     t.add_done_callback(_clear)
     return {"session_id": session_id, "status": "running", "resumed": True}
+
+
+@router.post("/sessions/{session_id}/resume")
+async def resume_vatra(
+    session_id: str, body: VatraExecuteRequest,
+    user: dict = Depends(get_current_user),
+):
+    """UI entry: resume a stalled/cancelled Vatra run from its durable checkpoints."""
+    return await launch_vatra_resume(
+        session_id, user, tiers=body.tiers, env_vars=body.env_vars,
+        api_key=body.api_key, horizon=body.horizon,
+        max_parallel=body.max_parallel, execution_groups=body.execution_groups)
 
 
 @router.post("/start")

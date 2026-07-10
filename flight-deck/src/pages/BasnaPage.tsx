@@ -241,9 +241,9 @@ const QUALITY_LABEL: Record<string, string> = { off: 'Basic', balanced: 'Balance
 export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
-    routing, planning, executing, recompiling, error,
+    routing, planning, executing, recompiling, resuming, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile,
-    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, resetDraft, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
+    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, resetDraft, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, resumeSession, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
   const {
@@ -455,6 +455,12 @@ export function BasnaPage() {
   const running = executing || activeBusy
   const finished = !!activeSession && (activeSession.status === 'done' || activeSession.status === 'error')
   const stage: Stage = running ? 'run' : finished ? 'done' : routePlan ? 'plan' : 'define'
+  // A stopped/failed run can be resumed from its checkpoints: finished agents are
+  // restored (no re-spend), only the missing ones re-run. Shown while it's idle
+  // (not actively executing) so the user decides when it's stuck.
+  const resumable = !!activeSession
+    && (activeSession.status === 'cancelled' || activeSession.status === 'error')
+    && !executing && !resuming
 
   // Which panels are expanded. Each stage transition sets sensible defaults;
   // the chips let the user reopen any collapsed stage at any time.
@@ -713,6 +719,31 @@ export function BasnaPage() {
                 summary={stage === 'run' ? (currentPhase || 'working') : stage === 'done' ? (activeSession?.status === 'error' ? 'failed' : 'finished') : undefined}
               />
             </div>
+
+            {/* A stopped/failed run can be resumed from its checkpoints — restore the
+                finished agents (no re-spend) and re-run only the missing ones. */}
+            {resumable && (
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-300/70 bg-amber-50/70 p-3 dark:border-amber-700/40 dark:bg-amber-900/10">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+                    {activeSession?.status === 'error' ? 'Run failed' : 'Run stopped'}
+                  </div>
+                  <div className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
+                    Resume from where it left off — finished {vatraMode ? 'specialists' : 'agents'} are
+                    restored from checkpoints (no re-run, no re-spend); only the missing ones re-run,
+                    then it synthesizes.
+                  </div>
+                </div>
+                <button
+                  onClick={() => resumeSession(tiers, envVars, vatraMode)}
+                  disabled={resuming}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-40"
+                >
+                  {resuming ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                  Resume
+                </button>
+              </div>
+            )}
 
             {/* Stage 1 — Task: title, the task itself, attachments. */}
             {open.define && (

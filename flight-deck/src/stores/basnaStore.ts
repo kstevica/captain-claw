@@ -308,6 +308,16 @@ async function apiExecute(body: Record<string, unknown>): Promise<ExecuteResult>
   return res.json()
 }
 
+// Resume a stalled/cancelled Basna run — runs inline like /execute and returns the
+// final result (finished agents restored from checkpoints, only the missing re-run).
+async function apiBasnaResume(sessionId: string, body: Record<string, unknown>): Promise<ExecuteResult> {
+  const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(sessionId)}/resume`, {
+    method: 'POST', body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'resume failed')
+  return res.json()
+}
+
 // A wizard setup recommendation from POST /fd/basna/recommend.
 export interface Recommendation {
   mode: 'basna' | 'vatra'
@@ -366,6 +376,19 @@ async function apiVatraExecute(body: Record<string, unknown>): Promise<{ session
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}))
     throw new Error((detail as { detail?: string }).detail || 'vatra run failed')
+  }
+  return res.json()
+}
+
+// Resume a stalled/cancelled Vatra run — backgrounds like /execute; the live monitor
+// polls its progress. Returns as soon as the run is re-launched.
+async function apiVatraResume(sessionId: string, body: Record<string, unknown>): Promise<{ session_id: string }> {
+  const res = await _authedFetch(`/fd/vatra/sessions/${encodeURIComponent(sessionId)}/resume`, {
+    method: 'POST', body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { detail?: string }).detail || 'resume failed')
   }
   return res.json()
 }
@@ -533,6 +556,7 @@ interface BasnaStore {
   planning: boolean   // Vatra "Plan as Vatra" step in flight (separate from Basna routing)
   executing: boolean
   recompiling: boolean
+  resuming: boolean    // resuming a stalled/cancelled run from its checkpoints
   error: string | null
 
   routerTier: string   // which Library tier selects the archetypes (the router)
@@ -603,6 +627,11 @@ interface BasnaStore {
   sendFeedback: (runId: number, success: boolean) => Promise<void>
   deleteSession: (id: string) => Promise<void>
   cancelSession: (id: string) => Promise<void>
+  // Resume a stalled/cancelled run from its durable checkpoints: finished agents
+  // are restored (no re-spend), only the missing ones re-run, then it synthesizes.
+  // Basna runs inline (like execute); Vatra backgrounds (like runVatra) and the
+  // live monitor picks up its progress.
+  resumeSession: (tiers: TierMap, envVars: EnvVar[], vatra: boolean) => Promise<void>
   deepenSession: (id: string, instruction?: string) => Promise<void>
   continueSession: (id: string, opts: { instruction: string; kind: string; sameCast: boolean; vatra: boolean }) => Promise<void>
 }
@@ -621,6 +650,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   planning: false,
   executing: false,
   recompiling: false,
+  resuming: false,
   error: null,
 
   routerTier: (typeof localStorage !== 'undefined' && localStorage.getItem(_ROUTER_TIER_LS)) || 'reason',
@@ -1064,6 +1094,47 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   cancelSession: async (id) => {
     await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
     await get().loadSessions()
+  },
+
+  resumeSession: async (tiers, envVars, vatra) => {
+    const sid = get().activeSession?.id
+    if (!sid) return
+    const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
+    set({ resuming: true, error: null })
+    if (vatra) {
+      // Vatra backgrounds the run; flip to the live view and let pollRunning drive it.
+      try {
+        await apiVatraResume(sid, { session_id: sid, tiers, env_vars })
+        const s = await apiGetSession(sid)
+        if (s) set({ activeSession: s })
+        await get().loadSessions()
+      } catch (e) {
+        set({ error: e instanceof Error ? e.message : 'resume failed' })
+      } finally {
+        set({ resuming: false })
+      }
+      return
+    }
+    // Basna runs inline (like execute): poll the live log while it blocks, then
+    // refresh the session, runs, and generated files.
+    set({ executing: true, progress: [] })
+    const poll = setInterval(async () => {
+      try { const p = await apiProgress(sid); set({ progress: p.events || [] }) } catch { /* ignore */ }
+    }, 700)
+    try {
+      const res = await apiBasnaResume(sid, { session_id: sid, tiers, env_vars })
+      const s = await apiGetSession(sid)
+      const runs = await apiListRuns(sid)
+      set({ lastExecute: res, activeSession: s, runs,
+            ...(s ? { attachments: parseFiles(s.files) } : {}) })
+      await get().loadSessions()
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'resume failed' })
+    } finally {
+      clearInterval(poll)
+      try { const p = await apiProgress(sid); set({ progress: p.events || [] }) } catch { /* ignore */ }
+      set({ executing: false, resuming: false })
+    }
   },
 
   deepenSession: async (id, instruction = '') => {

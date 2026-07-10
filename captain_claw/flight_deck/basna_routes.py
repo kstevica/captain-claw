@@ -1313,6 +1313,53 @@ async def agent_continue(body: _AgentContinueReq):
     return {"status": "running", **res}
 
 
+@router.post("/agent/resume")
+async def agent_resume(body: _AgentReq):
+    """Agent/tool entry: resume a stalled/cancelled run by session id (Basna or
+    Vatra). Restores agents that already finished from their checkpoints (no re-run,
+    no re-spend), re-dispatches only the missing ones, then synthesizes. Routes to
+    the Vatra resume when the run was a Vatra team, so one action covers both modes.
+    Backgrounds the run and returns immediately."""
+    owner = _resolve_owner(body)
+    db = get_db()
+    full_user = await db.get_user_by_id(owner) or {"id": owner}
+    sess = await db.get_basna_session(body.session_id, owner)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if (sess.get("status") or "") == "done" and (sess.get("truth") or "").strip():
+        raise HTTPException(400, "session already completed — nothing to resume")
+    try:
+        cfg = json.loads(sess.get("config") or "{}")
+    except (ValueError, TypeError):
+        cfg = {}
+    tiers, env_vars = await _load_owner_tiers(db, owner)
+    if cfg.get("mode") == "vatra":
+        # Lazy import to avoid a circular import (vatra_routes imports this module).
+        from captain_claw.flight_deck.vatra_routes import launch_vatra_resume
+        return await launch_vatra_resume(
+            body.session_id, full_user, tiers=tiers, env_vars=env_vars,
+            max_parallel=int(cfg.get("max_parallel") or 0),
+            execution_groups=bool(cfg.get("execution_groups")))
+    # Basna: tear down any live workers, then background a resumed inline run.
+    try:
+        await _cancel_basna_run(body.session_id, owner)
+    except Exception as e:  # noqa: BLE001
+        log.warning("agent resume: pre-cancel failed", session_id=body.session_id, error=str(e))
+    exec_req = ExecuteRequest(
+        session_id=body.session_id, tiers=tiers, env_vars=env_vars,
+        vfs_project=cfg.get("vfs_project") or "",
+        shared_datastore=bool(cfg.get("shared_datastore")), resume=True)
+    stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
+    t = asyncio.create_task(execute_route(exec_req, stub, full_user))
+    _basna_agent_tasks.add(t)
+    _agent_run_tasks[body.session_id] = t
+    def _clear(_t: asyncio.Task, _sid: str = body.session_id) -> None:
+        _basna_agent_tasks.discard(_t)
+        _agent_run_tasks.pop(_sid, None)
+    t.add_done_callback(_clear)
+    return {"status": "running", "session_id": body.session_id, "resumed": True}
+
+
 # ── Router endpoint ──────────────────────────────────────────────────
 
 class RecommendRequest(BaseModel):
