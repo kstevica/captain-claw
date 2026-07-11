@@ -9,6 +9,7 @@ import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type FolderMode, type 
 import { ShareModal } from '../components/common/ShareModal'
 import { useBasnaProjectStore, UNFILED_ID, type BasnaProject } from '../stores/basnaProjectStore'
 import { VatraTeamPlan } from '../components/VatraDelegation'
+import { VatraGroup0Plan } from '../components/VatraGroup0Plan'
 import { QualityControls } from '../components/QualityControls'
 import { BasnaWizardModal } from '../components/agents/BasnaWizardModal'
 import { KnowledgePicker } from '../components/agents/KnowledgePicker'
@@ -243,7 +244,7 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, resuming, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, groupedReview, setGroupedReview, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile,
-    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, resetDraft, route, planVatra, runVatra, fillGaps, saveTitle, execute, recompile, resumeSession, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
+    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, resetDraft, route, planVatra, runVatra, approveVatraPlan, cancelVatraPlan, approvingPlan, fillGaps, saveTitle, execute, recompile, resumeSession, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
   const {
@@ -355,7 +356,7 @@ export function BasnaPage() {
 
   // Live monitor: while any run (incl. agent-started) is mid-flight, poll the
   // list status + the open session's progress every few seconds; stop when idle.
-  const anyRunning = sessions.some((s) => ['routing', 'routed', 'running'].includes(s.status))
+  const anyRunning = sessions.some((s) => ['routing', 'routed', 'running', 'planning', 'awaiting_plan'].includes(s.status))
   // Vatra runs render the collaboration panel, not the Basna route-plan editor
   // (their route's `selected` carries no tier/prior_weight). Read from config so
   // it's correct even before the Lead has decomposed (route is still empty).
@@ -452,7 +453,11 @@ export function BasnaPage() {
   )
 
   // ── The stage machine: define → plan → run → done ──────────────────────────
-  const running = executing || activeBusy
+  // Group 0 pre-phase: 'planning' = the Long Horizon Planner is drafting the plan
+  // (a live run); 'awaiting_plan' = drafted, paused at the approval gate.
+  const group0Planning = !!activeSession && activeSession.status === 'planning'
+  const awaitingPlan = !!activeSession && activeSession.status === 'awaiting_plan'
+  const running = executing || activeBusy || group0Planning
   const finished = !!activeSession && (activeSession.status === 'done' || activeSession.status === 'error')
   const stage: Stage = running ? 'run' : finished ? 'done' : routePlan ? 'plan' : 'define'
   // A stopped/failed run can be resumed from its checkpoints: finished agents are
@@ -1265,8 +1270,20 @@ export function BasnaPage() {
               </div>
             )}
 
+            {/* Group 0 gate — the Long Horizon Planner's coordination plan, awaiting
+                the user's review/edit before any Group-A worker runs. */}
+            {awaitingPlan && activeSession && routePlan && (
+              <VatraGroup0Plan
+                plan={routePlan.group0_plan}
+                subtasks={routePlan.subtasks}
+                busy={approvingPlan}
+                onExecute={(edited) => approveVatraPlan(edited)}
+                onCancel={() => cancelVatraPlan()}
+              />
+            )}
+
             {/* Stage 3 — Plan review: the team the router/Lead picked, editable. */}
-            {open.plan && routePlan && (
+            {open.plan && routePlan && !awaitingPlan && (
               <>
                 {/* R12 intent brief — editable; re-routing on an edited brief re-selects the team. */}
                 {routePlan.brief && (
