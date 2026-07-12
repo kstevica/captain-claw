@@ -244,7 +244,7 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, resuming, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, groupedReview, setGroupedReview, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile,
-    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, resetDraft, route, planVatra, runVatra, approveVatraPlan, cancelVatraPlan, approvingPlan, fillGaps, saveTitle, execute, recompile, resumeSession, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
+    updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, resetDraft, route, planVatra, runVatra, approveVatraPlan, replanVatraGroups, cancelVatraPlan, approvingPlan, fillGaps, saveTitle, execute, recompile, resumeSession, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
   const {
@@ -466,6 +466,15 @@ export function BasnaPage() {
     if (awaitingPlan && routePlan?.group0_plan && !approvingPlan) setGroup0Draft(routePlan.group0_plan)
     else if (!awaitingPlan) setGroup0Draft(null)
   }, [awaitingPlan, routePlan?.group0_plan, approvingPlan])
+  // Whether the user re-grouped any agent vs the drafted plan. A group change makes the
+  // plan's mandates/dependencies stale (they were written for the old phasing), so we
+  // surface a Re-plan action to regenerate the coordination for the new order.
+  const groupsDirty = useMemo(() => {
+    const base = routePlan?.group0_plan
+    if (!awaitingPlan || !group0Draft || !base) return false
+    const byId = new Map((base.agents || []).map((a) => [a.subtask_id, a.group || '']))
+    return (group0Draft.agents || []).some((a) => (byId.get(a.subtask_id) ?? '') !== (a.group || ''))
+  }, [awaitingPlan, group0Draft, routePlan?.group0_plan])
   const finished = !!activeSession && (activeSession.status === 'done' || activeSession.status === 'error')
   const stage: Stage = running ? 'run' : finished ? 'done' : routePlan ? 'plan' : 'define'
   // A stopped/failed run can be resumed from its checkpoints: finished agents are
@@ -1166,6 +1175,11 @@ export function BasnaPage() {
                 since the run is already in motion. */}
             {awaitingPlan && (
               <div className="flex items-center justify-end gap-2">
+                {groupsDirty && (
+                  <span className="mr-auto text-[11px] text-amber-600 dark:text-amber-400">
+                    Groups changed — re-plan to update the coordination for the new order.
+                  </span>
+                )}
                 <button
                   onClick={() => cancelVatraPlan()}
                   disabled={approvingPlan}
@@ -1173,9 +1187,21 @@ export function BasnaPage() {
                 >
                   <Trash2 className="h-3.5 w-3.5" /> Cancel
                 </button>
+                {groupsDirty && group0Draft && (
+                  <button
+                    onClick={() => replanVatraGroups(group0Draft, tiers, envVars)}
+                    disabled={approvingPlan}
+                    title="Regenerate the coordination plan for the new grouping"
+                    className="flex items-center gap-1.5 rounded-lg border border-amber-400 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-500/20 disabled:opacity-40 dark:border-amber-500/60 dark:text-amber-300"
+                  >
+                    {approvingPlan ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    Re-plan
+                  </button>
+                )}
                 <button
                   onClick={() => approveVatraPlan(group0Draft ?? undefined, tiers, envVars)}
                   disabled={approvingPlan}
+                  title={groupsDirty ? 'Run with the new groups but the current (pre-re-plan) mandates' : 'Run Group A'}
                   className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
                 >
                   {approvingPlan ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
@@ -1309,6 +1335,7 @@ export function BasnaPage() {
                 plan={group0Draft}
                 subtasks={routePlan.subtasks}
                 onChange={setGroup0Draft}
+                dirty={groupsDirty}
               />
             )}
 

@@ -42,11 +42,12 @@ function Field({ label, value, onChange, rows = 3, placeholder }: {
 }
 
 export function VatraGroup0Plan({
-  plan, subtasks, onChange,
+  plan, subtasks, onChange, dirty = false,
 }: {
   plan: Group0Plan
   subtasks?: VatraSubtask[]
   onChange: (plan: Group0Plan) => void
+  dirty?: boolean
 }) {
   const agents = plan.agents || []
   // Select by subtask_id (not index) so re-sorting the list on a group change keeps
@@ -92,6 +93,15 @@ export function VatraGroup0Plan({
         review and edit its mandate, output, dependencies, and hand-off — then Execute above to run
         Group A (or Cancel to discard; nothing runs).
       </p>
+
+      {dirty && (
+        <div className="mb-3 rounded-md border border-amber-400/60 bg-amber-500/10 p-2.5 text-[11px] leading-snug text-amber-700 dark:border-amber-500/40 dark:text-amber-300">
+          You moved an agent to a different group. The mandates, dependencies, and hand-offs below
+          were written for the <span className="font-semibold">previous</span> phasing — click
+          <span className="font-semibold"> Re-plan</span> above to regenerate the coordination for
+          the new order, or Execute to run with the new groups but these existing mandates.
+        </div>
+      )}
 
       <div className="mb-3">
         <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">Coordination overview</div>

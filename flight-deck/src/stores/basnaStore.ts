@@ -432,6 +432,20 @@ async function apiVatraApprove(sessionId: string, body: Record<string, unknown>)
   return res.json()
 }
 
+// Re-plan the Group 0 coordination after the user re-grouped agents — the planner
+// regenerates mandates/dependencies/hand-offs for the new phasing, then re-gates.
+async function apiVatraReplan(sessionId: string, body: Record<string, unknown>): Promise<{ status: string }> {
+  const res = await _authedFetch('/fd/vatra/plan/replan', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId, ...body }),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { detail?: string }).detail || 'plan re-plan failed')
+  }
+  return res.json()
+}
+
 // Discard a Group 0 plan awaiting approval — nothing was spawned; session → 'routed'.
 async function apiVatraCancelPlan(sessionId: string): Promise<{ status: string }> {
   const res = await _authedFetch('/fd/vatra/plan/cancel', {
@@ -696,6 +710,7 @@ interface BasnaStore {
   planVatra: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   runVatra: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   approveVatraPlan: (plan?: Group0Plan, tiers?: TierMap, envVars?: EnvVar[]) => Promise<void>
+  replanVatraGroups: (plan: Group0Plan, tiers?: TierMap, envVars?: EnvVar[]) => Promise<void>
   cancelVatraPlan: () => Promise<void>
   fillGaps: (id: string, instruction?: string) => Promise<void>
   saveTitle: (title: string) => Promise<void>
@@ -1081,6 +1096,25 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       await get().loadSessions()
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'plan approve failed' })
+    } finally {
+      set({ approvingPlan: false })
+    }
+  },
+
+  // Group 0 gate: re-plan after re-grouping. Backgrounds the planner (status→planning);
+  // pollRunning shows it working, then the gate re-appears with the regenerated plan.
+  replanVatraGroups: async (plan, tiers, envVars) => {
+    const sid = get().activeSession?.id
+    if (!sid) return
+    set({ approvingPlan: true, error: null })
+    try {
+      const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
+      await apiVatraReplan(sid, { plan, ...(tiers ? { tiers } : {}), env_vars })
+      const s = await apiGetSession(sid)
+      if (s) set({ activeSession: s, routePlan: parseRoute(s.route) })
+      await get().loadSessions()
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'plan re-plan failed' })
     } finally {
       set({ approvingPlan: false })
     }
