@@ -38,6 +38,7 @@ import { AutonomousWorkPage } from './pages/AutonomousWorkPage'
 import { VFSPage } from './pages/VFSPage'
 import { AgentFoldersPage } from './pages/AgentFoldersPage'
 import { SystemPage } from './pages/SystemPage'
+import { BeingsPage } from './pages/BeingsPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -325,6 +326,7 @@ function AppContent() {
       {view === 'hosting' && <HostingPage />}
       {view === 'agent-folders' && <AgentFoldersPage />}
       {view === 'system' && <SystemPage />}
+      {view === 'beings' && <BeingsPage />}
       {view === 'connections' && <ConnectionsPage />}
       {view === 'gpu-cloud' && <GPUCloudPage />}
       {view === 'scheduler' && <SchedulerPage />}

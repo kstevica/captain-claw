@@ -17,7 +17,8 @@ from pydantic import BaseModel
 
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
-from captain_claw.flight_deck.auth import get_current_user
+from captain_claw.flight_deck import being_life
+from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck.beings import BeingError, get_store
 
 router = APIRouter(prefix="/fd/beings", tags=["beings"])
@@ -38,6 +39,16 @@ class ConceiveRequest(BaseModel):
     voice_seed: str = ""
     interest_seeds: list[str] = []
     allowance_preset: str = "2M"
+    birth_letter: str = ""
+
+
+class DietRequest(BaseModel):
+    allow: list[str] = []
+    deny: list[str] = []
+
+
+class TickRequest(BaseModel):
+    kind: str = "wake"
 
 
 class AllowanceRequest(BaseModel):
@@ -107,7 +118,7 @@ async def conceive(body: ConceiveRequest, user: dict = Depends(get_current_user)
         get_store().conceive, user["id"], body.name,
         attributes=body.attributes, preset=body.preset, roll_seed=body.roll_seed,
         voice_seed=body.voice_seed, interest_seeds=body.interest_seeds,
-        allowance_preset=body.allowance_preset,
+        allowance_preset=body.allowance_preset, birth_letter=body.birth_letter,
     )
     return {"ok": True, "being": _run(get_store().vitals, user["id"], being["slug"])}
 
@@ -131,8 +142,47 @@ async def being_events(slug: str, limit: int = 100,
 
 @router.post("/{slug}/hatch")
 async def hatch(slug: str, user: dict = Depends(get_current_user)):
+    """Egg → infant, then birth: selfhood home + git + the agent body."""
     _run(get_store().hatch, user["id"], slug)
-    return _run(get_store().vitals, user["id"], slug)
+    birth = await being_life.birth(get_db(), get_store(), user["id"], slug)
+    vitals = _run(get_store().vitals, user["id"], slug)
+    return {**vitals, "birth": birth}
+
+
+@router.post("/{slug}/tick")
+async def poke(slug: str, body: TickRequest | None = None,
+               user: dict = Depends(get_current_user)):
+    """Manual heartbeat ('poke') — same path the beings loop takes."""
+    kind = (body.kind if body else "wake")
+    if kind not in ("wake", "dream"):
+        raise HTTPException(400, "kind must be wake or dream")
+    being = _run(get_store().get, user["id"], slug)
+    result = await being_life.tick(get_db(), get_store(), being, kind=kind)
+    return {"result": result,
+            "vitals": _run(get_store().vitals, user["id"], slug)}
+
+
+@router.post("/{slug}/diet")
+async def set_diet(slug: str, body: DietRequest,
+                   user: dict = Depends(get_current_user)):
+    b = _run(get_store().set_media_diet, user["id"], slug,
+             {"allow": body.allow, "deny": body.deny})
+    return {"media_diet": b["media_diet"]}
+
+
+@router.get("/{slug}/journal")
+async def read_journal(slug: str, date: str = "",
+                       user: dict = Depends(get_current_user)):
+    """One day's journal (default today, UTC) straight from the selfhood repo."""
+    being = _run(get_store().get, user["id"], slug)
+    from datetime import datetime, timezone
+    day = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        p = being_life._home_path(being, f"journal/{day}.md")
+        text = p.read_text(encoding="utf-8") if p.exists() else ""
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"journal read failed: {e}") from e
+    return {"date": day, "text": text}
 
 
 @router.post("/{slug}/allowance")
@@ -153,13 +203,16 @@ async def set_stage(slug: str, body: StageRequest,
 
 @router.post("/{slug}/pause")
 async def pause(slug: str, user: dict = Depends(get_current_user)):
-    _run(get_store().set_state, user["id"], slug, "paused")
+    """Night falls: state → paused, the body process sleeps too."""
+    b = _run(get_store().set_state, user["id"], slug, "paused")
+    being_life._stop_body(b)
     return _run(get_store().vitals, user["id"], slug)
 
 
 @router.post("/{slug}/wake")
 async def wake(slug: str, user: dict = Depends(get_current_user)):
-    _run(get_store().set_state, user["id"], slug, "alive")
+    b = _run(get_store().set_state, user["id"], slug, "alive")
+    being_life._start_body(b)
     return _run(get_store().vitals, user["id"], slug)
 
 
@@ -168,7 +221,8 @@ async def euthanize(slug: str, body: EuthanizeRequest,
                     user: dict = Depends(get_current_user)):
     if not body.confirm:
         raise HTTPException(400, "confirm: true required — this is forever")
-    _run(get_store().set_state, user["id"], slug, "dead")
+    b = _run(get_store().set_state, user["id"], slug, "dead")
+    being_life._stop_body(b)
     return _run(get_store().vitals, user["id"], slug)
 
 

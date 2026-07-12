@@ -169,6 +169,20 @@ class BeingsStore:
                     ON being_events(being_id, at);
                 """
             )
+            # Lightweight migrations (columns added after first ship).
+            for col, ddl in [
+                ("birth_letter", "TEXT NOT NULL DEFAULT ''"),
+                ("media_diet", "TEXT NOT NULL DEFAULT '{}'"),
+                ("agent_slug", "TEXT"),
+                ("agent_port", "INTEGER"),
+                ("agent_token", "TEXT"),
+                ("last_tick_at", "TEXT"),
+                ("tick_count", "INTEGER NOT NULL DEFAULT 0"),
+            ]:
+                try:
+                    self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass
             self._c().commit()
 
     # ── Registry ─────────────────────────────────────────────────────
@@ -184,6 +198,7 @@ class BeingsStore:
         voice_seed: str = "",
         interest_seeds: list[str] | None = None,
         allowance_preset: str = "2M",
+        birth_letter: str = "",
         now: datetime | None = None,
     ) -> dict:
         """Point-buy conception (Generation 1). Exactly one of attributes /
@@ -213,9 +228,10 @@ class BeingsStore:
             c = self._c()
             c.execute(
                 "INSERT INTO beings (id, owner_id, slug, name, stage, state, genome,"
-                " born_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " born_at, created_at, updated_at, birth_letter)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (bid, owner_id, slug, name, "egg", "alive", json.dumps(g),
-                 _iso(now), _iso(now), _iso(now)),
+                 _iso(now), _iso(now), _iso(now), birth_letter),
             )
             c.execute(
                 "INSERT INTO being_wallets (being_id, allowance_preset, updated_at)"
@@ -240,6 +256,7 @@ class BeingsStore:
         b["genome"] = json.loads(b["genome"])
         b["drives"] = json.loads(b["drives"])
         b["lineage"] = json.loads(b["lineage"])
+        b["media_diet"] = json.loads(b.get("media_diet") or "{}")
         return b
 
     def list(self, owner_id: str) -> list[dict]:
@@ -268,7 +285,12 @@ class BeingsStore:
         b = self.get(owner_id, slug)
         if b["stage"] != "egg":
             raise BeingError("already hatched")
-        self._update(b["id"], now, stage="infant", hatched_at=_iso(now))
+        weights = genome_mod.derive(
+            genome_mod.effective_attributes(b["genome"]))["drive_weights"]
+        drives = {name: {"weight": w, "satisfaction": 0.7}
+                  for name, w in weights.items()}
+        self._update(b["id"], now, stage="infant", hatched_at=_iso(now),
+                     drives=json.dumps(drives))
         self.record_event(b["id"], "hatched", {}, now=now)
         self.credit_allowance(b["id"], now=now)
         return self.get(owner_id, slug)
@@ -604,6 +626,93 @@ class BeingsStore:
         ).fetchall()
         return [{"kind": r["kind"], "data": json.loads(r["data"]), "at": r["at"]}
                 for r in rows]
+
+    # ── Life support (Phase 1: beings loop bookkeeping) ──────────────
+
+    def set_agent(self, being_id: str, agent_slug: str, port: int, token: str,
+                  now: datetime | None = None) -> None:
+        self._update(being_id, now or _utcnow(), agent_slug=agent_slug,
+                     agent_port=port, agent_token=token)
+
+    def set_media_diet(self, owner_id: str, slug: str, diet: dict,
+                       now: datetime | None = None) -> dict:
+        b = self.get(owner_id, slug)
+        clean = {"allow": [str(d) for d in diet.get("allow", [])],
+                 "deny": [str(d) for d in diet.get("deny", [])]}
+        self._update(b["id"], now or _utcnow(), media_diet=json.dumps(clean))
+        return self.get(owner_id, slug)
+
+    def spend_attention(self, being_id: str, now: datetime | None = None) -> bool:
+        """One attention credit for a parent-bound message; False = suppressed."""
+        with self._lock:
+            cur = self._c().execute(
+                "UPDATE beings SET attention_credits = attention_credits - 1,"
+                " updated_at = ? WHERE id = ? AND attention_credits > 0",
+                (_iso(now or _utcnow()), being_id),
+            )
+            self._c().commit()
+            return (cur.rowcount or 0) > 0
+
+    def reset_attention(self, being_id: str, credits: int = 3,
+                        now: datetime | None = None) -> None:
+        self._update(being_id, now or _utcnow(), attention_credits=credits)
+
+    def tick_bookkeeping(
+        self, being_id: str, *, drives: dict, next_wake_at: datetime,
+        now: datetime | None = None,
+    ) -> None:
+        now = now or _utcnow()
+        with self._lock:
+            self._c().execute(
+                "UPDATE beings SET drives = ?, next_wake_at = ?, last_tick_at = ?,"
+                " tick_count = tick_count + 1, updated_at = ? WHERE id = ?",
+                (json.dumps(drives), _iso(next_wake_at), _iso(now), _iso(now),
+                 being_id),
+            )
+            self._c().commit()
+
+    def due_beings(self, now: datetime | None = None) -> list[dict]:
+        """Hatched, not paused/dead, wake time reached — across all owners."""
+        now = now or _utcnow()
+        rows = self._c().execute(
+            "SELECT owner_id, slug FROM beings"
+            " WHERE stage != 'egg' AND state IN ('alive', 'torpor')"
+            " AND (next_wake_at IS NULL OR next_wake_at <= ?)"
+            " ORDER BY next_wake_at",
+            (_iso(now),),
+        ).fetchall()
+        return [self.get(r["owner_id"], r["slug"]) for r in rows]
+
+    def debit_usage_clamped(
+        self, being_id: str, tier: str, usage: dict,
+        note: str | None = None, now: datetime | None = None,
+    ) -> dict:
+        """Post-hoc metering for spend that already happened (a tick's turn).
+
+        Debits the full weighted amount when the wallet covers it; otherwise
+        debits everything left and flags the overdraft — the being spent its
+        last strength and collapses toward torpor. Burn-cap breaches are
+        flagged, not blocked (the cap gates FUTURE dispatch, not past spend).
+        """
+        now = now or _utcnow()
+        b = self._being_by_id(being_id)
+        view = self.wallet_view(b)
+        weighted = constitution.weighted_tokens(usage, tier)
+        out = {"weighted": weighted, "debited": 0,
+               "overdraft": False, "burn_cap_hit": False}
+        if not view["enforced"] or weighted <= 0:
+            return out
+        debit = min(weighted, max(0, view["balance_tokens"]))
+        if debit > 0:
+            self._apply(b["owner_id"], tokens=debit, reason="usage",
+                        from_being=being_id, to_being=None,
+                        note=note or tier, now=now)
+        out["debited"] = debit
+        out["overdraft"] = debit < weighted
+        cap = view["daily_burn_cap"]
+        if cap is not None and self.spent_today(being_id, now=now) >= cap:
+            out["burn_cap_hit"] = True
+        return out
 
 
 _STORE: BeingsStore | None = None
