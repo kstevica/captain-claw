@@ -2337,6 +2337,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         run_cost = pricing.summarize(_RUN_USAGE.get(sid, []),
                                      elapsed_seconds=time.monotonic() - _run_started)
         _progress(sid, "cost", _cost_message(run_cost), cost=run_cost)
+        await db.log_run_cost(user["id"], "vatra", sid, run_cost)
     except Exception as e:  # noqa: BLE001 — cost is best-effort
         log.warning("Vatra cost summary failed", error=str(e))
     finally:

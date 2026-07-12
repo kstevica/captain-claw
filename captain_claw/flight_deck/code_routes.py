@@ -162,9 +162,10 @@ def _run_cost(pkey: str) -> dict | None:
     return pricing.summarize(u.get("usages", []), elapsed_seconds=elapsed)
 
 
-def _emit_cost(pkey: str) -> dict | None:
+def _emit_cost(pkey: str, owner_id: str | None = None) -> dict | None:
     """Emit the run's cost as a `cost` progress event (for the Code cost card),
-    once per run at completion. Skips runs with no model spend. Best-effort."""
+    once per run at completion. Skips runs with no model spend. Best-effort.
+    With ``owner_id``, also persists the block to the cost_ledger."""
     u = _TURN_USAGE.get(pkey)
     if not u or not u.get("usages"):
         return None
@@ -176,6 +177,12 @@ def _emit_cost(pkey: str) -> dict | None:
         _progress(pkey, "cost", _cost_message(cost), cost=cost)
     except Exception as e:  # noqa: BLE001 — cost is best-effort
         log.warning("code cost emit failed", error=str(e))
+    if owner_id:
+        try:
+            asyncio.get_running_loop().create_task(
+                get_db().log_run_cost(owner_id, "code", pkey, cost))
+        except Exception as e:  # noqa: BLE001 — persistence is best-effort
+            log.warning("code cost persist failed", error=str(e))
     return cost
 
 
@@ -1535,7 +1542,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             except Exception as e:  # noqa: BLE001
                 log.warning("code: outcome recording failed", error=str(e))
         _persist_trace(pkey, sdir, f"Build → review → fix: {intent[:80]}")
-        _emit_cost(pkey)  # run cost card
+        _emit_cost(pkey, user["id"])  # run cost card
         _progress_done(pkey)
 
 
@@ -1959,7 +1966,7 @@ async def map_build(project: str, session: str, request: Request,
             log.warning("map build failed", error=str(e))
         finally:
             _write_state(sdir, {"status": "idle"})
-            _emit_cost(pkey)  # run cost card
+            _emit_cost(pkey, uid)  # run cost card
             _progress_done(pkey)
 
     asyncio.create_task(_bg())
@@ -2163,7 +2170,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
     finally:
         _sz = (locals().get("route") or {}).get("size", "")
         _persist_trace(pkey, sdir, f"{_sz + ': ' if _sz else ''}{intent[:80]}")
-        _emit_cost(pkey)  # run cost card
+        _emit_cost(pkey, uid)  # run cost card
         _progress_done(pkey)
 
 
