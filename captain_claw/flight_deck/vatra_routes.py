@@ -3689,9 +3689,21 @@ async def approve_vatra_plan(body: VatraPlanApproveRequest, request: Request,
         cfg = json.loads(sess.get("config") or "{}")
     except json.JSONDecodeError:
         cfg = {}
+    # Tiers/env carry the model config + API keys — they are request-scoped and NEVER
+    # persisted to the session (secrets), so approve must resend them. If the client
+    # omitted them, fall back to the owner's saved workspace tiers; otherwise the run
+    # silently drops to the registry-default model (the anthropic default) instead of
+    # the user's configured tier — the model the planner already used.
+    _tiers = body.tiers
+    _env = body.env_vars
+    if _tiers is None:
+        _owner_tiers, _owner_env = await _load_owner_tiers(db, user["id"])
+        _tiers = _owner_tiers
+        if _env is None:
+            _env = _owner_env
     exec_req = ExecuteRequest(
-        session_id=body.session_id, tiers=body.tiers or None,
-        env_vars=body.env_vars or None, api_key=body.api_key or "",
+        session_id=body.session_id, tiers=_tiers or None,
+        env_vars=_env or None, api_key=body.api_key or "",
         horizon=body.horizon if body.horizon is not None else (cfg.get("horizon") or None),
         max_parallel=body.max_parallel or int(cfg.get("max_parallel") or 0),
         execution_groups=(body.execution_groups if body.execution_groups is not None

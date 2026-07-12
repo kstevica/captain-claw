@@ -1174,7 +1174,7 @@ export function BasnaPage() {
                   <Trash2 className="h-3.5 w-3.5" /> Cancel
                 </button>
                 <button
-                  onClick={() => approveVatraPlan(group0Draft ?? undefined)}
+                  onClick={() => approveVatraPlan(group0Draft ?? undefined, tiers, envVars)}
                   disabled={approvingPlan}
                   className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
                 >

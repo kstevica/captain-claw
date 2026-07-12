@@ -417,11 +417,13 @@ async function apiVatraExecute(body: Record<string, unknown>): Promise<{ session
   return res.json()
 }
 
-// Approve the Group 0 coordination plan (optionally edited) and start the run.
-async function apiVatraApprove(sessionId: string, plan?: Group0Plan): Promise<{ status: string }> {
+// Approve the Group 0 coordination plan (optionally edited) and start the run. The
+// tiers/env are resent (they carry the model config + keys and are never persisted),
+// so the workers run on the SAME models the planner used — not the registry default.
+async function apiVatraApprove(sessionId: string, body: Record<string, unknown>): Promise<{ status: string }> {
   const res = await _authedFetch('/fd/vatra/plan/approve', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sessionId, ...(plan ? { plan } : {}) }),
+    body: JSON.stringify({ session_id: sessionId, ...body }),
   })
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}))
@@ -693,7 +695,7 @@ interface BasnaStore {
   route: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   planVatra: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   runVatra: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
-  approveVatraPlan: (plan?: Group0Plan) => Promise<void>
+  approveVatraPlan: (plan?: Group0Plan, tiers?: TierMap, envVars?: EnvVar[]) => Promise<void>
   cancelVatraPlan: () => Promise<void>
   fillGaps: (id: string, instruction?: string) => Promise<void>
   saveTitle: (title: string) => Promise<void>
@@ -1058,13 +1060,22 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   },
 
   // Group 0 gate: approve the (optionally edited) coordination plan and start the run.
+  // Resend tiers/env/horizon so the workers run on the models the user configured (the
+  // same the planner used) — the gate rebuilds the run, and these aren't persisted.
   // pollRunning then drives the live view once the session flips to 'running'.
-  approveVatraPlan: async (plan) => {
+  approveVatraPlan: async (plan, tiers, envVars) => {
     const sid = get().activeSession?.id
     if (!sid) return
     set({ approvingPlan: true, error: null })
     try {
-      await apiVatraApprove(sid, plan)
+      const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
+      const horizon = get().deep ? { worker: true, close: true } : undefined
+      await apiVatraApprove(sid, {
+        ...(plan ? { plan } : {}),
+        ...(tiers ? { tiers } : {}),
+        env_vars,
+        ...(horizon ? { horizon } : {}),
+      })
       const s = await apiGetSession(sid)
       if (s) set({ activeSession: s, routePlan: parseRoute(s.route) })
       await get().loadSessions()
