@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ClipboardList } from 'lucide-react'
+import { ClipboardList, Pencil, Check } from 'lucide-react'
 import type { Group0Plan, Group0Agent, Group0Question, VatraSubtask } from '../stores/basnaStore'
 
 // The Group 0 gate: the Long Horizon Planner's per-agent coordination plan, presented
@@ -34,23 +34,30 @@ function TabBtn({ on, onClick, children }: { on: boolean; onClick: () => void; c
   )
 }
 
-function Field({ label, value, onChange, rows = 3, placeholder }: {
+function Field({ label, value, onChange, rows = 3, placeholder, editing }: {
   label: string
   value: string
   onChange: (v: string) => void
   rows?: number
   placeholder?: string
+  editing: boolean
 }) {
   return (
     <div className="mb-3">
       <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">{label}</div>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        rows={rows}
-        placeholder={placeholder}
-        className="w-full resize-y rounded border border-zinc-700 bg-zinc-950/60 px-2.5 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
-      />
+      {editing ? (
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={rows}
+          placeholder={placeholder}
+          className="w-full resize-y rounded border border-zinc-700 bg-zinc-950/60 px-2.5 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+        />
+      ) : (
+        <div className="whitespace-pre-wrap px-0.5 text-xs leading-relaxed text-zinc-300">
+          {value.trim() || <span className="italic text-zinc-600">{placeholder || '—'}</span>}
+        </div>
+      )}
     </div>
   )
 }
@@ -117,6 +124,9 @@ export function VatraGroup0Plan({
     else patchQ({ selected: has ? [] : [opt] })   // single-select: replace / toggle off
   }
 
+  // Read by default; the Edit toggle turns the plan's text fields into editors.
+  const [editing, setEditing] = useState(false)
+
   return (
     <div className={PANEL}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -124,6 +134,18 @@ export function VatraGroup0Plan({
         <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Group 0 — coordination plan</span>
         <Chip className="text-violet-600 dark:text-violet-300">Long Horizon Planner</Chip>
         <Chip className="text-amber-600 dark:text-amber-300">review before run</Chip>
+        {tab === 'plan' && (
+          <button
+            onClick={() => setEditing((v) => !v)}
+            title={editing ? 'Done editing — show the plan as text' : 'Edit the plan text'}
+            className={`ml-auto flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+              editing ? 'border-violet-500 bg-violet-500/10 text-violet-700 dark:text-violet-300'
+                      : 'border-zinc-700 text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            {editing ? <><Check className="h-3.5 w-3.5" /> Done</> : <><Pencil className="h-3.5 w-3.5" /> Edit</>}
+          </button>
+        )}
       </div>
       <p className="mb-3 text-[11px] leading-snug text-zinc-500">
         The Long Horizon Planner drafted how the team will operate. Review and edit the coordination
@@ -158,13 +180,19 @@ export function VatraGroup0Plan({
       <>
       <div className="mb-3">
         <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">Coordination overview</div>
-        <textarea
-          value={plan.overview}
-          onChange={(e) => onChange({ ...plan, overview: e.target.value })}
-          rows={2}
-          placeholder="How the team works together end to end…"
-          className="w-full resize-y rounded border border-zinc-700 bg-zinc-950/60 px-2.5 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
-        />
+        {editing ? (
+          <textarea
+            value={plan.overview}
+            onChange={(e) => onChange({ ...plan, overview: e.target.value })}
+            rows={3}
+            placeholder="How the team works together end to end…"
+            className="w-full resize-y rounded border border-zinc-700 bg-zinc-950/60 px-2.5 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+          />
+        ) : (
+          <div className="whitespace-pre-wrap px-0.5 text-xs leading-relaxed text-zinc-300">
+            {plan.overview.trim() || <span className="italic text-zinc-600">How the team works together end to end…</span>}
+          </div>
+        )}
       </div>
 
       {!agents.length ? (
@@ -206,55 +234,74 @@ export function VatraGroup0Plan({
                   <span className="text-violet-700 dark:text-violet-300/90">{a.agent_id}</span>
                   <span className="mx-1 text-zinc-700">·</span>{titleFor(a.subtask_id)}
                 </span>
-                {/* Group selector — the phase this agent runs in (A→B→C→D). */}
+                {/* Group — the phase this agent runs in (A→B→C→D). Selector in edit mode. */}
                 <div className="inline-flex shrink-0 items-center gap-1.5">
                   <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Group</span>
-                  <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-950/50 p-0.5">
-                    {GROUPS.map((g) => (
-                      <button
-                        key={g}
-                        onClick={() => patch({ group: g })}
-                        title={`Run this agent in group ${g}`}
-                        className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                          a.group === g ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
-                        }`}
-                      >
-                        {g}
-                      </button>
-                    ))}
-                  </div>
+                  {editing ? (
+                    <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-950/50 p-0.5">
+                      {GROUPS.map((g) => (
+                        <button
+                          key={g}
+                          onClick={() => patch({ group: g })}
+                          title={`Run this agent in group ${g}`}
+                          className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                            a.group === g ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                          }`}
+                        >
+                          {g}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="rounded bg-violet-500/20 px-1.5 py-0.5 text-[11px] font-semibold text-violet-700 dark:text-violet-300">{a.group || '—'}</span>
+                  )}
                 </div>
               </div>
-              <Field label="Mandate" value={a.mandate} rows={8}
+              <Field label="Mandate" value={a.mandate} rows={8} editing={editing}
                 onChange={(v) => patch({ mandate: v })} placeholder="What this agent must accomplish…" />
-              <Field label="Produces" value={a.produces} rows={2}
+              <Field label="Produces" value={a.produces} rows={2} editing={editing}
                 onChange={(v) => patch({ produces: v })} placeholder="The artifact it hands off…" />
               <div className="mb-3">
                 <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Consumes from</div>
-                {teammates.length ? (
+                {editing ? (
+                  teammates.length ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {teammates.map((s) => {
+                        const on = (a.consumes_from || []).includes(s.id)
+                        return (
+                          <button
+                            key={s.id}
+                            onClick={() => toggleConsume(s.id)}
+                            title={s.title}
+                            className={`rounded border px-2 py-1 text-[10px] transition-colors ${
+                              on ? 'border-violet-500 bg-violet-600 text-white'
+                                 : 'border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                            }`}
+                          >
+                            {s.owner_archetype_id}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <span className="text-[10px] text-zinc-600">no teammates</span>
+                  )
+                ) : (a.consumes_from || []).length ? (
                   <div className="flex flex-wrap gap-1.5">
-                    {teammates.map((s) => {
-                      const on = (a.consumes_from || []).includes(s.id)
+                    {(a.consumes_from || []).map((cid) => {
+                      const s = (subtasks || []).find((x) => x.id === cid)
                       return (
-                        <button
-                          key={s.id}
-                          onClick={() => toggleConsume(s.id)}
-                          title={s.title}
-                          className={`rounded border px-2 py-1 text-[10px] transition-colors ${
-                            on ? 'border-violet-500 bg-violet-600 text-white'
-                               : 'border-zinc-700 text-zinc-400 hover:text-zinc-200'
-                          }`}
-                        >
-                          {s.owner_archetype_id}
-                        </button>
+                        <span key={cid} className="rounded border border-zinc-700 bg-zinc-900/40 px-2 py-1 text-[10px] text-zinc-300">
+                          {s?.owner_archetype_id || cid}
+                        </span>
                       )
                     })}
                   </div>
                 ) : (
-                  <span className="text-[10px] text-zinc-600">no teammates</span>
+                  <span className="text-[10px] text-zinc-600">nothing — starts from scratch</span>
                 )}
               </div>
-              <Field label="Hand-off notes" value={a.hand_off_notes} rows={5}
+              <Field label="Hand-off notes" value={a.hand_off_notes} rows={5} editing={editing}
                 onChange={(v) => patch({ hand_off_notes: v })} placeholder="What downstream teammates need from its output…" />
             </div>
           )}
