@@ -21,6 +21,7 @@ this importable from anywhere (server imports being_routes → this module).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import types
@@ -580,7 +581,44 @@ async def _write_journal(being: dict, digest: dict, kind: str,
                     error=str(e))
 
 
+# Single-flight guard, one lock per being (mirrors the maybe_dream /
+# maybe_classify_topics idiom elsewhere in this codebase). Without it, a
+# manual Poke can race the beings_loop — most likely right after hatch,
+# since next_wake_at is NULL until the first tick_bookkeeping call, which
+# due_beings() treats as immediately due. A racing pair can both reach
+# _write_journal (which sits well before the terminal "tick" event) and
+# leave a duplicate entry behind even though only one tick is ever recorded.
+_TICK_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(being_id: str) -> asyncio.Lock:
+    lock = _TICK_LOCKS.get(being_id)
+    if lock is None:
+        lock = _TICK_LOCKS[being_id] = asyncio.Lock()
+    return lock
+
+
 async def tick(
+    db, store: BeingsStore, being: dict, *, kind: str = "wake",
+    now: datetime | None = None, send_fn=None, usage_fn=None,
+) -> dict:
+    """One heartbeat, single-flight per being — see :func:`_tick_locked`.
+
+    A concurrent call (manual Poke racing the beings loop, a double click)
+    returns immediately with ``outcome: "busy"`` rather than duplicating
+    work; it never blocks waiting for the in-flight tick.
+    """
+    lock = _lock_for(being["id"])
+    if lock.locked():
+        return {"slug": being["slug"], "kind": kind, "ok": False,
+                "outcome": "busy"}
+    async with lock:
+        return await _tick_locked(
+            db, store, being, kind=kind, now=now,
+            send_fn=send_fn, usage_fn=usage_fn)
+
+
+async def _tick_locked(
     db, store: BeingsStore, being: dict, *, kind: str = "wake",
     now: datetime | None = None, send_fn=None, usage_fn=None,
 ) -> dict:

@@ -356,7 +356,8 @@ function BeingCard({ item, meta, onChanged }: {
           <>
             <button
               onClick={() => void act('tick', () => tickBeing(item.slug, 'wake'))}
-              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+              disabled={busy === 'tick' || busy === 'dream'}
+              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
               title="Manual heartbeat"
             >
               {busy === 'tick' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
@@ -364,7 +365,8 @@ function BeingCard({ item, meta, onChanged }: {
             </button>
             <button
               onClick={() => void act('dream', () => tickBeing(item.slug, 'dream'))}
-              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+              disabled={busy === 'tick' || busy === 'dream'}
+              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
             >
               {busy === 'dream' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Moon className="h-3 w-3" />}
               Dream

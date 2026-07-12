@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -238,6 +239,42 @@ async def test_torpor_wakes_on_next_allowance(store):
 
 async def _usage_async(completion):
     return _usage(completion)
+
+
+async def test_concurrent_ticks_are_single_flight_no_duplicate_journal(store):
+    """Reproduces the hatch-then-immediately-due race: a manual Poke and the
+    beings loop's automatic pass both call tick() for the same being at once.
+    Only one may reach _write_journal / the terminal 'tick' event."""
+    db = FakeDB()
+    b = _born(store)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_send(being, prompt):
+        started.set()
+        await release.wait()
+        return _digest_reply()
+
+    async def runner():
+        return await life.tick(db, store, b, now=NOW, send_fn=slow_send,
+                               usage_fn=_usage)
+
+    first = asyncio.create_task(runner())
+    await started.wait()
+    # The racer arrives while the first tick is still mid-flight.
+    second = await life.tick(db, store, b, now=NOW, send_fn=slow_send,
+                             usage_fn=_usage)
+    assert second["outcome"] == "busy"
+    release.set()
+    out = await first
+    assert out["outcome"] == "ticked"
+
+    fresh = store.get(OWNER, b["slug"])
+    assert fresh["tick_count"] == 1
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert kinds.count("tick") == 1
+    day = life._home_path(fresh, f"journal/{NOW.strftime('%Y-%m-%d')}.md")
+    assert day.read_text().count("## ") == 1     # exactly one journal block
 
 
 async def test_bodiless_being_skips_gracefully(store):
