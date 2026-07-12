@@ -4308,6 +4308,36 @@ Three cross-mode capabilities landed in 0.7.3 for Basna, Vatra, and Code. **All 
 
 **Max parallel agents.** A **Max parallel** input (0 = unlimited) caps how many agent turns run at once — set it low (e.g. 2) for local models so parallel prefills don't exhaust the serving box's memory.
 
+### Vatra Group 0 — the Long Horizon Planner & coordination-plan gate (NEW in 0.7.5)
+
+Every interactive Vatra run now opens with a **permanent Group 0** planning pre-phase and **pauses for your approval** before any worker spawns. It sits between the team plan and the run, the same way Code stops at its plan gate.
+
+**The pre-phase.** After the Lead decomposes the task, the **`long-horizon-planner`** archetype runs as a live Group 0 agent (its own card in the progress panel). It reads the task, the attached files, and the whole roster — each agent's role and its resolved execution phase — and drafts a **structured, per-agent coordination plan**:
+
+- **Mandate** — what this agent must accomplish.
+- **Produces** — the concrete artifact it hands off.
+- **Consumes from** — which teammates' outputs it depends on (an agent may only consume from an equal-or-earlier phase).
+- **Hand-off notes** — what downstream teammates need from its output.
+
+Plus a short team **overview**. At run time each worker's prompt gets **its own slice** of this plan injected (right before the TEAM SCHEDULE block), so it runs knowing its contract *and* what to expect from the others; the overview is folded into the shared context every agent (and the reporter) sees.
+
+**The gate.** The run stops at status **`awaiting_plan`** — **nothing spawns** — and the plan is presented for review as a **master–detail** panel: the agent list on the left, the selected agent's fields on the right. It **reads as text by default**; an **Edit** toggle in the header flips the fields into editors when you want to change something. Two buttons drive it (they replace Plan/Run team while gated):
+
+- **Execute** — approve the plan and run Group A.
+- **Cancel** — discard; the session returns to `routed` (re-runnable), nothing spawned.
+
+A failed, timed-out, or unparseable planner falls back to a **pass-through plan** (derived straight from the decomposition) so it can never dead-end a run. **Headless** paths (agent-started runs, continuations) get a Group 0 plan but **auto-approve** — no human pause. **Resume** neither re-plans nor re-gates (the plan is already fixed).
+
+**Groups are yours, and absolute.** Each agent's phase is an editable **A/B/C/D** selector; the list **sorts by phase** and re-sorts live as you re-group, keeping the same agent selected. A group you set at the gate is an **absolute lock** — it overrides both the archetype floor and dependency repair, so the agent runs exactly where you put it (the shared board / `vatra(action="wait")` bridges any ordering you create). This means you *can* create an inversion (an agent earlier than something it consumes from) — that's intended; the wait/board machinery handles it.
+
+**Re-plan on change.** A group change or a question answer makes the planner's mandates/dependencies/hand-offs stale (they were written for the previous shape). Editing surfaces a **Re-plan** button: it re-runs the planner with your new grouping and answers folded in, regenerates the whole coordination for the new order, and lands you back at the gate to review before Execute. (You can still Execute as-is — the new groups apply, but the mandates stay as drafted.)
+
+**Clarifying questions (dynamic form).** When a genuinely blocking decision would change the plan, the planner may ask up to **9 questions**, surfaced as a **Questions tab** beside the plan (same master–detail layout). Each question offers **1–4 suggested options plus a free-form "Other"**, as **single-** or **multiple-select**; the tab badges how many are still unanswered. Answer what matters and hit **Re-plan** — your answers are folded into the planner prompt so the coordination reflects your decisions. Unanswered questions use the planner's defaults (answers take effect via Re-plan, not a bare Execute).
+
+**In-flight LLM calls in the log.** The dispatch log now streams a live **`Calling LLM (<model>) · … ctx tokens`** line at the start of every model call (deduped to one line per call), so a slow local-model call no longer reads as "stuck". It's wired across Vatra (owners + the planner) and Basna (ensemble members, the fact-check/revise closer, and the deep/Horizon pool). This surfaced — and led to the fix for — a regression where the approve gate dropped your per-tier model config: the gate now resends your **tiers/keys** (with an owner-tiers fallback), so workers run on the models you configured, not the registry default.
+
+Endpoints under `/fd/vatra`: `plan/approve`, `plan/cancel`, `plan/replan` (the gate actions); `execute` and `start` now background the Group 0 pre-phase and return `status: "planning"`. The plan lives in the session `route` JSON under `group0_plan` (no new table); new session statuses `planning` and `awaiting_plan` drive the poll-based UI.
+
 ### Multi-user sharing, a process monitor & projects (NEW in 0.7.4)
 
 **Cross-user resource sharing.** On an auth-enabled (multi-user) deck you can grant other Flight Deck users access to selected resources, with a per-share permission:

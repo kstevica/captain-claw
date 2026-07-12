@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.4-purple)](release-notes/RELEASE_NOTES_0.7.4.md)
+[![Version](https://img.shields.io/badge/version-0.7.5-purple)](release-notes/RELEASE_NOTES_0.7.5.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](#quick-start)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#multi-model-support)
 
@@ -66,6 +66,18 @@ Captain Claw is **MIT licensed and free forever** — your data stays on your ma
 </p>
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
+
+## What's New in 0.7.5
+
+**A Long Horizon Planner drafts a coordination plan you approve before the team runs.** Vatra now opens with a permanent **Group 0** planning pre-phase and a mandatory review gate. Additive; backward compatible with 0.7.4 (needs a Flight Deck restart).
+
+- **Group 0 — the Long Horizon Planner + a plan gate** — a real planning agent drafts a **per-agent coordination plan** (for each teammate: **mandate**, what it **produces**, who it **consumes from**, and **hand-off notes**, plus a team overview) and the run **pauses at a mandatory gate**: review, edit, then **Execute** (run Group A) or **Cancel** (nothing spawns). Each worker runs with its own slice of the plan injected. A failed planner falls back to a pass-through plan; headless runs auto-approve; **resume** never re-plans.
+- **A plan you actually read** — a **master–detail** gate (agents left, fields right) that **reads as text by default** with an **Edit** toggle; each agent's **group (A/B/C/D)** is an editable selector, the list **sorts by phase** and re-sorts live, and the group you set is **absolute** (overrides the archetype floor and dependency repair — the board/wait bridges any ordering).
+- **Re-plan on change** — re-grouping an agent or answering a question makes the plan dirty; **Re-plan** re-runs the planner (folding in the new grouping + answers) and regenerates the coordination for the new order, then re-gates.
+- **The planner can ask *you* questions** — up to **9 clarifying questions** as a **dynamic form** (a Questions tab): **1–4 suggested answers + free-form "Other"**, single- or multi-select. Answers are folded back into the planner on Re-plan.
+- **See the model while it's thinking** — the dispatch log now streams a live **`Calling LLM (<model>)…`** line at the start of every call (Vatra owners + planner, and Basna ensemble/fact-check/deep), so a slow local-model call no longer looks stuck — which surfaced and fixed a bug where the approve gate dropped your tier config and workers fell back to the default model.
+
+See [RELEASE_NOTES_0.7.5.md](release-notes/RELEASE_NOTES_0.7.5.md).
 
 ## What's New in 0.7.4
 
