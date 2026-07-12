@@ -820,6 +820,9 @@ async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent:
         _progress(sid, "usage", f"{label} · {pt:,}→{ct:,} tok", agent=label,
                   prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
+    def _on_status(text: str) -> None:
+        _progress(sid, "llm", f"{label} · {text}", agent=label, tool="llm", detail=text)
+
     sp = await _spawn_worker(
         request, user, name=label, description="Draft the team coordination plan",
         cognitive_mode=planner_arch.get("cognitive_mode") or "neutra",
@@ -833,7 +836,7 @@ async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent:
         prompt = _build_group0_prompt(intent, shared_context, file_names, subtasks, arch_by_id)
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, timeout,
                                 on_action=_on_action, on_usage=_on_usage,
-                                fleet_instructions=fleet, agent_name=label)
+                                on_status=_on_status, fleet_instructions=fleet, agent_name=label)
         if not d.get("ok"):
             _progress(sid, "note",
                       "Planner did not complete — using a pass-through coordination plan",
@@ -1340,7 +1343,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             def _on_usage(pt: int, ct: int, tt: int) -> None:
                 _progress(sid, "usage", f"{label} · {pt:,}→{ct:,} tok",
                           agent=label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt, **gx)
-            return _on_action, _on_usage
+
+            def _on_status(text: str) -> None:
+                # The model call is in flight — surface it so a slow call isn't mistaken
+                # for a stall. Tagged agent= so the live card shows "working".
+                _progress(sid, "llm", f"{label} · {text}", agent=label,
+                          tool="llm", detail=text, **gx)
+            return _on_action, _on_usage, _on_status
 
         # Set by the intro round below (a digest of every specialist's prep), then
         # injected into each owner's main-round brief so the main round starts
@@ -1379,7 +1388,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     return {"ok": True, "output": ck.get("output", ""), "actions": [],
                             "latency_ms": 0, "restored": True,
                             "produced_file": bool(ck.get("produced_file"))}
-            on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
+            on_action, on_usage, on_status = _owner_callbacks(label, arch["id"], st["id"])
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
@@ -1411,7 +1420,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
+                agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage,
+                on_status=on_status))
             # R2 acted-gate (opt-in): an owner that produced no text and wrote no
             # file wasted its slot — retry once with a corrective on the same agent.
             if (quality.acted_gate and d.get("ok") and worker_produced_nothing(d)
@@ -1422,7 +1432,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 d2 = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], ACTED_CORRECTIVE.strip(), body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
+                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage,
+                on_status=on_status))
                 if d2.get("ok") and not worker_produced_nothing(d2):
                     d = d2
             # R5 escalate (opt-in): focused-retry an owner that flagged ESCALATE.
@@ -1434,7 +1445,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 d2 = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], ESCALATE_CORRECTIVE.strip(), body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
+                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage,
+                on_status=on_status))
                 if d2.get("ok") and not escalate_reason(d2.get("output")) \
                         and not worker_produced_nothing(d2):
                     d = d2
@@ -1479,7 +1491,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 arch, st = sp["arch"], sp["subtask"]
                 role = arch.get("role") or arch["id"]
                 label = _owner_label(sp)
-                on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
+                on_action, on_usage, on_status = _owner_callbacks(label, arch["id"], st["id"])
                 prompt = _build_intro_prompt(role, st, shared_context, vfs_project=vfs_project)
                 prompt += _datastore_directive(vfs_project, _run_shared_datastore.get(sid, False))
                 if quality.source_corpus:
@@ -1487,7 +1499,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                    agent_name=label, on_usage=on_usage))
+                    agent_name=label, on_usage=on_usage, on_status=on_status))
                 mark = "✓" if d["ok"] else "✗"
                 ierr = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
                 _progress(sid, "dispatch",
@@ -1561,11 +1573,11 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             async def _redispatch_owner(sp: dict, instruction: str, tag: str) -> dict:
                 arch = sp["arch"]
                 label = _owner_label(sp)
-                on_action, on_usage = _owner_callbacks(label, arch["id"], sp["subtask"]["id"])
+                on_action, on_usage, on_status = _owner_callbacks(label, arch["id"], sp["subtask"]["id"])
                 d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], instruction, body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                    agent_name=label, on_usage=on_usage))
+                    agent_name=label, on_usage=on_usage, on_status=on_status))
                 _progress(sid, "dispatch",
                           f"{label} ({tag}) {'✓' if d['ok'] else '✗'} · {len(d['actions'])} action(s)",
                           ok=d["ok"], agent=label, **_gx(sp["subtask"]["id"]))
@@ -1851,12 +1863,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                         arch, st = sp["arch"], sp["subtask"]
                         role = arch.get("role") or arch["id"]
                         label = _owner_label(sp)
-                        on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
+                        on_action, on_usage, on_status = _owner_callbacks(label, arch["id"], st["id"])
                         prompt = _build_review_prompt(role, st, digest, shared_context, vfs_project=vfs_project)
                         prompt += _datastore_directive(vfs_project, _run_shared_datastore.get(sid, False))
                         d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                             sp["port"], sp["auth"], prompt, body.dispatch_timeout,
-                            on_action=on_action, agent_name=label, on_usage=on_usage))
+                            on_action=on_action, agent_name=label, on_usage=on_usage, on_status=on_status))
                         # A dispatch event marks the card done again (the live panel
                         # shows a spinner while it's working this round, then ✓).
                         mark = "✓" if d["ok"] else "✗"

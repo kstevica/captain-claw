@@ -219,7 +219,7 @@ export interface ExecuteResult {
 export interface ProgressEvent {
   i: number
   ts?: number     // epoch seconds (server clock)
-  stage: string   // route | spawn | dispatch | action | narration | usage | merge | learn | done
+  stage: string   // route | spawn | dispatch | action | narration | llm | usage | merge | learn | done
   message: string
   ok?: boolean
   // Structured fields on per-agent events, so the UI can group the stream into

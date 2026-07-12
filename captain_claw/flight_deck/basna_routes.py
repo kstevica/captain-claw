@@ -2254,11 +2254,21 @@ def _absorb_usage(sink: dict, msg: dict, u: dict | None = None) -> None:
         sink["model"] = str(model)
 
 
+def _llm_call_status(raw: str) -> str | None:
+    """Normalise an agent runtime-status broadcast into the 'Calling LLM …' line worth
+    surfacing (or None if it isn't an LLM-call status). Strips the ⚡ streaming prefix so
+    a call and its first-chunk repeat collapse to one line. The agent suppresses this
+    status for background maintenance, so anything reaching here is a real task call."""
+    norm = str(raw or "").replace("⚡", "").strip()
+    return norm if norm.startswith("Calling LLM") else None
+
+
 async def _send_chat_and_collect(
     port: int, token: str, prompt: str, timeout: float, on_action=None,
     fleet_instructions: str = "", agent_name: str = "",
     file_paths: list[str] | None = None, image_paths: list[str] | None = None,
-    on_usage=None, usage_sink: dict | None = None, error_sink: dict | None = None,
+    on_usage=None, on_status=None, usage_sink: dict | None = None,
+    error_sink: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Connect to an agent's /ws, send one chat, return (final reply, actions).
 
@@ -2277,6 +2287,7 @@ async def _send_chat_and_collect(
     answer = ""
     actions: list[dict] = []
     sent = False
+    last_status = ""     # last surfaced "Calling LLM …" status (dedupe streaming repeats)
     started_at: float | None = None
     deadline: float | None = None
     hard_deadline: float | None = None
@@ -2294,7 +2305,7 @@ async def _send_chat_and_collect(
 
     def _handle(msg: dict) -> bool:
         """Apply one inbound message; return True when the turn is complete."""
-        nonlocal answer
+        nonlocal answer, last_status
         mtype = msg.get("type")
         if mtype == "chat_message" and msg.get("role") == "assistant":
             if msg.get("content"):
@@ -2317,6 +2328,9 @@ async def _send_chat_and_collect(
             # Live, running cumulative token counts emitted after each internal
             # LLM call within the turn. Surfaced live (not persisted as an action)
             # so the UI shows usage climbing instead of one number at the end.
+            # This marks a call's END, so clear the last-status guard — the NEXT
+            # call's "Calling LLM …" then always surfaces, even if identical.
+            last_status = ""
             if usage_sink is not None:
                 _absorb_usage(usage_sink, msg)  # capture cache split + model for costing
             if on_usage:
@@ -2339,12 +2353,26 @@ async def _send_chat_and_collect(
             detail = " · ".join(x for x in [str(model), tok] if x)
             if detail:
                 _record("llm", detail)
-        elif mtype == "status" and str(msg.get("status", "")).lower() in _DONE_STATES:
-            # End-of-turn only once the turn actually ran — a fresh agent's boot
-            # "ready" carries no actions or answer and must not end us early. An
-            # agent that delivered via a file write ends with no answer but real
-            # actions, so `actions` is the signal there.
-            return bool(actions or answer.strip())
+        elif mtype == "status":
+            st = str(msg.get("status", "") or "")
+            if st.lower() in _DONE_STATES:
+                # End-of-turn only once the turn actually ran — a fresh agent's boot
+                # "ready" carries no actions or answer and must not end us early. An
+                # agent that delivered via a file write ends with no answer but real
+                # actions, so `actions` is the signal there.
+                return bool(actions or answer.strip())
+            # The agent broadcasts "Calling LLM (<model>) · … ctx tokens (X%)…" at the
+            # start of every LLM call (the slowest part of a turn). Surface it live so a
+            # long model call doesn't read as "stuck"; dedupe the ⚡-streaming repeat so
+            # it's one line per call, not two.
+            norm = _llm_call_status(st)
+            if on_status and norm and norm != last_status:
+                last_status = norm
+                try:
+                    on_status(norm)
+                except Exception:
+                    pass
+            return False
         elif mtype == "replay_done":
             # Reconnected after the turn committed: the replay already carried the
             # final reply, so we're done.
@@ -2522,7 +2550,8 @@ def _cost_message(cost: dict) -> str:
 async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_action=None,
                         fleet_instructions: str = "", agent_name: str = "",
                         file_paths: list[str] | None = None,
-                        image_paths: list[str] | None = None, on_usage=None) -> dict:
+                        image_paths: list[str] | None = None, on_usage=None,
+                        on_status=None) -> dict:
     # Max-parallel gate: wait for a dispatch slot before doing any work. Started is
     # taken AFTER acquiring, so latency measures the turn, not the queue wait.
     gate = _run_gate.get()
@@ -2536,7 +2565,7 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
             port, token, prompt, timeout, on_action=on_action,
             fleet_instructions=fleet_instructions, agent_name=agent_name,
             file_paths=file_paths, image_paths=image_paths, on_usage=on_usage,
-            usage_sink=sink, error_sink=err)
+            on_status=on_status, usage_sink=sink, error_sink=err)
         usage = _finalize_usage(sink)
         _record_run_usage(sink.get("model", ""), usage, time.monotonic() - started)  # cost + agent-time
         # An agent-side error (e.g. context overflow) no longer raises: it's flagged
