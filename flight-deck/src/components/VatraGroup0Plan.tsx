@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ClipboardList } from 'lucide-react'
 import type { Group0Plan, Group0Agent, VatraSubtask } from '../stores/basnaStore'
 
@@ -49,13 +49,29 @@ export function VatraGroup0Plan({
   onChange: (plan: Group0Plan) => void
 }) {
   const agents = plan.agents || []
-  const [sel, setSel] = useState(0)
-  const i = Math.min(sel, Math.max(0, agents.length - 1))
-  const a: Group0Agent | undefined = agents[i]
+  // Select by subtask_id (not index) so re-sorting the list on a group change keeps
+  // the same agent selected.
+  const [selId, setSelId] = useState('')
+  const a: Group0Agent | undefined = agents.find((x) => x.subtask_id === selId) || agents[0]
+  useEffect(() => {
+    if (agents.length && !agents.some((x) => x.subtask_id === selId)) setSelId(agents[0].subtask_id)
+  }, [agents, selId])
+
+  // Left-list order: grouped by phase (A→B→C→D, ungrouped last), stable within a group.
+  // Re-sorts live as the user re-groups an agent.
+  const ordered = useMemo(() => {
+    const rank = (g: string) => { const k = GROUPS.indexOf(g as (typeof GROUPS)[number]); return k < 0 ? GROUPS.length : k }
+    return agents
+      .map((x, idx) => ({ x, idx }))
+      .sort((p, q) => rank(p.x.group) - rank(q.x.group) || p.idx - q.idx)
+      .map((o) => o.x)
+  }, [agents])
 
   const titleFor = (id: string) => (subtasks || []).find((s) => s.id === id)?.title || id
-  const patch = (p: Partial<Group0Agent>) =>
-    onChange({ ...plan, agents: agents.map((x, j) => (j === i ? { ...x, ...p } : x)) })
+  const patch = (p: Partial<Group0Agent>) => {
+    if (!a) return
+    onChange({ ...plan, agents: agents.map((x) => (x.subtask_id === a.subtask_id ? { ...x, ...p } : x)) })
+  }
   const toggleConsume = (cid: string) => {
     if (!a) return
     const has = (a.consumes_from || []).includes(cid)
@@ -94,12 +110,12 @@ export function VatraGroup0Plan({
         <div className="flex flex-col gap-3 md:flex-row md:items-start">
           {/* Left column — agent list (≈30%). */}
           <div className="shrink-0 space-y-1 md:w-[30%]">
-            {agents.map((g, j) => {
-              const on = j === i
+            {ordered.map((g) => {
+              const on = g.subtask_id === a?.subtask_id
               return (
                 <button
                   key={g.subtask_id}
-                  onClick={() => setSel(j)}
+                  onClick={() => setSelId(g.subtask_id)}
                   className={`flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left transition-colors ${
                     on ? 'border-violet-500 bg-violet-500/10'
                        : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
