@@ -119,8 +119,57 @@ def test_sanitize_respects_a_user_regrouped_agent():
     assert by["s1"]["group"] == "C"   # user's edit wins over group_resolved ("B")
 
 
+def test_parse_extracts_clarifying_questions_capped_and_clean():
+    txt = ('{"overview":"o","agents":[{"subtask_id":"s0"},{"subtask_id":"s1"}],'
+           '"questions":[{"id":"q1","question":"EU or global scope?","multi":false,'
+           '"options":["EU","Global","Both","","Extra5"]},'
+           '{"question":"","options":["x"]}]}')  # blank question dropped
+    p = v._parse_group0_plan(txt, _SUBTASKS, _ARCH)
+    assert len(p["questions"]) == 1
+    q = p["questions"][0]
+    assert q["id"] == "q1" and q["multi"] is False
+    assert q["options"] == ["EU", "Global", "Both", "Extra5"]  # blanks removed, capped at 4
+    assert q["selected"] == [] and q["other"] == ""  # planner never provides answers
+
+
+def test_parse_questions_capped_at_nine():
+    qs = ",".join(f'{{"question":"q{i}","options":["a"]}}' for i in range(15))
+    p = v._parse_group0_plan('{"agents":[{"subtask_id":"s0"}],"questions":[' + qs + ']}',
+                             _SUBTASKS, _ARCH)
+    assert len(p["questions"]) == 9
+
+
+def test_sanitize_preserves_user_answers():
+    edited = {"agents": [{"subtask_id": "s0"}], "questions": [
+        {"id": "q1", "question": "EU or global?", "multi": True, "options": ["EU", "Global"],
+         "selected": ["EU"], "other": "and UK"}]}
+    p = v._sanitize_group0_plan(edited, _SUBTASKS)
+    q = p["questions"][0]
+    assert q["selected"] == ["EU"] and q["other"] == "and UK" and q["multi"] is True
+
+
+def test_format_clarifications_folds_answers():
+    qs = [
+        {"question": "EU or global?", "selected": ["EU"], "other": ""},
+        {"question": "Deadline?", "selected": [], "other": "March"},
+        {"question": "Unanswered?", "selected": [], "other": ""},  # skipped
+    ]
+    block = v._format_clarifications(qs)
+    assert "EU or global?" in block and "A: EU" in block
+    assert "Deadline?" in block and "March" in block
+    assert "Unanswered?" not in block
+    assert v._format_clarifications([]) == ""  # nothing answered → empty
+
+
 def test_build_prompt_lists_ids_roles_and_json_schema():
     pr = v._build_group0_prompt("Examine the org", "Use UK English", ["file.pdf"], _SUBTASKS, _ARCH)
     assert "id=s0" in pr and "id=s1" in pr
     assert "Deep Researcher" in pr and "Fact Checker" in pr
     assert '"subtask_id"' in pr and "file.pdf" in pr and "Use UK English" in pr
+    assert '"questions"' in pr  # the planner is offered the clarification channel
+
+
+def test_build_prompt_folds_clarifications():
+    pr = v._build_group0_prompt("t", "", [], _SUBTASKS, _ARCH,
+                                clarifications="\n\n## The user answered...\n- Q: x\n  A: y")
+    assert "The user answered" in pr and "A: y" in pr

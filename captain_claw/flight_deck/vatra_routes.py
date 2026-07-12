@@ -795,7 +795,7 @@ async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent:
                               shared_context: str, file_names: list[str],
                               subtasks: list[dict], arch_by_id: dict, tiers: dict | None,
                               api_key: str, env_vars: list[dict] | None,
-                              timeout: float) -> dict:
+                              timeout: float, clarifications: str = "") -> dict:
     """Spawn the Long Horizon Planner, dispatch it to draft the per-agent coordination
     plan, and return the parsed structured plan. Best-effort: any spawn/dispatch/parse
     failure yields the pass-through plan so a dead planner never blocks the run. Emits
@@ -833,7 +833,8 @@ async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent:
                   ok=False)
         return _passthrough_group0_plan(subtasks, arch_by_id)
     try:
-        prompt = _build_group0_prompt(intent, shared_context, file_names, subtasks, arch_by_id)
+        prompt = _build_group0_prompt(intent, shared_context, file_names, subtasks,
+                                      arch_by_id, clarifications=clarifications)
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, timeout,
                                 on_action=_on_action, on_usage=_on_usage,
                                 on_status=_on_status, fleet_instructions=fleet, agent_name=label)
@@ -2599,11 +2600,13 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
 # ── Group 0: the Long Horizon Planner's coordination plan ────────────
 
 def _build_group0_prompt(intent: str, shared_context: str, file_names: list[str],
-                         subtasks: list[dict], arch_by_id: dict) -> str:
+                         subtasks: list[dict], arch_by_id: dict,
+                         clarifications: str = "") -> str:
     """Frame the coordination-plan task for the Long Horizon Planner. The team, its
     pieces, and their execution groups are ALREADY decided — the planner writes, for
     every piece, its mandate / what it produces / who it consumes from / hand-off
-    notes, and returns ONLY the JSON envelope below."""
+    notes, and returns ONLY the JSON envelope below. It may also ask the user up to 9
+    clarifying questions; ``clarifications`` carries the user's prior answers."""
     roster_lines: list[str] = []
     for s in subtasks:
         arch = arch_by_id.get(str(s.get("owner_archetype_id") or "")) or {}
@@ -2633,17 +2636,26 @@ def _build_group0_prompt(intent: str, shared_context: str, file_names: list[str]
         "mandate, exactly what artifact it produces, which teammates' outputs it "
         "consumes, and the hand-off notes downstream teammates need.\n\n"
         f"## Overall task\n{intent}"
-        f"{contract_block}{files_block}\n\n"
+        f"{contract_block}{files_block}{clarifications}\n\n"
         f"## The team — plan for EVERY id (groups run in order A→B→C→D; earlier groups "
         f"produce what later groups consume)\n{roster}\n\n"
         "## The GROUP of each piece is FIXED by the user — do NOT change it, do NOT put "
         "everyone in one group, and do NOT emit a 'group' field. Honor the ordering: a "
         "piece may only CONSUME FROM pieces in an EQUAL-or-EARLIER group (A can't consume "
         "from B). Write each mandate and hand-off to respect that phase order.\n\n"
+        "## Clarifying questions (optional) — if a genuinely BLOCKING decision would "
+        "change the plan (scope, audience, priorities, which of several approaches), ask "
+        "the user in `questions` (0 to 9). Each: a short `question`, `multi` (true if "
+        "several answers can apply, else false), and 1-4 suggested `options` (the UI also "
+        "offers a free-form 'Other'). Prefer sensible defaults and leave `questions` empty "
+        "when you can plan without them. Never re-ask anything already answered above.\n\n"
         "## Output — return ONLY this JSON object. No markdown fence, no prose before "
         "or after:\n"
         "{\n"
         '  "overview": "2-4 sentences on how the team works together end to end",\n'
+        '  "questions": [\n'
+        '    {"id": "q1", "question": "...", "multi": false, "options": ["...", "..."]}\n'
+        "  ],\n"
         '  "agents": [\n'
         '    {"subtask_id": "<one id from above, verbatim>",\n'
         '     "mandate": "what this agent must accomplish",\n'
@@ -2652,8 +2664,8 @@ def _build_group0_prompt(intent: str, shared_context: str, file_names: list[str]
         '     "hand_off_notes": "what downstream teammates need from its output"}\n'
         "  ]\n"
         "}\n"
-        "Include EXACTLY one entry per id above, using the ids verbatim. Do not write "
-        "any files — return the JSON as your reply."
+        "Include EXACTLY one entry per id above, using the ids verbatim. `questions` may "
+        "be omitted or []. Do not write any files — return the JSON as your reply."
     )
 
 
@@ -2675,6 +2687,7 @@ def _passthrough_group0_plan(subtasks: list[dict], arch_by_id: dict) -> dict:
             }
             for s in subtasks
         ],
+        "questions": [],
     }
 
 
@@ -2725,6 +2738,61 @@ def _coerce_group0_entries(entries: Any, subtasks: list[dict], *, trust_group: b
     return seen
 
 
+_GROUP0_MAX_QUESTIONS = 9  # keep the clarification form short (below 10)
+
+
+def _coerce_group0_questions(raw: Any, *, keep_answers: bool = False) -> list[dict]:
+    """Validate the planner's clarifying questions (or a user-edited copy). Each →
+    {id, question, multi, options[≤4], selected[], other}. Capped at 9. ``keep_answers``
+    preserves the user's ``selected``/``other`` (from the coordination editor); off →
+    fresh (unanswered) questions as the planner emits them."""
+    out: list[dict] = []
+    for q in raw or []:
+        if not isinstance(q, dict):
+            continue
+        text = str(q.get("question") or "").strip()
+        if not text:
+            continue
+        opts = [str(o).strip() for o in (q.get("options") or []) if str(o).strip()][:4]
+        entry = {
+            "id": str(q.get("id") or f"q{len(out) + 1}"),
+            "question": text[:400],
+            "multi": bool(q.get("multi")),
+            "options": opts,
+            "selected": [],
+            "other": "",
+        }
+        if keep_answers:
+            sel = q.get("selected") or []
+            if isinstance(sel, str):
+                sel = [sel]
+            entry["selected"] = [str(s).strip() for s in sel if str(s).strip()]
+            entry["other"] = str(q.get("other") or "").strip()
+        out.append(entry)
+        if len(out) >= _GROUP0_MAX_QUESTIONS:
+            break
+    return out
+
+
+def _format_clarifications(questions: Any) -> str:
+    """Fold the user's answered clarifications into a prompt block for a re-plan. Empty
+    when nothing is answered."""
+    lines: list[str] = []
+    for q in questions or []:
+        if not isinstance(q, dict):
+            continue
+        ans = [str(s).strip() for s in (q.get("selected") or []) if str(s).strip()]
+        other = str(q.get("other") or "").strip()
+        if other:
+            ans.append(other)
+        if ans:
+            lines.append(f"- Q: {str(q.get('question') or '').strip()}\n  A: {'; '.join(ans)}")
+    if not lines:
+        return ""
+    return ("\n\n## The user answered these clarifications — honor them and do NOT "
+            "re-ask them:\n" + "\n".join(lines))
+
+
 def _parse_group0_plan(text: str, subtasks: list[dict], arch_by_id: dict) -> dict:
     """Parse the planner's reply into the structured plan. Tolerates ```json fences /
     surrounding prose. On any failure returns the pass-through plan so injection is
@@ -2748,7 +2816,8 @@ def _parse_group0_plan(text: str, subtasks: list[dict], arch_by_id: dict) -> dic
         return _passthrough_group0_plan(subtasks, arch_by_id)
     seen = _coerce_group0_entries(obj.get("agents"), subtasks)
     agents = [seen[s["id"]] for s in subtasks if s["id"] in seen]
-    return {"overview": str(obj.get("overview") or "").strip(), "agents": agents}
+    return {"overview": str(obj.get("overview") or "").strip(), "agents": agents,
+            "questions": _coerce_group0_questions(obj.get("questions"))}
 
 
 def _sanitize_group0_plan(plan: Any, subtasks: list[dict]) -> dict:
@@ -2760,7 +2829,10 @@ def _sanitize_group0_plan(plan: Any, subtasks: list[dict]) -> dict:
     seen = _coerce_group0_entries(entries, subtasks, trust_group=True)
     agents = [seen[s["id"]] for s in subtasks if s["id"] in seen]
     overview = str((plan.get("overview") if isinstance(plan, dict) else "") or "").strip()
-    return {"overview": overview, "agents": agents}
+    # keep_answers: preserve the user's selected/other from the questions form.
+    questions = _coerce_group0_questions(
+        plan.get("questions") if isinstance(plan, dict) else [], keep_answers=True)
+    return {"overview": overview, "agents": agents, "questions": questions}
 
 
 async def _llm_team_digest(intent: str, results: list[dict], creds: dict) -> str:
@@ -3767,8 +3839,9 @@ async def cancel_vatra_plan(body: VatraPlanCancelRequest,
 
 class VatraPlanReplanRequest(BaseModel):
     session_id: str
-    # The edited plan — only its per-agent `group` assignments are read; the mandates /
-    # dependencies / hand-offs are regenerated by the planner for the new phasing.
+    # The edited plan — its per-agent `group` assignments (absolute locks) and answered
+    # `questions` are read; the mandates / dependencies / hand-offs are regenerated by
+    # the planner for the new phasing + answers.
     plan: dict | None = None
     tiers: dict | None = None
     env_vars: list | None = None
@@ -3776,11 +3849,13 @@ class VatraPlanReplanRequest(BaseModel):
 
 
 async def _replan_group0(sid: str, request: Request, user: dict, *, new_groups: dict,
-                         tiers: dict | None, env_vars: list | None, api_key: str) -> None:
-    """Re-run the Long Horizon Planner after the user re-grouped agents at the gate.
-    Applies the new group assignments, re-resolves phasing, regenerates the whole
-    coordination plan for the new order, and lands back at the approval gate. Any
-    failure re-emits the existing gate so the user is never stranded."""
+                         clarifications: str = "", tiers: dict | None,
+                         env_vars: list | None, api_key: str) -> None:
+    """Re-run the Long Horizon Planner after the user re-grouped agents and/or answered
+    its clarifying questions at the gate. Applies the new group assignments, re-resolves
+    phasing, folds the answers into the prompt, regenerates the whole coordination plan,
+    and lands back at the approval gate. Any failure re-emits the existing gate so the
+    user is never stranded."""
     db = get_db()
     try:
         sess = await db.get_basna_session(sid, user["id"])
@@ -3806,7 +3881,9 @@ async def _replan_group0(sid: str, request: Request, user: dict, *, new_groups: 
         _progress_start(sid)
         await db.update_basna_session(sid, user["id"], status="planning")
         _phase(sid, "Group 0 · Long Horizon Planner (re-plan)")
-        _progress(sid, "group0", "Re-planning the coordination for your new grouping…")
+        _progress(sid, "group0",
+                  "Re-planning the coordination"
+                  + (" with your answers…" if clarifications else " for your new grouping…"))
 
         _tiers, _env = tiers, env_vars
         if _tiers is None:
@@ -3819,7 +3896,8 @@ async def _replan_group0(sid: str, request: Request, user: dict, *, new_groups: 
             request, user, sid, intent=(sess.get("intent") or "").strip(),
             shared_context=route.get("shared_context", ""),
             file_names=[f["name"] for f in input_files], subtasks=subtasks,
-            arch_by_id=arch_by_id, tiers=_tiers, api_key=api_key, env_vars=_env, timeout=600.0)
+            arch_by_id=arch_by_id, tiers=_tiers, api_key=api_key, env_vars=_env, timeout=600.0,
+            clarifications=clarifications)
         route["group0_plan"] = plan
         route["subtasks"] = subtasks  # persist the new groups for the run
         await db.update_basna_session(sid, user["id"], route=json.dumps(route))
@@ -3853,12 +3931,14 @@ async def replan_vatra_plan(body: VatraPlanReplanRequest, request: Request,
         for a in body.plan.get("agents") or []:
             if isinstance(a, dict) and a.get("subtask_id") and str(a.get("group") or "").strip():
                 new_groups[str(a["subtask_id"])] = str(a["group"]).strip()
+    clarifications = _format_clarifications(
+        (body.plan or {}).get("questions") if isinstance(body.plan, dict) else [])
     # Flip status synchronously so the UI leaves the gate immediately (no poll lag)
     # instead of waiting for the background task to set it.
     await db.update_basna_session(body.session_id, user["id"], status="planning")
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(_replan_group0(
-        body.session_id, stub, user, new_groups=new_groups,
+        body.session_id, stub, user, new_groups=new_groups, clarifications=clarifications,
         tiers=body.tiers, env_vars=body.env_vars, api_key=body.api_key or ""))
     _basna_agent_tasks.add(t)
     t.add_done_callback(_basna_agent_tasks.discard)

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ClipboardList } from 'lucide-react'
-import type { Group0Plan, Group0Agent, VatraSubtask } from '../stores/basnaStore'
+import type { Group0Plan, Group0Agent, Group0Question, VatraSubtask } from '../stores/basnaStore'
 
 // The Group 0 gate: the Long Horizon Planner's per-agent coordination plan, presented
 // for review and editing before any Group-A worker runs. Master–detail — the agent
@@ -17,6 +17,20 @@ function Chip({ children, className = '' }: { children: React.ReactNode; classNa
     <span className={`rounded-full border border-zinc-700/60 bg-zinc-800/60 px-2 py-0.5 text-[11px] font-medium ${className}`}>
       {children}
     </span>
+  )
+}
+
+function TabBtn({ on, onClick, children }: { on: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`-mb-px flex items-center rounded-t-md border-b-2 px-3 py-1.5 text-xs font-medium transition-colors ${
+        on ? 'border-violet-500 text-violet-700 dark:text-violet-300'
+           : 'border-transparent text-zinc-500 hover:text-zinc-300'
+      }`}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -80,6 +94,29 @@ export function VatraGroup0Plan({
   }
   const teammates = a ? (subtasks || []).filter((s) => s.id !== a.subtask_id) : []
 
+  // ── Clarifying questions (dynamic form) ──────────────────────────────
+  const questions = plan.questions || []
+  const [tab, setTab] = useState<'plan' | 'questions'>('plan')
+  const [selQId, setSelQId] = useState('')
+  const q: Group0Question | undefined = questions.find((x) => x.id === selQId) || questions[0]
+  useEffect(() => {
+    if (questions.length && !questions.some((x) => x.id === selQId)) setSelQId(questions[0].id)
+  }, [questions, selQId])
+  useEffect(() => { if (!questions.length && tab === 'questions') setTab('plan') }, [questions.length, tab])
+
+  const isAnswered = (x: Group0Question) => (x.selected?.length || 0) > 0 || !!(x.other || '').trim()
+  const unanswered = questions.filter((x) => !isAnswered(x)).length
+  const patchQ = (p: Partial<Group0Question>) => {
+    if (!q) return
+    onChange({ ...plan, questions: questions.map((x) => (x.id === q.id ? { ...x, ...p } : x)) })
+  }
+  const toggleOption = (opt: string) => {
+    if (!q) return
+    const has = (q.selected || []).includes(opt)
+    if (q.multi) patchQ({ selected: has ? q.selected.filter((o) => o !== opt) : [...(q.selected || []), opt] })
+    else patchQ({ selected: has ? [] : [opt] })   // single-select: replace / toggle off
+  }
+
   return (
     <div className={PANEL}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -89,20 +126,36 @@ export function VatraGroup0Plan({
         <Chip className="text-amber-600 dark:text-amber-300">review before run</Chip>
       </div>
       <p className="mb-3 text-[11px] leading-snug text-zinc-500">
-        The Long Horizon Planner drafted how the team will operate. Pick an agent on the left to
-        review and edit its mandate, output, dependencies, and hand-off — then Execute above to run
-        Group A (or Cancel to discard; nothing runs).
+        The Long Horizon Planner drafted how the team will operate. Review and edit the coordination
+        plan{questions.length ? ', and answer its clarifying questions,' : ''} then Execute above to
+        run Group A (or Cancel to discard; nothing runs).
       </p>
 
       {dirty && (
         <div className="mb-3 rounded-md border border-amber-400/60 bg-amber-500/10 p-2.5 text-[11px] leading-snug text-amber-700 dark:border-amber-500/40 dark:text-amber-300">
-          You moved an agent to a different group. The mandates, dependencies, and hand-offs below
-          were written for the <span className="font-semibold">previous</span> phasing — click
-          <span className="font-semibold"> Re-plan</span> above to regenerate the coordination for
-          the new order, or Execute to run with the new groups but these existing mandates.
+          You changed the grouping or answered a question. The mandates, dependencies, and hand-offs
+          were written for the <span className="font-semibold">previous</span> plan — click
+          <span className="font-semibold"> Re-plan</span> above to regenerate the coordination, or
+          Execute to run as-is.
         </div>
       )}
 
+      {questions.length > 0 && (
+        <div className="mb-3 flex items-center gap-1 border-b border-zinc-800">
+          <TabBtn on={tab === 'plan'} onClick={() => setTab('plan')}>Coordination plan</TabBtn>
+          <TabBtn on={tab === 'questions'} onClick={() => setTab('questions')}>
+            Questions
+            <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
+              unanswered ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
+                         : 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'}`}>
+              {unanswered ? `${unanswered} to answer` : 'answered'}
+            </span>
+          </TabBtn>
+        </div>
+      )}
+
+      {tab === 'plan' ? (
+      <>
       <div className="mb-3">
         <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">Coordination overview</div>
         <textarea
@@ -212,6 +265,77 @@ export function VatraGroup0Plan({
         Groups run in order A→B→C→D (barrier between). Each agent runs with its mandate, output, and
         the teammates it consumes from injected into its prompt.
       </p>
+      </>
+      ) : (
+        <>
+          <div className="flex flex-col gap-3 md:flex-row md:items-start">
+            {/* Left — question list. */}
+            <div className="shrink-0 space-y-1 md:w-[30%]">
+              {questions.map((x) => {
+                const on = x.id === q?.id
+                const done = isAnswered(x)
+                return (
+                  <button
+                    key={x.id}
+                    onClick={() => setSelQId(x.id)}
+                    className={`flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left transition-colors ${
+                      on ? 'border-violet-500 bg-violet-500/10'
+                         : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
+                    }`}
+                  >
+                    <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${done ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                    <span className={`min-w-0 text-[11px] leading-snug ${on ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-300'}`}>
+                      {x.question}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* Right — the selected question's answer. */}
+            {q && (
+              <div className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900/30 p-3">
+                <div className="mb-2 text-sm font-medium leading-snug text-zinc-200">{q.question}</div>
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                  {q.multi ? 'Pick any that apply' : 'Pick one'}
+                </div>
+                {q.options.length > 0 && (
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {q.options.map((opt) => {
+                      const on = (q.selected || []).includes(opt)
+                      return (
+                        <button
+                          key={opt}
+                          onClick={() => toggleOption(opt)}
+                          className={`rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
+                            on ? 'border-violet-500 bg-violet-600 text-white'
+                               : 'border-zinc-700 text-zinc-300 hover:text-zinc-100'
+                          }`}
+                        >
+                          {opt}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Other</div>
+                <textarea
+                  value={q.other}
+                  onChange={(e) => patchQ({ other: e.target.value })}
+                  rows={2}
+                  placeholder="Your own answer (optional)…"
+                  className="w-full resize-y rounded border border-zinc-700 bg-zinc-950/60 px-2.5 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+                />
+              </div>
+            )}
+          </div>
+          <p className="mt-3 text-[10px] text-zinc-600">
+            Answer what matters, then click Re-plan above — your answers are folded back into the
+            planner and the coordination is regenerated. Unanswered questions use the planner's
+            defaults.
+          </p>
+        </>
+      )}
     </div>
   )
 }

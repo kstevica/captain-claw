@@ -106,9 +106,20 @@ export interface Group0Agent {
   hand_off_notes: string
 }
 
+// A clarifying question the planner surfaces for the user to answer (dynamic form).
+export interface Group0Question {
+  id: string
+  question: string
+  multi: boolean          // several answers may apply (else single-select)
+  options: string[]       // 1-4 planner-suggested answers
+  selected: string[]      // the user's chosen options
+  other: string           // the user's free-form "Other" answer
+}
+
 export interface Group0Plan {
   overview: string
   agents: Group0Agent[]
+  questions?: Group0Question[]
 }
 
 // A cross-agent request on the Vatra blackboard.
