@@ -167,6 +167,25 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_events
                     ON being_events(being_id, at);
+
+                -- Chores: parent-posted fixed-fee tasks (plan §5.1, Phase 2).
+                -- The fee is minted only at judged payout, so conservation
+                -- holds; escrow_state tracks the promise lifecycle.
+                CREATE TABLE IF NOT EXISTS being_jobs (
+                    id           TEXT PRIMARY KEY,
+                    owner_id     TEXT NOT NULL,
+                    being_id     TEXT NOT NULL,
+                    spec         TEXT NOT NULL,
+                    fee_tokens   INTEGER NOT NULL,
+                    escrow_state TEXT NOT NULL DEFAULT 'open',
+                    result_text  TEXT NOT NULL DEFAULT '',
+                    judge_note   TEXT NOT NULL DEFAULT '',
+                    created_at   TEXT NOT NULL,
+                    done_at      TEXT,
+                    paid_at      TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_jobs
+                    ON being_jobs(being_id, escrow_state);
                 """
             )
             # Lightweight migrations (columns added after first ship).
@@ -178,6 +197,9 @@ class BeingsStore:
                 ("agent_token", "TEXT"),
                 ("last_tick_at", "TEXT"),
                 ("tick_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("house_rules", "TEXT NOT NULL DEFAULT '[]'"),
+                ("rules_pending", "INTEGER NOT NULL DEFAULT 0"),
+                ("affect", "TEXT NOT NULL DEFAULT '{}'"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -257,6 +279,8 @@ class BeingsStore:
         b["drives"] = json.loads(b["drives"])
         b["lineage"] = json.loads(b["lineage"])
         b["media_diet"] = json.loads(b.get("media_diet") or "{}")
+        b["house_rules"] = json.loads(b.get("house_rules") or "[]")
+        b["affect"] = json.loads(b.get("affect") or "{}")
         return b
 
     def list(self, owner_id: str) -> list[dict]:
@@ -565,6 +589,9 @@ class BeingsStore:
             "wallet": self.wallet_view(b),
             "spent_today": self.spent_today(b["id"]),
             "capabilities": sorted(constitution.capabilities(b["stage"])),
+            "house_rules": b["house_rules"],
+            "media_diet": b["media_diet"],
+            "affect": b["affect"],
         }
 
     def ledger(self, owner_id: str, slug: str, limit: int = 100) -> list[dict]:
@@ -682,6 +709,146 @@ class BeingsStore:
             (_iso(now),),
         ).fetchall()
         return [self.get(r["owner_id"], r["slug"]) for r in rows]
+
+    # ── Parenting: chores, house rules, affect, milestones (Phase 2) ──
+
+    def post_chore(self, owner_id: str, slug: str, spec: str, fee_tokens: int,
+                   now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if b["state"] == "dead":
+            raise BeingError("the dead take no chores")
+        if not constitution.has_capability(b["stage"], "chores"):
+            raise BeingError(f"a {b['stage']} is too young for chores")
+        if fee_tokens <= 0:
+            raise BeingError("fee must be positive")
+        jid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_jobs (id, owner_id, being_id, spec, fee_tokens,"
+                " created_at) VALUES (?,?,?,?,?,?)",
+                (jid, owner_id, b["id"], spec.strip(), int(fee_tokens), _iso(now)),
+            )
+            self._c().commit()
+        self.record_event(b["id"], "chore_posted",
+                          {"job_id": jid, "spec": spec[:200],
+                           "fee_tokens": int(fee_tokens)}, now=now)
+        return self.get_chore(owner_id, jid)
+
+    def get_chore(self, owner_id: str, job_id: str) -> dict:
+        row = self._c().execute(
+            "SELECT * FROM being_jobs WHERE id = ? AND owner_id = ?",
+            (job_id, owner_id),
+        ).fetchone()
+        if not row:
+            raise BeingNotFound("no such chore")
+        return dict(row)
+
+    def chores_for(self, owner_id: str, slug: str,
+                   states: tuple[str, ...] | None = None) -> list[dict]:
+        b = self.get(owner_id, slug)
+        q = "SELECT * FROM being_jobs WHERE being_id = ?"
+        args: list = [b["id"]]
+        if states:
+            q += f" AND escrow_state IN ({','.join('?' * len(states))})"
+            args += list(states)
+        q += " ORDER BY created_at DESC"
+        return [dict(r) for r in self._c().execute(q, args).fetchall()]
+
+    def chore_done(self, owner_id: str, job_id: str, result: str,
+                   now: datetime | None = None) -> dict:
+        """The being reports a chore finished → escrow moves to judging."""
+        now = now or _utcnow()
+        job = self.get_chore(owner_id, job_id)
+        if job["escrow_state"] != "open":
+            raise BeingError(f"chore is {job['escrow_state']}, not open")
+        with self._lock:
+            self._c().execute(
+                "UPDATE being_jobs SET escrow_state = 'judging', result_text = ?,"
+                " done_at = ? WHERE id = ?",
+                (result[:4000], _iso(now), job_id),
+            )
+            self._c().commit()
+        self.record_event(job["being_id"], "chore_done",
+                          {"job_id": job_id, "result": result[:200]}, now=now)
+        return self.get_chore(owner_id, job_id)
+
+    def judge_chore(self, owner_id: str, job_id: str, approve: bool,
+                    note: str = "", now: datetime | None = None) -> dict:
+        """The parent's judgment: pay (mint reason='fee') or fail. Payment is
+        the only mint in the chore lifecycle — conservation holds throughout."""
+        now = now or _utcnow()
+        job = self.get_chore(owner_id, job_id)
+        if job["escrow_state"] not in ("open", "judging"):
+            raise BeingError(f"chore already {job['escrow_state']}")
+        state = "paid" if approve else "failed"
+        if approve:
+            b = self._being_by_id(job["being_id"])
+            view = self.wallet_view(b)
+            fee = int(job["fee_tokens"])
+            if view["savings_ceiling"] is not None:
+                fee = min(fee, max(0, view["savings_ceiling"]
+                                   - view["balance_tokens"]))
+            if fee > 0:
+                self._apply(owner_id, tokens=fee, reason="fee",
+                            from_being=None, to_being=job["being_id"],
+                            job_id=job_id, note="chore", now=now)
+        with self._lock:
+            self._c().execute(
+                "UPDATE being_jobs SET escrow_state = ?, judge_note = ?,"
+                " paid_at = ? WHERE id = ?",
+                (state, note[:500], _iso(now) if approve else None, job_id),
+            )
+            self._c().commit()
+        self.record_event(job["being_id"],
+                          "chore_paid" if approve else "chore_failed",
+                          {"job_id": job_id, "fee_tokens": job["fee_tokens"],
+                           "note": note[:200]}, now=now)
+        if approve:
+            self.milestone(job["being_id"], "first_earned",
+                           {"fee_tokens": job["fee_tokens"]}, now=now)
+        return self.get_chore(owner_id, job_id)
+
+    def set_house_rules(self, owner_id: str, slug: str, rules: list[str],
+                        now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        clean = [str(r).strip() for r in rules if str(r).strip()][:20]
+        self._update(b["id"], now, house_rules=json.dumps(clean),
+                     rules_pending=1)
+        self.record_event(b["id"], "rules_updated", {"count": len(clean)},
+                          now=now)
+        return self.get(owner_id, slug)
+
+    def clear_rules_pending(self, being_id: str,
+                            now: datetime | None = None) -> None:
+        self._update(being_id, now or _utcnow(), rules_pending=0)
+
+    def set_affect(self, being_id: str, affect: dict,
+                   now: datetime | None = None) -> None:
+        self._update(being_id, now or _utcnow(), affect=json.dumps(affect))
+
+    def milestone(self, being_id: str, name: str, data: dict | None = None,
+                  now: datetime | None = None) -> bool:
+        """Record a once-per-life milestone; False if already achieved."""
+        rows = self._c().execute(
+            "SELECT data FROM being_events WHERE being_id = ?"
+            " AND kind = 'milestone' ORDER BY at DESC LIMIT 200",
+            (being_id,),
+        ).fetchall()
+        for r in rows:
+            try:
+                if json.loads(r["data"]).get("name") == name:
+                    return False
+            except json.JSONDecodeError:
+                continue
+        self.record_event(being_id, "milestone",
+                          {"name": name, **(data or {})}, now=now)
+        return True
+
+    def milestones(self, owner_id: str, slug: str) -> list[dict]:
+        return [e for e in self.events(owner_id, slug, limit=500)
+                if e["kind"] == "milestone"]
 
     def debit_usage_clamped(
         self, being_id: str, tier: str, usage: dict,

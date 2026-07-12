@@ -2,14 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Egg, Loader2, Moon, Pause, Play, Plus, RefreshCw, ScrollText,
-  Skull, Sparkles, Zap,
+  ClipboardList, Egg, GraduationCap, Loader2, Moon, Pause, Play, Plus,
+  RefreshCw, ScrollText, Skull, Sparkles, Zap,
 } from 'lucide-react'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
+  type Chore, type ReportCard,
   conceiveBeing, euthanizeBeing, getBeingEvents, getBeingJournal,
-  getBeingsMeta, getBeingVitals, getLiabilities, hatchBeing, listBeings,
-  pauseBeing, setAllowance, tickBeing, wakeBeing,
+  getBeingsMeta, getBeingVitals, getLiabilities, getReportCard, hatchBeing,
+  judgeChore, listBeings, listChores, pauseBeing, postChore, setAllowance,
+  setHouseRules, setMediaDiet, setStage, tickBeing, wakeBeing,
 } from '../services/beings'
 
 const REFRESH_MS = 6000
@@ -226,6 +228,14 @@ function BeingCard({ item, meta, onChanged }: {
   const [events, setEvents] = useState<BeingEvent[]>([])
   const [journal, setJournal] = useState<string | null>(null)
   const [busy, setBusy] = useState('')
+  const [parenting, setParenting] = useState(false)
+  const [chores, setChores] = useState<Chore[]>([])
+  const [choreSpec, setChoreSpec] = useState('')
+  const [choreFee, setChoreFee] = useState('500000')
+  const [ruleText, setRuleText] = useState('')
+  const [dietAllow, setDietAllow] = useState('')
+  const [dietDeny, setDietDeny] = useState('')
+  const [card, setCard] = useState<ReportCard | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -236,6 +246,21 @@ function BeingCard({ item, meta, onChanged }: {
       setEvents(ev.events)
     } catch { /* card stays in list-item mode */ }
   }, [item.slug])
+
+  const openParenting = async () => {
+    if (parenting) { setParenting(false); return }
+    setParenting(true)
+    setCard(null)
+    try {
+      const c = await listChores(item.slug)
+      setChores(c.chores)
+      if (vitals) {
+        setRuleText((vitals.house_rules || []).join('\n'))
+        setDietAllow((vitals.media_diet?.allow || []).join(', '))
+        setDietDeny((vitals.media_diet?.deny || []).join(', '))
+      }
+    } catch { /* section shows empty states */ }
+  }
 
   useEffect(() => { void load() }, [load])
 
@@ -257,6 +282,11 @@ function BeingCard({ item, meta, onChanged }: {
         <span className="text-sm font-semibold text-zinc-100">{item.name}</span>
         <span className={`rounded border px-1.5 py-0.5 text-[10px] ${STAGE_META[item.stage] || STAGE_META.egg}`}>{item.stage}</span>
         <span className={`rounded border px-1.5 py-0.5 text-[10px] ${STATE_META[item.state] || STATE_META.paused}`}>{item.state}</span>
+        {v?.affect?.mood && (
+          <span className="rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 text-[10px] text-zinc-300" title={(v.affect.notes || []).join('; ')}>
+            {v.affect.mood}
+          </span>
+        )}
         <span className="ml-auto text-[10px] text-zinc-600">{item.slug}</span>
       </div>
 
@@ -368,6 +398,12 @@ function BeingCard({ item, meta, onChanged }: {
             >
               <ScrollText className="h-3 w-3" /> Journal
             </button>
+            <button
+              onClick={() => void openParenting()}
+              className={`flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-zinc-800 ${parenting ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-400'}`}
+            >
+              <GraduationCap className="h-3 w-3" /> Parenting
+            </button>
           </>
         )}
         {item.state !== 'dead' && (
@@ -387,6 +423,147 @@ function BeingCard({ item, meta, onChanged }: {
         <pre className="mt-2 max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md border border-zinc-800 bg-zinc-950 p-3 text-[11px] leading-relaxed text-zinc-300">
           {journal}
         </pre>
+      )}
+
+      {parenting && v && (
+        <div className="mt-3 space-y-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+          {/* Chores */}
+          <div>
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+              <ClipboardList className="h-3.5 w-3.5 text-violet-400" /> Chores
+            </div>
+            {chores.filter(c => c.escrow_state === 'open' || c.escrow_state === 'judging').map((c) => (
+              <div key={c.id} className="mb-1 flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs">
+                <span className="flex-1 truncate text-zinc-300" title={c.result_text || c.spec}>
+                  {c.spec} <span className="text-zinc-600">· {fmtTokens(c.fee_tokens)}</span>
+                </span>
+                {c.escrow_state === 'judging' ? (
+                  <>
+                    <span className="text-[10px] text-amber-400">done — review:</span>
+                    <button
+                      onClick={() => void act('judge', async () => { await judgeChore(item.slug, c.id, true); setChores((await listChores(item.slug)).chores) })}
+                      className="rounded border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10"
+                    >Pay</button>
+                    <button
+                      onClick={() => void act('judge', async () => { await judgeChore(item.slug, c.id, false); setChores((await listChores(item.slug)).chores) })}
+                      className="rounded border border-red-500/30 px-1.5 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10"
+                    >Reject</button>
+                  </>
+                ) : (
+                  <span className="text-[10px] text-zinc-500">waiting</span>
+                )}
+              </div>
+            ))}
+            <div className="mt-1 flex items-center gap-1.5">
+              <input
+                value={choreSpec} onChange={(e) => setChoreSpec(e.target.value)}
+                placeholder="Post a chore… (fixed fee, judged before payout)"
+                className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+              />
+              <select
+                value={choreFee} onChange={(e) => setChoreFee(e.target.value)}
+                className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:outline-none"
+              >
+                <option value="100000">100k</option>
+                <option value="500000">500k</option>
+                <option value="1000000">1M</option>
+                <option value="2000000">2M</option>
+              </select>
+              <button
+                onClick={() => void act('chore', async () => {
+                  if (!choreSpec.trim()) return
+                  await postChore(item.slug, choreSpec.trim(), Number(choreFee))
+                  setChoreSpec('')
+                  setChores((await listChores(item.slug)).chores)
+                })}
+                className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+              >Post</button>
+            </div>
+          </div>
+
+          {/* House rules + diet */}
+          <div className="grid gap-2 md:grid-cols-2">
+            <div>
+              <div className="mb-1 text-xs font-medium text-zinc-300">House rules <span className="text-zinc-600">(one per line — it internalizes them next tick)</span></div>
+              <textarea
+                value={ruleText} onChange={(e) => setRuleText(e.target.value)} rows={3}
+                className="w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+              />
+              <button
+                onClick={() => void act('rules', () => setHouseRules(item.slug, ruleText.split('\n')))}
+                className="mt-1 rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+              >Save rules</button>
+            </div>
+            <div>
+              <div className="mb-1 text-xs font-medium text-zinc-300">Media diet</div>
+              <input
+                value={dietAllow} onChange={(e) => setDietAllow(e.target.value)}
+                placeholder="allow: wikipedia.org, arxiv.org (empty = open web)"
+                className="mb-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+              />
+              <input
+                value={dietDeny} onChange={(e) => setDietDeny(e.target.value)}
+                placeholder="deny: reddit.com, x.com"
+                className="w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+              />
+              <div className="mt-1 flex items-center gap-2">
+                <button
+                  onClick={() => void act('diet', () => setMediaDiet(
+                    item.slug,
+                    dietAllow.split(',').map(s => s.trim()).filter(Boolean),
+                    dietDeny.split(',').map(s => s.trim()).filter(Boolean),
+                  ))}
+                  className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                >Save diet</button>
+                <select
+                  value={v.stage}
+                  onChange={(e) => {
+                    const to = e.target.value
+                    if (window.confirm(`Advance ${item.name} to ${to}? New abilities unlock; this is a ceremony.`))
+                      void act('stage', () => setStage(item.slug, to))
+                  }}
+                  className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[11px] text-zinc-300 focus:outline-none"
+                  title="Stage (advancement ceremony)"
+                >
+                  {['infant', 'child', 'adolescent', 'adult'].map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Report card */}
+          <div>
+            <button
+              onClick={() => void (async () => {
+                try { setCard(await getReportCard(item.slug, 7)) }
+                catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+              })()}
+              className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+            >Report card (7d)</button>
+            {card && (
+              <div className="mt-2 space-y-1 rounded border border-zinc-800 bg-zinc-900/60 p-2.5 text-[11px] text-zinc-300">
+                <div>
+                  {card.ticks} ticks · spent {fmtTokens(card.tokens_spent_weighted)} · earned{' '}
+                  <span className="text-emerald-300">{fmtTokens(card.tokens_earned)}</span> · spoke {card.messages_to_parent}×
+                  {card.messages_suppressed > 0 && <span className="text-amber-400"> · {card.messages_suppressed} suppressed</span>}
+                  {' '}· rut {card.rut_score}
+                </div>
+                <div className="text-zinc-500">
+                  acts: {Object.entries(card.acts).map(([k, n]) => `${k}×${n}`).join(', ') || '—'}
+                  {card.milestones.length > 0 && <> · milestones: {card.milestones.join(', ')}</>}
+                </div>
+                {card.concerns.length > 0 && (
+                  <div className="text-amber-400">concerns: {card.concerns.join('; ')}</div>
+                )}
+                {card.in_its_own_words && (
+                  <div className="border-l-2 border-zinc-700 pl-2 italic text-zinc-400">
+                    in its own words: …{card.in_its_own_words.slice(-260)}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   )

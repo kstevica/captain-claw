@@ -51,6 +51,20 @@ class TickRequest(BaseModel):
     kind: str = "wake"
 
 
+class ChoreRequest(BaseModel):
+    spec: str
+    fee_tokens: int
+
+
+class JudgeRequest(BaseModel):
+    approve: bool
+    note: str = ""
+
+
+class RulesRequest(BaseModel):
+    rules: list[str]
+
+
 class AllowanceRequest(BaseModel):
     preset: str
     daily_burn_cap: int | None = None
@@ -168,6 +182,47 @@ async def set_diet(slug: str, body: DietRequest,
     b = _run(get_store().set_media_diet, user["id"], slug,
              {"allow": body.allow, "deny": body.deny})
     return {"media_diet": b["media_diet"]}
+
+
+@router.post("/{slug}/chores")
+async def post_chore(slug: str, body: ChoreRequest,
+                     user: dict = Depends(get_current_user)):
+    """Post a fixed-fee chore. The fee mints only on judged completion."""
+    return {"chore": _run(get_store().post_chore, user["id"], slug,
+                          body.spec, body.fee_tokens)}
+
+
+@router.get("/{slug}/chores")
+async def list_chores(slug: str, user: dict = Depends(get_current_user)):
+    return {"chores": _run(get_store().chores_for, user["id"], slug)}
+
+
+@router.post("/{slug}/chores/{job_id}/judge")
+async def judge_chore(slug: str, job_id: str, body: JudgeRequest,
+                      user: dict = Depends(get_current_user)):
+    """The parent's judgment — approve pays into savings, reject fails it."""
+    return {"chore": _run(get_store().judge_chore, user["id"], job_id,
+                          body.approve, body.note)}
+
+
+@router.post("/{slug}/rules")
+async def set_rules(slug: str, body: RulesRequest,
+                    user: dict = Depends(get_current_user)):
+    """House rules — the being internalizes them into VALUES.md next tick."""
+    b = _run(get_store().set_house_rules, user["id"], slug, body.rules)
+    return {"house_rules": b["house_rules"], "pending": True}
+
+
+@router.get("/{slug}/report-card")
+async def report_card(slug: str, days: int = 7,
+                      user: dict = Depends(get_current_user)):
+    being = _run(get_store().get, user["id"], slug)
+    return being_life.report_card(get_store(), being, days=days)
+
+
+@router.get("/{slug}/milestones")
+async def milestones(slug: str, user: dict = Depends(get_current_user)):
+    return {"milestones": _run(get_store().milestones, user["id"], slug)}
 
 
 @router.get("/{slug}/journal")

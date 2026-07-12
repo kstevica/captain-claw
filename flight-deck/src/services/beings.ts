@@ -104,6 +104,9 @@ export interface BeingVitals {
   }
   spent_today: number
   capabilities: string[]
+  house_rules: string[]
+  media_diet: { allow?: string[]; deny?: string[] }
+  affect: { mood?: string; notes?: string[] }
 }
 
 export interface BeingEvent {
@@ -154,4 +157,56 @@ export const wakeBeing = (slug: string) =>
 export const euthanizeBeing = (slug: string) =>
   fdFetch<BeingVitals>(`/beings/${slug}/euthanize`, {
     method: 'POST', body: JSON.stringify({ confirm: true }),
+  })
+
+// ── Phase 2: parenting ──
+
+export interface Chore {
+  id: string
+  spec: string
+  fee_tokens: number
+  escrow_state: 'open' | 'judging' | 'paid' | 'failed'
+  result_text: string
+  judge_note: string
+  created_at: string
+}
+
+export interface ReportCard {
+  period_days: number
+  ticks: number
+  acts: Record<string, number>
+  tokens_spent_weighted: number
+  tokens_earned: number
+  messages_to_parent: number
+  messages_suppressed: number
+  rut_score: number
+  concerns: string[]
+  milestones: string[]
+  in_its_own_words: string
+  affect: { mood?: string; notes?: string[] }
+}
+
+export const postChore = (slug: string, spec: string, fee_tokens: number) =>
+  fdFetch<{ chore: Chore }>(`/beings/${slug}/chores`, {
+    method: 'POST', body: JSON.stringify({ spec, fee_tokens }),
+  })
+export const listChores = (slug: string) =>
+  fdFetch<{ chores: Chore[] }>(`/beings/${slug}/chores`)
+export const judgeChore = (slug: string, jobId: string, approve: boolean, note = '') =>
+  fdFetch<{ chore: Chore }>(`/beings/${slug}/chores/${jobId}/judge`, {
+    method: 'POST', body: JSON.stringify({ approve, note }),
+  })
+export const setHouseRules = (slug: string, rules: string[]) =>
+  fdFetch<{ house_rules: string[] }>(`/beings/${slug}/rules`, {
+    method: 'POST', body: JSON.stringify({ rules }),
+  })
+export const setMediaDiet = (slug: string, allow: string[], deny: string[]) =>
+  fdFetch<{ media_diet: unknown }>(`/beings/${slug}/diet`, {
+    method: 'POST', body: JSON.stringify({ allow, deny }),
+  })
+export const getReportCard = (slug: string, days = 7) =>
+  fdFetch<ReportCard>(`/beings/${slug}/report-card?days=${days}`)
+export const setStage = (slug: string, stage: string) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/stage`, {
+    method: 'POST', body: JSON.stringify({ stage }),
   })

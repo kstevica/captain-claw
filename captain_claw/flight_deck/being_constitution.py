@@ -44,7 +44,7 @@ CACHE_WRITE_WEIGHT = 1.25  # cache writes are ~125% of input price
 _STAGE_GRANTS: dict[str, frozenset[str]] = {
     "egg": frozenset(),
     "infant": frozenset({"chat", "journal", "vfs_home"}),
-    "child": frozenset({"web_read", "flows", "commons_read"}),
+    "child": frozenset({"web_read", "flows", "commons_read", "chores"}),
     "adolescent": frozenset({
         "commons_write", "spawn_agents", "agent_messaging",
         "organ_runs", "trade", "jobs", "ventures",
