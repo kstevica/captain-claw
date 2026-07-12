@@ -46,10 +46,12 @@ def make_send(reply_for=None, emit_action: bool = False):
     seen: list[dict] = []
 
     async def send(port, token, prompt, timeout, *, fleet_instructions="",
-                   agent_name="", on_action=None, on_usage=None):
+                   agent_name="", on_action=None, on_usage=None, on_status=None):
         seen.append({"port": port, "prompt": prompt})
         if emit_action and on_action is not None:
             on_action({"tool": "search", "detail": "q"})
+        if on_status is not None:
+            on_status("Calling LLM (test-model)")
         if on_usage is not None:
             on_usage(10, 5, 15)
         return reply_for(port, prompt) if reply_for else "reasoning…\nAnswer: 42"

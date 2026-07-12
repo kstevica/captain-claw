@@ -3,9 +3,9 @@ import {
   Network, Play, Sparkles, Check, X, Paperclip, FileText, Image as ImageIcon,
   SlidersHorizontal, ScanSearch, RefreshCw, CornerDownRight, Users, HelpCircle,
   Gauge, ListChecks, Brain, FolderSearch, Loader2, ChevronDown, ChevronRight,
-  Folder, ChevronLeft, ClipboardList, Database,
+  Folder, ChevronLeft, ClipboardList, Database, Trash2,
 } from 'lucide-react'
-import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type FolderMode, type BasnaSession } from '../stores/basnaStore'
+import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type FolderMode, type BasnaSession, type Group0Plan } from '../stores/basnaStore'
 import { ShareModal } from '../components/common/ShareModal'
 import { useBasnaProjectStore, UNFILED_ID, type BasnaProject } from '../stores/basnaProjectStore'
 import { VatraTeamPlan } from '../components/VatraDelegation'
@@ -458,6 +458,14 @@ export function BasnaPage() {
   const group0Planning = !!activeSession && activeSession.status === 'planning'
   const awaitingPlan = !!activeSession && activeSession.status === 'awaiting_plan'
   const running = executing || activeBusy || group0Planning
+  // The editable Group 0 plan draft lives here (lifted) so the top-bar Execute button
+  // sends the user's edits. Seeded from the persisted plan when the gate opens; cleared
+  // when it closes. Not reseeded mid-approve so an in-flight Execute never clobbers edits.
+  const [group0Draft, setGroup0Draft] = useState<Group0Plan | null>(null)
+  useEffect(() => {
+    if (awaitingPlan && routePlan?.group0_plan && !approvingPlan) setGroup0Draft(routePlan.group0_plan)
+    else if (!awaitingPlan) setGroup0Draft(null)
+  }, [awaitingPlan, routePlan?.group0_plan, approvingPlan])
   const finished = !!activeSession && (activeSession.status === 'done' || activeSession.status === 'error')
   const stage: Stage = running ? 'run' : finished ? 'done' : routePlan ? 'plan' : 'define'
   // A stopped/failed run can be resumed from its checkpoints: finished agents are
@@ -1153,8 +1161,31 @@ export function BasnaPage() {
               </div>
             )}
 
-            {/* Action bar — pin a team, then route/plan/run. Hidden while live. */}
-            {!running && (
+            {/* Gate action bar — the coordination plan is drafted and awaiting the user;
+                Execute approves (runs Group A) and Cancel discards. Replaces Plan/Run team
+                since the run is already in motion. */}
+            {awaitingPlan && (
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => cancelVatraPlan()}
+                  disabled={approvingPlan}
+                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-rose-500/50 hover:text-rose-300 disabled:opacity-40"
+                >
+                  <Trash2 className="h-3.5 w-3.5" /> Cancel
+                </button>
+                <button
+                  onClick={() => approveVatraPlan(group0Draft ?? undefined)}
+                  disabled={approvingPlan}
+                  className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                >
+                  {approvingPlan ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                  Execute
+                </button>
+              </div>
+            )}
+
+            {/* Action bar — pin a team, then route/plan/run. Hidden while live or at the gate. */}
+            {!running && !awaitingPlan && (
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setTeamOpen((o) => !o)}
@@ -1271,14 +1302,13 @@ export function BasnaPage() {
             )}
 
             {/* Group 0 gate — the Long Horizon Planner's coordination plan, awaiting
-                the user's review/edit before any Group-A worker runs. */}
-            {awaitingPlan && activeSession && routePlan && (
+                the user's review/edit before any Group-A worker runs. The Execute/Cancel
+                CTAs live in the action bar above (replacing Plan/Run team). */}
+            {awaitingPlan && activeSession && routePlan && group0Draft && (
               <VatraGroup0Plan
-                plan={routePlan.group0_plan}
+                plan={group0Draft}
                 subtasks={routePlan.subtasks}
-                busy={approvingPlan}
-                onExecute={(edited) => approveVatraPlan(edited)}
-                onCancel={() => cancelVatraPlan()}
+                onChange={setGroup0Draft}
               />
             )}
 

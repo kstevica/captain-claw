@@ -2773,6 +2773,9 @@ async def _dispatch_horizon_workers(
             _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok",
                       agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
+        def _on_status(text: str) -> None:
+            _progress(sid, "llm", f"{role} · {text}", agent=role, tool="llm", detail=text)
+
         def _on_event(e: dict) -> None:
             conf = float(e.get("confidence", 0.0) or 0.0)
             mark = "✓ passed" if e.get("passed") else "✗ retry"
@@ -2790,7 +2793,7 @@ async def _dispatch_horizon_workers(
         res = await run_worker_horizon(
             spawn=_spawn_member, tier=tier, prompt=prompt, cfg=hcfg,
             critic_provider=critic_provider, fleet_instructions=fleet, agent_name=role,
-            on_action=_on_action, on_usage=_on_usage, on_event=_on_event,
+            on_action=_on_action, on_usage=_on_usage, on_status=_on_status, on_event=_on_event,
             on_spawn=_register, stop=_noop_stop, timeout=body.dispatch_timeout,
         )
         mark = "✓" if res["ok"] else "✗"
@@ -2886,6 +2889,9 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
         _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok", agent=role,
                   prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
+    def _on_status(text: str) -> None:
+        _progress(sid, "llm", f"{role} · {text}", agent=role, tool="llm", detail=text)
+
     _phase(sid, "Fact-checking")
     _progress(sid, "verify", f"Fact-checker ({role}) verifying the answer's claims…", agent=role)
     try:
@@ -2906,7 +2912,7 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
         d = await _dispatch_one(port, token, prompt, body.dispatch_timeout,
                                 on_action=_on_action,
                                 fleet_instructions=arch.get("fleet_instructions", ""),
-                                agent_name=role, on_usage=_on_usage)
+                                agent_name=role, on_usage=_on_usage, on_status=_on_status)
         findings = rv.parse_findings(d.get("output") or "")
         _progress(sid, "verify", f"Fact-checker: {rv.summary_line(findings)}", agent=role)
         for f in rv.refuted(findings):
@@ -2925,7 +2931,7 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
                  "\n\nOutput the complete corrected answer only."),
                 body.dispatch_timeout, on_action=_on_action,
                 fleet_instructions=arch.get("fleet_instructions", ""),
-                agent_name=role, on_usage=_on_usage)
+                agent_name=role, on_usage=_on_usage, on_status=_on_status)
             revised = (d2.get("output") or "").strip()
             collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
             if collapsed:
@@ -3370,6 +3376,11 @@ async def execute_route(
                     _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok",
                               agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
+                def _on_status(text: str) -> None:
+                    # Surface the in-flight LLM call so a slow model call isn't mistaken
+                    # for a stall; agent= keeps the live card in "working".
+                    _progress(sid, "llm", f"{role} · {text}", agent=role, tool="llm", detail=text)
+
                 ws = DATA_DIR / sp["slug"] / "data" / "workspace"
                 img_paths = [str(ws / f["name"]) for f in input_files
                              if str(f.get("mime", "")).startswith("image/")]
@@ -3403,6 +3414,7 @@ async def execute_route(
                     body.dispatch_timeout, on_action=_on_action,
                     fleet_instructions=fleet, agent_name=role,
                     file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
+                    on_status=_on_status,
                 )
                 # R2 acted-gate (opt-in): a worker that returned no text and wrote
                 # no file is a wasted slot — retry it once with a blunt corrective.
@@ -3434,7 +3446,8 @@ async def execute_route(
                         sp["port"], sp["auth"], ESCALATE_CORRECTIVE.strip(),
                         body.dispatch_timeout, on_action=_on_action,
                         fleet_instructions=fleet, agent_name=role,
-                        file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage)
+                        file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
+                        on_status=_on_status)
                     if d2.get("ok") and not escalate_reason(d2.get("output")) \
                             and not worker_produced_nothing(d2):
                         d = d2

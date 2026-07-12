@@ -107,7 +107,7 @@ class HorizonConfig:
 
 def _pool_provider(
     port: int, token: str, send: Send, *, timeout: float,
-    fleet_instructions: str, agent_name: str, on_action, on_usage,
+    fleet_instructions: str, agent_name: str, on_action, on_usage, on_status=None,
 ) -> LLMProvider:
     """A provider whose ``complete`` dispatches to one specific pooled agent.
 
@@ -119,7 +119,7 @@ def _pool_provider(
         return await send(
             port, token, prompt, timeout,
             fleet_instructions=fleet_instructions, agent_name=agent_name,
-            on_action=on_action, on_usage=on_usage,
+            on_action=on_action, on_usage=on_usage, on_status=on_status,
         )
 
     return DispatchProvider(dispatch)
@@ -136,6 +136,7 @@ async def run_worker_horizon(
     agent_name: str = "",
     on_action: Callable[[dict], None] | None = None,
     on_usage: Callable[[int, int, int], None] | None = None,
+    on_status: Callable[[str], None] | None = None,
     on_event: Callable[[dict], None] | None = None,
     on_spawn: Callable[[list[str]], None] | None = None,
     send: Send = _real_send,
@@ -199,7 +200,7 @@ async def run_worker_horizon(
             _pool_provider(
                 port, token, send, timeout=timeout,
                 fleet_instructions=fleet_instructions, agent_name=agent_name,
-                on_action=_mk_on_action(i), on_usage=on_usage,
+                on_action=_mk_on_action(i), on_usage=on_usage, on_status=on_status,
             )
             for i, (port, token, _slug) in enumerate(pool)
         ]
