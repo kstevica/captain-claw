@@ -1081,15 +1081,15 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     _group0_plan = route.get("group0_plan") or {}
     _group0_by_subtask = {e.get("subtask_id"): e for e in _group0_plan.get("agents", [])
                           if e.get("subtask_id")}
-    # Honor the group each agent was assigned in the coordination plan — the user may
-    # have re-grouped at the gate. Feed it back into the subtask so the grouped run's
-    # resolve_groups (below) phases the agent where the user put it (raised to the
-    # archetype floor + dependency-repaired, same as a team-plan group).
+    # Honor the group each agent has in the coordination plan — the value the user saw
+    # and (maybe) re-grouped at the gate. Set it as an ABSOLUTE lock so the grouped
+    # run's resolve_groups phases the agent exactly there — no floor raise, no
+    # dependency pull-back (the board/wait bridges any ordering the user creates).
     for _s in subtasks:
         _e = _group0_by_subtask.get(_s["id"])
         _eg = str((_e or {}).get("group") or "").strip()
         if _eg:
-            _s["group"] = _eg
+            _s["group_lock"] = _eg
     _g0_overview = str(_group0_plan.get("overview") or "").strip()
     if _g0_overview and _g0_overview not in shared_context:
         shared_context = (shared_context + "\n\n## Coordination overview (Group 0)\n"
@@ -3795,11 +3795,12 @@ async def _replan_group0(sid: str, request: Request, user: dict, *, new_groups: 
         subtasks = route.get("subtasks") or []
         archetypes = await merged_archetypes(db, user["id"])
         arch_by_id = {a["id"]: a for a in archetypes}
-        # Apply the user's new groups, then re-resolve so phasing reflects them.
+        # Apply the user's new groups as absolute locks, then re-resolve so the plan
+        # (and the planner's view of it) reflects exactly where the user put each agent.
         for s in subtasks:
             g = str(new_groups.get(s["id"]) or "").strip()
             if g:
-                s["group"] = g
+                s["group_lock"] = g
         vatra_groups.resolve_groups(subtasks, arch_by_id)
 
         _progress_start(sid)

@@ -118,11 +118,15 @@ def archetype_group(arch: dict) -> int:
 def effective_group(subtask: dict, arch: dict) -> int:
     """The group a subtask actually runs in.
 
-    A ``group_resolved`` pin (set once at plan normalization by
-    :func:`resolve_groups`, after dependency repair) is absolute — it may sit
-    BELOW the archetype floor, because a recorded dependency out-ranks both the
-    floor and a Lead push. Without a pin: the archetype FLOOR, raised (never
-    lowered) by an optional Lead-assigned ``group`` on the subtask."""
+    A ``group_lock`` (the user's explicit choice in the Group 0 coordination gate)
+    is ABSOLUTE — it overrides the archetype floor AND dependency repair, so the
+    agent runs exactly where the user put it (the live board/wait covers any
+    ordering the user creates). Else a ``group_resolved`` pin (set once by
+    :func:`resolve_groups`, after dependency repair) wins. Else the archetype
+    FLOOR, raised (never lowered) by an optional Lead-assigned ``group``."""
+    locked = _parse_group((subtask or {}).get("group_lock"))
+    if locked is not None:
+        return locked
     pinned = _parse_group((subtask or {}).get("group_resolved"))
     if pinned is not None:
         return pinned
@@ -146,16 +150,27 @@ def resolve_groups(subtasks: list[dict], arch_by_id: dict) -> list[str]:
     Mutates each subtask, setting ``group_resolved`` ('A'..'D').
     Returns human-readable notes describing any repairs, for the run log."""
     eff: dict[str, int] = {}
+    by_id: dict[str, dict] = {}
     for s in subtasks or []:
         arch = (arch_by_id or {}).get(str(s.get("owner_archetype_id") or ""), {})
         s.pop("group_resolved", None)  # re-resolve from scratch (idempotent)
         eff[s["id"]] = effective_group(s, arch)
+        by_id[s["id"]] = s
     notes: list[str] = []
     for _ in range(len(subtasks or []) + 1):
         moved = False
         for s in subtasks or []:
             for dep in s.get("depends_on") or []:
                 if dep in eff and eff[dep] > eff[s["id"]]:
+                    # A user-locked dependency is absolute — the user chose to run it
+                    # later than a dependent; honor it (the board/wait bridges the gap)
+                    # instead of pulling it back.
+                    dep_s = by_id.get(dep)
+                    if dep_s is not None and _parse_group(dep_s.get("group_lock")) is not None:
+                        notes.append(
+                            f"{dep} kept at {group_label(eff[dep])} (user-locked) though "
+                            f"{s['id']} depends on it")
+                        continue
                     notes.append(
                         f"{dep} pulled {group_label(eff[dep])}→{group_label(eff[s['id']])} "
                         f"— {s['id']} depends on its output")
