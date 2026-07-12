@@ -215,6 +215,32 @@ def test_repair_is_idempotent_and_cycle_safe():
     assert [s["group_resolved"] for s in subtasks] == first == ["B", "B"]
 
 
+# ── group_lock: the user's Group 0 gate choice is absolute ────────────
+
+def test_lock_overrides_the_archetype_floor_and_survives_resolve():
+    # fact-checker floor is A; a lock to D wins, and being absolute it survives a
+    # re-resolve (unlike a soft `group`, which resolve would floor/repair).
+    s = _st("s1", "fact-checker")
+    s["group_lock"] = "D"
+    assert g.effective_group(s, _ARCHS["fact-checker"]) == 4
+    g.resolve_groups([s], _ARCHS)
+    assert s["group_resolved"] == "D"
+
+
+def test_lock_is_not_pulled_back_by_a_dependent():
+    # The user locked the fact-checker to D though the group-B analyst depends on it.
+    # Repair must NOT pull it back — the lock is absolute (board/wait bridges the gap).
+    # Contrast test_repair_pulls_a_pushed_dependency_back, where the un-locked push → B.
+    s1 = _st("s1", "deep-researcher")                        # A
+    s2 = _st("s2", "fact-checker"); s2["group_lock"] = "D"   # locked D
+    s3 = _st("s3", "data-analyst", deps=["s1", "s2"])        # B — depends on s2
+    notes = g.resolve_groups([s1, s2, s3], _ARCHS)
+    by_id = {s["id"]: s for s in (s1, s2, s3)}
+    assert by_id["s2"]["group_resolved"] == "D"   # stayed put (was "B" without the lock)
+    assert by_id["s3"]["group_resolved"] == "B"
+    assert any("user-locked" in n for n in notes)
+
+
 # ── schedule awareness: worker brief block + wait-query matching ──────
 
 _SCHED = {

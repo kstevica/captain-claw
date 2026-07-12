@@ -94,6 +94,34 @@ export interface VatraSubtask {
   group?: string   // execution group A/B/C/D the user arranged this owner into (empty = auto)
 }
 
+// Vatra Group 0: the Long Horizon Planner's per-agent coordination plan. One entry
+// per subtask; each carries the agent's mandate, output, and cross-agent hand-offs.
+export interface Group0Agent {
+  subtask_id: string
+  agent_id: string
+  group: string
+  mandate: string
+  produces: string
+  consumes_from: string[]   // subtask ids this agent depends on
+  hand_off_notes: string
+}
+
+// A clarifying question the planner surfaces for the user to answer (dynamic form).
+export interface Group0Question {
+  id: string
+  question: string
+  multi: boolean          // several answers may apply (else single-select)
+  options: string[]       // 1-4 planner-suggested answers
+  selected: string[]      // the user's chosen options
+  other: string           // the user's free-form "Other" answer
+}
+
+export interface Group0Plan {
+  overview: string
+  agents: Group0Agent[]
+  questions?: Group0Question[]
+}
+
 // A cross-agent request on the Vatra blackboard.
 export interface VatraAsk {
   id: number
@@ -124,6 +152,7 @@ export interface RoutePlan {
   shared_context?: string   // the team contract every piece must follow
   brief?: string            // R12: the clarified, editable task brief the team was routed on
   group_instructions?: Record<string, string>  // per-group extra instructions {A,B,C,D}
+  group0_plan?: Group0Plan  // Group 0: the Long Horizon Planner's coordination plan (gated)
 }
 
 export async function apiListVatraAsks(sessionId: string): Promise<VatraAsk[]> {
@@ -201,7 +230,7 @@ export interface ExecuteResult {
 export interface ProgressEvent {
   i: number
   ts?: number     // epoch seconds (server clock)
-  stage: string   // route | spawn | dispatch | action | narration | usage | merge | learn | done
+  stage: string   // route | spawn | dispatch | action | narration | llm | usage | merge | learn | done
   message: string
   ok?: boolean
   // Structured fields on per-agent events, so the UI can group the stream into
@@ -399,6 +428,47 @@ async function apiVatraExecute(body: Record<string, unknown>): Promise<{ session
   return res.json()
 }
 
+// Approve the Group 0 coordination plan (optionally edited) and start the run. The
+// tiers/env are resent (they carry the model config + keys and are never persisted),
+// so the workers run on the SAME models the planner used — not the registry default.
+async function apiVatraApprove(sessionId: string, body: Record<string, unknown>): Promise<{ status: string }> {
+  const res = await _authedFetch('/fd/vatra/plan/approve', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId, ...body }),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { detail?: string }).detail || 'plan approve failed')
+  }
+  return res.json()
+}
+
+// Re-plan the Group 0 coordination after the user re-grouped agents — the planner
+// regenerates mandates/dependencies/hand-offs for the new phasing, then re-gates.
+async function apiVatraReplan(sessionId: string, body: Record<string, unknown>): Promise<{ status: string }> {
+  const res = await _authedFetch('/fd/vatra/plan/replan', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sessionId, ...body }),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { detail?: string }).detail || 'plan re-plan failed')
+  }
+  return res.json()
+}
+
+// Discard a Group 0 plan awaiting approval — nothing was spawned; session → 'routed'.
+async function apiVatraCancelPlan(sessionId: string): Promise<{ status: string }> {
+  const res = await _authedFetch('/fd/vatra/plan/cancel', {
+    method: 'POST', body: JSON.stringify({ session_id: sessionId }),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}))
+    throw new Error((detail as { detail?: string }).detail || 'plan cancel failed')
+  }
+  return res.json()
+}
+
 // Resume a stalled/cancelled Vatra run — backgrounds like /execute; the live monitor
 // polls its progress. Returns as soon as the run is re-launched.
 async function apiVatraResume(sessionId: string, body: Record<string, unknown>): Promise<{ session_id: string }> {
@@ -584,6 +654,7 @@ interface BasnaStore {
   executing: boolean
   recompiling: boolean
   resuming: boolean    // resuming a stalled/cancelled run from its checkpoints
+  approvingPlan: boolean  // Group 0 gate: approve/cancel request in flight
   error: string | null
 
   routerTier: string   // which Library tier selects the archetypes (the router)
@@ -649,6 +720,9 @@ interface BasnaStore {
   route: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   planVatra: (intent: string, tiers: TierMap, title?: string, archetypeIds?: string[], brief?: string) => Promise<void>
   runVatra: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
+  approveVatraPlan: (plan?: Group0Plan, tiers?: TierMap, envVars?: EnvVar[]) => Promise<void>
+  replanVatraGroups: (plan: Group0Plan, tiers?: TierMap, envVars?: EnvVar[]) => Promise<void>
+  cancelVatraPlan: () => Promise<void>
   fillGaps: (id: string, instruction?: string) => Promise<void>
   saveTitle: (title: string) => Promise<void>
   execute: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
@@ -680,6 +754,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   executing: false,
   recompiling: false,
   resuming: false,
+  approvingPlan: false,
   error: null,
 
   routerTier: (typeof localStorage !== 'undefined' && localStorage.getItem(_ROUTER_TIER_LS)) || 'reason',
@@ -820,7 +895,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     if (get().executing) return
     try { set({ sessions: await apiListSessions() }) } catch { /* ignore */ }
     const a = get().activeSession
-    if (a && ['routing', 'routed', 'running'].includes(a.status)) {
+    if (a && ['routing', 'routed', 'running', 'planning', 'awaiting_plan'].includes(a.status)) {
       try {
         const p = await apiProgress(a.id)
         if (p.events?.length) set({ progress: p.events })
@@ -1007,6 +1082,69 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       await get().loadSessions()
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'vatra run failed' })
+    }
+  },
+
+  // Group 0 gate: approve the (optionally edited) coordination plan and start the run.
+  // Resend tiers/env/horizon so the workers run on the models the user configured (the
+  // same the planner used) — the gate rebuilds the run, and these aren't persisted.
+  // pollRunning then drives the live view once the session flips to 'running'.
+  approveVatraPlan: async (plan, tiers, envVars) => {
+    const sid = get().activeSession?.id
+    if (!sid) return
+    set({ approvingPlan: true, error: null })
+    try {
+      const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
+      const horizon = get().deep ? { worker: true, close: true } : undefined
+      await apiVatraApprove(sid, {
+        ...(plan ? { plan } : {}),
+        ...(tiers ? { tiers } : {}),
+        env_vars,
+        ...(horizon ? { horizon } : {}),
+      })
+      const s = await apiGetSession(sid)
+      if (s) set({ activeSession: s, routePlan: parseRoute(s.route) })
+      await get().loadSessions()
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'plan approve failed' })
+    } finally {
+      set({ approvingPlan: false })
+    }
+  },
+
+  // Group 0 gate: re-plan after re-grouping. Backgrounds the planner (status→planning);
+  // pollRunning shows it working, then the gate re-appears with the regenerated plan.
+  replanVatraGroups: async (plan, tiers, envVars) => {
+    const sid = get().activeSession?.id
+    if (!sid) return
+    set({ approvingPlan: true, error: null })
+    try {
+      const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
+      await apiVatraReplan(sid, { plan, ...(tiers ? { tiers } : {}), env_vars })
+      const s = await apiGetSession(sid)
+      if (s) set({ activeSession: s, routePlan: parseRoute(s.route) })
+      await get().loadSessions()
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'plan re-plan failed' })
+    } finally {
+      set({ approvingPlan: false })
+    }
+  },
+
+  // Group 0 gate: discard the plan — the session returns to 'routed' (re-runnable).
+  cancelVatraPlan: async () => {
+    const sid = get().activeSession?.id
+    if (!sid) return
+    set({ approvingPlan: true, error: null })
+    try {
+      await apiVatraCancelPlan(sid)
+      const s = await apiGetSession(sid)
+      if (s) set({ activeSession: s, routePlan: parseRoute(s.route), progress: [] })
+      await get().loadSessions()
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'plan cancel failed' })
+    } finally {
+      set({ approvingPlan: false })
     }
   },
 

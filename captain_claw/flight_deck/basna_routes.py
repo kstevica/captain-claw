@@ -2254,11 +2254,21 @@ def _absorb_usage(sink: dict, msg: dict, u: dict | None = None) -> None:
         sink["model"] = str(model)
 
 
+def _llm_call_status(raw: str) -> str | None:
+    """Normalise an agent runtime-status broadcast into the 'Calling LLM …' line worth
+    surfacing (or None if it isn't an LLM-call status). Strips the ⚡ streaming prefix so
+    a call and its first-chunk repeat collapse to one line. The agent suppresses this
+    status for background maintenance, so anything reaching here is a real task call."""
+    norm = str(raw or "").replace("⚡", "").strip()
+    return norm if norm.startswith("Calling LLM") else None
+
+
 async def _send_chat_and_collect(
     port: int, token: str, prompt: str, timeout: float, on_action=None,
     fleet_instructions: str = "", agent_name: str = "",
     file_paths: list[str] | None = None, image_paths: list[str] | None = None,
-    on_usage=None, usage_sink: dict | None = None, error_sink: dict | None = None,
+    on_usage=None, on_status=None, usage_sink: dict | None = None,
+    error_sink: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Connect to an agent's /ws, send one chat, return (final reply, actions).
 
@@ -2277,6 +2287,7 @@ async def _send_chat_and_collect(
     answer = ""
     actions: list[dict] = []
     sent = False
+    last_status = ""     # last surfaced "Calling LLM …" status (dedupe streaming repeats)
     started_at: float | None = None
     deadline: float | None = None
     hard_deadline: float | None = None
@@ -2294,7 +2305,7 @@ async def _send_chat_and_collect(
 
     def _handle(msg: dict) -> bool:
         """Apply one inbound message; return True when the turn is complete."""
-        nonlocal answer
+        nonlocal answer, last_status
         mtype = msg.get("type")
         if mtype == "chat_message" and msg.get("role") == "assistant":
             if msg.get("content"):
@@ -2317,6 +2328,9 @@ async def _send_chat_and_collect(
             # Live, running cumulative token counts emitted after each internal
             # LLM call within the turn. Surfaced live (not persisted as an action)
             # so the UI shows usage climbing instead of one number at the end.
+            # This marks a call's END, so clear the last-status guard — the NEXT
+            # call's "Calling LLM …" then always surfaces, even if identical.
+            last_status = ""
             if usage_sink is not None:
                 _absorb_usage(usage_sink, msg)  # capture cache split + model for costing
             if on_usage:
@@ -2339,12 +2353,26 @@ async def _send_chat_and_collect(
             detail = " · ".join(x for x in [str(model), tok] if x)
             if detail:
                 _record("llm", detail)
-        elif mtype == "status" and str(msg.get("status", "")).lower() in _DONE_STATES:
-            # End-of-turn only once the turn actually ran — a fresh agent's boot
-            # "ready" carries no actions or answer and must not end us early. An
-            # agent that delivered via a file write ends with no answer but real
-            # actions, so `actions` is the signal there.
-            return bool(actions or answer.strip())
+        elif mtype == "status":
+            st = str(msg.get("status", "") or "")
+            if st.lower() in _DONE_STATES:
+                # End-of-turn only once the turn actually ran — a fresh agent's boot
+                # "ready" carries no actions or answer and must not end us early. An
+                # agent that delivered via a file write ends with no answer but real
+                # actions, so `actions` is the signal there.
+                return bool(actions or answer.strip())
+            # The agent broadcasts "Calling LLM (<model>) · … ctx tokens (X%)…" at the
+            # start of every LLM call (the slowest part of a turn). Surface it live so a
+            # long model call doesn't read as "stuck"; dedupe the ⚡-streaming repeat so
+            # it's one line per call, not two.
+            norm = _llm_call_status(st)
+            if on_status and norm and norm != last_status:
+                last_status = norm
+                try:
+                    on_status(norm)
+                except Exception:
+                    pass
+            return False
         elif mtype == "replay_done":
             # Reconnected after the turn committed: the replay already carried the
             # final reply, so we're done.
@@ -2522,7 +2550,8 @@ def _cost_message(cost: dict) -> str:
 async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_action=None,
                         fleet_instructions: str = "", agent_name: str = "",
                         file_paths: list[str] | None = None,
-                        image_paths: list[str] | None = None, on_usage=None) -> dict:
+                        image_paths: list[str] | None = None, on_usage=None,
+                        on_status=None) -> dict:
     # Max-parallel gate: wait for a dispatch slot before doing any work. Started is
     # taken AFTER acquiring, so latency measures the turn, not the queue wait.
     gate = _run_gate.get()
@@ -2536,7 +2565,7 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
             port, token, prompt, timeout, on_action=on_action,
             fleet_instructions=fleet_instructions, agent_name=agent_name,
             file_paths=file_paths, image_paths=image_paths, on_usage=on_usage,
-            usage_sink=sink, error_sink=err)
+            on_status=on_status, usage_sink=sink, error_sink=err)
         usage = _finalize_usage(sink)
         _record_run_usage(sink.get("model", ""), usage, time.monotonic() - started)  # cost + agent-time
         # An agent-side error (e.g. context overflow) no longer raises: it's flagged
@@ -2744,6 +2773,9 @@ async def _dispatch_horizon_workers(
             _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok",
                       agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
+        def _on_status(text: str) -> None:
+            _progress(sid, "llm", f"{role} · {text}", agent=role, tool="llm", detail=text)
+
         def _on_event(e: dict) -> None:
             conf = float(e.get("confidence", 0.0) or 0.0)
             mark = "✓ passed" if e.get("passed") else "✗ retry"
@@ -2761,7 +2793,7 @@ async def _dispatch_horizon_workers(
         res = await run_worker_horizon(
             spawn=_spawn_member, tier=tier, prompt=prompt, cfg=hcfg,
             critic_provider=critic_provider, fleet_instructions=fleet, agent_name=role,
-            on_action=_on_action, on_usage=_on_usage, on_event=_on_event,
+            on_action=_on_action, on_usage=_on_usage, on_status=_on_status, on_event=_on_event,
             on_spawn=_register, stop=_noop_stop, timeout=body.dispatch_timeout,
         )
         mark = "✓" if res["ok"] else "✗"
@@ -2857,6 +2889,9 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
         _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok", agent=role,
                   prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
+    def _on_status(text: str) -> None:
+        _progress(sid, "llm", f"{role} · {text}", agent=role, tool="llm", detail=text)
+
     _phase(sid, "Fact-checking")
     _progress(sid, "verify", f"Fact-checker ({role}) verifying the answer's claims…", agent=role)
     try:
@@ -2877,7 +2912,7 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
         d = await _dispatch_one(port, token, prompt, body.dispatch_timeout,
                                 on_action=_on_action,
                                 fleet_instructions=arch.get("fleet_instructions", ""),
-                                agent_name=role, on_usage=_on_usage)
+                                agent_name=role, on_usage=_on_usage, on_status=_on_status)
         findings = rv.parse_findings(d.get("output") or "")
         _progress(sid, "verify", f"Fact-checker: {rv.summary_line(findings)}", agent=role)
         for f in rv.refuted(findings):
@@ -2896,7 +2931,7 @@ async def _claim_check(request, user, sid: str, sid8: str, run_tag: str, *,
                  "\n\nOutput the complete corrected answer only."),
                 body.dispatch_timeout, on_action=_on_action,
                 fleet_instructions=arch.get("fleet_instructions", ""),
-                agent_name=role, on_usage=_on_usage)
+                agent_name=role, on_usage=_on_usage, on_status=_on_status)
             revised = (d2.get("output") or "").strip()
             collapsed = not revised or (len(deliverable) > 800 and len(revised) < 0.5 * len(deliverable))
             if collapsed:
@@ -3341,6 +3376,11 @@ async def execute_route(
                     _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok",
                               agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
+                def _on_status(text: str) -> None:
+                    # Surface the in-flight LLM call so a slow model call isn't mistaken
+                    # for a stall; agent= keeps the live card in "working".
+                    _progress(sid, "llm", f"{role} · {text}", agent=role, tool="llm", detail=text)
+
                 ws = DATA_DIR / sp["slug"] / "data" / "workspace"
                 img_paths = [str(ws / f["name"]) for f in input_files
                              if str(f.get("mime", "")).startswith("image/")]
@@ -3374,6 +3414,7 @@ async def execute_route(
                     body.dispatch_timeout, on_action=_on_action,
                     fleet_instructions=fleet, agent_name=role,
                     file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
+                    on_status=_on_status,
                 )
                 # R2 acted-gate (opt-in): a worker that returned no text and wrote
                 # no file is a wasted slot — retry it once with a blunt corrective.
@@ -3405,7 +3446,8 @@ async def execute_route(
                         sp["port"], sp["auth"], ESCALATE_CORRECTIVE.strip(),
                         body.dispatch_timeout, on_action=_on_action,
                         fleet_instructions=fleet, agent_name=role,
-                        file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage)
+                        file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
+                        on_status=_on_status)
                     if d2.get("ok") and not escalate_reason(d2.get("output")) \
                             and not worker_produced_nothing(d2):
                         d = d2

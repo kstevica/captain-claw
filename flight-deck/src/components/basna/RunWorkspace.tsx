@@ -228,6 +228,7 @@ export function ProgressFeed({ progress, running, defaultOpen = true, fill = fal
                 ev.stage === 'phase' ? 'text-sky-700 dark:text-sky-300 font-semibold'
                   : ev.stage === 'narration' ? 'text-zinc-200'
                   : ev.ok === false ? 'text-rose-400'
+                  : ev.stage === 'llm' ? 'italic text-sky-600/80 dark:text-sky-400/70'
                   : 'text-zinc-500'
               }>{ev.message}</span>
             </div>

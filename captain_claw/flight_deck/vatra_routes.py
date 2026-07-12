@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import time
 import types
@@ -274,6 +275,40 @@ def _group_instr_block(st: dict, arch: dict, group_instructions: dict) -> str:
     if not instr:
         return ""
     return f"\n\n## Group {letter} — additional instructions for this phase\n{instr}"
+
+
+# The archetype that runs as the permanent Group 0 pre-phase — it drafts the
+# per-agent coordination plan the whole team executes against.
+_GROUP0_PLANNER_ID = "long-horizon-planner"
+
+
+def _plan_slice_block(st: dict, group0_by_subtask: dict, arch_by_id: dict) -> str:
+    """This owner's slice of the Group 0 coordination plan: its mandate, the artifact
+    it produces, which named teammates it consumes from, and hand-off notes. Returns
+    '' when there is no plan or no entry for this subtask — so resume/legacy runs (no
+    ``group0_plan``) emit byte-identical prompts."""
+    e = (group0_by_subtask or {}).get(st["id"])
+    if not e:
+        return ""
+    lines = ["\n\n## Your coordination plan (Group 0)"]
+    if e.get("mandate"):
+        lines.append(f"Your mandate: {e['mandate']}")
+    if e.get("produces"):
+        lines.append(f"You produce: {e['produces']}")
+    cons = [c for c in (e.get("consumes_from") or []) if c]
+    if cons:
+        parts = []
+        for cid in cons:
+            src = (group0_by_subtask or {}).get(cid) or {}
+            arch = arch_by_id.get(str(src.get("agent_id") or "")) or {}
+            role = arch.get("role") or src.get("agent_id") or cid
+            produced = str(src.get("produces") or "").strip()
+            parts.append(f"{role} — {produced}" if produced else str(role))
+        lines.append("You consume from these teammates (read their output before "
+                     "you start, via the `vatra` tool): " + "; ".join(parts))
+    if e.get("hand_off_notes"):
+        lines.append(f"Hand-off notes for downstream teammates: {e['hand_off_notes']}")
+    return "\n".join(lines)
 
 
 def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
@@ -706,6 +741,219 @@ def _capture_generated(slug: str, exclude: set[str], dest_dir: Path,
     return files, "\n\n".join(t.strip() for t in texts if t.strip()).strip()
 
 
+# ── Group 0 pre-phase: plan → gate ───────────────────────────────────
+
+async def _ensure_route(db, user_id: str, sess: dict, sid: str, *, intent: str,
+                        max_agents: int, creds: dict, cfg: dict,
+                        shared_datastore: bool, vfs_project: str) -> dict:
+    """Reuse a route prepared by the UI's /route step if present; otherwise decompose
+    now and persist it. Shared by the Group 0 pre-phase and ``execute_vatra`` so both
+    paths decompose identically. Emits the same route progress lines. Raises
+    HTTPException (after marking the session errored) if the Lead fails."""
+    try:
+        existing = json.loads(sess.get("route") or "{}")
+    except json.JSONDecodeError:
+        existing = {}
+    if existing.get("mode") == "vatra" and existing.get("subtasks"):
+        _progress(sid, "route",
+                  f"Using prepared plan · {len(existing['subtasks'])} piece(s) · "
+                  f"{existing.get('domain', '')}")
+        return existing
+    _progress(sid, "route", "Lead decomposing the task…")
+    try:
+        # A plan-step child can fix the team via config.force_ids.
+        _force = [str(a) for a in (cfg.get("force_ids") or []) if str(a).strip()]
+        route = await _build_plan(db, user_id, intent, max_agents, creds,
+                                  force_ids=_force or None, shared_datastore=shared_datastore,
+                                  vfs_project=vfs_project)
+    except HTTPException:
+        await db.update_basna_session(sid, user_id, status="error")
+        raise
+    except Exception as e:
+        await db.update_basna_session(sid, user_id, status="error")
+        _msg = _lead_error_msg(e)
+        _progress(sid, "route", f"Lead decomposition failed: {_msg[:200]}", ok=False)
+        raise HTTPException(502, f"Vatra Lead failed: {_msg}")
+    await db.update_basna_session(
+        sid, user_id, domain=route["domain"], route=json.dumps(route),
+        config=json.dumps({**cfg, "mode": "vatra"}))
+    _progress(sid, "route", f"{len(route['subtasks'])} subtask(s) · {route['domain']}")
+    return route
+
+
+def _emit_awaiting_plan(sid: str, plan: dict) -> None:
+    """Signal the poll-based UI that a coordination plan is ready for review. The
+    plan rides on the event so the client can seed its editor without a second fetch;
+    the authoritative copy is also persisted in ``route['group0_plan']``."""
+    _phase(sid, "Awaiting plan approval")
+    _progress(sid, "awaiting_plan",
+              "Plan ready for your review — edit if needed, then Execute.", plan=plan)
+    _progress_done(sid)
+
+
+async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent: str,
+                              shared_context: str, file_names: list[str],
+                              subtasks: list[dict], arch_by_id: dict, tiers: dict | None,
+                              api_key: str, env_vars: list[dict] | None,
+                              timeout: float, clarifications: str = "") -> dict:
+    """Spawn the Long Horizon Planner, dispatch it to draft the per-agent coordination
+    plan, and return the parsed structured plan. Best-effort: any spawn/dispatch/parse
+    failure yields the pass-through plan so a dead planner never blocks the run. Emits
+    ``agent='Long Horizon Planner'`` events so it renders as a live pre-phase card."""
+    label = "Long Horizon Planner"
+    _progress(sid, "group0", "Long Horizon Planner drafting the team coordination plan…",
+              agent=label)
+    planner_arch = arch_by_id.get(_GROUP0_PLANNER_ID) or {}
+    fleet = planner_arch.get("fleet_instructions", "")
+
+    def _on_action(act: dict) -> None:
+        detail = act.get("detail", "")
+        if act.get("tool") == "narration":
+            _progress(sid, "narration", f"{label}: {detail}", agent=label,
+                      tool="narration", detail=detail)
+        else:
+            suffix = f": {detail}" if detail else ""
+            _progress(sid, "action", f"{label} → {act.get('tool', '')}{suffix}",
+                      agent=label, tool=act.get("tool", ""), detail=detail)
+
+    def _on_usage(pt: int, ct: int, tt: int) -> None:
+        _progress(sid, "usage", f"{label} · {pt:,}→{ct:,} tok", agent=label,
+                  prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
+
+    def _on_status(text: str) -> None:
+        _progress(sid, "llm", f"{label} · {text}", agent=label, tool="llm", detail=text)
+
+    sp = await _spawn_worker(
+        request, user, name=label, description="Draft the team coordination plan",
+        cognitive_mode=planner_arch.get("cognitive_mode") or "neutra",
+        tools=["read", "glob"], tier=planner_arch.get("tier") or "reason",
+        tiers=tiers, api_key=api_key, env_vars=env_vars)
+    if not sp.get("ok"):
+        _progress(sid, "note", "Planner unavailable — using a pass-through coordination plan",
+                  ok=False)
+        return _passthrough_group0_plan(subtasks, arch_by_id)
+    try:
+        prompt = _build_group0_prompt(intent, shared_context, file_names, subtasks,
+                                      arch_by_id, clarifications=clarifications)
+        d = await _dispatch_one(sp["port"], sp["auth"], prompt, timeout,
+                                on_action=_on_action, on_usage=_on_usage,
+                                on_status=_on_status, fleet_instructions=fleet, agent_name=label)
+        if not d.get("ok"):
+            _progress(sid, "note",
+                      "Planner did not complete — using a pass-through coordination plan",
+                      ok=False)
+            return _passthrough_group0_plan(subtasks, arch_by_id)
+        plan = _parse_group0_plan(d.get("output") or "", subtasks, arch_by_id)
+        _progress(sid, "dispatch", f"{label} ✓ · coordination plan ready", ok=True, agent=label)
+        return plan
+    except Exception as e:  # noqa: BLE001 — planner is best-effort
+        log.warning("Vatra Group 0 planner failed", session_id=sid, error=str(e))
+        _progress(sid, "note", "Planner error — using a pass-through coordination plan",
+                  ok=False)
+        return _passthrough_group0_plan(subtasks, arch_by_id)
+    finally:
+        _teardown([sp["slug"]])
+
+
+async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, *,
+                            gate: bool = True) -> dict:
+    """Permanent Group 0 pre-phase. Ensures a decomposition exists, runs the Long
+    Horizon Planner to draft a per-agent coordination plan, persists it into
+    ``route['group0_plan']``, then EITHER pauses at the approval gate (``gate=True``,
+    interactive UI) OR chains straight into ``execute_vatra`` (``gate=False``, headless
+    agent/continuation paths — auto-approve, no human pause). Resume never enters here."""
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    intent = (sess.get("intent") or "").strip()
+    if not intent:
+        raise HTTPException(400, "session has no intent")
+    sid = body.session_id
+    _run_sid.set(sid)               # bind cost accounting so the planner's tokens count
+    _RUN_USAGE.setdefault(sid, [])
+
+    try:
+        cfg = json.loads(sess.get("config") or "{}")
+    except json.JSONDecodeError:
+        cfg = {}
+    max_agents = int(cfg.get("max_agents") or 6)
+    archetypes = await merged_archetypes(db, user["id"])
+    arch_by_id = {a["id"]: a for a in archetypes}
+    registry = _load_registry()
+
+    def _creds(tier: str) -> dict:
+        return _resolve_creds(registry, body.tiers, body.api_key, tier)
+
+    # Persist the run's knobs onto the session config so /plan/approve (and any resume)
+    # reconstruct the same run without the UI having to resend them.
+    _knobs: dict[str, Any] = {
+        "execution_groups": bool(getattr(body, "execution_groups", False)),
+        "max_parallel": int(getattr(body, "max_parallel", 0) or 0),
+    }
+    if getattr(body, "grouped_review", False):
+        _knobs["grouped_review"] = True
+    if body.quality is not None:
+        _knobs["quality"] = body.quality
+    _changed = {k: v for k, v in _knobs.items() if cfg.get(k) != v}
+    if _changed:
+        cfg.update(_changed)
+        try:
+            await db.update_basna_session(sid, user["id"], config=json.dumps(cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra Group 0 knob persist failed", error=str(e))
+
+    _shared_ds = bool(getattr(body, "shared_datastore", False) or cfg.get("shared_datastore"))
+    _vfs_override = (cfg.get("vfs_project") or getattr(body, "vfs_project", "") or "").strip()
+    if _vfs_override:
+        _run_vfs_project[sid] = _vfs_override
+
+    session_files = _parse_files(sess)
+    input_files = [f for f in session_files if f.get("kind") != "generated"]
+    file_names = [f["name"] for f in input_files]
+
+    _progress_start(sid)
+    await db.update_basna_session(sid, user["id"], status="planning")
+    _phase(sid, "Group 0 · Long Horizon Planner")
+
+    route = await _ensure_route(db, user["id"], sess, sid, intent=intent,
+                                max_agents=max_agents, creds=_creds("reason"), cfg=cfg,
+                                shared_datastore=_shared_ds, vfs_project=_vfs_project(sid))
+    subtasks = route.get("subtasks") or []
+    # Re-resolve execution groups from the user's team-plan edits BEFORE the plan is
+    # drafted. The `/route` step pinned `group_resolved` from the Lead's assignment;
+    # the user then re-grouped agents in the team plan (subtask.group), but that never
+    # recomputed group_resolved — so the coordination plan would show stale (often
+    # collapsed) groups. This is the same resolution execute_vatra runs, so the plan's
+    # groups match how the run will actually phase. Idempotent.
+    vatra_groups.resolve_groups(subtasks, arch_by_id)
+
+    # Idempotency: a second /execute on an already-gated session re-emits the gate
+    # instead of spawning a second planner.
+    if (sess.get("status") or "") == "awaiting_plan" and route.get("group0_plan"):
+        _emit_awaiting_plan(sid, route["group0_plan"])
+        return {"session_id": sid, "status": "awaiting_plan"}
+
+    plan = await _run_group0_planner(
+        request, user, sid, intent=intent, shared_context=route.get("shared_context", ""),
+        file_names=file_names, subtasks=subtasks, arch_by_id=arch_by_id,
+        tiers=body.tiers, api_key=body.api_key, env_vars=body.env_vars,
+        timeout=body.dispatch_timeout)
+    route["group0_plan"] = plan
+    try:
+        await db.update_basna_session(sid, user["id"], route=json.dumps(route))
+    except Exception as e:  # noqa: BLE001
+        log.warning("Vatra Group 0 plan persist failed", error=str(e))
+
+    if not gate:
+        # Headless (agent/continuation): auto-approve — run immediately, no pause.
+        return await execute_vatra(body, request, user)
+
+    await db.update_basna_session(sid, user["id"], status="awaiting_plan")
+    _emit_awaiting_plan(sid, plan)
+    return {"session_id": sid, "status": "awaiting_plan"}
+
+
 # ── Orchestrator ─────────────────────────────────────────────────────
 
 async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> dict:
@@ -803,37 +1051,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     await db.update_basna_session(sid, user["id"], status="running")
     _phase(sid, "Planning")
 
-    # 1) Plan. Reuse a route prepared by the UI's /route step if present; otherwise
-    # decompose now (the one-shot /start and agent paths). Splitting decompose from
-    # spawn is what gives the UI a Basna-style prepare → review → run flow.
-    try:
-        existing = json.loads(sess.get("route") or "{}")
-    except json.JSONDecodeError:
-        existing = {}
-    if existing.get("mode") == "vatra" and existing.get("subtasks"):
-        route = existing
-        _progress(sid, "route",
-                  f"Using prepared plan · {len(route['subtasks'])} piece(s) · {route.get('domain', '')}")
-    else:
-        _progress(sid, "route", "Lead decomposing the task…")
-        try:
-            # A plan-step child can fix the team via config.force_ids.
-            _force = [str(a) for a in (cfg.get("force_ids") or []) if str(a).strip()]
-            route = await _build_plan(db, user["id"], intent, max_agents, _creds("reason"),
-                                      force_ids=_force or None, shared_datastore=_shared_ds,
-                                      vfs_project=_vfs_project(sid))
-        except HTTPException:
-            await db.update_basna_session(sid, user["id"], status="error")
-            raise
-        except Exception as e:
-            await db.update_basna_session(sid, user["id"], status="error")
-            _msg = _lead_error_msg(e)
-            _progress(sid, "route", f"Lead decomposition failed: {_msg[:200]}", ok=False)
-            raise HTTPException(502, f"Vatra Lead failed: {_msg}")
-        await db.update_basna_session(
-            sid, user["id"], domain=route["domain"], route=json.dumps(route),
-            config=json.dumps({**cfg, "mode": "vatra"}))
-        _progress(sid, "route", f"{len(route['subtasks'])} subtask(s) · {route['domain']}")
+    # 1) Plan. Reuse a route prepared by the UI's /route step or the Group 0 pre-phase
+    # if present; otherwise decompose now (resume path). Shared with the pre-phase via
+    # _ensure_route so both decompose identically.
+    route = await _ensure_route(db, user["id"], sess, sid, intent=intent,
+                                max_agents=max_agents, creds=_creds("reason"), cfg=cfg,
+                                shared_datastore=_shared_ds, vfs_project=_vfs_project(sid))
     domain = route["domain"]
     subtasks = route["subtasks"]
     shared_context = route.get("shared_context", "")
@@ -852,6 +1075,26 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _pk = await build_prior_knowledge(db, user["id"], _seed_ids)
         if _pk and _pk not in shared_context:
             shared_context = (shared_context + "\n\n## Prior run knowledge\n" + _pk).strip()
+    # Group 0 coordination plan (from the Long Horizon Planner pre-phase). Its overview
+    # is folded into shared_context for everyone (owners + reporter); each owner's own
+    # slice is injected per-owner in _dispatch_owner. Absent on resume/legacy runs, so
+    # the fold and the per-owner injection are both no-ops there.
+    _group0_plan = route.get("group0_plan") or {}
+    _group0_by_subtask = {e.get("subtask_id"): e for e in _group0_plan.get("agents", [])
+                          if e.get("subtask_id")}
+    # Honor the group each agent has in the coordination plan — the value the user saw
+    # and (maybe) re-grouped at the gate. Set it as an ABSOLUTE lock so the grouped
+    # run's resolve_groups phases the agent exactly there — no floor raise, no
+    # dependency pull-back (the board/wait bridges any ordering the user creates).
+    for _s in subtasks:
+        _e = _group0_by_subtask.get(_s["id"])
+        _eg = str((_e or {}).get("group") or "").strip()
+        if _eg:
+            _s["group_lock"] = _eg
+    _g0_overview = str(_group0_plan.get("overview") or "").strip()
+    if _g0_overview and _g0_overview not in shared_context:
+        shared_context = (shared_context + "\n\n## Coordination overview (Group 0)\n"
+                          + _g0_overview).strip()
     # Per-group extra instructions the user attached in the team-plan editor
     # ({"A": "...", "B": "..."}), injected into every owner that runs in that group.
     _group_instructions = route.get("group_instructions") or {}
@@ -1117,7 +1360,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             def _on_usage(pt: int, ct: int, tt: int) -> None:
                 _progress(sid, "usage", f"{label} · {pt:,}→{ct:,} tok",
                           agent=label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt, **gx)
-            return _on_action, _on_usage
+
+            def _on_status(text: str) -> None:
+                # The model call is in flight — surface it so a slow call isn't mistaken
+                # for a stall. Tagged agent= so the live card shows "working".
+                _progress(sid, "llm", f"{label} · {text}", agent=label,
+                          tool="llm", detail=text, **gx)
+            return _on_action, _on_usage, _on_status
 
         # Set by the intro round below (a digest of every specialist's prep), then
         # injected into each owner's main-round brief so the main round starts
@@ -1156,7 +1405,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     return {"ok": True, "output": ck.get("output", ""), "actions": [],
                             "latency_ms": 0, "restored": True,
                             "produced_file": bool(ck.get("produced_file"))}
-            on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
+            on_action, on_usage, on_status = _owner_callbacks(label, arch["id"], st["id"])
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
@@ -1165,6 +1414,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 subtasks, shared_context, team_prep=intro_digest,
                 vfs_project=vfs_project)
             prompt += _group_instr_block(st, arch, _group_instructions)
+            # Group 0: this owner's slice of the coordination plan — its mandate, what
+            # it produces, and which teammates it consumes from. Its *contract*, placed
+            # just before the TEAM SCHEDULE (its *timing*). No-op when there's no plan.
+            prompt += _plan_slice_block(st, _group0_by_subtask, arch_by_id)
             # Grouped runs: tell the worker who already ran, who runs with it, and
             # who runs AFTER it — so it never waits on output that can't arrive.
             _sched = _group_schedule.get(sid)
@@ -1184,7 +1437,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                 sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                 on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
+                agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage,
+                on_status=on_status))
             # R2 acted-gate (opt-in): an owner that produced no text and wrote no
             # file wasted its slot — retry once with a corrective on the same agent.
             if (quality.acted_gate and d.get("ok") and worker_produced_nothing(d)
@@ -1195,7 +1449,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 d2 = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], ACTED_CORRECTIVE.strip(), body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
+                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage,
+                on_status=on_status))
                 if d2.get("ok") and not worker_produced_nothing(d2):
                     d = d2
             # R5 escalate (opt-in): focused-retry an owner that flagged ESCALATE.
@@ -1207,7 +1462,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 d2 = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], ESCALATE_CORRECTIVE.strip(), body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage))
+                    agent_name=label, file_paths=doc, image_paths=img, on_usage=on_usage,
+                on_status=on_status))
                 if d2.get("ok") and not escalate_reason(d2.get("output")) \
                         and not worker_produced_nothing(d2):
                     d = d2
@@ -1252,7 +1508,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 arch, st = sp["arch"], sp["subtask"]
                 role = arch.get("role") or arch["id"]
                 label = _owner_label(sp)
-                on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
+                on_action, on_usage, on_status = _owner_callbacks(label, arch["id"], st["id"])
                 prompt = _build_intro_prompt(role, st, shared_context, vfs_project=vfs_project)
                 prompt += _datastore_directive(vfs_project, _run_shared_datastore.get(sid, False))
                 if quality.source_corpus:
@@ -1260,7 +1516,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], prompt, body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                    agent_name=label, on_usage=on_usage))
+                    agent_name=label, on_usage=on_usage, on_status=on_status))
                 mark = "✓" if d["ok"] else "✗"
                 ierr = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
                 _progress(sid, "dispatch",
@@ -1334,11 +1590,11 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             async def _redispatch_owner(sp: dict, instruction: str, tag: str) -> dict:
                 arch = sp["arch"]
                 label = _owner_label(sp)
-                on_action, on_usage = _owner_callbacks(label, arch["id"], sp["subtask"]["id"])
+                on_action, on_usage, on_status = _owner_callbacks(label, arch["id"], sp["subtask"]["id"])
                 d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                     sp["port"], sp["auth"], instruction, body.dispatch_timeout,
                     on_action=on_action, fleet_instructions=arch.get("fleet_instructions", ""),
-                    agent_name=label, on_usage=on_usage))
+                    agent_name=label, on_usage=on_usage, on_status=on_status))
                 _progress(sid, "dispatch",
                           f"{label} ({tag}) {'✓' if d['ok'] else '✗'} · {len(d['actions'])} action(s)",
                           ok=d["ok"], agent=label, **_gx(sp["subtask"]["id"]))
@@ -1624,12 +1880,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                         arch, st = sp["arch"], sp["subtask"]
                         role = arch.get("role") or arch["id"]
                         label = _owner_label(sp)
-                        on_action, on_usage = _owner_callbacks(label, arch["id"], st["id"])
+                        on_action, on_usage, on_status = _owner_callbacks(label, arch["id"], st["id"])
                         prompt = _build_review_prompt(role, st, digest, shared_context, vfs_project=vfs_project)
                         prompt += _datastore_directive(vfs_project, _run_shared_datastore.get(sid, False))
                         d = await _dispatch_skippable(sid, label, lambda: _dispatch_one(
                             sp["port"], sp["auth"], prompt, body.dispatch_timeout,
-                            on_action=on_action, agent_name=label, on_usage=on_usage))
+                            on_action=on_action, agent_name=label, on_usage=on_usage, on_status=on_status))
                         # A dispatch event marks the card done again (the live panel
                         # shows a spinner while it's working this round, then ✓).
                         mark = "✓" if d["ok"] else "✗"
@@ -2339,6 +2595,244 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"have; the review round and reporter reconcile the rest.\n\n"
         f"Return only your finished part — no preamble, no meta-commentary about the team."
     )
+
+
+# ── Group 0: the Long Horizon Planner's coordination plan ────────────
+
+def _build_group0_prompt(intent: str, shared_context: str, file_names: list[str],
+                         subtasks: list[dict], arch_by_id: dict,
+                         clarifications: str = "") -> str:
+    """Frame the coordination-plan task for the Long Horizon Planner. The team, its
+    pieces, and their execution groups are ALREADY decided — the planner writes, for
+    every piece, its mandate / what it produces / who it consumes from / hand-off
+    notes, and returns ONLY the JSON envelope below. It may also ask the user up to 9
+    clarifying questions; ``clarifications`` carries the user's prior answers."""
+    roster_lines: list[str] = []
+    for s in subtasks:
+        arch = arch_by_id.get(str(s.get("owner_archetype_id") or "")) or {}
+        role = arch.get("role") or s.get("owner_archetype_id") or "?"
+        desc = str(arch.get("description") or "").strip()
+        grp = s.get("group_resolved") or "?"
+        deps = ", ".join(s.get("depends_on") or []) or "none"
+        roster_lines.append(
+            f"- id={s['id']} | {role} · group {grp} · owns: {s.get('title', '')}\n"
+            f"    role: {desc[:200]}\n"
+            f"    brief: {str(s.get('brief', ''))[:300]}\n"
+            f"    depends_on: {deps}")
+    roster = "\n".join(roster_lines)
+    contract_block = ""
+    if shared_context.strip():
+        contract_block = ("\n\n## Shared conventions the whole team follows\n"
+                          f"{shared_context.strip()}")
+    files_block = ""
+    if file_names:
+        files_block = ("\n\n## Attached files the team can read\n"
+                       + "\n".join(f"- {n}" for n in file_names))
+    return (
+        "You are the Long Horizon Planner — Group 0 of a collaborating agent team. The "
+        "team, its pieces, and their execution groups are ALREADY decided (below). Do "
+        "NOT re-plan the team or invent new members. Your job is to write the "
+        "COORDINATION PLAN that makes them operate as one: for EACH piece, state its "
+        "mandate, exactly what artifact it produces, which teammates' outputs it "
+        "consumes, and the hand-off notes downstream teammates need.\n\n"
+        f"## Overall task\n{intent}"
+        f"{contract_block}{files_block}{clarifications}\n\n"
+        f"## The team — plan for EVERY id (groups run in order A→B→C→D; earlier groups "
+        f"produce what later groups consume)\n{roster}\n\n"
+        "## The GROUP of each piece is FIXED by the user — do NOT change it, do NOT put "
+        "everyone in one group, and do NOT emit a 'group' field. Honor the ordering: a "
+        "piece may only CONSUME FROM pieces in an EQUAL-or-EARLIER group (A can't consume "
+        "from B). Write each mandate and hand-off to respect that phase order.\n\n"
+        "## Clarifying questions (optional) — if a genuinely BLOCKING decision would "
+        "change the plan (scope, audience, priorities, which of several approaches), ask "
+        "the user in `questions` (0 to 9). Each: a short `question`, `multi` (true if "
+        "several answers can apply, else false), and 1-4 suggested `options` (the UI also "
+        "offers a free-form 'Other'). Prefer sensible defaults and leave `questions` empty "
+        "when you can plan without them. Never re-ask anything already answered above.\n\n"
+        "## Output — return ONLY this JSON object. No markdown fence, no prose before "
+        "or after:\n"
+        "{\n"
+        '  "overview": "2-4 sentences on how the team works together end to end",\n'
+        '  "questions": [\n'
+        '    {"id": "q1", "question": "...", "multi": false, "options": ["...", "..."]}\n'
+        "  ],\n"
+        '  "agents": [\n'
+        '    {"subtask_id": "<one id from above, verbatim>",\n'
+        '     "mandate": "what this agent must accomplish",\n'
+        '     "produces": "the concrete artifact it hands off",\n'
+        '     "consumes_from": ["<subtask_id it depends on>"],\n'
+        '     "hand_off_notes": "what downstream teammates need from its output"}\n'
+        "  ]\n"
+        "}\n"
+        "Include EXACTLY one entry per id above, using the ids verbatim. `questions` may "
+        "be omitted or []. Do not write any files — return the JSON as your reply."
+    )
+
+
+def _passthrough_group0_plan(subtasks: list[dict], arch_by_id: dict) -> dict:
+    """A trivial coordination plan derived straight from the decomposition — one entry
+    per subtask (mandate=brief, produces=title, consumes=depends_on). Used whenever the
+    planner is unavailable/failed so a dead planner never dead-ends the run."""
+    return {
+        "overview": "",
+        "agents": [
+            {
+                "subtask_id": s["id"],
+                "agent_id": s.get("owner_archetype_id", ""),
+                "group": s.get("group_resolved") or "",
+                "mandate": str(s.get("brief", "")).strip(),
+                "produces": str(s.get("title", "")).strip(),
+                "consumes_from": list(s.get("depends_on") or []),
+                "hand_off_notes": "",
+            }
+            for s in subtasks
+        ],
+        "questions": [],
+    }
+
+
+def _coerce_group0_entries(entries: Any, subtasks: list[dict], *, trust_group: bool = False) -> dict:
+    """Validate a list of plan entries against the real subtasks: drop unknown/dup
+    subtask ids, keep only real dependency references, coerce every field to a string,
+    then backfill any missing subtask so injection is total. Returns subtask_id → entry.
+
+    ``trust_group``: the execution group is decided by the user's team plan (subtask
+    ``group_resolved``), NOT the planner — so parsing the planner's reply IGNORES any
+    group it emits (trust_group=False). Only the user's own edits in the coordination
+    editor may override it (trust_group=True), so a re-grouped agent runs where the user
+    put it."""
+    by_id = {s["id"]: s for s in subtasks}
+    seen: dict[str, dict] = {}
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        sidk = str(e.get("subtask_id") or "").strip()
+        if sidk not in by_id or sidk in seen:
+            continue
+        s = by_id[sidk]
+        cons = e.get("consumes_from") or []
+        if isinstance(cons, str):
+            cons = [cons]
+        cons = [str(c).strip() for c in cons if str(c).strip() in by_id and str(c).strip() != sidk]
+        _grp = (str(e.get("group") or "").strip() if trust_group else "") or s.get("group_resolved") or ""
+        seen[sidk] = {
+            "subtask_id": sidk,
+            "agent_id": str(e.get("agent_id") or s.get("owner_archetype_id", "")),
+            "group": _grp,
+            "mandate": str(e.get("mandate") or s.get("brief") or "").strip(),
+            "produces": str(e.get("produces") or s.get("title") or "").strip(),
+            "consumes_from": cons if cons else list(s.get("depends_on") or []),
+            "hand_off_notes": str(e.get("hand_off_notes") or "").strip(),
+        }
+    for s in subtasks:
+        if s["id"] not in seen:
+            seen[s["id"]] = {
+                "subtask_id": s["id"],
+                "agent_id": s.get("owner_archetype_id", ""),
+                "group": s.get("group_resolved") or "",
+                "mandate": str(s.get("brief", "")).strip(),
+                "produces": str(s.get("title", "")).strip(),
+                "consumes_from": list(s.get("depends_on") or []),
+                "hand_off_notes": "",
+            }
+    return seen
+
+
+_GROUP0_MAX_QUESTIONS = 9  # keep the clarification form short (below 10)
+
+
+def _coerce_group0_questions(raw: Any, *, keep_answers: bool = False) -> list[dict]:
+    """Validate the planner's clarifying questions (or a user-edited copy). Each →
+    {id, question, multi, options[≤4], selected[], other}. Capped at 9. ``keep_answers``
+    preserves the user's ``selected``/``other`` (from the coordination editor); off →
+    fresh (unanswered) questions as the planner emits them."""
+    out: list[dict] = []
+    for q in raw or []:
+        if not isinstance(q, dict):
+            continue
+        text = str(q.get("question") or "").strip()
+        if not text:
+            continue
+        opts = [str(o).strip() for o in (q.get("options") or []) if str(o).strip()][:4]
+        entry = {
+            "id": str(q.get("id") or f"q{len(out) + 1}"),
+            "question": text[:400],
+            "multi": bool(q.get("multi")),
+            "options": opts,
+            "selected": [],
+            "other": "",
+        }
+        if keep_answers:
+            sel = q.get("selected") or []
+            if isinstance(sel, str):
+                sel = [sel]
+            entry["selected"] = [str(s).strip() for s in sel if str(s).strip()]
+            entry["other"] = str(q.get("other") or "").strip()
+        out.append(entry)
+        if len(out) >= _GROUP0_MAX_QUESTIONS:
+            break
+    return out
+
+
+def _format_clarifications(questions: Any) -> str:
+    """Fold the user's answered clarifications into a prompt block for a re-plan. Empty
+    when nothing is answered."""
+    lines: list[str] = []
+    for q in questions or []:
+        if not isinstance(q, dict):
+            continue
+        ans = [str(s).strip() for s in (q.get("selected") or []) if str(s).strip()]
+        other = str(q.get("other") or "").strip()
+        if other:
+            ans.append(other)
+        if ans:
+            lines.append(f"- Q: {str(q.get('question') or '').strip()}\n  A: {'; '.join(ans)}")
+    if not lines:
+        return ""
+    return ("\n\n## The user answered these clarifications — honor them and do NOT "
+            "re-ask them:\n" + "\n".join(lines))
+
+
+def _parse_group0_plan(text: str, subtasks: list[dict], arch_by_id: dict) -> dict:
+    """Parse the planner's reply into the structured plan. Tolerates ```json fences /
+    surrounding prose. On any failure returns the pass-through plan so injection is
+    always total and a malformed reply never blocks the run."""
+    raw = (text or "").strip()
+    if not raw:
+        return _passthrough_group0_plan(subtasks, arch_by_id)
+    if "```" in raw:
+        m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.S)
+        if m:
+            raw = m.group(1)
+    if not raw.lstrip().startswith("{"):
+        i, j = raw.find("{"), raw.rfind("}")
+        if 0 <= i < j:
+            raw = raw[i:j + 1]
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return _passthrough_group0_plan(subtasks, arch_by_id)
+    if not isinstance(obj, dict) or not isinstance(obj.get("agents"), list):
+        return _passthrough_group0_plan(subtasks, arch_by_id)
+    seen = _coerce_group0_entries(obj.get("agents"), subtasks)
+    agents = [seen[s["id"]] for s in subtasks if s["id"] in seen]
+    return {"overview": str(obj.get("overview") or "").strip(), "agents": agents,
+            "questions": _coerce_group0_questions(obj.get("questions"))}
+
+
+def _sanitize_group0_plan(plan: Any, subtasks: list[dict]) -> dict:
+    """Re-validate a (possibly user-edited) plan dict against the decomposition before
+    it is persisted + injected — the edit surface is free-form, so an entry could name
+    a stale subtask or drop a field. Same coercion as parsing, minus JSON decoding."""
+    entries = plan.get("agents") if isinstance(plan, dict) else []
+    # trust_group: the user may have re-grouped an agent in the coordination editor.
+    seen = _coerce_group0_entries(entries, subtasks, trust_group=True)
+    agents = [seen[s["id"]] for s in subtasks if s["id"] in seen]
+    overview = str((plan.get("overview") if isinstance(plan, dict) else "") or "").strip()
+    # keep_answers: preserve the user's selected/other from the questions form.
+    questions = _coerce_group0_questions(
+        plan.get("questions") if isinstance(plan, dict) else [], keep_answers=True)
+    return {"overview": overview, "agents": agents, "questions": questions}
 
 
 async def _llm_team_digest(intent: str, results: list[dict], creds: dict) -> str:
@@ -3233,9 +3727,10 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
 @router.post("/execute")
 async def execute_vatra_ui(body: VatraExecuteRequest, request: Request,
                            user: dict = Depends(get_current_user)):
-    """Spawn + run a prepared Vatra session in the background (its plan was made by
-    /route). Returns immediately; the UI polls progress. execute_vatra reuses the
-    persisted plan, so the Lead does not run again."""
+    """Run the permanent Group 0 pre-phase in the background: the Long Horizon Planner
+    drafts the coordination plan, then the run PAUSES at the approval gate
+    (status=awaiting_plan). The UI polls progress, shows the editable plan, and calls
+    /plan/approve or /plan/cancel. The team is not spawned until approval."""
     db = get_db()
     sess = await db.get_basna_session(body.session_id, user["id"])
     if not sess:
@@ -3246,10 +3741,208 @@ async def execute_vatra_ui(body: VatraExecuteRequest, request: Request,
         horizon=body.horizon or None, max_parallel=body.max_parallel or 0,
         execution_groups=bool(body.execution_groups))
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
+    t = asyncio.create_task(plan_vatra_group0(exec_req, stub, user, gate=True))
+    _basna_agent_tasks.add(t)
+    t.add_done_callback(_basna_agent_tasks.discard)
+    return {"session_id": body.session_id, "status": "planning"}
+
+
+class VatraPlanApproveRequest(BaseModel):
+    session_id: str
+    # The (possibly edited) group0_plan. None → approve the drafted plan as-is.
+    plan: dict | None = None
+    # Optional run-knob overrides; default to the values persisted at plan time.
+    tiers: dict | None = None
+    env_vars: list | None = None
+    api_key: str = ""
+    horizon: dict | None = None
+    max_parallel: int = Field(default=0, ge=0, le=16)
+    execution_groups: bool | None = None
+    grouped_review: bool = False
+    quality: dict | None = None
+
+
+class VatraPlanCancelRequest(BaseModel):
+    session_id: str
+
+
+@router.post("/plan/approve")
+async def approve_vatra_plan(body: VatraPlanApproveRequest, request: Request,
+                             user: dict = Depends(get_current_user)):
+    """Approve the Group 0 coordination plan and start the run. Persists the edited
+    plan (if any), then backgrounds execute_vatra with the knobs saved at plan time
+    (overridable). Mirrors the Code-mode plan/approve gate."""
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if (sess.get("status") or "") != "awaiting_plan":
+        raise HTTPException(409, "no plan awaiting approval")
+    try:
+        route = json.loads(sess.get("route") or "{}")
+    except json.JSONDecodeError:
+        route = {}
+    if body.plan is not None:
+        route["group0_plan"] = _sanitize_group0_plan(body.plan, route.get("subtasks") or [])
+        await db.update_basna_session(body.session_id, user["id"], route=json.dumps(route))
+    try:
+        cfg = json.loads(sess.get("config") or "{}")
+    except json.JSONDecodeError:
+        cfg = {}
+    # Tiers/env carry the model config + API keys — they are request-scoped and NEVER
+    # persisted to the session (secrets), so approve must resend them. If the client
+    # omitted them, fall back to the owner's saved workspace tiers; otherwise the run
+    # silently drops to the registry-default model (the anthropic default) instead of
+    # the user's configured tier — the model the planner already used.
+    _tiers = body.tiers
+    _env = body.env_vars
+    if _tiers is None:
+        _owner_tiers, _owner_env = await _load_owner_tiers(db, user["id"])
+        _tiers = _owner_tiers
+        if _env is None:
+            _env = _owner_env
+    exec_req = ExecuteRequest(
+        session_id=body.session_id, tiers=_tiers or None,
+        env_vars=_env or None, api_key=body.api_key or "",
+        horizon=body.horizon if body.horizon is not None else (cfg.get("horizon") or None),
+        max_parallel=body.max_parallel or int(cfg.get("max_parallel") or 0),
+        execution_groups=(body.execution_groups if body.execution_groups is not None
+                          else bool(cfg.get("execution_groups"))),
+        grouped_review=bool(body.grouped_review or cfg.get("grouped_review")),
+        shared_datastore=bool(cfg.get("shared_datastore")),
+        vfs_project=cfg.get("vfs_project") or "",
+        quality=body.quality if body.quality is not None else (cfg.get("quality") or None))
+    stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)
     t.add_done_callback(_basna_agent_tasks.discard)
     return {"session_id": body.session_id, "status": "running"}
+
+
+@router.post("/plan/cancel")
+async def cancel_vatra_plan(body: VatraPlanCancelRequest,
+                            user: dict = Depends(get_current_user)):
+    """Discard a coordination plan awaiting approval — nothing was spawned (the planner
+    was already torn down), so the session simply returns to 'routed' and its plan is
+    kept as re-executable history."""
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if (sess.get("status") or "") != "awaiting_plan":
+        raise HTTPException(409, "no plan awaiting approval")
+    await db.update_basna_session(body.session_id, user["id"], status="routed")
+    _progress(body.session_id, "note", "Plan discarded — nothing was run. Re-run when ready.")
+    _progress_done(body.session_id)
+    return {"session_id": body.session_id, "status": "idle"}
+
+
+class VatraPlanReplanRequest(BaseModel):
+    session_id: str
+    # The edited plan — its per-agent `group` assignments (absolute locks) and answered
+    # `questions` are read; the mandates / dependencies / hand-offs are regenerated by
+    # the planner for the new phasing + answers.
+    plan: dict | None = None
+    tiers: dict | None = None
+    env_vars: list | None = None
+    api_key: str = ""
+
+
+async def _replan_group0(sid: str, request: Request, user: dict, *, new_groups: dict,
+                         clarifications: str = "", tiers: dict | None,
+                         env_vars: list | None, api_key: str) -> None:
+    """Re-run the Long Horizon Planner after the user re-grouped agents and/or answered
+    its clarifying questions at the gate. Applies the new group assignments, re-resolves
+    phasing, folds the answers into the prompt, regenerates the whole coordination plan,
+    and lands back at the approval gate. Any failure re-emits the existing gate so the
+    user is never stranded."""
+    db = get_db()
+    try:
+        sess = await db.get_basna_session(sid, user["id"])
+        if not sess:
+            return
+        _run_sid.set(sid)
+        _RUN_USAGE.setdefault(sid, [])
+        try:
+            route = json.loads(sess.get("route") or "{}")
+        except json.JSONDecodeError:
+            route = {}
+        subtasks = route.get("subtasks") or []
+        archetypes = await merged_archetypes(db, user["id"])
+        arch_by_id = {a["id"]: a for a in archetypes}
+        # Apply the user's new groups as absolute locks, then re-resolve so the plan
+        # (and the planner's view of it) reflects exactly where the user put each agent.
+        for s in subtasks:
+            g = str(new_groups.get(s["id"]) or "").strip()
+            if g:
+                s["group_lock"] = g
+        vatra_groups.resolve_groups(subtasks, arch_by_id)
+
+        _progress_start(sid)
+        await db.update_basna_session(sid, user["id"], status="planning")
+        _phase(sid, "Group 0 · Long Horizon Planner (re-plan)")
+        _progress(sid, "group0",
+                  "Re-planning the coordination"
+                  + (" with your answers…" if clarifications else " for your new grouping…"))
+
+        _tiers, _env = tiers, env_vars
+        if _tiers is None:
+            _tiers, _oenv = await _load_owner_tiers(db, user["id"])
+            if _env is None:
+                _env = _oenv
+        session_files = _parse_files(sess)
+        input_files = [f for f in session_files if f.get("kind") != "generated"]
+        plan = await _run_group0_planner(
+            request, user, sid, intent=(sess.get("intent") or "").strip(),
+            shared_context=route.get("shared_context", ""),
+            file_names=[f["name"] for f in input_files], subtasks=subtasks,
+            arch_by_id=arch_by_id, tiers=_tiers, api_key=api_key, env_vars=_env, timeout=600.0,
+            clarifications=clarifications)
+        route["group0_plan"] = plan
+        route["subtasks"] = subtasks  # persist the new groups for the run
+        await db.update_basna_session(sid, user["id"], route=json.dumps(route))
+        await db.update_basna_session(sid, user["id"], status="awaiting_plan")
+        _emit_awaiting_plan(sid, plan)
+    except Exception as e:  # noqa: BLE001 — never strand the gate
+        log.warning("Vatra Group 0 re-plan failed", session_id=sid, error=str(e))
+        try:
+            sess2 = await db.get_basna_session(sid, user["id"])
+            route2 = json.loads((sess2 or {}).get("route") or "{}")
+            await db.update_basna_session(sid, user["id"], status="awaiting_plan")
+            _emit_awaiting_plan(sid, route2.get("group0_plan") or {})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@router.post("/plan/replan")
+async def replan_vatra_plan(body: VatraPlanReplanRequest, request: Request,
+                            user: dict = Depends(get_current_user)):
+    """Re-plan the coordination after the user re-grouped agents. Reads the new per-agent
+    groups from the edited plan, re-runs the planner in the background (status→planning),
+    and lands back at the gate with a fresh plan the user reviews before Execute."""
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    if (sess.get("status") or "") != "awaiting_plan":
+        raise HTTPException(409, "no plan awaiting approval")
+    new_groups: dict[str, str] = {}
+    if isinstance(body.plan, dict):
+        for a in body.plan.get("agents") or []:
+            if isinstance(a, dict) and a.get("subtask_id") and str(a.get("group") or "").strip():
+                new_groups[str(a["subtask_id"])] = str(a["group"]).strip()
+    clarifications = _format_clarifications(
+        (body.plan or {}).get("questions") if isinstance(body.plan, dict) else [])
+    # Flip status synchronously so the UI leaves the gate immediately (no poll lag)
+    # instead of waiting for the background task to set it.
+    await db.update_basna_session(body.session_id, user["id"], status="planning")
+    stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
+    t = asyncio.create_task(_replan_group0(
+        body.session_id, stub, user, new_groups=new_groups, clarifications=clarifications,
+        tiers=body.tiers, env_vars=body.env_vars, api_key=body.api_key or ""))
+    _basna_agent_tasks.add(t)
+    t.add_done_callback(_basna_agent_tasks.discard)
+    return {"session_id": body.session_id, "status": "planning"}
 
 
 async def launch_vatra_resume(
@@ -3272,6 +3965,8 @@ async def launch_vatra_resume(
         raise HTTPException(404, "session not found")
     if (sess.get("status") or "") == "done" and (sess.get("truth") or "").strip():
         raise HTTPException(400, "session already completed — nothing to resume")
+    if (sess.get("status") or "") == "awaiting_plan":
+        raise HTTPException(400, "approve or cancel the plan first — nothing to resume")
     try:
         cfg = json.loads(sess.get("config") or "{}")
     except json.JSONDecodeError:
@@ -3316,10 +4011,11 @@ async def resume_vatra(
 @router.post("/start")
 async def start_vatra(body: VatraStartRequest, request: Request,
                       user: dict = Depends(get_current_user)):
-    """Launch a Vatra run from the UI. Creates a collaborative session and runs it
-    in the background (the Lead decomposes inside execute_vatra — there's no
-    separate route step). Returns immediately; the UI polls progress like any other
-    running session. The agent path (`/agent/start`) is the other entry."""
+    """Launch a Vatra run from the UI (one-shot: no separate /route step). Creates a
+    session and runs the permanent Group 0 pre-phase in the background — the Long
+    Horizon Planner drafts the coordination plan, then the run PAUSES at the approval
+    gate. Returns immediately; the UI polls progress and drives /plan/approve or
+    /plan/cancel. The agent path (`/agent/start`) is the headless entry (auto-approve)."""
     intent = (body.intent or "").strip()
     if not intent:
         raise HTTPException(400, "intent is required")
@@ -3339,10 +4035,10 @@ async def start_vatra(body: VatraStartRequest, request: Request,
     # Background task with a stub request carrying the owner (spawn_process reads
     # request.state.user_id) — the real request object isn't safe to use post-response.
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
-    t = asyncio.create_task(execute_vatra(exec_req, stub, user))
+    t = asyncio.create_task(plan_vatra_group0(exec_req, stub, user, gate=True))
     _basna_agent_tasks.add(t)
     t.add_done_callback(_basna_agent_tasks.discard)
-    return {"session_id": sid, "title": title, "status": "running"}
+    return {"session_id": sid, "title": title, "status": "planning"}
 
 
 # ── Continuation: carry a finished Vatra run forward into another round ──
@@ -3506,7 +4202,8 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
                               horizon=parent_cfg.get("horizon") or None,
                               quality=parent_cfg.get("quality") or None)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
-    t = asyncio.create_task(execute_vatra(exec_req, stub, user))
+    # Headless continuation: draft a Group 0 plan then auto-approve (no human pause).
+    t = asyncio.create_task(plan_vatra_group0(exec_req, stub, user, gate=False))
     _basna_agent_tasks.add(t)
     t.add_done_callback(_basna_agent_tasks.discard)
     return {"session_id": sid, "title": title, "round": round_no, "kind": kind}
@@ -3625,7 +4322,8 @@ async def _run_and_notify(user: dict, session_id: str, title: str, exec_req,
     ok = False
     try:
         stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
-        result = await execute_vatra(exec_req, stub, user)
+        # Headless agent-started run: draft a Group 0 plan then auto-approve (no gate).
+        result = await plan_vatra_group0(exec_req, stub, user, gate=False)
         ok = True
         truth = (result.get("truth") or "").strip()
         n = len(result.get("subtasks") or [])
