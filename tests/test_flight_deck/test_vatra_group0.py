@@ -96,6 +96,29 @@ def test_slice_block_empty_without_plan():
     assert v._plan_slice_block(_SUBTASKS[0], {}, _ARCH) == ""
 
 
+def test_parse_ignores_any_group_the_planner_emits():
+    # The execution group is the user's (subtask.group_resolved); the planner must not
+    # set it. A group in the planner's reply is ignored on parse.
+    txt = ('{"overview":"o","agents":['
+           '{"subtask_id":"s0","group":"D","mandate":"m"},'
+           '{"subtask_id":"s1","group":"D","mandate":"m"}]}')
+    p = v._parse_group0_plan(txt, _SUBTASKS, _ARCH)
+    by = {a["subtask_id"]: a for a in p["agents"]}
+    assert by["s0"]["group"] == "A"   # from group_resolved, NOT the planner's "D"
+    assert by["s1"]["group"] == "B"
+
+
+def test_sanitize_respects_a_user_regrouped_agent():
+    # The user re-grouped s1 to C in the coordination editor — that IS honored.
+    edited = {"overview": "", "agents": [
+        {"subtask_id": "s0", "group": "A", "mandate": "m"},
+        {"subtask_id": "s1", "group": "C", "mandate": "m"}]}
+    p = v._sanitize_group0_plan(edited, _SUBTASKS)
+    by = {a["subtask_id"]: a for a in p["agents"]}
+    assert by["s0"]["group"] == "A"
+    assert by["s1"]["group"] == "C"   # user's edit wins over group_resolved ("B")
+
+
 def test_build_prompt_lists_ids_roles_and_json_schema():
     pr = v._build_group0_prompt("Examine the org", "Use UK English", ["file.pdf"], _SUBTASKS, _ARCH)
     assert "id=s0" in pr and "id=s1" in pr

@@ -10,6 +10,7 @@ import type { Group0Plan, Group0Agent, VatraSubtask } from '../stores/basnaStore
 
 // Theme-aware violet accent (matches VatraTeamPlan).
 const PANEL = 'rounded-lg border border-violet-300/70 bg-violet-50/60 p-4 dark:border-violet-800/40 dark:bg-violet-950/10'
+const GROUPS = ['A', 'B', 'C', 'D'] as const
 
 function Chip({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
@@ -122,13 +123,28 @@ export function VatraGroup0Plan({
           {a && (
             <div className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900/30 p-3">
               <div className="mb-3 flex items-center gap-2">
-                {a.group && (
-                  <span className="rounded bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700 dark:text-violet-300">{a.group}</span>
-                )}
-                <span className="min-w-0 truncate text-sm font-medium text-zinc-200">
+                <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-200">
                   <span className="text-violet-700 dark:text-violet-300/90">{a.agent_id}</span>
                   <span className="mx-1 text-zinc-700">·</span>{titleFor(a.subtask_id)}
                 </span>
+                {/* Group selector — the phase this agent runs in (A→B→C→D). */}
+                <div className="inline-flex shrink-0 items-center gap-1.5">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Group</span>
+                  <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-950/50 p-0.5">
+                    {GROUPS.map((g) => (
+                      <button
+                        key={g}
+                        onClick={() => patch({ group: g })}
+                        title={`Run this agent in group ${g}`}
+                        className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                          a.group === g ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                        }`}
+                      >
+                        {g}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
               <Field label="Mandate" value={a.mandate} rows={8}
                 onChange={(v) => patch({ mandate: v })} placeholder="What this agent must accomplish…" />

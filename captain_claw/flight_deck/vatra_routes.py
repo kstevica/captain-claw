@@ -919,6 +919,13 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
                                 max_agents=max_agents, creds=_creds("reason"), cfg=cfg,
                                 shared_datastore=_shared_ds, vfs_project=_vfs_project(sid))
     subtasks = route.get("subtasks") or []
+    # Re-resolve execution groups from the user's team-plan edits BEFORE the plan is
+    # drafted. The `/route` step pinned `group_resolved` from the Lead's assignment;
+    # the user then re-grouped agents in the team plan (subtask.group), but that never
+    # recomputed group_resolved — so the coordination plan would show stale (often
+    # collapsed) groups. This is the same resolution execute_vatra runs, so the plan's
+    # groups match how the run will actually phase. Idempotent.
+    vatra_groups.resolve_groups(subtasks, arch_by_id)
 
     # Idempotency: a second /execute on an already-gated session re-emits the gate
     # instead of spawning a second planner.
@@ -1074,6 +1081,15 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     _group0_plan = route.get("group0_plan") or {}
     _group0_by_subtask = {e.get("subtask_id"): e for e in _group0_plan.get("agents", [])
                           if e.get("subtask_id")}
+    # Honor the group each agent was assigned in the coordination plan — the user may
+    # have re-grouped at the gate. Feed it back into the subtask so the grouped run's
+    # resolve_groups (below) phases the agent where the user put it (raised to the
+    # archetype floor + dependency-repaired, same as a team-plan group).
+    for _s in subtasks:
+        _e = _group0_by_subtask.get(_s["id"])
+        _eg = str((_e or {}).get("group") or "").strip()
+        if _eg:
+            _s["group"] = _eg
     _g0_overview = str(_group0_plan.get("overview") or "").strip()
     if _g0_overview and _g0_overview not in shared_context:
         shared_context = (shared_context + "\n\n## Coordination overview (Group 0)\n"
@@ -2620,6 +2636,10 @@ def _build_group0_prompt(intent: str, shared_context: str, file_names: list[str]
         f"{contract_block}{files_block}\n\n"
         f"## The team — plan for EVERY id (groups run in order A→B→C→D; earlier groups "
         f"produce what later groups consume)\n{roster}\n\n"
+        "## The GROUP of each piece is FIXED by the user — do NOT change it, do NOT put "
+        "everyone in one group, and do NOT emit a 'group' field. Honor the ordering: a "
+        "piece may only CONSUME FROM pieces in an EQUAL-or-EARLIER group (A can't consume "
+        "from B). Write each mandate and hand-off to respect that phase order.\n\n"
         "## Output — return ONLY this JSON object. No markdown fence, no prose before "
         "or after:\n"
         "{\n"
@@ -2658,10 +2678,16 @@ def _passthrough_group0_plan(subtasks: list[dict], arch_by_id: dict) -> dict:
     }
 
 
-def _coerce_group0_entries(entries: Any, subtasks: list[dict]) -> dict:
+def _coerce_group0_entries(entries: Any, subtasks: list[dict], *, trust_group: bool = False) -> dict:
     """Validate a list of plan entries against the real subtasks: drop unknown/dup
     subtask ids, keep only real dependency references, coerce every field to a string,
-    then backfill any missing subtask so injection is total. Returns subtask_id → entry."""
+    then backfill any missing subtask so injection is total. Returns subtask_id → entry.
+
+    ``trust_group``: the execution group is decided by the user's team plan (subtask
+    ``group_resolved``), NOT the planner — so parsing the planner's reply IGNORES any
+    group it emits (trust_group=False). Only the user's own edits in the coordination
+    editor may override it (trust_group=True), so a re-grouped agent runs where the user
+    put it."""
     by_id = {s["id"]: s for s in subtasks}
     seen: dict[str, dict] = {}
     for e in entries or []:
@@ -2675,10 +2701,11 @@ def _coerce_group0_entries(entries: Any, subtasks: list[dict]) -> dict:
         if isinstance(cons, str):
             cons = [cons]
         cons = [str(c).strip() for c in cons if str(c).strip() in by_id and str(c).strip() != sidk]
+        _grp = (str(e.get("group") or "").strip() if trust_group else "") or s.get("group_resolved") or ""
         seen[sidk] = {
             "subtask_id": sidk,
             "agent_id": str(e.get("agent_id") or s.get("owner_archetype_id", "")),
-            "group": str(e.get("group") or s.get("group_resolved") or ""),
+            "group": _grp,
             "mandate": str(e.get("mandate") or s.get("brief") or "").strip(),
             "produces": str(e.get("produces") or s.get("title") or "").strip(),
             "consumes_from": cons if cons else list(s.get("depends_on") or []),
@@ -2729,7 +2756,8 @@ def _sanitize_group0_plan(plan: Any, subtasks: list[dict]) -> dict:
     it is persisted + injected — the edit surface is free-form, so an entry could name
     a stale subtask or drop a field. Same coercion as parsing, minus JSON decoding."""
     entries = plan.get("agents") if isinstance(plan, dict) else []
-    seen = _coerce_group0_entries(entries, subtasks)
+    # trust_group: the user may have re-grouped an agent in the coordination editor.
+    seen = _coerce_group0_entries(entries, subtasks, trust_group=True)
     agents = [seen[s["id"]] for s in subtasks if s["id"] in seen]
     overview = str((plan.get("overview") if isinstance(plan, dict) else "") or "").strip()
     return {"overview": overview, "agents": agents}
