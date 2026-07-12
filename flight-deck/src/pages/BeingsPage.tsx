@@ -2,9 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  ClipboardList, Egg, GraduationCap, Loader2, Moon, Pause, Play, Plus,
-  RefreshCw, ScrollText, Skull, Sparkles, Zap,
+  ChevronLeft, ChevronRight, ClipboardList, Egg, GraduationCap, History,
+  Loader2, Maximize2, Minimize2, Moon, Pause, Play, Plus, RefreshCw,
+  ScrollText, Skull, Sparkles, X, Zap,
 } from 'lucide-react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
   type Chore, type ReportCard,
@@ -36,6 +39,173 @@ function fmtTokens(n: number | null | undefined): string {
   if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (Math.abs(n) >= 1_000) return `${Math.round(n / 1_000)}k`
   return String(n)
+}
+
+function mdCell(v: unknown): string {
+  const s = v == null ? '' : String(v)
+  return s.replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 220)
+}
+
+function fmtAt(iso: string): string {
+  // "2026-07-12T19:54:03.123" -> "07-12 19:54"
+  return iso.length >= 16 ? `${iso.slice(5, 10)} ${iso.slice(11, 16)}` : iso
+}
+
+function summarizeEventData(e: BeingEvent): string {
+  const d = e.data as Record<string, unknown>
+  switch (e.kind) {
+    case 'hatched': return 'egg → infant'
+    case 'body': return `spawned on port ${d.port} (${d.tier})`
+    case 'stage': return `${d.from} → ${d.to}`
+    case 'state': return `${d.from} → ${d.to}`
+    case 'spoke_to_parent': return String(d.preview ?? '')
+    case 'message_suppressed': return String(d.reason ?? 'no attention credits')
+    case 'chore_posted': return `${d.spec} (fee ${fmtTokens(Number(d.fee_tokens) || 0)})`
+    case 'chore_done': return String(d.result ?? '')
+    case 'chore_paid': return `paid ${fmtTokens(Number(d.fee_tokens) || 0)}`
+    case 'chore_failed': return String(d.note ?? 'rejected')
+    case 'milestone': return String(d.name ?? '')
+    case 'rules_updated': return `${d.count} rule(s)`
+    case 'rules_internalized': return 'internalized into VALUES.md'
+    case 'metamorphosis': return `${d.from} → ${d.to} (${fmtTokens(Number(d.price_tokens) || 0)})`
+    case 'woke_from_torpor': return 'revived by allowance'
+    case 'collapsed_exhausted': return `overspent (${fmtTokens(Number(d.weighted) || 0)})`
+    case 'resting_at_cap': return 'daily burn cap reached'
+    case 'tick_skipped': return String(d.reason ?? '')
+    case 'tick_timeout': return 'no reply in time'
+    case 'digest_parse_failed': return 'unstructured reply'
+    case 'spawn_failed': return String(d.error ?? '')
+    case 'chore_claim_invalid': return `claimed unknown job ${d.job_id}`
+    default: return JSON.stringify(d).slice(0, 160)
+  }
+}
+
+function renderTicksMarkdown(events: BeingEvent[]): string {
+  const ticks = events.filter((e) => e.kind === 'tick')
+  const other = events.filter((e) => e.kind !== 'tick')
+  const lines: string[] = ['## Ticks', '']
+  if (ticks.length === 0) {
+    lines.push('_No ticks yet — poke to wake this being._')
+  } else {
+    lines.push('| Time | Kind | Act | Summary | Mood | Tokens |')
+    lines.push('|---|---|---|---|---|---|')
+    for (const e of ticks) {
+      const d = e.data as Record<string, unknown>
+      const mood = d.mood_engine ? `${mdCell(d.mood)} (${mdCell(d.mood_engine)})` : mdCell(d.mood)
+      lines.push(`| ${fmtAt(e.at)} | ${mdCell(d.kind)} | ${mdCell(d.act)} | ${mdCell(d.summary)} | ${mood} | ${fmtTokens(Number(d.tokens_weighted) || 0)} |`)
+    }
+  }
+  lines.push('', '## Other events', '')
+  if (other.length === 0) {
+    lines.push('_Nothing else yet._')
+  } else {
+    lines.push('| Time | Event | Details |')
+    lines.push('|---|---|---|')
+    for (const e of other) {
+      lines.push(`| ${fmtAt(e.at)} | ${mdCell(e.kind)} | ${mdCell(summarizeEventData(e))} |`)
+    }
+  }
+  return lines.join('\n')
+}
+
+// ── Journal / ticks log modal — full markdown, fullscreen toggle ──
+
+function BeingLogModal({ slug, name, mode, onClose }: {
+  slug: string
+  name: string
+  mode: 'journal' | 'ticks'
+  onClose: () => void
+}) {
+  const today = new Date().toISOString().slice(0, 10)
+  const [maximized, setMaximized] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [markdown, setMarkdown] = useState('')
+  const [date, setDate] = useState(today)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      if (mode === 'journal') {
+        const j = await getBeingJournal(slug, date)
+        setMarkdown(j.text || `_${name}'s journal is empty on ${j.date}._`)
+      } else {
+        const ev = await getBeingEvents(slug, 300)
+        setMarkdown(renderTicksMarkdown(ev.events))
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed to load')
+    } finally {
+      setLoading(false)
+    }
+  }, [slug, mode, date, name])
+
+  useEffect(() => { void load() }, [load])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const shiftDate = (deltaDays: number) => {
+    const d = new Date(`${date}T00:00:00Z`)
+    d.setUTCDate(d.getUTCDate() + deltaDays)
+    setDate(d.toISOString().slice(0, 10))
+  }
+
+  const sizeClass = maximized ? 'h-[95vh] w-[95vw]' : 'w-[820px] max-h-[85vh]'
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70" onClick={onClose}>
+      <div
+        className={`flex flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl transition-all duration-200 ${sizeClass}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-2.5">
+          <div className="flex items-center gap-2">
+            {mode === 'journal' ? <ScrollText className="h-4 w-4 text-violet-400" /> : <History className="h-4 w-4 text-violet-400" />}
+            <h3 className="text-sm font-semibold text-zinc-100">
+              {name} — {mode === 'journal' ? 'Journal' : 'Ticks log'}
+            </h3>
+            {mode === 'journal' && <span className="text-[11px] text-zinc-500">{date}</span>}
+          </div>
+          <div className="flex items-center gap-0.5">
+            {mode === 'journal' && (
+              <>
+                <button onClick={() => shiftDate(-1)} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" title="Previous day">
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <button onClick={() => shiftDate(1)} disabled={date >= today} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-30" title="Next day">
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+                <div className="mx-1 h-4 w-px bg-zinc-800" />
+              </>
+            )}
+            <button onClick={() => void load()} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" title="Refresh">
+              <RefreshCw className="h-3.5 w-3.5" />
+            </button>
+            <button onClick={() => setMaximized(!maximized)} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" title={maximized ? 'Restore' : 'Fullscreen'}>
+              {maximized ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            </button>
+            <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" title="Close (Esc)">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto">
+          {loading ? (
+            <div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></div>
+          ) : error ? (
+            <div className="px-6 py-8 text-sm text-red-400">{error}</div>
+          ) : (
+            <div className="fd-file-markdown p-6"><Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown></div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function derivePreview(a: Record<string, number>) {
@@ -226,7 +396,7 @@ function BeingCard({ item, meta, onChanged }: {
 }) {
   const [vitals, setVitals] = useState<BeingVitals | null>(null)
   const [events, setEvents] = useState<BeingEvent[]>([])
-  const [journal, setJournal] = useState<string | null>(null)
+  const [logView, setLogView] = useState<'journal' | 'ticks' | null>(null)
   const [busy, setBusy] = useState('')
   const [parenting, setParenting] = useState(false)
   const [chores, setChores] = useState<Chore[]>([])
@@ -387,18 +557,16 @@ function BeingCard({ item, meta, onChanged }: {
               </button>
             )}
             <button
-              onClick={async () => {
-                if (journal !== null) { setJournal(null); return }
-                try {
-                  const j = await getBeingJournal(item.slug)
-                  setJournal(j.text || '(the journal is empty today)')
-                } catch (e) {
-                  setJournal(e instanceof Error ? e.message : 'journal unavailable')
-                }
-              }}
+              onClick={() => setLogView('journal')}
               className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
             >
               <ScrollText className="h-3 w-3" /> Journal
+            </button>
+            <button
+              onClick={() => setLogView('ticks')}
+              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
+            >
+              <History className="h-3 w-3" /> Ticks
             </button>
             <button
               onClick={() => void openParenting()}
@@ -421,10 +589,11 @@ function BeingCard({ item, meta, onChanged }: {
         )}
       </div>
 
-      {journal !== null && (
-        <pre className="mt-2 max-h-56 overflow-y-auto whitespace-pre-wrap rounded-md border border-zinc-800 bg-zinc-950 p-3 text-[11px] leading-relaxed text-zinc-300">
-          {journal}
-        </pre>
+      {logView && (
+        <BeingLogModal
+          slug={item.slug} name={item.name} mode={logView}
+          onClose={() => setLogView(null)}
+        />
       )}
 
       {parenting && v && (
