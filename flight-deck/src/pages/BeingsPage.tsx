@@ -102,6 +102,7 @@ function summarizeEventData(e: BeingEvent): string {
     case 'earning_refused': return `earning refused (${d.what}): ${d.reason}`
     case 'act_unverified': return `claimed ${d.claimed} but made no artifact — logged as reflection`
     case 'narration_mismatch': return `journal claimed a file write, but nothing changed on disk — “${d.summary}”`
+    case 'drive_unearned': return `claimed to satisfy its ${d.drive} drive without making anything real`
     case 'woke_from_torpor': return 'revived by allowance'
     case 'collapsed_exhausted': return `overspent (${fmtTokens(Number(d.weighted) || 0)})`
     case 'resting_at_cap': return 'daily burn cap reached'

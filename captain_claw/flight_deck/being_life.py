@@ -1190,8 +1190,31 @@ async def _tick_locked(
         else:
             store.record_event(bid, "digest_parse_failed", {}, now=now)
         digest = fallback_digest(reply, kind)
+
+    # Ground truth FIRST (git diff, before the journal write dirties the tree):
+    # what the tools ACTUALLY wrote this turn drives everything downstream —
+    # the drive it's allowed to satisfy, the record, the feedback.
+    try:
+        changed = await _tick_changed_files(being)
+    except Exception as e:  # noqa: BLE001 — degrades to trust (None)
+        log.warning("artifact verification failed", slug=being["slug"],
+                    error=str(e))
+        changed = None
+    claims_write = _claims_file_write(
+        f"{digest['journal_entry']} {digest['summary']}")
+    made_nothing = changed is not None and not changed
+    mismatch = made_nothing and claims_write
+
+    # Satisfaction is EARNED, not narrated. The create drive rises only when a
+    # real artifact appeared this tick — claiming "I made something" while the
+    # disk is unchanged no longer feels as good as doing it (the whole point).
     if digest["served_drive"]:
-        drives = serve_drive(drives, digest["served_drive"])
+        if digest["served_drive"] == "create" and made_nothing:
+            store.record_event(bid, "drive_unearned",
+                               {"drive": "create",
+                                "summary": digest["summary"][:160]}, now=now)
+        else:
+            drives = serve_drive(drives, digest["served_drive"])
     affect = compute_affect(being.get("drives") or {}, drives,
                             store.wallet_view(store._being_by_id(bid)))
     store.set_affect(bid, affect, now=now)
@@ -1262,22 +1285,10 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("being procreation handling failed",
                         slug=being["slug"], error=str(e))
-    # Anti-theater (plan rule #1): reconcile the being's self-report against
-    # what its tools ACTUALLY wrote this turn. Computed from the git diff
-    # BEFORE the journal write dirties the tree — it is ground truth, not
-    # narration. It (a) downgrades a create/tend that produced nothing, (b)
-    # flags prose that claims a write no diff supports, (c) is stamped into
-    # the journal + commit + tick event, and (d) is fed back next tick.
-    try:
-        changed = await _tick_changed_files(being)
-    except Exception as e:  # noqa: BLE001 — degrades to trust (None)
-        log.warning("artifact verification failed", slug=being["slug"],
-                    error=str(e))
-        changed = None
-    claims_write = _claims_file_write(
-        f"{digest['journal_entry']} {digest['summary']}")
-    made_nothing = changed is not None and not changed
-    mismatch = made_nothing and claims_write
+    # Anti-theater (plan rule #1), using the ground truth computed above:
+    # (a) downgrade a create/tend that produced nothing, (b) flag prose that
+    # claims a write no diff supports, (c) stamp the diff into journal +
+    # commit + tick event, (d) feed it back next tick.
     if digest["act_kind"] in ("create", "tend") and made_nothing:
         store.record_event(bid, "act_unverified",
                            {"claimed": digest["act_kind"],
@@ -1384,6 +1395,8 @@ def report_card(store: BeingsStore, being: dict, days: int = 7,
                         ("narration_mismatch",
                          "claimed to write files it never wrote"),
                         ("act_unverified", "claimed to make things it didn't"),
+                        ("drive_unearned",
+                         "felt accomplished without making anything"),
                         ("chore_claim_invalid", "claimed a chore that wasn't open")]:
         n = sum(1 for e in events if e["kind"] == kind)
         if n:

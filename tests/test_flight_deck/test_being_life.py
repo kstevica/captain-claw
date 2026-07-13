@@ -308,6 +308,79 @@ async def test_tend_without_touching_garden_is_downgraded(store):
                                 store.events(OWNER, b["slug"])]
 
 
+async def test_create_drive_is_not_satisfied_by_narration(store):
+    """Satisfaction is earned, not narrated: claiming served_drive=create with
+    nothing on disk must NOT raise the create drive."""
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        return _digest_reply(act_kind="journal", served_drive="create",
+                             summary="made a thing",
+                             journal_entry="I made something wonderful.")
+
+    async def usage(being, since):
+        return _usage(30_000)
+
+    await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "drive_unearned" in kinds
+    tick_ev = next(e for e in store.events(OWNER, b["slug"])
+                   if e["kind"] == "tick")
+    assert tick_ev["data"]["drives"]["create"] < 0.75      # decayed, not bumped
+
+
+async def test_create_drive_is_satisfied_by_a_real_artifact(store):
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        p = life._home_path(being, "garden/made.md")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("# Made\n", encoding="utf-8")
+        return _digest_reply(act_kind="create", served_drive="create",
+                             summary="made a thing",
+                             journal_entry="I made something real.")
+
+    async def usage(being, since):
+        return _usage(30_000)
+
+    await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "drive_unearned" not in kinds
+    tick_ev = next(e for e in store.events(OWNER, b["slug"])
+                   if e["kind"] == "tick")
+    assert tick_ev["data"]["drives"]["create"] > 0.85      # earned the bump
+
+
+async def test_non_create_drive_still_credited_without_a_file(store):
+    """Only the create drive is artifact-gated — exploring/connecting/etc are
+    legitimately served without writing a file."""
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        return _digest_reply(act_kind="explore", served_drive="explore",
+                             summary="read about maps",
+                             journal_entry="I wandered old maps.")
+
+    async def usage(being, since):
+        return _usage(30_000)
+
+    await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    assert "drive_unearned" not in [e["kind"] for e in
+                                    store.events(OWNER, b["slug"])]
+    tick_ev = next(e for e in store.events(OWNER, b["slug"])
+                   if e["kind"] == "tick")
+    assert tick_ev["data"]["drives"]["explore"] > 0.85
+
+
 async def test_mismatch_under_journal_act_is_flagged_and_fed_back(store):
     """The exact pilot pattern: act_kind='journal' while the prose claims a
     file write. The narrow create/tend check misses it; the mismatch check
