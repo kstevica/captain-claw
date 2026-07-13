@@ -100,6 +100,7 @@ function summarizeEventData(e: BeingEvent): string {
     case 'venture_rejected': return `venture delivery rejected${d.note ? ` — ${d.note}` : ''}`
     case 'venture_state': return `venture → ${d.to}`
     case 'earning_refused': return `earning refused (${d.what}): ${d.reason}`
+    case 'act_unverified': return `claimed ${d.claimed} but made no artifact — logged as reflection`
     case 'woke_from_torpor': return 'revived by allowance'
     case 'collapsed_exhausted': return `overspent (${fmtTokens(Number(d.weighted) || 0)})`
     case 'resting_at_cap': return 'daily burn cap reached'

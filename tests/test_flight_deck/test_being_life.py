@@ -198,6 +198,86 @@ async def test_read_self_file_missing_is_not_found(store):
         life.read_self_file(b, "self/NOPE.md")
 
 
+# ── Anti-theater: a create/tend act must produce a real artifact ─────────
+
+async def test_create_without_artifact_is_downgraded(store):
+    """The bug the pilot exposed: a being narrates 'I planted a poem' but
+    writes no file. The claim must not count."""
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)                       # a real repo to check
+    b = store.get(OWNER, b["slug"])
+    seen = {}
+
+    async def send(being, prompt):
+        seen["prompt"] = prompt
+        return _digest_reply(act_kind="create", summary="made a poem",
+                             journal_entry="I planted a poem next to the seed.")
+
+    async def usage(being, since):
+        return _usage(40_000)
+
+    out = await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    assert out["act"] == "journal"                 # downgraded to the truth
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "act_unverified" in kinds
+    names = [m["data"]["name"] for m in store.milestones(OWNER, b["slug"])]
+    assert "first_artifact" not in names
+    tick_ev = next(e for e in store.events(OWNER, b["slug"])
+                   if e["kind"] == "tick")
+    assert tick_ev["data"]["act"] == "journal"
+    # the prompt now concretely demands a real file
+    assert "only a real file" in seen["prompt"]
+    # the journal entry itself is still preserved — her inner life is honest
+    day = life._home_path(b, f"journal/{NOW.strftime('%Y-%m-%d')}.md")
+    assert "planted a poem" in day.read_text(encoding="utf-8")
+
+
+async def test_create_with_real_artifact_counts(store):
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        # a real agent would call its write tool — simulate that here
+        p = life._home_path(being, "garden/poem-question.md")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("# Question\n\nWhat a seed turns into.\n",
+                     encoding="utf-8")
+        return _digest_reply(act_kind="create", summary="made a poem",
+                             journal_entry="I planted a real poem.")
+
+    async def usage(being, since):
+        return _usage(40_000)
+
+    out = await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    assert out["act"] == "create"
+    names = [m["data"]["name"] for m in store.milestones(OWNER, b["slug"])]
+    assert "first_artifact" in names
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "act_unverified" not in kinds
+
+
+async def test_tend_without_touching_garden_is_downgraded(store):
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        return _digest_reply(act_kind="tend", summary="tended",
+                             journal_entry="I tended my garden, I said.")
+
+    async def usage(being, since):
+        return _usage(40_000)
+
+    out = await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    assert out["act"] == "journal"
+    assert "act_unverified" in [e["kind"] for e in
+                                store.events(OWNER, b["slug"])]
+
+
 # ── The tick ─────────────────────────────────────────────────────────────
 
 async def test_tick_full_path_debits_journals_and_messages(store):

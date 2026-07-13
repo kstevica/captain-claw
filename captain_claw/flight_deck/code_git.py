@@ -135,6 +135,31 @@ async def git_init(project_dir: Path | str) -> bool:
         return True
 
 
+async def git_dirty_paths(project_dir: Path | str) -> list[str]:
+    """Repo-relative paths with uncommitted changes (``git status --porcelain``).
+
+    Empty list when the tree is clean or the dir is not a repo. Used to verify
+    that an agent actually wrote something this turn rather than just claiming
+    it — narration is cheap; a real file is not.
+    """
+    d = Path(project_dir)
+    if not await is_repo(d):
+        return []
+    rc, out = await _git(d, "status", "--porcelain", "--untracked-files=all")
+    if rc != 0:
+        return []
+    paths: list[str] = []
+    for line in out.splitlines():
+        # Porcelain v1: 2 status chars, a space, then the path (or "A -> B").
+        rest = line[3:] if len(line) > 3 else ""
+        if " -> " in rest:
+            rest = rest.split(" -> ", 1)[1]
+        rest = rest.strip().strip('"')
+        if rest:
+            paths.append(rest)
+    return paths
+
+
 async def git_commit(project_dir: Path | str, message: str) -> str | None:
     """Stage everything and commit. Returns the commit sha, or None if nothing changed."""
     d = Path(project_dir)

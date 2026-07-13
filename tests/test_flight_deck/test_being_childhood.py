@@ -202,7 +202,11 @@ async def test_report_card_counts_and_catches_a_rut(store):
     card = life.report_card(store, store.get(OWNER, b["slug"]), days=7,
                             now=NOW + timedelta(hours=6))
     assert card["ticks"] == 6
-    assert card["acts"].get("tend") == 6
+    assert sum(card["acts"].values()) == 6
+    # These "tend" claims never touched the garden — anti-theater downgrades
+    # them, and the report card sees the truth, not the narration.
+    assert "act_unverified" in [e["kind"] for e in
+                                store.events(OWNER, b["slug"])]
     assert card["tokens_spent_weighted"] == 6 * 2000
     assert any("monoton" in c or "rut" in c for c in card["concerns"])
     assert card["drives_trail"]                     # trajectory captured
@@ -222,8 +226,15 @@ def test_rut_score_math():
 async def test_milestones_fire_once(store):
     db = FakeDB()
     b = _child(store)
+    n = {"i": 0}
 
     async def send(being, prompt):
+        # a real agent makes a real thing each time — distinct so both ticks
+        # verify; first_artifact still fires once (once-per-life milestone)
+        n["i"] += 1
+        p = life._home_path(being, f"garden/thing-{n['i']}.md")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"thing {n['i']}\n", encoding="utf-8")
         return _reply(act_kind="create",
                       message_to_parent="I made my first thing!")
 
@@ -234,3 +245,5 @@ async def test_milestones_fire_once(store):
     names = [m["data"]["name"] for m in store.milestones(OWNER, b["slug"])]
     assert names.count("first_artifact") == 1
     assert names.count("first_word") == 1
+    assert "act_unverified" not in [e["kind"] for e in
+                                    store.events(OWNER, b["slug"])]

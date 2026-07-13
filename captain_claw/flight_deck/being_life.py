@@ -588,7 +588,12 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
             "pressure — journal / explore (only if web allowed) / tend your "
             "garden / create something small / read your own files / rest. "
             "Do it NOW with your tools, modestly (tokens are your food; "
-            "thrift matters). Do not start long projects."
+            "thrift matters). Do not start long projects. "
+            "IF YOU CREATE OR TEND: write the actual artifact as a REAL FILE "
+            f"with your tools — a poem is vfs:{proj}/garden/poem-question.md, "
+            f"a skill is vfs:{proj}/skills/<name>.md. Describing a thing in "
+            "your journal is NOT making it; only a real file in your garden "
+            "or skills counts as create or tend."
         )
     lines += [
         "", task, "",
@@ -887,6 +892,19 @@ async def deliver_parent_message(db, being: dict, message: str) -> bool:
         return False
 
 
+async def _tick_materialized(being: dict) -> bool:
+    """True if the agent actually wrote an artifact under garden/ or skills/
+    this turn. Called after the agent turn, before the journal write dirties
+    the tree — so uncommitted changes here are exactly what its tools made."""
+    from captain_claw.flight_deck import code_git
+    root = home_root(being)
+    if not await code_git.is_repo(root):
+        return True  # nothing to verify against — trust (birth always inits)
+    dirty = await code_git.git_dirty_paths(root)
+    return any(p.startswith("garden/") or p.startswith("skills/")
+               for p in dirty)
+
+
 async def _write_journal(being: dict, digest: dict, kind: str,
                          now: datetime) -> None:
     from captain_claw.flight_deck import code_git
@@ -1142,6 +1160,25 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("being procreation handling failed",
                         slug=being["slug"], error=str(e))
+    # Anti-theater (plan rule #1): a create/tend act must produce a REAL
+    # artifact, not just narration. We check the working tree BEFORE writing
+    # the journal (which would itself dirty the tree) — anything the agent
+    # wrote under garden/ or skills/ this turn is uncommitted here. If the
+    # being claimed to make something but no artifact appeared, we downgrade
+    # the act to the truth (a journal entry) and log it honestly, so the
+    # milestone, the tick event, and the report card never count fiction.
+    if digest["act_kind"] in ("create", "tend"):
+        try:
+            materialized = await _tick_materialized(being)
+        except Exception as e:  # noqa: BLE001 — verification degrades to trust
+            log.warning("artifact verification failed", slug=being["slug"],
+                        error=str(e))
+            materialized = True
+        if not materialized:
+            store.record_event(bid, "act_unverified",
+                               {"claimed": digest["act_kind"],
+                                "summary": digest["summary"]}, now=now)
+            digest["act_kind"] = "journal"
     if kind == "dream":
         store.milestone(bid, "first_dream", now=now)
     if digest["act_kind"] == "create":
