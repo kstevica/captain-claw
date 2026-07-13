@@ -33,6 +33,7 @@ from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck import code_contract
 from captain_claw.flight_deck import code_honesty
 from captain_claw.flight_deck import code_git
+from captain_claw.flight_deck import code_plan
 from captain_claw.flight_deck import code_map
 from captain_claw.flight_deck import code_verify
 from captain_claw.flight_deck.quality_profile import QualityProfile, TokenBudget
@@ -797,8 +798,14 @@ def _git_prompt(intent: str) -> str:
 
 async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
                      archetype_id: str, prompt: str, by_id: dict,
-                     tiers_map: dict, env_vars: list) -> dict:
-    """Spawn one archetype anchored at ``repo``, dispatch ``prompt``, dispose."""
+                     tiers_map: dict, env_vars: list, *,
+                     extra_tools: list | None = None,
+                     extra_env: list | None = None) -> dict:
+    """Spawn one archetype anchored at ``repo``, dispatch ``prompt``, dispose.
+
+    ``extra_tools``/``extra_env``: opt-in additions for a specific call (e.g. the
+    ``facts`` interface ledger + ``CLAW_FACTS_DIR`` on a decomposed build slice).
+    Both default to nothing, so existing callers are unchanged."""
     src = by_id[archetype_id]
     # Every code agent gets the codemap tool (query the repo's blackboard).
     # The `code` tool is stripped — a coding-run agent must never start a child
@@ -806,6 +813,9 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
     tools = [t for t in (src.get("tools") or []) if t != "code"]
     if "codemap" not in tools:
         tools = tools + ["codemap"]
+    for t in (extra_tools or []):
+        if t not in tools:
+            tools = tools + [t]
     arch = {**src, "tools": tools}
     role = arch.get("role", archetype_id)
     tier = arch.get("tier", "coding")
@@ -858,7 +868,7 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
     code_env = [
         {"key": "CLAW_WRITE_DIRECT", "value": "1"},
         {"key": "CLAW_CODE_AGENT", "value": "1"},
-    ] + _git_env()
+    ] + _git_env() + list(extra_env or [])
     port, token, slug = await spawn_archetype_agent(
         arch, tier, tcfg, request, user, name_suffix=suffix,
         env_vars=list(env_vars or []) + code_env, workspace_path=str(repo),
@@ -1330,6 +1340,117 @@ async def _deep_build(request: Request, user: dict, pkey: str, repo: Path, sdir:
     return d, last_sha
 
 
+# ── Phase B: decomposed, dependency-layered team build ────────────────
+
+_CODE_OWNER_POOL = ("code-implementer", "quick-dirty", "debugger")
+
+
+async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
+                          tiers_map: dict, registry: dict, quality: QualityProfile) -> list[dict]:
+    """Group-0 decomposition: one reason-tier call turns the approved plan into
+    dependency-layered build slices. Returns [] on any failure/degenerate result
+    (single trivial slice) → the caller falls back to the single-implementer build."""
+    plan_abs = repo / plan_file
+    plan_text = plan_abs.read_text() if plan_abs.is_file() else ""
+    roster = [a for a in _CODE_OWNER_POOL if a in by_id] or ["code-implementer"]
+    tier = _resolve_tcfg(tiers_map, "reason") or registry.get("tiers", {}).get("reason", {})
+    try:
+        from captain_claw.llm import Message, create_provider
+        prov = create_provider(
+            provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
+            api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+            temperature=0.1, max_tokens=2500)
+        resp = await prov.complete(messages=[
+            Message(role="system", content="You are a build coordinator. Reply with JSON only."),
+            Message(role="user", content=code_plan.decompose_prompt(
+                intent, plan_text, roster, quality.parallel_build_max_slices))],
+            temperature=0.1, max_tokens=2500)
+        slices = code_plan.parse_slices(resp.content, by_id, quality.parallel_build_max_slices)
+    except Exception as e:  # noqa: BLE001 — decomposition must never break the build
+        log.warning("plan decomposition failed", error=str(e))
+        return []
+    # A single slice is just the normal build with extra ceremony — skip it.
+    return slices if len(slices) >= 2 else []
+
+
+async def _run_decomposed_build(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
+                                intent: str, by_id: dict, tiers_map: dict, env_vars: list,
+                                registry: dict, plan_file: str, quality: QualityProfile,
+                                contract_dir: str) -> tuple[dict | None, str | None]:
+    """Phase B (opt-in, parallel_build): decompose the approved plan into
+    dependency-layered slices and build them layer by layer — a focused
+    implementer per slice, sharing the ``facts`` interface ledger so the slices
+    agree on signatures. A barrier between layers means a slice never runs before
+    the foundations it depends on. Returns ``(last_dispatch, last_sha)``; the
+    caller continues into the normal review/fix loop, which hardens the result.
+
+    Degrades safely: an empty/degenerate decomposition returns ``(None, None)``
+    and the caller falls back to the single ``code-implementer`` build."""
+    _phase(pkey, "Planning the build (decomposition)")
+    slices = await _decompose_plan(repo, plan_file, intent, by_id, tiers_map, registry, quality)
+    if not slices:
+        _progress(pkey, "note", "decomposition produced no usable slices — single-implementer build")
+        return None, None
+
+    plan_layers = code_plan.layers(slices)
+    coord = code_plan.coordination_markdown(slices)
+    _write_report(repo, "coordination-plan", coord)
+    _append_chat(sdir, "assistant",
+                 f"Build coordination plan: {len(slices)} slice(s) across "
+                 f"{len(plan_layers)} layer(s).\n\n{coord}", kind="note")
+    await code_git.git_commit(repo, "[plan] build coordination")
+
+    # The interface ledger is auto-armed with parallel_build (or an explicit
+    # facts_ledger): slices record/read signatures through the `facts` tool,
+    # backed by .facts.db in the repo (gitignored runtime state).
+    use_ledger = quality.parallel_build or quality.facts_ledger
+    extra_tools = ["facts"] if use_ledger else None
+    extra_env = [{"key": "CLAW_FACTS_DIR", "value": str(repo)}] if use_ledger else None
+
+    by_id_slices = {s["id"]: s for s in slices}
+    d: dict | None = None
+    last_sha: str | None = None
+    for lyr, group in plan_layers:
+        if _cancelled(pkey):
+            return d, last_sha
+        _phase(pkey, code_plan.schedule_progress(lyr, len(plan_layers), group))
+        # Within a layer, slices own disjoint files by construction — but they
+        # share one repo dir, so we build them sequentially (safe on the shared
+        # tree). Cross-layer ordering is the barrier that matters for correctness;
+        # true within-layer concurrency (worktrees) is a future refinement.
+        for s in group:
+            if _cancelled(pkey):
+                return d, last_sha
+            owner = s["owner_archetype_id"] if s["owner_archetype_id"] in by_id else "code-implementer"
+            _phase(pkey, f"Building slice: {s['title']} ({code_plan.vatra_groups.group_label(lyr)})")
+            sp = code_plan.slice_prompt(intent, s, by_id_slices, facts=use_ledger) + contract_dir
+            sd = None
+            ssha = None
+            for attempt in range(_BUILD_RETRIES + 1):
+                fp = (_no_change_corrective(attempt, _acted(sd)) if attempt else "") + sp
+                sd = await _run_agent(request, user, pkey, repo, owner, fp, by_id,
+                                      tiers_map, env_vars,
+                                      extra_tools=extra_tools, extra_env=extra_env)
+                if _cancelled(pkey):
+                    return sd, last_sha
+                ssha = await code_git.git_commit(repo, f"[build L{lyr}] {owner}: {s['title'][:50]}")
+                if ssha:
+                    break
+                _progress(pkey, "note",
+                          f"slice '{s['title']}' produced no changes (attempt {attempt + 1})")
+            d = sd or d
+            if ssha:
+                last_sha = ssha
+                _append_chat(sdir, "assistant", (sd.get("output") or "(slice produced no summary)").strip(),
+                             kind="build", archetype=owner, ok=bool(sd and sd.get("ok")), commit=ssha)
+            else:
+                _append_chat(sdir, "assistant",
+                             f"⚠️ Slice '{s['title']}' produced no file changes — continuing "
+                             "with the rest of the plan; the review/fix loop will catch gaps.",
+                             kind="note")
+    return d, last_sha
+
+
 async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                           intent: str, by_id: dict, tiers_map: dict,
                           env_vars: list, registry: dict, plan_file: str = "plan.md",
@@ -1436,27 +1557,38 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                 _write_state(sdir, {"status": "idle"})
                 return
         else:
-            _phase(pkey, "Building")
             did_build = True   # C2: a build was attempted; final_clean decides win/loss
             d = None
             sha = None
-            for attempt in range(_BUILD_RETRIES + 1):
-                bp = (_no_change_corrective(attempt, _acted(d)) if attempt else "") \
-                    + _build_prompt(intent, plan_file, contract_dir)
-                d = await _run_agent(request, user, pkey, repo, "code-implementer",
-                                     bp, by_id, tiers_map, env_vars)
+            # Phase B (opt-in): decompose the plan into a dependency-layered team
+            # build first. Degrades to the single-implementer build below when the
+            # decomposition is degenerate or commits nothing.
+            if quality.parallel_build:
+                d, sha = await _run_decomposed_build(
+                    request, user, pkey, repo, sdir, intent, by_id, tiers_map,
+                    env_vars, registry, plan_file, quality, contract_dir)
                 if _cancelled(pkey):
                     _finish_stopped()
                     return
-                sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
-                if sha:
-                    break
-                _progress(pkey, "note", f"build produced no file changes — retrying ({attempt + 1}/{_BUILD_RETRIES})")
-                _append_chat(sdir, "assistant",
-                             f"⚠️ The builder produced no file changes (attempt {attempt + 1}) — "
-                             "retrying with a corrective instruction.", kind="note")
-            _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
-                         kind="build", archetype="code-implementer", ok=bool(d.get("ok")), commit=sha or "")
+            if sha is None:
+                _phase(pkey, "Building")
+                for attempt in range(_BUILD_RETRIES + 1):
+                    bp = (_no_change_corrective(attempt, _acted(d)) if attempt else "") \
+                        + _build_prompt(intent, plan_file, contract_dir)
+                    d = await _run_agent(request, user, pkey, repo, "code-implementer",
+                                         bp, by_id, tiers_map, env_vars)
+                    if _cancelled(pkey):
+                        _finish_stopped()
+                        return
+                    sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
+                    if sha:
+                        break
+                    _progress(pkey, "note", f"build produced no file changes — retrying ({attempt + 1}/{_BUILD_RETRIES})")
+                    _append_chat(sdir, "assistant",
+                                 f"⚠️ The builder produced no file changes (attempt {attempt + 1}) — "
+                                 "retrying with a corrective instruction.", kind="note")
+                _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip() if d else "(build produced no summary)",
+                             kind="build", archetype="code-implementer", ok=bool(d and d.get("ok")), commit=sha or "")
             if not sha:
                 _u = _usage_summary(pkey)
                 _append_chat(sdir, "assistant",

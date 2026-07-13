@@ -9,7 +9,9 @@ export type QualityProfile = {
   test_gate: boolean
   deep_build: boolean
   coverage_check: boolean
+  parallel_build: boolean
   deep_build_samples: number
+  parallel_build_max_slices: number
   // Research-side (Basna / Vatra)
   acted_gate: boolean
   research_map: boolean
@@ -38,7 +40,7 @@ export type QualityProfile = {
 }
 
 export const BOOL_FLAGS = [
-  'test_gate', 'deep_build', 'coverage_check', 'acted_gate', 'research_map',
+  'test_gate', 'deep_build', 'coverage_check', 'parallel_build', 'acted_gate', 'research_map',
   'delta_rounds', 'critic_triage', 'worker_escalate', 'git_snapshots',
   'judgment_ledger', 'source_corpus', 'claim_check', 'rubric_contract', 'intent_brief',
   'consistency_check', 'facts_ledger', 'constraints_contract', 'block_on_critical',
@@ -48,7 +50,8 @@ export type BoolFlag = (typeof BOOL_FLAGS)[number]
 export function defaultProfile(): QualityProfile {
   return {
     profile: 'off',
-    test_gate: false, deep_build: false, coverage_check: false, deep_build_samples: 2,
+    test_gate: false, deep_build: false, coverage_check: false, parallel_build: false,
+    deep_build_samples: 2, parallel_build_max_slices: 6,
     acted_gate: false, research_map: false, delta_rounds: false, critic_triage: false,
     worker_escalate: false, git_snapshots: false,
     judgment_ledger: false, source_corpus: false, claim_check: false, rubric_contract: false,
@@ -104,6 +107,7 @@ export function toRequest(q: QualityProfile): Record<string, unknown> {
   const out: Record<string, unknown> = { profile: q.profile === 'custom' ? 'off' : q.profile }
   for (const f of BOOL_FLAGS) out[f] = q[f]
   out.deep_build_samples = q.deep_build_samples
+  out.parallel_build_max_slices = q.parallel_build_max_slices
   out.claim_check_max = q.claim_check_max
   out.block_max_rounds = q.block_max_rounds
   out.honesty_guard = q.honesty_guard
@@ -141,6 +145,8 @@ export const LEVERS: Lever[] = [
     blurb: 'Compare the approved plan against the build; unmet items go to the backlog. One extra model call.' },
   { flag: 'deep_build', code: 'C3', scope: 'code', cost: 'paid', label: 'Deep build',
     blurb: 'Best-of-N verified builds: try N times, keep the first that passes its tests. Uses more tokens — set a budget.' },
+  { flag: 'parallel_build', code: 'B', scope: 'code', cost: 'paid', label: 'Team build',
+    blurb: 'Decompose the approved plan into dependency-layered slices (foundations first) and build each with a focused implementer, sharing an interface ledger (the `facts` tool) so the slices agree on signatures. Layers run in order with a barrier between them; the review/fix loop then hardens the result. More agents = more tokens — set a budget.' },
   { flag: 'constraints_contract', code: 'A1', scope: 'code', cost: 'cheap', label: 'Acceptance contract',
     blurb: 'Derive the task’s acceptance criteria into checkable predicates (a command exits 0, a test/file exists, a placeholder is gone) once from the approved plan, persisted to a hand-editable .contract.json. Validated deterministically after each build/fix round; a failing rule becomes a ground-truth review finding.' },
   { flag: 'block_on_critical', code: 'A3', scope: 'code', cost: 'free', label: 'Block on regression',

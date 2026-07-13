@@ -208,6 +208,17 @@ export function QualityControls({
                         />
                       </label>
                     )}
+                    {/* parallel_build: max decomposition slices */}
+                    {l.flag === 'parallel_build' && on && (
+                      <label className="mt-1.5 flex items-center gap-2 text-[11px] text-zinc-400">
+                        Max slices
+                        <input
+                          type="number" min={2} max={8} value={value.parallel_build_max_slices}
+                          onChange={(e) => onChange({ ...value, parallel_build_max_slices: Math.max(2, Math.min(8, Number(e.target.value))) })}
+                          className="w-14 rounded border border-rose-800/50 bg-zinc-950/60 px-2 py-0.5 text-zinc-200 focus:border-rose-500 focus:outline-none"
+                        />
+                      </label>
+                    )}
                     {/* block_on_critical: revise-recheck rounds cap */}
                     {l.flag === 'block_on_critical' && on && (
                       <label className="mt-1.5 flex items-center gap-2 text-[11px] text-zinc-400">
