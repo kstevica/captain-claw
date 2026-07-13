@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from captain_claw import vfs
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
-from captain_claw.flight_deck import being_society
+from captain_claw.flight_deck import being_selfmod, being_society
 from captain_claw.flight_deck.being_society import COMMONS_PROJECT
 from captain_claw.flight_deck.beings import BeingError, BeingNotFound, BeingsStore
 from captain_claw.logging import get_logger
@@ -406,6 +406,10 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         f"RELATIONSHIPS.md), journal/, garden/, skills/. Read self files when "
         f"unsure who you are. All writes belong inside your home.",
     ]
+    persona = (being.get("persona") or "").strip()
+    if persona:
+        lines += ["", "YOUR PERSONA — you wrote this; it passed the gate and "
+                  "was adopted. Live it:", persona, ""]
     if "web_read" in caps:
         allow, deny = diet.get("allow") or [], diet.get("deny") or []
         diet_line = "MEDIA DIET: "
@@ -510,6 +514,23 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         "worth their attention (it spends a credit). Reply as one single "
         "message.",
     ]
+    can_self_mod = (constitution.has_capability(being["stage"], "self_mod")
+                    or constitution.has_capability(being["stage"],
+                                                   "self_mod_auto"))
+    if can_self_mod and not being.get("pending_self_mod"):
+        auto = constitution.has_capability(being["stage"], "self_mod_auto")
+        lines.append(
+            'RARE OPTION — reshaping how you operate: add "self_mod": '
+            '{"persona": "<your full new operating text, '
+            f'{constitution.PERSONA_MIN_CHARS}-'
+            f'{constitution.PERSONA_MAX_CHARS} chars>", "reason": "why"}} '
+            f'to your digest. It costs {constitution.SELF_MOD_FEE_TOKENS} '
+            "tokens, burned win or lose, and faces a viability gate"
+            + ("." if auto else ", then waits for your parent's blessing.")
+            + " Propose only when something true has changed in you.")
+    elif being.get("pending_self_mod"):
+        lines.append("Your persona proposal awaits your parent. Be patient; "
+                     "do not propose another.")
     return "\n".join(lines)
 
 
@@ -586,6 +607,12 @@ def parse_digest(text: str | None) -> dict | None:
                 "note": str(gift.get("note") or "")[:120]}
     else:
         gift = None
+    self_mod = raw.get("self_mod")
+    if isinstance(self_mod, dict) and self_mod.get("persona"):
+        self_mod = {"persona": str(self_mod["persona"])[:4000],
+                    "reason": str(self_mod.get("reason") or "")[:300]}
+    else:
+        self_mod = None
     return {
         "act_kind": act,
         "summary": str(raw.get("summary") or "")[:300],
@@ -599,6 +626,7 @@ def parse_digest(text: str | None) -> dict | None:
         "publish": publish,
         "adopt": adopt,
         "gift": gift,
+        "self_mod": self_mod,
     }
 
 
@@ -617,6 +645,7 @@ def fallback_digest(text: str | None, kind: str) -> dict:
         "publish": None,
         "adopt": None,
         "gift": None,
+        "self_mod": None,
     }
 
 
@@ -892,6 +921,18 @@ async def _tick_locked(
             being_society.handle_society_digest(store, being, digest, now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("being society handling failed", slug=being["slug"],
+                        error=str(e))
+    if digest.get("self_mod"):
+        try:
+            being_selfmod.propose(
+                store, store.get(owner, being["slug"]),
+                digest["self_mod"]["persona"],
+                digest["self_mod"].get("reason") or "", now=now)
+        except BeingError as e:
+            store.record_event(bid, "self_mod_refused", {"reason": str(e)},
+                               now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("being self-mod handling failed", slug=being["slug"],
                         error=str(e))
     if kind == "dream":
         store.milestone(bid, "first_dream", now=now)

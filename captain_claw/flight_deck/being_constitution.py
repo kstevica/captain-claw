@@ -44,13 +44,19 @@ LETTERS_PER_DAY = 5
 # A published skill may ask at most this much (anti-absurdity clamp).
 MAX_SKILL_PRICE_TOKENS = 50_000_000
 
+# Self-modification physics (plan §6.3): proposing a new persona costs a
+# burned fee — molting energy, spent whether or not the change is adopted.
+SELF_MOD_FEE_TOKENS = 250_000
+PERSONA_MAX_CHARS = 2000
+PERSONA_MIN_CHARS = 40
+
 # Capabilities unlocked per stage (cumulative — a stage grants everything
 # below it plus its own row).
 _STAGE_GRANTS: dict[str, frozenset[str]] = {
     "egg": frozenset(),
     "infant": frozenset({"chat", "journal", "vfs_home"}),
     "child": frozenset({"web_read", "flows", "commons_read", "chores",
-                        "letters"}),
+                        "letters", "self_mod"}),
     "adolescent": frozenset({
         "commons_write", "spawn_agents", "agent_messaging",
         "organ_runs", "trade", "jobs", "ventures",

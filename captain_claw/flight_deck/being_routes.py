@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
 from captain_claw.flight_deck import being_life
+from captain_claw.flight_deck import being_selfmod
 from captain_claw.flight_deck import being_society
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck.beings import BeingError, get_store
@@ -220,6 +221,32 @@ async def set_rules(slug: str, body: RulesRequest,
     """House rules — the being internalizes them into VALUES.md next tick."""
     b = _run(get_store().set_house_rules, user["id"], slug, body.rules)
     return {"house_rules": b["house_rules"], "pending": True}
+
+
+class SelfModRejectRequest(BaseModel):
+    note: str = ""
+
+
+@router.post("/{slug}/self-mod/approve")
+async def approve_self_mod(slug: str, user: dict = Depends(get_current_user)):
+    """The parent's blessing: the pending persona becomes the operating one."""
+    b = _run(being_selfmod.approve, get_store(), user["id"], slug)
+    return {"persona": b["persona"], "pending_self_mod": None}
+
+
+@router.post("/{slug}/self-mod/reject")
+async def reject_self_mod(slug: str, body: SelfModRejectRequest,
+                          user: dict = Depends(get_current_user)):
+    _run(being_selfmod.reject, get_store(), user["id"], slug, body.note)
+    return {"ok": True}
+
+
+@router.post("/{slug}/self-mod/rollback")
+async def rollback_self_mod(slug: str,
+                            user: dict = Depends(get_current_user)):
+    """Restore the persona that preceded the last adoption."""
+    b = _run(being_selfmod.rollback, get_store(), user["id"], slug)
+    return {"persona": b["persona"]}
 
 
 @router.get("/{slug}/report-card")

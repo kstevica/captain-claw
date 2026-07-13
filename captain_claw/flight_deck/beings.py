@@ -39,7 +39,7 @@ log = get_logger(__name__)
 STATES = ("alive", "paused", "torpor", "dead")
 TRANSFER_REASONS = (
     "allowance", "usage", "fee", "gift", "trade",
-    "procreation", "metamorphosis_burn", "adjust",
+    "procreation", "metamorphosis_burn", "self_mod_burn", "adjust",
 )
 
 
@@ -232,6 +232,8 @@ class BeingsStore:
                 ("house_rules", "TEXT NOT NULL DEFAULT '[]'"),
                 ("rules_pending", "INTEGER NOT NULL DEFAULT 0"),
                 ("affect", "TEXT NOT NULL DEFAULT '{}'"),
+                ("persona", "TEXT NOT NULL DEFAULT ''"),
+                ("pending_self_mod", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -313,6 +315,11 @@ class BeingsStore:
         b["media_diet"] = json.loads(b.get("media_diet") or "{}")
         b["house_rules"] = json.loads(b.get("house_rules") or "[]")
         b["affect"] = json.loads(b.get("affect") or "{}")
+        raw_pending = b.get("pending_self_mod") or ""
+        try:
+            b["pending_self_mod"] = json.loads(raw_pending) if raw_pending else None
+        except json.JSONDecodeError:
+            b["pending_self_mod"] = None
         return b
 
     def list(self, owner_id: str) -> list[dict]:
@@ -624,6 +631,8 @@ class BeingsStore:
             "house_rules": b["house_rules"],
             "media_diet": b["media_diet"],
             "affect": b["affect"],
+            "persona": b["persona"],
+            "pending_self_mod": b["pending_self_mod"],
         }
 
     def ledger(self, owner_id: str, slug: str, limit: int = 100) -> list[dict]:
@@ -859,6 +868,17 @@ class BeingsStore:
     def set_affect(self, being_id: str, affect: dict,
                    now: datetime | None = None) -> None:
         self._update(being_id, now or _utcnow(), affect=json.dumps(affect))
+
+    def set_persona(self, being_id: str, content: str,
+                    now: datetime | None = None) -> None:
+        """The ADOPTED persona — the only self-text that feeds cognition.
+        Mutated exclusively through the self-mod rite (being_selfmod)."""
+        self._update(being_id, now or _utcnow(), persona=content)
+
+    def set_pending_self_mod(self, being_id: str, pending: dict | None,
+                             now: datetime | None = None) -> None:
+        self._update(being_id, now or _utcnow(),
+                     pending_self_mod=json.dumps(pending) if pending else "")
 
     def milestone(self, being_id: str, name: str, data: dict | None = None,
                   now: datetime | None = None) -> bool:

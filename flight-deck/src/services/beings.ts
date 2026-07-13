@@ -107,6 +107,8 @@ export interface BeingVitals {
   house_rules: string[]
   media_diet: { allow?: string[]; deny?: string[] }
   affect: { mood?: string; notes?: string[] }
+  persona: string
+  pending_self_mod: { content: string; reason: string; proposed_at: string } | null
 }
 
 export interface BeingEvent {
@@ -153,6 +155,15 @@ export interface VillageItem {
 }
 export const getVillage = (limit = 40) =>
   fdFetch<{ items: VillageItem[] }>(`/beings/village?limit=${limit}`)
+
+export const approveSelfMod = (slug: string) =>
+  fdFetch<{ persona: string }>(`/beings/${slug}/self-mod/approve`, { method: 'POST' })
+export const rejectSelfMod = (slug: string, note = '') =>
+  fdFetch<{ ok: boolean }>(`/beings/${slug}/self-mod/reject`, {
+    method: 'POST', body: JSON.stringify({ note }),
+  })
+export const rollbackPersona = (slug: string) =>
+  fdFetch<{ persona: string }>(`/beings/${slug}/self-mod/rollback`, { method: 'POST' })
 
 export const conceiveBeing = (payload: ConceivePayload) =>
   fdFetch<{ ok: boolean; being: BeingVitals }>('/beings/conceive', {

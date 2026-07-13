@@ -3,19 +3,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowRightLeft, BookOpen, ChevronLeft, ChevronRight, ClipboardList, Egg,
-  Files, Gift, GraduationCap, History, Loader2, Mail, Maximize2, Minimize2,
-  Moon, Pause, Play, Plus, RefreshCw, ScrollText, Skull, Sparkles, Users,
-  X, Zap,
+  Files, Fingerprint, Gift, GraduationCap, History, Loader2, Mail, Maximize2,
+  Minimize2, Moon, Pause, Play, Plus, RefreshCw, ScrollText, Skull, Sparkles,
+  Users, X, Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
   type Chore, type ReportCard, type SelfFile, type VillageItem,
-  conceiveBeing, euthanizeBeing, getBeingEvents, getBeingJournal,
-  getBeingsMeta, getBeingVitals, getLiabilities, getReportCard, getSelfFile,
-  getSelfFiles, getVillage, hatchBeing, judgeChore, listBeings, listChores,
-  pauseBeing, postChore, setAllowance, setHouseRules, setMediaDiet, setStage,
+  approveSelfMod, conceiveBeing, euthanizeBeing, getBeingEvents,
+  getBeingJournal, getBeingsMeta, getBeingVitals, getLiabilities,
+  getReportCard, getSelfFile, getSelfFiles, getVillage, hatchBeing,
+  judgeChore, listBeings, listChores, pauseBeing, postChore, rejectSelfMod,
+  rollbackPersona, setAllowance, setHouseRules, setMediaDiet, setStage,
   tickBeing, wakeBeing,
 } from '../services/beings'
 
@@ -70,6 +71,14 @@ function summarizeEventData(e: BeingEvent): string {
     case 'rules_updated': return `${d.count} rule(s)`
     case 'rules_internalized': return 'internalized into VALUES.md'
     case 'metamorphosis': return `${d.from} → ${d.to} (${fmtTokens(Number(d.price_tokens) || 0)})`
+    case 'self_mod_proposed': return `proposed a new persona — ${d.reason}`
+    case 'self_mod_adopted': return `new persona adopted (${d.by}) — ${d.reason}`
+    case 'self_mod_rejected': return d.by === 'gate'
+      ? `persona failed the gate: ${(d.failed as { name: string }[] | undefined)?.map(f => f.name).join(', ')}`
+      : `persona rejected by parent${d.note ? ` — ${d.note}` : ''}`
+    case 'self_mod_refused': return `self-mod refused: ${d.reason}`
+    case 'self_mod_rolled_back': return 'persona rolled back by parent'
+    case 'self_mod_auto_notice': return `adult self-mod (auto) — ${d.reason}`
     case 'woke_from_torpor': return 'revived by allowance'
     case 'collapsed_exhausted': return `overspent (${fmtTokens(Number(d.weighted) || 0)})`
     case 'resting_at_cap': return 'daily burn cap reached'
@@ -790,6 +799,47 @@ function BeingCard({ item, meta, onChanged }: {
               </div>
             </div>
           </div>
+
+          {/* Self-modification (persona rite) */}
+          {(v.pending_self_mod || v.persona) && (
+            <div>
+              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+                <Fingerprint className="h-3.5 w-3.5 text-violet-400" /> Persona
+                {v.persona && !v.pending_self_mod && (
+                  <button
+                    onClick={() => {
+                      if (window.confirm(`Roll ${item.name}'s persona back to the previous self?`))
+                        void act('rollback', () => rollbackPersona(item.slug))
+                    }}
+                    className="ml-auto rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                  >Roll back</button>
+                )}
+              </div>
+              {v.persona && (
+                <p className="mb-1.5 line-clamp-2 text-[11px] italic text-zinc-500">“{v.persona}”</p>
+              )}
+              {v.pending_self_mod && (
+                <div className="rounded border border-violet-500/30 bg-violet-500/5 p-2.5">
+                  <div className="text-[11px] text-violet-300">
+                    Proposes a new self — “{v.pending_self_mod.reason}”
+                  </div>
+                  <p className="mt-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap text-[11px] text-zinc-300">
+                    {v.pending_self_mod.content}
+                  </p>
+                  <div className="mt-2 flex gap-1.5">
+                    <button
+                      onClick={() => void act('selfmod', () => approveSelfMod(item.slug))}
+                      className="rounded bg-violet-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-500"
+                    >Bless it</button>
+                    <button
+                      onClick={() => void act('selfmod', () => rejectSelfMod(item.slug, 'not yet'))}
+                      className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800"
+                    >Not yet</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Report card */}
           <div>
