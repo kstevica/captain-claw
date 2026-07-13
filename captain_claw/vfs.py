@@ -169,13 +169,38 @@ def link_target_at(root: Path, name: str) -> Path | None:
     return None
 
 
+def scope_projects() -> frozenset[str] | None:
+    """Optional per-process VFS containment (``CLAW_VFS_SCOPE``).
+
+    When set (comma-separated project names), this process may resolve ONLY
+    those projects — the physics behind Iskra's separation guarantee: a
+    being's body is walled to ``being-<slug>,commons`` while sibling homes
+    live under the same user root. Unset (every normal agent and the Flight
+    Deck server itself) means no restriction.
+    """
+    raw = os.environ.get("CLAW_VFS_SCOPE", "").strip()
+    if not raw:
+        return None
+    return frozenset(_sanitize(s.strip(), fallback="")
+                     for s in raw.split(",") if s.strip())
+
+
+def _scope_allows(project: str) -> bool:
+    scope = scope_projects()
+    return scope is None or project in scope
+
+
 def project_root(project: str = "", *, create: bool = False) -> Path:
     """Return the on-disk root for ``<project>``.
 
     A linked project resolves to its external path (never created here); an
-    ordinary project resolves to ``<user_root>/<project>``.
+    ordinary project resolves to ``<user_root>/<project>``. A scoped process
+    (``CLAW_VFS_SCOPE``) may not address projects outside its wall.
     """
     proj = _sanitize(project or default_project(), fallback=_DEFAULT_PROJECT)
+    if not _scope_allows(proj):
+        raise PermissionError(
+            f"project {proj!r} is outside this process's CLAW_VFS_SCOPE")
     root = user_root()
     tgt = link_target_at(root, proj)
     if tgt is not None:
@@ -230,6 +255,8 @@ def resolve_vfs_path(path: str, *, create_parents: bool = False) -> Path | None:
     if not is_vfs_path(path):
         return None
     project, rel = split_scheme(path)
+    if not _scope_allows(_sanitize(project, fallback=_DEFAULT_PROJECT)):
+        return None  # outside this process's wall — same as unresolvable
     base = project_root(project).resolve()
 
     rel_parts = [p for p in rel.replace("\\", "/").split("/") if p not in ("", ".")]

@@ -3878,6 +3878,7 @@ async def execute_route(
         run_cost = pricing.summarize(_RUN_USAGE.get(sid, []),
                                      elapsed_seconds=time.monotonic() - _run_started)
         _progress(sid, "cost", _cost_message(run_cost), cost=run_cost)
+        await db.log_run_cost(user["id"], "basna", sid, run_cost)
     except Exception as e:  # noqa: BLE001 — cost is best-effort, never blocks the result
         log.warning("Basna cost summary failed", error=str(e))
     finally:

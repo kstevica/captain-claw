@@ -15,6 +15,7 @@ import {
   Plug,
   CalendarDays,
   Sparkles,
+  Dna,
   Gamepad2,
   Cloud,
   FileText,
@@ -107,6 +108,12 @@ const navSections: { title: string; items: NavItem[] }[] = [
       { id: 'gpu-cloud', icon: Cloud, label: 'GPU Cloud' },
       { id: 'operations', icon: BarChart3, label: 'Stats' },
       { id: 'admin', icon: Shield, label: 'Admin', adminOnly: true },
+    ],
+  },
+  {
+    title: 'Life',
+    items: [
+      { id: 'beings', icon: Dna, label: 'Beings' },
     ],
   },
   {

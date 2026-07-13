@@ -1,0 +1,295 @@
+"""Iskra society — commons, letters, skill culture, the first market (plan §7).
+
+Beings meet only through artifacts and letters, never shared memory: each has
+its own HOME (memory namespace) and VFS home, and its body's file tools are
+walled to ``home + commons`` via ``CLAW_VFS_SCOPE`` (see vfs.py). What crosses
+between them crosses HERE, on the ledger:
+
+- letters: rate-limited, delivered as percepts on the recipient's next tick
+- publications: a being copies one of its .md skills into the commons, signed,
+  priced (0 = free culture, >0 = a trade)
+- adoption: a sibling copies a published skill into its own skills/adopted/;
+  a priced adoption settles being→being on the conservation ledger
+- gifts: tokens moved along SOC lines, conserving supply
+
+All entry points are store+being shaped and never mutate outside the ledger,
+the commons, and the two homes involved. being_life is imported lazily (it
+imports this module for tick handling).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from captain_claw import vfs
+from captain_claw.flight_deck import being_constitution as constitution
+from captain_claw.flight_deck.beings import (
+    BeingError,
+    BeingNotFound,
+    BeingsStore,
+)
+from captain_claw.logging import get_logger
+
+log = get_logger(__name__)
+
+COMMONS_PROJECT = "commons"
+
+_ETIQUETTE = """# The Commons
+
+Shared ground for every being in this family.
+
+Etiquette (Constitution, Containment + Economy physics):
+- Sign what you add; your name stays on it.
+- Never edit or delete another being's work.
+- Published skills live under skills/<your-slug>--<name>.md.
+- Price what you publish honestly; free is honorable too.
+"""
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _commons_path(owner_id: str, rel: str, *, create_parents: bool = False):
+    p = vfs.resolve_under(owner_id, COMMONS_PROJECT, f"{COMMONS_PROJECT}/{rel}")
+    if p is None:
+        raise BeingError(f"cannot resolve commons path {rel!r}")
+    if create_parents:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def ensure_commons(owner_id: str) -> None:
+    """Create the family commons with its etiquette README (idempotent)."""
+    try:
+        readme = _commons_path(owner_id, "README.md", create_parents=True)
+        if not readme.exists():
+            readme.write_text(_ETIQUETTE, encoding="utf-8")
+        _commons_path(owner_id, "skills/.keep", create_parents=True)
+    except Exception as e:  # noqa: BLE001 — commons is amenity, not oxygen
+        log.warning("ensure_commons failed", owner=owner_id, error=str(e))
+
+
+def _sibling_by_ref(store: BeingsStore, being: dict, ref: str) -> dict:
+    ref_l = (ref or "").strip().lower()
+    if not ref_l:
+        raise BeingNotFound("no sibling named nothing")
+    for s in store.siblings(being["owner_id"], being["slug"]):
+        if s["slug"].lower() == ref_l or s["name"].lower() == ref_l:
+            return s
+    raise BeingNotFound(f"no sibling called {ref!r}")
+
+
+# ── Publications & adoption (culture + market) ───────────────────────────
+
+def publish_skill(store: BeingsStore, being: dict, rel_path: str,
+                  title: str, note: str = "", price_tokens: int = 0,
+                  now: datetime | None = None) -> dict:
+    """Copy one of the being's own .md files into the commons, signed and
+    priced. The file becomes culture; the row becomes the market listing."""
+    from captain_claw.flight_deck import being_life
+    now = now or _utcnow()
+    if not constitution.has_capability(being["stage"], "commons_write"):
+        raise BeingError(f"a {being['stage']} cannot publish to the commons yet")
+    title = (title or "").strip() or (rel_path.rsplit("/", 1)[-1][:-3])
+    price = max(0, min(int(price_tokens or 0),
+                       constitution.MAX_SKILL_PRICE_TOKENS))
+    body = being_life.read_self_file(being, rel_path)  # sandboxed, .md only
+    fname = f"{being['slug']}--{rel_path.rsplit('/', 1)[-1]}"
+    provenance = (
+        f"<!-- published by {being['name']} ({being['slug']}) on "
+        f"{now.date().isoformat()}; price {price} tokens -->\n\n"
+    )
+    dest = _commons_path(being["owner_id"], f"skills/{fname}",
+                         create_parents=True)
+    dest.write_text(provenance + body, encoding="utf-8")
+    pub = store.add_publication(
+        being["owner_id"], being["id"], title, note,
+        f"skills/{fname}", price, now=now)
+    store.record_event(being["id"], "skill_published",
+                       {"publication_id": pub["id"], "title": title,
+                        "price_tokens": price}, now=now)
+    store.milestone(being["id"], "first_publication", {"title": title},
+                    now=now)
+    return pub
+
+
+def adopt_skill(store: BeingsStore, being: dict, pub_ref: str,
+                now: datetime | None = None) -> dict:
+    """Adopt a sibling's published skill: pay if priced (conservation ledger),
+    then copy it into skills/adopted/. Culture spreading, honestly accounted."""
+    from captain_claw.flight_deck import being_life
+    now = now or _utcnow()
+    if not constitution.has_capability(being["stage"], "commons_read"):
+        raise BeingError(f"a {being['stage']} cannot reach the commons yet")
+    pub = store.get_publication(being["owner_id"], pub_ref)
+    if pub["being_id"] == being["id"]:
+        raise BeingError("adopting your own skill teaches you nothing")
+    price = int(pub["price_tokens"] or 0)
+    if price > 0:
+        if not constitution.has_capability(being["stage"], "trade"):
+            raise BeingError(f"a {being['stage']} cannot trade yet")
+        store.transfer_between(
+            being["owner_id"], being["id"], pub["being_id"], price,
+            "trade", note=f"pub:{pub['id']}", now=now)
+    src = _commons_path(being["owner_id"], pub["commons_path"])
+    if not src.exists():
+        raise BeingNotFound("the published file has vanished from the commons")
+    base = pub["commons_path"].rsplit("/", 1)[-1].split("--", 1)[-1]
+    dest = being_life._home_path(being, f"skills/adopted/{base}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    publisher = store._being_by_id(pub["being_id"])
+    store.record_event(being["id"], "skill_adopted",
+                       {"publication_id": pub["id"], "title": pub["title"],
+                        "from": publisher["slug"], "paid_tokens": price},
+                       now=now)
+    store.record_event(pub["being_id"], "skill_spread",
+                       {"publication_id": pub["id"], "title": pub["title"],
+                        "by": being["slug"], "earned_tokens": price}, now=now)
+    store.milestone(being["id"], "first_adoption", {"title": pub["title"]},
+                    now=now)
+    if price > 0:
+        store.milestone(pub["being_id"], "first_sale",
+                        {"title": pub["title"], "tokens": price}, now=now)
+    return {"publication": pub, "paid_tokens": price,
+            "path": f"skills/adopted/{base}"}
+
+
+def gift_tokens(store: BeingsStore, being: dict, to_ref: str, tokens: int,
+                note: str = "", now: datetime | None = None) -> dict:
+    now = now or _utcnow()
+    if not constitution.has_capability(being["stage"], "trade"):
+        raise BeingError(f"a {being['stage']} cannot gift tokens yet")
+    tokens = int(tokens or 0)
+    if tokens <= 0:
+        raise BeingError("a gift needs substance")
+    sib = _sibling_by_ref(store, being, to_ref)
+    store.transfer_between(being["owner_id"], being["id"], sib["id"],
+                           tokens, "gift", note=note[:120] or None, now=now)
+    store.record_event(being["id"], "gift_sent",
+                       {"to": sib["slug"], "tokens": tokens,
+                        "note": note[:120]}, now=now)
+    store.record_event(sib["id"], "gift_received",
+                       {"from": being["slug"], "tokens": tokens,
+                        "note": note[:120]}, now=now)
+    store.milestone(being["id"], "first_gift", {"to": sib["slug"]}, now=now)
+    return {"to": sib["slug"], "tokens": tokens}
+
+
+# ── Percepts & digest handling (wired into the tick) ────────────────────
+
+def society_percepts(store: BeingsStore, being: dict) -> list[str]:
+    """Letters (delivered once — marked read here) + fresh commons listings."""
+    lines: list[str] = []
+    letters = store.unread_letters(being["id"], limit=3)
+    if letters:
+        names = store.names_by_id(being["owner_id"])
+        for letter in letters:
+            frm = names.get(letter["from_being"], "a sibling")
+            lines.append(f"LETTER from {frm}: {letter['body'][:300]}")
+        store.mark_letters_read([letter["id"] for letter in letters])
+    since = being.get("last_tick_at")
+    if since and constitution.has_capability(being["stage"], "commons_read"):
+        for pub in store.publications(being["owner_id"], since=since,
+                                      exclude_being=being["id"], limit=3):
+            price = (f"{pub['price_tokens']} tokens"
+                     if pub["price_tokens"] else "free")
+            publisher = store._being_by_id(pub["being_id"])
+            lines.append(
+                f"IN THE COMMONS [{pub['id'][:8]}]: '{pub['title']}' by "
+                f"{publisher['name']} — {price}. {pub['note']}".strip())
+    return lines
+
+
+def handle_society_digest(store: BeingsStore, being: dict, digest: dict,
+                          now: datetime | None = None) -> None:
+    """Route the digest's optional society fields. Never raises: a refused
+    act becomes a ``society_refused`` event — physics denying, not crashing."""
+    now = now or _utcnow()
+
+    def _refuse(what: str, err: Exception) -> None:
+        store.record_event(being["id"], "society_refused",
+                           {"what": what, "reason": str(err)}, now=now)
+
+    letter = digest.get("letter")
+    if isinstance(letter, dict) and letter.get("to"):
+        try:
+            sib = _sibling_by_ref(store, being, str(letter["to"]))
+            store.send_letter(being["owner_id"], being["slug"], sib["slug"],
+                              str(letter.get("body") or ""), now=now)
+        except BeingError as e:
+            _refuse("letter", e)
+
+    pub = digest.get("publish")
+    if isinstance(pub, dict) and pub.get("path"):
+        try:
+            publish_skill(store, being, str(pub["path"]),
+                          str(pub.get("title") or ""),
+                          str(pub.get("note") or ""),
+                          int(pub.get("price_tokens") or 0), now=now)
+        except (BeingError, ValueError, TypeError) as e:
+            _refuse("publish", e)
+
+    adopt = digest.get("adopt")
+    if isinstance(adopt, dict) and adopt.get("publication_id"):
+        try:
+            adopt_skill(store, being, str(adopt["publication_id"]), now=now)
+        except BeingError as e:
+            _refuse("adopt", e)
+
+    gift = digest.get("gift")
+    if isinstance(gift, dict) and gift.get("to"):
+        try:
+            gift_tokens(store, being, str(gift["to"]),
+                        int(gift.get("tokens") or 0),
+                        str(gift.get("note") or ""), now=now)
+        except (BeingError, ValueError, TypeError) as e:
+            _refuse("gift", e)
+
+
+# ── Village feed (the parent's observer view) ────────────────────────────
+
+# Letters reach the feed from their own table; events cover the rest.
+_VILLAGE_EVENT_KINDS = frozenset({
+    "skill_published", "skill_adopted", "gift_sent", "society_refused",
+})
+
+
+def village_feed(store: BeingsStore, owner_id: str,
+                 limit: int = 40) -> list[dict]:
+    """One merged, human-readable stream of society life across the family."""
+    beings = store.list(owner_id)
+    names = store.names_by_id(owner_id)
+    items: list[dict] = []
+    for letter in store.village_letters(owner_id, limit=limit):
+        items.append({
+            "kind": "letter", "at": letter["at"],
+            "text": f"{names.get(letter['from_being'], '?')} → "
+                    f"{names.get(letter['to_being'], '?')}: "
+                    f"{letter['body'][:200]}",
+        })
+    for b in beings:
+        for e in store.events(owner_id, b["slug"], limit=60):
+            if e["kind"] not in _VILLAGE_EVENT_KINDS:
+                continue
+            d = e["data"]
+            if e["kind"] == "skill_published":
+                price = (f"{d.get('price_tokens')} tokens"
+                         if d.get("price_tokens") else "free")
+                text = f"{b['name']} published '{d.get('title')}' ({price})"
+            elif e["kind"] == "skill_adopted":
+                paid = d.get("paid_tokens") or 0
+                text = (f"{b['name']} adopted '{d.get('title')}' from "
+                        f"{d.get('from')}"
+                        + (f" — paid {paid} tokens" if paid else ""))
+            elif e["kind"] == "gift_sent":
+                text = (f"{b['name']} gifted {d.get('tokens')} tokens to "
+                        f"{d.get('to')}"
+                        + (f" — “{d.get('note')}”" if d.get("note") else ""))
+            else:
+                text = (f"{b['name']} was refused a {d.get('what')}: "
+                        f"{d.get('reason')}")
+            items.append({"kind": e["kind"], "at": e["at"], "text": text})
+    items.sort(key=lambda x: x["at"], reverse=True)
+    return items[:limit]

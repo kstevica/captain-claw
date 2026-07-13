@@ -665,6 +665,15 @@ async def lifespan(app: FastAPI):
         app.state.events_stop = _ev_stop
         app.state.events_task = asyncio.create_task(_ev_loop(_ev_stop))
         print("Flight Deck: event spine poll loop started")
+    # ── Iskra beings heartbeat (living beings tick/dream on their own clock).
+    # Disable with FD_BEINGS_DISABLED=true. Cheap when no being is due. ──
+    if os.environ.get("FD_BEINGS_DISABLED", "").lower() not in ("true", "1", "yes"):
+        from captain_claw.flight_deck.beings_loop import beings_loop as _beings_loop
+        _beings_stop = asyncio.Event()
+        app.state.beings_stop = _beings_stop
+        app.state.beings_task = asyncio.create_task(
+            _beings_loop(getattr(app.state, "fd_db", None), _beings_stop))
+        print("Flight Deck: beings heartbeat started")
     # ── Flow engine (process automations: trigger → steps on the agent pool) ──
     try:
         from captain_claw.flight_deck.flows_store import FlowStore
@@ -928,6 +937,7 @@ from captain_claw.flight_deck.delivery_routes import router as delivery_router
 from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
+from captain_claw.flight_deck.being_routes import router as being_router
 from captain_claw.terminal.relay import router as pty_router
 
 app.include_router(auth_router)
@@ -970,6 +980,7 @@ app.include_router(delivery_router)
 app.include_router(agents_fs_router)
 app.include_router(system_router)
 app.include_router(share_router)
+app.include_router(being_router)
 app.include_router(pty_router)
 
 

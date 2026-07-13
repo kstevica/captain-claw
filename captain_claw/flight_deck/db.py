@@ -358,6 +358,27 @@ class FlightDeckDB:
                 ON resource_shares(grantee_id, resource_type);
             CREATE INDEX IF NOT EXISTS idx_resource_shares_owner
                 ON resource_shares(owner_id, resource_type, resource_id);
+
+            -- Persisted run costs (Iskra Phase 0, docs/living-beings-plan.md
+            -- §10). One row per finished run: the aggregate token usage +
+            -- dollar cost that pricing.summarize computed, which previously
+            -- lived only in the in-memory progress log. owner_type 'being'
+            -- rows carry the being slug in owner_ref; wallet debits stay in
+            -- beings.db — this table is the dollar/reporting side.
+            CREATE TABLE IF NOT EXISTS cost_ledger (
+                id              TEXT PRIMARY KEY,
+                owner_user_id   TEXT NOT NULL,
+                owner_type      TEXT NOT NULL DEFAULT 'user',
+                owner_ref       TEXT NOT NULL DEFAULT '',
+                run_kind        TEXT NOT NULL,
+                run_id          TEXT NOT NULL DEFAULT '',
+                usage           TEXT NOT NULL DEFAULT '{}',
+                usd             REAL,
+                elapsed_seconds REAL,
+                at              TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_cost_ledger_owner
+                ON cost_ledger(owner_user_id, at);
         """)
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
@@ -1685,6 +1706,40 @@ class FlightDeckDB:
         ) as cur:
             await self._db.commit()
             return (cur.rowcount or 0) > 0
+
+    # ── Cost ledger (persisted run costs) ─────────────────────────────
+
+    async def log_run_cost(
+        self, owner_user_id: str, run_kind: str, run_id: str, cost: dict,
+        owner_type: str = "user", owner_ref: str = "",
+    ) -> None:
+        """Persist one run's cost block (the pricing.summarize output)."""
+        assert self._db is not None
+        import json as _json
+        await self._db.execute(
+            "INSERT INTO cost_ledger (id, owner_user_id, owner_type, owner_ref,"
+            " run_kind, run_id, usage, usd, elapsed_seconds, at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (_uuid(), owner_user_id, owner_type, owner_ref, run_kind, run_id,
+             _json.dumps(cost.get("tokens") or {}), cost.get("usd"),
+             cost.get("elapsed_seconds"), _utcnow()),
+        )
+        await self._db.commit()
+
+    async def list_run_costs(
+        self, owner_user_id: str, limit: int = 200, run_kind: str | None = None,
+    ) -> list[dict]:
+        assert self._db is not None
+        q = "SELECT * FROM cost_ledger WHERE owner_user_id = ?"
+        args: list = [owner_user_id]
+        if run_kind:
+            q += " AND run_kind = ?"
+            args.append(run_kind)
+        q += " ORDER BY at DESC LIMIT ?"
+        args.append(limit)
+        async with self._db.execute(q, args) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
     async def list_shares_for_resource(
         self, resource_type: str, resource_id: str, owner_id: str,
