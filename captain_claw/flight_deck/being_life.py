@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from captain_claw import vfs
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
-from captain_claw.flight_deck.beings import BeingsStore
+from captain_claw.flight_deck.beings import BeingError, BeingNotFound, BeingsStore
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -112,6 +112,55 @@ def _home_path(being: dict, rel: str):
     if p is None:
         raise RuntimeError(f"cannot resolve being home path {rel!r}")
     return p
+
+
+_CORE_SELF_ORDER = {"self/SELF.md": 0, "self/VALUES.md": 1,
+                    "self/INTERESTS.md": 2, "self/RELATIONSHIPS.md": 3}
+
+
+def home_root(being: dict):
+    return _home_path(being, "self").parent
+
+
+def list_self_files(being: dict) -> list[dict]:
+    """Every markdown file in the being's home — self/, garden/, skills/,
+    and anything else it grows over time — except journal/, which has its
+    own dated viewer. Core selfhood files sort first."""
+    root = home_root(being)
+    if not root.exists():
+        return []
+    out = []
+    for p in sorted(root.rglob("*.md")):
+        rel = p.relative_to(root).as_posix()
+        if rel.startswith("journal/"):
+            continue
+        try:
+            stat = p.stat()
+        except OSError:
+            continue
+        out.append({
+            "path": rel, "size": stat.st_size,
+            "mtime": datetime.fromtimestamp(
+                stat.st_mtime, timezone.utc).isoformat(),
+        })
+    out.sort(key=lambda f: (_CORE_SELF_ORDER.get(f["path"], 99), f["path"]))
+    return out
+
+
+def read_self_file(being: dict, rel_path: str) -> str:
+    """Read one .md file from the being's home, sandboxed to that home."""
+    root = home_root(being).resolve()
+    rel_path = (rel_path or "").strip().lstrip("/")
+    parts = rel_path.split("/")
+    if (not rel_path.endswith(".md") or rel_path.startswith("journal/")
+            or ".." in parts or "" in parts):
+        raise BeingError("not a readable self file")
+    p = (root / rel_path).resolve()
+    if p != root and root not in p.parents:
+        raise BeingError("path escapes the being's home")
+    if not p.exists():
+        raise BeingNotFound("no such file")
+    return p.read_text(encoding="utf-8")
 
 
 async def build_home(being: dict) -> str:

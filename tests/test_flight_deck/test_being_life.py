@@ -11,7 +11,7 @@ import pytest
 from captain_claw import vfs
 from captain_claw.flight_deck import being_life as life
 from captain_claw.flight_deck import beings_loop
-from captain_claw.flight_deck.beings import BeingsStore
+from captain_claw.flight_deck.beings import BeingError, BeingNotFound, BeingsStore
 
 NOW = datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc)
 OWNER = "user-1"
@@ -147,6 +147,55 @@ async def test_build_home_scaffolds_and_git_inits(store):
     assert (r / "self" / "SELF.md").read_text().startswith("# Prva")
     assert "Grow curious and kind." in (r / "self" / "VALUES.md").read_text()
     assert (r / ".git").exists()
+
+
+async def test_list_self_files_core_ordered_journal_excluded(store):
+    b = _born(store, port=0)
+    await life.build_home(b)
+    files = life.list_self_files(b)
+    paths = [f["path"] for f in files]
+    assert paths[:4] == ["self/SELF.md", "self/VALUES.md",
+                        "self/INTERESTS.md", "self/RELATIONSHIPS.md"]
+    assert "garden/README.md" in paths
+    assert "skills/README.md" in paths
+    assert not any(p.startswith("journal/") for p in paths)
+    assert all("size" in f and "mtime" in f for f in files)
+
+
+async def test_list_self_files_picks_up_new_files(store):
+    b = _born(store, port=0)
+    await life.build_home(b)
+    root = life.home_root(b)
+    (root / "garden" / "map.md").write_text("# A map\n\nI drew this.\n")
+    files = life.list_self_files(b)
+    assert "garden/map.md" in [f["path"] for f in files]
+
+
+async def test_read_self_file_roundtrip(store):
+    b = _born(store, port=0)
+    await life.build_home(b)
+    text = life.read_self_file(b, "self/VALUES.md")
+    assert "Grow curious and kind." in text
+
+
+async def test_read_self_file_rejects_escape_and_journal(store):
+    b = _born(store, port=0)
+    await life.build_home(b)
+    with pytest.raises(BeingError):
+        life.read_self_file(b, "../../../etc/passwd.md")
+    with pytest.raises(BeingError):
+        life.read_self_file(b, "self/../../../etc/passwd.md")
+    with pytest.raises(BeingError):
+        life.read_self_file(b, "journal/2026-07-12.md")
+    with pytest.raises(BeingError):
+        life.read_self_file(b, "self/SELF.txt")   # not markdown
+
+
+async def test_read_self_file_missing_is_not_found(store):
+    b = _born(store, port=0)
+    await life.build_home(b)
+    with pytest.raises(BeingNotFound):
+        life.read_self_file(b, "self/NOPE.md")
 
 
 # ── The tick ─────────────────────────────────────────────────────────────

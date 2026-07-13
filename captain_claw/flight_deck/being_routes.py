@@ -240,6 +240,22 @@ async def read_journal(slug: str, date: str = "",
     return {"date": day, "text": text}
 
 
+@router.get("/{slug}/self/files")
+async def list_self_files(slug: str, user: dict = Depends(get_current_user)):
+    """Every .md file in the being's home — self/, garden/, skills/ — for
+    the parent to browse. Journal has its own dated endpoint above."""
+    being = _run(get_store().get, user["id"], slug)
+    return {"files": being_life.list_self_files(being)}
+
+
+@router.get("/{slug}/self/file")
+async def read_self_file(slug: str, path: str,
+                         user: dict = Depends(get_current_user)):
+    being = _run(get_store().get, user["id"], slug)
+    text = _run(being_life.read_self_file, being, path)
+    return {"path": path, "text": text}
+
+
 @router.post("/{slug}/allowance")
 async def set_allowance(slug: str, body: AllowanceRequest,
                         user: dict = Depends(get_current_user)):

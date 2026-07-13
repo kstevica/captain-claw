@@ -2,19 +2,20 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  ChevronLeft, ChevronRight, ClipboardList, Egg, GraduationCap, History,
-  Loader2, Maximize2, Minimize2, Moon, Pause, Play, Plus, RefreshCw,
-  ScrollText, Skull, Sparkles, X, Zap,
+  ChevronLeft, ChevronRight, ClipboardList, Egg, Files, GraduationCap,
+  History, Loader2, Maximize2, Minimize2, Moon, Pause, Play, Plus,
+  RefreshCw, ScrollText, Skull, Sparkles, X, Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
-  type Chore, type ReportCard,
+  type Chore, type ReportCard, type SelfFile,
   conceiveBeing, euthanizeBeing, getBeingEvents, getBeingJournal,
-  getBeingsMeta, getBeingVitals, getLiabilities, getReportCard, hatchBeing,
-  judgeChore, listBeings, listChores, pauseBeing, postChore, setAllowance,
-  setHouseRules, setMediaDiet, setStage, tickBeing, wakeBeing,
+  getBeingsMeta, getBeingVitals, getLiabilities, getReportCard, getSelfFile,
+  getSelfFiles, hatchBeing, judgeChore, listBeings, listChores, pauseBeing,
+  postChore, setAllowance, setHouseRules, setMediaDiet, setStage, tickBeing,
+  wakeBeing,
 } from '../services/beings'
 
 const REFRESH_MS = 6000
@@ -108,12 +109,19 @@ function renderTicksMarkdown(events: BeingEvent[]): string {
   return lines.join('\n')
 }
 
-// ── Journal / ticks log modal — full markdown, fullscreen toggle ──
+// ── Journal / ticks log / self-files modal — full markdown, fullscreen ──
+
+function selfFileLabel(path: string): string {
+  const base = path.split('/').pop() || path
+  const stem = base.replace(/\.md$/i, '')
+  const folder = path.includes('/') ? path.slice(0, path.indexOf('/')) : ''
+  return folder && folder !== 'self' ? `${folder}/${stem}` : stem
+}
 
 function BeingLogModal({ slug, name, mode, onClose }: {
   slug: string
   name: string
-  mode: 'journal' | 'ticks'
+  mode: 'journal' | 'ticks' | 'self'
   onClose: () => void
 }) {
   const today = new Date().toISOString().slice(0, 10)
@@ -122,24 +130,70 @@ function BeingLogModal({ slug, name, mode, onClose }: {
   const [error, setError] = useState('')
   const [markdown, setMarkdown] = useState('')
   const [date, setDate] = useState(today)
+  const [files, setFiles] = useState<SelfFile[]>([])
+  const [activeFile, setActiveFile] = useState('')
+  // A ref (not state) so loadSelf's identity stays stable across file
+  // switches — it only needs to change when `slug` changes, never when the
+  // user clicks a different file in the sidebar.
+  const activeFileRef = useRef('')
 
-  const load = useCallback(async () => {
+  const loadFile = useCallback(async (path: string) => {
     setLoading(true)
     setError('')
     try {
-      if (mode === 'journal') {
-        const j = await getBeingJournal(slug, date)
-        setMarkdown(j.text || `_${name}'s journal is empty on ${j.date}._`)
-      } else {
-        const ev = await getBeingEvents(slug, 300)
-        setMarkdown(renderTicksMarkdown(ev.events))
-      }
+      const f = await getSelfFile(slug, path)
+      setMarkdown(f.text || `_${selfFileLabel(path)} is empty._`)
+      setActiveFile(path)
+      activeFileRef.current = path
     } catch (e) {
       setError(e instanceof Error ? e.message : 'failed to load')
     } finally {
       setLoading(false)
     }
-  }, [slug, mode, date, name])
+  }, [slug])
+
+  const loadSelf = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const list = await getSelfFiles(slug)
+      setFiles(list.files)
+      if (!list.files.length) { setMarkdown(''); setLoading(false); return }
+      const keep = list.files.find((f) => f.path === activeFileRef.current)
+      await loadFile(keep ? keep.path : list.files[0].path)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed to load')
+      setLoading(false)
+    }
+  }, [slug, loadFile])
+
+  const loadJournal = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const j = await getBeingJournal(slug, date)
+      setMarkdown(j.text || `_${name}'s journal is empty on ${j.date}._`)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed to load')
+    } finally {
+      setLoading(false)
+    }
+  }, [slug, date, name])
+
+  const loadTicks = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const ev = await getBeingEvents(slug, 300)
+      setMarkdown(renderTicksMarkdown(ev.events))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed to load')
+    } finally {
+      setLoading(false)
+    }
+  }, [slug])
+
+  const load = mode === 'journal' ? loadJournal : mode === 'ticks' ? loadTicks : loadSelf
 
   useEffect(() => { void load() }, [load])
 
@@ -155,7 +209,10 @@ function BeingLogModal({ slug, name, mode, onClose }: {
     setDate(d.toISOString().slice(0, 10))
   }
 
-  const sizeClass = maximized ? 'h-[95vh] w-[95vw]' : 'w-[820px] max-h-[85vh]'
+  const titles = { journal: 'Journal', ticks: 'Ticks log', self: 'Self files' } as const
+  const sizeClass = maximized
+    ? 'h-[95vh] w-[95vw]'
+    : mode === 'self' ? 'h-[80vh] w-[920px]' : 'w-[820px] max-h-[85vh]'
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70" onClick={onClose}>
@@ -165,11 +222,12 @@ function BeingLogModal({ slug, name, mode, onClose }: {
       >
         <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-2.5">
           <div className="flex items-center gap-2">
-            {mode === 'journal' ? <ScrollText className="h-4 w-4 text-violet-400" /> : <History className="h-4 w-4 text-violet-400" />}
-            <h3 className="text-sm font-semibold text-zinc-100">
-              {name} — {mode === 'journal' ? 'Journal' : 'Ticks log'}
-            </h3>
+            {mode === 'journal' && <ScrollText className="h-4 w-4 text-violet-400" />}
+            {mode === 'ticks' && <History className="h-4 w-4 text-violet-400" />}
+            {mode === 'self' && <Files className="h-4 w-4 text-violet-400" />}
+            <h3 className="text-sm font-semibold text-zinc-100">{name} — {titles[mode]}</h3>
             {mode === 'journal' && <span className="text-[11px] text-zinc-500">{date}</span>}
+            {mode === 'self' && activeFile && <span className="text-[11px] text-zinc-500">{activeFile}</span>}
           </div>
           <div className="flex items-center gap-0.5">
             {mode === 'journal' && (
@@ -194,14 +252,37 @@ function BeingLogModal({ slug, name, mode, onClose }: {
             </button>
           </div>
         </div>
-        <div className="flex-1 overflow-auto">
-          {loading ? (
-            <div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></div>
-          ) : error ? (
-            <div className="px-6 py-8 text-sm text-red-400">{error}</div>
-          ) : (
-            <div className="fd-file-markdown p-6"><Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown></div>
+        <div className="flex min-h-0 flex-1">
+          {mode === 'self' && (
+            <div className="w-48 shrink-0 overflow-y-auto border-r border-zinc-800 py-2">
+              {files.length === 0 && !loading && (
+                <div className="px-3 py-2 text-[11px] text-zinc-600">no files yet</div>
+              )}
+              {files.map((f) => (
+                <button
+                  key={f.path}
+                  onClick={() => void loadFile(f.path)}
+                  className={`block w-full truncate px-3 py-1.5 text-left text-xs ${
+                    activeFile === f.path
+                      ? 'bg-violet-500/15 text-violet-300'
+                      : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+                  }`}
+                  title={f.path}
+                >
+                  {selfFileLabel(f.path)}
+                </button>
+              ))}
+            </div>
           )}
+          <div className="flex-1 overflow-auto">
+            {loading ? (
+              <div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></div>
+            ) : error ? (
+              <div className="px-6 py-8 text-sm text-red-400">{error}</div>
+            ) : (
+              <div className="fd-file-markdown p-6"><Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown></div>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -396,7 +477,7 @@ function BeingCard({ item, meta, onChanged }: {
 }) {
   const [vitals, setVitals] = useState<BeingVitals | null>(null)
   const [events, setEvents] = useState<BeingEvent[]>([])
-  const [logView, setLogView] = useState<'journal' | 'ticks' | null>(null)
+  const [logView, setLogView] = useState<'journal' | 'ticks' | 'self' | null>(null)
   const [busy, setBusy] = useState('')
   const [parenting, setParenting] = useState(false)
   const [chores, setChores] = useState<Chore[]>([])
@@ -567,6 +648,13 @@ function BeingCard({ item, meta, onChanged }: {
               className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
             >
               <History className="h-3 w-3" /> Ticks
+            </button>
+            <button
+              onClick={() => setLogView('self')}
+              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
+              title="Browse her selfhood files (SELF, VALUES, INTERESTS, garden, skills…)"
+            >
+              <Files className="h-3 w-3" /> Files
             </button>
             <button
               onClick={() => void openParenting()}

@@ -115,6 +115,12 @@ export interface BeingEvent {
   at: string
 }
 
+export interface SelfFile {
+  path: string
+  size: number
+  mtime: string
+}
+
 export interface ConceivePayload {
   name: string
   attributes: Record<string, number>
@@ -133,6 +139,10 @@ export const getBeingEvents = (slug: string, limit = 12) =>
   fdFetch<{ events: BeingEvent[] }>(`/beings/${slug}/events?limit=${limit}`)
 export const getBeingJournal = (slug: string, date = '') =>
   fdFetch<{ date: string; text: string }>(`/beings/${slug}/journal${date ? `?date=${date}` : ''}`)
+export const getSelfFiles = (slug: string) =>
+  fdFetch<{ files: SelfFile[] }>(`/beings/${slug}/self/files`)
+export const getSelfFile = (slug: string, path: string) =>
+  fdFetch<{ path: string; text: string }>(`/beings/${slug}/self/file?path=${encodeURIComponent(path)}`)
 export const getLiabilities = () =>
   fdFetch<{ total_tokens: number; beings: { slug: string; balance_tokens: number }[] }>('/beings/liabilities')
 
