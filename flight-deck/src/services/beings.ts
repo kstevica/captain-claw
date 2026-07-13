@@ -161,6 +161,54 @@ export interface VillageItem {
 export const getVillage = (limit = 40) =>
   fdFetch<{ items: VillageItem[] }>(`/beings/village?limit=${limit}`)
 
+export interface Quest {
+  id: string
+  title: string
+  spec: string
+  fee_tokens: number
+  origin: string
+  state: string
+  claimant: string
+  result_text: string
+  created_at: string
+}
+export interface Venture {
+  id: string
+  being: string
+  title: string
+  description: string
+  price_tokens: number
+  cadence_days: number
+  state: string
+  pending_result: string
+  deliveries: number
+  next_due_at: string | null
+}
+export const getBoard = () =>
+  fdFetch<{ quests: Quest[]; ventures: Venture[] }>('/beings/board')
+export const postQuest = (title: string, spec: string, fee_tokens: number) =>
+  fdFetch<{ quest: Quest }>('/beings/quests', {
+    method: 'POST', body: JSON.stringify({ title, spec, fee_tokens }),
+  })
+export const judgeQuest = (questId: string, approve: boolean, note = '') =>
+  fdFetch<{ quest: Quest }>(`/beings/quests/${questId}/judge`, {
+    method: 'POST', body: JSON.stringify({ approve, note }),
+  })
+export const cancelQuest = (questId: string) =>
+  fdFetch<{ quest: Quest }>(`/beings/quests/${questId}/cancel`, { method: 'POST' })
+export const approveVenture = (ventureId: string, price_tokens: number | null) =>
+  fdFetch<{ venture: Venture }>(`/beings/ventures/${ventureId}/approve`, {
+    method: 'POST', body: JSON.stringify({ price_tokens }),
+  })
+export const setVentureState = (ventureId: string, state: string) =>
+  fdFetch<{ venture: Venture }>(`/beings/ventures/${ventureId}/state`, {
+    method: 'POST', body: JSON.stringify({ state }),
+  })
+export const acceptVenture = (ventureId: string, approve: boolean, note = '') =>
+  fdFetch<{ venture: Venture }>(`/beings/ventures/${ventureId}/accept`, {
+    method: 'POST', body: JSON.stringify({ approve, note }),
+  })
+
 export const approveSelfMod = (slug: string) =>
   fdFetch<{ persona: string }>(`/beings/${slug}/self-mod/approve`, { method: 'POST' })
 export const rejectSelfMod = (slug: string, note = '') =>

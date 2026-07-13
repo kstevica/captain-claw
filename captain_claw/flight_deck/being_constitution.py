@@ -50,6 +50,14 @@ SELF_MOD_FEE_TOKENS = 250_000
 PERSONA_MAX_CHARS = 2000
 PERSONA_MIN_CHARS = 40
 
+# Earning physics (plan §5.1): the open bounty market and being-initiated
+# recurring income. Fees/prices are minted only by the parent at judged
+# delivery — conservation holds, and these clamps keep asks sane.
+QUEST_MAX_FEE_TOKENS = 20_000_000
+VENTURE_MAX_PRICE_TOKENS = 5_000_000
+VENTURE_MIN_CADENCE_DAYS = 1
+VENTURE_MAX_CADENCE_DAYS = 30
+
 # Procreation physics (plan §8): the dowry moves from the parents' savings
 # to the child (reason='procreation') — earned wealth, never conjured; a
 # couple splits it. Consent is the human parent's authenticated approval.

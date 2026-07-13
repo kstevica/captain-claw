@@ -11,13 +11,16 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
-  type Chore, type ReportCard, type SelfFile, type VillageItem,
-  approveProcreation, approveSelfMod, arrangeOffspring, conceiveBeing,
-  euthanizeBeing, getBeingEvents, getBeingJournal, getBeingsMeta,
-  getBeingVitals, getLiabilities, getReportCard, getSelfFile, getSelfFiles,
-  getVillage, hatchBeing, judgeChore, listBeings, listChores, pauseBeing,
-  postChore, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
-  setHouseRules, setMediaDiet, setStage, tickBeing, wakeBeing,
+  type Chore, type Quest, type ReportCard, type SelfFile, type Venture,
+  type VillageItem,
+  acceptVenture, approveProcreation, approveSelfMod, approveVenture,
+  arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
+  getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
+  getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
+  hatchBeing, judgeChore, judgeQuest, listBeings, listChores, pauseBeing,
+  postChore, postQuest, rejectProcreation, rejectSelfMod, rollbackPersona,
+  setAllowance, setHouseRules, setMediaDiet, setStage, setVentureState,
+  tickBeing, wakeBeing,
 } from '../services/beings'
 
 const REFRESH_MS = 6000
@@ -86,6 +89,17 @@ function summarizeEventData(e: BeingEvent): string {
     case 'had_child': return `had a child: ${d.name}${d.with ? ` (with ${d.with})` : ''} — dowry ${fmtTokens(Number(d.dowry_share) || 0)}`
     case 'endowed': return `endowed: ${(d.skills as string[] | undefined)?.join(', ') || 'nothing'}${Number(d.heirlooms) ? ` + ${d.heirlooms} heirloom(s)` : ''}`
     case 'died': return `died — ${d.cause}${d.asleep_days ? ` after ${d.asleep_days} days of torpor` : ''}`
+    case 'quest_claimed': return `claimed quest '${d.title}' (${fmtTokens(Number(d.fee_tokens) || 0)})`
+    case 'quest_delivered': return `delivered quest '${d.title}'`
+    case 'quest_paid': return `paid for quest '${d.title}' — ${fmtTokens(Number(d.fee_tokens) || 0)}`
+    case 'quest_failed': return `quest '${d.title}' rejected${d.note ? ` — ${d.note}` : ''}`
+    case 'venture_proposed': return `proposed venture '${d.title}' (${fmtTokens(Number(d.price_tokens) || 0)}/${d.cadence_days}d)`
+    case 'venture_approved': return `venture '${d.title}' approved at ${fmtTokens(Number(d.price_tokens) || 0)}`
+    case 'venture_delivered': return `delivered venture '${d.title}'`
+    case 'venture_paid': return `venture '${d.title}' paid — ${fmtTokens(Number(d.price_tokens) || 0)}`
+    case 'venture_rejected': return `venture delivery rejected${d.note ? ` — ${d.note}` : ''}`
+    case 'venture_state': return `venture → ${d.to}`
+    case 'earning_refused': return `earning refused (${d.what}): ${d.reason}`
     case 'woke_from_torpor': return 'revived by allowance'
     case 'collapsed_exhausted': return `overspent (${fmtTokens(Number(d.weighted) || 0)})`
     case 'resting_at_cap': return 'daily burn cap reached'
@@ -964,6 +978,138 @@ const VILLAGE_ICONS: Record<string, typeof Mail> = {
   society_refused: X,
 }
 
+const QUEST_STATE_COLOR: Record<string, string> = {
+  open: 'text-sky-300', claimed: 'text-violet-300', judging: 'text-amber-300',
+  paid: 'text-emerald-300', failed: 'text-red-300',
+}
+const VENTURE_STATE_COLOR: Record<string, string> = {
+  proposed: 'text-amber-300', active: 'text-emerald-300',
+  paused: 'text-zinc-400', ended: 'text-red-300',
+}
+
+// The parent's earning control center — the open bounty board + ventures.
+function EarningBoard({ onChanged }: { onChanged: () => void }) {
+  const [quests, setQuests] = useState<Quest[]>([])
+  const [ventures, setVentures] = useState<Venture[]>([])
+  const [title, setTitle] = useState('')
+  const [spec, setSpec] = useState('')
+  const [fee, setFee] = useState('1000000')
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      const b = await getBoard()
+      setQuests(b.quests)
+      setVentures(b.ventures)
+    } catch { /* transient */ }
+  }, [])
+  useEffect(() => { void load() }, [load])
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true)
+    try { await fn(); await load(); onChanged() }
+    catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+        <ClipboardList className="h-3.5 w-3.5 text-violet-400" /> The board — bounties & ventures
+      </div>
+
+      {/* Post a quest */}
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="quest title"
+          className="w-40 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+        <input value={spec} onChange={(e) => setSpec(e.target.value)} placeholder="what needs doing (any being may claim)"
+          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+        <input value={fee} onChange={(e) => setFee(e.target.value)} type="number"
+          className="w-24 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none" />
+        <button
+          disabled={busy || !title.trim() || !spec.trim()}
+          onClick={() => void act(async () => { await postQuest(title.trim(), spec.trim(), Number(fee) || 0); setTitle(''); setSpec('') })}
+          className="rounded bg-violet-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+        >Post bounty</button>
+      </div>
+
+      {/* Quests */}
+      {quests.length > 0 && (
+        <div className="mb-3 space-y-1">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-600">Quests</div>
+          {quests.map((q) => (
+            <div key={q.id} className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs">
+              <span className={`shrink-0 ${QUEST_STATE_COLOR[q.state] || 'text-zinc-400'}`}>{q.state}</span>
+              <span className="min-w-0 flex-1 truncate text-zinc-300" title={q.spec}>
+                {q.title} <span className="text-zinc-600">· {fmtTokens(q.fee_tokens)}</span>
+                {q.claimant && <span className="text-violet-400"> · {q.claimant}</span>}
+                {q.origin === 'autonomy' && <span className="text-zinc-600"> · from autonomy</span>}
+              </span>
+              {q.state === 'judging' && (
+                <>
+                  <button onClick={() => void act(() => judgeQuest(q.id, true))} className="rounded border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10">Pay</button>
+                  <button onClick={() => void act(() => judgeQuest(q.id, false, 'not yet'))} className="rounded border border-red-500/30 px-1.5 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10">Reject</button>
+                </>
+              )}
+              {(q.state === 'open' || q.state === 'claimed') && (
+                <button onClick={() => void act(() => cancelQuest(q.id))} className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800">Cancel</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Ventures */}
+      {ventures.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] uppercase tracking-wide text-zinc-600">Ventures</div>
+          {ventures.map((v) => (
+            <div key={v.id} className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs">
+              <span className={`shrink-0 ${VENTURE_STATE_COLOR[v.state] || 'text-zinc-400'}`}>{v.state}</span>
+              <span className="min-w-0 flex-1 truncate text-zinc-300" title={v.description}>
+                {v.title} <span className="text-zinc-600">· {v.being} · {fmtTokens(v.price_tokens)}/{v.cadence_days}d · {v.deliveries} paid</span>
+              </span>
+              {v.state === 'proposed' && (
+                <>
+                  <button
+                    onClick={() => {
+                      const p = window.prompt(`Price per ${v.cadence_days}-day cycle (tokens)?`, String(v.price_tokens))
+                      if (p !== null) void act(() => approveVenture(v.id, Number(p) || v.price_tokens))
+                    }}
+                    className="rounded border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10">Approve</button>
+                  <button onClick={() => void act(() => setVentureState(v.id, 'ended'))} className="rounded border border-red-500/30 px-1.5 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10">Decline</button>
+                </>
+              )}
+              {v.pending_result && (
+                <>
+                  <span className="text-[10px] text-amber-400" title={v.pending_result}>delivered:</span>
+                  <button onClick={() => void act(() => acceptVenture(v.id, true))} className="rounded border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10">Accept &amp; pay</button>
+                  <button onClick={() => void act(() => acceptVenture(v.id, false, 'redo'))} className="rounded border border-red-500/30 px-1.5 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10">Reject</button>
+                </>
+              )}
+              {v.state === 'active' && !v.pending_result && (
+                <button onClick={() => void act(() => setVentureState(v.id, 'paused'))} className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800">Pause</button>
+              )}
+              {v.state === 'paused' && (
+                <button onClick={() => void act(() => setVentureState(v.id, 'active'))} className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-zinc-800">Resume</button>
+              )}
+              {(v.state === 'active' || v.state === 'paused') && (
+                <button onClick={() => void act(() => setVentureState(v.id, 'ended'))} className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800">End</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {quests.length === 0 && ventures.length === 0 && (
+        <p className="text-xs text-zinc-600">
+          No bounties or ventures yet. Post a bounty for any being to claim, or wait for an adolescent to pitch a venture.
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function BeingsPage() {
   const [meta, setMeta] = useState<BeingsMeta | null>(null)
   const [beings, setBeings] = useState<BeingListItem[]>([])
@@ -971,6 +1117,7 @@ export function BeingsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showConceive, setShowConceive] = useState(false)
+  const [showBoard, setShowBoard] = useState(false)
   const [showVillage, setShowVillage] = useState(false)
   const [village, setVillage] = useState<VillageItem[]>([])
   const timer = useRef<number | null>(null)
@@ -1021,6 +1168,15 @@ export function BeingsPage() {
               outstanding liabilities{' '}
               <span className="font-semibold text-zinc-200">{fmtTokens(liabilities)}</span> tokens
             </span>
+            {beings.length >= 1 && (
+              <button
+                onClick={() => setShowBoard(v => !v)}
+                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-zinc-800 ${showBoard ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-300'}`}
+                title="The bounty board and ventures — how beings earn"
+              >
+                <ClipboardList className="h-3.5 w-3.5" /> Board
+              </button>
+            )}
             {beings.length >= 2 && (
               <button
                 onClick={() => {
@@ -1046,6 +1202,8 @@ export function BeingsPage() {
         {error && (
           <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
         )}
+
+        {showBoard && <EarningBoard onChanged={() => void load(false)} />}
 
         {showVillage && (
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">

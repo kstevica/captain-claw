@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
+from captain_claw.flight_deck import being_earning
 from captain_claw.flight_deck import being_life
 from captain_claw.flight_deck import being_selfmod
 from captain_claw.flight_deck import being_society
@@ -128,6 +129,79 @@ async def village(limit: int = 40, user: dict = Depends(get_current_user)):
     gifts, refusals — one merged family stream. (Registered before /{slug}.)"""
     return {"items": _run(being_society.village_feed, get_store(),
                           user["id"], limit)}
+
+
+class QuestRequest(BaseModel):
+    title: str
+    spec: str
+    fee_tokens: int
+    origin: str = "parent"
+
+
+class VentureApproveRequest(BaseModel):
+    price_tokens: int | None = None
+
+
+class VentureStateRequest(BaseModel):
+    state: str
+
+
+class AcceptRequest(BaseModel):
+    approve: bool
+    note: str = ""
+
+
+# ── Earning: quest board + ventures (registered before /{slug}) ──────────
+
+@router.get("/board")
+async def earning_board(user: dict = Depends(get_current_user)):
+    """The parent's earning view: every quest + venture across the family."""
+    return _run(being_earning.board_summary, get_store(), user["id"])
+
+
+@router.post("/quests")
+async def post_quest(body: QuestRequest,
+                     user: dict = Depends(get_current_user)):
+    """Post an OPEN bounty — any eligible being may claim it."""
+    return {"quest": _run(get_store().post_quest, user["id"], body.title,
+                          body.spec, body.fee_tokens, body.origin)}
+
+
+@router.post("/quests/{quest_id}/judge")
+async def judge_quest(quest_id: str, body: AcceptRequest,
+                      user: dict = Depends(get_current_user)):
+    return {"quest": _run(get_store().judge_quest, user["id"], quest_id,
+                          body.approve, body.note)}
+
+
+@router.post("/quests/{quest_id}/cancel")
+async def cancel_quest(quest_id: str,
+                       user: dict = Depends(get_current_user)):
+    return {"quest": _run(get_store().cancel_quest, user["id"], quest_id)}
+
+
+@router.post("/ventures/{venture_id}/approve")
+async def approve_venture(venture_id: str, body: VentureApproveRequest,
+                          user: dict = Depends(get_current_user)):
+    """Price and approve a proposed venture — it becomes a standing service."""
+    return {"venture": _run(get_store().approve_venture, user["id"],
+                            venture_id, body.price_tokens)}
+
+
+@router.post("/ventures/{venture_id}/state")
+async def set_venture_state(venture_id: str, body: VentureStateRequest,
+                            user: dict = Depends(get_current_user)):
+    """Pause, resume, or end a standing venture."""
+    return {"venture": _run(get_store().set_venture_state, user["id"],
+                            venture_id, body.state)}
+
+
+@router.post("/ventures/{venture_id}/accept")
+async def accept_venture(venture_id: str, body: AcceptRequest,
+                         user: dict = Depends(get_current_user)):
+    """Accept (pay + advance) or reject this cycle's venture delivery."""
+    return {"venture": _run(get_store().accept_venture, user["id"],
+                            venture_id, body.approve, body.note)}
 
 
 @router.get("")

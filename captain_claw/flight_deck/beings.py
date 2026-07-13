@@ -27,7 +27,7 @@ import re
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from captain_claw.flight_deck import being_constitution as constitution
@@ -218,6 +218,53 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_pubs
                     ON being_publications(owner_id, at);
+
+                -- Quest board (plan §5.1): OPEN bounties, not targeted at one
+                -- being — any eligible being may claim, deliver, be judged.
+                -- origin traces provenance (parent | autonomy). The fee mints
+                -- only at judged completion, so conservation holds.
+                CREATE TABLE IF NOT EXISTS being_quests (
+                    id          TEXT PRIMARY KEY,
+                    owner_id    TEXT NOT NULL,
+                    title       TEXT NOT NULL,
+                    spec        TEXT NOT NULL,
+                    fee_tokens  INTEGER NOT NULL,
+                    origin      TEXT NOT NULL DEFAULT 'parent',
+                    state       TEXT NOT NULL DEFAULT 'open',
+                    claimed_by  TEXT,
+                    result_text TEXT NOT NULL DEFAULT '',
+                    judge_note  TEXT NOT NULL DEFAULT '',
+                    created_at  TEXT NOT NULL,
+                    claimed_at  TEXT,
+                    done_at     TEXT,
+                    paid_at     TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_quests
+                    ON being_quests(owner_id, state);
+
+                -- Ventures (plan §5.1): the being-INITIATED recurring service —
+                -- the sanctioned outlet for earning creativity. Proposed by a
+                -- being, priced+approved by the parent, then delivered every
+                -- cadence for recurring pay. pending_result set = a delivery
+                -- awaits the parent's acceptance this cycle.
+                CREATE TABLE IF NOT EXISTS being_ventures (
+                    id             TEXT PRIMARY KEY,
+                    owner_id       TEXT NOT NULL,
+                    being_id       TEXT NOT NULL,
+                    title          TEXT NOT NULL,
+                    description    TEXT NOT NULL DEFAULT '',
+                    price_tokens   INTEGER NOT NULL,
+                    cadence_days   INTEGER NOT NULL,
+                    state          TEXT NOT NULL DEFAULT 'proposed',
+                    pending_result TEXT NOT NULL DEFAULT '',
+                    deliveries     INTEGER NOT NULL DEFAULT 0,
+                    created_at     TEXT NOT NULL,
+                    approved_at    TEXT,
+                    next_due_at    TEXT,
+                    last_paid_at   TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_ventures
+                    ON being_ventures(owner_id, state);
                 """
             )
             # Lightweight migrations (columns added after first ship).
@@ -972,6 +1019,366 @@ class BeingsStore:
             self.milestone(job["being_id"], "first_earned",
                            {"fee_tokens": job["fee_tokens"]}, now=now)
         return self.get_chore(owner_id, job_id)
+
+    # ── Quest board: open bounties (plan §5.1) ────────────────────────
+
+    def post_quest(self, owner_id: str, title: str, spec: str,
+                   fee_tokens: int, origin: str = "parent",
+                   now: datetime | None = None) -> dict:
+        """An OPEN bounty — any eligible being may claim it. Unlike a chore,
+        it targets no one; origin traces provenance (parent | autonomy)."""
+        now = now or _utcnow()
+        if origin not in ("parent", "autonomy"):
+            raise BeingError(f"unknown quest origin {origin!r}")
+        if fee_tokens <= 0:
+            raise BeingError("fee must be positive")
+        fee = min(int(fee_tokens), constitution.QUEST_MAX_FEE_TOKENS)
+        qid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_quests (id, owner_id, title, spec,"
+                " fee_tokens, origin, created_at) VALUES (?,?,?,?,?,?,?)",
+                (qid, owner_id, title.strip()[:120], spec.strip(), fee,
+                 origin, _iso(now)),
+            )
+            self._c().commit()
+        return self.get_quest(owner_id, qid)
+
+    def get_quest(self, owner_id: str, quest_id: str) -> dict:
+        row = self._c().execute(
+            "SELECT * FROM being_quests WHERE owner_id = ?"
+            " AND (id = ? OR id LIKE ?) LIMIT 2",
+            (owner_id, quest_id, f"{quest_id}%"),
+        ).fetchall()
+        if len(row) != 1:
+            raise BeingNotFound("no such quest")
+        return dict(row[0])
+
+    def open_quests(self, owner_id: str, limit: int = 20) -> list[dict]:
+        return [dict(r) for r in self._c().execute(
+            "SELECT * FROM being_quests WHERE owner_id = ? AND state = 'open'"
+            " ORDER BY created_at DESC LIMIT ?", (owner_id, limit),
+        ).fetchall()]
+
+    def all_quests(self, owner_id: str, limit: int = 50) -> list[dict]:
+        return [dict(r) for r in self._c().execute(
+            "SELECT * FROM being_quests WHERE owner_id = ?"
+            " ORDER BY created_at DESC LIMIT ?", (owner_id, limit),
+        ).fetchall()]
+
+    def quests_claimed_by(self, owner_id: str, slug: str) -> list[dict]:
+        b = self.get(owner_id, slug)
+        return [dict(r) for r in self._c().execute(
+            "SELECT * FROM being_quests WHERE claimed_by = ?"
+            " AND state IN ('claimed', 'judging') ORDER BY created_at DESC",
+            (b["id"],),
+        ).fetchall()]
+
+    def claim_quest(self, owner_id: str, slug: str, quest_id: str,
+                    now: datetime | None = None) -> dict:
+        """Atomic claim — first eligible being to reach an open quest wins it.
+        The UPDATE...WHERE state='open' guard makes the race safe."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if not constitution.has_capability(b["stage"], "jobs"):
+            raise BeingError(f"a {b['stage']} cannot take quests yet")
+        if b["state"] == "dead":
+            raise BeingError("the dead take no quests")
+        quest = self.get_quest(owner_id, quest_id)
+        with self._lock:
+            cur = self._c().execute(
+                "UPDATE being_quests SET state = 'claimed', claimed_by = ?,"
+                " claimed_at = ? WHERE id = ? AND state = 'open'",
+                (b["id"], _iso(now), quest["id"]),
+            )
+            self._c().commit()
+            if cur.rowcount != 1:
+                raise BeingError("that quest was already claimed")
+        self.record_event(b["id"], "quest_claimed",
+                          {"quest_id": quest["id"], "title": quest["title"],
+                           "fee_tokens": quest["fee_tokens"]}, now=now)
+        return self.get_quest(owner_id, quest["id"])
+
+    def deliver_quest(self, owner_id: str, slug: str, quest_id: str,
+                      result: str, now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        quest = self.get_quest(owner_id, quest_id)
+        if quest["claimed_by"] != b["id"] or quest["state"] != "claimed":
+            raise BeingError("this is not your claimed quest")
+        with self._lock:
+            self._c().execute(
+                "UPDATE being_quests SET state = 'judging', result_text = ?,"
+                " done_at = ? WHERE id = ?",
+                (result[:4000], _iso(now), quest["id"]),
+            )
+            self._c().commit()
+        self.record_event(b["id"], "quest_delivered",
+                          {"quest_id": quest["id"], "title": quest["title"],
+                           "result": result[:200]}, now=now)
+        return self.get_quest(owner_id, quest["id"])
+
+    def judge_quest(self, owner_id: str, quest_id: str, approve: bool,
+                    note: str = "", now: datetime | None = None) -> dict:
+        """Approve → pay the claimant (the only mint). Reject → back on the
+        board (unclaimed), so another being may try — a real bounty."""
+        now = now or _utcnow()
+        quest = self.get_quest(owner_id, quest_id)
+        if quest["state"] not in ("claimed", "judging"):
+            raise BeingError(f"quest is {quest['state']}, not deliverable")
+        claimant = quest["claimed_by"]
+        if approve:
+            if not claimant:
+                raise BeingError("no claimant to pay")
+            b = self._being_by_id(claimant)
+            view = self.wallet_view(b)
+            fee = int(quest["fee_tokens"])
+            if view["savings_ceiling"] is not None:
+                fee = min(fee, max(0, view["savings_ceiling"]
+                                   - view["balance_tokens"]))
+            if fee > 0:
+                self._apply(owner_id, tokens=fee, reason="fee",
+                            from_being=None, to_being=claimant,
+                            job_id=quest["id"], note="quest", now=now)
+            with self._lock:
+                self._c().execute(
+                    "UPDATE being_quests SET state = 'paid', judge_note = ?,"
+                    " paid_at = ? WHERE id = ?",
+                    (note[:500], _iso(now), quest["id"]),
+                )
+                self._c().commit()
+            self.record_event(claimant, "quest_paid",
+                              {"quest_id": quest["id"],
+                               "title": quest["title"],
+                               "fee_tokens": quest["fee_tokens"]}, now=now)
+            self.milestone(claimant, "first_earned",
+                           {"fee_tokens": quest["fee_tokens"]}, now=now)
+        else:
+            with self._lock:
+                self._c().execute(
+                    "UPDATE being_quests SET state = 'open', claimed_by = NULL,"
+                    " judge_note = ?, claimed_at = NULL, done_at = NULL"
+                    " WHERE id = ?", (note[:500], quest["id"]),
+                )
+                self._c().commit()
+            if claimant:
+                self.record_event(claimant, "quest_failed",
+                                  {"quest_id": quest["id"],
+                                   "title": quest["title"],
+                                   "note": note[:200]}, now=now)
+        return self.get_quest(owner_id, quest["id"])
+
+    def cancel_quest(self, owner_id: str, quest_id: str,
+                     now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        quest = self.get_quest(owner_id, quest_id)
+        if quest["state"] in ("paid",):
+            raise BeingError("a paid quest is history")
+        with self._lock:
+            self._c().execute(
+                "UPDATE being_quests SET state = 'expired' WHERE id = ?",
+                (quest["id"],),
+            )
+            self._c().commit()
+        return self.get_quest(owner_id, quest["id"])
+
+    # ── Ventures: being-initiated recurring income (plan §5.1) ────────
+
+    def propose_venture(self, owner_id: str, slug: str, title: str,
+                        description: str, price_tokens: int,
+                        cadence_days: int, now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if not constitution.has_capability(b["stage"], "ventures"):
+            raise BeingError(f"a {b['stage']} cannot propose ventures yet")
+        if b["state"] == "dead":
+            raise BeingError("the dead run no services")
+        price = max(1, min(int(price_tokens or 0),
+                           constitution.VENTURE_MAX_PRICE_TOKENS))
+        cadence = max(constitution.VENTURE_MIN_CADENCE_DAYS,
+                      min(int(cadence_days or 1),
+                          constitution.VENTURE_MAX_CADENCE_DAYS))
+        active = self._c().execute(
+            "SELECT COUNT(*) AS c FROM being_ventures WHERE being_id = ?"
+            " AND state IN ('proposed', 'active', 'paused')", (b["id"],),
+        ).fetchone()["c"]
+        if active >= 5:
+            raise BeingError("too many ventures already running")
+        vid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_ventures (id, owner_id, being_id, title,"
+                " description, price_tokens, cadence_days, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (vid, owner_id, b["id"], title.strip()[:120],
+                 description.strip()[:500], price, cadence, _iso(now)),
+            )
+            self._c().commit()
+        self.record_event(b["id"], "venture_proposed",
+                          {"venture_id": vid, "title": title[:120],
+                           "price_tokens": price, "cadence_days": cadence},
+                          now=now)
+        return self.get_venture(owner_id, vid)
+
+    def get_venture(self, owner_id: str, venture_id: str) -> dict:
+        row = self._c().execute(
+            "SELECT * FROM being_ventures WHERE owner_id = ?"
+            " AND (id = ? OR id LIKE ?) LIMIT 2",
+            (owner_id, venture_id, f"{venture_id}%"),
+        ).fetchall()
+        if len(row) != 1:
+            raise BeingNotFound("no such venture")
+        return dict(row[0])
+
+    def list_ventures(self, owner_id: str) -> list[dict]:
+        return [dict(r) for r in self._c().execute(
+            "SELECT * FROM being_ventures WHERE owner_id = ?"
+            " ORDER BY created_at DESC", (owner_id,),
+        ).fetchall()]
+
+    def ventures_for(self, owner_id: str, slug: str,
+                     states: tuple[str, ...] | None = None) -> list[dict]:
+        b = self.get(owner_id, slug)
+        q = "SELECT * FROM being_ventures WHERE being_id = ?"
+        args: list = [b["id"]]
+        if states:
+            q += f" AND state IN ({','.join('?' * len(states))})"
+            args += list(states)
+        q += " ORDER BY created_at DESC"
+        return [dict(r) for r in self._c().execute(q, args).fetchall()]
+
+    def due_ventures_for(self, owner_id: str, slug: str,
+                         now: datetime | None = None) -> list[dict]:
+        """Active ventures past their due date with no delivery pending."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        return [dict(r) for r in self._c().execute(
+            "SELECT * FROM being_ventures WHERE being_id = ? AND state = 'active'"
+            " AND pending_result = '' AND next_due_at IS NOT NULL"
+            " AND next_due_at <= ?", (b["id"], _iso(now)),
+        ).fetchall()]
+
+    def approve_venture(self, owner_id: str, venture_id: str,
+                        price_tokens: int | None = None,
+                        now: datetime | None = None) -> dict:
+        """The parent turns a proposal into a standing service. First due date
+        is one cadence out; the parent may renegotiate the price here."""
+        now = now or _utcnow()
+        v = self.get_venture(owner_id, venture_id)
+        if v["state"] != "proposed":
+            raise BeingError(f"venture is {v['state']}, not proposable")
+        price = v["price_tokens"]
+        if price_tokens is not None:
+            price = max(1, min(int(price_tokens),
+                               constitution.VENTURE_MAX_PRICE_TOKENS))
+        due = now + timedelta(days=int(v["cadence_days"]))
+        with self._lock:
+            self._c().execute(
+                "UPDATE being_ventures SET state = 'active', price_tokens = ?,"
+                " approved_at = ?, next_due_at = ? WHERE id = ?",
+                (price, _iso(now), _iso(due), v["id"]),
+            )
+            self._c().commit()
+        self.record_event(v["being_id"], "venture_approved",
+                          {"venture_id": v["id"], "title": v["title"],
+                           "price_tokens": price}, now=now)
+        self.milestone(v["being_id"], "first_venture", {"title": v["title"]},
+                       now=now)
+        return self.get_venture(owner_id, v["id"])
+
+    def set_venture_state(self, owner_id: str, venture_id: str, state: str,
+                          now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        if state not in ("active", "paused", "ended"):
+            raise BeingError(f"cannot set venture to {state!r}")
+        v = self.get_venture(owner_id, venture_id)
+        if v["state"] in ("proposed", "ended"):
+            raise BeingError(f"a {v['state']} venture cannot change to {state}")
+        fields = {"state": state}
+        set_clause = "state = ?"
+        args: list = [state]
+        if state == "active" and not v["next_due_at"]:
+            due = now + timedelta(days=int(v["cadence_days"]))
+            set_clause += ", next_due_at = ?"
+            args.append(_iso(due))
+        args.append(v["id"])
+        with self._lock:
+            self._c().execute(
+                f"UPDATE being_ventures SET {set_clause} WHERE id = ?", args,
+            )
+            self._c().commit()
+        self.record_event(v["being_id"], "venture_state",
+                          {"venture_id": v["id"], "to": state}, now=now)
+        del fields
+        return self.get_venture(owner_id, v["id"])
+
+    def deliver_venture(self, owner_id: str, slug: str, venture_id: str,
+                        result: str, now: datetime | None = None) -> dict:
+        """The being fulfils this cycle's service → awaits parent acceptance."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        v = self.get_venture(owner_id, venture_id)
+        if v["being_id"] != b["id"]:
+            raise BeingError("not your venture")
+        if v["state"] != "active":
+            raise BeingError(f"venture is {v['state']}, not active")
+        if v["pending_result"]:
+            raise BeingError("this cycle's delivery already awaits your parent")
+        with self._lock:
+            self._c().execute(
+                "UPDATE being_ventures SET pending_result = ? WHERE id = ?",
+                (result[:4000] or "(delivered)", v["id"]),
+            )
+            self._c().commit()
+        self.record_event(b["id"], "venture_delivered",
+                          {"venture_id": v["id"], "title": v["title"],
+                           "result": result[:200]}, now=now)
+        return self.get_venture(owner_id, v["id"])
+
+    def accept_venture(self, owner_id: str, venture_id: str, approve: bool,
+                       note: str = "", now: datetime | None = None) -> dict:
+        """Approve → pay the price (the only mint), advance the next due date.
+        Reject → clear the delivery so the being redelivers this cycle."""
+        now = now or _utcnow()
+        v = self.get_venture(owner_id, venture_id)
+        if not v["pending_result"]:
+            raise BeingError("no delivery awaits acceptance")
+        if approve:
+            b = self._being_by_id(v["being_id"])
+            view = self.wallet_view(b)
+            price = int(v["price_tokens"])
+            if view["savings_ceiling"] is not None:
+                price = min(price, max(0, view["savings_ceiling"]
+                                       - view["balance_tokens"]))
+            if price > 0:
+                self._apply(owner_id, tokens=price, reason="fee",
+                            from_being=None, to_being=v["being_id"],
+                            job_id=v["id"], note="venture", now=now)
+            due = now + timedelta(days=int(v["cadence_days"]))
+            with self._lock:
+                self._c().execute(
+                    "UPDATE being_ventures SET pending_result = '',"
+                    " deliveries = deliveries + 1, last_paid_at = ?,"
+                    " next_due_at = ? WHERE id = ?",
+                    (_iso(now), _iso(due), v["id"]),
+                )
+                self._c().commit()
+            self.record_event(v["being_id"], "venture_paid",
+                              {"venture_id": v["id"], "title": v["title"],
+                               "price_tokens": v["price_tokens"]}, now=now)
+            self.milestone(v["being_id"], "first_earned",
+                           {"price_tokens": v["price_tokens"]}, now=now)
+        else:
+            with self._lock:
+                self._c().execute(
+                    "UPDATE being_ventures SET pending_result = '' WHERE id = ?",
+                    (v["id"],),
+                )
+                self._c().commit()
+            self.record_event(v["being_id"], "venture_rejected",
+                              {"venture_id": v["id"], "title": v["title"],
+                               "note": note[:200]}, now=now)
+        return self.get_venture(owner_id, v["id"])
 
     def set_house_rules(self, owner_id: str, slug: str, rules: list[str],
                         now: datetime | None = None) -> dict:

@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from captain_claw import vfs
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
-from captain_claw.flight_deck import being_selfmod, being_society
+from captain_claw.flight_deck import being_earning, being_selfmod, being_society
 from captain_claw.flight_deck.being_society import COMMONS_PROJECT
 from captain_claw.flight_deck.beings import BeingError, BeingNotFound, BeingsStore
 from captain_claw.logging import get_logger
@@ -406,6 +406,11 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
         log.warning("society percepts failed", slug=being["slug"],
                     error=str(e))
     try:
+        lines += being_earning.earning_percepts(store, being)
+    except Exception as e:  # noqa: BLE001
+        log.warning("earning percepts failed", slug=being["slug"],
+                    error=str(e))
+    try:
         for child in store.children_of(being["owner_id"], being["slug"]):
             for e in reversed(store.events(being["owner_id"], child["slug"],
                                            limit=10)):
@@ -538,6 +543,11 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
             lines += ["OPTIONAL SOCIETY FIELDS for your digest — use only "
                       "when genuine, never to perform:",
                       *("  " + f for f in society_fields)]
+    earning_fields = being_earning.earning_prompt_fields(being)
+    if earning_fields:
+        lines += ["OPTIONAL EARNING FIELDS for your digest — tokens are your "
+                  "food, but never claim work you cannot finish:",
+                  *("  " + f for f in earning_fields)]
     affect = being.get("affect") or {}
     if affect.get("mood"):
         note = (f" ({'; '.join(affect.get('notes') or [])})"
@@ -709,6 +719,36 @@ def parse_digest(text: str | None) -> dict | None:
                     "reason": str(self_mod.get("reason") or "")[:300]}
     else:
         self_mod = None
+    def _obj(key: str, *fields: str) -> dict | None:
+        v = raw.get(key)
+        if not isinstance(v, dict):
+            return None
+        out = {f: str(v.get(f) or "")[:4000] for f in fields}
+        return out if any(out.values()) else None
+
+    claim_quest = _obj("claim_quest", "quest_id")
+    quest_deliver = _obj("quest_deliver", "quest_id", "result")
+    if quest_deliver and not quest_deliver.get("quest_id"):
+        quest_deliver = None
+    venture_deliver = _obj("venture_deliver", "venture_id", "result")
+    if venture_deliver and not venture_deliver.get("venture_id"):
+        venture_deliver = None
+    propose_venture = raw.get("propose_venture")
+    if isinstance(propose_venture, dict) and propose_venture.get("title"):
+        try:
+            pv_price = max(0, int(propose_venture.get("price_tokens") or 0))
+        except (TypeError, ValueError):
+            pv_price = 0
+        try:
+            pv_cadence = int(propose_venture.get("cadence_days") or 7)
+        except (TypeError, ValueError):
+            pv_cadence = 7
+        propose_venture = {
+            "title": str(propose_venture["title"])[:120],
+            "description": str(propose_venture.get("description") or "")[:500],
+            "price_tokens": pv_price, "cadence_days": pv_cadence}
+    else:
+        propose_venture = None
     procreate = raw.get("procreate")
     if isinstance(procreate, dict) and procreate.get("case"):
         procreate = {
@@ -735,6 +775,10 @@ def parse_digest(text: str | None) -> dict | None:
         "gift": gift,
         "self_mod": self_mod,
         "procreate": procreate,
+        "claim_quest": claim_quest,
+        "quest_deliver": quest_deliver,
+        "propose_venture": propose_venture,
+        "venture_deliver": venture_deliver,
     }
 
 
@@ -755,6 +799,10 @@ def fallback_digest(text: str | None, kind: str) -> dict:
         "gift": None,
         "self_mod": None,
         "procreate": None,
+        "claim_quest": None,
+        "quest_deliver": None,
+        "propose_venture": None,
+        "venture_deliver": None,
     }
 
 
@@ -1050,6 +1098,14 @@ async def _tick_locked(
             being_society.handle_society_digest(store, being, digest, now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("being society handling failed", slug=being["slug"],
+                        error=str(e))
+    if any(digest.get(k) for k in ("claim_quest", "quest_deliver",
+                                   "propose_venture", "venture_deliver")):
+        try:
+            being_earning.handle_earning_digest(
+                store, store.get(owner, being["slug"]), digest, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("being earning handling failed", slug=being["slug"],
                         error=str(e))
     if digest.get("self_mod"):
         try:
