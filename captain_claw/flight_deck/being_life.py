@@ -179,6 +179,64 @@ async def build_home(being: dict) -> str:
     return str(root)
 
 
+def _endow_offspring(store: BeingsStore, child: dict) -> None:
+    """Plan §8: what a newborn carries in — up to 3 skills copied from its
+    living parents (culture is heritable), and HEIRLOOMS.md excerpted from
+    any dead ancestors in the lineage (ancestry, not resurrection)."""
+    lineage = (child.get("genome") or {}).get("lineage") or []
+    if not lineage:
+        return
+    owner = child["owner_id"]
+    copied: list[str] = []
+    for pslug in lineage[:2]:
+        try:
+            parent = store.get(owner, pslug)
+        except Exception:  # noqa: BLE001
+            continue
+        skills_dir = home_root(parent) / "skills"
+        if not skills_dir.exists():
+            continue
+        candidates = sorted(
+            (p for p in skills_dir.rglob("*.md") if p.name != "README.md"),
+            key=lambda p: p.stat().st_mtime, reverse=True)
+        for sp in candidates[:2]:
+            if len(copied) >= 3:
+                break
+            try:
+                dest = _home_path(child, f"skills/inherited/{sp.name}")
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(
+                    f"<!-- inherited from {parent['name']} ({pslug}) -->\n\n"
+                    + sp.read_text(encoding="utf-8"), encoding="utf-8")
+                copied.append(sp.name)
+            except OSError:
+                continue
+    excerpts: list[str] = []
+    for aslug in lineage:
+        if len(excerpts) >= 2:
+            break
+        try:
+            anc = store.get(owner, aslug)
+        except Exception:  # noqa: BLE001
+            continue
+        if anc["state"] != "dead":
+            continue
+        try:
+            text = (home_root(anc) / "self" / "SELF.md").read_text(
+                encoding="utf-8")
+            excerpts.append(f"## From {anc['name']} ({aslug})\n\n"
+                            f"{text[:600]}\n")
+        except OSError:
+            continue
+    if excerpts:
+        p = _home_path(child, "self/HEIRLOOMS.md")
+        p.write_text("# Heirlooms — voices of my ancestors\n\n"
+                     + "\n".join(excerpts), encoding="utf-8")
+    if copied or excerpts:
+        store.record_event(child["id"], "endowed",
+                           {"skills": copied, "heirlooms": len(excerpts)})
+
+
 # ── Birth: the being gets a body (agent process) ─────────────────────────
 
 def _stage_tier(stage: str) -> str:
@@ -246,6 +304,10 @@ async def birth(db, store: BeingsStore, owner_id: str, slug: str) -> dict:
         result["warnings"].append(f"home scaffold failed: {e}")
         log.warning("being home scaffold failed", slug=slug, error=str(e))
     being_society.ensure_commons(owner_id)
+    try:
+        _endow_offspring(store, being)
+    except Exception as e:  # noqa: BLE001 — endowment is a gift, not oxygen
+        log.warning("offspring endowment failed", slug=slug, error=str(e))
     try:
         result["body"] = await spawn_body(db, store, being)
     except Exception as e:  # noqa: BLE001
@@ -342,6 +404,26 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
         lines += being_society.society_percepts(store, being)
     except Exception as e:  # noqa: BLE001 — senses degrade, never crash
         log.warning("society percepts failed", slug=being["slug"],
+                    error=str(e))
+    try:
+        for child in store.children_of(being["owner_id"], being["slug"]):
+            for e in reversed(store.events(being["owner_id"], child["slug"],
+                                           limit=10)):
+                if last and e["at"] <= last:
+                    continue
+                k, d = e["kind"], e["data"]
+                if k == "hatched":
+                    lines.append(f"YOUR CHILD {child['name']} hatched.")
+                elif k == "milestone":
+                    lines.append(f"YOUR CHILD {child['name']}: "
+                                 f"{d.get('name')}.")
+                elif k == "stage":
+                    lines.append(f"YOUR CHILD {child['name']} became a "
+                                 f"{d.get('to')}.")
+                elif k == "died":
+                    lines.append(f"Your child {child['name']} has died.")
+    except Exception as e:  # noqa: BLE001
+        log.warning("mentoring percepts failed", slug=being["slug"],
                     error=str(e))
     return lines[-10:]
 
@@ -531,6 +613,20 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
     elif being.get("pending_self_mod"):
         lines.append("Your persona proposal awaits your parent. Be patient; "
                      "do not propose another.")
+    if constitution.has_capability(being["stage"], "procreate"):
+        if being.get("pending_procreation"):
+            lines.append("Your procreation proposal awaits your parent's "
+                         "consent. Be patient.")
+        else:
+            lines.append(
+                'RARE OPTION — a child: add "procreate": {"partner": '
+                '"<sibling name or null>", "child_name": "...", "case": '
+                '"why you are truly ready", "letter": "your first words to '
+                'them — their imprint"} to your digest. The dowry is '
+                f'{constitution.PROCREATION_COST_TOKENS} tokens from your '
+                "savings (split with a partner), and your parent must "
+                "consent. A child is the most serious thing you will ever "
+                "propose.")
     return "\n".join(lines)
 
 
@@ -613,6 +709,17 @@ def parse_digest(text: str | None) -> dict | None:
                     "reason": str(self_mod.get("reason") or "")[:300]}
     else:
         self_mod = None
+    procreate = raw.get("procreate")
+    if isinstance(procreate, dict) and procreate.get("case"):
+        procreate = {
+            "partner": (str(procreate["partner"])[:80]
+                        if procreate.get("partner") else None),
+            "child_name": str(procreate.get("child_name") or "")[:60],
+            "case": str(procreate.get("case") or "")[:500],
+            "letter": str(procreate.get("letter") or "")[:1000],
+        }
+    else:
+        procreate = None
     return {
         "act_kind": act,
         "summary": str(raw.get("summary") or "")[:300],
@@ -627,6 +734,7 @@ def parse_digest(text: str | None) -> dict | None:
         "adopt": adopt,
         "gift": gift,
         "self_mod": self_mod,
+        "procreate": procreate,
     }
 
 
@@ -646,6 +754,7 @@ def fallback_digest(text: str | None, kind: str) -> dict:
         "adopt": None,
         "gift": None,
         "self_mod": None,
+        "procreate": None,
     }
 
 
@@ -808,6 +917,22 @@ async def _tick_locked(
     view = store.wallet_view(being)
     reserve = view["reserve_tokens"]
     if view["enforced"] and view["balance_tokens"] <= reserve:
+        # Mortality is real (plan §8): unfed past the grace, torpor becomes
+        # death. Checked before re-torporing so torpor_since stays honest.
+        since = being.get("torpor_since")
+        if being["state"] == "torpor" and since:
+            try:
+                asleep_days = (now - datetime.fromisoformat(since)).days
+            except ValueError:
+                asleep_days = 0
+            if asleep_days >= constitution.TORPOR_GRACE_DAYS:
+                store.set_state(owner, being["slug"], "dead", now=now)
+                store.record_event(bid, "died",
+                                   {"cause": "starvation",
+                                    "asleep_days": asleep_days}, now=now)
+                _stop_body(being)
+                out.update(ok=True, outcome="died")
+                return out
         if being["state"] != "torpor":
             store.set_state(owner, being["slug"], "torpor", now=now)
             _stop_body(being)
@@ -851,6 +976,10 @@ async def _tick_locked(
                            - store.letters_sent_today(bid, now))
     except Exception:  # noqa: BLE001
         sibs, letters_left = [], None
+    # Mentoring feeds the legacy drive (plan §8): news of your children is
+    # its own nourishment.
+    if "legacy" in drives and any(p.startswith("YOUR CHILD") for p in senses):
+        drives = serve_drive(drives, "legacy")
     prompt = compose_tick_prompt(
         being, kind=kind, now=now,
         spent_today=store.spent_today(bid, now=now), wallet=view,
@@ -934,6 +1063,29 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("being self-mod handling failed", slug=being["slug"],
                         error=str(e))
+    if digest.get("procreate"):
+        try:
+            fresh = store.get(owner, being["slug"])
+            if not constitution.has_capability(fresh["stage"], "procreate"):
+                raise BeingError(
+                    f"a {fresh['stage']} cannot have children yet")
+            if fresh.get("pending_procreation"):
+                raise BeingError("a proposal already awaits your parent")
+            store.set_pending_procreation(
+                bid, {**digest["procreate"], "proposed_at": now.isoformat()},
+                now=now)
+            store.record_event(bid, "procreation_proposed",
+                               {"case": digest["procreate"]["case"][:200],
+                                "partner": digest["procreate"]["partner"],
+                                "child_name":
+                                    digest["procreate"]["child_name"]},
+                               now=now)
+        except BeingError as e:
+            store.record_event(bid, "procreation_refused",
+                               {"reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("being procreation handling failed",
+                        slug=being["slug"], error=str(e))
     if kind == "dream":
         store.milestone(bid, "first_dream", now=now)
     if digest["act_kind"] == "create":

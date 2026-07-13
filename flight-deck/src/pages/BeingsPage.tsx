@@ -12,12 +12,12 @@ import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
   type Chore, type ReportCard, type SelfFile, type VillageItem,
-  approveSelfMod, conceiveBeing, euthanizeBeing, getBeingEvents,
-  getBeingJournal, getBeingsMeta, getBeingVitals, getLiabilities,
-  getReportCard, getSelfFile, getSelfFiles, getVillage, hatchBeing,
-  judgeChore, listBeings, listChores, pauseBeing, postChore, rejectSelfMod,
-  rollbackPersona, setAllowance, setHouseRules, setMediaDiet, setStage,
-  tickBeing, wakeBeing,
+  approveProcreation, approveSelfMod, arrangeOffspring, conceiveBeing,
+  euthanizeBeing, getBeingEvents, getBeingJournal, getBeingsMeta,
+  getBeingVitals, getLiabilities, getReportCard, getSelfFile, getSelfFiles,
+  getVillage, hatchBeing, judgeChore, listBeings, listChores, pauseBeing,
+  postChore, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
+  setHouseRules, setMediaDiet, setStage, tickBeing, wakeBeing,
 } from '../services/beings'
 
 const REFRESH_MS = 6000
@@ -79,6 +79,13 @@ function summarizeEventData(e: BeingEvent): string {
     case 'self_mod_refused': return `self-mod refused: ${d.reason}`
     case 'self_mod_rolled_back': return 'persona rolled back by parent'
     case 'self_mod_auto_notice': return `adult self-mod (auto) — ${d.reason}`
+    case 'procreation_proposed': return `asks for a child (${d.child_name || '?'}) — ${d.case}`
+    case 'procreation_refused': return `procreation refused: ${d.reason}`
+    case 'procreation_consented': return `parent consented — ${d.name} conceived`
+    case 'procreation_rejected': return `procreation declined${d.note ? ` — ${d.note}` : ''}`
+    case 'had_child': return `had a child: ${d.name}${d.with ? ` (with ${d.with})` : ''} — dowry ${fmtTokens(Number(d.dowry_share) || 0)}`
+    case 'endowed': return `endowed: ${(d.skills as string[] | undefined)?.join(', ') || 'nothing'}${Number(d.heirlooms) ? ` + ${d.heirlooms} heirloom(s)` : ''}`
+    case 'died': return `died — ${d.cause}${d.asleep_days ? ` after ${d.asleep_days} days of torpor` : ''}`
     case 'woke_from_torpor': return 'revived by allowance'
     case 'collapsed_exhausted': return `overspent (${fmtTokens(Number(d.weighted) || 0)})`
     case 'resting_at_cap': return 'daily burn cap reached'
@@ -562,6 +569,14 @@ function BeingCard({ item, meta, onChanged }: {
             <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
               gen {v.generation}
             </span>
+            {v.lineage.length > 0 && (
+              <span
+                className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500"
+                title={`lineage: ${v.lineage.join(' → ')}`}
+              >
+                of {v.lineage.slice(0, 2).map(s => s.replace(/^iskra-/, '').replace(/-[0-9a-f]{4}$/, '')).join(' & ')}
+              </span>
+            )}
           </div>
 
           <div className="mb-1 flex items-center justify-between text-xs">
@@ -613,40 +628,45 @@ function BeingCard({ item, meta, onChanged }: {
             {busy === 'hatch' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Egg className="h-3 w-3" />}
             Hatch
           </button>
-        ) : item.state !== 'dead' && (
+        ) : (
           <>
-            <button
-              onClick={() => void act('tick', () => tickBeing(item.slug, 'wake'))}
-              disabled={busy === 'tick' || busy === 'dream'}
-              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-              title="Manual heartbeat"
-            >
-              {busy === 'tick' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-              Poke
-            </button>
-            <button
-              onClick={() => void act('dream', () => tickBeing(item.slug, 'dream'))}
-              disabled={busy === 'tick' || busy === 'dream'}
-              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-            >
-              {busy === 'dream' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Moon className="h-3 w-3" />}
-              Dream
-            </button>
-            {item.state === 'paused' ? (
-              <button
-                onClick={() => void act('wake', () => wakeBeing(item.slug))}
-                className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-emerald-300 hover:bg-zinc-800"
-              >
-                <Play className="h-3 w-3" /> Wake
-              </button>
-            ) : (
-              <button
-                onClick={() => void act('pause', () => pauseBeing(item.slug))}
-                className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
-              >
-                <Pause className="h-3 w-3" /> Pause
-              </button>
+            {item.state !== 'dead' && (
+              <>
+                <button
+                  onClick={() => void act('tick', () => tickBeing(item.slug, 'wake'))}
+                  disabled={busy === 'tick' || busy === 'dream'}
+                  className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                  title="Manual heartbeat"
+                >
+                  {busy === 'tick' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
+                  Poke
+                </button>
+                <button
+                  onClick={() => void act('dream', () => tickBeing(item.slug, 'dream'))}
+                  disabled={busy === 'tick' || busy === 'dream'}
+                  className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                >
+                  {busy === 'dream' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Moon className="h-3 w-3" />}
+                  Dream
+                </button>
+                {item.state === 'paused' ? (
+                  <button
+                    onClick={() => void act('wake', () => wakeBeing(item.slug))}
+                    className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-emerald-300 hover:bg-zinc-800"
+                  >
+                    <Play className="h-3 w-3" /> Wake
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => void act('pause', () => pauseBeing(item.slug))}
+                    className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
+                  >
+                    <Pause className="h-3 w-3" /> Pause
+                  </button>
+                )}
+              </>
             )}
+            {/* Remains stay readable (plan §8): logs outlive the being */}
             <button
               onClick={() => setLogView('journal')}
               className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
@@ -666,12 +686,14 @@ function BeingCard({ item, meta, onChanged }: {
             >
               <Files className="h-3 w-3" /> Files
             </button>
-            <button
-              onClick={() => void openParenting()}
-              className={`flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-zinc-800 ${parenting ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-400'}`}
-            >
-              <GraduationCap className="h-3 w-3" /> Parenting
-            </button>
+            {item.state !== 'dead' && (
+              <button
+                onClick={() => void openParenting()}
+                className={`flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-zinc-800 ${parenting ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-400'}`}
+              >
+                <GraduationCap className="h-3 w-3" /> Parenting
+              </button>
+            )}
           </>
         )}
         {item.state !== 'dead' && (
@@ -836,6 +858,59 @@ function BeingCard({ item, meta, onChanged }: {
                       className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800"
                     >Not yet</button>
                   </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Procreation (consent rite) */}
+          {(v.pending_procreation || v.capabilities.includes('procreate')) && (
+            <div>
+              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+                <Egg className="h-3.5 w-3.5 text-violet-400" /> Procreation
+                {!v.pending_procreation && v.capabilities.includes('procreate') && (
+                  <button
+                    onClick={() => {
+                      const name = window.prompt(`Name for ${item.name}'s child?`)
+                      if (!name) return
+                      const partner = window.prompt('Co-parent (sibling name), or leave empty for budding:') || null
+                      void act('procreate', () => arrangeOffspring(item.slug, name, partner))
+                    }}
+                    className="ml-auto rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
+                  >Arrange offspring</button>
+                )}
+              </div>
+              {v.pending_procreation && (
+                <div className="rounded border border-violet-500/30 bg-violet-500/5 p-2.5">
+                  <div className="text-[11px] text-violet-300">
+                    Asks for a child{v.pending_procreation.partner ? ` with ${v.pending_procreation.partner}` : ''} —
+                    “{v.pending_procreation.case}”
+                  </div>
+                  {v.pending_procreation.letter && (
+                    <p className="mt-1 text-[11px] italic text-zinc-400">To the child: “{v.pending_procreation.letter}”</p>
+                  )}
+                  <div className="mt-2 flex items-center gap-1.5">
+                    <input
+                      defaultValue={v.pending_procreation.child_name}
+                      id={`childname-${item.slug}`}
+                      placeholder="child's name"
+                      className="w-32 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => {
+                        const el = document.getElementById(`childname-${item.slug}`) as HTMLInputElement | null
+                        void act('procreate', () => approveProcreation(item.slug, el?.value || ''))
+                      }}
+                      className="rounded bg-violet-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-500"
+                    >Consent</button>
+                    <button
+                      onClick={() => void act('procreate', () => rejectProcreation(item.slug, 'not yet'))}
+                      className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800"
+                    >Not yet</button>
+                  </div>
+                  <p className="mt-1.5 text-[10px] text-zinc-600">
+                    Dowry {fmtTokens(10_000_000)} tokens from the parent{v.pending_procreation.partner ? 's — split' : "'s savings"}.
+                  </p>
                 </div>
               )}
             </div>

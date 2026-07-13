@@ -234,6 +234,8 @@ class BeingsStore:
                 ("affect", "TEXT NOT NULL DEFAULT '{}'"),
                 ("persona", "TEXT NOT NULL DEFAULT ''"),
                 ("pending_self_mod", "TEXT NOT NULL DEFAULT ''"),
+                ("pending_procreation", "TEXT NOT NULL DEFAULT ''"),
+                ("torpor_since", "TEXT"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -298,6 +300,113 @@ class BeingsStore:
         self.record_event(bid, "conceived", {"sheet": sheet, "name": name}, now=now)
         return self.get(owner_id, slug)
 
+    def set_pending_procreation(self, being_id: str, pending: dict | None,
+                                now: datetime | None = None) -> None:
+        self._update(being_id, now or _utcnow(),
+                     pending_procreation=json.dumps(pending) if pending else "")
+
+    def conceive_offspring(
+        self,
+        owner_id: str,
+        name: str,
+        parent_slug: str,
+        partner_slug: str | None = None,
+        *,
+        letter: str = "",
+        allowance_preset: str = "2M",
+        seed: int | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        """Generation N+1 (plan §8): crossover (two parents) or budding (one),
+        never point-buy. The dowry (PROCREATION_COST_TOKENS) moves from the
+        parents' savings to the child on the conservation ledger — earned
+        wealth, split between co-parents, each of whom must afford their half.
+        Consent is the human parent's authenticated call into this method."""
+        import random
+        now = now or _utcnow()
+        parent = self.get(owner_id, parent_slug)
+        if not constitution.has_capability(parent["stage"], "procreate"):
+            raise BeingError(f"a {parent['stage']} cannot have children yet")
+        if parent["state"] == "dead":
+            raise BeingError("the dead bear no children")
+        partner = None
+        if partner_slug:
+            partner = self.get(owner_id, partner_slug)
+            if partner["id"] == parent["id"]:
+                raise BeingError("a partner must be another being")
+            if not constitution.has_capability(partner["stage"], "procreate"):
+                raise BeingError(f"the partner ({partner['stage']}) is too young")
+            if partner["state"] == "dead":
+                raise BeingError("the dead bear no children")
+        funders = [parent] + ([partner] if partner else [])
+        cost = constitution.PROCREATION_COST_TOKENS
+        share = cost // len(funders)
+        for f in funders:
+            view = self.wallet_view(f)
+            if view["enforced"] and view["balance_tokens"] < share:
+                raise InsufficientTokens(
+                    f"{f['name']} cannot afford the dowry share ({share})")
+        rng = random.Random(seed)
+        pa = genome_mod.effective_attributes(parent["genome"])
+        if partner:
+            sheet = genome_mod.crossover(
+                pa, genome_mod.effective_attributes(partner["genome"]), rng)
+        else:
+            sheet = genome_mod.budding(pa, rng)
+        seeds_pool = list(dict.fromkeys(
+            (parent["genome"].get("interest_seeds") or [])
+            + ((partner["genome"].get("interest_seeds") or []) if partner else [])))
+        rng.shuffle(seeds_pool)
+        voice_pool = [g for g in (
+            parent["genome"].get("voice_seed"),
+            partner["genome"].get("voice_seed") if partner else None) if g]
+        lineage = [parent["slug"]] + ([partner["slug"]] if partner else [])
+        lineage += (parent["genome"].get("lineage") or [])[:4]
+        gen = 1 + max(parent["genome"].get("generation", 1),
+                      partner["genome"].get("generation", 1) if partner else 0)
+        g = genome_mod.new_genome(
+            sheet,
+            voice_seed=rng.choice(voice_pool) if voice_pool else "",
+            interest_seeds=seeds_pool[:3],
+            generation=gen,
+            lineage=lineage[:6],
+            inherited_skills=[],
+        )
+        bid = uuid.uuid4().hex
+        slug = f"iskra-{_slugify(name)}-{bid[:4]}"
+        with self._lock:
+            c = self._c()
+            c.execute(
+                "INSERT INTO beings (id, owner_id, slug, name, stage, state, genome,"
+                " born_at, created_at, updated_at, birth_letter)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (bid, owner_id, slug, name, "egg", "alive", json.dumps(g),
+                 _iso(now), _iso(now), _iso(now), letter),
+            )
+            c.execute(
+                "INSERT INTO being_wallets (being_id, allowance_preset, updated_at)"
+                " VALUES (?,?,?)",
+                (bid, allowance_preset, _iso(now)),
+            )
+            c.commit()
+        for f in funders:
+            self._apply(owner_id, tokens=share, reason="procreation",
+                        from_being=f["id"], to_being=bid,
+                        note=f"dowry for {name}", now=now)
+            self.record_event(f["id"], "had_child",
+                              {"child": slug, "name": name,
+                               "dowry_share": share,
+                               "with": (partner["slug"] if partner
+                                        and f["id"] == parent["id"]
+                                        else parent["slug"] if partner
+                                        else None)}, now=now)
+            self.milestone(f["id"], "first_child", {"child": name}, now=now)
+        self.record_event(bid, "conceived", {
+            "sheet": sheet, "name": name, "generation": gen,
+            "of": [f["slug"] for f in funders], "dowry_tokens": cost,
+        }, now=now)
+        return self.get(owner_id, slug)
+
     def _row(self, owner_id: str, slug: str) -> sqlite3.Row:
         row = self._c().execute(
             "SELECT * FROM beings WHERE owner_id = ? AND slug = ?",
@@ -315,11 +424,12 @@ class BeingsStore:
         b["media_diet"] = json.loads(b.get("media_diet") or "{}")
         b["house_rules"] = json.loads(b.get("house_rules") or "[]")
         b["affect"] = json.loads(b.get("affect") or "{}")
-        raw_pending = b.get("pending_self_mod") or ""
-        try:
-            b["pending_self_mod"] = json.loads(raw_pending) if raw_pending else None
-        except json.JSONDecodeError:
-            b["pending_self_mod"] = None
+        for pending_col in ("pending_self_mod", "pending_procreation"):
+            raw_pending = b.get(pending_col) or ""
+            try:
+                b[pending_col] = json.loads(raw_pending) if raw_pending else None
+            except json.JSONDecodeError:
+                b[pending_col] = None
         return b
 
     def list(self, owner_id: str) -> list[dict]:
@@ -368,7 +478,15 @@ class BeingsStore:
             raise BeingError("cannot change stage of a dead being")
         if stage == "egg":
             raise BeingError("cannot return to the egg")
-        self._update(b["id"], now, stage=stage)
+        fields: dict = {"stage": stage}
+        if stage == "adult":
+            drives = dict(b.get("drives") or {})
+            if drives and "legacy" not in drives:
+                soc = genome_mod.effective_attributes(b["genome"])["SOC"]
+                drives["legacy"] = {"weight": round(0.5 + 0.03 * soc, 3),
+                                    "satisfaction": 0.6}
+                fields["drives"] = json.dumps(drives)
+        self._update(b["id"], now, **fields)
         self.record_event(b["id"], "stage", {"from": b["stage"], "to": stage}, now=now)
         return self.get(owner_id, slug)
 
@@ -383,6 +501,10 @@ class BeingsStore:
         fields: dict = {"state": state}
         if state == "dead":
             fields["died_at"] = _iso(now)
+        if state == "torpor" and b["state"] != "torpor":
+            fields["torpor_since"] = _iso(now)
+        elif state == "alive":
+            fields["torpor_since"] = None
         self._update(b["id"], now, **fields)
         self.record_event(b["id"], "state", {"from": b["state"], "to": state}, now=now)
         return self.get(owner_id, slug)
@@ -633,6 +755,7 @@ class BeingsStore:
             "affect": b["affect"],
             "persona": b["persona"],
             "pending_self_mod": b["pending_self_mod"],
+            "pending_procreation": b["pending_procreation"],
         }
 
     def ledger(self, owner_id: str, slug: str, limit: int = 100) -> list[dict]:
@@ -920,6 +1043,23 @@ class BeingsStore:
                 mood = ""
             out.append({"id": r["id"], "slug": r["slug"], "name": r["name"],
                         "stage": r["stage"], "mood": mood})
+        return out
+
+    def children_of(self, owner_id: str, slug: str) -> list[dict]:
+        """Beings whose immediate parents (lineage[:2]) include *slug*."""
+        rows = self._c().execute(
+            "SELECT id, slug, name, genome FROM beings WHERE owner_id = ?",
+            (owner_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                g = json.loads(r["genome"])
+            except json.JSONDecodeError:
+                continue
+            if slug in (g.get("lineage") or [])[:2]:
+                out.append({"id": r["id"], "slug": r["slug"],
+                            "name": r["name"]})
         return out
 
     def names_by_id(self, owner_id: str) -> dict[str, str]:

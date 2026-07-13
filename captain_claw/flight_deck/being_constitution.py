@@ -50,6 +50,13 @@ SELF_MOD_FEE_TOKENS = 250_000
 PERSONA_MAX_CHARS = 2000
 PERSONA_MIN_CHARS = 40
 
+# Procreation physics (plan §8): the dowry moves from the parents' savings
+# to the child (reason='procreation') — earned wealth, never conjured; a
+# couple splits it. Consent is the human parent's authenticated approval.
+PROCREATION_COST_TOKENS = 10_000_000
+# Torpor grace: unfed this long → death. Mortality is real (plan §8).
+TORPOR_GRACE_DAYS = 14
+
 # Capabilities unlocked per stage (cumulative — a stage grants everything
 # below it plus its own row).
 _STAGE_GRANTS: dict[str, frozenset[str]] = {

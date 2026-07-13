@@ -227,6 +227,16 @@ class SelfModRejectRequest(BaseModel):
     note: str = ""
 
 
+class ProcreateConsentRequest(BaseModel):
+    name: str = ""
+
+
+class ProcreateArrangeRequest(BaseModel):
+    name: str
+    partner: str | None = None
+    letter: str = ""
+
+
 @router.post("/{slug}/self-mod/approve")
 async def approve_self_mod(slug: str, user: dict = Depends(get_current_user)):
     """The parent's blessing: the pending persona becomes the operating one."""
@@ -247,6 +257,64 @@ async def rollback_self_mod(slug: str,
     """Restore the persona that preceded the last adoption."""
     b = _run(being_selfmod.rollback, get_store(), user["id"], slug)
     return {"persona": b["persona"]}
+
+
+def _resolve_partner_slug(store, owner_id: str, being: dict,
+                          ref: str | None) -> str | None:
+    if not ref:
+        return None
+    return _run(being_society._sibling_by_ref, store, being, ref)["slug"]
+
+
+@router.post("/{slug}/procreate/approve")
+async def procreate_approve(slug: str, body: ProcreateConsentRequest,
+                            user: dict = Depends(get_current_user)):
+    """The consent rite (Constitution #4): the parent's authenticated
+    approval IS the non-forgeable token. Executes the conception —
+    genome ops + dowry — and clears the proposal."""
+    store = get_store()
+    being = _run(store.get, user["id"], slug)
+    pending = being.get("pending_procreation")
+    if not pending:
+        raise HTTPException(400, "no procreation proposal awaits")
+    child_name = (body.name or pending.get("child_name")
+                  or f"{being['name']} II").strip()
+    partner_slug = _resolve_partner_slug(store, user["id"], being,
+                                         pending.get("partner"))
+    child = _run(store.conceive_offspring, user["id"], child_name, slug,
+                 partner_slug, letter=pending.get("letter") or "")
+    store.set_pending_procreation(being["id"], None)
+    store.record_event(being["id"], "procreation_consented",
+                       {"child": child["slug"], "name": child_name})
+    return {"ok": True, "child": _run(store.vitals, user["id"],
+                                      child["slug"])}
+
+
+@router.post("/{slug}/procreate/reject")
+async def procreate_reject(slug: str, body: SelfModRejectRequest,
+                           user: dict = Depends(get_current_user)):
+    store = get_store()
+    being = _run(store.get, user["id"], slug)
+    if not being.get("pending_procreation"):
+        raise HTTPException(400, "no procreation proposal awaits")
+    store.set_pending_procreation(being["id"], None)
+    store.record_event(being["id"], "procreation_rejected",
+                       {"note": body.note[:200]})
+    return {"ok": True}
+
+
+@router.post("/{slug}/procreate/arrange")
+async def procreate_arrange(slug: str, body: ProcreateArrangeRequest,
+                            user: dict = Depends(get_current_user)):
+    """Parent-arranged conception — same executor, no proposal needed."""
+    store = get_store()
+    being = _run(store.get, user["id"], slug)
+    partner_slug = _resolve_partner_slug(store, user["id"], being,
+                                         body.partner)
+    child = _run(store.conceive_offspring, user["id"], body.name.strip(),
+                 slug, partner_slug, letter=body.letter)
+    return {"ok": True, "child": _run(store.vitals, user["id"],
+                                      child["slug"])}
 
 
 @router.get("/{slug}/report-card")

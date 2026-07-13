@@ -91,6 +91,7 @@ export interface BeingVitals {
     [k: string]: unknown
   }
   generation: number
+  lineage: string[]
   metamorphoses: unknown[]
   interest_seeds: string[]
   wallet: {
@@ -109,6 +110,10 @@ export interface BeingVitals {
   affect: { mood?: string; notes?: string[] }
   persona: string
   pending_self_mod: { content: string; reason: string; proposed_at: string } | null
+  pending_procreation: {
+    partner: string | null; child_name: string; case: string
+    letter: string; proposed_at: string
+  } | null
 }
 
 export interface BeingEvent {
@@ -164,6 +169,19 @@ export const rejectSelfMod = (slug: string, note = '') =>
   })
 export const rollbackPersona = (slug: string) =>
   fdFetch<{ persona: string }>(`/beings/${slug}/self-mod/rollback`, { method: 'POST' })
+
+export const approveProcreation = (slug: string, name = '') =>
+  fdFetch<{ ok: boolean; child: BeingVitals }>(`/beings/${slug}/procreate/approve`, {
+    method: 'POST', body: JSON.stringify({ name }),
+  })
+export const rejectProcreation = (slug: string, note = '') =>
+  fdFetch<{ ok: boolean }>(`/beings/${slug}/procreate/reject`, {
+    method: 'POST', body: JSON.stringify({ note }),
+  })
+export const arrangeOffspring = (slug: string, name: string, partner: string | null, letter = '') =>
+  fdFetch<{ ok: boolean; child: BeingVitals }>(`/beings/${slug}/procreate/arrange`, {
+    method: 'POST', body: JSON.stringify({ name, partner, letter }),
+  })
 
 export const conceiveBeing = (payload: ConceivePayload) =>
   fdFetch<{ ok: boolean; being: BeingVitals }>('/beings/conceive', {
