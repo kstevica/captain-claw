@@ -456,7 +456,9 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                         percepts: list[str] | None = None,
                         first_of_day: bool = False,
                         siblings: list[dict] | None = None,
-                        letters_left: int | None = None) -> str:
+                        letters_left: int | None = None,
+                        last_changed: list[str] | None = None,
+                        last_mismatch: bool = False) -> str:
     now = now or _utcnow()
     g = being["genome"]
     attrs = genome_mod.effective_attributes(g)
@@ -548,6 +550,14 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         lines += ["OPTIONAL EARNING FIELDS for your digest — tokens are your "
                   "food, but never claim work you cannot finish:",
                   *("  " + f for f in earning_fields)]
+    if last_mismatch:
+        lines.append(
+            "REALITY CHECK: last tick your journal described writing a file, "
+            "but NOTHING was written to disk. That gap is recorded. This tick, "
+            "either write the file for real with your tools, or don't claim to.")
+    elif last_changed is not None:
+        real = ", ".join(last_changed[:5]) if last_changed else "nothing"
+        lines.append(f"Last tick you actually changed on disk: {real}.")
     affect = being.get("affect") or {}
     if affect.get("mood"):
         note = (f" ({'; '.join(affect.get('notes') or [])})"
@@ -589,11 +599,13 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
             "garden / create something small / read your own files / rest. "
             "Do it NOW with your tools, modestly (tokens are your food; "
             "thrift matters). Do not start long projects. "
-            "IF YOU CREATE OR TEND: write the actual artifact as a REAL FILE "
-            f"with your tools — a poem is vfs:{proj}/garden/poem-question.md, "
-            f"a skill is vfs:{proj}/skills/<name>.md. Describing a thing in "
-            "your journal is NOT making it; only a real file in your garden "
-            "or skills counts as create or tend."
+            "HONESTY OF RECORD: Flight Deck records what your tools actually "
+            "wrote to disk this tick and stamps it into your journal. If you "
+            "want to make or change something, USE YOUR WRITE TOOL to write "
+            f"the real file (e.g. vfs:{proj}/garden/<name>.md). Do NOT write "
+            "in your journal that you wrote, saved, or updated a file unless "
+            "you truly did this tick — the record will show 'files changed: "
+            "none' beside your words, and the mismatch is noticed."
         )
     lines += [
         "", task, "",
@@ -892,33 +904,78 @@ async def deliver_parent_message(db, being: dict, message: str) -> bool:
         return False
 
 
-async def _tick_materialized(being: dict) -> bool:
-    """True if the agent actually wrote an artifact under garden/ or skills/
-    this turn. Called after the agent turn, before the journal write dirties
-    the tree — so uncommitted changes here are exactly what its tools made."""
+_IGNORED_CHANGES = {".vfs-meta.jsonl", ".gitignore"}
+
+
+async def _tick_changed_files(being: dict) -> list[str] | None:
+    """The files the agent ACTUALLY wrote this turn — ground truth. Called
+    after the agent turn but before the journal write dirties the tree, so
+    uncommitted non-journal changes are exactly what its tools made.
+
+    Returns None when there's no repo to check against (birth always inits
+    one, so production is always verifiable); [] means it changed nothing."""
     from captain_claw.flight_deck import code_git
     root = home_root(being)
     if not await code_git.is_repo(root):
-        return True  # nothing to verify against — trust (birth always inits)
-    dirty = await code_git.git_dirty_paths(root)
-    return any(p.startswith("garden/") or p.startswith("skills/")
-               for p in dirty)
+        return None
+    return [p for p in await code_git.git_dirty_paths(root)
+            if not p.startswith("journal/") and p not in _IGNORED_CHANGES]
+
+
+# Words that, near a file/artifact noun, mean the being is CLAIMING it wrote
+# something to disk. Used only to detect narration that contradicts the diff.
+_WRITE_VERB = re.compile(
+    r"\b(wrote|saved|updated|created|added|put|planted|recorded|noted|penned|"
+    r"filed|committed|edited|drafted)\b", re.IGNORECASE)
+_ARTIFACT_NOUN = re.compile(
+    r"\b(file|\.md|\.txt|garden|skills?|self|values|interests|relationships|"
+    r"journal entry|artifact|note|poem|essay|document|marker|entry)\b",
+    re.IGNORECASE)
+
+
+def _claims_file_write(text: str) -> bool:
+    """Whether the prose claims a concrete write to disk this tick."""
+    t = text or ""
+    return bool(_WRITE_VERB.search(t) and _ARTIFACT_NOUN.search(t))
+
+
+def _changed_footer(changed: list[str] | None) -> str:
+    """The factual record stamped into every journal entry: what the being's
+    tools ACTUALLY wrote this tick, from the git diff — not its self-report.
+    So a reader always sees the truth beside the prose."""
+    if changed is None:
+        return ""
+    if not changed:
+        return "\n*(files changed this tick: none)*\n"
+    shown = ", ".join(changed[:6]) + ("…" if len(changed) > 6 else "")
+    return f"\n*(files changed this tick: {shown})*\n"
 
 
 async def _write_journal(being: dict, digest: dict, kind: str,
-                         now: datetime) -> None:
+                         now: datetime, changed: list[str] | None = None,
+                         mismatch: bool = False) -> None:
     from captain_claw.flight_deck import code_git
     p = _home_path(being, _journal_rel(now))
     p.parent.mkdir(parents=True, exist_ok=True)
     header = "Dream" if kind == "dream" else digest["act_kind"]
     mood = f" · {digest['mood']}" if digest.get("mood") else ""
+    correction = ("\n*(note: this entry described writing a file, but nothing "
+                  "was written to disk this tick.)*\n") if mismatch else ""
     entry = (f"\n## {now.strftime('%H:%M')} — {header}{mood}\n\n"
-             f"{digest['journal_entry']}\n")
+             f"{digest['journal_entry']}\n{correction}{_changed_footer(changed)}")
     with p.open("a", encoding="utf-8") as f:
         f.write(entry)
+    # Commit message states the REAL diff, not the being's summary — the git
+    # log (and the Ticks view built from it) can no longer launder fiction.
+    if changed is None:
+        real = digest["summary"][:60]
+    elif changed:
+        real = ", ".join(changed[:4]) + ("…" if len(changed) > 4 else "")
+    else:
+        real = "journal only"
     root = _home_path(being, "self").parent
     try:
-        await code_git.git_commit(root, f"[{kind}] {digest['summary'][:60]}")
+        await code_git.git_commit(root, f"[{kind}] {real}")
     except Exception as e:  # noqa: BLE001
         log.warning("being journal commit failed", slug=being["slug"],
                     error=str(e))
@@ -1046,11 +1103,23 @@ async def _tick_locked(
     # its own nourishment.
     if "legacy" in drives and any(p.startswith("YOUR CHILD") for p in senses):
         drives = serve_drive(drives, "legacy")
+    # Feed the previous tick's ground truth back in — so a being that narrated
+    # a write it never made is told so, and can stop.
+    last_changed, last_mismatch = None, False
+    try:
+        for e in store.events(owner, being["slug"], limit=12):
+            if e["kind"] == "tick":
+                last_changed = e["data"].get("changed")
+                last_mismatch = bool(e["data"].get("mismatch"))
+                break
+    except Exception:  # noqa: BLE001
+        pass
     prompt = compose_tick_prompt(
         being, kind=kind, now=now,
         spent_today=store.spent_today(bid, now=now), wallet=view,
         percepts=senses, first_of_day=first_of_day,
-        siblings=sibs, letters_left=letters_left)
+        siblings=sibs, letters_left=letters_left,
+        last_changed=last_changed, last_mismatch=last_mismatch)
     t0 = now
     send = send_fn or _send_via_channel
     try:
@@ -1160,31 +1229,37 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("being procreation handling failed",
                         slug=being["slug"], error=str(e))
-    # Anti-theater (plan rule #1): a create/tend act must produce a REAL
-    # artifact, not just narration. We check the working tree BEFORE writing
-    # the journal (which would itself dirty the tree) — anything the agent
-    # wrote under garden/ or skills/ this turn is uncommitted here. If the
-    # being claimed to make something but no artifact appeared, we downgrade
-    # the act to the truth (a journal entry) and log it honestly, so the
-    # milestone, the tick event, and the report card never count fiction.
-    if digest["act_kind"] in ("create", "tend"):
-        try:
-            materialized = await _tick_materialized(being)
-        except Exception as e:  # noqa: BLE001 — verification degrades to trust
-            log.warning("artifact verification failed", slug=being["slug"],
-                        error=str(e))
-            materialized = True
-        if not materialized:
-            store.record_event(bid, "act_unverified",
-                               {"claimed": digest["act_kind"],
-                                "summary": digest["summary"]}, now=now)
-            digest["act_kind"] = "journal"
+    # Anti-theater (plan rule #1): reconcile the being's self-report against
+    # what its tools ACTUALLY wrote this turn. Computed from the git diff
+    # BEFORE the journal write dirties the tree — it is ground truth, not
+    # narration. It (a) downgrades a create/tend that produced nothing, (b)
+    # flags prose that claims a write no diff supports, (c) is stamped into
+    # the journal + commit + tick event, and (d) is fed back next tick.
+    try:
+        changed = await _tick_changed_files(being)
+    except Exception as e:  # noqa: BLE001 — degrades to trust (None)
+        log.warning("artifact verification failed", slug=being["slug"],
+                    error=str(e))
+        changed = None
+    claims_write = _claims_file_write(
+        f"{digest['journal_entry']} {digest['summary']}")
+    made_nothing = changed is not None and not changed
+    mismatch = made_nothing and claims_write
+    if digest["act_kind"] in ("create", "tend") and made_nothing:
+        store.record_event(bid, "act_unverified",
+                           {"claimed": digest["act_kind"],
+                            "summary": digest["summary"]}, now=now)
+        digest["act_kind"] = "journal"
+    if mismatch:
+        store.record_event(bid, "narration_mismatch",
+                           {"summary": digest["summary"][:200]}, now=now)
     if kind == "dream":
         store.milestone(bid, "first_dream", now=now)
-    if digest["act_kind"] == "create":
+    if digest["act_kind"] == "create" and changed:
         store.milestone(bid, "first_artifact", now=now)
     try:
-        await _write_journal(being, digest, kind, now)
+        await _write_journal(being, digest, kind, now,
+                             changed=changed, mismatch=mismatch)
     except Exception as e:  # noqa: BLE001
         log.warning("being journal write failed", slug=being["slug"],
                     error=str(e))
@@ -1226,6 +1301,7 @@ async def _tick_locked(
         "mood": digest["mood"], "mood_engine": affect.get("mood", ""),
         "tokens_weighted": debit["weighted"],
         "drives": {n: d["satisfaction"] for n, d in drives.items()},
+        "changed": changed, "mismatch": mismatch,
     }, now=now)
     out.update(ok=True, outcome="ticked", act=digest["act_kind"],
                tokens=debit["weighted"], next_wake=next_wake.isoformat())
@@ -1272,6 +1348,9 @@ def report_card(store: BeingsStore, being: dict, days: int = 7,
                         ("tick_timeout", "ticks timed out"),
                         ("digest_parse_failed", "gave unstructured reports"),
                         ("spawn_failed", "body failed to spawn"),
+                        ("narration_mismatch",
+                         "claimed to write files it never wrote"),
+                        ("act_unverified", "claimed to make things it didn't"),
                         ("chore_claim_invalid", "claimed a chore that wasn't open")]:
         n = sum(1 for e in events if e["kind"] == kind)
         if n:

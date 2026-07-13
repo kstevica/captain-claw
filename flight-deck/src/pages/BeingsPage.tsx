@@ -101,6 +101,7 @@ function summarizeEventData(e: BeingEvent): string {
     case 'venture_state': return `venture → ${d.to}`
     case 'earning_refused': return `earning refused (${d.what}): ${d.reason}`
     case 'act_unverified': return `claimed ${d.claimed} but made no artifact — logged as reflection`
+    case 'narration_mismatch': return `journal claimed a file write, but nothing changed on disk — “${d.summary}”`
     case 'woke_from_torpor': return 'revived by allowance'
     case 'collapsed_exhausted': return `overspent (${fmtTokens(Number(d.weighted) || 0)})`
     case 'resting_at_cap': return 'daily burn cap reached'
@@ -120,12 +121,18 @@ function renderTicksMarkdown(events: BeingEvent[]): string {
   if (ticks.length === 0) {
     lines.push('_No ticks yet — poke to wake this being._')
   } else {
-    lines.push('| Time | Kind | Act | Summary | Mood | Tokens |')
+    lines.push('| Time | Kind | Act | Summary (its words) | Actually changed | Tokens |')
     lines.push('|---|---|---|---|---|---|')
     for (const e of ticks) {
       const d = e.data as Record<string, unknown>
-      const mood = d.mood_engine ? `${mdCell(d.mood)} (${mdCell(d.mood_engine)})` : mdCell(d.mood)
-      lines.push(`| ${fmtAt(e.at)} | ${mdCell(d.kind)} | ${mdCell(d.act)} | ${mdCell(d.summary)} | ${mood} | ${fmtTokens(Number(d.tokens_weighted) || 0)} |`)
+      // Ground truth: what the tools really wrote, from the git diff — shown
+      // beside its self-report so narration can't stand unchecked.
+      const ch = d.changed as string[] | null | undefined
+      let changed: string
+      if (ch === null || ch === undefined) changed = '·'
+      else if (ch.length === 0) changed = d.mismatch ? '⚠ none (claimed a write)' : 'none'
+      else changed = ch.join(', ')
+      lines.push(`| ${fmtAt(e.at)} | ${mdCell(d.kind)} | ${mdCell(d.act)} | ${mdCell(d.summary)} | ${mdCell(changed)} | ${fmtTokens(Number(d.tokens_weighted) || 0)} |`)
     }
   }
   lines.push('', '## Other events', '')

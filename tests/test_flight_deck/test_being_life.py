@@ -226,11 +226,17 @@ async def test_create_without_artifact_is_downgraded(store):
     tick_ev = next(e for e in store.events(OWNER, b["slug"])
                    if e["kind"] == "tick")
     assert tick_ev["data"]["act"] == "journal"
-    # the prompt now concretely demands a real file
-    assert "only a real file" in seen["prompt"]
-    # the journal entry itself is still preserved — her inner life is honest
-    day = life._home_path(b, f"journal/{NOW.strftime('%Y-%m-%d')}.md")
-    assert "planted a poem" in day.read_text(encoding="utf-8")
+    assert tick_ev["data"]["changed"] == []
+    # the prompt makes the honesty-of-record contract explicit
+    assert "HONESTY OF RECORD" in seen["prompt"]
+    # claiming a write with no diff also trips the mismatch flag
+    assert "narration_mismatch" in kinds
+    # the journal preserves her words AND stamps the factual footer + note
+    day_text = life._home_path(
+        b, f"journal/{NOW.strftime('%Y-%m-%d')}.md").read_text(encoding="utf-8")
+    assert "planted a poem" in day_text
+    assert "files changed this tick: none" in day_text
+    assert "nothing was written to disk" in day_text
 
 
 async def test_create_with_real_artifact_counts(store):
@@ -256,7 +262,14 @@ async def test_create_with_real_artifact_counts(store):
     names = [m["data"]["name"] for m in store.milestones(OWNER, b["slug"])]
     assert "first_artifact" in names
     kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
-    assert "act_unverified" not in kinds
+    assert "act_unverified" not in kinds and "narration_mismatch" not in kinds
+    # the journal footer names the real file; the commit message too
+    day_text = life._home_path(
+        b, f"journal/{NOW.strftime('%Y-%m-%d')}.md").read_text(encoding="utf-8")
+    assert "garden/poem-question.md" in day_text
+    from captain_claw.flight_deck import code_git
+    log_rows = await code_git.git_log(life.home_root(b), limit=1)
+    assert "garden/poem-question.md" in log_rows[0]["message"]
 
 
 async def test_tend_without_touching_garden_is_downgraded(store):
@@ -276,6 +289,41 @@ async def test_tend_without_touching_garden_is_downgraded(store):
     assert out["act"] == "journal"
     assert "act_unverified" in [e["kind"] for e in
                                 store.events(OWNER, b["slug"])]
+
+
+async def test_mismatch_under_journal_act_is_flagged_and_fed_back(store):
+    """The exact pilot pattern: act_kind='journal' while the prose claims a
+    file write. The narrow create/tend check misses it; the mismatch check
+    catches it, and the NEXT tick's prompt tells her so."""
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+    seen = {}
+
+    async def send1(being, prompt):
+        return _digest_reply(
+            act_kind="journal", summary="wrote skills/observation.md",
+            journal_entry="I wrote it down as a real skill — observation.")
+
+    async def usage(being, since):
+        return _usage(30_000)
+
+    await life.tick(db, store, b, now=NOW, send_fn=send1, usage_fn=usage)
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "narration_mismatch" in kinds
+    # commit message reflects reality ("journal only"), not her false summary
+    from captain_claw.flight_deck import code_git
+    msg = (await code_git.git_log(life.home_root(b), limit=1))[0]["message"]
+    assert "observation" not in msg and "journal only" in msg
+
+    async def send2(being, prompt):
+        seen["prompt"] = prompt
+        return _digest_reply()
+
+    await life.tick(db, store, store.get(OWNER, b["slug"]),
+                    now=NOW + timedelta(hours=1), send_fn=send2, usage_fn=usage)
+    assert "REALITY CHECK" in seen["prompt"]
 
 
 # ── The tick ─────────────────────────────────────────────────────────────
