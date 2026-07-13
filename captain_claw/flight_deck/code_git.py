@@ -33,6 +33,7 @@ _GITIGNORE = """\
 .codemap/
 .captain-claw/
 .uploads/
+.facts.db
 saved/
 node_modules/
 __pycache__/
@@ -49,7 +50,7 @@ build/
 # Runtime artifacts an agent litters into ANY workspace (incl. linked real
 # repos). Written to .git/info/exclude — a LOCAL ignore that never modifies the
 # repo's own tracked .gitignore, so linking a real project stays non-invasive.
-_LOCAL_EXCLUDES = ["saved/", ".code/", ".codemap/", ".captain-claw/", ".uploads/", ".DS_Store"]
+_LOCAL_EXCLUDES = ["saved/", ".code/", ".codemap/", ".captain-claw/", ".uploads/", ".facts.db", ".DS_Store"]
 
 
 async def _ensure_excludes(project_dir: Path | str) -> None:

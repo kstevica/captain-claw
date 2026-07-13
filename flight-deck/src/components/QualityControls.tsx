@@ -74,7 +74,7 @@ export function QualityControls({
             <span className="rounded-md bg-violet-600 px-2.5 py-1 text-xs font-medium text-white">Custom</span>
           )}
         </div>
-        {scope === 'research' && !value.honesty_guard && (
+        {!value.honesty_guard && (
           <span className="rounded border border-rose-300 bg-rose-50 px-1.5 py-px text-[9px] font-semibold uppercase text-rose-700 dark:border-rose-700/50 dark:bg-rose-900/30 dark:text-rose-300"
                 title="The anti-fabrication guard is switched off for this run">
             guard off
@@ -132,6 +132,45 @@ export function QualityControls({
               </div>
             </div>
           )}
+          {/* Calibration posture (code): the same default-on honesty guard, but
+              about claiming work done — plus the code output mode. Applies only
+              within an active profile, so a bare off-profile run is unchanged. */}
+          {scope === 'code' && (
+            <div className="space-y-2.5 rounded-md border border-zinc-800/70 bg-zinc-950/30 px-2.5 py-2">
+              <div className="flex items-start gap-3.5">
+                <div className="pt-0.5">
+                  <Switch on={value.honesty_guard}
+                          onClick={() => onChange({ ...value, honesty_guard: !value.honesty_guard })} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-zinc-200">Honesty guard</span>
+                    <span className="rounded border border-emerald-300 bg-emerald-50 px-1 py-px text-[9px] font-semibold uppercase text-emerald-700 dark:border-emerald-700/50 dark:bg-emerald-900/30 dark:text-emerald-300">
+                      default on
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-snug text-zinc-500">
+                    Stops an agent claiming work it didn’t do — “tests pass”, “build green”, “done” — without
+                    actually running the command, and stops it describing an edit it never wrote to disk. The
+                    prompt-side counterweight to the deterministic build/fix guards. Free; only applies within an
+                    active profile, and switching it off restores the previous prompts exactly.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 border-t border-zinc-800/60 pt-2">
+                <span className="text-[11px] text-zinc-400">Output mode</span>
+                <select
+                  value={value.output_mode}
+                  onChange={(e) => onChange({ ...value, output_mode: e.target.value as QualityProfile['output_mode'] })}
+                  className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-0.5 text-xs text-zinc-200 focus:border-sky-500 focus:outline-none"
+                >
+                  <option value="">Default</option>
+                  <option value="complete">Full build — implement everything, label placeholders</option>
+                  <option value="conservative">Cautious — no fakes/stubs to pass checks</option>
+                </select>
+              </div>
+            </div>
+          )}
           {levers.map((l) => {
             const on = value[l.flag as BoolFlag]
             return (
@@ -165,6 +204,17 @@ export function QualityControls({
                         <input
                           type="number" min={3} max={20} value={value.claim_check_max}
                           onChange={(e) => onChange({ ...value, claim_check_max: Math.max(3, Math.min(20, Number(e.target.value))) })}
+                          className="w-14 rounded border border-rose-800/50 bg-zinc-950/60 px-2 py-0.5 text-zinc-200 focus:border-rose-500 focus:outline-none"
+                        />
+                      </label>
+                    )}
+                    {/* parallel_build: max decomposition slices */}
+                    {l.flag === 'parallel_build' && on && (
+                      <label className="mt-1.5 flex items-center gap-2 text-[11px] text-zinc-400">
+                        Max slices
+                        <input
+                          type="number" min={2} max={8} value={value.parallel_build_max_slices}
+                          onChange={(e) => onChange({ ...value, parallel_build_max_slices: Math.max(2, Math.min(8, Number(e.target.value))) })}
                           className="w-14 rounded border border-rose-800/50 bg-zinc-950/60 px-2 py-0.5 text-zinc-200 focus:border-rose-500 focus:outline-none"
                         />
                       </label>

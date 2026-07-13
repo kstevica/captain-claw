@@ -62,6 +62,15 @@ class FactsTool(Tool):
     }
 
     def _project(self) -> Path | None:
+        # Code mode anchors agents at a real repo dir (no vfs: scheme), so it
+        # points the ledger straight at the workspace via CLAW_FACTS_DIR. The
+        # research path (vfs: folder) resolves via vfs.project_root() as before.
+        import os
+        direct = os.environ.get("CLAW_FACTS_DIR", "").strip()
+        if direct:
+            p = Path(direct)
+            if p.is_dir():
+                return p
         from captain_claw import vfs
         try:
             return vfs.project_root()

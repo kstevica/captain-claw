@@ -30,7 +30,11 @@ from pydantic import BaseModel
 
 from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
+from captain_claw.flight_deck import code_consistency
+from captain_claw.flight_deck import code_contract
+from captain_claw.flight_deck import code_honesty
 from captain_claw.flight_deck import code_git
+from captain_claw.flight_deck import code_plan
 from captain_claw.flight_deck import code_map
 from captain_claw.flight_deck import code_verify
 from captain_claw.flight_deck.quality_profile import QualityProfile, TokenBudget
@@ -795,8 +799,14 @@ def _git_prompt(intent: str) -> str:
 
 async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
                      archetype_id: str, prompt: str, by_id: dict,
-                     tiers_map: dict, env_vars: list) -> dict:
-    """Spawn one archetype anchored at ``repo``, dispatch ``prompt``, dispose."""
+                     tiers_map: dict, env_vars: list, *,
+                     extra_tools: list | None = None,
+                     extra_env: list | None = None) -> dict:
+    """Spawn one archetype anchored at ``repo``, dispatch ``prompt``, dispose.
+
+    ``extra_tools``/``extra_env``: opt-in additions for a specific call (e.g. the
+    ``facts`` interface ledger + ``CLAW_FACTS_DIR`` on a decomposed build slice).
+    Both default to nothing, so existing callers are unchanged."""
     src = by_id[archetype_id]
     # Every code agent gets the codemap tool (query the repo's blackboard).
     # The `code` tool is stripped — a coding-run agent must never start a child
@@ -804,6 +814,9 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
     tools = [t for t in (src.get("tools") or []) if t != "code"]
     if "codemap" not in tools:
         tools = tools + ["codemap"]
+    for t in (extra_tools or []):
+        if t not in tools:
+            tools = tools + [t]
     arch = {**src, "tools": tools}
     role = arch.get("role", archetype_id)
     tier = arch.get("tier", "coding")
@@ -856,7 +869,7 @@ async def _run_agent(request: Request, user: dict, pkey: str, repo: Path,
     code_env = [
         {"key": "CLAW_WRITE_DIRECT", "value": "1"},
         {"key": "CLAW_CODE_AGENT", "value": "1"},
-    ] + _git_env()
+    ] + _git_env() + list(extra_env or [])
     port, token, slug = await spawn_archetype_agent(
         arch, tier, tcfg, request, user, name_suffix=suffix,
         env_vars=list(env_vars or []) + code_env, workspace_path=str(repo),
@@ -911,7 +924,7 @@ def _plan_prompt(intent: str, plan_rel: str = "plan.md") -> str:
     )
 
 
-def _build_prompt(intent: str, plan_rel: str = "plan.md") -> str:
+def _build_prompt(intent: str, plan_rel: str = "plan.md", contract: str = "") -> str:
     return (
         f"An implementation plan has been approved and saved as `{plan_rel}` in THIS "
         "repository (your workspace and current directory). Read that plan file, then "
@@ -923,7 +936,8 @@ def _build_prompt(intent: str, plan_rel: str = "plan.md") -> str:
         "turn is judged by the files you actually change. Do not spend the turn on plan "
         "bookkeeping; the plan is already saved.\n\n"
         f"Original request for context:\n{intent}\n\n"
-        "When finished, summarize what you built and how you verified it runs." + _HOSTING_DIRECTIVE + _REPORTS_DIRECTIVE
+        "When finished, summarize what you built and how you verified it runs."
+        + _HOSTING_DIRECTIVE + _REPORTS_DIRECTIVE + contract
     )
 
 
@@ -1012,13 +1026,13 @@ def _select_reviewers(rnd: int, prior_findings: list | None, fix_instructions: s
     return [rv for rv in _REVIEWERS if keep_security or rv != "security-reviewer"]
 
 
-def _fix_prompt(intent: str, fix_instructions: str) -> str:
+def _fix_prompt(intent: str, fix_instructions: str, contract: str = "") -> str:
     return (
         "A code review of THIS repository (your workspace) found issues that must be fixed. "
         "Apply the fixes with relative paths and verify via your shell. Fix ONLY the issues "
         "listed; keep working code intact.\n\n"
         f"Issues to fix:\n{fix_instructions}\n\n"
-        f"Original request for context:\n{intent}" + _REPORTS_DIRECTIVE
+        f"Original request for context:\n{intent}" + _REPORTS_DIRECTIVE + contract
     )
 
 
@@ -1157,6 +1171,78 @@ async def _coverage_gaps(repo: Path, plan_file: str, intent: str,
         return []
 
 
+# ── A1: acceptance contract (opt-in) ────────────────────────────────
+# The task's acceptance criteria, turned into checkable predicates once and
+# validated deterministically after each review round. A failed critical/major
+# rides into triage as a ground-truth report (like the C1 test gate), so the fix
+# loop aims at real acceptance, not reviewer opinion. Zero tokens except the one
+# derive call (and, only if the contract has judge-type rules, one judge call).
+
+async def _load_or_derive_contract(repo: Path, plan_file: str, intent: str,
+                                   tiers_map: dict, registry: dict,
+                                   derive: bool = True) -> list[dict]:
+    """The persisted ``.contract.json`` if present (follow-up turns, user edits);
+    otherwise derive it once from the approved plan. Returns [] on any failure —
+    the contract is opt-in insurance, never a blocker."""
+    existing = code_contract.load(repo)
+    if existing is not None:
+        return existing
+    if not derive:
+        return []
+    plan_abs = repo / plan_file
+    plan_text = plan_abs.read_text() if plan_abs.is_file() else ""
+    tier = _resolve_tcfg(tiers_map, "reason") or registry.get("tiers", {}).get("reason", {})
+    try:
+        from captain_claw.llm import Message, create_provider
+        prov = create_provider(
+            provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
+            api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+            temperature=0.1, max_tokens=1500)
+        resp = await prov.complete(messages=[
+            Message(role="system", content="You extract checkable acceptance criteria. "
+                    "Reply with JSON only."),
+            Message(role="user", content=code_contract.derive_prompt(intent, plan_text))],
+            temperature=0.1, max_tokens=1500)
+        constraints = code_contract.parse_contract(resp.content)
+    except Exception as e:  # noqa: BLE001 — deriving must never break the build
+        log.warning("contract derive failed", error=str(e))
+        return []
+    if constraints:
+        code_contract.save(repo, constraints, intent)
+    return constraints
+
+
+async def _validate_contract(repo: Path, constraints: list[dict],
+                             tiers_map: dict, registry: dict) -> tuple[dict | None, dict]:
+    """Validate the contract against the current repo. Deterministic checks are
+    free; judge-type (and errored) rules cost one reason-tier call, folded in.
+    Returns ``(review_entry | None, summary)`` — the entry is a synthetic
+    ground-truth report for triage when a critical/major rule fails."""
+    result = await code_contract.validate(repo, constraints)
+    if result.get("unresolved"):
+        try:
+            tree = "\n".join(sorted(
+                p.relative_to(repo).as_posix() for p in repo.rglob("*")
+                if p.is_file() and not any(part.startswith(".")
+                                           for part in p.relative_to(repo).parts))[:400])
+            tier = _resolve_tcfg(tiers_map, "reason") or registry.get("tiers", {}).get("reason", {})
+            from captain_claw.llm import Message, create_provider
+            prov = create_provider(
+                provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
+                api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+                temperature=0.1, max_tokens=1000)
+            resp = await prov.complete(messages=[
+                Message(role="system", content="You judge acceptance rules a script can't "
+                        "check. Reply with a JSON array only."),
+                Message(role="user", content=code_contract.judge_prompt(
+                    result["unresolved"], tree))],
+                temperature=0.1, max_tokens=1000)
+            code_contract.apply_judgement(result, code_contract.parse_judgement(resp.content))
+        except Exception as e:  # noqa: BLE001 — judge is best-effort
+            log.warning("contract judge failed", error=str(e))
+    return code_contract.as_review_entry(result), code_contract.summarize(result)
+
+
 _BACKLOG_REPORT = "backlog"
 
 
@@ -1196,7 +1282,7 @@ _DEEP_BUILD_EST = 20000  # rough per-attempt output-token estimate for budget ac
 async def _deep_build(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                       intent: str, by_id: dict, tiers_map: dict, env_vars: list,
                       plan_file: str, quality: QualityProfile,
-                      budget: TokenBudget) -> tuple[dict | None, str | None]:
+                      budget: TokenBudget, contract_dir: str = "") -> tuple[dict | None, str | None]:
     """C3 deep build (opt-in): up to N independent build attempts, each verified by
     the test gate, keep the FIRST that passes its tests (else the last).
 
@@ -1216,7 +1302,7 @@ async def _deep_build(request: Request, user: dict, pkey: str, repo: Path, sdir:
         sha: str | None = None
         for attempt in range(_BUILD_RETRIES + 1):
             bp = (_no_change_corrective(attempt, _acted(d)) if attempt else "") \
-                + _build_prompt(intent, plan_file)
+                + _build_prompt(intent, plan_file, contract_dir)
             d = await _run_agent(request, user, pkey, repo, "code-implementer",
                                  bp, by_id, tiers_map, env_vars)
             if _cancelled(pkey):
@@ -1255,6 +1341,128 @@ async def _deep_build(request: Request, user: dict, pkey: str, repo: Path, sdir:
     return d, last_sha
 
 
+# ── Phase B: decomposed, dependency-layered team build ────────────────
+
+_CODE_OWNER_POOL = ("code-implementer", "quick-dirty", "debugger")
+
+
+async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
+                          tiers_map: dict, registry: dict, quality: QualityProfile) -> list[dict]:
+    """Group-0 decomposition: one reason-tier call turns the approved plan into
+    build slices (0..N). Returns the parsed slices verbatim — the caller decides
+    whether there are enough (>=2) to run a team, so it can explain the fallback.
+    Returns [] on any failure."""
+    plan_abs = repo / plan_file
+    plan_text = plan_abs.read_text() if plan_abs.is_file() else ""
+    roster = [a for a in _CODE_OWNER_POOL if a in by_id] or ["code-implementer"]
+    tier = _resolve_tcfg(tiers_map, "reason") or registry.get("tiers", {}).get("reason", {})
+    try:
+        from captain_claw.llm import Message, create_provider
+        prov = create_provider(
+            provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
+            api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+            temperature=0.1, max_tokens=2500)
+        resp = await prov.complete(messages=[
+            Message(role="system", content="You are a build coordinator. Reply with JSON only."),
+            Message(role="user", content=code_plan.decompose_prompt(
+                intent, plan_text, roster, quality.parallel_build_max_slices))],
+            temperature=0.1, max_tokens=2500)
+        return code_plan.parse_slices(resp.content, by_id, quality.parallel_build_max_slices)
+    except Exception as e:  # noqa: BLE001 — decomposition must never break the build
+        log.warning("plan decomposition failed", error=str(e))
+        return []
+
+
+async def _run_decomposed_build(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
+                                intent: str, by_id: dict, tiers_map: dict, env_vars: list,
+                                registry: dict, plan_file: str, quality: QualityProfile,
+                                contract_dir: str) -> tuple[dict | None, str | None]:
+    """Phase B (opt-in, parallel_build): decompose the approved plan into
+    dependency-layered slices and build them layer by layer — a focused
+    implementer per slice, sharing the ``facts`` interface ledger so the slices
+    agree on signatures. A barrier between layers means a slice never runs before
+    the foundations it depends on. Returns ``(last_dispatch, last_sha)``; the
+    caller continues into the normal review/fix loop, which hardens the result.
+
+    Degrades safely: an empty/degenerate decomposition returns ``(None, None)``
+    and the caller falls back to the single ``code-implementer`` build."""
+    _phase(pkey, "Planning the build (decomposition)")
+    slices = await _decompose_plan(repo, plan_file, intent, by_id, tiers_map, registry, quality)
+    if len(slices) < 2:
+        # A team needs >=2 independent slices. One slice (a single-file or
+        # otherwise indivisible plan) or none (the model couldn't split it) means
+        # there is nothing to parallelize — say so explicitly in the transcript so
+        # it's obvious a team did NOT run, then fall back to one implementer.
+        reason = ("this plan is a single-file or otherwise indivisible deliverable"
+                  if len(slices) == 1 else
+                  "the plan couldn't be split into independent slices")
+        _progress(pkey, "note", "team build → single-implementer fallback")
+        _append_chat(sdir, "assistant",
+                     f"🧩 **Team build:** {reason}, so there's nothing to parallelize — "
+                     "building with a single implementer instead. (Team build shines on "
+                     "multi-file plans, where each slice owns different files.)",
+                     kind="note")
+        return None, None
+
+    plan_layers = code_plan.layers(slices)
+    coord = code_plan.coordination_markdown(slices)
+    _write_report(repo, "coordination-plan", coord)
+    _append_chat(sdir, "assistant",
+                 f"Build coordination plan: {len(slices)} slice(s) across "
+                 f"{len(plan_layers)} layer(s).\n\n{coord}", kind="note")
+    await code_git.git_commit(repo, "[plan] build coordination")
+
+    # The interface ledger is auto-armed with parallel_build (or an explicit
+    # facts_ledger): slices record/read signatures through the `facts` tool,
+    # backed by .facts.db in the repo (gitignored runtime state).
+    use_ledger = quality.parallel_build or quality.facts_ledger
+    extra_tools = ["facts"] if use_ledger else None
+    extra_env = [{"key": "CLAW_FACTS_DIR", "value": str(repo)}] if use_ledger else None
+
+    by_id_slices = {s["id"]: s for s in slices}
+    d: dict | None = None
+    last_sha: str | None = None
+    for lyr, group in plan_layers:
+        if _cancelled(pkey):
+            return d, last_sha
+        _phase(pkey, code_plan.schedule_progress(lyr, len(plan_layers), group))
+        # Within a layer, slices own disjoint files by construction — but they
+        # share one repo dir, so we build them sequentially (safe on the shared
+        # tree). Cross-layer ordering is the barrier that matters for correctness;
+        # true within-layer concurrency (worktrees) is a future refinement.
+        for s in group:
+            if _cancelled(pkey):
+                return d, last_sha
+            owner = s["owner_archetype_id"] if s["owner_archetype_id"] in by_id else "code-implementer"
+            _phase(pkey, f"Building slice: {s['title']} ({code_plan.vatra_groups.group_label(lyr)})")
+            sp = code_plan.slice_prompt(intent, s, by_id_slices, facts=use_ledger) + contract_dir
+            sd = None
+            ssha = None
+            for attempt in range(_BUILD_RETRIES + 1):
+                fp = (_no_change_corrective(attempt, _acted(sd)) if attempt else "") + sp
+                sd = await _run_agent(request, user, pkey, repo, owner, fp, by_id,
+                                      tiers_map, env_vars,
+                                      extra_tools=extra_tools, extra_env=extra_env)
+                if _cancelled(pkey):
+                    return sd, last_sha
+                ssha = await code_git.git_commit(repo, f"[build L{lyr}] {owner}: {s['title'][:50]}")
+                if ssha:
+                    break
+                _progress(pkey, "note",
+                          f"slice '{s['title']}' produced no changes (attempt {attempt + 1})")
+            d = sd or d
+            if ssha:
+                last_sha = ssha
+                _append_chat(sdir, "assistant", (sd.get("output") or "(slice produced no summary)").strip(),
+                             kind="build", archetype=owner, ok=bool(sd and sd.get("ok")), commit=ssha)
+            else:
+                _append_chat(sdir, "assistant",
+                             f"⚠️ Slice '{s['title']}' produced no file changes — continuing "
+                             "with the rest of the plan; the review/fix loop will catch gaps.",
+                             kind="note")
+    return d, last_sha
+
+
 async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                           intent: str, by_id: dict, tiers_map: dict,
                           env_vars: list, registry: dict, plan_file: str = "plan.md",
@@ -1290,6 +1498,23 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         _write_state(sdir, {"status": "idle"})
 
     try:
+        # A1 acceptance contract (opt-in): load or derive the checkable acceptance
+        # criteria once, inject them into the build/fix prompts as the target, and
+        # validate them after each review round. Empty when the lever is off.
+        contract: list[dict] = []
+        contract_sum: dict = {}
+        if quality.constraints_contract:
+            contract = await _load_or_derive_contract(
+                repo, plan_file, intent, tiers_map, registry, derive=not seed_fix)
+            if contract:
+                _progress(pkey, "note", f"acceptance contract armed: {len(contract)} rule(s)")
+        # A2 completion-honesty guard + output mode (opt-in): applied only when a
+        # quality profile is active, so a bare off-profile run stays byte-for-byte
+        # today's prompts. Combined with the contract directive into one suffix.
+        guard_dir = code_honesty.guard_directive(
+            quality.honesty_guard and quality.any_enabled, quality.output_mode)
+        contract_dir = guard_dir + code_contract.contract_directive(contract)
+
         last_fix_sha: str | None = None
         if seed_fix:
             # Seeded pass: backlog continuation OR a C6 follow-up (harden/cover/
@@ -1300,7 +1525,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             fd = None
             for attempt in range(_FIX_RETRIES + 1):
                 fp = (_no_change_corrective(attempt, _acted(fd)) if attempt else "") \
-                    + _fix_prompt(intent, seed_fix)
+                    + _fix_prompt(intent, seed_fix, contract_dir)
                 fd = await _run_agent(request, user, pkey, repo, _sfixer,
                                       fp, by_id, tiers_map, env_vars)
                 if _cancelled(pkey):
@@ -1327,7 +1552,8 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             _phase(pkey, "Deep building")
             did_build = True
             d, sha = await _deep_build(request, user, pkey, repo, sdir, intent, by_id,
-                                       tiers_map, env_vars, plan_file, quality, budget)
+                                       tiers_map, env_vars, plan_file, quality, budget,
+                                       contract_dir)
             if _cancelled(pkey):
                 _finish_stopped()
                 return
@@ -1343,27 +1569,38 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                 _write_state(sdir, {"status": "idle"})
                 return
         else:
-            _phase(pkey, "Building")
             did_build = True   # C2: a build was attempted; final_clean decides win/loss
             d = None
             sha = None
-            for attempt in range(_BUILD_RETRIES + 1):
-                bp = (_no_change_corrective(attempt, _acted(d)) if attempt else "") \
-                    + _build_prompt(intent, plan_file)
-                d = await _run_agent(request, user, pkey, repo, "code-implementer",
-                                     bp, by_id, tiers_map, env_vars)
+            # Phase B (opt-in): decompose the plan into a dependency-layered team
+            # build first. Degrades to the single-implementer build below when the
+            # decomposition is degenerate or commits nothing.
+            if quality.parallel_build:
+                d, sha = await _run_decomposed_build(
+                    request, user, pkey, repo, sdir, intent, by_id, tiers_map,
+                    env_vars, registry, plan_file, quality, contract_dir)
                 if _cancelled(pkey):
                     _finish_stopped()
                     return
-                sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
-                if sha:
-                    break
-                _progress(pkey, "note", f"build produced no file changes — retrying ({attempt + 1}/{_BUILD_RETRIES})")
-                _append_chat(sdir, "assistant",
-                             f"⚠️ The builder produced no file changes (attempt {attempt + 1}) — "
-                             "retrying with a corrective instruction.", kind="note")
-            _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip(),
-                         kind="build", archetype="code-implementer", ok=bool(d.get("ok")), commit=sha or "")
+            if sha is None:
+                _phase(pkey, "Building")
+                for attempt in range(_BUILD_RETRIES + 1):
+                    bp = (_no_change_corrective(attempt, _acted(d)) if attempt else "") \
+                        + _build_prompt(intent, plan_file, contract_dir)
+                    d = await _run_agent(request, user, pkey, repo, "code-implementer",
+                                         bp, by_id, tiers_map, env_vars)
+                    if _cancelled(pkey):
+                        _finish_stopped()
+                        return
+                    sha = await code_git.git_commit(repo, f"[build] code-implementer: {intent[:60]}")
+                    if sha:
+                        break
+                    _progress(pkey, "note", f"build produced no file changes — retrying ({attempt + 1}/{_BUILD_RETRIES})")
+                    _append_chat(sdir, "assistant",
+                                 f"⚠️ The builder produced no file changes (attempt {attempt + 1}) — "
+                                 "retrying with a corrective instruction.", kind="note")
+                _append_chat(sdir, "assistant", (d.get("output") or "(build produced no summary)").strip() if d else "(build produced no summary)",
+                             kind="build", archetype="code-implementer", ok=bool(d and d.get("ok")), commit=sha or "")
             if not sha:
                 _u = _usage_summary(pkey)
                 _append_chat(sdir, "assistant",
@@ -1386,6 +1623,18 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                     if quality.test_gate else "")
         if test_cmd:
             _progress(pkey, "note", f"test gate armed: {test_cmd}")
+
+        # A3 blocking gate (opt-in, block_on_critical): track the deterministic
+        # ground-truth signal (failing tests + failing contract criticals) across
+        # rounds. A fix round that makes it WORSE is reverted and the loop stops —
+        # a regressing fixer never gets to keep degrading the repo. quality_verdict
+        # records where the run landed for the metrics record (A4). All no-ops when
+        # the lever is off.
+        quality_verdict = ""
+        prev_det_crit: int | None = None
+        pre_fix_sha: str | None = None
+        fix_rounds_run = 0
+        last_triage: dict = {"findings": []}
 
         prior_findings: list = []
         prior_fix_instructions: str = seed_fix
@@ -1425,17 +1674,81 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             # tokens; a pass injects nothing (no manufactured work). A failure
             # keeps triage.needs_fix true, so it also flows into C2's success
             # signal for free.
+            tests_ok = True
             if test_cmd:
                 _phase(pkey, "Running tests")
                 tres = await code_verify.run_tests(repo, test_cmd)
+                tests_ok = bool(tres.get("ok"))
                 _progress(pkey, "note",
-                          ("✓ tests passed" if tres.get("ok") else "✗ tests failing")
+                          ("✓ tests passed" if tests_ok else "✗ tests failing")
                           + f" · {test_cmd}")
                 entry = code_verify.as_review_entry(tres)
                 if entry:
                     reviews = [entry] + reviews
                     _write_report(repo, f"review-r{rnd}-tests",
                                   f"# Test Runner — r{rnd}\n\n{entry['output']}")
+
+            # A1: validate the acceptance contract on the current committed state.
+            # A failed critical/major rides in as a ground-truth report, so triage
+            # keeps needs_fix and the fix loop closes it. Zero tokens unless the
+            # contract has judge-type rules.
+            if contract:
+                _phase(pkey, "Checking acceptance contract")
+                centry, contract_sum = await _validate_contract(
+                    repo, contract, tiers_map, registry)
+                _progress(pkey, "note",
+                          f"acceptance contract: {contract_sum.get('passed', 0)}/"
+                          f"{contract_sum.get('checked', 0)} rule(s) pass"
+                          + (f" · {contract_sum.get('failed_critical', 0)} critical +"
+                             f" {contract_sum.get('failed_major', 0)} major failing"
+                             if centry else ""))
+                if centry:
+                    reviews = [centry] + reviews
+                    _write_report(repo, f"review-r{rnd}-contract",
+                                  f"# Acceptance Contract — r{rnd}\n\n{centry['output']}")
+
+            # Phase C: cross-file interface consistency (opt-in). Deterministic,
+            # zero-token: broken local imports (a symbol imported from a module
+            # that doesn't define it — the classic parallel-slice interface drift)
+            # ride into triage as ground truth, like the test gate and contract.
+            iface_crit = 0
+            if quality.interface_consistency:
+                ifindings = code_consistency.check(repo)
+                iface_crit = sum(1 for f in ifindings if f.get("severity") == "critical")
+                _progress(pkey, "note",
+                          f"interface check: {iface_crit} broken import(s)"
+                          if iface_crit else "interface check: imports resolve")
+                ientry = code_consistency.as_review_entry(ifindings)
+                if ientry:
+                    reviews = [ientry] + reviews
+                    _write_report(repo, f"review-r{rnd}-interface",
+                                  f"# Interface Consistency — r{rnd}\n\n{ientry['output']}")
+
+            # A3: the deterministic ground-truth count for THIS committed state.
+            # If block_on_critical is on and the previous fix round pushed it up,
+            # that fix regressed the repo — revert it and stop with an honest
+            # verdict rather than letting the fixer keep degrading things.
+            det_crit = ((0 if tests_ok else 1) + int(contract_sum.get("failed_critical", 0))
+                        + iface_crit)
+            if (quality.block_on_critical and prev_det_crit is not None
+                    and det_crit > prev_det_crit and pre_fix_sha):
+                _progress(pkey, "note",
+                          f"blocking gate: fix round regressed ground truth "
+                          f"({prev_det_crit}→{det_crit} critical) — reverting")
+                try:
+                    await code_git.git_reset(repo, pre_fix_sha)
+                except Exception as e:  # noqa: BLE001 — revert is best-effort
+                    log.warning("blocking gate revert failed", error=str(e))
+                # The reverted state is exactly what last round's triage described.
+                _write_backlog(repo, last_triage)
+                _append_chat(sdir, "assistant",
+                             "⛔ Blocking gate: the last fix made the build's ground-truth "
+                             "checks worse, so it was reverted and the run stopped at the "
+                             "prior state. Say **continue fixing** to try again (a stronger "
+                             "coding-tier model usually resolves this.)", kind="note", ok=False)
+                quality_verdict = "critical_findings_remain"
+                break
+            prev_det_crit = det_crit
 
             triage = await _triage_reviews(reviews, intent, tiers_map, registry)
             review_summary = triage.get("summary", "Review complete.")
@@ -1445,14 +1758,17 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                          findings=triage.get("findings", []), needs_fix=triage["needs_fix"])
             prior_findings = triage.get("findings", []) or []
             prior_fix_instructions = triage.get("fix_instructions", "") or ""
+            last_triage = triage
 
             if not triage["needs_fix"]:
                 # Clean pass — a stale backlog from an earlier capped run is done.
                 final_clean = True   # C2: the run reached a verified-clean state
+                quality_verdict = "clean"
                 _backlog_path(repo).unlink(missing_ok=True)
                 break
             if rnd == _MAX_FIX_ROUNDS:
                 rel = _write_backlog(repo, triage)
+                quality_verdict = "critical_findings_remain"
                 _append_chat(sdir, "assistant",
                              f"Reached the fix-round cap ({_MAX_FIX_ROUNDS}). Open findings "
                              f"saved to `{rel}` — say **continue fixing** to resume from "
@@ -1463,12 +1779,16 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                 _finish_stopped()
                 return
             _phase(pkey, f"Fixing (round {rnd + 1})")
+            # A3: remember the pre-fix HEAD so a regressing fix can be reverted.
+            _head = await code_git.git_log(repo, 1)
+            pre_fix_sha = _head[0]["sha"] if _head else None
+            fix_rounds_run += 1
             fixer = triage["fixer"]
             fd = None
             fsha = None
             for attempt in range(_FIX_RETRIES + 1):
                 fp = (_no_change_corrective(attempt, _acted(fd)) if attempt else "") \
-                    + _fix_prompt(intent, triage.get("fix_instructions", ""))
+                    + _fix_prompt(intent, triage.get("fix_instructions", ""), contract_dir)
                 fd = await _run_agent(request, user, pkey, repo, fixer,
                                       fp, by_id, tiers_map, env_vars)
                 if _cancelled(pkey):
@@ -1487,6 +1807,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                 # The fixer isn't landing changes — re-reviewing the same tree
                 # would just repeat the findings. Preserve them and stop.
                 rel = _write_backlog(repo, triage)
+                quality_verdict = "critical_findings_remain"
                 _append_chat(sdir, "assistant",
                              f"❌ Fix round {rnd + 1} produced no file changes after "
                              f"{_FIX_RETRIES + 1} attempts — stopping. Open findings saved to "
@@ -1508,6 +1829,31 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                              f"Coverage check found {len(gaps)} plan item(s) not fully "
                              "addressed — added to the backlog. Say **continue fixing** to close them.",
                              kind="note")
+
+        # A4 quality metrics (opt-in): one per-run record via the SAME
+        # build_quality_metrics() the research engines use, so the schema can't
+        # drift. Persisted to a report + surfaced when the verdict isn't clean.
+        # Absent levers → absent keys; skipped entirely on a bare off-profile run.
+        if quality.any_enabled and not _cancelled(pkey):
+            try:
+                from captain_claw.flight_deck.quality_profile import build_quality_metrics
+                qm = build_quality_metrics(
+                    contract=contract_sum or None,
+                    gate=({"rounds": fix_rounds_run, "verdict": quality_verdict}
+                          if quality_verdict else None),
+                    budget=budget)
+                qm.update(build_retries_used=0, fix_rounds=fix_rounds_run,
+                          final_clean=final_clean, tests_armed=bool(test_cmd),
+                          contract_rules=len(contract))
+                _write_report(repo, "quality-metrics",
+                              "# Quality metrics\n\n```json\n"
+                              + json.dumps(qm, indent=2) + "\n```")
+                if quality_verdict and quality_verdict != "clean":
+                    _append_chat(sdir, "assistant",
+                                 f"_Quality verdict: **{quality_verdict}** "
+                                 f"(fix rounds: {fix_rounds_run})._", kind="note")
+            except Exception as e:  # noqa: BLE001 — metrics are best-effort
+                log.warning("code quality metrics failed", error=str(e))
 
         # The repo just changed substantially — (re)build the code map so future
         # sessions/tasks can query it instead of re-reading everything.
