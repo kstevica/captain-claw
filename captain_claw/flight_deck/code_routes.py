@@ -1349,8 +1349,9 @@ _CODE_OWNER_POOL = ("code-implementer", "quick-dirty", "debugger")
 async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
                           tiers_map: dict, registry: dict, quality: QualityProfile) -> list[dict]:
     """Group-0 decomposition: one reason-tier call turns the approved plan into
-    dependency-layered build slices. Returns [] on any failure/degenerate result
-    (single trivial slice) → the caller falls back to the single-implementer build."""
+    build slices (0..N). Returns the parsed slices verbatim — the caller decides
+    whether there are enough (>=2) to run a team, so it can explain the fallback.
+    Returns [] on any failure."""
     plan_abs = repo / plan_file
     plan_text = plan_abs.read_text() if plan_abs.is_file() else ""
     roster = [a for a in _CODE_OWNER_POOL if a in by_id] or ["code-implementer"]
@@ -1366,12 +1367,10 @@ async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
             Message(role="user", content=code_plan.decompose_prompt(
                 intent, plan_text, roster, quality.parallel_build_max_slices))],
             temperature=0.1, max_tokens=2500)
-        slices = code_plan.parse_slices(resp.content, by_id, quality.parallel_build_max_slices)
+        return code_plan.parse_slices(resp.content, by_id, quality.parallel_build_max_slices)
     except Exception as e:  # noqa: BLE001 — decomposition must never break the build
         log.warning("plan decomposition failed", error=str(e))
         return []
-    # A single slice is just the normal build with extra ceremony — skip it.
-    return slices if len(slices) >= 2 else []
 
 
 async def _run_decomposed_build(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
@@ -1389,8 +1388,20 @@ async def _run_decomposed_build(request: Request, user: dict, pkey: str, repo: P
     and the caller falls back to the single ``code-implementer`` build."""
     _phase(pkey, "Planning the build (decomposition)")
     slices = await _decompose_plan(repo, plan_file, intent, by_id, tiers_map, registry, quality)
-    if not slices:
-        _progress(pkey, "note", "decomposition produced no usable slices — single-implementer build")
+    if len(slices) < 2:
+        # A team needs >=2 independent slices. One slice (a single-file or
+        # otherwise indivisible plan) or none (the model couldn't split it) means
+        # there is nothing to parallelize — say so explicitly in the transcript so
+        # it's obvious a team did NOT run, then fall back to one implementer.
+        reason = ("this plan is a single-file or otherwise indivisible deliverable"
+                  if len(slices) == 1 else
+                  "the plan couldn't be split into independent slices")
+        _progress(pkey, "note", "team build → single-implementer fallback")
+        _append_chat(sdir, "assistant",
+                     f"🧩 **Team build:** {reason}, so there's nothing to parallelize — "
+                     "building with a single implementer instead. (Team build shines on "
+                     "multi-file plans, where each slice owns different files.)",
+                     kind="note")
         return None, None
 
     plan_layers = code_plan.layers(slices)
