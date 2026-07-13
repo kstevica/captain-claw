@@ -198,6 +198,23 @@ async def test_read_self_file_missing_is_not_found(store):
         life.read_self_file(b, "self/NOPE.md")
 
 
+async def test_prompt_shows_real_home_manifest_not_journal_fiction(store):
+    """The false-memory antidote: the prompt lists what's REALLY on disk, so a
+    being can't believe in files its journal claims but never wrote."""
+    b = _born(store, port=0)
+    await life.build_home(b)
+    # a real artifact exists; a journal-claimed one does not
+    p = life._home_path(b, "garden/poem-question.md")
+    p.write_text("# Question\n", encoding="utf-8")
+    b = store.get(OWNER, b["slug"])
+    prompt = life.compose_tick_prompt(b, now=NOW, wallet=store.wallet_view(b))
+    assert "WHAT IS REALLY IN YOUR HOME RIGHT NOW" in prompt
+    assert "garden/: README.md, poem-question.md" in prompt
+    assert "RELATIONSHIPS.md" in prompt                 # a real self/ file
+    assert "sky-note.md" not in prompt                  # never written
+    assert "it does NOT exist" in prompt
+
+
 # ── Anti-theater: a create/tend act must produce a real artifact ─────────
 
 async def test_create_without_artifact_is_downgraded(store):

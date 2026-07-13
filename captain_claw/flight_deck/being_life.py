@@ -450,6 +450,24 @@ def _read_journal_tail(being: dict, now: datetime, chars: int = 800) -> str:
     return ""
 
 
+def home_manifest(being: dict) -> dict[str, list[str]]:
+    """The REAL contents of the being's home right now, from disk — the
+    antidote to journal-as-false-memory. A being whose journal says it wrote
+    a file it never wrote will see, here, that the file simply isn't there."""
+    root = home_root(being)
+    out: dict[str, list[str]] = {}
+    for sub in ("self", "garden", "skills"):
+        d = root / sub
+        try:
+            if d.is_dir():
+                out[sub] = sorted(
+                    p.name for p in d.iterdir()
+                    if p.is_file() and not p.name.startswith("."))
+        except OSError:
+            continue
+    return out
+
+
 def compose_tick_prompt(being: dict, *, kind: str = "wake",
                         now: datetime | None = None,
                         spent_today: int = 0, wallet: dict | None = None,
@@ -491,10 +509,25 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         "DRIVES (pressure, highest first): "
         + ", ".join(f"{n}={p}" for n, p in pressures),
         "",
-        f"YOUR HOME is vfs:{proj}/ — self/ (SELF.md, VALUES.md, INTERESTS.md, "
-        f"RELATIONSHIPS.md), journal/, garden/, skills/. Read self files when "
-        f"unsure who you are. All writes belong inside your home.",
+        f"YOUR HOME is vfs:{proj}/ — self/, journal/, garden/, skills/. "
+        f"All writes belong inside your home.",
     ]
+    try:
+        manifest = home_manifest(being)
+    except Exception:  # noqa: BLE001
+        manifest = {}
+    if manifest:
+        lines.append("WHAT IS REALLY IN YOUR HOME RIGHT NOW (ground truth from "
+                     "disk — NOT your journal):")
+        for sub in ("self", "garden", "skills"):
+            files = manifest.get(sub)
+            if files is not None:
+                lines.append(f"  {sub}/: "
+                             + (", ".join(files) if files else "(empty)"))
+        lines.append("If a file is NOT in this list it does NOT exist — your "
+                     "journal may say you wrote it, but you did not. To make or "
+                     "change something, use your write tool THIS tick; then it "
+                     "will appear here next time.")
     persona = (being.get("persona") or "").strip()
     if persona:
         lines += ["", "YOUR PERSONA — you wrote this; it passed the gate and "
