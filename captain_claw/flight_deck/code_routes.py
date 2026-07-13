@@ -1379,7 +1379,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         # quality profile is active, so a bare off-profile run stays byte-for-byte
         # today's prompts. Combined with the contract directive into one suffix.
         guard_dir = code_honesty.guard_directive(
-            quality.honesty_guard and quality.any_enabled(), quality.output_mode)
+            quality.honesty_guard and quality.any_enabled, quality.output_mode)
         contract_dir = guard_dir + code_contract.contract_directive(contract)
 
         last_fix_sha: str | None = None
@@ -1672,7 +1672,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         # build_quality_metrics() the research engines use, so the schema can't
         # drift. Persisted to a report + surfaced when the verdict isn't clean.
         # Absent levers → absent keys; skipped entirely on a bare off-profile run.
-        if quality.any_enabled() and not _cancelled(pkey):
+        if quality.any_enabled and not _cancelled(pkey):
             try:
                 from captain_claw.flight_deck.quality_profile import build_quality_metrics
                 qm = build_quality_metrics(
