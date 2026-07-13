@@ -138,6 +138,11 @@ class QualityProfile:
                                    # build each with a focused implementer sharing an
                                    # interface ledger (facts), instead of one implementer
 
+    # ── Code Phase C: cross-file interface consistency (explicit opt-in, no preset) ──
+    interface_consistency: bool = False  # deterministic check that local imports
+                                         # resolve to real definitions (catches
+                                         # interface drift between parallel slices)
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     parallel_build_max_slices: int = 6  # cap on decomposition slices (keeps cost bounded)
@@ -165,6 +170,7 @@ class QualityProfile:
             "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
             "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
             "constraints_contract", "block_on_critical", "parallel_build",
+            "interface_consistency",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -204,7 +210,8 @@ class QualityProfile:
         "research_map", "delta_rounds", "critic_triage", "worker_escalate",
         "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
         "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
-        "constraints_contract", "block_on_critical",
+        "constraints_contract", "block_on_critical", "parallel_build",
+        "interface_consistency",
     )
 
     @property

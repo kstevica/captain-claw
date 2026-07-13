@@ -28,6 +28,7 @@ export type QualityProfile = {
   facts_ledger: boolean
   constraints_contract: boolean
   block_on_critical: boolean
+  interface_consistency: boolean
   claim_check_max: number
   block_max_rounds: number
   // Calibration posture — honesty_guard is the ONE default-on flag; it is
@@ -44,6 +45,7 @@ export const BOOL_FLAGS = [
   'delta_rounds', 'critic_triage', 'worker_escalate', 'git_snapshots',
   'judgment_ledger', 'source_corpus', 'claim_check', 'rubric_contract', 'intent_brief',
   'consistency_check', 'facts_ledger', 'constraints_contract', 'block_on_critical',
+  'interface_consistency',
 ] as const
 export type BoolFlag = (typeof BOOL_FLAGS)[number]
 
@@ -57,7 +59,7 @@ export function defaultProfile(): QualityProfile {
     judgment_ledger: false, source_corpus: false, claim_check: false, rubric_contract: false,
     intent_brief: false,
     consistency_check: false, facts_ledger: false, constraints_contract: false,
-    block_on_critical: false,
+    block_on_critical: false, interface_consistency: false,
     claim_check_max: 8,
     block_max_rounds: 2,
     honesty_guard: true,
@@ -149,8 +151,10 @@ export const LEVERS: Lever[] = [
     blurb: 'Decompose the approved plan into dependency-layered slices (foundations first) and build each with a focused implementer, sharing an interface ledger (the `facts` tool) so the slices agree on signatures. Layers run in order with a barrier between them; the review/fix loop then hardens the result. More agents = more tokens — set a budget.' },
   { flag: 'constraints_contract', code: 'A1', scope: 'code', cost: 'cheap', label: 'Acceptance contract',
     blurb: 'Derive the task’s acceptance criteria into checkable predicates (a command exits 0, a test/file exists, a placeholder is gone) once from the approved plan, persisted to a hand-editable .contract.json. Validated deterministically after each build/fix round; a failing rule becomes a ground-truth review finding.' },
+  { flag: 'interface_consistency', code: 'C', scope: 'code', cost: 'free', label: 'Interface check',
+    blurb: 'Deterministic cross-file check (Python): every local import must resolve to a real definition — catches the classic parallel-slice drift where one slice renames or drops a symbol another imports. Broken imports become blocking findings. Zero model tokens.' },
   { flag: 'block_on_critical', code: 'A3', scope: 'code', cost: 'free', label: 'Block on regression',
-    blurb: 'Guard the fix loop with the deterministic ground truth (failing tests + failing contract criticals): a fix round that makes it worse is reverted and the run stops at the prior state with an honest verdict, instead of a fixer degrading the repo. Zero extra model tokens.' },
+    blurb: 'Guard the fix loop with the deterministic ground truth (failing tests + failing contract criticals + broken imports): a fix round that makes it worse is reverted and the run stops at the prior state with an honest verdict, instead of a fixer degrading the repo. Zero extra model tokens.' },
   // Research
   { flag: 'intent_brief', code: 'R12', scope: 'research', cost: 'cheap', label: 'Intent brief',
     blurb: 'Before routing, clarify the task into one structured brief — shown for you to edit — and select the team against it. The original request always governs. Keeps weak workers on-scope (often pays for itself).' },

@@ -30,6 +30,7 @@ from pydantic import BaseModel
 
 from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
+from captain_claw.flight_deck import code_consistency
 from captain_claw.flight_deck import code_contract
 from captain_claw.flight_deck import code_honesty
 from captain_claw.flight_deck import code_git
@@ -1695,11 +1696,29 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                     _write_report(repo, f"review-r{rnd}-contract",
                                   f"# Acceptance Contract — r{rnd}\n\n{centry['output']}")
 
+            # Phase C: cross-file interface consistency (opt-in). Deterministic,
+            # zero-token: broken local imports (a symbol imported from a module
+            # that doesn't define it — the classic parallel-slice interface drift)
+            # ride into triage as ground truth, like the test gate and contract.
+            iface_crit = 0
+            if quality.interface_consistency:
+                ifindings = code_consistency.check(repo)
+                iface_crit = sum(1 for f in ifindings if f.get("severity") == "critical")
+                _progress(pkey, "note",
+                          f"interface check: {iface_crit} broken import(s)"
+                          if iface_crit else "interface check: imports resolve")
+                ientry = code_consistency.as_review_entry(ifindings)
+                if ientry:
+                    reviews = [ientry] + reviews
+                    _write_report(repo, f"review-r{rnd}-interface",
+                                  f"# Interface Consistency — r{rnd}\n\n{ientry['output']}")
+
             # A3: the deterministic ground-truth count for THIS committed state.
             # If block_on_critical is on and the previous fix round pushed it up,
             # that fix regressed the repo — revert it and stop with an honest
             # verdict rather than letting the fixer keep degrading things.
-            det_crit = (0 if tests_ok else 1) + int(contract_sum.get("failed_critical", 0))
+            det_crit = ((0 if tests_ok else 1) + int(contract_sum.get("failed_critical", 0))
+                        + iface_crit)
             if (quality.block_on_critical and prev_det_crit is not None
                     and det_crit > prev_det_crit and pre_fix_sha):
                 _progress(pkey, "note",
