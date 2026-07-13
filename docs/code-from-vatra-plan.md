@@ -1,11 +1,20 @@
 # Captain Claw Code — Borrowing Vatra's Coordination Gains
 
-> Status: **PROPOSED** (2026-07-13). Not started. Three phases, cheapest/safest first.
+> Status: **ALL THREE PHASES SHIPPED** on branch `feat/code-from-vatra` (2026-07-13).
+> A 9a7654e (+ fix cafc594) · B 3e0623e · C 82a638f. 81 new tests; suite 551 pass
+> (the 8 failures are the pre-existing MCP + vfs-routes-DB-init ones). Every lever is
+> opt-in; a bare off-profile Code run is byte-for-byte today's behaviour. Needs a
+> backend restart + the rebuilt FD bundle (index-Bhj7gWsV.js) on deploy. Scope note vs
+> the text below: Phase B ships **dependency-layered, sequential-within-layer** builds
+> (slices own disjoint files but share one repo dir); true within-layer concurrency via
+> git worktrees is the documented next refinement. Phase B/C landed as explicit opt-in
+> levers (no preset) rather than folding into `thorough`, pending live A/B on prod.
+>
 > Motivation: Basna/Vatra on a DeepSeek v4 Pro now beat Opus 4.8 on a light scaffold —
 > the gap was closed by the **coordination + verification layer** built in the quality-
 > tightening initiative (`docs/vatra-quality-tightening-plan.md`) and the group-execution
 > work (`docs/vatra-execution-groups-plan.md`). **Code never received that layer.** This
-> plan ports it into Code.
+> plan ported it into Code.
 
 Related: `docs/code-basna-vatra-cross-pollination-plan.md` (the earlier, already-merged
 round), `docs/vatra-quality-tightening-plan.md`, `docs/vatra-execution-groups-plan.md`,
