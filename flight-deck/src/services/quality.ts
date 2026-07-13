@@ -141,6 +141,10 @@ export const LEVERS: Lever[] = [
     blurb: 'Compare the approved plan against the build; unmet items go to the backlog. One extra model call.' },
   { flag: 'deep_build', code: 'C3', scope: 'code', cost: 'paid', label: 'Deep build',
     blurb: 'Best-of-N verified builds: try N times, keep the first that passes its tests. Uses more tokens — set a budget.' },
+  { flag: 'constraints_contract', code: 'A1', scope: 'code', cost: 'cheap', label: 'Acceptance contract',
+    blurb: 'Derive the task’s acceptance criteria into checkable predicates (a command exits 0, a test/file exists, a placeholder is gone) once from the approved plan, persisted to a hand-editable .contract.json. Validated deterministically after each build/fix round; a failing rule becomes a ground-truth review finding.' },
+  { flag: 'block_on_critical', code: 'A3', scope: 'code', cost: 'free', label: 'Block on regression',
+    blurb: 'Guard the fix loop with the deterministic ground truth (failing tests + failing contract criticals): a fix round that makes it worse is reverted and the run stops at the prior state with an honest verdict, instead of a fixer degrading the repo. Zero extra model tokens.' },
   // Research
   { flag: 'intent_brief', code: 'R12', scope: 'research', cost: 'cheap', label: 'Intent brief',
     blurb: 'Before routing, clarify the task into one structured brief — shown for you to edit — and select the team against it. The original request always governs. Keeps weak workers on-scope (often pays for itself).' },
