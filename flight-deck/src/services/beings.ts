@@ -146,6 +146,14 @@ export const getSelfFile = (slug: string, path: string) =>
 export const getLiabilities = () =>
   fdFetch<{ total_tokens: number; beings: { slug: string; balance_tokens: number }[] }>('/beings/liabilities')
 
+export interface VillageItem {
+  kind: string
+  at: string
+  text: string
+}
+export const getVillage = (limit = 40) =>
+  fdFetch<{ items: VillageItem[] }>(`/beings/village?limit=${limit}`)
+
 export const conceiveBeing = (payload: ConceivePayload) =>
   fdFetch<{ ok: boolean; being: BeingVitals }>('/beings/conceive', {
     method: 'POST', body: JSON.stringify(payload),

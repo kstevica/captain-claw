@@ -30,6 +30,8 @@ from datetime import datetime, timedelta, timezone
 from captain_claw import vfs
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
+from captain_claw.flight_deck import being_society
+from captain_claw.flight_deck.being_society import COMMONS_PROJECT
 from captain_claw.flight_deck.beings import BeingError, BeingNotFound, BeingsStore
 from captain_claw.logging import get_logger
 
@@ -203,6 +205,11 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
     env_vars = list(owner_env or []) + [
         {"key": "CLAW_VFS_PROJECT", "value": home_project(being)},
         {"key": "CLAW_AGENT_LABEL", "value": being["slug"]},
+        # Separation physics (plan §7): the body's file tools resolve ONLY
+        # its own home and the family commons — sibling homes are not
+        # addressable from inside, whatever the model asks for.
+        {"key": "CLAW_VFS_SCOPE",
+         "value": f"{home_project(being)},{COMMONS_PROJECT}"},
     ]
     cfg = AgentConfig(
         name=being["slug"],
@@ -238,6 +245,7 @@ async def birth(db, store: BeingsStore, owner_id: str, slug: str) -> dict:
     except Exception as e:  # noqa: BLE001 — a being without a home yet still lives
         result["warnings"].append(f"home scaffold failed: {e}")
         log.warning("being home scaffold failed", slug=slug, error=str(e))
+    being_society.ensure_commons(owner_id)
     try:
         result["body"] = await spawn_body(db, store, being)
     except Exception as e:  # noqa: BLE001
@@ -330,7 +338,12 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
                                 states=("open",)):
         lines.append(f"CHORE from your parent [{job['id'][:8]}]: "
                      f"{job['spec']}  (fee {job['fee_tokens']} tokens)")
-    return lines[-8:]
+    try:
+        lines += being_society.society_percepts(store, being)
+    except Exception as e:  # noqa: BLE001 — senses degrade, never crash
+        log.warning("society percepts failed", slug=being["slug"],
+                    error=str(e))
+    return lines[-10:]
 
 
 # ── Tick prompt ──────────────────────────────────────────────────────────
@@ -354,7 +367,9 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                         now: datetime | None = None,
                         spent_today: int = 0, wallet: dict | None = None,
                         percepts: list[str] | None = None,
-                        first_of_day: bool = False) -> str:
+                        first_of_day: bool = False,
+                        siblings: list[dict] | None = None,
+                        letters_left: int | None = None) -> str:
     now = now or _utcnow()
     g = being["genome"]
     attrs = genome_mod.effective_attributes(g)
@@ -403,6 +418,40 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
     else:
         lines.append("You cannot browse the web yet at your stage — your world "
                      "is your home, your journal, and what your parent brings.")
+    if "commons_read" in caps:
+        lines.append(
+            "THE COMMONS is vfs:commons/ — shared ground with your siblings. "
+            "Sign what you add there; never edit or delete another's work.")
+    if siblings:
+        roster = ", ".join(
+            f"{s['name']} ({s['stage']}" + (f", {s['mood']}" if s.get("mood")
+                                            else "") + ")"
+            for s in siblings)
+        lines.append(f"YOUR SIBLINGS: {roster}. You share the commons and "
+                     "nothing else — their homes and memories are their own.")
+        society_fields = []
+        if "letters" in caps and (letters_left is None or letters_left > 0):
+            left = (f" — {letters_left} left today"
+                    if letters_left is not None else "")
+            society_fields.append(
+                '"letter": {"to": "<sibling name>", "body": "short and '
+                f'true"}}{left}')
+        if "commons_write" in caps:
+            society_fields.append(
+                '"publish": {"path": "skills/<file>.md", "title": "...", '
+                '"note": "one line", "price_tokens": 0}')
+            society_fields.append(
+                '"gift": {"to": "<sibling name>", "tokens": 100000, '
+                '"note": "why"}')
+        if "commons_read" in caps:
+            society_fields.append(
+                '"adopt": {"publication_id": "<id from a commons percept>"}'
+                + ("" if "trade" in caps else "  (free skills only at your "
+                   "stage)"))
+        if society_fields:
+            lines += ["OPTIONAL SOCIETY FIELDS for your digest — use only "
+                      "when genuine, never to perform:",
+                      *("  " + f for f in society_fields)]
     affect = being.get("affect") or {}
     if affect.get("mood"):
         note = (f" ({'; '.join(affect.get('notes') or [])})"
@@ -504,6 +553,39 @@ def parse_digest(text: str | None) -> dict | None:
                  "result": str(chore.get("result") or "")[:2000]}
     else:
         chore = None
+    letter = raw.get("letter")
+    if isinstance(letter, dict) and letter.get("to"):
+        letter = {"to": str(letter["to"])[:80],
+                  "body": str(letter.get("body") or "")[:2000]}
+    else:
+        letter = None
+    publish = raw.get("publish")
+    if isinstance(publish, dict) and publish.get("path"):
+        try:
+            price = max(0, int(publish.get("price_tokens") or 0))
+        except (TypeError, ValueError):
+            price = 0
+        publish = {"path": str(publish["path"])[:200],
+                   "title": str(publish.get("title") or "")[:80],
+                   "note": str(publish.get("note") or "")[:300],
+                   "price_tokens": price}
+    else:
+        publish = None
+    adopt = raw.get("adopt")
+    if isinstance(adopt, dict) and adopt.get("publication_id"):
+        adopt = {"publication_id": str(adopt["publication_id"])[:64]}
+    else:
+        adopt = None
+    gift = raw.get("gift")
+    if isinstance(gift, dict) and gift.get("to"):
+        try:
+            g_tokens = int(gift.get("tokens") or 0)
+        except (TypeError, ValueError):
+            g_tokens = 0
+        gift = {"to": str(gift["to"])[:80], "tokens": g_tokens,
+                "note": str(gift.get("note") or "")[:120]}
+    else:
+        gift = None
     return {
         "act_kind": act,
         "summary": str(raw.get("summary") or "")[:300],
@@ -513,6 +595,10 @@ def parse_digest(text: str | None) -> dict | None:
         "next_wake_minutes": wake,
         "mood": str(raw.get("mood") or "")[:40],
         "chore": chore,
+        "letter": letter,
+        "publish": publish,
+        "adopt": adopt,
+        "gift": gift,
     }
 
 
@@ -527,6 +613,10 @@ def fallback_digest(text: str | None, kind: str) -> dict:
         "next_wake_minutes": 0,
         "mood": "",
         "chore": None,
+        "letter": None,
+        "publish": None,
+        "adopt": None,
+        "gift": None,
     }
 
 
@@ -726,10 +816,17 @@ async def _tick_locked(
         senses = percepts_since(store, being)
     except Exception:  # noqa: BLE001
         senses = []
+    try:
+        sibs = store.siblings(owner, being["slug"])
+        letters_left = max(0, constitution.LETTERS_PER_DAY
+                           - store.letters_sent_today(bid, now))
+    except Exception:  # noqa: BLE001
+        sibs, letters_left = [], None
     prompt = compose_tick_prompt(
         being, kind=kind, now=now,
         spent_today=store.spent_today(bid, now=now), wallet=view,
-        percepts=senses, first_of_day=first_of_day)
+        percepts=senses, first_of_day=first_of_day,
+        siblings=sibs, letters_left=letters_left)
     t0 = now
     send = send_fn or _send_via_channel
     try:
@@ -789,6 +886,12 @@ async def _tick_locked(
                                    {"job_id": jid}, now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("being chore handling failed", slug=being["slug"],
+                        error=str(e))
+    if any(digest.get(k) for k in ("letter", "publish", "adopt", "gift")):
+        try:
+            being_society.handle_society_digest(store, being, digest, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("being society handling failed", slug=being["slug"],
                         error=str(e))
     if kind == "dream":
         store.milestone(bid, "first_dream", now=now)

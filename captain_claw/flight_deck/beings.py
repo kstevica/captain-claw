@@ -186,6 +186,38 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_jobs
                     ON being_jobs(being_id, escrow_state);
+
+                -- Letters between siblings (plan §7): asynchronous, logged,
+                -- rate-limited; delivered as percepts on the recipient's tick.
+                CREATE TABLE IF NOT EXISTS being_letters (
+                    id         TEXT PRIMARY KEY,
+                    owner_id   TEXT NOT NULL,
+                    from_being TEXT NOT NULL,
+                    to_being   TEXT NOT NULL,
+                    body       TEXT NOT NULL,
+                    at         TEXT NOT NULL,
+                    read_at    TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_letters_to
+                    ON being_letters(to_being, read_at);
+                CREATE INDEX IF NOT EXISTS idx_being_letters_from
+                    ON being_letters(from_being, at);
+
+                -- Skills published to the commons (plan §7 culture + §5.1
+                -- market): price 0 = free adoption, >0 = a trade settles on
+                -- the conservation ledger when a sibling adopts.
+                CREATE TABLE IF NOT EXISTS being_publications (
+                    id           TEXT PRIMARY KEY,
+                    owner_id     TEXT NOT NULL,
+                    being_id     TEXT NOT NULL,
+                    title        TEXT NOT NULL,
+                    note         TEXT NOT NULL DEFAULT '',
+                    commons_path TEXT NOT NULL,
+                    price_tokens INTEGER NOT NULL DEFAULT 0,
+                    at           TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_pubs
+                    ON being_publications(owner_id, at);
                 """
             )
             # Lightweight migrations (columns added after first ship).
@@ -849,6 +881,165 @@ class BeingsStore:
     def milestones(self, owner_id: str, slug: str) -> list[dict]:
         return [e for e in self.events(owner_id, slug, limit=500)
                 if e["kind"] == "milestone"]
+
+    # ── Society: siblings, letters, publications, transfers (Phase 3) ──
+
+    def siblings(self, owner_id: str, slug: str) -> list[dict]:
+        """The other living, hatched beings of this family."""
+        rows = self._c().execute(
+            "SELECT id, slug, name, stage, affect FROM beings"
+            " WHERE owner_id = ? AND slug != ? AND state != 'dead'"
+            " AND stage != 'egg' ORDER BY born_at",
+            (owner_id, slug),
+        ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                mood = json.loads(r["affect"] or "{}").get("mood", "")
+            except json.JSONDecodeError:
+                mood = ""
+            out.append({"id": r["id"], "slug": r["slug"], "name": r["name"],
+                        "stage": r["stage"], "mood": mood})
+        return out
+
+    def names_by_id(self, owner_id: str) -> dict[str, str]:
+        rows = self._c().execute(
+            "SELECT id, name FROM beings WHERE owner_id = ?", (owner_id,)
+        ).fetchall()
+        return {r["id"]: r["name"] for r in rows}
+
+    def letters_sent_today(self, being_id: str,
+                           now: datetime | None = None) -> int:
+        now = now or _utcnow()
+        row = self._c().execute(
+            "SELECT COUNT(*) AS c FROM being_letters"
+            " WHERE from_being = ? AND at >= ?",
+            (being_id, _iso(now)[:10]),
+        ).fetchone()
+        return int(row["c"])
+
+    def send_letter(self, owner_id: str, from_slug: str, to_slug: str,
+                    body: str, now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        a = self.get(owner_id, from_slug)
+        b = self.get(owner_id, to_slug)
+        if a["id"] == b["id"]:
+            raise BeingError("cannot write a letter to oneself")
+        if not constitution.has_capability(a["stage"], "letters"):
+            raise BeingError(f"a {a['stage']} cannot send letters yet")
+        if a["state"] == "dead" or b["state"] == "dead" or b["stage"] == "egg":
+            raise BeingError("letters flow only between the living")
+        body = (body or "").strip()
+        if not body:
+            raise BeingError("an empty letter says nothing")
+        if self.letters_sent_today(a["id"], now) >= constitution.LETTERS_PER_DAY:
+            raise BeingError("letter limit reached for today")
+        lid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_letters"
+                " (id, owner_id, from_being, to_being, body, at)"
+                " VALUES (?,?,?,?,?,?)",
+                (lid, owner_id, a["id"], b["id"], body[:2000], _iso(now)),
+            )
+            self._c().commit()
+        self.record_event(a["id"], "letter_sent",
+                          {"to": b["slug"], "preview": body[:120]}, now=now)
+        self.record_event(b["id"], "letter_received",
+                          {"from": a["slug"], "preview": body[:120]}, now=now)
+        self.milestone(a["id"], "first_letter", {"to": b["slug"]}, now=now)
+        return {"id": lid, "to": b["slug"]}
+
+    def unread_letters(self, being_id: str, limit: int = 3) -> list[dict]:
+        rows = self._c().execute(
+            "SELECT * FROM being_letters WHERE to_being = ?"
+            " AND read_at IS NULL ORDER BY at LIMIT ?",
+            (being_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_letters_read(self, letter_ids: list[str],
+                          now: datetime | None = None) -> None:
+        if not letter_ids:
+            return
+        now = now or _utcnow()
+        with self._lock:
+            self._c().executemany(
+                "UPDATE being_letters SET read_at = ? WHERE id = ?",
+                [(_iso(now), lid) for lid in letter_ids],
+            )
+            self._c().commit()
+
+    def village_letters(self, owner_id: str, limit: int = 30) -> list[dict]:
+        rows = self._c().execute(
+            "SELECT * FROM being_letters WHERE owner_id = ?"
+            " ORDER BY at DESC LIMIT ?",
+            (owner_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_publication(self, owner_id: str, being_id: str, title: str,
+                        note: str, commons_path: str, price_tokens: int,
+                        now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        pid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_publications"
+                " (id, owner_id, being_id, title, note, commons_path,"
+                "  price_tokens, at) VALUES (?,?,?,?,?,?,?,?)",
+                (pid, owner_id, being_id, title[:80], note[:300],
+                 commons_path, int(price_tokens), _iso(now)),
+            )
+            self._c().commit()
+        return self.get_publication(owner_id, pid)
+
+    def get_publication(self, owner_id: str, ref: str) -> dict:
+        """Exact id or unambiguous prefix (percepts show 8-char ids)."""
+        rows = self._c().execute(
+            "SELECT * FROM being_publications WHERE owner_id = ?"
+            " AND (id = ? OR id LIKE ?) LIMIT 2",
+            (owner_id, ref, f"{ref}%"),
+        ).fetchall()
+        if len(rows) != 1:
+            raise BeingNotFound("no such publication")
+        return dict(rows[0])
+
+    def publications(self, owner_id: str, since: str | None = None,
+                     exclude_being: str | None = None,
+                     limit: int = 20) -> list[dict]:
+        q = "SELECT * FROM being_publications WHERE owner_id = ?"
+        args: list = [owner_id]
+        if since:
+            q += " AND at > ?"
+            args.append(since)
+        if exclude_being:
+            q += " AND being_id != ?"
+            args.append(exclude_being)
+        q += " ORDER BY at DESC LIMIT ?"
+        args.append(limit)
+        return [dict(r) for r in self._c().execute(q, args).fetchall()]
+
+    def transfer_between(self, owner_id: str, from_id: str, to_id: str,
+                         tokens: int, reason: str, note: str | None = None,
+                         now: datetime | None = None) -> None:
+        """Being→being transfer on the conservation ledger (gift/trade).
+
+        Savings ceilings do NOT clip transfers: ceilings cap only mints
+        (allowance, fees), because moving existing tokens never increases
+        the parent's total liability. The sender simply must afford it.
+        """
+        now = now or _utcnow()
+        if reason not in ("gift", "trade"):
+            raise BeingError(f"{reason!r} is not a being-to-being reason")
+        if from_id == to_id:
+            raise BeingError("cannot transfer to oneself")
+        sender = self._being_by_id(from_id)
+        view = self.wallet_view(sender)
+        if view["enforced"] and view["balance_tokens"] < int(tokens):
+            raise InsufficientTokens("the sender cannot afford this")
+        self._apply(owner_id, tokens=int(tokens), reason=reason,
+                    from_being=from_id, to_being=to_id, note=note, now=now)
 
     def debit_usage_clamped(
         self, being_id: str, tier: str, usage: dict,

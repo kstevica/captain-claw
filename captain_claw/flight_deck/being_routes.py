@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
 from captain_claw.flight_deck import being_life
+from captain_claw.flight_deck import being_society
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck.beings import BeingError, get_store
 
@@ -118,6 +119,14 @@ async def beings_meta(user: dict = Depends(get_current_user)):
 async def beings_liabilities(user: dict = Depends(get_current_user)):
     """Outstanding token liabilities — the parent's real-cost exposure."""
     return _run(get_store().liabilities, user["id"])
+
+
+@router.get("/village")
+async def village(limit: int = 40, user: dict = Depends(get_current_user)):
+    """The observer view of society: letters, publications, adoptions,
+    gifts, refusals — one merged family stream. (Registered before /{slug}.)"""
+    return {"items": _run(being_society.village_feed, get_store(),
+                          user["id"], limit)}
 
 
 @router.get("")

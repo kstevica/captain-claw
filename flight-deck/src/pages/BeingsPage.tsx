@@ -2,20 +2,21 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  ChevronLeft, ChevronRight, ClipboardList, Egg, Files, GraduationCap,
-  History, Loader2, Maximize2, Minimize2, Moon, Pause, Play, Plus,
-  RefreshCw, ScrollText, Skull, Sparkles, X, Zap,
+  ArrowRightLeft, BookOpen, ChevronLeft, ChevronRight, ClipboardList, Egg,
+  Files, Gift, GraduationCap, History, Loader2, Mail, Maximize2, Minimize2,
+  Moon, Pause, Play, Plus, RefreshCw, ScrollText, Skull, Sparkles, Users,
+  X, Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
-  type Chore, type ReportCard, type SelfFile,
+  type Chore, type ReportCard, type SelfFile, type VillageItem,
   conceiveBeing, euthanizeBeing, getBeingEvents, getBeingJournal,
   getBeingsMeta, getBeingVitals, getLiabilities, getReportCard, getSelfFile,
-  getSelfFiles, hatchBeing, judgeChore, listBeings, listChores, pauseBeing,
-  postChore, setAllowance, setHouseRules, setMediaDiet, setStage, tickBeing,
-  wakeBeing,
+  getSelfFiles, getVillage, hatchBeing, judgeChore, listBeings, listChores,
+  pauseBeing, postChore, setAllowance, setHouseRules, setMediaDiet, setStage,
+  tickBeing, wakeBeing,
 } from '../services/beings'
 
 const REFRESH_MS = 6000
@@ -830,6 +831,14 @@ function BeingCard({ item, meta, onChanged }: {
 
 // ── Page ──
 
+const VILLAGE_ICONS: Record<string, typeof Mail> = {
+  letter: Mail,
+  skill_published: BookOpen,
+  skill_adopted: ArrowRightLeft,
+  gift_sent: Gift,
+  society_refused: X,
+}
+
 export function BeingsPage() {
   const [meta, setMeta] = useState<BeingsMeta | null>(null)
   const [beings, setBeings] = useState<BeingListItem[]>([])
@@ -837,7 +846,11 @@ export function BeingsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showConceive, setShowConceive] = useState(false)
+  const [showVillage, setShowVillage] = useState(false)
+  const [village, setVillage] = useState<VillageItem[]>([])
   const timer = useRef<number | null>(null)
+  const villageOn = useRef(false)
+  villageOn.current = showVillage
 
   const load = useCallback(async (spinner = false) => {
     if (spinner) setLoading(true)
@@ -850,6 +863,7 @@ export function BeingsPage() {
       setMeta(m)
       setBeings(b.beings)
       setLiabilities(l.total_tokens)
+      if (villageOn.current) setVillage((await getVillage()).items)
       setError('')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'failed to load beings')
@@ -882,6 +896,19 @@ export function BeingsPage() {
               outstanding liabilities{' '}
               <span className="font-semibold text-zinc-200">{fmtTokens(liabilities)}</span> tokens
             </span>
+            {beings.length >= 2 && (
+              <button
+                onClick={() => {
+                  const next = !showVillage
+                  setShowVillage(next)
+                  if (next) void getVillage().then((v) => setVillage(v.items)).catch(() => {})
+                }}
+                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-zinc-800 ${showVillage ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-300'}`}
+                title="Letters, publications, trades and gifts across the family"
+              >
+                <Users className="h-3.5 w-3.5" /> Village
+              </button>
+            )}
             <button
               onClick={() => setShowConceive(true)}
               className="flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
@@ -893,6 +920,32 @@ export function BeingsPage() {
 
         {error && (
           <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
+        )}
+
+        {showVillage && (
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+            <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+              <Users className="h-3.5 w-3.5 text-violet-400" /> The village — society, observed
+            </div>
+            {village.length === 0 ? (
+              <p className="text-xs text-zinc-600">
+                Quiet so far. Letters, published skills, trades and gifts will appear here.
+              </p>
+            ) : (
+              <div className="max-h-64 space-y-1 overflow-y-auto">
+                {village.map((it, i) => {
+                  const Icon = VILLAGE_ICONS[it.kind] ?? Sparkles
+                  return (
+                    <div key={i} className="flex items-start gap-2 text-xs">
+                      <Icon className={`mt-0.5 h-3 w-3 shrink-0 ${it.kind === 'society_refused' ? 'text-amber-400' : 'text-violet-400'}`} />
+                      <span className="text-zinc-600">{fmtAt(it.at)}</span>
+                      <span className="min-w-0 flex-1 text-zinc-300">{it.text}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         )}
 
         {loading ? (
