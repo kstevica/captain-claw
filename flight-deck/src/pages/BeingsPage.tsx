@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowRightLeft, BookOpen, ChevronDown, ChevronLeft, ChevronRight,
-  ClipboardList, Egg, Files, Fingerprint, Gift, GraduationCap, History,
-  Loader2, Mail, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause,
-  Play, Plus, RefreshCw, Search, ScrollText, Skull, Sparkles, Sprout, Users,
-  Wrench, X, Zap,
+  ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, ChevronDown,
+  ChevronLeft, ChevronRight, ClipboardList, Egg, Files, Fingerprint, Gift,
+  GraduationCap, History, Loader2, Mail, Maximize2, MessageCircle, Minimize2,
+  Moon, Network, Pause, Play, Plus, RefreshCw, Search, ScrollText, Skull,
+  Sparkles, Sprout, Users, Wrench, X, Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -68,6 +68,38 @@ function fmtRelTime(iso: string): string {
   if (s < 86400) return `${Math.floor(s / 3600)}h`
   if (s < 86400 * 7) return `${Math.floor(s / 86400)}d`
   return iso.slice(5, 10) // MM-DD
+}
+
+// Date buckets for the Self-files filter (computed in the viewer's local time
+// against each file's mtime). Weeks start Monday.
+const DATE_BUCKETS = [
+  { key: 'all', label: 'All time' },
+  { key: 'today', label: 'Today' },
+  { key: 'yesterday', label: 'Yesterday' },
+  { key: 'week', label: 'This week' },
+  { key: 'lastweek', label: 'Last week' },
+  { key: 'month', label: 'This month' },
+] as const
+type DateBucket = typeof DATE_BUCKETS[number]['key']
+
+function inDateBucket(iso: string, bucket: DateBucket): boolean {
+  if (bucket === 'all') return true
+  const t = new Date(iso).getTime()
+  if (!t) return false
+  const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime() }
+  const now = new Date()
+  const today = startOfDay(now)
+  const dow = (now.getDay() + 6) % 7 // 0 = Monday
+  const weekStart = today - dow * 86400000
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+  switch (bucket) {
+    case 'today': return t >= today
+    case 'yesterday': return t >= today - 86400000 && t < today
+    case 'week': return t >= weekStart
+    case 'lastweek': return t >= weekStart - 7 * 86400000 && t < weekStart
+    case 'month': return t >= monthStart
+    default: return true
+  }
 }
 
 function summarizeEventData(e: BeingEvent): string {
@@ -331,6 +363,8 @@ function BeingLogModal({ slug, name, mode, onClose }: {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState('')
   const [filterGroup, setFilterGroup] = useState<string | null>(null)
+  const [dateFilter, setDateFilter] = useState<DateBucket>('all')
+  const [sortBy, setSortBy] = useState<'name' | 'newest' | 'oldest'>('name')
   // A ref (not state) so loadSelf's identity stays stable across file
   // switches — it only needs to change when `slug` changes, never when the
   // user clicks a different file in the sidebar.
@@ -477,11 +511,14 @@ function BeingLogModal({ slug, name, mode, onClose }: {
             const allGroups = groupSelfFiles(files)
             const groups = allGroups
               .filter((g) => !filterGroup || g.key === filterGroup)
-              .map((g) => ({
-                ...g,
-                files: q ? g.files.filter((f) =>
-                  fileStem(f.path).toLowerCase().includes(q) || f.path.toLowerCase().includes(q)) : g.files,
-              }))
+              .map((g) => {
+                let fs = g.files.filter((f) => inDateBucket(f.mtime, dateFilter))
+                if (q) fs = fs.filter((f) =>
+                  fileStem(f.path).toLowerCase().includes(q) || f.path.toLowerCase().includes(q))
+                if (sortBy === 'newest') fs = [...fs].sort((a, b) => b.mtime.localeCompare(a.mtime))
+                else if (sortBy === 'oldest') fs = [...fs].sort((a, b) => a.mtime.localeCompare(b.mtime))
+                return { ...g, files: fs }
+              })
               .filter((g) => g.files.length > 0)
             const totalShown = groups.reduce((n, g) => n + g.files.length, 0)
             return (
@@ -522,6 +559,33 @@ function BeingLogModal({ slug, name, mode, onClose }: {
                       })}
                     </div>
                   )}
+                  {/* Sort + date filter */}
+                  <div className="flex gap-1">
+                    <div className="relative flex-1">
+                      <ArrowDownUp className="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-500" />
+                      <select
+                        value={sortBy}
+                        onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+                        className="w-full appearance-none rounded-md border border-zinc-700 bg-zinc-950 py-1 pl-6 pr-1 text-[10px] text-zinc-300 focus:border-violet-500/50 focus:outline-none"
+                        title="Sort files"
+                      >
+                        <option value="name">A–Z</option>
+                        <option value="newest">Newest</option>
+                        <option value="oldest">Oldest</option>
+                      </select>
+                    </div>
+                    <div className="relative flex-1">
+                      <CalendarDays className="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-500" />
+                      <select
+                        value={dateFilter}
+                        onChange={(e) => setDateFilter(e.target.value as DateBucket)}
+                        className="w-full appearance-none rounded-md border border-zinc-700 bg-zinc-950 py-1 pl-6 pr-1 text-[10px] text-zinc-300 focus:border-violet-500/50 focus:outline-none"
+                        title="Filter by date"
+                      >
+                        {DATE_BUCKETS.map((b) => <option key={b.key} value={b.key}>{b.label}</option>)}
+                      </select>
+                    </div>
+                  </div>
                 </div>
                 {/* File groups */}
                 <div className="flex-1 overflow-y-auto py-1.5">
