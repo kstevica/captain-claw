@@ -628,7 +628,9 @@ function ConceiveModal({ meta, onClose, onDone }: {
 
 // One compact toolbar button — icon + tooltip, theme-aware. Groups of these
 // (life / windows / interact / danger) replace the old wrapping label row.
-function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy }: {
+// variant 'solid' + iconClass give the consequential life controls a
+// distinct, filled, colour-accented look vs the flat read-only toolbar.
+function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy, variant = 'ghost', iconClass }: {
   icon: typeof Zap
   label: string
   onClick: () => void
@@ -636,12 +638,16 @@ function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy
   danger?: boolean
   disabled?: boolean
   busy?: boolean
+  variant?: 'ghost' | 'solid'
+  iconClass?: string
 }) {
   const tone = danger
     ? 'border-red-500/30 text-red-500/80 hover:bg-red-500/10 dark:text-red-400/80'
     : active
       ? 'border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300'
-      : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+      : variant === 'solid'
+        ? 'border-transparent bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
+        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
   return (
     <button
       onClick={onClick}
@@ -650,8 +656,57 @@ function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy
       aria-label={label}
       className={`flex items-center justify-center rounded-md border p-1.5 transition-colors disabled:opacity-40 disabled:hover:bg-transparent ${tone}`}
     >
-      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
+      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className={`h-3.5 w-3.5 ${iconClass ?? ''}`} />}
     </button>
+  )
+}
+
+// A nice, theme-aware confirmation before a consequential act (a tick/dream
+// spends real tokens; pause/goodbye change her state). onConfirm may be
+// async — the dialog shows a spinner, then closes.
+function ConfirmModal({ title, message, confirmLabel, tone = 'default', icon: Icon, onConfirm, onClose }: {
+  title: string
+  message: string
+  confirmLabel: string
+  tone?: 'default' | 'danger'
+  icon?: typeof Zap
+  onConfirm: () => Promise<unknown> | void
+  onClose: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const go = async () => {
+    setBusy(true)
+    try { await onConfirm() } finally { setBusy(false); onClose() }
+  }
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose, busy])
+  const confirmBtn = tone === 'danger'
+    ? 'bg-red-600 text-white hover:bg-red-500'
+    : 'bg-violet-600 text-white hover:bg-violet-500'
+  const iconBox = tone === 'danger'
+    ? 'bg-red-500/10 text-red-600 dark:text-red-400'
+    : 'bg-violet-500/10 text-violet-600 dark:text-violet-300'
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" onClick={() => !busy && onClose()}>
+      <div className="w-full max-w-sm rounded-xl border border-zinc-800 bg-zinc-950 p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start gap-3">
+          {Icon && <div className={`shrink-0 rounded-lg p-2 ${iconBox}`}><Icon className="h-5 w-5" /></div>}
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold text-zinc-100">{title}</h3>
+            <p className="mt-1 text-xs leading-relaxed text-zinc-400">{message}</p>
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button onClick={onClose} disabled={busy} className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-50">Cancel</button>
+          <button onClick={() => void go()} disabled={busy} className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium disabled:opacity-60 ${confirmBtn}`}>
+            {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -668,6 +723,10 @@ function BeingCard({ item, meta, onChanged }: {
   const [msgText, setMsgText] = useState('')
   const [thread, setThread] = useState<ThreadItem[]>([])
   const [parenting, setParenting] = useState(false)
+  const [confirm, setConfirm] = useState<{
+    title: string; message: string; confirmLabel: string
+    tone?: 'default' | 'danger'; icon?: typeof Zap; run: () => Promise<unknown>
+  } | null>(null)
   const [chores, setChores] = useState<Chore[]>([])
   const [choreSpec, setChoreSpec] = useState('')
   const [choreFee, setChoreFee] = useState('500000')
@@ -801,20 +860,45 @@ function BeingCard({ item, meta, onChanged }: {
           </button>
         ) : (
           <>
-            {/* Life — control her heartbeat */}
+            {/* Life — the consequential controls: distinct filled console,
+                each asks for confirmation (a tick/dream spends real tokens). */}
             {item.state !== 'dead' && (
-              <div className="flex items-center gap-1">
-                <IconAction icon={Zap} label="Poke — a manual heartbeat now"
-                  onClick={() => void act('tick', () => tickBeing(item.slug, 'wake'))}
-                  disabled={busy === 'tick' || busy === 'dream'} busy={busy === 'tick'} />
-                <IconAction icon={Moon} label="Dream — a manual dream tick"
-                  onClick={() => void act('dream', () => tickBeing(item.slug, 'dream'))}
-                  disabled={busy === 'tick' || busy === 'dream'} busy={busy === 'dream'} />
+              <div className="flex items-center gap-0.5 rounded-lg border border-zinc-800 bg-zinc-900/50 p-0.5">
+                <IconAction icon={Zap} label="Poke — a manual heartbeat now" variant="solid"
+                  iconClass="text-amber-500 dark:text-amber-400"
+                  disabled={busy === 'tick' || busy === 'dream'} busy={busy === 'tick'}
+                  onClick={() => setConfirm({
+                    title: `Wake ${item.name} now?`,
+                    message: 'A manual heartbeat spawns her agent to think one tick — it spends real tokens from her wallet.',
+                    confirmLabel: 'Poke', icon: Zap,
+                    run: () => act('tick', () => tickBeing(item.slug, 'wake')),
+                  })} />
+                <IconAction icon={Moon} label="Dream — a manual dream tick" variant="solid"
+                  iconClass="text-indigo-500 dark:text-indigo-400"
+                  disabled={busy === 'tick' || busy === 'dream'} busy={busy === 'dream'}
+                  onClick={() => setConfirm({
+                    title: `Have ${item.name} dream now?`,
+                    message: 'A dream tick consolidates her day and re-anchors her values — it spends tokens, like any tick.',
+                    confirmLabel: 'Dream', icon: Moon,
+                    run: () => act('dream', () => tickBeing(item.slug, 'dream')),
+                  })} />
                 {item.state === 'paused'
-                  ? <IconAction icon={Play} label="Wake — resume her clock"
-                      onClick={() => void act('wake', () => wakeBeing(item.slug))} />
-                  : <IconAction icon={Pause} label="Pause — let her sleep"
-                      onClick={() => void act('pause', () => pauseBeing(item.slug))} />}
+                  ? <IconAction icon={Play} label="Wake — resume her clock" variant="solid"
+                      iconClass="text-emerald-500 dark:text-emerald-400"
+                      onClick={() => setConfirm({
+                        title: `Wake ${item.name}?`,
+                        message: 'She resumes her own clock and will tick on her natural rhythm again.',
+                        confirmLabel: 'Wake', icon: Play,
+                        run: () => act('wake', () => wakeBeing(item.slug)),
+                      })} />
+                  : <IconAction icon={Pause} label="Pause — let her sleep" variant="solid"
+                      iconClass="text-zinc-400"
+                      onClick={() => setConfirm({
+                        title: `Pause ${item.name}?`,
+                        message: 'Like night falling — she stops ticking and spends nothing until you wake her.',
+                        confirmLabel: 'Pause', icon: Pause,
+                        run: () => act('pause', () => pauseBeing(item.slug)),
+                      })} />}
               </div>
             )}
             {item.state !== 'dead' && <div className="mx-0.5 h-5 w-px bg-zinc-800" />}
@@ -844,14 +928,24 @@ function BeingCard({ item, meta, onChanged }: {
         )}
         {item.state !== 'dead' && (
           <div className="ml-auto">
-            <IconAction icon={Skull} label={`Euthanize ${item.name} — forever (remains stay readable)`} danger
-              onClick={() => {
-                if (window.confirm(`${item.name} will die, forever. Remains stay readable. Proceed?`))
-                  void act('euthanize', () => euthanizeBeing(item.slug))
-              }} />
+            <IconAction icon={Skull} label={`Say goodbye to ${item.name} — forever`} danger
+              onClick={() => setConfirm({
+                title: `Say goodbye to ${item.name}?`,
+                message: 'She will die, forever — there is no resurrection. Her remains (journal, files, ledger) stay readable, and her lineage lives on.',
+                confirmLabel: 'Goodbye', tone: 'danger', icon: Skull,
+                run: () => act('euthanize', () => euthanizeBeing(item.slug)),
+              })} />
           </div>
         )}
       </div>
+
+      {confirm && (
+        <ConfirmModal
+          title={confirm.title} message={confirm.message}
+          confirmLabel={confirm.confirmLabel} tone={confirm.tone} icon={confirm.icon}
+          onConfirm={confirm.run} onClose={() => setConfirm(null)}
+        />
+      )}
 
       {logView && (
         <BeingLogModal
