@@ -18,7 +18,6 @@ from captain_claw.tools.vision import (
     VisionTool,
     _hamming,
     _parse_box,
-    dedupe_frame_indices,
 )
 
 
@@ -158,3 +157,92 @@ def test_qr_decode(workdir):
     res = _run(VisionTool(), op="qr", path=p)
     assert res.success
     assert "captain-claw://ok" in res.content
+
+
+# ── Phase 2: detect ────────────────────────────────────────────────────────────
+
+
+def test_models_dir_honors_env(monkeypatch, tmp_path):
+    from captain_claw.tools import vision
+
+    monkeypatch.setenv("CAPTAIN_CLAW_VISION_MODELS", str(tmp_path))
+    assert vision._models_dir() == tmp_path
+
+
+def test_decode_yolo_v8_layout():
+    # v8 output [1, 84, N]: 4 box rows + 80 class rows, anchors in columns.
+    out = np.zeros((1, 84, 8400), np.float32)
+    out[0, 0, 0], out[0, 1, 0], out[0, 2, 0], out[0, 3, 0] = 320, 320, 100, 200
+    out[0, 4, 0] = 0.9  # class 0 == "person"
+    dets = VisionTool._decode_yolo(out, 640, 640, 0.25, 0.45, 640)
+    assert len(dets) == 1
+    assert dets[0]["label"] == "person"
+    assert dets[0]["confidence"] == pytest.approx(0.9, abs=1e-3)
+    assert dets[0]["box"] == [270, 220, 100, 200]
+
+
+def test_decode_yolo_v5_layout_with_objectness():
+    # v5 output [1, N, 85]: 4 box + 1 objectness + 80 classes; conf = obj * cls.
+    out = np.zeros((1, 25200, 85), np.float32)
+    out[0, 0, :4] = [320, 320, 80, 60]
+    out[0, 0, 4] = 0.8
+    out[0, 0, 5 + 2] = 0.9  # class 2 == "car"
+    dets = VisionTool._decode_yolo(out, 1280, 720, 0.25, 0.45, 640)
+    assert len(dets) == 1
+    assert dets[0]["label"] == "car"
+    assert dets[0]["confidence"] == pytest.approx(0.72, abs=1e-3)  # 0.8 * 0.9
+
+
+def test_decode_yolo_below_threshold_returns_nothing():
+    out = np.zeros((1, 84, 8400), np.float32)
+    out[0, 4, 0] = 0.1  # under the 0.25 conf floor
+    assert VisionTool._decode_yolo(out, 640, 640, 0.25, 0.45, 640) == []
+
+
+def test_detect_objects_without_model_is_actionable(workdir, monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPTAIN_CLAW_VISION_MODELS", str(tmp_path))
+    p = _write(os.path.join(workdir, "x.png"), _solid(200, 200, 255))
+    res = _run(VisionTool(), op="detect", what="objects", path=p)
+    assert res.success is False
+    assert "ONNX" in (res.error or "") and "model" in (res.error or "")
+
+
+def test_detect_bad_what_rejected(workdir):
+    p = _write(os.path.join(workdir, "x.png"), _solid(50, 50, 255))
+    res = _run(VisionTool(), op="detect", what="unicorns", path=p)
+    assert res.success is False
+
+
+# Network-gated: downloads the small YuNet / PP-OCRv3 models from the OpenCV Zoo.
+# Skips (does not fail) when offline, so CI without network stays green.
+
+
+def _models_available(tmp_dir) -> bool:
+    import os as _os
+
+    _os.environ["CAPTAIN_CLAW_VISION_MODELS"] = str(tmp_dir)
+    from captain_claw.tools.vision import _ensure_model
+
+    _, e1 = _ensure_model("yunet")
+    _, e2 = _ensure_model("ppocr_db")
+    return e1 is None and e2 is None
+
+
+def test_detect_faces_and_text_end_to_end(monkeypatch, tmp_path, workdir):
+    monkeypatch.setenv("CAPTAIN_CLAW_VISION_MODELS", str(tmp_path))
+    if not _models_available(tmp_path):
+        pytest.skip("detector models unavailable (offline?) — skipping network test")
+
+    # Faces: YuNet must at least load and run (0 on a blank frame is fine).
+    blank = _write(os.path.join(workdir, "blank.png"), _solid(640, 480, 255))
+    fr = _run(VisionTool(), op="detect", what="faces", path=blank)
+    assert fr.success and "detect (faces)" in fr.content
+
+    # Text: a rendered word must produce at least one text region + annotation.
+    txt = _solid(700, 300, 255)
+    cv2.putText(txt, "CAPTAIN CLAW", (30, 170), cv2.FONT_HERSHEY_SIMPLEX, 2.2, (0, 0, 0), 5)
+    pt = _write(os.path.join(workdir, "t.png"), txt)
+    out = os.path.join(workdir, "t_annot.png")
+    tr = _run(VisionTool(), op="detect", what="text", path=pt, out=out)
+    assert tr.success and "text" in tr.content
+    assert os.path.exists(out)
