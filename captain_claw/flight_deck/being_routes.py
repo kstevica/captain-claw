@@ -92,6 +92,13 @@ class AssessRequest(BaseModel):
     assessor: str   # registry slug of the agent to ask for a second opinion
 
 
+class SaveAssessmentRequest(BaseModel):
+    assessor: str
+    content: str
+    score: int | None = None
+    verdict: str = ""
+
+
 class EuthanizeRequest(BaseModel):
     confirm: bool = False
 
@@ -483,7 +490,38 @@ async def third_party_assess(slug: str, body: AssessRequest,
         timeout=150)
     if not reply:
         raise HTTPException(502, "the assessor didn't reply in time")
-    return {"assessor": entry.get("name", body.assessor), "assessment": reply}
+    return {"assessor": entry.get("name", body.assessor), "assessment": reply,
+            "score": a["overall"]["score"], "verdict": a["overall"]["status"]}
+
+
+@router.get("/{slug}/assessments")
+async def list_assessments(slug: str, user: dict = Depends(get_current_user)):
+    """Saved second opinions — sealed from the being until adulthood."""
+    return {"assessments": _run(get_store().assessments_for, user["id"], slug)}
+
+
+@router.post("/{slug}/assessments")
+async def save_assessment(slug: str, body: SaveAssessmentRequest,
+                          user: dict = Depends(get_current_user)):
+    """Keep a second opinion on record. Stored OUTSIDE the being's home — she
+    can't read it until adulthood, when the records are unsealed into
+    assessments/ (an already-adult being receives it immediately)."""
+    from captain_claw.flight_deck import being_assessment
+    saved = _run(get_store().add_assessment, user["id"], slug,
+                 body.assessor, body.content,
+                 score=body.score, verdict=body.verdict)
+    being = _run(get_store().get, user["id"], slug)
+    if being["stage"] == "adult":
+        _run(being_assessment.release_assessments, get_store(), being)
+        saved = _run(get_store().get_assessment, user["id"], saved["id"])
+    return {"assessment": saved}
+
+
+@router.delete("/{slug}/assessments/{assessment_id}")
+async def delete_assessment(slug: str, assessment_id: str,
+                            user: dict = Depends(get_current_user)):
+    _run(get_store().delete_assessment, user["id"], assessment_id)
+    return {"ok": True}
 
 
 @router.get("/{slug}/milestones")
@@ -535,6 +573,11 @@ async def set_allowance(slug: str, body: AllowanceRequest,
 async def set_stage(slug: str, body: StageRequest,
                     user: dict = Depends(get_current_user)):
     _run(get_store().set_stage, user["id"], slug, body.stage)
+    if body.stage == "adult":
+        # The unsealing rite: her childhood assessment records become hers.
+        from captain_claw.flight_deck import being_assessment
+        being = _run(get_store().get, user["id"], slug)
+        _run(being_assessment.release_assessments, get_store(), being)
     return _run(get_store().vitals, user["id"], slug)
 
 

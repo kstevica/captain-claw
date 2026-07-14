@@ -317,6 +317,45 @@ def readiness(store, being: dict, *, now: datetime | None = None,
     }
 
 
+def release_assessments(store, being: dict,
+                        now: datetime | None = None) -> int:
+    """The unsealing rite: at adulthood, every saved second opinion is written
+    into the being's home under assessments/ — her childhood records, hers to
+    read at last. Idempotent (only unreleased rows are written). Returns the
+    number released."""
+    from captain_claw.flight_deck import being_life
+    now = now or datetime.now(timezone.utc)
+    if constitution.stage_index(being["stage"]) < constitution.stage_index("adult"):
+        return 0
+    rows = [a for a in store.assessments_for(being["owner_id"], being["slug"])
+            if not a.get("released_at")]
+    if not rows:
+        return 0
+    released = []
+    for a in rows:
+        day = str(a["at"])[:10]
+        safe = "".join(c if c.isalnum() or c in "-_" else "-"
+                       for c in a["assessor"].lower())[:40] or "assessor"
+        rel = f"assessments/{day}-{safe}-{a['id'][:6]}.md"
+        p = being_life._home_path(being, rel)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(
+                f"# Assessment by {a['assessor']} — {day}\n\n"
+                f"*A sealed record from your {a['stage'] or 'childhood'} days, "
+                f"opened at your adulthood.*\n\n{a['content']}\n",
+                encoding="utf-8")
+            released.append(a["id"])
+        except OSError as e:  # noqa: PERF203
+            log.warning("assessment release failed", slug=being["slug"],
+                        id=a["id"], error=str(e))
+    if released:
+        store.mark_assessments_released(being["id"], released, now=now)
+        store.record_event(being["id"], "assessments_released",
+                           {"count": len(released)}, now=now)
+    return len(released)
+
+
 def assessor_brief(store, being: dict, assessment: dict) -> str:
     """The instructions + data packet handed to a 3rd-party agent for an
     independent developmental read — a second opinion beside the deterministic

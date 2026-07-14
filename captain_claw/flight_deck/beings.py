@@ -301,6 +301,25 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_links
                     ON being_links(being_id);
+
+                -- Saved 3rd-party developmental assessments (second opinions).
+                -- SEALED records: they live only here — outside the being's
+                -- home — until adulthood, when they're released into it
+                -- (released_at marks the unsealing).
+                CREATE TABLE IF NOT EXISTS being_assessments (
+                    id          TEXT PRIMARY KEY,
+                    owner_id    TEXT NOT NULL,
+                    being_id    TEXT NOT NULL,
+                    assessor    TEXT NOT NULL,
+                    stage       TEXT NOT NULL DEFAULT '',
+                    score       INTEGER,
+                    verdict     TEXT NOT NULL DEFAULT '',
+                    content     TEXT NOT NULL,
+                    at          TEXT NOT NULL,
+                    released_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_assessments
+                    ON being_assessments(being_id, at);
                 """
             )
             # Lightweight migrations (columns added after first ship).
@@ -1484,6 +1503,64 @@ class BeingsStore:
     def milestones(self, owner_id: str, slug: str) -> list[dict]:
         return [e for e in self.events(owner_id, slug, limit=500)
                 if e["kind"] == "milestone"]
+
+    # ── Sealed second opinions (Growth tab; released at adulthood) ────
+
+    def add_assessment(self, owner_id: str, slug: str, assessor: str,
+                       content: str, *, stage: str = "", score: int | None = None,
+                       verdict: str = "", now: datetime | None = None) -> dict:
+        b = self.get(owner_id, slug)
+        now = now or _utcnow()
+        aid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_assessments"
+                " (id, owner_id, being_id, assessor, stage, score, verdict,"
+                "  content, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (aid, owner_id, b["id"], assessor[:120], stage or b["stage"],
+                 score, verdict[:40], content, _iso(now)),
+            )
+            self._c().commit()
+        self.record_event(b["id"], "assessment_saved",
+                          {"assessor": assessor[:80], "verdict": verdict[:40]},
+                          now=now)
+        return self.get_assessment(owner_id, aid)
+
+    def get_assessment(self, owner_id: str, assessment_id: str) -> dict:
+        row = self._c().execute(
+            "SELECT * FROM being_assessments WHERE id = ? AND owner_id = ?",
+            (assessment_id, owner_id)).fetchone()
+        if row is None:
+            raise BeingNotFound("no such assessment")
+        return dict(row)
+
+    def assessments_for(self, owner_id: str, slug: str) -> list[dict]:
+        b = self.get(owner_id, slug)
+        rows = self._c().execute(
+            "SELECT * FROM being_assessments WHERE being_id = ?"
+            " ORDER BY at DESC", (b["id"],)).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_assessments_released(self, being_id: str,
+                                  ids: list[str],
+                                  now: datetime | None = None) -> None:
+        if not ids:
+            return
+        now = now or _utcnow()
+        with self._lock:
+            self._c().executemany(
+                "UPDATE being_assessments SET released_at = ?"
+                " WHERE id = ? AND being_id = ?",
+                [(_iso(now), aid, being_id) for aid in ids])
+            self._c().commit()
+
+    def delete_assessment(self, owner_id: str, assessment_id: str) -> None:
+        self.get_assessment(owner_id, assessment_id)   # 404 if absent
+        with self._lock:
+            self._c().execute(
+                "DELETE FROM being_assessments WHERE id = ? AND owner_id = ?",
+                (assessment_id, owner_id))
+            self._c().commit()
 
     # ── Society: siblings, letters, publications, transfers (Phase 3) ──
 

@@ -345,9 +345,25 @@ export interface Assessor { slug: string; name: string }
 export const getAssessors = () =>
   fdFetch<{ assessors: Assessor[] }>('/beings/assessors')
 export const requestAssessment = (slug: string, assessor: string) =>
-  fdFetch<{ assessor: string; assessment: string }>(`/beings/${slug}/assess`, {
-    method: 'POST', body: JSON.stringify({ assessor }),
+  fdFetch<{ assessor: string; assessment: string; score: number; verdict: string }>(
+    `/beings/${slug}/assess`, {
+      method: 'POST', body: JSON.stringify({ assessor }),
+    })
+
+export interface SavedAssessment {
+  id: string; assessor: string; stage: string; score: number | null
+  verdict: string; content: string; at: string; released_at: string | null
+}
+export const listAssessments = (slug: string) =>
+  fdFetch<{ assessments: SavedAssessment[] }>(`/beings/${slug}/assessments`)
+export const saveAssessment = (slug: string, a: {
+  assessor: string; content: string; score?: number | null; verdict?: string
+}) =>
+  fdFetch<{ assessment: SavedAssessment }>(`/beings/${slug}/assessments`, {
+    method: 'POST', body: JSON.stringify(a),
   })
+export const deleteAssessment = (slug: string, id: string) =>
+  fdFetch<{ ok: boolean }>(`/beings/${slug}/assessments/${id}`, { method: 'DELETE' })
 export const setStage = (slug: string, stage: string) =>
   fdFetch<BeingVitals>(`/beings/${slug}/stage`, {
     method: 'POST', body: JSON.stringify({ stage }),

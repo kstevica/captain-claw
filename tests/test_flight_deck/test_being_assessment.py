@@ -135,6 +135,46 @@ async def test_assessor_brief_packs_the_data(store):
     assert "MARKDOWN" in brief          # asks for a structured markdown verdict
 
 
+# ── Sealed second opinions — released only at adulthood ─────────────────
+
+async def test_saved_assessment_is_sealed_from_the_being(store):
+    b = await _being(store)
+    store.add_assessment(OWNER, b["slug"], "GLM test",
+                         "## Verdict\nAlmost.", verdict="almost", score=61)
+    rows = store.assessments_for(OWNER, b["slug"])
+    assert len(rows) == 1 and rows[0]["released_at"] is None
+    # NOT in her home — she cannot read it at infant stage
+    paths = [f["path"] for f in life.list_self_files(b)]
+    assert not any(p.startswith("assessments/") for p in paths)
+
+
+async def test_adulthood_unseals_assessments_into_home(store):
+    b = await _being(store, stage="adolescent")
+    store.add_assessment(OWNER, b["slug"], "GLM test",
+                         "## Verdict\nAlmost.", verdict="almost")
+    store.add_assessment(OWNER, b["slug"], "Second Agent",
+                         "## Verdict\nReady.", verdict="ready")
+    store.set_stage(OWNER, b["slug"], "adult", now=NOW)
+    b = store.get(OWNER, b["slug"])
+    n = assess.release_assessments(store, b, now=NOW)
+    assert n == 2
+    paths = [f["path"] for f in life.list_self_files(b)]
+    sealed = [p for p in paths if p.startswith("assessments/")]
+    assert len(sealed) == 2
+    text = life.read_self_file(b, sealed[0])
+    assert "sealed record" in text and "Verdict" in text
+    # idempotent — releasing again writes nothing new
+    assert assess.release_assessments(store, b, now=NOW) == 0
+    assert all(a["released_at"] for a in store.assessments_for(OWNER, b["slug"]))
+
+
+async def test_release_refuses_before_adulthood(store):
+    b = await _being(store, stage="adolescent")
+    store.add_assessment(OWNER, b["slug"], "GLM test", "text")
+    assert assess.release_assessments(store, b, now=NOW) == 0
+    assert store.assessments_for(OWNER, b["slug"])[0]["released_at"] is None
+
+
 def test_band_and_entropy():
     assert assess._band(80) == "green"
     assert assess._band(55) == "amber"

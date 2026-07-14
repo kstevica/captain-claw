@@ -13,8 +13,10 @@ import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
   type Assessor, type BeingGraph, type Chore, type Quest, type Readiness,
-  type ReportCard, type SelfFile, type ThreadItem, type Venture, type VillageItem,
-  getAssessors, getReadiness, requestAssessment,
+  type ReportCard, type SavedAssessment, type SelfFile, type ThreadItem,
+  type Venture, type VillageItem,
+  deleteAssessment, getAssessors, getReadiness, listAssessments,
+  requestAssessment, saveAssessment,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
@@ -1090,98 +1092,110 @@ const _READY_META = {
 } as const
 const _BAR = { green: 'bg-emerald-500', amber: 'bg-amber-500', red: 'bg-red-500' } as const
 
-function ReadinessView({ ready, loading, onAssess }: {
-  ready: Readiness | null; loading: boolean; onAssess?: () => void
-}) {
+const _RING = { ready: '#10b981', emerging: '#f59e0b', not_yet: '#ef4444', grown: '#8b5cf6' } as const
+
+function ScoreRing({ score, status }: { score: number; status: keyof typeof _RING }) {
+  const r = 34
+  const c = 2 * Math.PI * r
+  return (
+    <div className="relative h-24 w-24 shrink-0">
+      <svg viewBox="0 0 84 84" className="h-full w-full -rotate-90">
+        <circle cx="42" cy="42" r={r} fill="none" strokeWidth="7" className="stroke-zinc-800" />
+        <circle cx="42" cy="42" r={r} fill="none" strokeWidth="7" strokeLinecap="round"
+          stroke={_RING[status]} strokeDasharray={c}
+          strokeDashoffset={c * (1 - score / 100)}
+          style={{ transition: 'stroke-dashoffset 600ms ease' }} />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="text-2xl font-bold leading-none text-zinc-100">{score}</span>
+        <span className="text-[9px] uppercase tracking-wider text-zinc-500">/ 100</span>
+      </div>
+    </div>
+  )
+}
+
+function ReadinessView({ ready, loading }: { ready: Readiness | null; loading: boolean }) {
   if (loading && !ready) return (
-    <div className="flex items-center justify-center py-6 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /></div>
+    <div className="flex items-center justify-center py-10 text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>
   )
   if (!ready) return null
   const r = ready
   const m = _READY_META[r.overall.status]
   const rec = r.recommendation
   return (
-    <div className="space-y-3">
-      {/* Verdict banner */}
-      <div className={`rounded-lg border p-3 ${m.box}`}>
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className={`text-[10px] font-bold uppercase tracking-wider ${m.ring}`}>{m.label}</span>
-              {r.next_stage && <span className="text-[11px] text-zinc-500">for {r.next_stage} · day {r.days_alive}</span>}
-            </div>
-            <div className="mt-0.5 text-sm font-semibold text-zinc-100">{rec.title}</div>
-            {r.estimate_days != null && (
-              <div className="mt-0.5 text-[11px] text-zinc-500">≈ {r.estimate_days} more day{r.estimate_days === 1 ? '' : 's'} at this pace</div>
-            )}
+    <div className="space-y-4">
+      {/* Verdict hero: ring + title + estimate */}
+      <div className={`flex items-center gap-5 rounded-xl border p-4 ${m.box}`}>
+        <ScoreRing score={r.overall.score} status={r.overall.status} />
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${m.ring} ring-1 ring-current/30`}>{m.label}</span>
+            {r.next_stage && <span className="text-[11px] text-zinc-500">for {r.next_stage} · day {r.days_alive} · last {r.window_days}d</span>}
           </div>
-          <div className="shrink-0 text-right">
-            <div className={`text-2xl font-bold leading-none ${m.ring}`}>{r.overall.score}</div>
-            <div className="text-[9px] uppercase tracking-wider text-zinc-500">/ 100</div>
-          </div>
+          <div className="mt-1 text-base font-semibold text-zinc-100">{rec.title}</div>
+          {r.estimate_days != null && (
+            <div className="mt-0.5 text-[11px] text-zinc-500">≈ {r.estimate_days} more day{r.estimate_days === 1 ? '' : 's'} at this pace</div>
+          )}
         </div>
       </div>
 
-      {/* Domain bars */}
-      <div className="space-y-2">
+      {/* Domain grid — two columns of bars */}
+      <div className="grid gap-x-6 gap-y-3 md:grid-cols-2">
         {r.dimensions.map((d) => (
-          <div key={d.key} title={d.evidence}>
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-zinc-300">
+          <div key={d.key} title={d.evidence} className="group">
+            <div className="flex items-baseline justify-between text-[11px]">
+              <span className="font-medium text-zinc-300">
                 {d.label}
                 {d.critical && <span className="ml-1 text-zinc-600" title="critical — gates advancement">✦</span>}
               </span>
-              <span className="tabular-nums text-zinc-500">{d.score}</span>
+              <span className="tabular-nums font-semibold text-zinc-400">{d.score}</span>
             </div>
-            <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-zinc-800">
-              <div className={`h-full rounded-full transition-all ${_BAR[d.status]}`} style={{ width: `${Math.max(3, d.score)}%` }} />
+            <div className="mt-1 h-2 overflow-hidden rounded-full bg-zinc-800">
+              <div className={`h-full rounded-full transition-all duration-500 ${_BAR[d.status]}`} style={{ width: `${Math.max(3, d.score)}%` }} />
             </div>
-            <div className="mt-0.5 text-[10px] text-zinc-600">{d.detail}</div>
+            <div className="mt-0.5 truncate text-[10px] text-zinc-600 group-hover:whitespace-normal">{d.detail}</div>
           </div>
         ))}
       </div>
 
-      {/* Recommendation */}
-      <div className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
-        {rec.steps.length > 0 && (
-          <div>
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">What to do</div>
-            <ul className="mt-1 space-y-0.5">
-              {rec.steps.map((s, i) => (
-                <li key={i} className="flex gap-1.5 text-[11px] text-zinc-400"><span className="shrink-0 text-violet-500 dark:text-violet-400">›</span>{s}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-        {rec.expect.length > 0 && (
-          <div>
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">What to expect</div>
-            <ul className="mt-1 space-y-0.5">
-              {rec.expect.map((s, i) => (
-                <li key={i} className="flex gap-1.5 text-[11px] text-zinc-400"><span className="shrink-0 text-zinc-600">·</span>{s}</li>
-              ))}
-            </ul>
-          </div>
-        )}
+      {/* Guidance: do / expect side by side, cautions + unlocks under */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+        <div className="grid gap-4 md:grid-cols-2">
+          {rec.steps.length > 0 && (
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">What to do</div>
+              <ul className="mt-1.5 space-y-1">
+                {rec.steps.map((s, i) => (
+                  <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed text-zinc-400"><span className="shrink-0 text-violet-500 dark:text-violet-400">›</span>{s}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {rec.expect.length > 0 && (
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">What to expect</div>
+              <ul className="mt-1.5 space-y-1">
+                {rec.expect.map((s, i) => (
+                  <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed text-zinc-400"><span className="shrink-0 text-zinc-600">·</span>{s}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
         {rec.cautions.length > 0 && (
-          <div className="rounded border border-amber-500/25 bg-amber-500/[0.05] p-2">
+          <div className="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.05] p-2.5">
             {rec.cautions.map((c, i) => (
               <div key={i} className="text-[11px] text-amber-700 dark:text-amber-300">⚠ {c}</div>
             ))}
           </div>
         )}
         {r.next_stage && r.unlocks.length > 0 && (
-          <div>
+          <div className="mt-3">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{r.next_stage} unlocks</div>
-            <div className="mt-1 flex flex-wrap gap-1">
-              {r.unlocks.map((u) => <span key={u} className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-600 dark:text-violet-300">{u}</span>)}
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {r.unlocks.map((u) => <span key={u} className="rounded-md bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-600 dark:text-violet-300">{u}</span>)}
             </div>
           </div>
-        )}
-        {onAssess && (
-          <button onClick={onAssess} className="text-[10px] text-zinc-500 underline decoration-dotted underline-offset-2 hover:text-zinc-300">
-            Get a second opinion from another agent →
-          </button>
         )}
       </div>
     </div>
@@ -1206,11 +1220,13 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   const [dietDeny, setDietDeny] = useState('')
   const [ready, setReady] = useState<Readiness | null>(null)
   const [readyLoading, setReadyLoading] = useState(false)
-  const [assessOpen, setAssessOpen] = useState(false)
   const [assessors, setAssessors] = useState<Assessor[]>([])
   const [assessorSlug, setAssessorSlug] = useState('')
-  const [assessResult, setAssessResult] = useState<{ assessor: string; assessment: string } | null>(null)
+  const [assessResult, setAssessResult] = useState<{ assessor: string; assessment: string; score: number; verdict: string } | null>(null)
   const [assessBusy, setAssessBusy] = useState(false)
+  const [assessSaved, setAssessSaved] = useState(false)
+  const [saved, setSaved] = useState<SavedAssessment[]>([])
+  const [openSaved, setOpenSaved] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -1255,20 +1271,40 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
     finally { setBusy('') }
   }
 
-  const openAssess = async () => {
-    setAssessOpen(true)
+  const loadOpinions = useCallback(async () => {
     try {
-      const r = await getAssessors()
-      setAssessors(r.assessors)
-      setAssessorSlug((s) => s || (r.assessors[0]?.slug ?? ''))
-    } catch { setAssessors([]) }
-  }
+      const [a, s] = await Promise.all([getAssessors(), listAssessments(slug)])
+      setAssessors(a.assessors)
+      setAssessorSlug((cur) => cur || (a.assessors[0]?.slug ?? ''))
+      setSaved(s.assessments)
+    } catch { /* panel shows empty states */ }
+  }, [slug])
+  useEffect(() => { if (tab === 'growth') void loadOpinions() }, [tab, loadOpinions])
+
   const doAssess = async () => {
     if (!assessorSlug) return
-    setAssessBusy(true); setAssessResult(null)
+    setAssessBusy(true); setAssessResult(null); setAssessSaved(false)
     try { setAssessResult(await requestAssessment(slug, assessorSlug)) }
     catch (e) { alert(e instanceof Error ? e.message : 'failed') }
     finally { setAssessBusy(false) }
+  }
+  const doSaveOpinion = async () => {
+    if (!assessResult) return
+    try {
+      await saveAssessment(slug, {
+        assessor: assessResult.assessor, content: assessResult.assessment,
+        score: assessResult.score, verdict: assessResult.verdict,
+      })
+      setAssessSaved(true)
+      setSaved((await listAssessments(slug)).assessments)
+    } catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+  }
+  const doDeleteOpinion = async (id: string) => {
+    if (!window.confirm('Discard this saved opinion?')) return
+    try {
+      await deleteAssessment(slug, id)
+      setSaved((await listAssessments(slug)).assessments)
+    } catch (e) { alert(e instanceof Error ? e.message : 'failed') }
   }
 
   const stages = ['infant', 'child', 'adolescent', 'adult']
@@ -1279,7 +1315,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
-      <div className="flex max-h-[88vh] w-[680px] flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+      <div className="flex h-[80vh] w-[80vw] flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
            onClick={(e) => e.stopPropagation()}>
         <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-2.5">
           <div className="flex items-center gap-2">
@@ -1350,7 +1386,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
             {/* Report tab */}
             {tab === 'report' && (
-            <div>
+            <div className="mx-auto w-full max-w-3xl">
               <div className="mb-1.5 flex items-center gap-2">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">last {days} days</span>
                 <div className="flex overflow-hidden rounded border border-zinc-700 text-[10px]">
@@ -1462,61 +1498,108 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
             {/* Growth tab */}
             {tab === 'growth' && (
-            <div className="space-y-4">
-              <ReadinessView ready={ready} loading={readyLoading}
-                onAssess={ready ? openAssess : undefined} />
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(340px,420px)]">
+              {/* Left — the assessment itself */}
+              <ReadinessView ready={ready} loading={readyLoading} />
 
-              {assessOpen && (
-                <div className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+              {/* Right — second opinion, sealed records, rites */}
+              <div className="space-y-4">
+                <div className="space-y-2.5 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Second opinion</div>
                   {assessors.length === 0 ? (
-                    <p className="text-[11px] text-zinc-500">No running agents to ask. Start one of your agents, then reopen this.</p>
+                    <p className="text-[11px] text-zinc-500">No running agents to ask. Start one of your agents, then reopen this tab.</p>
                   ) : (
-                    <>
-                      <div className="flex items-center gap-2">
-                        <select value={assessorSlug} onChange={(e) => setAssessorSlug(e.target.value)}
-                          className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
-                          {assessors.map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
-                        </select>
-                        <button onClick={doAssess} disabled={assessBusy || !assessorSlug}
-                          className="flex shrink-0 items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
-                          {assessBusy ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Assessing…</> : 'Ask for assessment'}
-                        </button>
-                      </div>
-                      {assessBusy && <p className="text-[10px] text-zinc-600">She's being read by another mind — this can take a minute.</p>}
-                    </>
+                    <div className="flex items-center gap-2">
+                      <select value={assessorSlug} onChange={(e) => setAssessorSlug(e.target.value)}
+                        className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
+                        {assessors.map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
+                      </select>
+                      <button onClick={doAssess} disabled={assessBusy || !assessorSlug}
+                        className="flex shrink-0 items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+                        {assessBusy ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Assessing…</> : 'Ask'}
+                      </button>
+                    </div>
                   )}
+                  {assessBusy && <p className="text-[10px] text-zinc-600">She's being read by another mind — this can take a minute.</p>}
                   {assessResult && (
-                    <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
-                      <div className="mb-1 text-[10px] text-zinc-500">{assessResult.assessor} says</div>
-                      <div className="fd-file-markdown text-[12px] leading-relaxed text-zinc-300">
+                    <div className="rounded-lg border border-zinc-800 bg-zinc-950/60">
+                      <div className="flex items-center justify-between border-b border-zinc-800/70 px-3 py-2">
+                        <span className="text-[11px] font-medium text-zinc-300">{assessResult.assessor} says</span>
+                        {assessSaved ? (
+                          <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400"><Check className="h-3 w-3" /> kept on record</span>
+                        ) : (
+                          <button onClick={doSaveOpinion}
+                            className="rounded-md border border-violet-500/40 px-2 py-0.5 text-[10px] font-medium text-violet-600 hover:bg-violet-500/10 dark:text-violet-300">
+                            Keep on record
+                          </button>
+                        )}
+                      </div>
+                      <div className="fd-file-markdown max-h-[38vh] overflow-y-auto p-3 text-[12px] leading-relaxed text-zinc-300">
                         <Markdown remarkPlugins={[remarkGfm]}>{assessResult.assessment}</Markdown>
                       </div>
                     </div>
                   )}
                 </div>
-              )}
 
-              <div>
-              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Rites</div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[11px] text-zinc-400">stage <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-200">{v.stage}</span></span>
-                {nextStage && (
-                  <button onClick={() => { if (window.confirm(`Advance ${name} to ${nextStage}? New abilities unlock — this is a ceremony.`)) void run('stage', () => setStage(slug, nextStage)) }} disabled={busy === 'stage'}
-                    className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">Advance to {nextStage} →</button>
-                )}
-                {v.persona && !v.pending_self_mod && (
-                  <button onClick={() => { if (window.confirm(`Roll ${name}'s persona back to the previous self?`)) void run('rollback', () => rollbackPersona(slug)) }} disabled={busy === 'rollback'}
-                    className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Roll back persona</button>
-                )}
-                {!v.pending_procreation && v.capabilities.includes('procreate') && (
-                  <button onClick={() => { const cn = window.prompt(`Name for ${name}'s child?`); if (!cn) return; const partner = window.prompt('Co-parent (sibling name), or leave empty for budding:') || null; void run('procreate', () => arrangeOffspring(slug, cn, partner)) }} disabled={busy === 'procreate'}
-                    className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Arrange offspring</button>
-                )}
-              </div>
-              {v.persona && (
-                <p className="mt-2 line-clamp-3 border-l-2 border-zinc-800 pl-2 text-[11px] italic text-zinc-500">“{v.persona}”</p>
-              )}
+                {/* Sealed records */}
+                <div className="space-y-2 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Records</span>
+                    <span className="text-[10px] text-zinc-600">{v.stage === 'adult' ? 'unsealed — hers to read' : `sealed until adulthood — ${name} can't read these`}</span>
+                  </div>
+                  {saved.length === 0 ? (
+                    <p className="text-[11px] text-zinc-600">No opinions kept yet. Ask one above, then “Keep on record”.</p>
+                  ) : saved.map((s) => (
+                    <div key={s.id} className="rounded-lg border border-zinc-800 bg-zinc-950/60">
+                      <button onClick={() => setOpenSaved(openSaved === s.id ? null : s.id)}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left">
+                        <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-zinc-300">{s.assessor}</span>
+                        {s.verdict && <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-zinc-400">{s.verdict}</span>}
+                        {s.score != null && <span className="shrink-0 text-[10px] tabular-nums text-zinc-500">{s.score}</span>}
+                        <span className="shrink-0 text-[10px] text-zinc-600">{s.at.slice(0, 10)} · {s.stage}</span>
+                        <span className="shrink-0 text-[10px]" title={s.released_at ? 'unsealed — in her home' : 'sealed'}>
+                          {s.released_at ? '🔓' : '🔒'}
+                        </span>
+                      </button>
+                      {openSaved === s.id && (
+                        <div className="border-t border-zinc-800/70">
+                          <div className="fd-file-markdown max-h-[32vh] overflow-y-auto p-3 text-[12px] leading-relaxed text-zinc-300">
+                            <Markdown remarkPlugins={[remarkGfm]}>{s.content}</Markdown>
+                          </div>
+                          {!s.released_at && (
+                            <div className="flex justify-end border-t border-zinc-800/70 px-3 py-1.5">
+                              <button onClick={() => void doDeleteOpinion(s.id)}
+                                className="text-[10px] text-red-600/80 hover:text-red-500 dark:text-red-400/80">discard</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Rites */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                  <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Rites</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] text-zinc-400">stage <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-200">{v.stage}</span></span>
+                    {nextStage && (
+                      <button onClick={() => { if (window.confirm(`Advance ${name} to ${nextStage}? New abilities unlock — this is a ceremony.`)) void run('stage', () => setStage(slug, nextStage)) }} disabled={busy === 'stage'}
+                        className="rounded-md bg-violet-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40">Advance to {nextStage} →</button>
+                    )}
+                    {v.persona && !v.pending_self_mod && (
+                      <button onClick={() => { if (window.confirm(`Roll ${name}'s persona back to the previous self?`)) void run('rollback', () => rollbackPersona(slug)) }} disabled={busy === 'rollback'}
+                        className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Roll back persona</button>
+                    )}
+                    {!v.pending_procreation && v.capabilities.includes('procreate') && (
+                      <button onClick={() => { const cn = window.prompt(`Name for ${name}'s child?`); if (!cn) return; const partner = window.prompt('Co-parent (sibling name), or leave empty for budding:') || null; void run('procreate', () => arrangeOffspring(slug, cn, partner)) }} disabled={busy === 'procreate'}
+                        className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Arrange offspring</button>
+                    )}
+                  </div>
+                  {v.persona && (
+                    <p className="mt-2 line-clamp-3 border-l-2 border-zinc-800 pl-2 text-[11px] italic text-zinc-500">“{v.persona}”</p>
+                  )}
+                </div>
               </div>
             </div>
             )}
