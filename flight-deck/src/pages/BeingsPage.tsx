@@ -881,18 +881,19 @@ function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy
   )
 }
 
-// Chores — post fixed-fee tasks a being earns by doing; every payout is
-// escrow-gated by the parent's judgment (plan §5.1). Its own modal so the
-// review flow (see her result → approve & pay / reject with a reason) has room.
+// Talk — everything parent↔being: the letters thread (chat-style) beside the
+// chores board (post → she attempts → you judge → escrowed payout, plan §5.1).
+// One modal because both are the same conversation, in words and in work.
 const CHORE_FEES = [
   { v: '100000', label: '100k' }, { v: '500000', label: '500k' },
   { v: '1000000', label: '1M' }, { v: '2000000', label: '2M' },
 ] as const
 
-function ChoresModal({ slug, name, onClose, onChanged }: {
+function TalkModal({ slug, name, onClose, onChanged }: {
   slug: string; name: string; onClose: () => void; onChanged: () => void
 }) {
   const [chores, setChores] = useState<Chore[]>([])
+  const [thread, setThread] = useState<ThreadItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
@@ -900,15 +901,21 @@ function ChoresModal({ slug, name, onClose, onChanged }: {
   const [fee, setFee] = useState('500000')
   const [rejectingId, setRejectingId] = useState<string | null>(null)
   const [rejectNote, setRejectNote] = useState('')
+  const [msg, setMsg] = useState('')
+  const endRef = useRef<HTMLDivElement>(null)
 
   const load = useCallback(async () => {
     setLoading(true); setError('')
-    try { setChores((await listChores(slug)).chores) }
-    catch (e) { setError(e instanceof Error ? e.message : 'failed to load') }
+    try {
+      const [c, t] = await Promise.all([listChores(slug), getBeingMessages(slug)])
+      setChores(c.chores); setThread(t.thread)
+    } catch (e) { setError(e instanceof Error ? e.message : 'failed to load') }
     finally { setLoading(false) }
   }, [slug])
 
   useEffect(() => { void load() }, [load])
+  // Keep the conversation pinned to its newest words.
+  useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }) }, [thread])
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -925,6 +932,10 @@ function ChoresModal({ slug, name, onClose, onChanged }: {
     if (!spec.trim()) return
     await postChore(slug, spec.trim(), Number(fee)); setSpec('')
   })
+  const send = () => run('send', async () => {
+    if (!msg.trim()) return
+    await messageBeing(slug, msg.trim()); setMsg('')
+  })
   const pay = (id: string) => run(`pay:${id}`, () => judgeChore(slug, id, true))
   const reject = (id: string) => run(`rej:${id}`, async () => {
     await judgeChore(slug, id, false, rejectNote.trim())
@@ -937,12 +948,12 @@ function ChoresModal({ slug, name, onClose, onChanged }: {
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
-      <div className="flex max-h-[85vh] w-[640px] flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+      <div className="flex h-[80vh] w-[80vw] flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
            onClick={(e) => e.stopPropagation()}>
         <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-2.5">
           <div className="flex items-center gap-2">
-            <ClipboardList className="h-4 w-4 text-violet-500 dark:text-violet-400" />
-            <h3 className="text-sm font-semibold text-zinc-100">{name} — Chores</h3>
+            <MessageCircle className="h-4 w-4 text-violet-500 dark:text-violet-400" />
+            <h3 className="text-sm font-semibold text-zinc-100">{name} — Write & Chores</h3>
             {review.length > 0 && (
               <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
                 {review.length} to review
@@ -955,6 +966,54 @@ function ChoresModal({ slug, name, onClose, onChanged }: {
           </div>
         </div>
 
+        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-2">
+        {/* Letters — the conversation itself */}
+        <div className="flex min-h-0 flex-col border-b border-zinc-800 lg:border-b-0 lg:border-r">
+          <div className="shrink-0 border-b border-zinc-800/70 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Letters</div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            {loading && thread.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>
+            ) : thread.length === 0 ? (
+              <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+                <MessageCircle className="h-8 w-8 text-zinc-700" />
+                <p className="text-xs text-zinc-500">No letters yet — say something to {name}.</p>
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {thread.map((m, i) => (
+                  <div key={i} className={`flex ${m.from === 'parent' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[80%] rounded-2xl px-3 py-2 ${m.from === 'parent'
+                      ? 'rounded-br-sm bg-violet-600 text-white'
+                      : 'rounded-bl-sm bg-zinc-800 text-zinc-200'}`}>
+                      <p className="whitespace-pre-wrap text-[12px] leading-relaxed">{m.body}</p>
+                      <div className={`mt-0.5 text-right text-[9px] ${m.from === 'parent' ? 'text-violet-200/80' : 'text-zinc-500'}`}>
+                        {fmtRelTime(m.at)}{m.from === 'parent' ? (m.read ? ' · read' : ' · unread') : ''}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <div ref={endRef} />
+              </div>
+            )}
+          </div>
+          <div className="shrink-0 border-t border-zinc-800 p-3">
+            <div className="flex items-end gap-2">
+              <textarea value={msg} onChange={(e) => setMsg(e.target.value)} rows={2}
+                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send() }}
+                placeholder={`Say something to ${name}…`}
+                className="min-w-0 flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+              <button onClick={send} disabled={!msg.trim() || busy === 'send'}
+                className="flex shrink-0 items-center gap-1 rounded-lg bg-violet-600 px-3 py-2 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+                {busy === 'send' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageCircle className="h-3.5 w-3.5" />} Send
+              </button>
+            </div>
+            <p className="mt-1.5 text-[10px] text-zinc-600">Delivered on her next wake — reading is free, replying costs her an attention credit. Poke her to have her read it now.</p>
+          </div>
+        </div>
+
+        {/* Chores — the conversation, in work */}
+        <div className="flex min-h-0 flex-col">
+        <div className="shrink-0 border-b border-zinc-800/70 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Chores</div>
         {/* Post a chore */}
         <div className="shrink-0 border-b border-zinc-800 bg-zinc-900/40 p-3">
           <textarea
@@ -1076,6 +1135,8 @@ function ChoresModal({ slug, name, onClose, onChanged }: {
               )}
             </div>
           )}
+        </div>
+        </div>
         </div>
       </div>
     </div>
@@ -1980,14 +2041,11 @@ function BeingCard({ item, meta, onChanged }: {
   const [events, setEvents] = useState<BeingEvent[]>([])
   const [logView, setLogView] = useState<'journal' | 'ticks' | 'self' | 'mind' | null>(null)
   const [busy, setBusy] = useState('')
-  const [messaging, setMessaging] = useState(false)
-  const [msgText, setMsgText] = useState('')
-  const [thread, setThread] = useState<ThreadItem[]>([])
   const [confirm, setConfirm] = useState<{
     title: string; message: string; confirmLabel: string
     tone?: 'default' | 'danger'; icon?: typeof Zap; run: () => Promise<unknown>
   } | null>(null)
-  const [choresOpen, setChoresOpen] = useState(false)
+  const [talkOpen, setTalkOpen] = useState(false)
   const [parentingOpen, setParentingOpen] = useState(false)
 
   const load = useCallback(async () => {
@@ -2169,14 +2227,8 @@ function BeingCard({ item, meta, onChanged }: {
               <>
                 <div className="mx-0.5 h-5 w-px bg-zinc-800" />
                 <div className="flex items-center gap-1">
-                  <IconAction icon={MessageCircle} label="Write to her — she reads it next tick" active={messaging}
-                    onClick={() => {
-                      const next = !messaging
-                      setMessaging(next)
-                      if (next) void getBeingMessages(item.slug).then((r) => setThread(r.thread)).catch(() => {})
-                    }} />
-                  <IconAction icon={ClipboardList} label="Chores — tasks she earns tokens for"
-                    onClick={() => setChoresOpen(true)} />
+                  <IconAction icon={MessageCircle} label="Write & chores — talk to her, give her work"
+                    onClick={() => setTalkOpen(true)} />
                   <IconAction icon={GraduationCap} label="Parenting — report card, rules, diet, growth"
                     onClick={() => setParentingOpen(true)} />
                 </div>
@@ -2212,10 +2264,10 @@ function BeingCard({ item, meta, onChanged }: {
         />
       )}
 
-      {choresOpen && (
-        <ChoresModal
+      {talkOpen && (
+        <TalkModal
           slug={item.slug} name={item.name}
-          onClose={() => setChoresOpen(false)}
+          onClose={() => setTalkOpen(false)}
           onChanged={() => { void load(); onChanged() }}
         />
       )}
@@ -2226,53 +2278,6 @@ function BeingCard({ item, meta, onChanged }: {
           onClose={() => setParentingOpen(false)}
           onChanged={() => { void load(); onChanged() }}
         />
-      )}
-
-      {messaging && item.state !== 'dead' && (
-        <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
-          <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
-            <MessageCircle className="h-3.5 w-3.5 text-violet-400" /> Write to {item.name}
-            <span className="text-[10px] font-normal text-zinc-600">she reads it on her next tick — reading is free, replying costs her a credit</span>
-          </div>
-          {thread.length > 0 && (
-            <div className="mb-2 max-h-56 space-y-1.5 overflow-y-auto rounded border border-zinc-800/70 bg-zinc-900/40 p-2">
-              {thread.map((t, i) => (
-                <div key={i} className={`flex ${t.from === 'parent' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] rounded-lg px-2.5 py-1.5 text-[11px] ${t.from === 'parent' ? 'bg-violet-600/20 text-violet-100' : 'bg-zinc-800 text-zinc-300'}`}>
-                    <div className="mb-0.5 flex items-center gap-1.5 text-[9px] uppercase tracking-wide text-zinc-500">
-                      <span>{t.from === 'parent' ? 'you' : item.name}</span>
-                      <span>{fmtAt(t.at)}</span>
-                      {t.from === 'parent' && <span className={t.read ? 'text-emerald-400/70' : 'text-amber-400/70'}>{t.read ? 'read' : 'unread'}</span>}
-                    </div>
-                    {t.body}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          <textarea
-            value={msgText}
-            onChange={(e) => setMsgText(e.target.value)}
-            rows={3}
-            placeholder={`Say something to ${item.name}…`}
-            className="w-full resize-none rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-          />
-          <div className="mt-1.5 flex items-center gap-2">
-            <button
-              disabled={busy === 'message' || !msgText.trim()}
-              onClick={() => void act('message', async () => {
-                await messageBeing(item.slug, msgText.trim())
-                setMsgText('')
-                setThread((await getBeingMessages(item.slug)).thread)
-              })}
-              className="flex items-center gap-1 rounded-md bg-violet-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
-            >
-              {busy === 'message' ? <Loader2 className="h-3 w-3 animate-spin" /> : <MessageCircle className="h-3 w-3" />}
-              Send
-            </button>
-            <span className="text-[10px] text-zinc-600">delivered to her next wake — Poke to have her read it now</span>
-          </div>
-        </div>
       )}
 
     </div>
