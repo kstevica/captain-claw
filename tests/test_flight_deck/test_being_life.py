@@ -638,6 +638,11 @@ async def test_tick_follows_drifted_port(store, monkeypatch):
     monkeypatch.setattr(
         "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
         lambda slug: (2222, "tok2"))                # registry says 2222 (live)
+
+    async def _alive(host, port, timeout=1.0):
+        return True
+
+    monkeypatch.setattr(life, "_port_reachable", _alive)
     seen = {}
 
     async def fake_send(being, prompt):
@@ -655,3 +660,41 @@ async def test_tick_follows_drifted_port(store, monkeypatch):
     assert out["ok"] is True
     assert seen["send_port"] == 2222 and seen["usage_port"] == 2222
     assert store.get(OWNER, b["slug"])["agent_port"] == 2222
+
+
+async def test_tick_restarts_unreachable_body(store, monkeypatch):
+    """The registry has a port but nothing answers there (a clobbered announce /
+    a body that drifted): the being restarts its body and reschedules soon
+    instead of thinking against a dead port — the actual prod symptom."""
+    db = FakeDB()
+    b = _born(store, port=24096)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (24096, "tok"))                 # registry insists on 24096
+
+    async def _dead(host, port, timeout=1.0):        # ...but nothing listens
+        return False
+
+    monkeypatch.setattr(life, "_port_reachable", _dead)
+    calls = {"spawn": 0, "stop": 0}
+
+    async def _fake_spawn(db_, store_, being_):
+        calls["spawn"] += 1
+        return {"port": 24096}
+
+    monkeypatch.setattr(life, "spawn_body", _fake_spawn)
+    monkeypatch.setattr(life, "_stop_body",
+                        lambda being: calls.__setitem__("stop", calls["stop"] + 1))
+    out = await life.tick(db, store, b, now=NOW)
+    assert out["outcome"] == "body_unreachable"
+    assert calls["stop"] == 1 and calls["spawn"] == 1   # kicked the body
+    assert "body_unreachable" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+    fresh = store.get(OWNER, b["slug"])
+    assert fresh["next_wake_at"].startswith("2026-07-12T12:05")   # retry in 5 min
+
+
+async def test_port_reachable_false_on_dead_port(store):
+    # nothing is listening on this port → not reachable, fast
+    assert await life._port_reachable("127.0.0.1", 6) is False

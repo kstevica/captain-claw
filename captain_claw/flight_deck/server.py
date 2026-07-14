@@ -515,7 +515,19 @@ def _reattach_processes():
                 restarted.append(slug)
             else:
                 entry["pid"] = None
-    _save_process_registry(registry)
+    # Persist our pid updates WITHOUT clobbering a port a child announced while
+    # we were spawning: a freshly-restarted agent whose port was taken drifts to
+    # a fallback and POSTs /announce-port, which rewrites the on-disk registry
+    # independently. Re-read and carry the on-disk web_port/web_auth forward (the
+    # announce handler is the authority for those) — only pid is ours to set.
+    fresh = _load_process_registry()
+    for slug, entry in registry.items():
+        f = fresh.get(slug)
+        if f is None:
+            fresh[slug] = entry
+        else:
+            f["pid"] = entry.get("pid")
+    _save_process_registry(fresh)
     if restarted:
         print(f"Flight Deck: restarted {len(restarted)} process agent(s): {', '.join(restarted)}")
     if skipped:
@@ -5494,7 +5506,16 @@ def _do_start_process(slug: str) -> ProcessActionResult:
     if not _start_registered_process(slug, entry):
         raise HTTPException(500, "Failed to start process (captain-claw-web not found?)")
 
-    _save_process_registry(registry)
+    # Re-read before saving so a drifted-port announce from the child we just
+    # started isn't clobbered by our stale in-memory web_port (see announce-port).
+    fresh = _load_process_registry()
+    f = fresh.get(slug)
+    if f is None:
+        fresh[slug] = entry
+    else:
+        f["pid"] = entry.get("pid")
+        f.pop("stopped", None)
+    _save_process_registry(fresh)
 
     return ProcessActionResult(ok=True, slug=slug, message=f"Started (PID {entry.get('pid', '?')})")
 

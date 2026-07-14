@@ -951,6 +951,25 @@ async def _usage_since(being: dict, since: datetime) -> dict:
     return total
 
 
+async def _port_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
+    """Can we actually open a TCP connection to the agent? A bound socket
+    accepts the connect even mid-turn, so this tests 'is the body listening
+    HERE', not 'is it idle' — no false restart of a busy-but-alive agent."""
+    if not port:
+        return False
+    try:
+        fut = asyncio.open_connection(host, int(port))
+        reader, writer = await asyncio.wait_for(fut, timeout=timeout)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+    except Exception:  # noqa: BLE001 — refused / timeout / bad port = not there
+        return False
+
+
 def _resolve_live_port(store: BeingsStore, being: dict) -> int | None:
     """The being's agent port AS IT IS RIGHT NOW, from the live fleet registry —
     the source of truth. A being caches (port, token) in its own row at birth,
@@ -1177,15 +1196,39 @@ async def _tick_locked(
                            now=now)
         _start_body(being)
 
-    # 2. A body is required to think — and it must be where it ACTUALLY is.
-    #    The agent process drifts to a fallback port on restart (announce-port
-    #    self-heals the fleet registry but not our cached copy), so re-resolve
-    #    the live port each tick and re-pin the row when it moved. A being with
-    #    no live body in the registry cleanly skips (as before) — a fresh body
-    #    is FD's reattach-on-boot / the parent's re-hatch, never an in-tick spawn.
+    # 2. A body is required to think — and it must be REACHABLE where the
+    #    registry says it is. The agent drifts to a fallback port on restart and
+    #    announces it, but the registry can still hold a stale port (a clobbered
+    #    announce, or a body that survived an FD restart on a drifted port) — so
+    #    both our cached copy AND the registry can be wrong. Re-resolve, then
+    #    actually probe the port; if nothing answers there, restart the body so
+    #    it re-announces, and heal on the next tick.
     if send_fn is None:
         live_port = _resolve_live_port(store, being)
         being = store.get(owner, being["slug"])   # pick up any re-pin
+        if live_port is not None and not await _port_reachable("127.0.0.1",
+                                                               live_port):
+            store.record_event(bid, "body_unreachable", {"port": live_port},
+                               now=now)
+            if db is not None and being.get("agent_slug"):
+                try:
+                    _stop_body(being)
+                    await spawn_body(db, store, being)
+                except Exception as e:  # noqa: BLE001
+                    store.record_event(bid, "spawn_failed", {"error": str(e)},
+                                       now=now)
+                being = store.get(owner, being["slug"])
+                live_port = _resolve_live_port(store, being)
+                being = store.get(owner, being["slug"])
+            # A freshly-spawned body may still be binding — reschedule soon and
+            # let the next tick reach it, rather than think against a dead port.
+            if live_port is None or not await _port_reachable("127.0.0.1",
+                                                              live_port):
+                store.tick_bookkeeping(
+                    bid, drives=being.get("drives") or {},
+                    next_wake_at=now + timedelta(minutes=5), now=now)
+                out.update(outcome="body_unreachable")
+                return out
         if live_port is None:
             store.record_event(bid, "tick_skipped", {"reason": "no body"},
                                now=now)
