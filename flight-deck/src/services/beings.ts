@@ -148,6 +148,10 @@ export const getBeingJournal = (slug: string, date = '') =>
   fdFetch<{ date: string; text: string }>(`/beings/${slug}/journal${date ? `?date=${date}` : ''}`)
 export const getSelfFiles = (slug: string) =>
   fdFetch<{ files: SelfFile[] }>(`/beings/${slug}/self/files`)
+export const messageBeing = (slug: string, body: string) =>
+  fdFetch<{ message: { id: string; preview: string } }>(`/beings/${slug}/message`, {
+    method: 'POST', body: JSON.stringify({ body }),
+  })
 export const getSelfFile = (slug: string, path: string) =>
   fdFetch<{ path: string; text: string }>(`/beings/${slug}/self/file?path=${encodeURIComponent(path)}`)
 export const getLiabilities = () =>

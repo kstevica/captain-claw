@@ -68,6 +68,10 @@ class RulesRequest(BaseModel):
     rules: list[str]
 
 
+class MessageRequest(BaseModel):
+    body: str
+
+
 class AllowanceRequest(BaseModel):
     preset: str
     daily_burn_cap: int | None = None
@@ -295,6 +299,14 @@ async def set_rules(slug: str, body: RulesRequest,
     """House rules — the being internalizes them into VALUES.md next tick."""
     b = _run(get_store().set_house_rules, user["id"], slug, body.rules)
     return {"house_rules": b["house_rules"], "pending": True}
+
+
+@router.post("/{slug}/message")
+async def message_being(slug: str, body: MessageRequest,
+                        user: dict = Depends(get_current_user)):
+    """Write to your being — delivered once as a percept on its next tick."""
+    return {"message": _run(get_store().send_parent_message,
+                            user["id"], slug, body.body)}
 
 
 class SelfModRejectRequest(BaseModel):

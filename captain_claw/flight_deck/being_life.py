@@ -380,6 +380,22 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
     """Event-driven senses: what happened to me since my last tick."""
     last = being.get("last_tick_at") or ""
     lines: list[str] = []
+    # The parent writing back — the most important percept there is. Surfaced
+    # first (never truncated) and delivered once. Reading is free; a reply,
+    # like any outbound message, still spends an attention credit.
+    parent_lines: list[str] = []
+    try:
+        msgs = store.unread_parent_messages(being["id"], limit=5)
+        for m in msgs:
+            parent_lines.append(f"YOUR PARENT WROTE TO YOU: {m['body']}")
+        if msgs:
+            store.mark_parent_messages_read([m["id"] for m in msgs])
+            parent_lines.append(
+                "Reading your parent's words is free; answer if it moves you "
+                "(a reply spends an attention credit, as always).")
+    except Exception as e:  # noqa: BLE001
+        log.warning("parent-message percepts failed", slug=being["slug"],
+                    error=str(e))
     for e in reversed(store.events(being["owner_id"], being["slug"], limit=30)):
         if last and e["at"] <= last:
             continue
@@ -430,7 +446,7 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
     except Exception as e:  # noqa: BLE001
         log.warning("mentoring percepts failed", slug=being["slug"],
                     error=str(e))
-    return lines[-10:]
+    return parent_lines + lines[-10:]
 
 
 # ── Tick prompt ──────────────────────────────────────────────────────────
@@ -1136,6 +1152,9 @@ async def _tick_locked(
     # its own nourishment.
     if "legacy" in drives and any(p.startswith("YOUR CHILD") for p in senses):
         drives = serve_drive(drives, "legacy")
+    # The parent reaching out is connection — it feeds the connect drive.
+    if any(p.startswith("YOUR PARENT WROTE") for p in senses):
+        drives = serve_drive(drives, "connect")
     # Feed the previous tick's ground truth back in — so a being that narrated
     # a write it never made is told so, and can stop.
     last_changed, last_mismatch = None, False

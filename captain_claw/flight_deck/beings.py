@@ -265,6 +265,22 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_ventures
                     ON being_ventures(owner_id, state);
+
+                -- The parent writing back (the reply channel): free-form
+                -- messages from the human parent, delivered ONCE as a
+                -- high-priority percept on the being's next tick. Reactive —
+                -- the being reads for free; only its own outbound message
+                -- spends attention. Mirrors being_letters' deliver-once shape.
+                CREATE TABLE IF NOT EXISTS being_parent_messages (
+                    id        TEXT PRIMARY KEY,
+                    owner_id  TEXT NOT NULL,
+                    being_id  TEXT NOT NULL,
+                    body      TEXT NOT NULL,
+                    at        TEXT NOT NULL,
+                    read_at   TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_parent_msgs
+                    ON being_parent_messages(being_id, read_at);
                 """
             )
             # Lightweight migrations (columns added after first ship).
@@ -1544,6 +1560,51 @@ class BeingsStore:
             (owner_id, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── The parent writing back (reply channel) ──────────────────────
+
+    def send_parent_message(self, owner_id: str, slug: str, body: str,
+                            now: datetime | None = None) -> dict:
+        """The human parent writes to a being; delivered once, next tick."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if b["state"] == "dead":
+            raise BeingError("the dead receive no letters")
+        body = (body or "").strip()
+        if not body:
+            raise BeingError("an empty message says nothing")
+        mid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_parent_messages"
+                " (id, owner_id, being_id, body, at) VALUES (?,?,?,?,?)",
+                (mid, owner_id, b["id"], body[:4000], _iso(now)),
+            )
+            self._c().commit()
+        self.record_event(b["id"], "parent_message",
+                          {"preview": body[:200]}, now=now)
+        return {"id": mid, "preview": body[:200]}
+
+    def unread_parent_messages(self, being_id: str,
+                               limit: int = 5) -> list[dict]:
+        rows = self._c().execute(
+            "SELECT * FROM being_parent_messages WHERE being_id = ?"
+            " AND read_at IS NULL ORDER BY at LIMIT ?",
+            (being_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_parent_messages_read(self, message_ids: list[str],
+                                  now: datetime | None = None) -> None:
+        if not message_ids:
+            return
+        now = now or _utcnow()
+        with self._lock:
+            self._c().executemany(
+                "UPDATE being_parent_messages SET read_at = ? WHERE id = ?",
+                [(_iso(now), mid) for mid in message_ids],
+            )
+            self._c().commit()
 
     def add_publication(self, owner_id: str, being_id: str, title: str,
                         note: str, commons_path: str, price_tokens: int,

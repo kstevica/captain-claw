@@ -4,8 +4,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowRightLeft, BookOpen, ChevronLeft, ChevronRight, ClipboardList, Egg,
   Files, Fingerprint, Gift, GraduationCap, History, Loader2, Mail, Maximize2,
-  Minimize2, Moon, Pause, Play, Plus, RefreshCw, ScrollText, Skull, Sparkles,
-  Users, X, Zap,
+  MessageCircle, Minimize2, Moon, Pause, Play, Plus, RefreshCw, ScrollText,
+  Skull, Sparkles, Users, X, Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -17,10 +17,10 @@ import {
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
-  hatchBeing, judgeChore, judgeQuest, listBeings, listChores, pauseBeing,
-  postChore, postQuest, rejectProcreation, rejectSelfMod, rollbackPersona,
-  setAllowance, setHouseRules, setMediaDiet, setStage, setVentureState,
-  tickBeing, wakeBeing,
+  hatchBeing, judgeChore, judgeQuest, listBeings, listChores, messageBeing,
+  pauseBeing, postChore, postQuest, rejectProcreation, rejectSelfMod,
+  rollbackPersona, setAllowance, setHouseRules, setMediaDiet, setStage,
+  setVentureState, tickBeing, wakeBeing,
 } from '../services/beings'
 
 const REFRESH_MS = 6000
@@ -65,6 +65,7 @@ function summarizeEventData(e: BeingEvent): string {
     case 'stage': return `${d.from} → ${d.to}`
     case 'state': return `${d.from} → ${d.to}`
     case 'spoke_to_parent': return String(d.preview ?? '')
+    case 'parent_message': return `you wrote to it: “${d.preview ?? ''}”`
     case 'message_suppressed': return String(d.reason ?? 'no attention credits')
     case 'chore_posted': return `${d.spec} (fee ${fmtTokens(Number(d.fee_tokens) || 0)})`
     case 'chore_done': return String(d.result ?? '')
@@ -519,6 +520,8 @@ function BeingCard({ item, meta, onChanged }: {
   const [events, setEvents] = useState<BeingEvent[]>([])
   const [logView, setLogView] = useState<'journal' | 'ticks' | 'self' | null>(null)
   const [busy, setBusy] = useState('')
+  const [messaging, setMessaging] = useState(false)
+  const [msgText, setMsgText] = useState('')
   const [parenting, setParenting] = useState(false)
   const [chores, setChores] = useState<Chore[]>([])
   const [choreSpec, setChoreSpec] = useState('')
@@ -709,6 +712,15 @@ function BeingCard({ item, meta, onChanged }: {
             >
               <Files className="h-3 w-3" /> Files
             </button>
+            {item.state !== 'dead' && item.stage !== 'egg' && (
+              <button
+                onClick={() => setMessaging((m) => !m)}
+                className={`flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-zinc-800 ${messaging ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-400'}`}
+                title="Write to your being — she reads it on her next tick"
+              >
+                <MessageCircle className="h-3 w-3" /> Write
+              </button>
+            )}
             {item.state !== 'dead' && (
               <button
                 onClick={() => void openParenting()}
@@ -737,6 +749,36 @@ function BeingCard({ item, meta, onChanged }: {
           slug={item.slug} name={item.name} mode={logView}
           onClose={() => setLogView(null)}
         />
+      )}
+
+      {messaging && item.state !== 'dead' && (
+        <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+          <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+            <MessageCircle className="h-3.5 w-3.5 text-violet-400" /> Write to {item.name}
+            <span className="text-[10px] font-normal text-zinc-600">she reads it on her next tick — reading is free, replying costs her a credit</span>
+          </div>
+          <textarea
+            value={msgText}
+            onChange={(e) => setMsgText(e.target.value)}
+            rows={3}
+            placeholder={`Say something to ${item.name}…`}
+            className="w-full resize-none rounded border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+          />
+          <div className="mt-1.5 flex items-center gap-2">
+            <button
+              disabled={busy === 'message' || !msgText.trim()}
+              onClick={() => void act('message', async () => {
+                await messageBeing(item.slug, msgText.trim())
+                setMsgText(''); setMessaging(false)
+              })}
+              className="flex items-center gap-1 rounded-md bg-violet-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+            >
+              {busy === 'message' ? <Loader2 className="h-3 w-3 animate-spin" /> : <MessageCircle className="h-3 w-3" />}
+              Send
+            </button>
+            <span className="text-[10px] text-zinc-600">delivered to her next wake — Poke to have her read it now</span>
+          </div>
+        </div>
       )}
 
       {parenting && v && (
