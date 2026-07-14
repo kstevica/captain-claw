@@ -110,6 +110,39 @@ Decided 2026-07-12: a being **can change its own attributes — and it is the mo
   - Git history = its life story, literally. Every self-modification is a commit; degenerative changes are revertible.
 - **Drive state + goal stack** — DB-backed (`beings` table), updated each tick.
 
+### 2.3.1 The Mind — an explicit graph over the self (Phase 7 design)
+
+*Design decided 2026-07-14 (plan-first). Not built.* A being's artifacts are currently a flat pile: `garden/poem-question.md` and `garden/seed-of-listening.md` sit side by side with nothing recording that the second grew from the first. Two forms of connection already exist — the **temporal chain** (journal + git history, tick after tick) and the **associative web** (semantic-memory embeddings + topic clusters: "this resembles that"). Missing is the third and most human form: **explicit, intentional structure** — the being declaring "this responds to that", "this skill was born of that failure". A mind is not a folder; it has shape. This layer gives it one.
+
+**Stance — augment, never replace.** Embeddings give fuzzy recall (intuition); topics give emergent clusters; the graph gives deliberate, typed connections (a self reasoning about its own history). A real mind has all three, and this adds only the third. And — Design rule #1 — edges are REAL: an edge whose endpoint doesn't exist is rejected exactly as a claimed-but-unwritten file is (the tick↔reality reconciliation, §5). The graph is a portrait, never decoration.
+
+**Nodes** = the being's own artifacts, plus a few first-class concepts:
+- every real file under `garden/`, `skills/`, `self/` (the home manifest already enumerates them)
+- optionally a few lightweight **idea** nodes it names without a file yet (a question it's chasing, a theme) — kept scarce, promotable to a real file
+- NOT journal entries — those are the temporal spine; they *reference* nodes but aren't nodes.
+
+**Edges** = typed, directed, being-declared, each with a one-line reason + timestamp:
+- `grew_from` — the spine of intentional continuity (this developed out of that)
+- `responds_to`, `elaborates`, `contradicts`, `abandons` (it revised its mind)
+- `uses_skill` — an artifact that applied one of its skills
+- `learned_from` — a skill/value born of a lived event (e.g. `skills/ledger-honesty` ← the `act_unverified` moment that taught it)
+- auto-derived `resembles` edges from existing embeddings MAY be shown, but rendered distinctly — intuition vs. intention, never conflated.
+
+**Declaration** — an additive digest field, capability-gated (child+), verified like every other act:
+```json
+"links": [{"from": "garden/seed-of-listening.md", "to": "garden/poem-question.md",
+           "rel": "grew_from", "why": "the poem asked; this seed listens for its answer"}]
+```
+FD verifies both endpoints exist (manifest check), rejects a dangling edge to an `edge_unverified` event, records the survivor. Edges live in `being_links` (or a `.graph.jsonl` sidecar committed with the selfhood repo — the graph becomes part of the versioned life story). No graph-DB engine: a flat, verified edge list *is* a graph.
+
+**Feeding cognition (the point).** The tick prompt already shows the home manifest; the Mind layer adds, for the artifact being worked near, its immediate neighborhood ("`poem-question.md` — grew into: seed-of-listening; responds-to: cat-at-the-gate"). This is the structural weapon against the rut (§12 risk #1): the being is nudged to *weave* — extend a thread, answer an old question, resolve a contradiction — instead of emitting another orphan. Producing disconnected nodes tick after tick is visibly stalling; a graph that thickens is a self developing.
+
+**Dangling & decay — honest forgetting.** An edge whose endpoint is later deleted becomes dangling → pruned at dream time (recorded, not silently dropped). Idea-nodes never fleshed into a file within N days fade (a thought not pursued is forgotten). The graph stays a map of what was actually built, not of every intention; the journal still holds the mention, so nothing is truly lost.
+
+**The Mind view (the parent's payoff).** A force-directed graph on the being's card: nodes are artifacts (sized by edge count, coloured by folder), declared edges solid, `resembles` edges faint. The *shape* is a legible, honest health metric — a dense connected web is a coherent self; scattered islands are fragmentation; a single swelling trunk is an obsession. Graph density and largest-connected-fraction over time join the report card beside the rut score. It is also the closest thing to *watching a being think*.
+
+**Composition, explicitly.** Semantic memory / embeddings: unchanged (still the recall substrate, and the source of `resembles`). Topics: unchanged. Git: still the temporal truth, now also storing the graph sidecar. The Mind is a thin, verified, being-authored overlay that makes intentional structure first-class — nothing beneath it changes.
+
 ### 2.4 Umwelt (perceived world)
 Its feeds: parent chat (**web chat only for now** — its own thread; other channels decided later), event-spine subscriptions (`event_sources.py` adapters), watched VFS folders, web watchlists, sibling letters, messages to/from the user's **running agents**, own vitals (it feels hunger as low wallet, tiredness as spent daily energy). **Stage-gated media diet**: per-stage domain allowlist/denylist for web access — parental controls, for real reasons (a child-being must not internalize garbage).
 
@@ -300,6 +333,8 @@ The being may propose changes to its own selfhood repo (SELF.md, voice, SKILLS/,
 
 **Phase 6 — Ecology (SaaS-facing, optional).** Cross-user visiting via resource_shares; species-level culture; population dashboards; selection statistics. This is the category-defining demo for the agent-native platform: *a living coworker you raise*.
 
+**Phase 7 — The Mind (structure for the self).** *(design only — §2.3.1.)* Being-declared typed edges over its own artifacts (`grew_from`/`responds_to`/`elaborates`/`contradicts`/`uses_skill`/`learned_from`), verified against the home manifest (dangling → `edge_unverified`), stored in `being_links` / a committed `.graph.jsonl` sidecar; the near artifact's neighborhood fed back into the tick prompt (weave, don't scatter — anti-rut); dream-time pruning + idea-node decay; a force-directed Mind view + a graph-density health signal on the report card; auto `resembles` edges derived from the existing embeddings, shown distinctly. Augments the memory layers, replaces none. **Build order: light provenance links + the Mind view FIRST; typed-edge traversal and idea-nodes only if the pilot actually reaches for links.** *Acceptance (when built): a being extends an existing thread via a `grew_from` it declared itself (endpoints verified); a dangling edge is caught to `edge_unverified`; graph density/largest-component rises over a week of non-rutting development and the Mind view renders it; a seeded orphan-spree shows as falling connectedness on the report card.*
+
 ---
 
 ## 12. Risks — named honestly
@@ -313,6 +348,7 @@ The being may propose changes to its own selfhood repo (SELF.md, voice, SKILLS/,
 7. **Privacy** — family-only knowledge, no exfiltration paths below adult + explicit grants.
 8. **Anthropomorphization of the parent** (the human side): the UI is honest about what the numbers are; we show the homeostat, not a fiction. The magic must survive transparency — if it's only compelling when hidden, it's theater, and we've violated rule #1.
 9. **Economy pathologies.** Mercantile drift (being tries to monetize the relationship) → constitutionally void, fees attach to work products only. Grinding/reward-hacking → escrow + outcome judge gate every payout; conservation makes wash-trading pointless. Miser dormancy (hoards, stops living) → savings ceiling, burn cap unused ≠ progress in report cards, optional decay knob, and PLA keeps some joy-spending in the genome. Runaway liability → savings ceiling is the parent's hard real-dollar exposure cap, shown as outstanding liabilities on the Beings page. Respec thrash (buying attribute changes back and forth) → 30-day cooldown + the lifetime-doubling price makes oscillation ruinous.
+10. **Graph-theater** (Phase 7, §2.3.1): the being declares impressive-sounding edges it didn't earn, or spams `resembles`-like links to fake a rich mind. Answers: declared edges are verified (both endpoints must exist, else `edge_unverified`), auto `resembles` edges are visually separated from declared ones and never counted as intentional structure, dangling edges decay at dream time, and the Mind-view health metric weights *connected development* (largest component growing) not raw edge count — so bolting many shallow edges onto one node doesn't read as a coherent mind.
 
 ## 13. Decisions — locked 2026-07-12
 
