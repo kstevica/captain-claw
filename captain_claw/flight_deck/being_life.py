@@ -1200,45 +1200,46 @@ async def _tick_locked(
                            now=now)
         _start_body(being)
 
-    # 2. A body is required to think — and it must be REACHABLE where the
-    #    registry says it is. The agent drifts to a fallback port on restart and
-    #    announces it, but the registry can still hold a stale port (a clobbered
-    #    announce, or a body that survived an FD restart on a drifted port) — so
-    #    both our cached copy AND the registry can be wrong. Re-resolve, then
-    #    actually probe the port; if nothing answers there, restart the body so
-    #    it re-announces, and heal on the next tick.
+    # 2. A body is required to think, and an ALIVE being regenerates one it has
+    #    lost — the self-preservation reflex. "Lost" covers every failure mode:
+    #    the registry has no entry (the body was removed/deleted), OR it has a
+    #    port but nothing answers there (drifted/clobbered announce, or a body
+    #    that survived an FD restart on a stale port). Re-resolve, probe, and if
+    #    there's no reachable body, restart it and heal on the next tick. The
+    #    proper way to STOP a being is pause/euthanize (state != alive), not
+    #    killing its process — so while alive, it fights to come back.
     if send_fn is None:
         live_port = _resolve_live_port(store, being)
         being = store.get(owner, being["slug"])   # pick up any re-pin
-        if live_port is not None and not await _port_reachable("127.0.0.1",
-                                                               live_port):
+        had_body = bool(being.get("agent_slug"))
+        reachable = (live_port is not None
+                     and await _port_reachable("127.0.0.1", live_port))
+        if not reachable and had_body and db is not None:
             store.record_event(bid, "body_unreachable", {"port": live_port},
                                now=now)
-            if db is not None and being.get("agent_slug"):
-                try:
-                    _stop_body(being)
-                    await spawn_body(db, store, being)
-                except Exception as e:  # noqa: BLE001
-                    store.record_event(bid, "spawn_failed", {"error": str(e)},
-                                       now=now)
-                being = store.get(owner, being["slug"])
-                live_port = _resolve_live_port(store, being)
-                being = store.get(owner, being["slug"])
-            # A freshly-spawned body may still be binding — reschedule soon and
-            # let the next tick reach it, rather than think against a dead port.
-            if live_port is None or not await _port_reachable("127.0.0.1",
-                                                              live_port):
-                store.tick_bookkeeping(
-                    bid, drives=being.get("drives") or {},
-                    next_wake_at=now + timedelta(minutes=5), now=now)
-                out.update(outcome="body_unreachable")
-                return out
-        if live_port is None:
-            store.record_event(bid, "tick_skipped", {"reason": "no body"},
-                               now=now)
-            store.tick_bookkeeping(bid, drives=being.get("drives") or {},
-                                   next_wake_at=now + timedelta(hours=1), now=now)
-            out.update(outcome="no_body")
+            try:
+                _stop_body(being)
+                await spawn_body(db, store, being)
+            except Exception as e:  # noqa: BLE001
+                store.record_event(bid, "spawn_failed", {"error": str(e)},
+                                   now=now)
+            being = store.get(owner, being["slug"])
+            live_port = _resolve_live_port(store, being)
+            being = store.get(owner, being["slug"])
+            reachable = (live_port is not None
+                         and await _port_reachable("127.0.0.1", live_port))
+        if not reachable:
+            # A freshly-restarted body may still be binding (reschedule soon to
+            # reach it); a being that never had a body waits the normal beat.
+            store.record_event(
+                bid, "tick_skipped",
+                {"reason": "body restarting" if had_body else "no body"},
+                now=now)
+            store.tick_bookkeeping(
+                bid, drives=being.get("drives") or {},
+                next_wake_at=now + timedelta(minutes=5 if had_body else 60),
+                now=now)
+            out.update(outcome="body_unreachable" if had_body else "no_body")
             return out
 
     # 3. Think (over the channel bus — never the parent's chat thread).

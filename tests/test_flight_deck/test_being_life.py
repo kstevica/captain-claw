@@ -695,6 +695,52 @@ async def test_tick_restarts_unreachable_body(store, monkeypatch):
     assert fresh["next_wake_at"].startswith("2026-07-12T12:05")   # retry in 5 min
 
 
+async def test_tick_regenerates_body_when_registry_entry_removed(store, monkeypatch):
+    """The body was fully REMOVED (no registry entry → resolve returns None), not
+    just killed. An alive being that once had a body must still regenerate it —
+    the exact case of 'I removed the agent, waiting for a heartbeat'."""
+    db = FakeDB()
+    b = _born(store, port=24096)                     # had a body (agent_slug set)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    def _gone(slug):                                 # registry has no entry
+        raise ValueError("agent not found or has no port")
+
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token", _gone)
+    calls = {"spawn": 0}
+
+    async def _fake_spawn(db_, store_, being_):
+        calls["spawn"] += 1
+        return {"port": 24096}
+
+    monkeypatch.setattr(life, "spawn_body", _fake_spawn)
+    monkeypatch.setattr(life, "_stop_body", lambda being: None)
+    out = await life.tick(db, store, b, now=NOW)
+    assert calls["spawn"] == 1                        # it rebuilt its body
+    assert out["outcome"] == "body_unreachable"
+    assert "body_unreachable" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+    fresh = store.get(OWNER, b["slug"])
+    assert fresh["next_wake_at"].startswith("2026-07-12T12:05")   # retry in 5 min
+
+
+async def test_never_bodied_being_does_not_spawn_in_tick(store, monkeypatch):
+    """A being that never had a body (no agent_slug) skips as no_body — it must
+    NOT trigger an in-tick spawn (that path spawns a real subprocess)."""
+    db = FakeDB()
+    b = _born(store, port=0)                          # never got a body
+    spawned = {"n": 0}
+
+    async def _boom(db_, store_, being_):
+        spawned["n"] += 1
+
+    monkeypatch.setattr(life, "spawn_body", _boom)
+    out = await life.tick(db, store, b, now=NOW)
+    assert out["outcome"] == "no_body"
+    assert spawned["n"] == 0
+
+
 async def test_port_reachable_false_on_dead_port(store):
     # nothing is listening on this port → not reachable, fast
     assert await life._port_reachable("127.0.0.1", 6) is False
