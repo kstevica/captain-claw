@@ -1,0 +1,147 @@
+# OpenCV vision tool (deterministic local CV under the LLM vision layer)
+
+Add a single `vision` tool backed by **OpenCV 5** — a cheap, deterministic, local
+computer-vision layer that sits *under* the existing multimodal-LLM vision tools.
+It doesn't replace them; it pre-processes and measures for them (cutting LLM spend)
+and does pixel-exact things an LLM can't do reliably (diffs, QR/barcode decode,
+geometric measurement, template matching).
+
+Motivation: **every visual operation in Captain Claw today routes through a
+multimodal LLM.** `image_vision`, `image_ocr`, `video_vision` (one LLM call *per
+sampled frame*), `browser_vision`, and `screen_capture` analysis all base64 an image
+and pay for a model round-trip. There is no deterministic pixel-level layer at all.
+Two payoffs, both landing on things we already track: (1) it cuts LLM spend (feeds
+the run-cost accounting) by pre-filtering/deduping frames and gating "watch this
+page" loops so a model fires only when pixels actually changed; (2) it unlocks
+deterministic operations LLMs are bad at. CPU-only and light — matches the
+"light on resources" constraint that prompted this.
+
+Status: **Phase 1 shipped (uncommitted), verified locally against cv2 4.13.**
+Decisions locked 2026-07-14. Phases 2–3 not started.
+
+## Locked decisions (2026-07-14, with the user)
+
+1. **One `vision` verb-tool**, matching the consolidated-verb convention
+   (`vfs`, `facts`, `datastore`, `topics`) rather than a tool per operation.
+2. **Classical CV + small bundled ONNX detectors only.** OpenCV 5 can run
+   LLMs/VLMs inside its DNN module — we deliberately do **not** use that: it's
+   CPU-only and would compete with the LiteLLM multi-model routing. We use the
+   rewritten DNN engine only for small local detectors (YOLO / face / text region).
+3. **Deterministic → zero run-cost.** Ops that touch no model spend nothing and are
+   not costed. `detect` (ONNX) runs locally on CPU, also no LLM spend.
+4. **Optional dependency, guarded import.** `try: import cv2` with a graceful
+   `_HAS_CV2` fallback (mirrors `_HAS_PILLOW` in `image_ocr.py`). Nothing else in the
+   system changes when OpenCV is absent; the tool just reports it's unavailable.
+5. **Derived images go to the shared VFS**, so agents / Basna / Vatra / Code can pass
+   cropped/annotated/cleaned outputs between each other by path.
+
+## What OpenCV 5 brings (and what we take)
+
+- **Classical CV** (the workhorse for us): SSIM/pixel diff, contours, perceptual
+  hashing, deskew/threshold/enhance, `QRCodeDetector` + barcode decode, template
+  matching, color/blur/quality metrics.
+- **Rewritten DNN engine** — ONNX coverage jumped ~23% (4.x) → **80%+**, with a
+  CPU-tuned Hardware Acceleration Layer (SSE/AVX/NEON). Small bundled ONNX detectors
+  (YOLO, face, EAST/DB text) load and run reliably on CPU through one dependency.
+- **Not taken:** VLM/LLM-in-DNN inference (see decision 2).
+
+Packaging is settled: `opencv-python-headless==5.0.0.93` is on PyPI with manylinux
+x86_64/aarch64 + macOS wheels, and OpenCV is **already a declared optional dep** in
+the `faces` extra (`pyproject.toml`, `opencv-python-headless>=4.9.0`). The headless
+wheel is ~40–90 MB, CPU-only, no GUI deps.
+
+## The gap it fills
+
+| Need | Today | With `vision` |
+| --- | --- | --- |
+| "Describe this image" | `image_vision` (LLM) ✓ | unchanged — LLM still wins |
+| "Did the page change between these two shots?" | LLM call every poll | SSIM diff, **$0**, returns change boxes |
+| "Sample the *meaningful* frames of a video" | fixed every 6s → up to 20 LLM calls | scene-cut + dedupe → 3–5 LLM calls |
+| "Read this QR / barcode" | LLM (unreliable) | `QRCodeDetector`, deterministic |
+| "Deskew/clean a scan before OCR" | none | better OCR, sometimes skips the LLM |
+| "Where's this button on screen?" | LLM guess | template match → exact coords |
+| "Is this image blurry / blank / a dupe?" | none | blur score / pHash, **$0** |
+
+## The tool
+
+`vision(op=..., ...)` — deterministic; writes derivatives to the VFS; returns
+structured JSON (boxes, hashes, scores, paths).
+
+- `diff` — two images → SSIM score + bounding boxes of changed regions.
+- `keyframes` — video → scene-cut + dedupe frame list (feeds `video_vision`).
+- `dedupe` — images → perceptual-hash near-duplicate clusters.
+- `prep` — deskew / threshold / crop / enhance → cleaned image in VFS (pre-OCR).
+- `qr` — decode QR + barcodes → text/payloads.
+- `detect` — bundled ONNX (objects / faces / text regions) → boxes. **(Phase 2)**
+- `measure` — dimensions, dominant colors, blur score, brightness → metrics.
+- `locate` — template-match a needle image in a haystack → coords + confidence.
+- `annotate` — draw boxes/labels on an image → new image in VFS (for reports).
+
+Standard `Tool` shape: `name = "vision"`, JSON-schema `parameters` with an `op`
+enum + per-op args, `async def execute(**kwargs) -> ToolResult`, registered in
+`tools/__init__.py` (import + `__all__`). Heavy calls (`cv2` is sync) run via
+`asyncio.to_thread` to keep the event loop free.
+
+## Where it plugs in (highest-leverage first)
+
+1. **`video_vision` keyframe pre-pass** — replace fixed-interval sampling with
+   `keyframes` (scene-cut + dedupe). Fewer LLM calls per video; cleanest first win.
+2. **Diff-gate for watch/autonomy loops** — `browser_vision` / `screen_capture` and
+   the autonomous-work / Jarvis polling loops call the LLM **only when the image
+   changed** (`diff` above a threshold). Recurring cost cut on anything that polls.
+3. **OCR pre-processing** — `prep` (deskew/crop/threshold) before `image_ocr`, plus
+   `qr` decode that OCR and LLMs both miss.
+4. **Deterministic click targets** — `locate` gives the browser/desktop tools exact
+   coordinates instead of an LLM guess.
+5. **(Future) Iskra beings** — a per-tick perception primitive cheap enough to run
+   continuously, if beings ever get "eyes." Flagged, not in scope here.
+
+## Cost behaviour
+
+Every Phase-1 op is deterministic and local → **zero tokens, not costed.** `detect`
+(Phase 2) runs a small ONNX model on CPU → still no LLM spend. Net effect on the
+run-cost ledger is *negative* (fewer LLM frames), never positive.
+
+## Phases
+
+- **Phase 1 — classical, no models. DONE (uncommitted).** `vision` tool with
+  `diff` (SSIM + change boxes), `dedupe` (dHash clustering), `measure` (size/blur/
+  brightness/blank/dominant-colors), `prep` (grayscale/deskew/threshold/denoise/
+  enhance/autocrop/crop), `qr` (QR + barcode-if-present), `locate` (template match),
+  `annotate` (boxes/labels), plus a standalone `keyframes` (histogram scene-cut).
+  Guarded `cv2` import; VFS-aware input (`vfs:`/real) and output; sync work in
+  `asyncio.to_thread`. Registered + `_ALWAYS_ENABLED` (parity with `video_vision`).
+  `video_vision` gets a `dedupe_frame_indices` keyframe pre-pass (drops near-identical
+  frames before the per-frame LLM loop; no-ops without cv2). New `cv` extra. 11 tests
+  (`tests/test_tools/test_vision.py`, importorskip). Verified end-to-end on cv2 4.13:
+  all ops produce correct output; `locate` hits conf 1.0; QR decodes; diff SSIM correct.
+- **Phase 2 — bundled ONNX detectors.** `detect` (objects / faces / text) via the new
+  DNN engine, small models bundled/downloaded once. Faces can reuse the existing
+  `faces` extra path (insightface/onnxruntime) or the OpenCV DNN face detector.
+- **Phase 3 — pipeline integration.** Diff-gate the watch/autonomy loops; OCR
+  pre-processing hook in `image_ocr`; `locate` exposed to browser/desktop tools.
+
+## Safety / back-compat
+
+Absent OpenCV, the tool reports unavailable and every existing tool behaves exactly
+as today (guarded import, no hard dependency added to core). The `video_vision`
+pre-pass falls back to fixed-interval sampling when `cv2` is missing, so no regression.
+
+## Touch list (Phase 1)
+
+- `captain_claw/tools/vision.py` — new `VisionTool` (verb dispatch, guarded `cv2`).
+- `captain_claw/tools/__init__.py` — import + `__all__` entry.
+- `captain_claw/tools/video_vision.py` — optional `keyframes` pre-pass before the
+  frame-description loop (guarded; falls back to current sampling).
+- `pyproject.toml` — add a `cv` optional-extra (or bump the `faces`-shared pin) with
+  `opencv-python-headless>=5.0`; keep it out of core deps.
+
+## Follow-ups / known limits
+
+- `cv2` is not importable in the current dev env — Phase 1 must add the extra and the
+  install step; verify the OpenCV 5 headless wheel resolves on the prod platform
+  (manylinux/macOS/arm) before relying on `detect`.
+- Barcode decode via OpenCV alone is weaker than a dedicated lib (e.g. `pyzbar`);
+  if 1D barcodes matter, revisit in Phase 2. QR is solid in-box.
+- The new DNN engine is **CPU-only** at the OpenCV 5.0 launch (GPU planned later);
+  keep bundled detectors small so `detect` stays "light on resources."

@@ -67,6 +67,7 @@ from captain_claw.tools.consult_peer import ConsultPeerTool
 from captain_claw.tools.project_memory import ProjectMemoryTool
 from captain_claw.tools.terminal import TerminalTool
 from captain_claw.tools.vfs import VfsTool
+from captain_claw.tools.vision import VisionTool
 
 __all__ = [
     "Tool",
@@ -136,4 +137,5 @@ __all__ = [
     "ProjectMemoryTool",
     "TerminalTool",
     "VfsTool",
+    "VisionTool",
 ]
