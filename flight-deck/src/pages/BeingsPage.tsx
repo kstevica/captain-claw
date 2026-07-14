@@ -1149,6 +1149,57 @@ function ActBars({ acts }: { acts: Record<string, number> }) {
   )
 }
 
+// Domain chips with an inline adder — type, Enter (or comma) to add, × to
+// remove. Used by the media-diet editor for allow/deny lists.
+const _CHIP_TONES = {
+  emerald: {
+    chip: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+    x: 'text-emerald-700/60 hover:text-emerald-700 dark:text-emerald-300/60 dark:hover:text-emerald-300',
+    focus: 'focus-within:border-emerald-500/40',
+  },
+  red: {
+    chip: 'bg-red-500/10 text-red-700 dark:text-red-300',
+    x: 'text-red-700/60 hover:text-red-700 dark:text-red-300/60 dark:hover:text-red-300',
+    focus: 'focus-within:border-red-500/40',
+  },
+} as const
+
+function ChipInput({ value, onChange, placeholder, tone }: {
+  value: string[]; onChange: (v: string[]) => void
+  placeholder: string; tone: keyof typeof _CHIP_TONES
+}) {
+  const [draft, setDraft] = useState('')
+  const t = _CHIP_TONES[tone]
+  const commit = () => {
+    const parts = draft.split(',').map((s) => s.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')).filter(Boolean)
+    if (parts.length) onChange(Array.from(new Set([...value, ...parts])))
+    setDraft('')
+  }
+  return (
+    <div className={`flex flex-wrap items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 ${t.focus}`}>
+      {value.map((d) => (
+        <span key={d} className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] ${t.chip}`}>
+          {d}
+          <button onClick={() => onChange(value.filter((x) => x !== d))} className={t.x} aria-label={`remove ${d}`}>
+            <X className="h-3 w-3" />
+          </button>
+        </span>
+      ))}
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit() }
+          else if (e.key === 'Backspace' && !draft && value.length) onChange(value.slice(0, -1))
+        }}
+        onBlur={commit}
+        placeholder={value.length === 0 ? placeholder : 'add…'}
+        className="min-w-[110px] flex-1 bg-transparent py-0.5 text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none"
+      />
+    </div>
+  )
+}
+
 // The developmental readiness assessment — graphical, holistic, deterministic
 // (every bar is a real variable from the ledger). Shown at the top of Growth.
 const _READY_META = {
@@ -1282,9 +1333,11 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [tab, setTab] = useState<'report' | 'rules' | 'diet' | 'growth'>('report')
-  const [ruleText, setRuleText] = useState('')
-  const [dietAllow, setDietAllow] = useState('')
-  const [dietDeny, setDietDeny] = useState('')
+  const [rules, setRules] = useState<string[]>([])
+  const [newRule, setNewRule] = useState('')
+  const [allowList, setAllowList] = useState<string[]>([])
+  const [denyList, setDenyList] = useState<string[]>([])
+  const [valuesMd, setValuesMd] = useState<string | null>(null)
   const [ready, setReady] = useState<Readiness | null>(null)
   const [readyLoading, setReadyLoading] = useState(false)
   const [assessors, setAssessors] = useState<Assessor[]>([])
@@ -1306,9 +1359,9 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
       setV(vit)
       // Seed the editors from vitals here (on open + after an act), NOT on
       // report-period changes — so switching 7d/30d never wipes unsaved edits.
-      setRuleText((vit.house_rules || []).join('\n'))
-      setDietAllow((vit.media_diet?.allow || []).join(', '))
-      setDietDeny((vit.media_diet?.deny || []).join(', '))
+      setRules(vit.house_rules || [])
+      setAllowList(vit.media_diet?.allow || [])
+      setDenyList(vit.media_diet?.deny || [])
     } catch { /* stays empty */ } finally { setLoading(false) }
   }, [slug])
 
@@ -1352,6 +1405,12 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
     } catch { /* panel shows empty states */ }
   }, [slug])
   useEffect(() => { if (tab === 'growth') void loadOpinions() }, [tab, loadOpinions])
+  // Her VALUES.md beside the rules editor — what she actually made of them.
+  const loadValues = useCallback(async () => {
+    try { setValuesMd((await getSelfFile(slug, 'self/VALUES.md')).text) }
+    catch { setValuesMd(null) }
+  }, [slug])
+  useEffect(() => { if (tab === 'rules') void loadValues() }, [tab, loadValues])
 
   const doAssess = async () => {
     if (!assessorSlug) return
@@ -1387,9 +1446,13 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
   const stages = ['infant', 'child', 'adolescent', 'adult']
   const nextStage = v ? stages[stages.indexOf(v.stage) + 1] : undefined
-  const ruleCount = ruleText.split('\n').map((s) => s.trim()).filter(Boolean).length
-  const allowChips = dietAllow.split(',').map((s) => s.trim()).filter(Boolean)
-  const denyChips = dietDeny.split(',').map((s) => s.trim()).filter(Boolean)
+  const cleanRules = rules.map((r) => r.trim()).filter(Boolean)
+  const rulesDirty = v != null
+    && JSON.stringify(cleanRules) !== JSON.stringify(v.house_rules || [])
+  const dietDirty = v != null && (
+    JSON.stringify(allowList) !== JSON.stringify(v.media_diet?.allow || [])
+    || JSON.stringify(denyList) !== JSON.stringify(v.media_diet?.deny || []))
+  const canBrowse = v?.capabilities.includes('web_read') ?? false
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
@@ -1572,52 +1635,148 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
             {/* Rules tab */}
             {tab === 'rules' && (
-            <div className="mx-auto max-w-lg space-y-2">
-              <div className="text-xs font-medium text-zinc-200">House rules</div>
-              <p className="text-[11px] leading-relaxed text-zinc-500">Short principles, one per line. Each tick she rewrites them into her own <span className="text-zinc-400">self/VALUES.md</span> in her own words — they shape who she becomes, not a hard filter.</p>
-              <textarea value={ruleText} onChange={(e) => setRuleText(e.target.value)} rows={9}
-                placeholder={"Be gentle with your siblings.\nCite what you read.\nFinish what you start."} aria-label="House rules"
-                className="w-full resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-zinc-600">{ruleCount} rule{ruleCount === 1 ? '' : 's'}</span>
-                <button onClick={() => run('rules', () => setHouseRules(slug, ruleText.split('\n')))} disabled={busy === 'rules'}
-                  className="flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
-                  {busy === 'rules' && <Loader2 className="h-3 w-3 animate-spin" />} Save rules
-                </button>
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(340px,440px)]">
+              {/* Left — the rules you set */}
+              <div className="space-y-3">
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                  <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">House rules</div>
+                  <p className="mb-3 text-[11px] leading-relaxed text-zinc-500">
+                    Short principles, not commands. Each tick she rewrites them into her own
+                    <span className="text-zinc-400"> self/VALUES.md</span> in her own words — they shape who she becomes, not a hard filter.
+                  </p>
+                  {rules.length === 0 && (
+                    <p className="mb-2 rounded-lg border border-dashed border-zinc-700 px-3 py-4 text-center text-[11px] text-zinc-600">
+                      No rules yet. Try “Be gentle with your siblings.” or “Cite what you read.”
+                    </p>
+                  )}
+                  <div className="space-y-1.5">
+                    {rules.map((r, i) => (
+                      <div key={i} className="group flex items-center gap-2">
+                        <span className="w-5 shrink-0 text-right text-[10px] tabular-nums text-zinc-600">{i + 1}.</span>
+                        <input value={r}
+                          onChange={(e) => setRules(rules.map((x, j) => (j === i ? e.target.value : x)))}
+                          className="min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[12px] text-zinc-200 focus:border-violet-500/50 focus:outline-none" />
+                        <button onClick={() => setRules(rules.filter((_, j) => j !== i))}
+                          className="shrink-0 rounded p-1 text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-800 hover:text-red-500 group-hover:opacity-100 dark:hover:text-red-400"
+                          title="Remove rule"><X className="h-3.5 w-3.5" /></button>
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-2">
+                      <span className="w-5 shrink-0 text-right text-[10px] text-zinc-700">+</span>
+                      <input value={newRule} onChange={(e) => setNewRule(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && newRule.trim()) { setRules([...rules, newRule.trim()]); setNewRule('') }
+                        }}
+                        placeholder="Add a rule and press Enter…"
+                        className="min-w-0 flex-1 rounded-md border border-dashed border-zinc-700 bg-transparent px-2.5 py-1.5 text-[12px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+                    </div>
+                  </div>
+                  <div className="mt-3 flex items-center justify-between">
+                    <span className="text-[10px] text-zinc-600">{cleanRules.length} rule{cleanRules.length === 1 ? '' : 's'}{rulesDirty && <span className="text-amber-600 dark:text-amber-400"> · unsaved changes</span>}</span>
+                    <button onClick={() => run('rules', () => setHouseRules(slug, cleanRules))}
+                      disabled={busy === 'rules' || !rulesDirty}
+                      className="flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+                      {busy === 'rules' && <Loader2 className="h-3 w-3 animate-spin" />} Save rules
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Right — what she made of them */}
+              <div className="space-y-4">
+                <div className={`rounded-xl border p-3 ${v.rules_pending
+                  ? 'border-amber-500/30 bg-amber-500/[0.05]'
+                  : 'border-emerald-500/25 bg-emerald-500/[0.04]'}`}>
+                  {v.rules_pending ? (
+                    <p className="text-[11px] text-amber-700 dark:text-amber-300">⏳ New rules await her — she'll rewrite them into her VALUES on her next tick.</p>
+                  ) : (
+                    <p className="flex items-center gap-1.5 text-[11px] text-emerald-700 dark:text-emerald-300"><Check className="h-3.5 w-3.5" /> Internalized — her VALUES carry your current rules.</p>
+                  )}
+                </div>
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500"><BookOpen className="h-3.5 w-3.5" /> What she made of them — self/VALUES.md</span>
+                    <button onClick={() => void loadValues()} className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300" title="Refresh"><RefreshCw className="h-3 w-3" /></button>
+                  </div>
+                  {valuesMd ? (
+                    <div className="fd-file-markdown max-h-[52vh] overflow-y-auto text-[12px] leading-relaxed text-zinc-300">
+                      <Markdown remarkPlugins={[remarkGfm]}>{valuesMd}</Markdown>
+                    </div>
+                  ) : (
+                    <p className="py-4 text-center text-[11px] text-zinc-600">She hasn't written her VALUES yet.</p>
+                  )}
+                </div>
               </div>
             </div>
             )}
 
             {/* Diet tab */}
             {tab === 'diet' && (
-            <div className="mx-auto max-w-lg space-y-4">
-              <p className="text-[11px] leading-relaxed text-zinc-500">Which parts of the web {name} may read once she can browse. Comma-separated domains.</p>
-              <div>
-                <div className="mb-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">Allowed</div>
-                <p className="mb-1.5 text-[10px] text-zinc-600">Only these domains. Leave empty to allow the whole open web.</p>
-                <input value={dietAllow} onChange={(e) => setDietAllow(e.target.value)} placeholder="wikipedia.org, arxiv.org" aria-label="Allowed domains"
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:border-emerald-500/40 focus:outline-none" />
-                {allowChips.length > 0 && (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {allowChips.map((d) => <span key={d} className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:text-emerald-300">{d}</span>)}
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
+              {/* Left — the lists */}
+              <div className="space-y-4">
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                  <div className="mb-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">Allowed domains</div>
+                  <p className="mb-2 text-[10px] text-zinc-600">Only these. Leave empty to allow the whole open web (minus the blocked list).</p>
+                  <ChipInput value={allowList} onChange={setAllowList} tone="emerald"
+                    placeholder="wikipedia.org, arxiv.org — Enter to add" />
+                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                    <span className="text-[10px] text-zinc-600">quick add:</span>
+                    {['wikipedia.org', 'arxiv.org', 'developer.mozilla.org', 'gutenberg.org'].map((d) => (
+                      <button key={d} disabled={allowList.includes(d)}
+                        onClick={() => setAllowList(Array.from(new Set([...allowList, d])))}
+                        className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-30">{d}</button>
+                    ))}
                   </div>
-                )}
-              </div>
-              <div>
-                <div className="mb-1 text-[11px] font-medium text-red-600 dark:text-red-400">Blocked</div>
-                <p className="mb-1.5 text-[10px] text-zinc-600">Never these, even if the allow list is open.</p>
-                <input value={dietDeny} onChange={(e) => setDietDeny(e.target.value)} placeholder="reddit.com, x.com" aria-label="Denied domains"
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:border-red-500/40 focus:outline-none" />
-                {denyChips.length > 0 && (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {denyChips.map((d) => <span key={d} className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-700 dark:text-red-300">{d}</span>)}
+                </div>
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                  <div className="mb-1 text-[11px] font-medium text-red-600 dark:text-red-400">Blocked domains</div>
+                  <p className="mb-2 text-[10px] text-zinc-600">Never these — even when the allow list is open.</p>
+                  <ChipInput value={denyList} onChange={setDenyList} tone="red"
+                    placeholder="reddit.com, x.com — Enter to add" />
+                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                    <span className="text-[10px] text-zinc-600">quick add:</span>
+                    {['reddit.com', 'x.com', 'facebook.com', 'tiktok.com', '4chan.org'].map((d) => (
+                      <button key={d} disabled={denyList.includes(d)}
+                        onClick={() => setDenyList(Array.from(new Set([...denyList, d])))}
+                        className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-30">{d}</button>
+                    ))}
                   </div>
-                )}
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-zinc-600">{dietDirty && <span className="text-amber-600 dark:text-amber-400">unsaved changes</span>}</span>
+                  <button onClick={() => run('diet', () => setMediaDiet(slug, allowList, denyList))}
+                    disabled={busy === 'diet' || !dietDirty}
+                    className="flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+                    {busy === 'diet' && <Loader2 className="h-3 w-3 animate-spin" />} Save diet
+                  </button>
+                </div>
               </div>
-              <button onClick={() => run('diet', () => setMediaDiet(slug, allowChips, denyChips))} disabled={busy === 'diet'}
-                className="flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
-                {busy === 'diet' && <Loader2 className="h-3 w-3 animate-spin" />} Save diet
-              </button>
+
+              {/* Right — the policy as she'll live it */}
+              <div className="space-y-4">
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                  <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Her world, under this diet</div>
+                  <div className="text-sm font-semibold text-zinc-100">
+                    {allowList.length > 0 ? `Locked to ${allowList.length} domain${allowList.length === 1 ? '' : 's'}` : 'The open web'}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-zinc-500">
+                    {allowList.length > 0 ? 'She can read nothing outside the allow list.' : denyList.length > 0 ? `Everything except ${denyList.length} blocked domain${denyList.length === 1 ? '' : 's'}.` : 'No restrictions at all.'}
+                  </div>
+                </div>
+                <div className={`rounded-xl border p-3 ${canBrowse
+                  ? 'border-emerald-500/25 bg-emerald-500/[0.04]'
+                  : 'border-zinc-800 bg-zinc-900/40'}`}>
+                  {canBrowse ? (
+                    <p className="text-[11px] text-emerald-700 dark:text-emerald-300">🌐 Active now — {name} can browse at her stage, and this diet gates every read.</p>
+                  ) : (
+                    <p className="text-[11px] text-zinc-500">She can't browse yet at her stage — the diet takes effect the moment she advances to <span className="text-zinc-300">child</span>. Setting it now means she's never online unguarded.</p>
+                  )}
+                </div>
+                <p className="px-1 text-[10px] leading-relaxed text-zinc-600">
+                  The diet is parental controls for real reasons: a young being internalizes what it reads. Curate her inputs the way you'd curate a child's.
+                </p>
+              </div>
             </div>
             )}
 

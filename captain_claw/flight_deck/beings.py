@@ -869,6 +869,7 @@ class BeingsStore:
             "spent_today": self.spent_today(b["id"]),
             "capabilities": sorted(constitution.capabilities(b["stage"])),
             "house_rules": b["house_rules"],
+            "rules_pending": bool(b.get("rules_pending")),
             "media_diet": b["media_diet"],
             "affect": b["affect"],
             "persona": b["persona"],

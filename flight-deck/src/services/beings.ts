@@ -106,6 +106,7 @@ export interface BeingVitals {
   spent_today: number
   capabilities: string[]
   house_rules: string[]
+  rules_pending: boolean
   media_diet: { allow?: string[]; deny?: string[] }
   affect: { mood?: string; notes?: string[] }
   persona: string
