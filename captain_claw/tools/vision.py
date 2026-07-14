@@ -6,7 +6,7 @@ operation here runs locally on CPU. Use it to pre-process and measure for the LL
 (dedupe/keyframe/diff-gate → fewer LLM frames) and to do things an LLM does poorly
 (pixel diffs, QR/barcode decode, geometric measurement, template matching).
 
-Scope (Phase 1): classical CV only — no models, no LLM/VLM inference. Operations:
+Operations:
 
   diff       two images → SSIM score + bounding boxes of changed regions
   dedupe     images → perceptual-hash near-duplicate clusters
@@ -16,6 +16,14 @@ Scope (Phase 1): classical CV only — no models, no LLM/VLM inference. Operatio
   locate     template-match a needle image in a haystack → coords + confidence
   annotate   draw boxes/labels on an image → new image
   keyframes  video → scene-change representative-frame timestamps
+  detect     faces / text-regions / objects via small local ONNX models  (Phase 2)
+
+Phase 1 is classical CV only (no models). Phase 2 adds ``detect``: small, CPU-only
+ONNX detectors run through OpenCV's DNN engine — still no LLM/VLM inference and no
+token spend. Face (YuNet, ~232 KB) and text-region (PP-OCRv3 DB, ~2.4 MB) models are
+fetched once from the OpenCV Zoo into a local cache (``CAPTAIN_CLAW_VISION_MODELS`` or
+an ``fd-data/models`` dir — prod can pre-place them offline); ``objects`` is
+bring-your-own YOLOv8/v5 ONNX (a COCO model worth bundling is heavier than we want on).
 
 OpenCV is an optional dependency (the ``cv`` extra). Absent it, the tool reports
 unavailable and nothing else in the system changes (guarded import, like
@@ -54,12 +62,52 @@ _NO_CV2 = (
     "This is a local, CPU-only dependency."
 )
 
-_OPS = ("diff", "dedupe", "measure", "prep", "qr", "locate", "annotate", "keyframes")
+_OPS = ("diff", "dedupe", "measure", "prep", "qr", "locate", "annotate", "keyframes", "detect")
 
 # Default perceptual-hash Hamming distance under which two frames are "the same".
 _DEDUPE_MAX_HAMMING = 6
 # Default template-match confidence (TM_CCOEFF_NORMED) to accept a hit.
 _LOCATE_MIN_CONF = 0.75
+
+# ── Phase 2: ONNX detectors (OpenCV DNN) ───────────────────────────────────────
+# Small, CPU-only models from the OpenCV Zoo. The zoo stores weights in git-lfs, so
+# only the media.githubusercontent.com/media/ path returns the real ONNX (a plain
+# raw.githubusercontent URL returns a ~130-byte LFS pointer). Kept tiny on purpose —
+# "light on resources". `objects` is bring-your-own-model (see _op_detect): a COCO
+# object detector worth bundling is heavier than we want on by default.
+_ZOO = "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/"
+_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
+    "yunet": {
+        "filename": "face_detection_yunet_2023mar.onnx",
+        "url": _ZOO + "face_detection_yunet/face_detection_yunet_2023mar.onnx",
+        "min_bytes": 100_000,  # real file ~232 KB; guards against an LFS pointer
+    },
+    "ppocr_db": {
+        "filename": "text_detection_en_ppocrv3_2023may.onnx",
+        "url": _ZOO + "text_detection_ppocr/text_detection_en_ppocrv3_2023may.onnx",
+        "min_bytes": 1_000_000,  # real file ~2.4 MB
+    },
+}
+_DETECT_WHAT = ("faces", "text", "objects")
+_DEFAULT_FACE_CONF = 0.85
+_DEFAULT_TEXT_CONF = 0.5
+_DEFAULT_OBJ_CONF = 0.25
+_OBJ_NMS = 0.45
+# COCO-80 class names (YOLOv5/v8 ordering) for the bring-your-own object detector.
+_COCO_CLASSES = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
+    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
+    "toothbrush",
+)
 
 
 # ── path resolution (accepts both real paths and vfs: paths) ───────────────────
@@ -226,6 +274,73 @@ def _parse_box(box: Any) -> tuple[int, int, int, int] | None:
     return None
 
 
+# ── model cache / provisioning (Phase 2 detectors) ─────────────────────────────
+
+
+def _models_dir() -> Path:
+    """Where detector models live. Prod can pre-place them (offline-friendly).
+
+    Resolution order: ``CAPTAIN_CLAW_VISION_MODELS`` env → an ``fd-data`` ancestor
+    (shared with the VFS/fd-data root) → ``~/.captain-claw/models/vision``.
+    """
+    import os
+
+    override = os.environ.get("CAPTAIN_CLAW_VISION_MODELS", "").strip()
+    if override:
+        return Path(override).expanduser()
+    try:
+        from captain_claw.vfs import vfs_base
+
+        base = vfs_base()  # …/fd-data/vfs → models under fd-data/models/vision
+        if base is not None:
+            return Path(base).parent / "models" / "vision"
+    except Exception:
+        pass
+    return Path.home() / ".captain-claw" / "models" / "vision"
+
+
+def _download(url: str, dest: Path, *, min_bytes: int, timeout: float = 60.0) -> str | None:
+    """Best-effort download to *dest*. Returns None on success, else an error string."""
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "captain-claw-vision"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+    except Exception as exc:
+        return f"download failed: {exc}"
+    if data[:40].startswith(b"version https://git-lfs"):
+        return "download returned a git-lfs pointer, not the model (bad URL)"
+    if len(data) < min_bytes:
+        return f"downloaded file too small ({len(data)} bytes < {min_bytes}); likely incomplete"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        tmp.write_bytes(data)
+        tmp.replace(dest)  # atomic
+    except Exception as exc:
+        return f"could not save model: {exc}"
+    return None
+
+
+def _ensure_model(key: str) -> tuple[Path | None, str | None]:
+    """Return a local path to model *key*, downloading it once if needed."""
+    spec = _MODEL_REGISTRY.get(key)
+    if spec is None:
+        return None, f"unknown model '{key}'"
+    dest = _models_dir() / spec["filename"]
+    if dest.is_file() and dest.stat().st_size >= spec["min_bytes"]:
+        return dest, None
+    log.info("vision: fetching detector model", model=key, dest=str(dest))
+    err = _download(spec["url"], dest, min_bytes=spec["min_bytes"])
+    if err:
+        return None, (
+            f"{err}. Place the model manually at {dest} (or set "
+            f"CAPTAIN_CLAW_VISION_MODELS). Source: {spec['url']}"
+        )
+    return dest, None
+
+
 class VisionTool(Tool):
     """Deterministic, local computer-vision operations (OpenCV). No LLM spend."""
 
@@ -241,7 +356,8 @@ class VisionTool(Tool):
         "'qr' (decode QR codes and barcodes), "
         "'locate' (find a small template image inside a larger one → coordinates), "
         "'annotate' (draw boxes/labels on an image), "
-        "'keyframes' (pick scene-change frames of a video). "
+        "'keyframes' (pick scene-change frames of a video), "
+        "'detect' (find faces / text-regions / objects via small local ONNX models). "
         "Paths may be real files or vfs: paths; derived images are written to the VFS/saved."
     )
     parameters = {
@@ -263,8 +379,10 @@ class VisionTool(Tool):
             "box": {"type": "array", "items": {"type": "number"}, "description": "prep+crop: [x,y,w,h] crop rectangle."},
             "boxes": {"type": "array", "items": {"type": "array"}, "description": "annotate: list of [x,y,w,h] rectangles."},
             "labels": {"type": "array", "items": {"type": "string"}, "description": "annotate: optional label per box."},
-            "threshold": {"type": "number", "description": "dedupe: max Hamming distance (default 6). locate: min confidence 0-1 (default 0.75)."},
+            "threshold": {"type": "number", "description": "dedupe: max Hamming distance (default 6). locate: min confidence 0-1 (default 0.75). detect: min confidence."},
             "max_frames": {"type": "integer", "description": "keyframes: cap on returned frames (default 12)."},
+            "what": {"type": "string", "enum": list(_DETECT_WHAT), "description": "detect: 'faces', 'text' (text regions, feeds image_ocr), or 'objects' (COCO)."},
+            "model": {"type": "string", "description": "detect+objects: path to a YOLOv8/v5 ONNX model (required for 'objects'; faces/text auto-download)."},
         },
         "required": ["op"],
     }
@@ -662,3 +780,169 @@ class VisionTool(Tool):
         payload = {"sampled": len(scored), "keyframes": len(timestamps), "timestamps_s": timestamps}
         return ToolResult(success=True, content=f"keyframes: {len(timestamps)} scene-change frame(s) from {len(scored)} samples.\n"
                           + json.dumps(payload, indent=2))
+
+    # ── detect (Phase 2: small local ONNX detectors) ───────────────────────────
+
+    def _op_detect(self, kw: dict[str, Any]) -> ToolResult:
+        what = str(kw.get("what") or "").strip().lower()
+        if what not in _DETECT_WHAT:
+            return ToolResult(success=False, error=f"detect: pass what={'/'.join(_DETECT_WHAT)}.")
+        rp, err = _resolve_input(kw.get("path") or kw.get("image") or kw.get("a"), kw)
+        if err:
+            return ToolResult(success=False, error=f"detect: {err}")
+        img = _imread(rp)
+        if img is None:
+            return ToolResult(success=False, error="detect: could not decode the image.")
+        thr = kw.get("threshold")
+        if what == "faces":
+            dets, derr = self._detect_faces(img, float(thr) if thr is not None else _DEFAULT_FACE_CONF)
+        elif what == "text":
+            dets, derr = self._detect_text(img, float(thr) if thr is not None else _DEFAULT_TEXT_CONF)
+        else:
+            dets, derr = self._detect_objects(img, kw, float(thr) if thr is not None else _DEFAULT_OBJ_CONF)
+        if derr:
+            return ToolResult(success=False, error=f"detect ({what}): {derr}")
+
+        out_display = ""
+        if kw.get("out") is not None:
+            annotated = self._draw_detections(img, dets)
+            dest, out_display = _resolve_output(kw.get("out"), kw, f"detect_{what}_{rp.stem}_{uuid.uuid4().hex[:6]}.png")
+            _cv2.imwrite(str(dest), annotated)
+
+        # Summarize by label (e.g. "3 person, 1 dog") for objects; count otherwise.
+        counts: dict[str, int] = {}
+        for d in dets:
+            counts[d["label"]] = counts.get(d["label"], 0) + 1
+        summary = ", ".join(f"{n} {lbl}" for lbl, n in sorted(counts.items(), key=lambda kv: -kv[1])) or "nothing"
+        payload: dict[str, Any] = {"what": what, "count": len(dets), "detections": dets[:100]}
+        if out_display:
+            payload["annotated"] = out_display
+        return ToolResult(success=True, content=f"detect ({what}): {len(dets)} — {summary}.\n" + json.dumps(payload, indent=2))
+
+    @staticmethod
+    def _detect_faces(img, conf: float) -> tuple[list[dict[str, Any]], str | None]:
+        model_path, err = _ensure_model("yunet")
+        if err:
+            return [], err
+        h, w = img.shape[:2]
+        det = _cv2.FaceDetectorYN_create(str(model_path), "", (w, h), conf, 0.3, 5000)
+        det.setInputSize((w, h))
+        _, faces = det.detect(img)
+        out: list[dict[str, Any]] = []
+        if faces is not None:
+            for f in faces:
+                x, y, bw, bh = (int(f[0]), int(f[1]), int(f[2]), int(f[3]))
+                out.append({
+                    "label": "face",
+                    "box": [x, y, bw, bh],
+                    "confidence": round(float(f[-1]), 3),
+                    # 5 landmarks: right-eye, left-eye, nose, right-mouth, left-mouth
+                    "landmarks": [[int(f[4 + 2 * i]), int(f[5 + 2 * i])] for i in range(5)],
+                })
+        return out, None
+
+    @staticmethod
+    def _detect_text(img, conf: float) -> tuple[list[dict[str, Any]], str | None]:
+        model_path, err = _ensure_model("ppocr_db")
+        if err:
+            return [], err
+        model = _cv2.dnn.TextDetectionModel_DB(str(model_path))
+        model.setBinaryThreshold(0.3).setPolygonThreshold(max(0.1, conf))
+        model.setInputParams(1 / 255.0, (736, 736), (122.67891434, 116.66876762, 104.00698793))
+        boxes, confs = model.detect(img)
+        out: list[dict[str, Any]] = []
+        for i, quad in enumerate(boxes or []):
+            pts = _np.array(quad, dtype=_np.int32).reshape(-1, 2)
+            x, y, bw, bh = _cv2.boundingRect(pts)
+            c = float(confs[i]) if confs is not None and i < len(confs) else 0.0
+            out.append({"label": "text", "box": [int(x), int(y), int(bw), int(bh)],
+                        "confidence": round(c, 3), "quad": pts.tolist()})
+        return out, None
+
+    def _detect_objects(self, img, kw: dict[str, Any], conf: float) -> tuple[list[dict[str, Any]], str | None]:
+        # Bring-your-own YOLOv8/v5 ONNX (a COCO detector worth bundling is heavier
+        # than we want on by default). Model from `model=` or the configured dir.
+        model_arg = str(kw.get("model") or "").strip()
+        if model_arg:
+            mp, merr = _resolve_input(model_arg, kw)
+            if merr:
+                return [], f"model: {merr}"
+            model_path = mp
+        else:
+            cand = _models_dir() / "yolov8n.onnx"
+            if not cand.is_file():
+                return [], (
+                    "objects needs a YOLOv8/v5 ONNX model. Pass model=<path.onnx>, or place "
+                    f"one at {cand} (or set CAPTAIN_CLAW_VISION_MODELS). Export e.g. "
+                    "`yolo export model=yolov8n.pt format=onnx`."
+                )
+            model_path = cand
+        try:
+            net = _cv2.dnn.readNetFromONNX(str(model_path))
+        except Exception as exc:
+            return [], f"could not load model {model_path}: {exc}"
+        h, w = img.shape[:2]
+        size = 640
+        blob = _cv2.dnn.blobFromImage(img, 1 / 255.0, (size, size), swapRB=True, crop=False)
+        net.setInput(blob)
+        out = net.forward()
+        dets = self._decode_yolo(out, w, h, conf, _OBJ_NMS, size)
+        return dets, None
+
+    @staticmethod
+    def _decode_yolo(output, orig_w: int, orig_h: int, conf: float, nms: float, size: int) -> list[dict[str, Any]]:
+        """Decode a YOLOv8 ([1,84,N]) or YOLOv5 ([1,N,85]) ONNX output → detections."""
+        arr = _np.squeeze(output)
+        if arr.ndim != 2:
+            return []
+        if arr.shape[0] < arr.shape[1]:  # (84, N) → (N, 84) for v8
+            arr = arr.T
+        cols = arr.shape[1]
+        box_xywh = arr[:, :4]  # cx,cy,w,h in model-input pixels — same for both layouts
+        if cols == 84 or cols - 4 == 80:          # v8: 4 box + 80 class scores
+            cls_scores = arr[:, 4:]
+            confidences = cls_scores.max(axis=1)
+        else:                                      # v5/v7: 4 box + 1 obj + classes
+            obj = arr[:, 4]
+            cls_scores = arr[:, 5:]
+            confidences = cls_scores.max(axis=1) * obj
+        class_ids = cls_scores.argmax(axis=1)
+        keep = confidences >= conf
+        if not keep.any():
+            return []
+        box_xywh = box_xywh[keep]
+        confidences = confidences[keep]
+        class_ids = class_ids[keep]
+        # cx,cy,w,h (model-input pixels) → x,y,w,h
+        xs = (box_xywh[:, 0] - box_xywh[:, 2] / 2)
+        ys = (box_xywh[:, 1] - box_xywh[:, 3] / 2)
+        rects = _np.stack([xs, ys, box_xywh[:, 2], box_xywh[:, 3]], axis=1)
+        idxs = _cv2.dnn.NMSBoxes(rects.tolist(), confidences.tolist(), float(conf), float(nms))
+        if idxs is None or len(idxs) == 0:
+            return []
+        sx, sy = orig_w / float(size), orig_h / float(size)
+        dets: list[dict[str, Any]] = []
+        for i in _np.array(idxs).flatten():
+            x, y, bw, bh = rects[i]
+            cid = int(class_ids[i])
+            dets.append({
+                "label": _COCO_CLASSES[cid] if cid < len(_COCO_CLASSES) else f"class_{cid}",
+                "box": [int(x * sx), int(y * sy), int(bw * sx), int(bh * sy)],
+                "confidence": round(float(confidences[i]), 3),
+            })
+        return dets
+
+    @staticmethod
+    def _draw_detections(img, dets: list[dict[str, Any]]):
+        canvas = img.copy() if img.ndim == 3 else _cv2.cvtColor(img, _cv2.COLOR_GRAY2BGR)
+        for d in dets:
+            box = _parse_box(d.get("box"))
+            if box is None:
+                continue
+            x, y, bw, bh = box
+            _cv2.rectangle(canvas, (x, y), (x + bw, y + bh), (0, 0, 255), 2)
+            tag = f"{d.get('label', '')} {d.get('confidence', '')}".strip()
+            if tag:
+                _cv2.putText(canvas, tag, (x, max(12, y - 6)), _cv2.FONT_HERSHEY_SIMPLEX,
+                             0.5, (0, 0, 255), 1, _cv2.LINE_AA)
+        return canvas

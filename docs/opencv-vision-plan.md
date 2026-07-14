@@ -16,8 +16,9 @@ page" loops so a model fires only when pixels actually changed; (2) it unlocks
 deterministic operations LLMs are bad at. CPU-only and light — matches the
 "light on resources" constraint that prompted this.
 
-Status: **Phase 1 shipped (uncommitted), verified locally against cv2 4.13.**
-Decisions locked 2026-07-14. Phases 2–3 not started.
+Status: **Phases 1–2 shipped & committed on branch `feat/opencv-vision-tool`**,
+verified locally against cv2 4.13 (Phase 2 detectors downloaded + run for real).
+Decisions locked 2026-07-14. Phase 3 (pipeline integration) not started.
 
 ## Locked decisions (2026-07-14, with the user)
 
@@ -115,9 +116,20 @@ run-cost ledger is *negative* (fewer LLM frames), never positive.
   frames before the per-frame LLM loop; no-ops without cv2). New `cv` extra. 11 tests
   (`tests/test_tools/test_vision.py`, importorskip). Verified end-to-end on cv2 4.13:
   all ops produce correct output; `locate` hits conf 1.0; QR decodes; diff SSIM correct.
-- **Phase 2 — bundled ONNX detectors.** `detect` (objects / faces / text) via the new
-  DNN engine, small models bundled/downloaded once. Faces can reuse the existing
-  `faces` extra path (insightface/onnxruntime) or the OpenCV DNN face detector.
+- **Phase 2 — local ONNX detectors. DONE (committed).** `detect what=faces|text|objects`
+  via OpenCV's DNN engine — no LLM, no token spend. **faces** = YuNet (native
+  `FaceDetectorYN`, ~232 KB); **text** = PP-OCRv3 DB (native `TextDetectionModel_DB`,
+  ~2.4 MB, returns text-region boxes to feed `image_ocr`); **objects** = generic
+  YOLOv8/v5 ONNX decode + `NMSBoxes` + COCO-80 labels, **bring-your-own model** (a COCO
+  detector worth bundling is heavier than the "light on resources" bar — no default
+  auto-download). Model cache infra: `_MODEL_REGISTRY` + `_ensure_model` (best-effort,
+  LFS-aware download that rejects git-lfs pointer files) + `_models_dir()`
+  (`CAPTAIN_CLAW_VISION_MODELS` env → `fd-data/models/vision` → `~/.captain-claw/...`)
+  so prod can pre-place models offline. Optional `out` annotates. 7 new tests (YOLO
+  decode on synthetic v8/v5 tensors + model-dir + no-model error + network-gated
+  faces/text). Verified on cv2 4.13: text fires on rendered text, YuNet loads/runs,
+  cache reused on 2nd call. NOTE: reused the OpenCV DNN face detector, **not** the
+  heavier `faces` extra (insightface/onnxruntime) — lighter and no extra dep.
 - **Phase 3 — pipeline integration.** Diff-gate the watch/autonomy loops; OCR
   pre-processing hook in `image_ocr`; `locate` exposed to browser/desktop tools.
 
