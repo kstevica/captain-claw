@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, ChevronDown,
-  ChevronLeft, ChevronRight, ClipboardList, Egg, Files, Fingerprint, Gift,
+  ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, Check, ChevronDown,
+  ChevronLeft, ChevronRight, ClipboardList, Coins, Egg, Files, Fingerprint, Gift,
   GraduationCap, History, Loader2, Mail, Maximize2, MessageCircle, Minimize2,
   Moon, Network, Pause, Play, Plus, RefreshCw, Search, ScrollText, Skull,
   Sparkles, Sprout, Users, Wrench, X, Zap,
@@ -878,6 +878,207 @@ function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy
   )
 }
 
+// Chores — post fixed-fee tasks a being earns by doing; every payout is
+// escrow-gated by the parent's judgment (plan §5.1). Its own modal so the
+// review flow (see her result → approve & pay / reject with a reason) has room.
+const CHORE_FEES = [
+  { v: '100000', label: '100k' }, { v: '500000', label: '500k' },
+  { v: '1000000', label: '1M' }, { v: '2000000', label: '2M' },
+] as const
+
+function ChoresModal({ slug, name, onClose, onChanged }: {
+  slug: string; name: string; onClose: () => void; onChanged: () => void
+}) {
+  const [chores, setChores] = useState<Chore[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+  const [spec, setSpec] = useState('')
+  const [fee, setFee] = useState('500000')
+  const [rejectingId, setRejectingId] = useState<string | null>(null)
+  const [rejectNote, setRejectNote] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try { setChores((await listChores(slug)).chores) }
+    catch (e) { setError(e instanceof Error ? e.message : 'failed to load') }
+    finally { setLoading(false) }
+  }, [slug])
+
+  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const run = async (label: string, fn: () => Promise<unknown>) => {
+    setBusy(label)
+    try { await fn(); await load(); onChanged() }
+    catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    finally { setBusy('') }
+  }
+  const post = () => run('post', async () => {
+    if (!spec.trim()) return
+    await postChore(slug, spec.trim(), Number(fee)); setSpec('')
+  })
+  const pay = (id: string) => run(`pay:${id}`, () => judgeChore(slug, id, true))
+  const reject = (id: string) => run(`rej:${id}`, async () => {
+    await judgeChore(slug, id, false, rejectNote.trim())
+    setRejectingId(null); setRejectNote('')
+  })
+
+  const review = chores.filter((c) => c.escrow_state === 'judging')
+  const open = chores.filter((c) => c.escrow_state === 'open')
+  const settled = chores.filter((c) => c.escrow_state === 'paid' || c.escrow_state === 'failed')
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div className="flex max-h-[85vh] w-[640px] flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+           onClick={(e) => e.stopPropagation()}>
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-2.5">
+          <div className="flex items-center gap-2">
+            <ClipboardList className="h-4 w-4 text-violet-500 dark:text-violet-400" />
+            <h3 className="text-sm font-semibold text-zinc-100">{name} — Chores</h3>
+            {review.length > 0 && (
+              <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                {review.length} to review
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-0.5">
+            <button onClick={() => void load()} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" title="Refresh"><RefreshCw className="h-3.5 w-3.5" /></button>
+            <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" title="Close (Esc)"><X className="h-4 w-4" /></button>
+          </div>
+        </div>
+
+        {/* Post a chore */}
+        <div className="shrink-0 border-b border-zinc-800 bg-zinc-900/40 p-3">
+          <textarea
+            value={spec} onChange={(e) => setSpec(e.target.value)} rows={2}
+            onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) post() }}
+            placeholder={`Ask ${name} to do something specific — e.g. “Write a short poem about the sea into garden/sea.md”`}
+            className="w-full resize-none rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="flex items-center gap-1 text-[11px] text-zinc-500"><Coins className="h-3.5 w-3.5" /> reward</span>
+            <div className="flex gap-1">
+              {CHORE_FEES.map((f) => (
+                <button key={f.v} onClick={() => setFee(f.v)}
+                  className={`rounded-md border px-2 py-1 text-[11px] transition-colors ${fee === f.v ? 'border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300' : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}>
+                  {f.label}
+                </button>
+              ))}
+            </div>
+            <button onClick={post} disabled={!spec.trim() || busy === 'post'}
+              className="ml-auto flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+              {busy === 'post' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Post chore
+            </button>
+          </div>
+          <p className="mt-1.5 text-[10px] text-zinc-600">She attempts it on a future tick. The reward is escrowed and only paid when you approve her result.</p>
+        </div>
+
+        {/* Chore list */}
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          {loading ? (
+            <div className="flex items-center justify-center py-10 text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>
+          ) : error ? (
+            <div className="py-8 text-center text-xs text-red-500 dark:text-red-400">{error}</div>
+          ) : chores.length === 0 ? (
+            <div className="py-10 text-center">
+              <ClipboardList className="mx-auto mb-2 h-8 w-8 text-zinc-700" />
+              <p className="text-xs text-zinc-500">No chores yet. Post one above — it's how {name} earns beyond her allowance.</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {review.length > 0 && (
+                <div>
+                  <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">Needs your review</div>
+                  <div className="space-y-2">
+                    {review.map((c) => (
+                      <div key={c.id} className="rounded-lg border border-amber-500/25 bg-amber-500/[0.04] p-2.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="flex-1 text-xs text-zinc-200">{c.spec}</p>
+                          <span className="shrink-0 text-[11px] font-medium text-amber-600 dark:text-amber-400">{fmtTokens(c.fee_tokens)}</span>
+                        </div>
+                        {c.result_text && (
+                          <div className="mt-2 rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5 text-[11px] text-zinc-400">
+                            <span className="text-zinc-600">{name} says: </span>{c.result_text}
+                          </div>
+                        )}
+                        {rejectingId === c.id ? (
+                          <div className="mt-2 space-y-1.5">
+                            <textarea value={rejectNote} onChange={(e) => setRejectNote(e.target.value)} rows={2}
+                              placeholder="Why isn't this right? She learns from it (optional)"
+                              className="w-full resize-none rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-red-500/40 focus:outline-none" />
+                            <div className="flex gap-1.5">
+                              <button onClick={() => reject(c.id)} disabled={busy === `rej:${c.id}`}
+                                className="flex items-center gap-1 rounded-md border border-red-500/40 px-2.5 py-1 text-[11px] text-red-600 hover:bg-red-500/10 dark:text-red-300 disabled:opacity-40">
+                                {busy === `rej:${c.id}` && <Loader2 className="h-3 w-3 animate-spin" />} Confirm reject
+                              </button>
+                              <button onClick={() => { setRejectingId(null); setRejectNote('') }}
+                                className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800">Cancel</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="mt-2 flex items-center gap-1.5">
+                            <button onClick={() => pay(c.id)} disabled={busy === `pay:${c.id}`}
+                              className="flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:opacity-40">
+                              {busy === `pay:${c.id}` ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} Approve & pay {fmtTokens(c.fee_tokens)}
+                            </button>
+                            <button onClick={() => setRejectingId(c.id)}
+                              className="rounded-md border border-red-500/30 px-2.5 py-1 text-[11px] text-red-600 hover:bg-red-500/10 dark:text-red-300">Reject</button>
+                            <span className="ml-auto text-[10px] text-zinc-600">{fmtRelTime(c.created_at)}</span>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {open.length > 0 && (
+                <div>
+                  <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">In progress</div>
+                  <div className="space-y-1.5">
+                    {open.map((c) => (
+                      <div key={c.id} className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-2">
+                        <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-violet-500" />
+                        <p className="flex-1 text-xs text-zinc-300">{c.spec}</p>
+                        <span className="shrink-0 text-[11px] text-zinc-500">{fmtTokens(c.fee_tokens)}</span>
+                        <span className="shrink-0 text-[10px] text-zinc-600">{fmtRelTime(c.created_at)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {settled.length > 0 && (
+                <div>
+                  <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">History</div>
+                  <div className="space-y-1">
+                    {settled.slice(0, 15).map((c) => (
+                      <div key={c.id} className="flex items-center gap-2 rounded-md px-2 py-1.5">
+                        <span className={`shrink-0 text-[10px] font-medium ${c.escrow_state === 'paid' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
+                          {c.escrow_state === 'paid' ? 'paid' : 'rejected'}
+                        </span>
+                        <p className="flex-1 truncate text-[11px] text-zinc-500" title={c.spec}>{c.spec}</p>
+                        {c.escrow_state === 'paid'
+                          ? <span className="shrink-0 text-[11px] text-emerald-600/80 dark:text-emerald-400/80">+{fmtTokens(c.fee_tokens)}</span>
+                          : c.judge_note
+                            ? <span className="shrink-0 max-w-[45%] truncate text-[10px] text-zinc-600" title={c.judge_note}>“{c.judge_note}”</span>
+                            : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // A nice, theme-aware confirmation before a consequential act (a tick/dream
 // spends real tokens; pause/goodbye change her state). onConfirm may be
 // async — the dialog shows a spinner, then closes.
@@ -944,9 +1145,7 @@ function BeingCard({ item, meta, onChanged }: {
     title: string; message: string; confirmLabel: string
     tone?: 'default' | 'danger'; icon?: typeof Zap; run: () => Promise<unknown>
   } | null>(null)
-  const [chores, setChores] = useState<Chore[]>([])
-  const [choreSpec, setChoreSpec] = useState('')
-  const [choreFee, setChoreFee] = useState('500000')
+  const [choresOpen, setChoresOpen] = useState(false)
   const [ruleText, setRuleText] = useState('')
   const [dietAllow, setDietAllow] = useState('')
   const [dietDeny, setDietDeny] = useState('')
@@ -962,19 +1161,15 @@ function BeingCard({ item, meta, onChanged }: {
     } catch { /* card stays in list-item mode */ }
   }, [item.slug])
 
-  const openParenting = async () => {
+  const openParenting = () => {
     if (parenting) { setParenting(false); return }
     setParenting(true)
     setCard(null)
-    try {
-      const c = await listChores(item.slug)
-      setChores(c.chores)
-      if (vitals) {
-        setRuleText((vitals.house_rules || []).join('\n'))
-        setDietAllow((vitals.media_diet?.allow || []).join(', '))
-        setDietDeny((vitals.media_diet?.deny || []).join(', '))
-      }
-    } catch { /* section shows empty states */ }
+    if (vitals) {
+      setRuleText((vitals.house_rules || []).join('\n'))
+      setDietAllow((vitals.media_diet?.allow || []).join(', '))
+      setDietDeny((vitals.media_diet?.deny || []).join(', '))
+    }
   }
 
   useEffect(() => { void load() }, [load])
@@ -1152,8 +1347,10 @@ function BeingCard({ item, meta, onChanged }: {
                       setMessaging(next)
                       if (next) void getBeingMessages(item.slug).then((r) => setThread(r.thread)).catch(() => {})
                     }} />
-                  <IconAction icon={GraduationCap} label="Parenting — chores, rules, allowance, stage" active={parenting}
-                    onClick={() => void openParenting()} />
+                  <IconAction icon={ClipboardList} label="Chores — tasks she earns tokens for"
+                    onClick={() => setChoresOpen(true)} />
+                  <IconAction icon={GraduationCap} label="Parenting — rules, diet, allowance, stage" active={parenting}
+                    onClick={() => openParenting()} />
                 </div>
               </>
             )}
@@ -1184,6 +1381,14 @@ function BeingCard({ item, meta, onChanged }: {
         <BeingLogModal
           slug={item.slug} name={item.name} mode={logView}
           onClose={() => setLogView(null)}
+        />
+      )}
+
+      {choresOpen && (
+        <ChoresModal
+          slug={item.slug} name={item.name}
+          onClose={() => setChoresOpen(false)}
+          onChanged={() => { void load(); onChanged() }}
         />
       )}
 
@@ -1236,60 +1441,6 @@ function BeingCard({ item, meta, onChanged }: {
 
       {parenting && v && (
         <div className="mt-3 space-y-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
-          {/* Chores */}
-          <div>
-            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
-              <ClipboardList className="h-3.5 w-3.5 text-violet-400" /> Chores
-            </div>
-            {chores.filter(c => c.escrow_state === 'open' || c.escrow_state === 'judging').map((c) => (
-              <div key={c.id} className="mb-1 flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs">
-                <span className="flex-1 truncate text-zinc-300" title={c.result_text || c.spec}>
-                  {c.spec} <span className="text-zinc-600">· {fmtTokens(c.fee_tokens)}</span>
-                </span>
-                {c.escrow_state === 'judging' ? (
-                  <>
-                    <span className="text-[10px] text-amber-400">done — review:</span>
-                    <button
-                      onClick={() => void act('judge', async () => { await judgeChore(item.slug, c.id, true); setChores((await listChores(item.slug)).chores) })}
-                      className="rounded border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300 hover:bg-emerald-500/10"
-                    >Pay</button>
-                    <button
-                      onClick={() => void act('judge', async () => { await judgeChore(item.slug, c.id, false); setChores((await listChores(item.slug)).chores) })}
-                      className="rounded border border-red-500/30 px-1.5 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10"
-                    >Reject</button>
-                  </>
-                ) : (
-                  <span className="text-[10px] text-zinc-500">waiting</span>
-                )}
-              </div>
-            ))}
-            <div className="mt-1 flex items-center gap-1.5">
-              <input
-                value={choreSpec} onChange={(e) => setChoreSpec(e.target.value)}
-                placeholder="Post a chore… (fixed fee, judged before payout)"
-                className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-              />
-              <select
-                value={choreFee} onChange={(e) => setChoreFee(e.target.value)}
-                className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:outline-none"
-              >
-                <option value="100000">100k</option>
-                <option value="500000">500k</option>
-                <option value="1000000">1M</option>
-                <option value="2000000">2M</option>
-              </select>
-              <button
-                onClick={() => void act('chore', async () => {
-                  if (!choreSpec.trim()) return
-                  await postChore(item.slug, choreSpec.trim(), Number(choreFee))
-                  setChoreSpec('')
-                  setChores((await listChores(item.slug)).chores)
-                })}
-                className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-              >Post</button>
-            </div>
-          </div>
-
           {/* House rules + diet */}
           <div className="grid gap-2 md:grid-cols-2">
             <div>
