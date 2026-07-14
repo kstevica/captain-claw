@@ -201,6 +201,15 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
     # Browser automation
     (_re.compile(r"\bbrowser\b|\blogin\b|\bclick\b|\bnavigate\b|\bweb\s+app\b", _re.I),
      frozenset({"browser"})),
+    # Hosting / publishing a VFS folder to the web. Without this, eco mode
+    # strips the `hosting` tool's schema and the agent — knowing only that a
+    # hosting capability exists — hallucinates it as a shell command or reaches
+    # for external hosts (surge/vercel/ngrok) outside our sandbox. Surface the
+    # in-sandbox tools instead. /vfs/ and /vfs-apps/ are our own served paths.
+    (_re.compile(
+        r"\bhost(?:ing)?\b|\bpublish\b|\bdeploy\b|\bgo\s+live\b|\bput\s+(?:it\s+)?online\b"
+        r"|\bpublic\s+url\b|\bserve\b|/vfs(?:-apps)?/", _re.I),
+     frozenset({"hosting", "app_runner"})),
     # Audio / TTS
     (_re.compile(r"\bspeak\b|\bsay\b|\baudio\b|\btts\b|\bvoice\b|\bread\s+aloud\b", _re.I),
      frozenset({"pocket_tts"})),

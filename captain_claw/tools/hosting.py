@@ -30,17 +30,26 @@ class HostingTool(Tool):
     name = "hosting"
     description = (
         "Publish and manage web hosting for the user's VFS folders — put a static site or a "
-        "runnable app on the web and get back a public URL. MANDATORY: when the user asks to "
-        "'host', 'publish', 'deploy', 'put online', or 'serve' a site/app you built in a VFS "
-        "folder, call this with action='publish' — don't just describe how. "
-        "kind='static' serves files at /vfs/<name>/ (needs an index.html, else a file listing); "
-        "kind='app' runs a process (give `start_cmd`, e.g. 'node server.js') and reverse-proxies "
-        "it at /vfs-apps/<name>/ — apps are started automatically on publish. `name` is the URL "
-        "slug (lowercase letters, digits, dashes). `project` is the VFS project/folder the files "
-        "live in (as used by Code); `subdir` narrows to a sub-path inside it. Re-publishing a "
-        "name you own updates it (and restarts the app). Other actions: 'list' your published "
-        "sites, 'start'/'stop' an app, 'status' (URL, running state, recent logs, visit count), "
-        "'unpublish' to remove. Returns the public URL — relay it to the user."
+        "runnable app on the web and get back a public URL. This is THE ONLY way to publish: "
+        "Flight Deck hosts the files itself and serves them on the user's own domain. "
+        "NEVER shell out to do this — there is no `hosting` shell command, and you must NOT use "
+        "surge, vercel, netlify, ngrok, `npx`, `python -m http.server`, or any external/third-party "
+        "host. Everything stays inside our sandbox; reaching outside it will fail and is wrong. "
+        "MANDATORY: when the user asks to 'host', 'publish', 'deploy', 'put online', 'go live', "
+        "'serve', or 'get a public URL' for a site/app in a VFS folder, call this tool with "
+        "action='publish' — don't just describe how, and don't run a shell command.\n"
+        "kind='static' serves files at /vfs/<name>/ (needs an index.html at the served root, else a "
+        "file listing); kind='app' runs a process (give `start_cmd`, e.g. 'node server.js') and "
+        "reverse-proxies it at /vfs-apps/<name>/ — apps are started automatically on publish. "
+        "`name` is the URL slug (lowercase letters, digits, dashes). "
+        "`project` is the VFS project/folder the files live in (the first path segment, as used by "
+        "Code); `subdir` narrows to a sub-path inside it. Split any file path you're given into "
+        "these: for `saved/showcase/abc123/index.html` pass project='saved', "
+        "subdir='showcase/abc123' (point at the folder that CONTAINS index.html, never the "
+        "index.html file itself). Re-publishing a name you own updates it (and restarts the app). "
+        "Other actions: 'list' your published sites, 'start'/'stop' an app, 'status' (URL, running "
+        "state, recent logs, visit count), 'unpublish' to remove. Returns the public URL — relay it "
+        "to the user."
     )
     timeout_seconds = 60.0
 
@@ -72,13 +81,18 @@ class HostingTool(Tool):
             "project": {
                 "type": "string",
                 "description": (
-                    "publish: the VFS project/folder holding the files (same name you'd use in "
-                    "Code). Required for publish."
+                    "publish: the VFS project/folder holding the files — the FIRST segment of the "
+                    "path (same name you'd use in Code). For 'saved/showcase/abc/index.html' this is "
+                    "'saved'. Required for publish."
                 ),
             },
             "subdir": {
                 "type": "string",
-                "description": "publish: optional sub-path inside the project (e.g. 'dist' or 'build').",
+                "description": (
+                    "publish: optional sub-path inside the project pointing at the folder that "
+                    "CONTAINS index.html (never the .html file itself), e.g. 'dist', 'build', or "
+                    "'showcase/abc' for 'saved/showcase/abc/index.html'."
+                ),
             },
             "start_cmd": {
                 "type": "string",
