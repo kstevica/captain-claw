@@ -66,7 +66,7 @@ async def _being(store, name="Zvjezdana", stage="child", pocket=5_000_000):
 
 
 def _reply(**over):
-    d = {"act_kind": "tend", "summary": "tended", "journal_entry": "I tended.",
+    d = {"act_kind": "journal", "summary": "tended", "journal_entry": "I tended.",
          "served_drive": "create", "message_to_parent": None,
          "next_wake_minutes": 60, "mood": "calm"}
     d.update(over)

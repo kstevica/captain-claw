@@ -59,7 +59,7 @@ async def _adult(store, name, pocket=20_000_000, preset="explorer"):
 
 
 def _reply(**over):
-    d = {"act_kind": "tend", "summary": "t", "journal_entry": "I tended.",
+    d = {"act_kind": "journal", "summary": "t", "journal_entry": "I tended.",
          "served_drive": "create", "message_to_parent": None,
          "next_wake_minutes": 60, "mood": "calm"}
     d.update(over)

@@ -83,6 +83,11 @@ class StageRequest(BaseModel):
     stage: str
 
 
+class CadenceRequest(BaseModel):
+    # minutes between ticks; null returns the being to its own stage-clamped pace
+    minutes: int | None = None
+
+
 class EuthanizeRequest(BaseModel):
     confirm: bool = False
 
@@ -474,6 +479,17 @@ async def set_allowance(slug: str, body: AllowanceRequest,
 async def set_stage(slug: str, body: StageRequest,
                     user: dict = Depends(get_current_user)):
     _run(get_store().set_stage, user["id"], slug, body.stage)
+    return _run(get_store().vitals, user["id"], slug)
+
+
+@router.post("/{slug}/cadence")
+async def set_cadence(slug: str, body: CadenceRequest,
+                      user: dict = Depends(get_current_user)):
+    """Pin how often this being ticks (minutes), or null for its own pace (#2)."""
+    if body.minutes is not None and body.minutes not in being_life.TICK_INTERVAL_CHOICES:
+        raise HTTPException(
+            400, f"minutes must be one of {list(being_life.TICK_INTERVAL_CHOICES)} or null")
+    _run(get_store().set_tick_interval, user["id"], slug, body.minutes)
     return _run(get_store().vitals, user["id"], slug)
 
 

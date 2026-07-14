@@ -319,6 +319,7 @@ class BeingsStore:
                 ("pending_self_mod", "TEXT NOT NULL DEFAULT ''"),
                 ("pending_procreation", "TEXT NOT NULL DEFAULT ''"),
                 ("torpor_since", "TEXT"),
+                ("tick_interval_minutes", "INTEGER"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -571,6 +572,21 @@ class BeingsStore:
                 fields["drives"] = json.dumps(drives)
         self._update(b["id"], now, **fields)
         self.record_event(b["id"], "stage", {"from": b["stage"], "to": stage}, now=now)
+        return self.get(owner_id, slug)
+
+    def set_tick_interval(self, owner_id: str, slug: str, minutes: int | None,
+                          now: datetime | None = None) -> dict:
+        """Pin the being's tick cadence in minutes (the parent sets the pace, #2),
+        or None to return it to its own stage-clamped rhythm."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        val = None
+        if minutes is not None:
+            val = int(minutes)
+            if val < 1 or val > 1440:
+                raise BeingError("tick interval must be 1–1440 minutes")
+        self._update(b["id"], now, tick_interval_minutes=val)
+        self.record_event(b["id"], "cadence_set", {"minutes": val}, now=now)
         return self.get(owner_id, slug)
 
     def set_state(self, owner_id: str, slug: str, state: str,
@@ -839,6 +855,7 @@ class BeingsStore:
             "persona": b["persona"],
             "pending_self_mod": b["pending_self_mod"],
             "pending_procreation": b["pending_procreation"],
+            "tick_interval_minutes": b.get("tick_interval_minutes"),
         }
 
     def ledger(self, owner_id: str, slug: str, limit: int = 100) -> list[dict]:

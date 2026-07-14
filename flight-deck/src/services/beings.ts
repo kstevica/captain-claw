@@ -114,7 +114,10 @@ export interface BeingVitals {
     partner: string | null; child_name: string; case: string
     letter: string; proposed_at: string
   } | null
+  tick_interval_minutes: number | null
 }
+
+export const TICK_INTERVAL_CHOICES = [2, 5, 10, 15, 30, 60] as const
 
 export interface BeingEvent {
   kind: string
@@ -325,4 +328,8 @@ export const getReportCard = (slug: string, days = 7) =>
 export const setStage = (slug: string, stage: string) =>
   fdFetch<BeingVitals>(`/beings/${slug}/stage`, {
     method: 'POST', body: JSON.stringify({ stage }),
+  })
+export const setCadence = (slug: string, minutes: number | null) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/cadence`, {
+    method: 'POST', body: JSON.stringify({ minutes }),
   })

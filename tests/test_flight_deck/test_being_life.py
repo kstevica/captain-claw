@@ -227,7 +227,9 @@ async def test_create_without_artifact_is_downgraded(store):
     seen = {}
 
     async def send(being, prompt):
-        seen["prompt"] = prompt
+        seen.setdefault("first_prompt", prompt)
+        seen["last_prompt"] = prompt
+        seen["calls"] = seen.get("calls", 0) + 1
         return _digest_reply(act_kind="create", summary="made a poem",
                              journal_entry="I planted a poem next to the seed.")
 
@@ -238,14 +240,18 @@ async def test_create_without_artifact_is_downgraded(store):
     assert out["act"] == "journal"                 # downgraded to the truth
     kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
     assert "act_unverified" in kinds
+    # the completion gate (#1) pushed her once more in the SAME tick first
+    assert seen["calls"] == 2
+    assert "write_gate_retry" in kinds
+    assert "reality check" in seen["last_prompt"].lower()   # the gate prompt
     names = [m["data"]["name"] for m in store.milestones(OWNER, b["slug"])]
     assert "first_artifact" not in names
     tick_ev = next(e for e in store.events(OWNER, b["slug"])
                    if e["kind"] == "tick")
     assert tick_ev["data"]["act"] == "journal"
     assert tick_ev["data"]["changed"] == []
-    # the prompt makes the honesty-of-record contract explicit
-    assert "HONESTY OF RECORD" in seen["prompt"]
+    # the FIRST prompt makes the honesty-of-record contract explicit
+    assert "HONESTY OF RECORD" in seen["first_prompt"]
     # claiming a write with no diff also trips the mismatch flag
     assert "narration_mismatch" in kinds
     # the journal preserves her words AND stamps the factual footer + note
@@ -254,6 +260,59 @@ async def test_create_without_artifact_is_downgraded(store):
     assert "planted a poem" in day_text
     assert "files changed this tick: none" in day_text
     assert "nothing was written to disk" in day_text
+
+
+async def test_write_gate_makes_her_write_on_the_second_push(store):
+    """#1: she claims a create with no file on turn 1; the gate pushes her and
+    she actually writes on turn 2 — so THIS tick counts as a real create."""
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+    n = {"i": 0}
+
+    async def send(being, prompt):
+        n["i"] += 1
+        if n["i"] >= 2:                              # writes for real once pushed
+            p = life._home_path(being, "garden/finally.md")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("# Finally\n", encoding="utf-8")
+        return _digest_reply(act_kind="create", summary="made a thing",
+                             journal_entry="I created garden/finally.md.")
+
+    async def usage(being, since):
+        return _usage(40_000)
+
+    out = await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    assert n["i"] == 2                               # gate pushed once
+    assert out["act"] == "create"                    # real this time — counts
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "write_gate_retry" in kinds
+    assert "act_unverified" not in kinds and "narration_mismatch" not in kinds
+    assert "garden/finally.md" in life._home_path(
+        b, f"journal/{NOW.strftime('%Y-%m-%d')}.md").read_text(encoding="utf-8")
+
+
+async def test_write_gate_does_not_fire_for_honest_rest(store):
+    """A genuine no-write act (rest, no write claim) is never gated."""
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+    n = {"i": 0}
+
+    async def send(being, prompt):
+        n["i"] += 1
+        return _digest_reply(act_kind="rest", summary="rested",
+                             journal_entry="I sat with what I have and rested.")
+
+    async def usage(being, since):
+        return _usage(20_000)
+
+    await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    assert n["i"] == 1                               # no retry — honest rest
+    assert "write_gate_retry" not in [
+        e["kind"] for e in store.events(OWNER, b["slug"])]
 
 
 async def test_create_with_real_artifact_counts(store):
@@ -813,3 +872,36 @@ async def test_spawn_body_marks_being_as_fd_worker(store, monkeypatch):
         lambda slug: (24096, "tok"))
     await life.spawn_body(None, store, b)               # db=None → tiers skipped
     assert captured["env"].get("CLAW_BEING_WORKER") == "1"
+
+
+# ── #2: per-being tick cadence the parent pins ───────────────────────────
+
+async def test_parent_pinned_cadence_overrides_next_wake(store):
+    """A parent-pinned cadence sets the beat regardless of the being's own
+    requested next_wake_minutes or its stage bounds."""
+    db = FakeDB()
+    b = _born(store, name="Cad", port=0)             # infant (floor 30 min)
+    await life.build_home(b)
+    store.set_tick_interval(OWNER, b["slug"], 5)     # pin 5 min (below the floor)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        return _digest_reply(next_wake_minutes=90)   # the being asks for 90
+
+    async def usage(being, since):
+        return _usage(20_000)
+
+    out = await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    assert out["next_wake"].startswith("2026-07-12T12:05")   # 5-min pin wins
+
+
+def test_set_tick_interval_validates_and_clears(store):
+    import pytest as _pt
+    b = _born(store)
+    assert store.get(OWNER, b["slug"])["tick_interval_minutes"] is None  # default
+    store.set_tick_interval(OWNER, b["slug"], 15)
+    assert store.get(OWNER, b["slug"])["tick_interval_minutes"] == 15
+    store.set_tick_interval(OWNER, b["slug"], None)                # back to its pace
+    assert store.get(OWNER, b["slug"])["tick_interval_minutes"] is None
+    with _pt.raises(BeingError):
+        store.set_tick_interval(OWNER, b["slug"], 99999)          # out of range

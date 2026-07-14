@@ -20,9 +20,9 @@ import {
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
   getBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
   listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
-  rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
+  rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance, setCadence,
   setHouseRules, setMediaDiet, setStage, setVentureState, tickBeing,
-  wakeBeing,
+  wakeBeing, TICK_INTERVAL_CHOICES,
 } from '../services/beings'
 
 const REFRESH_MS = 6000
@@ -152,6 +152,8 @@ function summarizeEventData(e: BeingEvent): string {
     case 'act_unverified': return `claimed ${d.claimed} but made no artifact — logged as reflection`
     case 'narration_mismatch': return `journal claimed a file write, but nothing changed on disk — “${d.summary}”`
     case 'drive_unearned': return `claimed to satisfy its ${d.drive} drive without making anything real`
+    case 'write_gate_retry': return `claimed a write with nothing on disk — pushed to actually write it (attempt ${d.attempt})`
+    case 'cadence_set': return d.minutes ? `tick cadence pinned to every ${d.minutes} min` : 'tick cadence back to its own pace'
     case 'edge_declared': return `linked ${d.from} → ${d.to} (${d.rel})${d.why ? ` — ${d.why}` : ''}`
     case 'edge_unverified': return `link ${d.from} → ${d.to} refused — ${d.reason}`
     case 'edges_pruned': return `pruned ${d.count} dangling link(s) at dream`
@@ -1047,6 +1049,21 @@ function BeingCard({ item, meta, onChanged }: {
             {w!.effective_preset !== w!.allowance_preset && (
               <span className="text-[10px] text-amber-400">stage-capped to {w!.effective_preset}</span>
             )}
+          </div>
+
+          <div className="mb-2 flex items-center gap-2 text-xs">
+            <span className="text-zinc-500">ticks</span>
+            <select
+              value={v.tick_interval_minutes ?? ''}
+              onChange={(e) => void act('cadence', () => setCadence(
+                item.slug, e.target.value ? Number(e.target.value) : null))}
+              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
+            >
+              <option value="">Auto (its own pace)</option>
+              {TICK_INTERVAL_CHOICES.map((m) => (
+                <option key={m} value={m}>every {m} min</option>
+              ))}
+            </select>
           </div>
 
           {events.length > 0 && (

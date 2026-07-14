@@ -44,6 +44,14 @@ log = get_logger(__name__)
 
 TICK_TIMEOUT_SECONDS = 300.0
 DAILY_ATTENTION_CREDITS = 3
+# Write completion gate (plan rule #1): if a being CLAIMS/attempts a write but
+# the git diff shows nothing, push it this many extra times IN THE SAME TICK to
+# actually write the file, before accepting the anti-theater downgrade. Bounded
+# so a stubborn tick costs at most (1+N) turns, not an unbounded loop.
+WRITE_GATE_RETRIES = 1
+# Per-being tick cadence the parent may pin (minutes). None → the being's own
+# requested next_wake_minutes, clamped to its stage bounds (the default).
+TICK_INTERVAL_CHOICES = (2, 5, 10, 15, 30, 60)
 # When a being regenerates its body mid-tick, wait up to TRIES×SECONDS for it to
 # bind so the SAME tick can think (spawn → boot → bind → maybe drift+announce),
 # rather than bouncing the poke to a later heartbeat.
@@ -714,6 +722,26 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
     return "\n".join(lines)
 
 
+def compose_write_gate_prompt(being: dict, digest: dict) -> str:
+    """The completion gate (#1 / plan rule #1): the being said it wrote
+    something the git diff does NOT show. Push it, in the SAME tick, to make the
+    file real this turn — or to stop claiming it. Mirrors a single-agent
+    completion gate: don't accept a turn that claims work it didn't do."""
+    proj = home_project(being)
+    claimed = (digest.get("summary") or "what you described").strip()[:200]
+    return (
+        f"STOP — reality check before this tick closes. You just reported: "
+        f"“{claimed}” — but Flight Deck checked the disk and NOTHING "
+        f"changed this tick. Your words are not a file; describing a write is "
+        f"not writing it. Do it FOR REAL NOW: call your write tool to create or "
+        f"update the actual file under vfs:{proj}/ THIS turn (e.g. "
+        f"vfs:{proj}/garden/<name>.md), then reply with your one fenced json "
+        f"digest. This is your FINAL attempt this tick. If you truly are not "
+        f"writing anything, be honest — use act_kind “rest” or "
+        f"“journal” and make no write claim."
+    )
+
+
 # ── Digest parsing ───────────────────────────────────────────────────────
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -1311,13 +1339,45 @@ async def _tick_locked(
         mind_lines=mind_lines or None)
     t0 = now
     send = send_fn or _send_via_channel
-    try:
-        reply = await send(being, prompt)
-    except Exception as e:  # noqa: BLE001
-        store.record_event(bid, "tick_error", {"error": str(e)}, now=now)
-        reply = None
+    # 3b. Think — with a WRITE COMPLETION GATE (#1): if the being claims/attempts
+    # a write the git diff doesn't show, push it once more THIS tick to actually
+    # write the file, instead of accepting theater and waiting for the next
+    # heartbeat. Ground truth (git diff) is recomputed each attempt.
+    gate_prompt = prompt
+    reply, digest, changed = None, None, None
+    for attempt in range(WRITE_GATE_RETRIES + 1):
+        try:
+            reply = await send(being, gate_prompt)
+        except Exception as e:  # noqa: BLE001
+            store.record_event(bid, "tick_error", {"error": str(e)}, now=now)
+            reply = None
+        digest = parse_digest(reply)
+        if digest is None:
+            if reply is None:
+                store.record_event(bid, "tick_timeout", {}, now=now)
+            else:
+                store.record_event(bid, "digest_parse_failed", {}, now=now)
+            digest = fallback_digest(reply, kind)
+        try:
+            changed = await _tick_changed_files(being)
+        except Exception as e:  # noqa: BLE001 — degrades to trust (None)
+            log.warning("artifact verification failed", slug=being["slug"],
+                        error=str(e))
+            changed = None
+        made_nothing = changed is not None and not changed
+        wants_write = (digest["act_kind"] in ("create", "tend")
+                       or _claims_file_write(
+                           f"{digest['journal_entry']} {digest['summary']}"))
+        if (reply is not None and made_nothing and wants_write
+                and kind != "dream" and attempt < WRITE_GATE_RETRIES):
+            store.record_event(bid, "write_gate_retry",
+                               {"attempt": attempt + 1,
+                                "claimed": digest["summary"][:120]}, now=now)
+            gate_prompt = compose_write_gate_prompt(being, digest)
+            continue
+        break
 
-    # 4. Meter the real spend and debit — physics, clamped at the floor.
+    # 4. Meter the real spend across ALL attempts and debit — physics, clamped.
     usage = {}
     try:
         usage = await (usage_fn or _usage_since)(being, t0)
@@ -1338,24 +1398,7 @@ async def _tick_locked(
         except Exception:  # noqa: BLE001 — dollar reporting is best-effort
             pass
 
-    # 5. Digest the self-report; the arithmetic of feeling stays FD-side.
-    digest = parse_digest(reply)
-    if digest is None:
-        if reply is None:
-            store.record_event(bid, "tick_timeout", {}, now=now)
-        else:
-            store.record_event(bid, "digest_parse_failed", {}, now=now)
-        digest = fallback_digest(reply, kind)
-
-    # Ground truth FIRST (git diff, before the journal write dirties the tree):
-    # what the tools ACTUALLY wrote this turn drives everything downstream —
-    # the drive it's allowed to satisfy, the record, the feedback.
-    try:
-        changed = await _tick_changed_files(being)
-    except Exception as e:  # noqa: BLE001 — degrades to trust (None)
-        log.warning("artifact verification failed", slug=being["slug"],
-                    error=str(e))
-        changed = None
+    # 5. The self-report is digested; the arithmetic of feeling stays FD-side.
     claims_write = _claims_file_write(
         f"{digest['journal_entry']} {digest['summary']}")
     made_nothing = changed is not None and not changed
@@ -1499,8 +1542,13 @@ async def _tick_locked(
             store.record_event(bid, "message_suppressed",
                                {"reason": "no attention credits"}, now=now)
 
-    # 7. Schedule the next heartbeat.
-    minutes = clamp_next_wake(being["stage"], digest["next_wake_minutes"])
+    # 7. Schedule the next heartbeat. A parent-pinned cadence (#2) overrides the
+    #    being's own request and its stage bounds — the parent sets the pace.
+    interval = being.get("tick_interval_minutes")
+    if interval:
+        minutes = int(interval)
+    else:
+        minutes = clamp_next_wake(being["stage"], digest["next_wake_minutes"])
     if debit["overdraft"]:
         store.set_state(owner, being["slug"], "torpor", now=now)
         store.record_event(bid, "collapsed_exhausted",
