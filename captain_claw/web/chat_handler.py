@@ -252,16 +252,20 @@ async def handle_chat(
     _has_video = False
     _VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")
     video_attachments: list[str] = []  # auto-analyzed server-side before the turn
+    image_attachments: list[str] = []  # non-inline images auto-analyzed server-side
+    _all_images: list[str] = []
 
     # Single image (backward compat)
     if image_path:
         attachment_lines.append(f"[Attached image: {image_path}]")
         _has_image = True
+        _all_images.append(str(image_path))
     # Multiple images
     if image_paths:
         for p in image_paths:
             attachment_lines.append(f"[Attached image: {p}]")
             _has_image = True
+            _all_images.append(str(p))
     # Single data file (backward compat)
     if file_path:
         attachment_lines.append(f"[Attached file: {file_path}]")
@@ -292,14 +296,17 @@ async def handle_chat(
                 "delegate, and do NOT use read; just look and answer." + _this_msg_only + ")"
             )
         else:
+            # Auto-analyze server-side (a vision model or a multimodal peer) and inject
+            # the description — the image mirror of the video path (_prefix_image_analysis
+            # in _run_agent). The model no longer has to pick the right tool: it kept
+            # grabbing the always-on `cv` tool and returning pixel stats instead of a
+            # description. Now the answer is already in the turn.
+            image_attachments = list(_all_images)
             attachment_lines.append(
-                "(To view/understand the image(s) above you MUST call a tool: image_vision "
-                "(to describe or answer questions) or image_ocr (to read the text) with the "
-                "path, or — if you can't see images — delegate it to a multimodal peer via "
-                "flight_deck with file=<path>. Do NOT use the 'cv' tool for this — 'cv' "
-                "does pixel ops only (measure/diff/detect regions) and cannot read text or say "
-                "what an image shows. Never use read on an image. Never say you "
-                "sent/delegated/described it unless you actually called the tool this turn." + _this_msg_only + ")"
+                "(An automatic visual description of the image(s) — including any visible "
+                "text — is included below. Answer the user from it; you usually need no tool. "
+                "Only call image_ocr if the user needs exact/complete text extraction, or cv "
+                "for a pixel task they explicitly asked for (QR, blur, diff)." + _this_msg_only + ")"
             )
     # Video is analyzed deterministically server-side (see _run_agent) and the
     # analysis is injected into this turn — so we do NOT ask the model to call
@@ -393,6 +400,7 @@ async def handle_chat(
         is_public=is_public,
         public_session_id=public_session_id,
         video_attachments=video_attachments,
+        image_attachments=image_attachments,
         no_flow=no_flow,
         deny_tools=deny_tools,
         no_tools=no_tools,
@@ -448,6 +456,93 @@ async def _prefix_video_analysis(
         "analysis. Do NOT call video_vision again, do NOT write or run any script "
         "(no cv2, no ffmpeg, no shell), and do NOT save anything to a file unless "
         "the user explicitly asked you to.\n\n"
+        f"{content}"
+    )
+
+
+async def _prefix_image_analysis(
+    agent: Any, content: str, image_paths: list[str], send: Any,
+) -> str:
+    """Describe attached image(s) server-side and prepend it to the user message —
+    the image mirror of ``_prefix_video_analysis``. Routes like ``video_vision``
+    does internally: a locally-configured vision model if there is one, otherwise a
+    multimodal peer over Flight Deck. When neither exists it injects an explicit
+    "couldn't see it" note so the model tells the truth instead of hallucinating.
+
+    This is what actually fixes the failure the naming/prompt work only nudged: a
+    weak, non-vision model no longer has to *choose* image_vision over the always-on
+    `cv` tool — the description is already in the turn.
+    """
+    from pathlib import Path as _Path
+
+    from captain_claw.tools.image_ocr import ImageVisionTool
+
+    kwargs = {"_agent": agent, "_session": getattr(agent, "session", None)}
+    prompt = (
+        "Describe this image in detail for someone who cannot see it. Include: how "
+        "many people are present (count them), the main objects, any visible text "
+        "(quote it), and what is happening."
+    )
+
+    # Resolve the vision path once (not per image): local model, else a peer.
+    has_local = ImageVisionTool()._find_model() is not None
+    peer = fdt = fd_url = None
+    if not has_local:
+        from captain_claw.tools.video_vision import _find_vision_peer
+
+        peer = _find_vision_peer(kwargs)
+        if peer:
+            from captain_claw.tools.flight_deck import FlightDeckTool
+
+            fdt = FlightDeckTool()
+            fd_url = fdt._get_fd_url(**kwargs)
+            if not fd_url:
+                peer = None  # no way to reach the peer → fall through to the note
+
+    blocks: list[str] = []
+    for ip in image_paths:
+        name = _Path(ip).name
+        try:
+            send({"type": "status", "status": f"\U0001F5BC️ Analyzing attached image {name}…"})
+        except Exception:
+            pass
+        try:
+            if has_local:
+                res = await agent._execute_tool_with_guard(
+                    "image_vision", {"path": ip, "prompt": prompt},
+                    interaction_label="image_autorun",
+                )
+                if res is not None and getattr(res, "success", False):
+                    desc = res.content
+                else:
+                    err = getattr(res, "error", "unknown error") if res is not None else "no result"
+                    desc = f"(automatic analysis failed: {err})"
+            elif peer:
+                from captain_claw.tools.video_vision import _describe_frame_via_peer
+
+                desc = await _describe_frame_via_peer(fdt, fd_url, peer, _Path(ip), prompt, kwargs)
+            else:
+                desc = (
+                    "(could not be analyzed — this session has no vision model or multimodal "
+                    "peer, so the image can't be seen here. Tell the user that plainly; do NOT "
+                    "guess what it shows.)"
+                )
+        except Exception as exc:
+            log.warning("Auto image analysis failed", path=ip, error=str(exc))
+            desc = f"(automatic analysis failed: {exc})"
+        blocks.append(f"[Automatic analysis of attached image {name}]\n{desc}")
+
+    if not blocks:
+        return content
+    analysis = "\n\n".join(blocks)
+    return (
+        f"{analysis}\n\n---\n"
+        "The attached image(s) were described above by a vision model (the description "
+        "includes any visible text). Answer the user from that description — for "
+        "'what/who/how many/what does it say' you need no further tool. Only call "
+        "image_ocr if the user needs exact/complete text beyond what's quoted, or cv "
+        "for an explicit pixel task (QR decode, blur/quality, diff). Do NOT re-describe "
+        "via image_vision, and do NOT use the cv tool to 'read' or 'understand' it.\n\n"
         f"{content}"
     )
 
@@ -523,6 +618,7 @@ async def _run_agent(
     is_public: bool = False,
     public_session_id: str | None = None,
     video_attachments: list[str] | None = None,
+    image_attachments: list[str] | None = None,
     no_flow: bool = False,
     deny_tools: list[str] | None = None,
     no_tools: bool = False,
@@ -580,6 +676,13 @@ async def _run_agent(
         if video_attachments:
             content = await _prefix_video_analysis(agent, content, video_attachments, send)
 
+        # Deterministic image preprocessing (mirror of video): when a non-inline
+        # image was attached, describe it server-side (a vision model, else a
+        # multimodal peer) and inject the description. The agent never has to pick
+        # image_vision vs the pixel-only `cv` tool — the answer is already in-turn.
+        if image_attachments:
+            content = await _prefix_image_analysis(agent, content, image_attachments, send)
+
         # Deterministic per-turn tool denials (guardrails that do NOT rely on the
         # model obeying instructions). Cleared in `finally` below.
         #   • video turn → no scripts/shell (the analysis is already injected)
@@ -600,6 +703,11 @@ async def _run_agent(
         _deny_tools: list[str] = list(deny_tools or [])  # caller-requested (e.g. consult)
         if video_attachments:
             _deny_tools += ["scripts", "shell"]
+        # NB: image turns deliberately do NOT deny tools. The description is injected
+        # (so describe/understand questions are already answered in-context), but a
+        # user may still legitimately want image_ocr (precise text) or cv (QR, blur,
+        # diff) on the same image — denying them would break those. The injection,
+        # not a deny, is what stops the "grabbed cv for a describe" failure.
         if isinstance(content, str) and "[Delegated result from" in content:
             _deny_tools += ["flight_deck", "consult_peer"]
         # no_tools wins: an empty allow-list filters every tool away, so the agent
