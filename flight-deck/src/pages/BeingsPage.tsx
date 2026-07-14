@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  ArrowRightLeft, BookOpen, ChevronLeft, ChevronRight, ClipboardList, Egg,
-  Files, Fingerprint, Gift, GraduationCap, History, Loader2, Mail, Maximize2,
-  MessageCircle, Minimize2, Moon, Pause, Play, Plus, RefreshCw, ScrollText,
-  Skull, Sparkles, Users, X, Zap,
+  ArrowRightLeft, BookOpen, ChevronDown, ChevronLeft, ChevronRight,
+  ClipboardList, Egg, Files, Fingerprint, Gift, GraduationCap, History,
+  Loader2, Mail, Maximize2, MessageCircle, Minimize2, Moon, Pause, Play,
+  Plus, RefreshCw, ScrollText, Skull, Sparkles, Sprout, Users, Wrench, X,
+  Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -160,6 +161,39 @@ function selfFileLabel(path: string): string {
   return folder && folder !== 'self' ? `${folder}/${stem}` : stem
 }
 
+// The being's home is grouped by folder so the sidebar stays navigable as it
+// grows: identity files first, then the garden, then skills, then anything new.
+const SELF_CORE_ORDER = ['SELF.md', 'VALUES.md', 'INTERESTS.md', 'RELATIONSHIPS.md', 'REFLECTIONS.md']
+const SELF_GROUP_ORDER = ['self', 'garden', 'skills']
+const SELF_GROUP_LABEL: Record<string, string> = { self: 'Identity', garden: 'Garden', skills: 'Skills' }
+const SELF_GROUP_ICON: Record<string, typeof Fingerprint> = { self: Fingerprint, garden: Sprout, skills: Wrench }
+
+function fileStem(path: string): string {
+  return (path.split('/').pop() || path).replace(/\.md$/i, '')
+}
+function fileGroup(path: string): string {
+  return path.includes('/') ? path.slice(0, path.indexOf('/')) : 'self'
+}
+function groupSelfFiles(files: SelfFile[]): { key: string; label: string; files: SelfFile[] }[] {
+  const byGroup = new Map<string, SelfFile[]>()
+  for (const f of files) {
+    const g = fileGroup(f.path)
+    if (!byGroup.has(g)) byGroup.set(g, [])
+    byGroup.get(g)!.push(f)
+  }
+  const rank = (arr: string[], v: string) => { const i = arr.indexOf(v); return i < 0 ? 99 : i }
+  return Array.from(byGroup.keys())
+    .sort((a, b) => rank(SELF_GROUP_ORDER, a) - rank(SELF_GROUP_ORDER, b) || a.localeCompare(b))
+    .map((k) => ({
+      key: k,
+      label: SELF_GROUP_LABEL[k] || k.charAt(0).toUpperCase() + k.slice(1),
+      files: [...byGroup.get(k)!].sort((a, b) =>
+        k === 'self'
+          ? rank(SELF_CORE_ORDER, a.path.split('/').pop() || '') - rank(SELF_CORE_ORDER, b.path.split('/').pop() || '') || a.path.localeCompare(b.path)
+          : a.path.localeCompare(b.path)),
+    }))
+}
+
 function BeingLogModal({ slug, name, mode, onClose }: {
   slug: string
   name: string
@@ -174,6 +208,7 @@ function BeingLogModal({ slug, name, mode, onClose }: {
   const [date, setDate] = useState(today)
   const [files, setFiles] = useState<SelfFile[]>([])
   const [activeFile, setActiveFile] = useState('')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   // A ref (not state) so loadSelf's identity stays stable across file
   // switches — it only needs to change when `slug` changes, never when the
   // user clicks a different file in the sidebar.
@@ -264,9 +299,9 @@ function BeingLogModal({ slug, name, mode, onClose }: {
       >
         <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-2.5">
           <div className="flex items-center gap-2">
-            {mode === 'journal' && <ScrollText className="h-4 w-4 text-violet-400" />}
-            {mode === 'ticks' && <History className="h-4 w-4 text-violet-400" />}
-            {mode === 'self' && <Files className="h-4 w-4 text-violet-400" />}
+            {mode === 'journal' && <ScrollText className="h-4 w-4 text-violet-500 dark:text-violet-400" />}
+            {mode === 'ticks' && <History className="h-4 w-4 text-violet-500 dark:text-violet-400" />}
+            {mode === 'self' && <Files className="h-4 w-4 text-violet-500 dark:text-violet-400" />}
             <h3 className="text-sm font-semibold text-zinc-100">{name} — {titles[mode]}</h3>
             {mode === 'journal' && <span className="text-[11px] text-zinc-500">{date}</span>}
             {mode === 'self' && activeFile && <span className="text-[11px] text-zinc-500">{activeFile}</span>}
@@ -296,31 +331,52 @@ function BeingLogModal({ slug, name, mode, onClose }: {
         </div>
         <div className="flex min-h-0 flex-1">
           {mode === 'self' && (
-            <div className="w-48 shrink-0 overflow-y-auto border-r border-zinc-800 py-2">
+            <div className="w-56 shrink-0 overflow-y-auto border-r border-zinc-800 py-1.5">
               {files.length === 0 && !loading && (
                 <div className="px-3 py-2 text-[11px] text-zinc-600">no files yet</div>
               )}
-              {files.map((f) => (
-                <button
-                  key={f.path}
-                  onClick={() => void loadFile(f.path)}
-                  className={`block w-full truncate px-3 py-1.5 text-left text-xs ${
-                    activeFile === f.path
-                      ? 'bg-violet-500/15 text-violet-300'
-                      : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
-                  }`}
-                  title={f.path}
-                >
-                  {selfFileLabel(f.path)}
-                </button>
-              ))}
+              {groupSelfFiles(files).map((g) => {
+                const Icon = SELF_GROUP_ICON[g.key] ?? Files
+                const isCollapsed = collapsed.has(g.key)
+                return (
+                  <div key={g.key} className="mb-1">
+                    <button
+                      onClick={() => setCollapsed((prev) => {
+                        const next = new Set(prev)
+                        next.has(g.key) ? next.delete(g.key) : next.add(g.key)
+                        return next
+                      })}
+                      className="flex w-full items-center gap-1.5 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-300"
+                    >
+                      {isCollapsed ? <ChevronRight className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
+                      <Icon className="h-3 w-3 shrink-0 text-violet-500 dark:text-violet-400" />
+                      <span className="truncate">{g.label}</span>
+                      <span className="ml-auto rounded bg-zinc-800 px-1 text-[9px] font-normal text-zinc-400">{g.files.length}</span>
+                    </button>
+                    {!isCollapsed && g.files.map((f) => (
+                      <button
+                        key={f.path}
+                        onClick={() => void loadFile(f.path)}
+                        className={`block w-full truncate rounded-md py-1 pl-8 pr-2 text-left text-xs ${
+                          activeFile === f.path
+                            ? 'bg-violet-500/10 font-medium text-violet-700 dark:bg-violet-500/20 dark:text-violet-200'
+                            : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+                        }`}
+                        title={f.path}
+                      >
+                        {fileStem(f.path)}
+                      </button>
+                    ))}
+                  </div>
+                )
+              })}
             </div>
           )}
           <div className="flex-1 overflow-auto">
             {loading ? (
               <div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></div>
             ) : error ? (
-              <div className="px-6 py-8 text-sm text-red-400">{error}</div>
+              <div className="px-6 py-8 text-sm text-red-600 dark:text-red-400">{error}</div>
             ) : (
               <div className="fd-file-markdown p-6"><Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown></div>
             )}
