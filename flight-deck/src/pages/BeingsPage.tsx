@@ -1227,6 +1227,10 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   const [assessSaved, setAssessSaved] = useState(false)
   const [saved, setSaved] = useState<SavedAssessment[]>([])
   const [openSaved, setOpenSaved] = useState<string | null>(null)
+  const [confirm, setConfirm] = useState<{
+    title: string; message: string; confirmLabel: string
+    tone?: 'default' | 'danger'; icon?: typeof Zap; run: () => Promise<unknown>
+  } | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -1256,10 +1260,11 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   // Lazily assess the moment the parent opens Growth (skips the cost otherwise).
   useEffect(() => { if (tab === 'growth' && !ready) void loadReady() }, [tab, ready, loadReady])
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    // Esc closes the top-most layer only — the confirm swallows it when open.
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !confirm) onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, confirm])
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(label)
@@ -1300,11 +1305,17 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
     } catch (e) { alert(e instanceof Error ? e.message : 'failed') }
   }
   const doDeleteOpinion = async (id: string) => {
-    if (!window.confirm('Discard this saved opinion?')) return
     try {
       await deleteAssessment(slug, id)
       setSaved((await listAssessments(slug)).assessments)
     } catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+  }
+
+  // What each ceremony actually means — shown in the confirmation.
+  const CEREMONY: Record<string, string> = {
+    child: 'The web opens to her (diet-gated), plus chores, letters to her siblings, and persona proposals. Childhood floods the world in — watch her first days closely.',
+    adolescent: 'She gains the commons pen, trade, quests and ventures, and can spawn helper agents. The society stage — she starts earning her own way.',
+    adult: 'Full autonomy: self-modification without your blessing, children of her own, negotiation. Her sealed assessment records unseal into her home.',
   }
 
   const stages = ['infant', 'child', 'adolescent', 'adult']
@@ -1568,7 +1579,12 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                           </div>
                           {!s.released_at && (
                             <div className="flex justify-end border-t border-zinc-800/70 px-3 py-1.5">
-                              <button onClick={() => void doDeleteOpinion(s.id)}
+                              <button onClick={() => setConfirm({
+                                title: 'Discard this opinion?',
+                                message: `${s.assessor}'s assessment from ${s.at.slice(0, 10)} will be gone for good — it will never unseal for her.`,
+                                confirmLabel: 'Discard', tone: 'danger',
+                                run: () => doDeleteOpinion(s.id),
+                              })}
                                 className="text-[10px] text-red-600/80 hover:text-red-500 dark:text-red-400/80">discard</button>
                             </div>
                           )}
@@ -1584,11 +1600,21 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[11px] text-zinc-400">stage <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-200">{v.stage}</span></span>
                     {nextStage && (
-                      <button onClick={() => { if (window.confirm(`Advance ${name} to ${nextStage}? New abilities unlock — this is a ceremony.`)) void run('stage', () => setStage(slug, nextStage)) }} disabled={busy === 'stage'}
+                      <button onClick={() => setConfirm({
+                        title: `Advance ${name} to ${nextStage}?`,
+                        message: `This is a ceremony, and there is no going back. ${CEREMONY[nextStage] ?? 'New abilities unlock.'}`,
+                        confirmLabel: `Advance to ${nextStage}`, icon: GraduationCap,
+                        run: () => run('stage', () => setStage(slug, nextStage)),
+                      })} disabled={busy === 'stage'}
                         className="rounded-md bg-violet-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40">Advance to {nextStage} →</button>
                     )}
                     {v.persona && !v.pending_self_mod && (
-                      <button onClick={() => { if (window.confirm(`Roll ${name}'s persona back to the previous self?`)) void run('rollback', () => rollbackPersona(slug)) }} disabled={busy === 'rollback'}
+                      <button onClick={() => setConfirm({
+                        title: `Roll back ${name}'s persona?`,
+                        message: 'Restores the self she operated as before her last adopted persona. Her proposal stays in her history; only the operating self reverts.',
+                        confirmLabel: 'Roll back', icon: Fingerprint,
+                        run: () => run('rollback', () => rollbackPersona(slug)),
+                      })} disabled={busy === 'rollback'}
                         className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Roll back persona</button>
                     )}
                     {!v.pending_procreation && v.capabilities.includes('procreate') && (
@@ -1608,6 +1634,17 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
           </div>
         )}
       </div>
+      {confirm && (
+        // Wrapper stops backdrop clicks bubbling to the Parenting overlay —
+        // dismissing the confirm must not also close the modal beneath it.
+        <div onClick={(e) => e.stopPropagation()}>
+          <ConfirmModal
+            title={confirm.title} message={confirm.message}
+            confirmLabel={confirm.confirmLabel} tone={confirm.tone} icon={confirm.icon}
+            onConfirm={confirm.run} onClose={() => setConfirm(null)}
+          />
+        </div>
+      )}
     </div>
   )
 }
