@@ -486,7 +486,7 @@ class VideoVisionTool(Tool):
         # No-ops (keeps every frame) when OpenCV isn't installed — no regression.
         frame_pairs.sort(key=lambda p: p[0])  # chronological, so dedupe compares neighbours
         try:
-            from captain_claw.tools.vision import dedupe_frame_indices
+            from captain_claw.tools.cv import dedupe_frame_indices
 
             keep_idx = dedupe_frame_indices([fp for _, fp in frame_pairs])
             if 0 < len(keep_idx) < len(frame_pairs):

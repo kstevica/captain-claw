@@ -296,7 +296,7 @@ async def handle_chat(
                 "(To view/understand the image(s) above you MUST call a tool: image_vision "
                 "(to describe or answer questions) or image_ocr (to read the text) with the "
                 "path, or — if you can't see images — delegate it to a multimodal peer via "
-                "flight_deck with file=<path>. Do NOT use the 'vision' tool for this — 'vision' "
+                "flight_deck with file=<path>. Do NOT use the 'cv' tool for this — 'cv' "
                 "does pixel ops only (measure/diff/detect regions) and cannot read text or say "
                 "what an image shows. Never use read on an image. Never say you "
                 "sent/delegated/described it unless you actually called the tool this turn." + _this_msg_only + ")"

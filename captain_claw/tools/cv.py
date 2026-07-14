@@ -1,4 +1,8 @@
-"""vision — deterministic, local computer-vision ops backed by OpenCV.
+"""cv — deterministic, local computer-vision ops backed by OpenCV.
+
+Named `cv` (not `vision`) to avoid confusion with `image_vision` (the multimodal
+LLM that *describes/reads* an image). This tool never reads or describes — it only
+measures and manipulates pixels. See the tool description for the full split.
 
 This is the cheap, pixel-exact layer *under* the multimodal-LLM vision tools
 (``image_vision`` / ``image_ocr`` / ``video_vision``). It spends no tokens: every
@@ -57,7 +61,7 @@ except Exception:  # pragma: no cover — exercised only where cv2 is absent
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 _VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 _NO_CV2 = (
-    "vision requires OpenCV, which isn't installed. Install the extra: "
+    "cv requires OpenCV, which isn't installed. Install the extra: "
     "pip install 'captain-claw[cv]' (or pip install opencv-python-headless). "
     "This is a local, CPU-only dependency."
 )
@@ -331,7 +335,7 @@ def _ensure_model(key: str) -> tuple[Path | None, str | None]:
     dest = _models_dir() / spec["filename"]
     if dest.is_file() and dest.stat().st_size >= spec["min_bytes"]:
         return dest, None
-    log.info("vision: fetching detector model", model=key, dest=str(dest))
+    log.info("cv: fetching detector model", model=key, dest=str(dest))
     err = _download(spec["url"], dest, min_bytes=spec["min_bytes"])
     if err:
         return None, (
@@ -341,10 +345,10 @@ def _ensure_model(key: str) -> tuple[Path | None, str | None]:
     return dest, None
 
 
-class VisionTool(Tool):
+class CvTool(Tool):
     """Deterministic, local computer-vision operations (OpenCV). No LLM spend."""
 
-    name = "vision"
+    name = "cv"
     timeout_seconds = 120.0
     description = (
         "Local, deterministic OpenCV pixel/geometry operations. Spends NO tokens. "
@@ -401,8 +405,8 @@ class VisionTool(Tool):
         try:
             return await asyncio.to_thread(handler, kwargs)
         except Exception as exc:  # keep the agent moving; surface the real reason
-            log.warning("vision op failed", op=op, error=str(exc))
-            return ToolResult(success=False, error=f"vision '{op}' failed: {exc}")
+            log.warning("cv op failed", op=op, error=str(exc))
+            return ToolResult(success=False, error=f"cv '{op}' failed: {exc}")
 
     # ── ops (each runs in a worker thread; all sync below this line) ────────────
 
@@ -973,7 +977,7 @@ def preprocess_ocr_bytes(image_bytes: bytes, *, deskew: bool = True, enhance: bo
         if img is None:
             return image_bytes
         if deskew:
-            img = VisionTool._deskew(img)
+            img = CvTool._deskew(img)
         if enhance:
             img = _cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(_gray(img))
         ok, buf = _cv2.imencode(".png", img)

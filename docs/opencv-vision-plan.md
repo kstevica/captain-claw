@@ -1,6 +1,6 @@
 # OpenCV vision tool (deterministic local CV under the LLM vision layer)
 
-Add a single `vision` tool backed by **OpenCV 5** — a cheap, deterministic, local
+Add a single `cv` tool backed by **OpenCV 5** — a cheap, deterministic, local
 computer-vision layer that sits *under* the existing multimodal-LLM vision tools.
 It doesn't replace them; it pre-processes and measures for them (cutting LLM spend)
 and does pixel-exact things an LLM can't do reliably (diffs, QR/barcode decode,
@@ -22,7 +22,7 @@ Phase 3 helpers + wiring unit-tested). Decisions locked 2026-07-14. All phases d
 
 ## Locked decisions (2026-07-14, with the user)
 
-1. **One `vision` verb-tool**, matching the consolidated-verb convention
+1. **One `cv` verb-tool**, matching the consolidated-verb convention
    (`vfs`, `facts`, `datastore`, `topics`) rather than a tool per operation.
 2. **Classical CV + small bundled ONNX detectors only.** OpenCV 5 can run
    LLMs/VLMs inside its DNN module — we deliberately do **not** use that: it's
@@ -53,7 +53,7 @@ wheel is ~40–90 MB, CPU-only, no GUI deps.
 
 ## The gap it fills
 
-| Need | Today | With `vision` |
+| Need | Today | With `cv` |
 | --- | --- | --- |
 | "Describe this image" | `image_vision` (LLM) ✓ | unchanged — LLM still wins |
 | "Did the page change between these two shots?" | LLM call every poll | SSIM diff, **$0**, returns change boxes |
@@ -65,7 +65,7 @@ wheel is ~40–90 MB, CPU-only, no GUI deps.
 
 ## The tool
 
-`vision(op=..., ...)` — deterministic; writes derivatives to the VFS; returns
+`cv(op=..., ...)` — deterministic; writes derivatives to the VFS; returns
 structured JSON (boxes, hashes, scores, paths).
 
 - `diff` — two images → SSIM score + bounding boxes of changed regions.
@@ -78,7 +78,7 @@ structured JSON (boxes, hashes, scores, paths).
 - `locate` — template-match a needle image in a haystack → coords + confidence.
 - `annotate` — draw boxes/labels on an image → new image in VFS (for reports).
 
-Standard `Tool` shape: `name = "vision"`, JSON-schema `parameters` with an `op`
+Standard `Tool` shape: `name = "cv"`, JSON-schema `parameters` with an `op`
 enum + per-op args, `async def execute(**kwargs) -> ToolResult`, registered in
 `tools/__init__.py` (import + `__all__`). Heavy calls (`cv2` is sync) run via
 `asyncio.to_thread` to keep the event loop free.
@@ -105,7 +105,7 @@ run-cost ledger is *negative* (fewer LLM frames), never positive.
 
 ## Phases
 
-- **Phase 1 — classical, no models. DONE (uncommitted).** `vision` tool with
+- **Phase 1 — classical, no models. DONE (uncommitted).** `cv` tool with
   `diff` (SSIM + change boxes), `dedupe` (dHash clustering), `measure` (size/blur/
   brightness/blank/dominant-colors), `prep` (grayscale/deskew/threshold/denoise/
   enhance/autocrop/crop), `qr` (QR + barcode-if-present), `locate` (template match),
@@ -114,7 +114,7 @@ run-cost ledger is *negative* (fewer LLM frames), never positive.
   `asyncio.to_thread`. Registered + `_ALWAYS_ENABLED` (parity with `video_vision`).
   `video_vision` gets a `dedupe_frame_indices` keyframe pre-pass (drops near-identical
   frames before the per-frame LLM loop; no-ops without cv2). New `cv` extra. 11 tests
-  (`tests/test_tools/test_vision.py`, importorskip). Verified end-to-end on cv2 4.13:
+  (`tests/test_tools/test_cv.py`, importorskip). Verified end-to-end on cv2 4.13:
   all ops produce correct output; `locate` hits conf 1.0; QR decodes; diff SSIM correct.
 - **Phase 2 — local ONNX detectors. DONE (committed).** `detect what=faces|text|objects`
   via OpenCV's DNN engine — no LLM, no token spend. **faces** = YuNet (native
@@ -145,13 +145,13 @@ run-cost ledger is *negative* (fewer LLM frames), never positive.
     only pays for the LLM when the screen actually changed. Fail-open: absent OpenCV /
     unreadable baseline → treated as changed, so it analyses (no regression).
   - **`locate` → click** — `desktop_action screenshot_click` gains an opt-in `template`
-    image path: finds the element by pixel-exact OpenCV template match (`vision locate`,
+    image path: finds the element by pixel-exact OpenCV template match (`cv locate`,
     no LLM) and clicks its center via the existing coordinate-click path. Browser was
     left out deliberately — it has no coordinate-click path (Playwright selectors only),
     so `locate` doesn't plug in without new machinery; desktop already clicks by (x,y).
-  - Two new public helpers in `vision.py` (`preprocess_ocr_bytes`, `images_differ`),
+  - Two new public helpers in `cv.py` (`preprocess_ocr_bytes`, `images_differ`),
     both guarded + fail-open. 8 new tests (helpers + `_locate_by_template` parsing) →
-    24 total in `test_vision.py`. Verified on cv2 4.13.
+    24 total in `test_cv.py`. Verified on cv2 4.13.
 
 ## Safety / back-compat
 
@@ -161,7 +161,7 @@ pre-pass falls back to fixed-interval sampling when `cv2` is missing, so no regr
 
 ## Touch list (Phase 1)
 
-- `captain_claw/tools/vision.py` — new `VisionTool` (verb dispatch, guarded `cv2`).
+- `captain_claw/tools/cv.py` — new `CvTool` (verb dispatch, guarded `cv2`).
 - `captain_claw/tools/__init__.py` — import + `__all__` entry.
 - `captain_claw/tools/video_vision.py` — optional `keyframes` pre-pass before the
   frame-description loop (guarded; falls back to current sampling).
@@ -170,24 +170,28 @@ pre-pass falls back to fixed-interval sampling when `cv2` is missing, so no regr
 
 ## Post-ship: tool/name disambiguation (2026-07-14)
 
-A live run surfaced a **naming collision**: a user said "use the vision tool on this
-image" with a non-vision model whose multimodal peer was down; the agent reached for
-this `vision` tool and ran `measure` + `detect what=text` — which found *where* text
-was (region boxes) but of course couldn't read it or describe the image. `vision` is
-easy to confuse with `image_vision`, and (being in `_ALWAYS_ENABLED`) is sometimes the
-only image tool present in a constrained session. Fix — sharpened the guidance so an
-agent picks the right tool, in three places:
+A live run surfaced a **naming collision**: the tool was originally named `vision`;
+a user said "use the vision tool on this image" with a non-vision model whose
+multimodal peer was down, and the agent reached for the OpenCV tool and ran `measure`
++ `detect what=text` — which found *where* text was (region boxes) but of course
+couldn't read it or describe the image. `vision` was easy to confuse with
+`image_vision`, and (being in `_ALWAYS_ENABLED`) is sometimes the only image tool
+present in a constrained session. Two-part fix:
 
-- **`vision` tool description** — leads with "NOT for looking at, reading, or
-  understanding a picture — use image_vision to describe, image_ocr to read text";
-  `detect what=text` now says it returns *regions, not the words*.
-- **Flight Deck attachment hint** (`ChatPanel.tsx`) and **web/WhatsApp hint**
-  (`chat_handler.py`) — both now name `image_ocr` for reading text and explicitly say
-  "do NOT use the 'vision' tool for this (pixel ops only)". FD bundle rebuilt.
-
-Root-cause option still open: **rename the tool** (e.g. `cv`/`imagecv`/`pixels`) to
-remove the collision with `image_vision` entirely — cheap now (branch not merged), but
-a product-naming call, so left to the user.
+1. **Renamed the tool `vision` → `cv`** (commit on branch) to kill the collision at
+   the root. Module `tools/vision.py` → `tools/cv.py`, class `VisionTool` → `CvTool`,
+   `name="cv"`, config `enabled`/`_ALWAYS_ENABLED` keys, the dispatch branch, all
+   importing consumers (`video_vision`, `image_ocr`, `screen_capture`,
+   `desktop_action`), and `test_cv.py`. The model-cache dir and
+   `CAPTAIN_CLAW_VISION_MODELS` env stayed "vision"-named (renaming would orphan
+   pre-placed models). 24 tests green.
+2. **Sharpened the image guidance** so agents still pick the right tool by capability,
+   not just name: the `cv` tool description leads with "NOT for looking at, reading, or
+   understanding a picture — use image_vision to describe, image_ocr to read text"
+   (`detect what=text` says it returns *regions, not the words*); the Flight Deck
+   attachment hint (`ChatPanel.tsx`) and web/WhatsApp hint (`chat_handler.py`) name
+   `image_ocr` for text and say "do NOT use the 'cv' tool for this (pixel ops only)".
+   FD bundle rebuilt.
 
 ## Follow-ups / known limits
 
