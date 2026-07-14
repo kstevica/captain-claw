@@ -568,6 +568,35 @@ function ConceiveModal({ meta, onClose, onDone }: {
 
 // ── Being card ──
 
+// One compact toolbar button — icon + tooltip, theme-aware. Groups of these
+// (life / windows / interact / danger) replace the old wrapping label row.
+function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy }: {
+  icon: typeof Zap
+  label: string
+  onClick: () => void
+  active?: boolean
+  danger?: boolean
+  disabled?: boolean
+  busy?: boolean
+}) {
+  const tone = danger
+    ? 'border-red-500/30 text-red-500/80 hover:bg-red-500/10 dark:text-red-400/80'
+    : active
+      ? 'border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300'
+      : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+      className={`flex items-center justify-center rounded-md border p-1.5 transition-colors disabled:opacity-40 disabled:hover:bg-transparent ${tone}`}
+    >
+      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
+    </button>
+  )
+}
+
 function BeingCard({ item, meta, onChanged }: {
   item: BeingListItem
   meta: BeingsMeta
@@ -703,7 +732,7 @@ function BeingCard({ item, meta, onChanged }: {
         </>
       )}
 
-      <div className="flex flex-wrap items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-1">
         {item.stage === 'egg' ? (
           <button
             onClick={() => void act('hatch', () => hatchBeing(item.slug))}
@@ -714,95 +743,55 @@ function BeingCard({ item, meta, onChanged }: {
           </button>
         ) : (
           <>
+            {/* Life — control her heartbeat */}
+            {item.state !== 'dead' && (
+              <div className="flex items-center gap-1">
+                <IconAction icon={Zap} label="Poke — a manual heartbeat now"
+                  onClick={() => void act('tick', () => tickBeing(item.slug, 'wake'))}
+                  disabled={busy === 'tick' || busy === 'dream'} busy={busy === 'tick'} />
+                <IconAction icon={Moon} label="Dream — a manual dream tick"
+                  onClick={() => void act('dream', () => tickBeing(item.slug, 'dream'))}
+                  disabled={busy === 'tick' || busy === 'dream'} busy={busy === 'dream'} />
+                {item.state === 'paused'
+                  ? <IconAction icon={Play} label="Wake — resume her clock"
+                      onClick={() => void act('wake', () => wakeBeing(item.slug))} />
+                  : <IconAction icon={Pause} label="Pause — let her sleep"
+                      onClick={() => void act('pause', () => pauseBeing(item.slug))} />}
+              </div>
+            )}
+            {item.state !== 'dead' && <div className="mx-0.5 h-5 w-px bg-zinc-800" />}
+            {/* Windows — read her (remains stay readable, plan §8) */}
+            <div className="flex items-center gap-1">
+              <IconAction icon={ScrollText} label="Journal" onClick={() => setLogView('journal')} />
+              <IconAction icon={History} label="Ticks log" onClick={() => setLogView('ticks')} />
+              <IconAction icon={Files} label="Self files — SELF, VALUES, garden, skills…" onClick={() => setLogView('self')} />
+            </div>
+            {/* Interact — talk to & steer her */}
             {item.state !== 'dead' && (
               <>
-                <button
-                  onClick={() => void act('tick', () => tickBeing(item.slug, 'wake'))}
-                  disabled={busy === 'tick' || busy === 'dream'}
-                  className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-                  title="Manual heartbeat"
-                >
-                  {busy === 'tick' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />}
-                  Poke
-                </button>
-                <button
-                  onClick={() => void act('dream', () => tickBeing(item.slug, 'dream'))}
-                  disabled={busy === 'tick' || busy === 'dream'}
-                  className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-                >
-                  {busy === 'dream' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Moon className="h-3 w-3" />}
-                  Dream
-                </button>
-                {item.state === 'paused' ? (
-                  <button
-                    onClick={() => void act('wake', () => wakeBeing(item.slug))}
-                    className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-emerald-300 hover:bg-zinc-800"
-                  >
-                    <Play className="h-3 w-3" /> Wake
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => void act('pause', () => pauseBeing(item.slug))}
-                    className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
-                  >
-                    <Pause className="h-3 w-3" /> Pause
-                  </button>
-                )}
+                <div className="mx-0.5 h-5 w-px bg-zinc-800" />
+                <div className="flex items-center gap-1">
+                  <IconAction icon={MessageCircle} label="Write to her — she reads it next tick" active={messaging}
+                    onClick={() => {
+                      const next = !messaging
+                      setMessaging(next)
+                      if (next) void getBeingMessages(item.slug).then((r) => setThread(r.thread)).catch(() => {})
+                    }} />
+                  <IconAction icon={GraduationCap} label="Parenting — chores, rules, allowance, stage" active={parenting}
+                    onClick={() => void openParenting()} />
+                </div>
               </>
-            )}
-            {/* Remains stay readable (plan §8): logs outlive the being */}
-            <button
-              onClick={() => setLogView('journal')}
-              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
-            >
-              <ScrollText className="h-3 w-3" /> Journal
-            </button>
-            <button
-              onClick={() => setLogView('ticks')}
-              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
-            >
-              <History className="h-3 w-3" /> Ticks
-            </button>
-            <button
-              onClick={() => setLogView('self')}
-              className="flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800"
-              title="Browse her selfhood files (SELF, VALUES, INTERESTS, garden, skills…)"
-            >
-              <Files className="h-3 w-3" /> Files
-            </button>
-            {item.state !== 'dead' && item.stage !== 'egg' && (
-              <button
-                onClick={() => {
-                  const next = !messaging
-                  setMessaging(next)
-                  if (next) void getBeingMessages(item.slug).then((r) => setThread(r.thread)).catch(() => {})
-                }}
-                className={`flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-zinc-800 ${messaging ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-400'}`}
-                title="Write to your being — she reads it on her next tick"
-              >
-                <MessageCircle className="h-3 w-3" /> Write
-              </button>
-            )}
-            {item.state !== 'dead' && (
-              <button
-                onClick={() => void openParenting()}
-                className={`flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-zinc-800 ${parenting ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-400'}`}
-              >
-                <GraduationCap className="h-3 w-3" /> Parenting
-              </button>
             )}
           </>
         )}
         {item.state !== 'dead' && (
-          <button
-            onClick={() => {
-              if (window.confirm(`${item.name} will die, forever. Remains stay readable. Proceed?`))
-                void act('euthanize', () => euthanizeBeing(item.slug))
-            }}
-            className="ml-auto flex items-center gap-1 rounded-md border border-red-500/30 px-2 py-1 text-xs text-red-400/80 hover:bg-red-500/10"
-          >
-            <Skull className="h-3 w-3" />
-          </button>
+          <div className="ml-auto">
+            <IconAction icon={Skull} label={`Euthanize ${item.name} — forever (remains stay readable)`} danger
+              onClick={() => {
+                if (window.confirm(`${item.name} will die, forever. Remains stay readable. Proceed?`))
+                  void act('euthanize', () => euthanizeBeing(item.slug))
+              }} />
+          </div>
         )}
       </div>
 
