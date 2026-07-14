@@ -88,6 +88,10 @@ class CadenceRequest(BaseModel):
     minutes: int | None = None
 
 
+class AssessRequest(BaseModel):
+    assessor: str   # registry slug of the agent to ask for a second opinion
+
+
 class EuthanizeRequest(BaseModel):
     confirm: bool = False
 
@@ -167,6 +171,22 @@ class AcceptRequest(BaseModel):
 async def earning_board(user: dict = Depends(get_current_user)):
     """The parent's earning view: every quest + venture across the family."""
     return _run(being_earning.board_summary, get_store(), user["id"])
+
+
+@router.get("/assessors")
+async def list_assessors(user: dict = Depends(get_current_user)):
+    """The user's running agents that can give a being a second opinion — the
+    fleet minus the beings themselves (a being shouldn't grade its own kin)."""
+    from captain_claw.flight_deck.server import _load_process_registry
+    reg = _load_process_registry()
+    out = []
+    for slug, e in reg.items():
+        if e.get("owner") and e.get("owner") != user["id"]:
+            continue
+        if e.get("stopped") or not e.get("web_port") or slug.startswith("iskra-"):
+            continue
+        out.append({"slug": slug, "name": e.get("name", slug)})
+    return {"assessors": out}
 
 
 @router.post("/quests")
@@ -436,6 +456,34 @@ async def readiness(slug: str, user: dict = Depends(get_current_user)):
     from captain_claw.flight_deck import being_assessment
     being = _run(get_store().get, user["id"], slug)
     return being_assessment.readiness(get_store(), being)
+
+
+@router.post("/{slug}/assess")
+async def third_party_assess(slug: str, body: AssessRequest,
+                             user: dict = Depends(get_current_user)):
+    """A second opinion: hand the being's data to one of the user's own agents
+    and return its independent developmental read (markdown)."""
+    from captain_claw.flight_deck import being_assessment
+    from captain_claw.flight_deck.dubina_agents import resolve_agent_port_token
+    from captain_claw.flight_deck.fd_scheduler import run_prompt_and_capture
+    from captain_claw.flight_deck.server import _load_process_registry
+    reg = _load_process_registry()
+    entry = reg.get(body.assessor)
+    if not entry or (entry.get("owner") and entry.get("owner") != user["id"]):
+        raise HTTPException(404, "assessor agent not found")
+    being = _run(get_store().get, user["id"], slug)
+    a = being_assessment.readiness(get_store(), being)
+    brief = being_assessment.assessor_brief(get_store(), being, a)
+    try:
+        port, token = resolve_agent_port_token(body.assessor)
+    except Exception:
+        raise HTTPException(404, "assessor agent is not running")
+    reply = await run_prompt_and_capture(
+        host="127.0.0.1", port=int(port), auth=token or "", prompt=brief,
+        timeout=150)
+    if not reply:
+        raise HTTPException(502, "the assessor didn't reply in time")
+    return {"assessor": entry.get("name", body.assessor), "assessment": reply}
 
 
 @router.get("/{slug}/milestones")

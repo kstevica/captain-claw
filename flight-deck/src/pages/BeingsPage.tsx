@@ -12,8 +12,9 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
-  type BeingGraph, type Chore, type Quest, type Readiness, type ReportCard,
-  type SelfFile, type ThreadItem, type Venture, type VillageItem, getReadiness,
+  type Assessor, type BeingGraph, type Chore, type Quest, type Readiness,
+  type ReportCard, type SelfFile, type ThreadItem, type Venture, type VillageItem,
+  getAssessors, getReadiness, requestAssessment,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
@@ -1205,6 +1206,11 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   const [dietDeny, setDietDeny] = useState('')
   const [ready, setReady] = useState<Readiness | null>(null)
   const [readyLoading, setReadyLoading] = useState(false)
+  const [assessOpen, setAssessOpen] = useState(false)
+  const [assessors, setAssessors] = useState<Assessor[]>([])
+  const [assessorSlug, setAssessorSlug] = useState('')
+  const [assessResult, setAssessResult] = useState<{ assessor: string; assessment: string } | null>(null)
+  const [assessBusy, setAssessBusy] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -1247,6 +1253,22 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
       onChanged()
     } catch (e) { alert(e instanceof Error ? e.message : 'failed') }
     finally { setBusy('') }
+  }
+
+  const openAssess = async () => {
+    setAssessOpen(true)
+    try {
+      const r = await getAssessors()
+      setAssessors(r.assessors)
+      setAssessorSlug((s) => s || (r.assessors[0]?.slug ?? ''))
+    } catch { setAssessors([]) }
+  }
+  const doAssess = async () => {
+    if (!assessorSlug) return
+    setAssessBusy(true); setAssessResult(null)
+    try { setAssessResult(await requestAssessment(slug, assessorSlug)) }
+    catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    finally { setAssessBusy(false) }
   }
 
   const stages = ['infant', 'child', 'adolescent', 'adult']
@@ -1441,7 +1463,39 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
             {/* Growth tab */}
             {tab === 'growth' && (
             <div className="space-y-4">
-              <ReadinessView ready={ready} loading={readyLoading} />
+              <ReadinessView ready={ready} loading={readyLoading}
+                onAssess={ready ? openAssess : undefined} />
+
+              {assessOpen && (
+                <div className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Second opinion</div>
+                  {assessors.length === 0 ? (
+                    <p className="text-[11px] text-zinc-500">No running agents to ask. Start one of your agents, then reopen this.</p>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <select value={assessorSlug} onChange={(e) => setAssessorSlug(e.target.value)}
+                          className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
+                          {assessors.map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
+                        </select>
+                        <button onClick={doAssess} disabled={assessBusy || !assessorSlug}
+                          className="flex shrink-0 items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+                          {assessBusy ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Assessing…</> : 'Ask for assessment'}
+                        </button>
+                      </div>
+                      {assessBusy && <p className="text-[10px] text-zinc-600">She's being read by another mind — this can take a minute.</p>}
+                    </>
+                  )}
+                  {assessResult && (
+                    <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+                      <div className="mb-1 text-[10px] text-zinc-500">{assessResult.assessor} says</div>
+                      <div className="fd-file-markdown text-[12px] leading-relaxed text-zinc-300">
+                        <Markdown remarkPlugins={[remarkGfm]}>{assessResult.assessment}</Markdown>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div>
               <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Rites</div>

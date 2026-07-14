@@ -125,6 +125,16 @@ async def test_adult_is_grown_no_advancement(store):
 
 # ── Unit: helpers ────────────────────────────────────────────────────────
 
+async def test_assessor_brief_packs_the_data(store):
+    b = await _being(store)
+    a = assess.readiness(store, b, now=NOW)
+    brief = assess.assessor_brief(store, b, a)
+    assert "INDEPENDENT developmental assessor" in brief
+    assert b["name"] in brief and "infant" in brief
+    assert "REPORT CARD" in brief and "own words" in brief.lower()
+    assert "MARKDOWN" in brief          # asks for a structured markdown verdict
+
+
 def test_band_and_entropy():
     assert assess._band(80) == "green"
     assert assess._band(55) == "amber"

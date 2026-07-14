@@ -340,6 +340,14 @@ export interface Readiness {
 }
 export const getReadiness = (slug: string) =>
   fdFetch<Readiness>(`/beings/${slug}/readiness`)
+
+export interface Assessor { slug: string; name: string }
+export const getAssessors = () =>
+  fdFetch<{ assessors: Assessor[] }>('/beings/assessors')
+export const requestAssessment = (slug: string, assessor: string) =>
+  fdFetch<{ assessor: string; assessment: string }>(`/beings/${slug}/assess`, {
+    method: 'POST', body: JSON.stringify({ assessor }),
+  })
 export const setStage = (slug: string, stage: string) =>
   fdFetch<BeingVitals>(`/beings/${slug}/stage`, {
     method: 'POST', body: JSON.stringify({ stage }),

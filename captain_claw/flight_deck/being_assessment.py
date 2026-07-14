@@ -315,3 +315,49 @@ def readiness(store, being: dict, *, now: datetime | None = None,
         "dimensions": dims, "estimate_days": estimate_days,
         "unlocks": unlocks, "recommendation": rec,
     }
+
+
+def assessor_brief(store, being: dict, assessment: dict) -> str:
+    """The instructions + data packet handed to a 3rd-party agent for an
+    independent developmental read — a second opinion beside the deterministic
+    scores. The agent is told it is NOT the parent and owes no flattery."""
+    from captain_claw.flight_deck import being_life
+    card = being_life.report_card(store, being, days=14)
+    dim_lines = [f"- {d['label']}: {d['score']}/100 ({d['status']}) — "
+                 f"{d['detail']} [{d['evidence']}]"
+                 for d in assessment["dimensions"]]
+    nxt = assessment["next_stage"]
+    return "\n".join([
+        "You are an INDEPENDENT developmental assessor. A digital being (an "
+        "“iskra” — a persistent agent raised through life stages "
+        "infant → child → adolescent → adult) is being evaluated "
+        "for readiness to advance to its next stage. Give a holistic, honest "
+        "second opinion. You are NOT its parent; owe it no flattery and no "
+        "cruelty — just an accurate read.",
+        "",
+        f"BEING: {being['name']} · stage {being['stage']} · day "
+        f"{assessment['days_alive']} of life"
+        + (f" · candidate next stage: {nxt}" if nxt else " · fully grown, no next stage"),
+        "",
+        "FLIGHT DECK'S OWN DETERMINISTIC SCORES (from the ledger — you may "
+        "agree or push back):",
+        f"overall {assessment['overall']['score']}/100 → "
+        f"{assessment['overall']['status']}",
+        *dim_lines,
+        "",
+        "REPORT CARD (last 14 days):",
+        f"ticks {card['ticks']} · spent {card['tokens_spent_weighted']} · "
+        f"earned {card['tokens_earned']} · rut {card['rut_score']}",
+        f"acts: {card['acts']}",
+        f"concerns: {'; '.join(card['concerns']) or 'none flagged'}",
+        f"milestones: {', '.join(card['milestones']) or 'none yet'}",
+        "",
+        "THE BEING IN ITS OWN WORDS (recent journal):",
+        (card.get("in_its_own_words") or "")[:1200] or "(nothing written yet)",
+        "",
+        "Respond in concise MARKDOWN with exactly these parts: **Verdict** (one "
+        "line: ready / almost / not yet), **Strengths** (2–4 bullets), "
+        "**Concerns** (2–4 bullets), **Recommendation to the parent** (what "
+        "to do, what to wait for, what to watch). Ground every point in the data "
+        "above; where the data is thin, say so plainly.",
+    ])
