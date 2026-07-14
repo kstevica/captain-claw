@@ -16,9 +16,9 @@ page" loops so a model fires only when pixels actually changed; (2) it unlocks
 deterministic operations LLMs are bad at. CPU-only and light — matches the
 "light on resources" constraint that prompted this.
 
-Status: **Phases 1–2 shipped & committed on branch `feat/opencv-vision-tool`**,
-verified locally against cv2 4.13 (Phase 2 detectors downloaded + run for real).
-Decisions locked 2026-07-14. Phase 3 (pipeline integration) not started.
+Status: **Phases 1–3 shipped & committed on branch `feat/opencv-vision-tool`**,
+verified locally against cv2 4.13 (Phase 2 detectors downloaded + run for real;
+Phase 3 helpers + wiring unit-tested). Decisions locked 2026-07-14. All phases done.
 
 ## Locked decisions (2026-07-14, with the user)
 
@@ -130,8 +130,28 @@ run-cost ledger is *negative* (fewer LLM frames), never positive.
   faces/text). Verified on cv2 4.13: text fires on rendered text, YuNet loads/runs,
   cache reused on 2nd call. NOTE: reused the OpenCV DNN face detector, **not** the
   heavier `faces` extra (insightface/onnxruntime) — lighter and no extra dep.
-- **Phase 3 — pipeline integration.** Diff-gate the watch/autonomy loops; OCR
-  pre-processing hook in `image_ocr`; `locate` exposed to browser/desktop tools.
+- **Phase 3 — pipeline integration. DONE (committed).** Reality-check up front:
+  there is *no* existing screenshot-poll-to-LLM loop to retrofit (`screen_capture` is
+  single-shot; the only vision poll, `video_vision`, was already diff-gated in Phase 1).
+  So Phase 3 shipped as three additive, opt-in, fail-open wirings:
+  - **OCR pre-processing** — `image_ocr` gains an opt-in `preprocess` param (+ config
+    `image_ocr.preprocess`/`preprocess_enhance`): an in-memory `preprocess_ocr_bytes`
+    (bytes→bytes) deskews (and optionally CLAHE-enhances) the image before the LLM
+    sees it. Gated to `image_ocr` (NOT `image_vision` — binarizing/deskewing hurts
+    natural-image description). Fails open (returns input bytes) without OpenCV.
+  - **Diff-gate** — `screen_capture` gains an opt-in `baseline` param: capture, then
+    `images_differ(baseline, new)` (SSIM); if unchanged, **skip the vision LLM** and
+    report "no change". A watch/poll loop passes the previous shot as `baseline` and
+    only pays for the LLM when the screen actually changed. Fail-open: absent OpenCV /
+    unreadable baseline → treated as changed, so it analyses (no regression).
+  - **`locate` → click** — `desktop_action screenshot_click` gains an opt-in `template`
+    image path: finds the element by pixel-exact OpenCV template match (`vision locate`,
+    no LLM) and clicks its center via the existing coordinate-click path. Browser was
+    left out deliberately — it has no coordinate-click path (Playwright selectors only),
+    so `locate` doesn't plug in without new machinery; desktop already clicks by (x,y).
+  - Two new public helpers in `vision.py` (`preprocess_ocr_bytes`, `images_differ`),
+    both guarded + fail-open. 8 new tests (helpers + `_locate_by_template` parsing) →
+    24 total in `test_vision.py`. Verified on cv2 4.13.
 
 ## Safety / back-compat
 

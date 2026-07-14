@@ -274,6 +274,8 @@ class ImageOcrToolConfig(BaseModel):
     default_prompt: str = ""  # empty = use built-in default
     max_pixels: int = 1568  # longest edge cap before sending to LLM (0 = no resize)
     jpeg_quality: int = 85  # JPEG compression quality (1-100) for resized images
+    preprocess: bool = False  # opt-in: deskew (via OpenCV) before OCR — helps rotated scans
+    preprocess_enhance: bool = False  # also CLAHE-enhance (can hurt clean images; off by default)
 
 
 class ImageVisionToolConfig(BaseModel):

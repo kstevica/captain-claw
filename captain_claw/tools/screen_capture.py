@@ -339,6 +339,15 @@ class ScreenCaptureTool(Tool):
                     "If omitted, just capture and return the file path."
                 ),
             },
+            "baseline": {
+                "type": "string",
+                "description": (
+                    "Optional: path to a previous screenshot. If the new capture is "
+                    "visually unchanged from it, skip the (costly) vision analysis and "
+                    "report 'no change'. Use in watch/poll loops to only call the LLM "
+                    "when the screen actually changed."
+                ),
+            },
         },
         "required": [],
     }
@@ -347,6 +356,7 @@ class ScreenCaptureTool(Tool):
         self,
         monitor: int = 0,
         prompt: str = "",
+        baseline: str = "",
         **kwargs: Any,
     ) -> ToolResult:
         # macOS uses the native screencapture CLI — no extra deps needed.
@@ -374,6 +384,32 @@ class ScreenCaptureTool(Tool):
                 success=False,
                 error=f"Screenshot capture failed: {exc}",
             )
+
+        # Diff-gate (opt-in): if a baseline screenshot is given and the new capture
+        # is visually unchanged, skip the LLM entirely. Fails open — if OpenCV is
+        # missing or the baseline can't be read, images_differ returns "changed" and
+        # we proceed to analyze as usual (no regression).
+        baseline_path = str(baseline or "").strip()
+        if baseline_path:
+            runtime_base = kwargs.get("_runtime_base_path")
+            bp = Path(baseline_path).expanduser()
+            if not bp.is_absolute() and runtime_base:
+                bp = Path(runtime_base) / bp
+            try:
+                from captain_claw.tools.vision import images_differ
+
+                changed, ssim = images_differ(str(bp), str(path))
+            except Exception:
+                changed, ssim = True, 0.0
+            if not changed:
+                return ToolResult(
+                    success=True,
+                    content=(
+                        f"No significant change since baseline (SSIM={round(ssim, 4)}).\n"
+                        f"Path: {path}\n"
+                        f"Skipped vision analysis — the screen looks the same as {baseline_path}."
+                    ),
+                )
 
         # If a prompt was provided, chain into vision analysis.
         effective_prompt = str(prompt or "").strip()

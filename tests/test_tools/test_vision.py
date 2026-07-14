@@ -246,3 +246,83 @@ def test_detect_faces_and_text_end_to_end(monkeypatch, tmp_path, workdir):
     tr = _run(VisionTool(), op="detect", what="text", path=pt, out=out)
     assert tr.success and "text" in tr.content
     assert os.path.exists(out)
+
+
+# ── Phase 3: pipeline-integration helpers ──────────────────────────────────────
+
+
+def test_preprocess_ocr_bytes_deskews_and_stays_decodable():
+    from captain_claw.tools.vision import preprocess_ocr_bytes
+
+    img = _solid(500, 200, 255)
+    cv2.putText(img, "SKEWED", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 0, 0), 3)
+    rot = cv2.warpAffine(img, cv2.getRotationMatrix2D((250, 100), 12, 1.0), (500, 200),
+                         borderValue=(255, 255, 255))
+    raw = cv2.imencode(".png", rot)[1].tobytes()
+    out = preprocess_ocr_bytes(raw, deskew=True)
+    assert out is not raw  # something changed
+    assert cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR) is not None
+
+
+def test_preprocess_ocr_bytes_failopen_without_cv2(monkeypatch):
+    import captain_claw.tools.vision as vision
+
+    monkeypatch.setattr(vision, "_HAS_CV2", False)
+    assert vision.preprocess_ocr_bytes(b"rawbytes") == b"rawbytes"
+
+
+def test_images_differ_same_changed_and_missing(workdir):
+    from captain_claw.tools.vision import images_differ
+
+    a = _solid(160, 120, 200)
+    cv2.circle(a, (80, 60), 15, (0, 0, 255), -1)
+    pa = _write(os.path.join(workdir, "a.png"), a)
+    pa2 = _write(os.path.join(workdir, "a2.png"), a.copy())
+    b = a.copy()
+    cv2.rectangle(b, (5, 5), (70, 70), (0, 255, 0), -1)
+    pb = _write(os.path.join(workdir, "b.png"), b)
+
+    changed, ssim = images_differ(pa, pa2)
+    assert changed is False and ssim == pytest.approx(1.0, abs=1e-6)
+    changed, ssim = images_differ(pa, pb)
+    assert changed is True and ssim < 0.995
+    # Unreadable baseline → fail-open (treat as changed so the caller still analyzes).
+    assert images_differ(os.path.join(workdir, "nope.png"), pa) == (True, 0.0)
+
+
+def test_images_differ_failopen_without_cv2(monkeypatch):
+    import captain_claw.tools.vision as vision
+
+    monkeypatch.setattr(vision, "_HAS_CV2", False)
+    assert vision.images_differ("a.png", "b.png") == (True, 0.0)
+
+
+def test_locate_by_template_parses_center():
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from captain_claw.tools import vision as vision_mod
+    from captain_claw.tools.desktop_action import DesktopActionTool
+    from captain_claw.tools.registry import ToolResult
+
+    canned = ToolResult(success=True, content=(
+        'locate: 1 match\n{"match_count":1,"matches":['
+        '{"box":[10,20,30,40],"confidence":0.99,"center":[25,40]}]}'
+    ))
+    with patch.object(vision_mod.VisionTool, "execute", new=AsyncMock(return_value=canned)):
+        cx, cy, err = _asyncio.run(DesktopActionTool._locate_by_template("shot.png", "tpl.png"))
+    assert (cx, cy, err) == (25, 40, None)
+
+
+def test_locate_by_template_not_found_is_error():
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from captain_claw.tools import vision as vision_mod
+    from captain_claw.tools.desktop_action import DesktopActionTool
+    from captain_claw.tools.registry import ToolResult
+
+    canned = ToolResult(success=True, content='locate: no match\n{"best_confidence":0.1,"matches":[]}')
+    with patch.object(vision_mod.VisionTool, "execute", new=AsyncMock(return_value=canned)):
+        cx, cy, err = _asyncio.run(DesktopActionTool._locate_by_template("s.png", "t.png"))
+    assert err is not None and "not found" in err

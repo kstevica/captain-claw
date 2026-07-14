@@ -138,6 +138,15 @@ class DesktopActionTool(Tool):
                     "For 'screenshot_click': description of the UI element to find and click."
                 ),
             },
+            "template": {
+                "type": "string",
+                "description": (
+                    "For 'screenshot_click': path to a small template image (e.g. a "
+                    "cropped button/icon). When set, the element is found by exact "
+                    "pixel template-matching (OpenCV, no LLM) instead of the 'text' "
+                    "description — faster and deterministic."
+                ),
+            },
             "keys": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -180,6 +189,7 @@ class DesktopActionTool(Tool):
         target: str | None = None,
         dx: float | None = None,
         dy: float | None = None,
+        template: str | None = None,
         **kwargs: Any,
     ) -> ToolResult:
         # The 'open' action doesn't require pyautogui.
@@ -218,7 +228,7 @@ class DesktopActionTool(Tool):
             elif action == "mouse_position":
                 return await self._mouse_position()
             elif action == "screenshot_click":
-                return await self._screenshot_click(text, **kwargs)
+                return await self._screenshot_click(text, template=template, **kwargs)
             else:
                 return ToolResult(
                     success=False,
@@ -364,12 +374,12 @@ class DesktopActionTool(Tool):
 
     # ── screenshot_click composite ────────────────────────────
 
-    async def _screenshot_click(self, text: str | None, **kwargs: Any) -> ToolResult:
-        """Take a screenshot, ask vision to find an element, click it."""
-        if not text:
+    async def _screenshot_click(self, text: str | None, template: str | None = None, **kwargs: Any) -> ToolResult:
+        """Take a screenshot, find an element (template-match or vision), click it."""
+        if not text and not template:
             return ToolResult(
                 success=False,
-                error="screenshot_click requires 'text' describing the UI element to find.",
+                error="screenshot_click requires 'text' (a description) or 'template' (an image path).",
             )
 
         # Step 1: capture screenshot
@@ -391,6 +401,21 @@ class DesktopActionTool(Tool):
                 error="Could not determine screenshot file path.",
             )
         screenshot_path = path_match.group(1)
+
+        # Template path: pixel-exact OpenCV match, no LLM. Preferred when given.
+        if template:
+            cx, cy, err = await self._locate_by_template(screenshot_path, template, **kwargs)
+            if err:
+                return ToolResult(success=False, error=err)
+            await asyncio.to_thread(pyautogui.click, int(cx), int(cy))
+            pos = pyautogui.position()
+            return ToolResult(
+                success=True,
+                content=(
+                    f"Matched template at ({int(cx)}, {int(cy)}) and clicked. "
+                    f"Mouse now at ({pos.x}, {pos.y})."
+                ),
+            )
 
         # Step 2: ask vision to locate the element
         from captain_claw.tools.image_ocr import ImageVisionTool
@@ -456,3 +481,38 @@ class DesktopActionTool(Tool):
                 f"Mouse now at ({pos.x}, {pos.y})."
             ),
         )
+
+    @staticmethod
+    async def _locate_by_template(
+        screenshot_path: str, template: str, **kwargs: Any
+    ) -> tuple[int, int, str | None]:
+        """Return (center_x, center_y, error) for a template match on the screenshot.
+
+        Uses the vision tool's deterministic `locate` op (OpenCV template matching) —
+        no LLM. Returns an error string when OpenCV/the tool is unavailable or nothing
+        matches, so the caller can surface it.
+        """
+        from captain_claw.tools.vision import VisionTool
+
+        res = await VisionTool().execute(
+            op="locate", image=screenshot_path, template=template, **kwargs
+        )
+        if not res.success:
+            return 0, 0, f"template locate failed: {res.error}"
+        # locate returns a summary line + a JSON payload with matches[].center.
+        content = res.content or ""
+        brace = content.find("{")
+        if brace < 0:
+            return 0, 0, "template locate returned no data."
+        try:
+            payload = json.loads(content[brace:])
+        except json.JSONDecodeError:
+            return 0, 0, "could not parse template locate result."
+        matches = payload.get("matches") or []
+        if not matches:
+            best = payload.get("best_confidence")
+            return 0, 0, f"template not found on screen (best confidence {best})."
+        center = matches[0].get("center") or []
+        if len(center) != 2:
+            return 0, 0, "template match missing center coordinates."
+        return int(center[0]), int(center[1]), None
