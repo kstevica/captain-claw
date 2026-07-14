@@ -1032,6 +1032,12 @@ class AgentConfig(BaseModel):
     # leave `tier` empty and set provider/model explicitly (the Forge review step
     # clears `tier` when the user overrides the model).
     tier: str = ""
+    # Optional archetype selector — `id` or `id@tier` (e.g. "fact-checker@reason").
+    # When set, the spawn endpoints resolve it via `merged_archetypes` and fold the
+    # archetype's cognitive_mode / tools / role / tier→model into this config
+    # (mirroring dubina's `_build_agent_config`). Explicit fields the caller already
+    # set win over the archetype; an unknown id is a non-fatal no-op.
+    archetype: str = ""
     # Optional per-session selectable model list (config.model.allowed). Used by
     # the free-OpenRouter "Freebie" spawn so all free models are available to
     # switch between at runtime, with `model` as the default.
@@ -1116,6 +1122,91 @@ def _resolve_tier(config: AgentConfig) -> None:
         config.base_url = tier_def["base_url"]
     log.info("Resolved model tier",
              tier=config.tier, provider=config.provider, model=config.model)
+
+
+async def _resolve_archetype(config: AgentConfig, request: Request, user: dict | None) -> None:
+    """Resolve `config.archetype` (`id` or `id@tier`) into a concrete spawn config.
+
+    Mirrors dubina's ``_build_agent_config``: the archetype supplies
+    ``cognitive_mode``, ``tools``, a role-based ``description``, and — via its tier
+    — the model. Fields the caller already set explicitly win over the archetype
+    (so overrides still work), and the model is only overridden when the requested
+    tier actually resolves against the owner's Library config, so a caller-inherited
+    working model is never replaced by a keyless one. An unknown id is a non-fatal
+    no-op — a bad selector must never fail the spawn. Runs before ``_resolve_tier``.
+    """
+    if not config.archetype:
+        return
+    aid, _, tier_suffix = config.archetype.strip().partition("@")
+    aid, explicit_tier = aid.strip(), tier_suffix.strip()
+    if not aid:
+        return
+
+    # Owner: authenticated user → request state → owner_hint → env. Determines
+    # whose Library archetypes + tier keys we resolve against.
+    uid = str((user or {}).get("id") or "")
+    if not uid:
+        uid = str(getattr(getattr(request, "state", None), "user_id", "") or "")
+    if not uid:
+        uid = config.owner_hint or os.environ.get("FD_OWNER_ID", "")
+
+    from captain_claw.flight_deck.archetypes import merged_archetypes
+    from captain_claw.flight_deck.auth import get_db
+    try:
+        arch = next(
+            (a for a in await merged_archetypes(get_db(), uid or None) if a.get("id") == aid),
+            None,
+        )
+    except Exception as exc:
+        log.warning("Archetype resolution failed; spawning config as-is",
+                    archetype=aid, error=str(exc))
+        return
+    if not arch:
+        log.warning("Unknown archetype; spawning config as-is", archetype=aid)
+        return
+
+    # Fill from the archetype only where the caller left the AgentConfig defaults,
+    # so explicit spawn overrides still take precedence.
+    if config.cognitive_mode in ("", "neutra") and arch.get("cognitive_mode"):
+        config.cognitive_mode = str(arch["cognitive_mode"])
+    if config.tools == AgentConfig().tools and arch.get("tools"):
+        config.tools = list(arch["tools"])
+    if not config.description:
+        config.description = str(arch.get("role") or arch.get("description") or f"archetype:{aid}")
+
+    # Model: the requested tier (`@tier` wins, else the archetype's own default
+    # tier) resolved against the OWNER's Library tier config — the same source
+    # Basna/flows use, so the child gets a real provider/model/key. Only override
+    # the caller-inherited model when we actually resolve one; otherwise leave it
+    # and let `_resolve_tier` try the central registry table as a last resort.
+    eff_tier = explicit_tier or str(arch.get("tier") or "")
+    if eff_tier:
+        tcfg: dict = {}
+        try:
+            from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+            tiers_map, _env = await _load_owner_tiers(get_db(), uid)
+            tcfg = (tiers_map or {}).get(eff_tier) or {}
+        except Exception as exc:
+            log.warning("Archetype tier resolve failed", tier=eff_tier, error=str(exc))
+        if tcfg.get("model"):
+            new_provider = tcfg.get("provider", config.provider)
+            provider_changed = new_provider != config.provider
+            config.provider = new_provider
+            config.model = tcfg["model"]
+            if tcfg.get("api_key"):
+                config.provider_api_key = tcfg["api_key"]
+            if tcfg.get("base_url"):
+                config.base_url = tcfg["base_url"]
+            elif provider_changed:
+                # The tier moved us to a different provider but named no endpoint —
+                # drop any caller-inherited base_url so we don't route the new
+                # provider at the old provider's custom URL.
+                config.base_url = ""
+            config.tier = ""  # pinned now — don't let _resolve_tier re-map it
+        elif not config.tier:
+            config.tier = eff_tier  # last resort: central registry tier table
+    log.info("Resolved archetype spawn", archetype=aid, tier=eff_tier or "(default)",
+             cognitive_mode=config.cognitive_mode, provider=config.provider, model=config.model)
 
 
 class ContainerInfo(BaseModel):
@@ -1423,7 +1514,9 @@ def _schedule_fleet_notify(name: str, port: int, event: str = "joined", owner_id
 @app.post("/fd/spawn", response_model=ContainerActionResult)
 async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = _optional_user_dep):
     """Spawn a new Captain Claw container."""
-    # Resolve a model-recommendation tier (if any) to a concrete provider/model.
+    # Resolve an archetype selector (if any) into cognitive_mode/tools/tier/model,
+    # then a bare model-recommendation tier to a concrete provider/model.
+    await _resolve_archetype(config, request, user)
     _resolve_tier(config)
     # Check if docker spawn is allowed
     sys_cfg = await _get_system_config()
@@ -5122,7 +5215,9 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
 
 
 async def _spawn_process_locked(config: AgentConfig, request: Request, user: dict | None):
-    # Resolve a model-recommendation tier (if any) to a concrete provider/model.
+    # Resolve an archetype selector (if any) into cognitive_mode/tools/tier/model,
+    # then a bare model-recommendation tier to a concrete provider/model.
+    await _resolve_archetype(config, request, user)
     _resolve_tier(config)
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:

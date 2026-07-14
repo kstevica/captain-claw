@@ -68,8 +68,11 @@ class FlightDeckTool(Tool):
                     "'delegate' — for ANY task the peer should handle: research, scraping, analysis, summarization, file creation, etc. "
                     "You send the task and immediately free yourself. The peer works independently and delivers results back to you when done. "
                     "'spawn_agent' — create a new agent in the fleet. Provide agent_name (required), and optionally "
-                    "spawn_provider, spawn_model, spawn_description via the message field as JSON. "
-                    "Uses your own model/key as defaults. "
+                    "an `archetype` (e.g. 'fact-checker' or 'fact-checker@reason') to base the new agent on a "
+                    "library archetype (its role, tools, cognitive mode, and tier→model). "
+                    "You can also pass provider/model/api_key/base_url/description/tools overrides, and an "
+                    "`env` map ({\"BRAVE_API_KEY\": \"...\"}) to give the new agent extra credentials, via the "
+                    "message field as JSON. Without an archetype it uses your own provider/model/key/base_url as defaults. "
                     "RULE: If the user says 'delegate' or the task involves work (not just a question), use 'delegate'."
                 ),
             },
@@ -79,6 +82,16 @@ class FlightDeckTool(Tool):
                     "Name of the peer agent to consult or delegate to "
                     "(required for 'consult' and 'delegate' actions). "
                     "Use list_agents first to see available agents."
+                ),
+            },
+            "archetype": {
+                "type": "string",
+                "description": (
+                    "Optional, for 'spawn_agent' only: base the new agent on a library "
+                    "archetype. Format 'id' or 'id@tier' (e.g. 'fact-checker' or "
+                    "'fact-checker@reason'). The archetype supplies the agent's role, "
+                    "tools, cognitive mode, and model tier; explicit provider/model/tools "
+                    "overrides in the message JSON still take precedence."
                 ),
             },
             "message": {
@@ -460,10 +473,13 @@ class FlightDeckTool(Tool):
     async def _spawn_agent(self, fd_url: str, agent_name: str, message: str = "", **kwargs: Any) -> ToolResult:
         """Spawn a new agent in the Flight Deck fleet.
 
-        Uses the caller's own provider/model/api_key as defaults so that
+        Uses the caller's own provider/model/api_key/base_url as defaults so that
         Old Man can spawn agents that inherit its configuration.
         The *message* field can optionally contain a JSON object with overrides:
-        ``{"provider": "...", "model": "...", "description": "..."}``.
+        ``{"provider": "...", "model": "...", "api_key": "...", "base_url": "...",
+        "description": "...", "tools": [...], "env": {"BRAVE_API_KEY": "..."}}``.
+        The new agent inherits the Flight Deck server's environment; use ``env``
+        (or ``env_vars``) to hand it credentials the server doesn't already hold.
         """
         try:
             import httpx
@@ -476,6 +492,10 @@ class FlightDeckTool(Tool):
         default_provider = str(getattr(provider_obj, "provider", "ollama") or "ollama")
         default_model = str(getattr(provider_obj, "model", "") or "")
         default_api_key = str(getattr(provider_obj, "api_key", "") or "")
+        # Inherit the caller's endpoint too — without it, a child that inherits
+        # provider=openai (or any custom-endpoint provider) would fall back to the
+        # default cloud URL and misroute. An explicit override still wins.
+        default_base_url = str(getattr(provider_obj, "base_url", "") or "")
 
         # Parse optional overrides from message.
         overrides: dict[str, Any] = {}
@@ -489,22 +509,57 @@ class FlightDeckTool(Tool):
         import os
         owner_hint = os.environ.get("FD_OWNER_ID", "")
 
-        spawn_body = {
+        # Optional archetype selector — `id` or `id@tier` (e.g. "fact-checker@reason"),
+        # from the top-level param or the JSON overrides. When set, the FD spawn
+        # endpoint folds the archetype's cognitive_mode/tools/role/tier→model into
+        # the config; we deliberately DON'T send a tools/description baseline in that
+        # case so the archetype's own values win (the server only fills defaults).
+        archetype = str(kwargs.get("archetype") or overrides.get("archetype") or "").strip()
+
+        # Optional extra env for the child, as `env` (a {KEY: value} dict, the
+        # ergonomic form) or `env_vars` (the raw [{"key","value"}] list the config
+        # expects). Both normalise to the list shape; the child ALSO inherits the FD
+        # server's own environment, so this is only for keys the server lacks.
+        env_vars: list[dict[str, str]] = []
+        raw_env = overrides.get("env")
+        if isinstance(raw_env, dict):
+            env_vars.extend({"key": str(k), "value": str(v)} for k, v in raw_env.items() if str(k).strip())
+        raw_env_list = overrides.get("env_vars")
+        if isinstance(raw_env_list, list):
+            for ev in raw_env_list:
+                if isinstance(ev, dict) and str(ev.get("key", "")).strip():
+                    env_vars.append({"key": str(ev["key"]), "value": str(ev.get("value", ""))})
+
+        spawn_body: dict[str, Any] = {
             "name": agent_name,
-            "description": overrides.get("description", f"Agent spawned by Old Man"),
+            # Inherit the caller's working provider/model/key/base_url as a baseline
+            # so the child always has a usable, correctly-routed model even if an
+            # archetype tier doesn't resolve; explicit overrides (and an archetype's
+            # tier) may still override these server-side.
             "provider": overrides.get("provider", default_provider),
             "model": overrides.get("model", default_model),
             "provider_api_key": overrides.get("api_key", default_api_key),
-            "tools": overrides.get("tools", [
-                "shell", "read", "write", "glob", "edit",
-                "web_fetch", "web_search", "browser",
-                "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
-                "scripts", "playbooks", "personality", "flight_deck",
-            ]),
+            "base_url": overrides.get("base_url", default_base_url),
             "web_enabled": True,
             "web_port": overrides.get("web_port", 0),  # 0 = auto-assign
             "owner_hint": owner_hint,
         }
+        if env_vars:
+            spawn_body["env_vars"] = env_vars
+        if archetype:
+            spawn_body["archetype"] = archetype
+            if "tools" in overrides:
+                spawn_body["tools"] = overrides["tools"]
+            if "description" in overrides:
+                spawn_body["description"] = overrides["description"]
+        else:
+            spawn_body["description"] = overrides.get("description", "Agent spawned by Old Man")
+            spawn_body["tools"] = overrides.get("tools", [
+                "shell", "read", "write", "glob", "edit",
+                "web_fetch", "web_search", "browser",
+                "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
+                "scripts", "playbooks", "personality", "flight_deck",
+            ])
 
         # Try process spawn first (no Docker needed), fall back to docker.
         last_error = ""
@@ -515,10 +570,12 @@ class FlightDeckTool(Tool):
                     if resp.status_code == 200:
                         result = resp.json()
                         if result.get("ok"):
+                            arch_line = f"Archetype: {archetype}\n" if archetype else ""
                             return ToolResult(
                                 success=True,
                                 content=(
                                     f"Agent **{agent_name}** spawned successfully.\n"
+                                    f"{arch_line}"
                                     f"Provider: {spawn_body['provider']}, Model: {spawn_body['model']}\n"
                                     f"The agent will be available in the fleet shortly. "
                                     f"Use list_agents to check when it's running."
