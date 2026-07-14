@@ -303,6 +303,8 @@ export interface ReportCard {
   milestones: string[]
   in_its_own_words: string
   affect: { mood?: string; notes?: string[] }
+  mind?: { nodes: number; edges: number; density: number; connected_fraction: number; consolidations?: number }
+  drives_trail?: Array<Record<string, number | string>>
 }
 
 export const postChore = (slug: string, spec: string, fee_tokens: number) =>

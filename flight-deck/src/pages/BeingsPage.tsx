@@ -1082,6 +1082,73 @@ function ChoresModal({ slug, name, onClose, onChanged }: {
   )
 }
 
+// ── Report dashboard pieces ──────────────────────────────────────────────
+
+const DRIVE_COLORS: Record<string, string> = {
+  survive: '#ef4444', grow: '#10b981', explore: '#3b82f6',
+  connect: '#f59e0b', create: '#8b5cf6', legacy: '#ec4899',
+}
+
+// Drive satisfaction over the last ticks — one line per drive, 0..1. The
+// closest thing to watching her inner weather move.
+function DrivesChart({ trail }: { trail: Array<Record<string, number | string>> }) {
+  const drives = Array.from(new Set(trail.flatMap((t) =>
+    Object.keys(t).filter((k) => k !== 'at' && typeof t[k] === 'number'))))
+  if (trail.length < 2 || drives.length === 0) {
+    return <p className="py-6 text-center text-[11px] text-zinc-600">Not enough ticks yet to chart her drives.</p>
+  }
+  const W = 600, H = 130, P = 6
+  const x = (i: number) => P + (i * (W - 2 * P)) / (trail.length - 1)
+  const y = (v: number) => H - P - Math.max(0, Math.min(1, v)) * (H - 2 * P)
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="none" style={{ height: 130 }}>
+        {[0.25, 0.5, 0.75].map((g) => (
+          <line key={g} x1={P} x2={W - P} y1={y(g)} y2={y(g)} className="stroke-zinc-800" strokeWidth="1" strokeDasharray="3 5" />
+        ))}
+        {drives.map((d) => {
+          const pts = trail.map((t, i) => (typeof t[d] === 'number' ? `${x(i)},${y(t[d] as number)}` : null))
+            .filter(Boolean).join(' ')
+          return <polyline key={d} points={pts} fill="none" stroke={DRIVE_COLORS[d] ?? '#71717a'}
+            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" opacity="0.9" />
+        })}
+      </svg>
+      <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
+        {drives.map((d) => {
+          const last = [...trail].reverse().find((t) => typeof t[d] === 'number')
+          const v = last ? Math.round((last[d] as number) * 100) : null
+          return (
+            <span key={d} className="flex items-center gap-1 text-[10px] text-zinc-500">
+              <span className="h-1.5 w-1.5 rounded-full" style={{ background: DRIVE_COLORS[d] ?? '#71717a' }} />
+              {d}{v != null && <span className="tabular-nums text-zinc-600">{v}%</span>}
+            </span>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// How she spent her days — a ranked horizontal bar per act kind.
+function ActBars({ acts }: { acts: Record<string, number> }) {
+  const rows = Object.entries(acts).sort((a, b) => b[1] - a[1])
+  if (rows.length === 0) return <p className="py-4 text-center text-[11px] text-zinc-600">No acts yet.</p>
+  const max = rows[0][1]
+  return (
+    <div className="space-y-1.5">
+      {rows.map(([k, n]) => (
+        <div key={k} className="flex items-center gap-2">
+          <span className="w-16 shrink-0 text-right text-[11px] text-zinc-400">{k}</span>
+          <div className="h-3.5 min-w-0 flex-1 overflow-hidden rounded-sm bg-zinc-800/60">
+            <div className="h-full rounded-sm bg-violet-500/70" style={{ width: `${Math.max(4, (100 * n) / max)}%` }} />
+          </div>
+          <span className="w-7 shrink-0 text-[11px] tabular-nums text-zinc-500">{n}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // The developmental readiness assessment — graphical, holistic, deterministic
 // (every bar is a real variable from the ledger). Shown at the top of Growth.
 const _READY_META = {
@@ -1397,63 +1464,110 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
             {/* Report tab */}
             {tab === 'report' && (
-            <div className="mx-auto w-full max-w-3xl">
-              <div className="mb-1.5 flex items-center gap-2">
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">last {days} days</span>
-                <div className="flex overflow-hidden rounded border border-zinc-700 text-[10px]">
+                <div className="flex overflow-hidden rounded-md border border-zinc-700 text-[10px]">
                   {[7, 30].map((d) => (
                     <button key={d} onClick={() => setDays(d)}
-                      className={`px-1.5 py-0.5 ${days === d ? 'bg-violet-500/15 text-violet-600 dark:text-violet-300' : 'text-zinc-500 hover:bg-zinc-800'}`}>{d}d</button>
+                      className={`px-2 py-0.5 ${days === d ? 'bg-violet-500/15 text-violet-600 dark:text-violet-300' : 'text-zinc-500 hover:bg-zinc-800'}`}>{d}d</button>
                   ))}
                 </div>
+                {card?.affect?.mood && (
+                  <span className="ml-auto rounded-full bg-zinc-800/70 px-2.5 py-0.5 text-[11px] text-zinc-300">
+                    feeling <span className="font-medium">{card.affect.mood}</span>
+                  </span>
+                )}
               </div>
+
               {!card ? (
-                <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-4 text-center text-[11px] text-zinc-600">No report yet.</div>
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-10 text-center text-[11px] text-zinc-600">No report yet — she hasn't lived enough to grade.</div>
               ) : (
-                <div className="space-y-2.5 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
-                  <div className="grid grid-cols-4 gap-2">
-                    {[
-                      { l: 'ticks', v: String(card.ticks) },
-                      { l: 'spent', v: fmtTokens(card.tokens_spent_weighted) },
-                      { l: 'earned', v: fmtTokens(card.tokens_earned), c: 'text-emerald-600 dark:text-emerald-400' },
-                      { l: 'rut', v: String(card.rut_score), c: card.rut_score >= 0.6 ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-200' },
-                    ].map((s) => (
-                      <div key={s.l} className="rounded-md border border-zinc-800 bg-zinc-950/60 px-2 py-1.5">
-                        <div className={`text-sm font-semibold ${s.c || 'text-zinc-200'}`}>{s.v}</div>
-                        <div className="text-[10px] text-zinc-500">{s.l}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="flex flex-wrap gap-1">
-                    {Object.entries(card.acts).map(([k, n]) => (
-                      <span key={k} className="rounded bg-zinc-800/70 px-1.5 py-0.5 text-[10px] text-zinc-400">{k} ×{n}</span>
-                    ))}
-                    {Object.keys(card.acts).length === 0 && <span className="text-[11px] text-zinc-600">no acts yet</span>}
-                  </div>
-                  {card.milestones.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-1">
-                      <span className="text-[10px] text-zinc-500">milestones:</span>
-                      {card.milestones.map((m) => (
-                        <span key={m} className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-600 dark:text-violet-300">{m}</span>
-                      ))}
+              <>
+                {/* Vital numbers */}
+                <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 lg:grid-cols-6">
+                  {[
+                    { l: 'ticks', v: String(card.ticks), sub: `${(card.ticks / days).toFixed(1)}/day` },
+                    { l: 'spent', v: fmtTokens(card.tokens_spent_weighted), sub: 'weighted tokens' },
+                    { l: 'earned', v: fmtTokens(card.tokens_earned), sub: 'chores & quests', c: 'text-emerald-600 dark:text-emerald-400' },
+                    { l: 'rut', v: card.rut_score.toFixed(2), sub: '0 fresh · 1 loop', c: card.rut_score >= 0.6 ? 'text-amber-600 dark:text-amber-400' : undefined },
+                    { l: 'spoke', v: `${card.messages_to_parent}×`, sub: card.messages_suppressed > 0 ? `${card.messages_suppressed} suppressed` : 'to you', c: card.messages_suppressed > 0 ? 'text-amber-600 dark:text-amber-400' : undefined },
+                    ...(card.mind ? [{
+                      l: 'mind', v: `${card.mind.edges} link${card.mind.edges === 1 ? '' : 's'}`,
+                      sub: `${card.mind.nodes} files · ${Math.round(card.mind.connected_fraction * 100)}% woven`,
+                    }] : []),
+                  ].map((s) => (
+                    <div key={s.l} className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2.5">
+                      <div className={`truncate text-lg font-semibold leading-tight ${s.c || 'text-zinc-100'}`}>{s.v}</div>
+                      <div className="text-[10px] text-zinc-500">{s.l} <span className="text-zinc-600">· {s.sub}</span></div>
                     </div>
-                  )}
-                  <div className="text-[11px] text-zinc-500">
-                    spoke {card.messages_to_parent}×
-                    {card.messages_suppressed > 0 && <span className="text-amber-600 dark:text-amber-400"> · {card.messages_suppressed} suppressed</span>}
-                  </div>
-                  {card.concerns.length > 0 && (
-                    <div className="rounded border border-amber-500/25 bg-amber-500/[0.05] px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
-                      <span className="font-medium">concerns:</span> {card.concerns.join('; ')}
-                    </div>
-                  )}
-                  {card.in_its_own_words && (
-                    <blockquote className="border-l-2 border-zinc-700 pl-2.5 text-[11px] italic text-zinc-400">…{card.in_its_own_words.slice(-280)}</blockquote>
-                  )}
+                  ))}
                 </div>
+
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
+                  {/* Left — the shape of her days */}
+                  <div className="space-y-4">
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Her inner weather — drive satisfaction per tick</div>
+                      <DrivesChart trail={card.drives_trail ?? []} />
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">How she spent her days</div>
+                      <ActBars acts={card.acts} />
+                    </div>
+                    {card.in_its_own_words && (
+                      <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">In her own words</div>
+                        <blockquote className="border-l-2 border-violet-500/40 pl-3 text-[12px] italic leading-relaxed text-zinc-400">
+                          …{card.in_its_own_words.slice(-500)}
+                        </blockquote>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right — what needs you */}
+                  <div className="space-y-4">
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Concerns</div>
+                      {card.concerns.length === 0 ? (
+                        <p className="flex items-center gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400"><Check className="h-3.5 w-3.5" /> Nothing flagged — a clean week.</p>
+                      ) : (
+                        <ul className="space-y-1.5">
+                          {card.concerns.map((c, i) => (
+                            <li key={i} className="flex gap-1.5 text-[11px] leading-snug text-amber-700 dark:text-amber-300">
+                              <span className="shrink-0">⚠</span>{c}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Milestones</div>
+                      {card.milestones.length === 0 ? (
+                        <p className="text-[11px] text-zinc-600">None yet — the firsts are still ahead.</p>
+                      ) : (
+                        <div className="flex flex-wrap gap-1">
+                          {card.milestones.map((m) => (
+                            <span key={m} className="rounded-md bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-600 dark:text-violet-300">{m.replaceAll('_', ' ')}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {(card.affect?.notes?.length ?? 0) > 0 && (
+                      <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                        <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Why she feels this way</div>
+                        <ul className="space-y-1">
+                          {card.affect.notes!.map((n, i) => (
+                            <li key={i} className="text-[11px] text-zinc-400">· {n}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
               )}
             </div>
-
             )}
 
             {/* Rules tab */}
