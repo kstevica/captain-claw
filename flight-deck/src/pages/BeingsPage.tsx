@@ -1079,6 +1079,229 @@ function ChoresModal({ slug, name, onClose, onChanged }: {
   )
 }
 
+// Parenting — everything a parent does to shape a being: read the weekly report
+// card, set house rules + media diet, run the growth/persona/procreation rites.
+// Its own modal (like Chores) so the rich report card + pending decisions have
+// room. Self-contained: loads vitals + report, re-fetches after every act.
+function ParentingModal({ slug, name, onClose, onChanged }: {
+  slug: string; name: string; onClose: () => void; onChanged: () => void
+}) {
+  const [v, setV] = useState<BeingVitals | null>(null)
+  const [card, setCard] = useState<ReportCard | null>(null)
+  const [days, setDays] = useState(7)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState('')
+  const [ruleText, setRuleText] = useState('')
+  const [dietAllow, setDietAllow] = useState('')
+  const [dietDeny, setDietDeny] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const vit = await getBeingVitals(slug)
+      setV(vit)
+      // Seed the editors from vitals here (on open + after an act), NOT on
+      // report-period changes — so switching 7d/30d never wipes unsaved edits.
+      setRuleText((vit.house_rules || []).join('\n'))
+      setDietAllow((vit.media_diet?.allow || []).join(', '))
+      setDietDeny((vit.media_diet?.deny || []).join(', '))
+    } catch { /* stays empty */ } finally { setLoading(false) }
+  }, [slug])
+
+  const loadCard = useCallback(async () => {
+    try { setCard(await getReportCard(slug, days)) } catch { setCard(null) }
+  }, [slug, days])
+
+  useEffect(() => { void load() }, [load])
+  useEffect(() => { void loadCard() }, [loadCard])
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const run = async (label: string, fn: () => Promise<unknown>) => {
+    setBusy(label)
+    try { await fn(); await Promise.all([load(), loadCard()]); onChanged() }
+    catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    finally { setBusy('') }
+  }
+
+  const stages = ['infant', 'child', 'adolescent', 'adult']
+  const nextStage = v ? stages[stages.indexOf(v.stage) + 1] : undefined
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div className="flex max-h-[88vh] w-[680px] flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+           onClick={(e) => e.stopPropagation()}>
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-4 py-2.5">
+          <div className="flex items-center gap-2">
+            <GraduationCap className="h-4 w-4 text-violet-500 dark:text-violet-400" />
+            <h3 className="text-sm font-semibold text-zinc-100">{name} — Parenting</h3>
+          </div>
+          <div className="flex items-center gap-0.5">
+            <button onClick={() => void load()} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" title="Refresh"><RefreshCw className="h-3.5 w-3.5" /></button>
+            <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" title="Close (Esc)"><X className="h-4 w-4" /></button>
+          </div>
+        </div>
+
+        {loading && !v ? (
+          <div className="flex items-center justify-center py-16 text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>
+        ) : !v ? (
+          <div className="py-12 text-center text-xs text-red-500 dark:text-red-400">Couldn't load {name}.</div>
+        ) : (
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+
+            {/* Awaiting your decision — rites that need the parent NOW */}
+            {(v.pending_self_mod || v.pending_procreation) && (
+              <div className="space-y-2 rounded-lg border border-violet-500/30 bg-violet-500/[0.05] p-3">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-violet-600 dark:text-violet-300">Awaiting your decision</div>
+                {v.pending_self_mod && (
+                  <div>
+                    <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-200"><Fingerprint className="h-3.5 w-3.5 text-violet-500 dark:text-violet-400" /> A new persona — “{v.pending_self_mod.reason}”</div>
+                    <p className="mt-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap rounded border border-zinc-800 bg-zinc-950/70 p-2 text-[11px] text-zinc-300">{v.pending_self_mod.content}</p>
+                    <div className="mt-2 flex gap-1.5">
+                      <button onClick={() => run('selfmod', () => approveSelfMod(slug))} disabled={busy === 'selfmod'}
+                        className="flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+                        {busy === 'selfmod' && <Loader2 className="h-3 w-3 animate-spin" />} Bless it
+                      </button>
+                      <button onClick={() => run('selfmod', () => rejectSelfMod(slug, 'not yet'))} disabled={busy === 'selfmod'}
+                        className="rounded-md border border-zinc-700 px-3 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800">Not yet</button>
+                    </div>
+                  </div>
+                )}
+                {v.pending_procreation && (
+                  <div className={v.pending_self_mod ? 'mt-2 border-t border-zinc-800 pt-2' : ''}>
+                    <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-200"><Egg className="h-3.5 w-3.5 text-violet-500 dark:text-violet-400" /> A child{v.pending_procreation.partner ? ` with ${v.pending_procreation.partner}` : ''} — “{v.pending_procreation.case}”</div>
+                    {v.pending_procreation.letter && <p className="mt-1 text-[11px] italic text-zinc-400">To the child: “{v.pending_procreation.letter}”</p>}
+                    <div className="mt-2 flex items-center gap-1.5">
+                      <input id={`childname-${slug}`} defaultValue={v.pending_procreation.child_name} placeholder="child's name"
+                        className="w-32 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200 focus:border-violet-500/50 focus:outline-none" />
+                      <button onClick={() => { const el = document.getElementById(`childname-${slug}`) as HTMLInputElement | null; void run('procreate', () => approveProcreation(slug, el?.value || '')) }} disabled={busy === 'procreate'}
+                        className="rounded-md bg-violet-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40">Consent</button>
+                      <button onClick={() => run('procreate', () => rejectProcreation(slug, 'not yet'))} disabled={busy === 'procreate'}
+                        className="rounded-md border border-zinc-700 px-3 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800">Not yet</button>
+                    </div>
+                    <p className="mt-1.5 text-[10px] text-zinc-600">Dowry {fmtTokens(10_000_000)} tokens from the parent{v.pending_procreation.partner ? 's — split' : "'s savings"}.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Report card */}
+            <div>
+              <div className="mb-1.5 flex items-center gap-2">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Report card</span>
+                <div className="flex overflow-hidden rounded border border-zinc-700 text-[10px]">
+                  {[7, 30].map((d) => (
+                    <button key={d} onClick={() => setDays(d)}
+                      className={`px-1.5 py-0.5 ${days === d ? 'bg-violet-500/15 text-violet-600 dark:text-violet-300' : 'text-zinc-500 hover:bg-zinc-800'}`}>{d}d</button>
+                  ))}
+                </div>
+              </div>
+              {!card ? (
+                <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-4 text-center text-[11px] text-zinc-600">No report yet.</div>
+              ) : (
+                <div className="space-y-2.5 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { l: 'ticks', v: String(card.ticks) },
+                      { l: 'spent', v: fmtTokens(card.tokens_spent_weighted) },
+                      { l: 'earned', v: fmtTokens(card.tokens_earned), c: 'text-emerald-600 dark:text-emerald-400' },
+                      { l: 'rut', v: String(card.rut_score), c: card.rut_score >= 0.6 ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-200' },
+                    ].map((s) => (
+                      <div key={s.l} className="rounded-md border border-zinc-800 bg-zinc-950/60 px-2 py-1.5">
+                        <div className={`text-sm font-semibold ${s.c || 'text-zinc-200'}`}>{s.v}</div>
+                        <div className="text-[10px] text-zinc-500">{s.l}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {Object.entries(card.acts).map(([k, n]) => (
+                      <span key={k} className="rounded bg-zinc-800/70 px-1.5 py-0.5 text-[10px] text-zinc-400">{k} ×{n}</span>
+                    ))}
+                    {Object.keys(card.acts).length === 0 && <span className="text-[11px] text-zinc-600">no acts yet</span>}
+                  </div>
+                  {card.milestones.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1">
+                      <span className="text-[10px] text-zinc-500">milestones:</span>
+                      {card.milestones.map((m) => (
+                        <span key={m} className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-600 dark:text-violet-300">{m}</span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="text-[11px] text-zinc-500">
+                    spoke {card.messages_to_parent}×
+                    {card.messages_suppressed > 0 && <span className="text-amber-600 dark:text-amber-400"> · {card.messages_suppressed} suppressed</span>}
+                  </div>
+                  {card.concerns.length > 0 && (
+                    <div className="rounded border border-amber-500/25 bg-amber-500/[0.05] px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+                      <span className="font-medium">concerns:</span> {card.concerns.join('; ')}
+                    </div>
+                  )}
+                  {card.in_its_own_words && (
+                    <blockquote className="border-l-2 border-zinc-700 pl-2.5 text-[11px] italic text-zinc-400">…{card.in_its_own_words.slice(-280)}</blockquote>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Guidance: house rules + media diet */}
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">House rules</div>
+                <p className="mb-1.5 text-[10px] text-zinc-600">One per line — she rewrites them into her VALUES in her own words next tick.</p>
+                <textarea value={ruleText} onChange={(e) => setRuleText(e.target.value)} rows={4}
+                  placeholder="Be gentle with your siblings.&#10;Cite what you read." aria-label="House rules"
+                  className="w-full resize-none rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+                <button onClick={() => run('rules', () => setHouseRules(slug, ruleText.split('\n')))} disabled={busy === 'rules'}
+                  className="mt-1.5 flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
+                  {busy === 'rules' && <Loader2 className="h-3 w-3 animate-spin" />} Save rules
+                </button>
+              </div>
+              <div>
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Media diet</div>
+                <p className="mb-1.5 text-[10px] text-zinc-600">Comma-separated domains. Allow empty = the open web.</p>
+                <input value={dietAllow} onChange={(e) => setDietAllow(e.target.value)} placeholder="allow: wikipedia.org, arxiv.org" aria-label="Allowed domains"
+                  className="mb-1.5 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+                <input value={dietDeny} onChange={(e) => setDietDeny(e.target.value)} placeholder="deny: reddit.com, x.com" aria-label="Denied domains"
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+                <button onClick={() => run('diet', () => setMediaDiet(slug, dietAllow.split(',').map((s) => s.trim()).filter(Boolean), dietDeny.split(',').map((s) => s.trim()).filter(Boolean)))} disabled={busy === 'diet'}
+                  className="mt-1.5 flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
+                  {busy === 'diet' && <Loader2 className="h-3 w-3 animate-spin" />} Save diet
+                </button>
+              </div>
+            </div>
+
+            {/* Growth: stage ceremony + persona + arrange offspring */}
+            <div>
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Growth</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] text-zinc-400">stage <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-200">{v.stage}</span></span>
+                {nextStage && (
+                  <button onClick={() => { if (window.confirm(`Advance ${name} to ${nextStage}? New abilities unlock — this is a ceremony.`)) void run('stage', () => setStage(slug, nextStage)) }} disabled={busy === 'stage'}
+                    className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">Advance to {nextStage} →</button>
+                )}
+                {v.persona && !v.pending_self_mod && (
+                  <button onClick={() => { if (window.confirm(`Roll ${name}'s persona back to the previous self?`)) void run('rollback', () => rollbackPersona(slug)) }} disabled={busy === 'rollback'}
+                    className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Roll back persona</button>
+                )}
+                {!v.pending_procreation && v.capabilities.includes('procreate') && (
+                  <button onClick={() => { const cn = window.prompt(`Name for ${name}'s child?`); if (!cn) return; const partner = window.prompt('Co-parent (sibling name), or leave empty for budding:') || null; void run('procreate', () => arrangeOffspring(slug, cn, partner)) }} disabled={busy === 'procreate'}
+                    className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Arrange offspring</button>
+                )}
+              </div>
+              {v.persona && (
+                <p className="mt-2 line-clamp-3 border-l-2 border-zinc-800 pl-2 text-[11px] italic text-zinc-500">“{v.persona}”</p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // A nice, theme-aware confirmation before a consequential act (a tick/dream
 // spends real tokens; pause/goodbye change her state). onConfirm may be
 // async — the dialog shows a spinner, then closes.
@@ -1140,16 +1363,12 @@ function BeingCard({ item, meta, onChanged }: {
   const [messaging, setMessaging] = useState(false)
   const [msgText, setMsgText] = useState('')
   const [thread, setThread] = useState<ThreadItem[]>([])
-  const [parenting, setParenting] = useState(false)
   const [confirm, setConfirm] = useState<{
     title: string; message: string; confirmLabel: string
     tone?: 'default' | 'danger'; icon?: typeof Zap; run: () => Promise<unknown>
   } | null>(null)
   const [choresOpen, setChoresOpen] = useState(false)
-  const [ruleText, setRuleText] = useState('')
-  const [dietAllow, setDietAllow] = useState('')
-  const [dietDeny, setDietDeny] = useState('')
-  const [card, setCard] = useState<ReportCard | null>(null)
+  const [parentingOpen, setParentingOpen] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -1160,17 +1379,6 @@ function BeingCard({ item, meta, onChanged }: {
       setEvents(ev.events)
     } catch { /* card stays in list-item mode */ }
   }, [item.slug])
-
-  const openParenting = () => {
-    if (parenting) { setParenting(false); return }
-    setParenting(true)
-    setCard(null)
-    if (vitals) {
-      setRuleText((vitals.house_rules || []).join('\n'))
-      setDietAllow((vitals.media_diet?.allow || []).join(', '))
-      setDietDeny((vitals.media_diet?.deny || []).join(', '))
-    }
-  }
 
   useEffect(() => { void load() }, [load])
 
@@ -1349,8 +1557,8 @@ function BeingCard({ item, meta, onChanged }: {
                     }} />
                   <IconAction icon={ClipboardList} label="Chores — tasks she earns tokens for"
                     onClick={() => setChoresOpen(true)} />
-                  <IconAction icon={GraduationCap} label="Parenting — rules, diet, allowance, stage" active={parenting}
-                    onClick={() => openParenting()} />
+                  <IconAction icon={GraduationCap} label="Parenting — report card, rules, diet, growth"
+                    onClick={() => setParentingOpen(true)} />
                 </div>
               </>
             )}
@@ -1388,6 +1596,14 @@ function BeingCard({ item, meta, onChanged }: {
         <ChoresModal
           slug={item.slug} name={item.name}
           onClose={() => setChoresOpen(false)}
+          onChanged={() => { void load(); onChanged() }}
+        />
+      )}
+
+      {parentingOpen && (
+        <ParentingModal
+          slug={item.slug} name={item.name}
+          onClose={() => setParentingOpen(false)}
           onChanged={() => { void load(); onChanged() }}
         />
       )}
@@ -1439,186 +1655,6 @@ function BeingCard({ item, meta, onChanged }: {
         </div>
       )}
 
-      {parenting && v && (
-        <div className="mt-3 space-y-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
-          {/* House rules + diet */}
-          <div className="grid gap-2 md:grid-cols-2">
-            <div>
-              <div className="mb-1 text-xs font-medium text-zinc-300">House rules <span className="text-zinc-600">(one per line — it internalizes them next tick)</span></div>
-              <textarea
-                value={ruleText} onChange={(e) => setRuleText(e.target.value)} rows={3}
-                className="w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-              />
-              <button
-                onClick={() => void act('rules', () => setHouseRules(item.slug, ruleText.split('\n')))}
-                className="mt-1 rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
-              >Save rules</button>
-            </div>
-            <div>
-              <div className="mb-1 text-xs font-medium text-zinc-300">Media diet</div>
-              <input
-                value={dietAllow} onChange={(e) => setDietAllow(e.target.value)}
-                placeholder="allow: wikipedia.org, arxiv.org (empty = open web)"
-                className="mb-1 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-              />
-              <input
-                value={dietDeny} onChange={(e) => setDietDeny(e.target.value)}
-                placeholder="deny: reddit.com, x.com"
-                className="w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-              />
-              <div className="mt-1 flex items-center gap-2">
-                <button
-                  onClick={() => void act('diet', () => setMediaDiet(
-                    item.slug,
-                    dietAllow.split(',').map(s => s.trim()).filter(Boolean),
-                    dietDeny.split(',').map(s => s.trim()).filter(Boolean),
-                  ))}
-                  className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
-                >Save diet</button>
-                <select
-                  value={v.stage}
-                  onChange={(e) => {
-                    const to = e.target.value
-                    if (window.confirm(`Advance ${item.name} to ${to}? New abilities unlock; this is a ceremony.`))
-                      void act('stage', () => setStage(item.slug, to))
-                  }}
-                  className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[11px] text-zinc-300 focus:outline-none"
-                  title="Stage (advancement ceremony)"
-                >
-                  {['infant', 'child', 'adolescent', 'adult'].map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </div>
-            </div>
-          </div>
-
-          {/* Self-modification (persona rite) */}
-          {(v.pending_self_mod || v.persona) && (
-            <div>
-              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
-                <Fingerprint className="h-3.5 w-3.5 text-violet-400" /> Persona
-                {v.persona && !v.pending_self_mod && (
-                  <button
-                    onClick={() => {
-                      if (window.confirm(`Roll ${item.name}'s persona back to the previous self?`))
-                        void act('rollback', () => rollbackPersona(item.slug))
-                    }}
-                    className="ml-auto rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
-                  >Roll back</button>
-                )}
-              </div>
-              {v.persona && (
-                <p className="mb-1.5 line-clamp-2 text-[11px] italic text-zinc-500">“{v.persona}”</p>
-              )}
-              {v.pending_self_mod && (
-                <div className="rounded border border-violet-500/30 bg-violet-500/5 p-2.5">
-                  <div className="text-[11px] text-violet-300">
-                    Proposes a new self — “{v.pending_self_mod.reason}”
-                  </div>
-                  <p className="mt-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap text-[11px] text-zinc-300">
-                    {v.pending_self_mod.content}
-                  </p>
-                  <div className="mt-2 flex gap-1.5">
-                    <button
-                      onClick={() => void act('selfmod', () => approveSelfMod(item.slug))}
-                      className="rounded bg-violet-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-500"
-                    >Bless it</button>
-                    <button
-                      onClick={() => void act('selfmod', () => rejectSelfMod(item.slug, 'not yet'))}
-                      className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800"
-                    >Not yet</button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Procreation (consent rite) */}
-          {(v.pending_procreation || v.capabilities.includes('procreate')) && (
-            <div>
-              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
-                <Egg className="h-3.5 w-3.5 text-violet-400" /> Procreation
-                {!v.pending_procreation && v.capabilities.includes('procreate') && (
-                  <button
-                    onClick={() => {
-                      const name = window.prompt(`Name for ${item.name}'s child?`)
-                      if (!name) return
-                      const partner = window.prompt('Co-parent (sibling name), or leave empty for budding:') || null
-                      void act('procreate', () => arrangeOffspring(item.slug, name, partner))
-                    }}
-                    className="ml-auto rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800"
-                  >Arrange offspring</button>
-                )}
-              </div>
-              {v.pending_procreation && (
-                <div className="rounded border border-violet-500/30 bg-violet-500/5 p-2.5">
-                  <div className="text-[11px] text-violet-300">
-                    Asks for a child{v.pending_procreation.partner ? ` with ${v.pending_procreation.partner}` : ''} —
-                    “{v.pending_procreation.case}”
-                  </div>
-                  {v.pending_procreation.letter && (
-                    <p className="mt-1 text-[11px] italic text-zinc-400">To the child: “{v.pending_procreation.letter}”</p>
-                  )}
-                  <div className="mt-2 flex items-center gap-1.5">
-                    <input
-                      defaultValue={v.pending_procreation.child_name}
-                      id={`childname-${item.slug}`}
-                      placeholder="child's name"
-                      className="w-32 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-                    />
-                    <button
-                      onClick={() => {
-                        const el = document.getElementById(`childname-${item.slug}`) as HTMLInputElement | null
-                        void act('procreate', () => approveProcreation(item.slug, el?.value || ''))
-                      }}
-                      className="rounded bg-violet-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-500"
-                    >Consent</button>
-                    <button
-                      onClick={() => void act('procreate', () => rejectProcreation(item.slug, 'not yet'))}
-                      className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800"
-                    >Not yet</button>
-                  </div>
-                  <p className="mt-1.5 text-[10px] text-zinc-600">
-                    Dowry {fmtTokens(10_000_000)} tokens from the parent{v.pending_procreation.partner ? 's — split' : "'s savings"}.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Report card */}
-          <div>
-            <button
-              onClick={() => void (async () => {
-                try { setCard(await getReportCard(item.slug, 7)) }
-                catch (e) { alert(e instanceof Error ? e.message : 'failed') }
-              })()}
-              className="rounded border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
-            >Report card (7d)</button>
-            {card && (
-              <div className="mt-2 space-y-1 rounded border border-zinc-800 bg-zinc-900/60 p-2.5 text-[11px] text-zinc-300">
-                <div>
-                  {card.ticks} ticks · spent {fmtTokens(card.tokens_spent_weighted)} · earned{' '}
-                  <span className="text-emerald-300">{fmtTokens(card.tokens_earned)}</span> · spoke {card.messages_to_parent}×
-                  {card.messages_suppressed > 0 && <span className="text-amber-400"> · {card.messages_suppressed} suppressed</span>}
-                  {' '}· rut {card.rut_score}
-                </div>
-                <div className="text-zinc-500">
-                  acts: {Object.entries(card.acts).map(([k, n]) => `${k}×${n}`).join(', ') || '—'}
-                  {card.milestones.length > 0 && <> · milestones: {card.milestones.join(', ')}</>}
-                </div>
-                {card.concerns.length > 0 && (
-                  <div className="text-amber-400">concerns: {card.concerns.join('; ')}</div>
-                )}
-                {card.in_its_own_words && (
-                  <div className="border-l-2 border-zinc-700 pl-2 italic text-zinc-400">
-                    in its own words: …{card.in_its_own_words.slice(-260)}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
