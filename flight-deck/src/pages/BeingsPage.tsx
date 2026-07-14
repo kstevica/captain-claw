@@ -5,8 +5,8 @@ import {
   ArrowRightLeft, BookOpen, ChevronDown, ChevronLeft, ChevronRight,
   ClipboardList, Egg, Files, Fingerprint, Gift, GraduationCap, History,
   Loader2, Mail, Maximize2, MessageCircle, Minimize2, Moon, Pause, Play,
-  Plus, RefreshCw, ScrollText, Skull, Sparkles, Sprout, Users, Wrench, X,
-  Zap,
+  Plus, RefreshCw, Search, ScrollText, Skull, Sparkles, Sprout, Users,
+  Wrench, X, Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -209,6 +209,8 @@ function BeingLogModal({ slug, name, mode, onClose }: {
   const [files, setFiles] = useState<SelfFile[]>([])
   const [activeFile, setActiveFile] = useState('')
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [search, setSearch] = useState('')
+  const [filterGroup, setFilterGroup] = useState<string | null>(null)
   // A ref (not state) so loadSelf's identity stays stable across file
   // switches — it only needs to change when `slug` changes, never when the
   // user clicks a different file in the sidebar.
@@ -330,48 +332,104 @@ function BeingLogModal({ slug, name, mode, onClose }: {
           </div>
         </div>
         <div className="flex min-h-0 flex-1">
-          {mode === 'self' && (
-            <div className="w-56 shrink-0 overflow-y-auto border-r border-zinc-800 py-1.5">
-              {files.length === 0 && !loading && (
-                <div className="px-3 py-2 text-[11px] text-zinc-600">no files yet</div>
-              )}
-              {groupSelfFiles(files).map((g) => {
-                const Icon = SELF_GROUP_ICON[g.key] ?? Files
-                const isCollapsed = collapsed.has(g.key)
-                return (
-                  <div key={g.key} className="mb-1">
-                    <button
-                      onClick={() => setCollapsed((prev) => {
-                        const next = new Set(prev)
-                        next.has(g.key) ? next.delete(g.key) : next.add(g.key)
-                        return next
-                      })}
-                      className="flex w-full items-center gap-1.5 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-300"
-                    >
-                      {isCollapsed ? <ChevronRight className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
-                      <Icon className="h-3 w-3 shrink-0 text-violet-500 dark:text-violet-400" />
-                      <span className="truncate">{g.label}</span>
-                      <span className="ml-auto rounded bg-zinc-800 px-1 text-[9px] font-normal text-zinc-400">{g.files.length}</span>
-                    </button>
-                    {!isCollapsed && g.files.map((f) => (
-                      <button
-                        key={f.path}
-                        onClick={() => void loadFile(f.path)}
-                        className={`block w-full truncate rounded-md py-1 pl-8 pr-2 text-left text-xs ${
-                          activeFile === f.path
-                            ? 'bg-violet-500/10 font-medium text-violet-700 dark:bg-violet-500/20 dark:text-violet-200'
-                            : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
-                        }`}
-                        title={f.path}
-                      >
-                        {fileStem(f.path)}
+          {mode === 'self' && (() => {
+            const q = search.trim().toLowerCase()
+            const allGroups = groupSelfFiles(files)
+            const groups = allGroups
+              .filter((g) => !filterGroup || g.key === filterGroup)
+              .map((g) => ({
+                ...g,
+                files: q ? g.files.filter((f) =>
+                  fileStem(f.path).toLowerCase().includes(q) || f.path.toLowerCase().includes(q)) : g.files,
+              }))
+              .filter((g) => g.files.length > 0)
+            const totalShown = groups.reduce((n, g) => n + g.files.length, 0)
+            return (
+              <div className="flex w-56 shrink-0 flex-col border-r border-zinc-800">
+                {/* Search + folder filter */}
+                <div className="shrink-0 space-y-1.5 border-b border-zinc-800/70 p-2">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-500" />
+                    <input
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      placeholder="Search files…"
+                      className="w-full rounded-md border border-zinc-700 bg-zinc-950 py-1 pl-7 pr-6 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+                    />
+                    {search && (
+                      <button onClick={() => setSearch('')} className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-zinc-500 hover:text-zinc-300" title="Clear">
+                        <X className="h-3 w-3" />
                       </button>
-                    ))}
+                    )}
                   </div>
-                )
-              })}
-            </div>
-          )}
+                  {allGroups.length > 1 && (
+                    <div className="flex flex-wrap gap-1">
+                      {[{ key: null, label: 'All' }, ...allGroups.map((g) => ({ key: g.key, label: g.label }))].map((p) => {
+                        const on = filterGroup === p.key
+                        return (
+                          <button
+                            key={p.key ?? 'all'}
+                            onClick={() => setFilterGroup(p.key)}
+                            className={`rounded-full border px-2 py-0.5 text-[10px] ${
+                              on
+                                ? 'border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300'
+                                : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                            }`}
+                          >
+                            {p.label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+                {/* File groups */}
+                <div className="flex-1 overflow-y-auto py-1.5">
+                  {files.length === 0 && !loading && (
+                    <div className="px-3 py-2 text-[11px] text-zinc-600">no files yet</div>
+                  )}
+                  {files.length > 0 && totalShown === 0 && (
+                    <div className="px-3 py-2 text-[11px] text-zinc-600">no files match</div>
+                  )}
+                  {groups.map((g) => {
+                    const Icon = SELF_GROUP_ICON[g.key] ?? Files
+                    const isCollapsed = !q && collapsed.has(g.key)
+                    return (
+                      <div key={g.key} className="mb-1">
+                        <button
+                          onClick={() => setCollapsed((prev) => {
+                            const next = new Set(prev)
+                            next.has(g.key) ? next.delete(g.key) : next.add(g.key)
+                            return next
+                          })}
+                          className="flex w-full items-center gap-1.5 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-300"
+                        >
+                          {isCollapsed ? <ChevronRight className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
+                          <Icon className="h-3 w-3 shrink-0 text-violet-500 dark:text-violet-400" />
+                          <span className="truncate">{g.label}</span>
+                          <span className="ml-auto rounded bg-zinc-800 px-1 text-[9px] font-normal text-zinc-400">{g.files.length}</span>
+                        </button>
+                        {!isCollapsed && g.files.map((f) => (
+                          <button
+                            key={f.path}
+                            onClick={() => void loadFile(f.path)}
+                            className={`block w-full truncate rounded-md py-1 pl-8 pr-2 text-left text-xs ${
+                              activeFile === f.path
+                                ? 'bg-violet-500/10 font-medium text-violet-700 dark:bg-violet-500/20 dark:text-violet-200'
+                                : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+                            }`}
+                            title={f.path}
+                          >
+                            {fileStem(f.path)}
+                          </button>
+                        ))}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })()}
           <div className="flex-1 overflow-auto">
             {loading ? (
               <div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></div>
