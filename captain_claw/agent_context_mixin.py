@@ -2225,7 +2225,7 @@ class AgentContextMixin:
             TopicsTool,
             SessionHistoryTool,
             VfsTool,
-            VisionTool,
+            CvTool,
         )
 
         config = get_config()
@@ -2299,8 +2299,8 @@ class AgentContextMixin:
                 self.tools.register(ht)
             elif tool_name == "video_vision":
                 self.tools.register(VideoVisionTool())
-            elif tool_name == "vision":
-                self.tools.register(VisionTool())
+            elif tool_name == "cv":
+                self.tools.register(CvTool())
             elif tool_name == "gws":
                 self.tools.register(GwsTool())
             elif tool_name == "todo":

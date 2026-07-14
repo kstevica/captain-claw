@@ -65,7 +65,8 @@ function nextAttachId() { return `attach-${Date.now()}-${++attachId}` }
 
 // Build the outgoing message text, appending references to any uploaded files
 // so the agent can locate them. Images use the "[Attached image: …]" marker
-// that routes them to the vision tool instead of `read`.
+// that routes them to the image_vision tool (describe) / image_ocr (read text)
+// instead of `read` — and NOT the `cv` (OpenCV pixel-ops) tool.
 function appendAttachmentRefs(text: string, uploadedFiles: Attachment[]): string {
   if (uploadedFiles.length === 0) return text
   const hasImage = uploadedFiles.some((a) => a.type.startsWith('image/'))
@@ -75,7 +76,7 @@ function appendAttachmentRefs(text: string, uploadedFiles: Attachment[]): string
       : `[Attached file: ${a.name} → ${a.uploadedPath}]`,
   ).join('\n')
   const hint = hasImage
-    ? '\n(To view/understand the image(s), call image_vision (to describe or answer questions) or image_ocr (to read text) with the path. Do NOT use read on an image, and do NOT use the "vision" tool for this — "vision" does pixel ops only (measure/diff/detect regions) and cannot read text or say what an image shows.)'
+    ? '\n(To view/understand the image(s), call image_vision (to describe or answer questions) or image_ocr (to read text) with the path. Do NOT use read on an image, and do NOT use the "cv" tool for this — "cv" does pixel ops only (measure/diff/detect regions) and cannot read text or say what an image shows.)'
     : ''
   return text ? `${text}\n\n${fileRefs}${hint}` : `${fileRefs}${hint}`
 }

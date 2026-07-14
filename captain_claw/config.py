@@ -470,7 +470,7 @@ class ToolsConfig(BaseModel):
         "image_ocr",
         "image_vision",
         "video_vision",
-        "vision",
+        "cv",
         "send_mail",
         "whatsapp_send_file",
         "intentions",
@@ -523,7 +523,7 @@ class ToolsConfig(BaseModel):
         "read", "write", "edit", "personality", "botport", "playbooks",
         "browser", "datastore", "direct_api", "cron",
         "google_drive", "google_calendar", "google_mail",
-        "whatsapp_send_file", "intentions", "video_vision", "vision", "topics",
+        "whatsapp_send_file", "intentions", "video_vision", "cv", "topics",
         "history", "vfs",
     })
 

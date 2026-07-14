@@ -396,7 +396,7 @@ class ScreenCaptureTool(Tool):
             if not bp.is_absolute() and runtime_base:
                 bp = Path(runtime_base) / bp
             try:
-                from captain_claw.tools.vision import images_differ
+                from captain_claw.tools.cv import images_differ
 
                 changed, ssim = images_differ(str(bp), str(path))
             except Exception:

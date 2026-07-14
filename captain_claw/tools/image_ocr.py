@@ -346,7 +346,7 @@ class _BaseImageLLMTool(Tool):
             want_prep = preprocess if preprocess is not None else bool(getattr(tool_cfg, "preprocess", False))
             if want_prep and self._config_key == "image_ocr":
                 try:
-                    from captain_claw.tools.vision import preprocess_ocr_bytes
+                    from captain_claw.tools.cv import preprocess_ocr_bytes
 
                     enhance = bool(getattr(tool_cfg, "preprocess_enhance", False))
                     new_bytes = await asyncio.to_thread(

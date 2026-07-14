@@ -488,13 +488,13 @@ class DesktopActionTool(Tool):
     ) -> tuple[int, int, str | None]:
         """Return (center_x, center_y, error) for a template match on the screenshot.
 
-        Uses the vision tool's deterministic `locate` op (OpenCV template matching) —
+        Uses the cv tool's deterministic `locate` op (OpenCV template matching) —
         no LLM. Returns an error string when OpenCV/the tool is unavailable or nothing
         matches, so the caller can surface it.
         """
-        from captain_claw.tools.vision import VisionTool
+        from captain_claw.tools.cv import CvTool
 
-        res = await VisionTool().execute(
+        res = await CvTool().execute(
             op="locate", image=screenshot_path, template=template, **kwargs
         )
         if not res.success:
