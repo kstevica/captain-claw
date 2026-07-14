@@ -946,3 +946,56 @@ class VisionTool(Tool):
                 _cv2.putText(canvas, tag, (x, max(12, y - 6)), _cv2.FONT_HERSHEY_SIMPLEX,
                              0.5, (0, 0, 255), 1, _cv2.LINE_AA)
         return canvas
+
+
+# ── Phase 3: public helpers for pipeline integration ───────────────────────────
+# These let other tools reach the cheap CV layer without going through the tool's
+# op-dispatch. All are guarded and FAIL-OPEN — absent OpenCV they behave so the
+# caller's existing (LLM) path is unchanged (no regression).
+
+
+def preprocess_ocr_bytes(image_bytes: bytes, *, deskew: bool = True, enhance: bool = False) -> bytes:
+    """Deskew (and optionally CLAHE-enhance) an image in memory, before OCR.
+
+    Bytes in → bytes out (PNG). Returns the input untouched when OpenCV is absent
+    or anything fails, so ``image_ocr`` can call it unconditionally. Deskew helps a
+    vision LLM read rotated scans; enhancement is opt-in (can hurt natural images).
+    """
+    if not _HAS_CV2 or not image_bytes:
+        return image_bytes
+    try:
+        arr = _np.frombuffer(image_bytes, _np.uint8)
+        img = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
+        if img is None:
+            return image_bytes
+        if deskew:
+            img = VisionTool._deskew(img)
+        if enhance:
+            img = _cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(_gray(img))
+        ok, buf = _cv2.imencode(".png", img)
+        return buf.tobytes() if ok else image_bytes
+    except Exception:  # never let pre-processing break OCR
+        return image_bytes
+
+
+def images_differ(path_a: str | Path, path_b: str | Path, *, ssim_threshold: float = 0.995) -> tuple[bool, float]:
+    """Return (changed, ssim) for two images. Diff-gate for watch/poll loops.
+
+    ``changed`` is True when SSIM < *ssim_threshold*. FAIL-OPEN: when OpenCV is
+    absent or a read fails, returns (True, 0.0) — i.e. "treat as changed", so a
+    caller gating an LLM call still makes the call rather than silently skipping it.
+    """
+    if not _HAS_CV2:
+        return True, 0.0
+    try:
+        ia = _cv2.imread(str(path_a))
+        ib = _cv2.imread(str(path_b))
+        if ia is None or ib is None:
+            return True, 0.0
+        ga, gb = _gray(ia), _gray(ib)
+        if ga.shape != gb.shape:
+            gb = _cv2.resize(gb, (ga.shape[1], ga.shape[0]), interpolation=_cv2.INTER_AREA)
+        score = _ssim(ga, gb)
+        return (score < ssim_threshold), float(score)
+    except Exception:
+        return True, 0.0

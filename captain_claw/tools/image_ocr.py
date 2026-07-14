@@ -257,6 +257,7 @@ class _BaseImageLLMTool(Tool):
         path: str,
         prompt: str = "",
         max_chars: int | None = None,
+        preprocess: bool | None = None,
         **kwargs: Any,
     ) -> ToolResult:
         """Send an image to a vision LLM and return the response."""
@@ -337,6 +338,26 @@ class _BaseImageLLMTool(Tool):
             # Read, optionally resize, and encode image.
             image_bytes = await asyncio.to_thread(file_path.read_bytes)
             original_size = len(image_bytes)
+
+            # OCR pre-processing (opt-in, image_ocr only): deskew via OpenCV before
+            # the LLM sees it. Helps rotated scans; fails open (returns input bytes)
+            # when OpenCV is absent, so nothing regresses. Not applied to
+            # image_vision (binarizing/deskewing can hurt natural-image description).
+            want_prep = preprocess if preprocess is not None else bool(getattr(tool_cfg, "preprocess", False))
+            if want_prep and self._config_key == "image_ocr":
+                try:
+                    from captain_claw.tools.vision import preprocess_ocr_bytes
+
+                    enhance = bool(getattr(tool_cfg, "preprocess_enhance", False))
+                    new_bytes = await asyncio.to_thread(
+                        preprocess_ocr_bytes, image_bytes, deskew=True, enhance=enhance,
+                    )
+                    if new_bytes and new_bytes is not image_bytes:
+                        log.info("image_ocr preprocessed (deskew)", enhance=enhance,
+                                 before=len(image_bytes), after=len(new_bytes))
+                        image_bytes = new_bytes
+                except Exception as exc:
+                    log.warning("image_ocr preprocess skipped: %s", exc)
 
             max_px = int(getattr(tool_cfg, "max_pixels", 1568) if tool_cfg else 1568)
             jpg_q = int(getattr(tool_cfg, "jpeg_quality", 85) if tool_cfg else 85)
@@ -467,6 +488,10 @@ class ImageOcrTool(_BaseImageLLMTool):
             "max_chars": {
                 "type": "number",
                 "description": "Maximum characters to return (default: 120000).",
+            },
+            "preprocess": {
+                "type": "boolean",
+                "description": "Optional: deskew the image (OpenCV) before OCR. Helps rotated/skewed scans.",
             },
         },
         "required": ["path"],
