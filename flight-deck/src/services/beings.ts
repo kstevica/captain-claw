@@ -325,6 +325,21 @@ export const setMediaDiet = (slug: string, allow: string[], deny: string[]) =>
   })
 export const getReportCard = (slug: string, days = 7) =>
   fdFetch<ReportCard>(`/beings/${slug}/report-card?days=${days}`)
+
+export interface ReadinessDim {
+  key: string; label: string; score: number
+  status: 'green' | 'amber' | 'red'; detail: string; evidence: string; critical: boolean
+}
+export interface Readiness {
+  stage: string; next_stage: string | null; days_alive: number; window_days: number
+  overall: { score: number; status: 'ready' | 'emerging' | 'not_yet' | 'grown' }
+  dimensions: ReadinessDim[]
+  estimate_days: number | null
+  unlocks: string[]
+  recommendation: { action: string; title: string; steps: string[]; expect: string[]; cautions: string[] }
+}
+export const getReadiness = (slug: string) =>
+  fdFetch<Readiness>(`/beings/${slug}/readiness`)
 export const setStage = (slug: string, stage: string) =>
   fdFetch<BeingVitals>(`/beings/${slug}/stage`, {
     method: 'POST', body: JSON.stringify({ stage }),

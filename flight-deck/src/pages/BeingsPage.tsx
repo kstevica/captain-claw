@@ -12,8 +12,8 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
-  type BeingGraph, type Chore, type Quest, type ReportCard, type SelfFile,
-  type ThreadItem, type Venture, type VillageItem,
+  type BeingGraph, type Chore, type Quest, type Readiness, type ReportCard,
+  type SelfFile, type ThreadItem, type Venture, type VillageItem, getReadiness,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
@@ -1079,6 +1079,114 @@ function ChoresModal({ slug, name, onClose, onChanged }: {
   )
 }
 
+// The developmental readiness assessment — graphical, holistic, deterministic
+// (every bar is a real variable from the ledger). Shown at the top of Growth.
+const _READY_META = {
+  ready: { label: 'Ready', ring: 'text-emerald-600 dark:text-emerald-400', box: 'border-emerald-500/30 bg-emerald-500/[0.05]' },
+  emerging: { label: 'Emerging', ring: 'text-amber-600 dark:text-amber-400', box: 'border-amber-500/30 bg-amber-500/[0.05]' },
+  not_yet: { label: 'Not yet', ring: 'text-red-600 dark:text-red-400', box: 'border-red-500/30 bg-red-500/[0.05]' },
+  grown: { label: 'Fully grown', ring: 'text-violet-600 dark:text-violet-300', box: 'border-violet-500/30 bg-violet-500/[0.05]' },
+} as const
+const _BAR = { green: 'bg-emerald-500', amber: 'bg-amber-500', red: 'bg-red-500' } as const
+
+function ReadinessView({ ready, loading, onAssess }: {
+  ready: Readiness | null; loading: boolean; onAssess?: () => void
+}) {
+  if (loading && !ready) return (
+    <div className="flex items-center justify-center py-6 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /></div>
+  )
+  if (!ready) return null
+  const r = ready
+  const m = _READY_META[r.overall.status]
+  const rec = r.recommendation
+  return (
+    <div className="space-y-3">
+      {/* Verdict banner */}
+      <div className={`rounded-lg border p-3 ${m.box}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className={`text-[10px] font-bold uppercase tracking-wider ${m.ring}`}>{m.label}</span>
+              {r.next_stage && <span className="text-[11px] text-zinc-500">for {r.next_stage} · day {r.days_alive}</span>}
+            </div>
+            <div className="mt-0.5 text-sm font-semibold text-zinc-100">{rec.title}</div>
+            {r.estimate_days != null && (
+              <div className="mt-0.5 text-[11px] text-zinc-500">≈ {r.estimate_days} more day{r.estimate_days === 1 ? '' : 's'} at this pace</div>
+            )}
+          </div>
+          <div className="shrink-0 text-right">
+            <div className={`text-2xl font-bold leading-none ${m.ring}`}>{r.overall.score}</div>
+            <div className="text-[9px] uppercase tracking-wider text-zinc-500">/ 100</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Domain bars */}
+      <div className="space-y-2">
+        {r.dimensions.map((d) => (
+          <div key={d.key} title={d.evidence}>
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="text-zinc-300">
+                {d.label}
+                {d.critical && <span className="ml-1 text-zinc-600" title="critical — gates advancement">✦</span>}
+              </span>
+              <span className="tabular-nums text-zinc-500">{d.score}</span>
+            </div>
+            <div className="mt-0.5 h-1.5 overflow-hidden rounded-full bg-zinc-800">
+              <div className={`h-full rounded-full transition-all ${_BAR[d.status]}`} style={{ width: `${Math.max(3, d.score)}%` }} />
+            </div>
+            <div className="mt-0.5 text-[10px] text-zinc-600">{d.detail}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Recommendation */}
+      <div className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+        {rec.steps.length > 0 && (
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">What to do</div>
+            <ul className="mt-1 space-y-0.5">
+              {rec.steps.map((s, i) => (
+                <li key={i} className="flex gap-1.5 text-[11px] text-zinc-400"><span className="shrink-0 text-violet-500 dark:text-violet-400">›</span>{s}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {rec.expect.length > 0 && (
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">What to expect</div>
+            <ul className="mt-1 space-y-0.5">
+              {rec.expect.map((s, i) => (
+                <li key={i} className="flex gap-1.5 text-[11px] text-zinc-400"><span className="shrink-0 text-zinc-600">·</span>{s}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {rec.cautions.length > 0 && (
+          <div className="rounded border border-amber-500/25 bg-amber-500/[0.05] p-2">
+            {rec.cautions.map((c, i) => (
+              <div key={i} className="text-[11px] text-amber-700 dark:text-amber-300">⚠ {c}</div>
+            ))}
+          </div>
+        )}
+        {r.next_stage && r.unlocks.length > 0 && (
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{r.next_stage} unlocks</div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {r.unlocks.map((u) => <span key={u} className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-600 dark:text-violet-300">{u}</span>)}
+            </div>
+          </div>
+        )}
+        {onAssess && (
+          <button onClick={onAssess} className="text-[10px] text-zinc-500 underline decoration-dotted underline-offset-2 hover:text-zinc-300">
+            Get a second opinion from another agent →
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // Parenting — everything a parent does to shape a being: read the weekly report
 // card, set house rules + media diet, run the growth/persona/procreation rites.
 // Its own modal (like Chores) so the rich report card + pending decisions have
@@ -1095,6 +1203,8 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   const [ruleText, setRuleText] = useState('')
   const [dietAllow, setDietAllow] = useState('')
   const [dietDeny, setDietDeny] = useState('')
+  const [ready, setReady] = useState<Readiness | null>(null)
+  const [readyLoading, setReadyLoading] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -1113,8 +1223,16 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
     try { setCard(await getReportCard(slug, days)) } catch { setCard(null) }
   }, [slug, days])
 
+  const loadReady = useCallback(async () => {
+    setReadyLoading(true)
+    try { setReady(await getReadiness(slug)) } catch { setReady(null) }
+    finally { setReadyLoading(false) }
+  }, [slug])
+
   useEffect(() => { void load() }, [load])
   useEffect(() => { void loadCard() }, [loadCard])
+  // Lazily assess the moment the parent opens Growth (skips the cost otherwise).
+  useEffect(() => { if (tab === 'growth' && !ready) void loadReady() }, [tab, ready, loadReady])
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -1123,8 +1241,11 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(label)
-    try { await fn(); await Promise.all([load(), loadCard()]); onChanged() }
-    catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    try {
+      await fn()
+      await Promise.all([load(), loadCard(), ready ? loadReady() : Promise.resolve()])
+      onChanged()
+    } catch (e) { alert(e instanceof Error ? e.message : 'failed') }
     finally { setBusy('') }
   }
 
@@ -1319,7 +1440,11 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
             {/* Growth tab */}
             {tab === 'growth' && (
-            <div>
+            <div className="space-y-4">
+              <ReadinessView ready={ready} loading={readyLoading} />
+
+              <div>
+              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Rites</div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[11px] text-zinc-400">stage <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-200">{v.stage}</span></span>
                 {nextStage && (
@@ -1338,6 +1463,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
               {v.persona && (
                 <p className="mt-2 line-clamp-3 border-l-2 border-zinc-800 pl-2 text-[11px] italic text-zinc-500">“{v.persona}”</p>
               )}
+              </div>
             </div>
             )}
 

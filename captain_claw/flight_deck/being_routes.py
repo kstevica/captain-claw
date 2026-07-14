@@ -430,6 +430,14 @@ async def report_card(slug: str, days: int = 7,
     return being_life.report_card(get_store(), being, days=days)
 
 
+@router.get("/{slug}/readiness")
+async def readiness(slug: str, user: dict = Depends(get_current_user)):
+    """Developmental readiness assessment for the Growth tab."""
+    from captain_claw.flight_deck import being_assessment
+    being = _run(get_store().get, user["id"], slug)
+    return being_assessment.readiness(get_store(), being)
+
+
 @router.get("/{slug}/milestones")
 async def milestones(slug: str, user: dict = Depends(get_current_user)):
     return {"milestones": _run(get_store().milestones, user["id"], slug)}
