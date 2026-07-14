@@ -1,25 +1,25 @@
 // Iskra — living beings: conception (point-buy), vitals, wallet, journal.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRightLeft, BookOpen, ChevronDown, ChevronLeft, ChevronRight,
   ClipboardList, Egg, Files, Fingerprint, Gift, GraduationCap, History,
-  Loader2, Mail, Maximize2, MessageCircle, Minimize2, Moon, Pause, Play,
-  Plus, RefreshCw, Search, ScrollText, Skull, Sparkles, Sprout, Users,
+  Loader2, Mail, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause,
+  Play, Plus, RefreshCw, Search, ScrollText, Skull, Sparkles, Sprout, Users,
   Wrench, X, Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
-  type Chore, type Quest, type ReportCard, type SelfFile, type ThreadItem,
-  type Venture, type VillageItem,
+  type BeingGraph, type Chore, type Quest, type ReportCard, type SelfFile,
+  type ThreadItem, type Venture, type VillageItem,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
-  getBeingMessages, hatchBeing, judgeChore, judgeQuest, listBeings,
-  listChores, messageBeing, pauseBeing, postChore, postQuest,
+  getBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
+  listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
   rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setHouseRules, setMediaDiet, setStage, setVentureState, tickBeing,
   wakeBeing,
@@ -152,6 +152,114 @@ function renderTicksMarkdown(events: BeingEvent[]): string {
   return lines.join('\n')
 }
 
+// ── The Mind — a force-directed graph of the being's own artifacts ──
+
+// A tiny dependency-free force layout: repulsion + edge springs + gravity,
+// deterministic (no randomness) so the same graph always lays out the same.
+function layoutGraph(
+  nodes: BeingGraph['nodes'], edges: BeingGraph['edges'], W: number, H: number,
+): { x: number; y: number }[] {
+  const N = nodes.length
+  const pos = nodes.map((_, i) => {
+    const ang = i * 2.3999632   // golden angle → an even initial spread
+    const rad = 30 + Math.sqrt(i) * 22
+    return { x: W / 2 + Math.cos(ang) * rad, y: H / 2 + Math.sin(ang) * rad }
+  })
+  if (N <= 1) return pos
+  const idx = new Map(nodes.map((n, i) => [n.path, i]))
+  const E = edges
+    .map((e) => [idx.get(e.from), idx.get(e.to)] as [number | undefined, number | undefined])
+    .filter((p): p is [number, number] => p[0] != null && p[1] != null)
+  for (let it = 0; it < 320; it++) {
+    const fx = new Array(N).fill(0), fy = new Array(N).fill(0)
+    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
+      const dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y
+      const d2 = dx * dx + dy * dy || 0.01, d = Math.sqrt(d2), f = 2600 / d2
+      fx[i] += dx / d * f; fy[i] += dy / d * f; fx[j] -= dx / d * f; fy[j] -= dy / d * f
+    }
+    for (const [a, b] of E) {
+      const dx = pos[b].x - pos[a].x, dy = pos[b].y - pos[a].y
+      const d = Math.sqrt(dx * dx + dy * dy) || 0.01, f = (d - 70) * 0.03
+      fx[a] += dx / d * f; fy[a] += dy / d * f; fx[b] -= dx / d * f; fy[b] -= dy / d * f
+    }
+    for (let i = 0; i < N; i++) { fx[i] += (W / 2 - pos[i].x) * 0.008; fy[i] += (H / 2 - pos[i].y) * 0.008 }
+    const step = it < 40 ? 6 : it < 160 ? 3 : 1.2
+    for (let i = 0; i < N; i++) {
+      const m = Math.hypot(fx[i], fy[i]) || 1, s = Math.min(step, m) / m
+      pos[i].x += fx[i] * s; pos[i].y += fy[i] * s
+    }
+  }
+  const pad = 52
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const p of pos) { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y) }
+  const s = Math.min((W - 2 * pad) / Math.max(1, maxX - minX), (H - 2 * pad) / Math.max(1, maxY - minY), 3)
+  for (const p of pos) { p.x = pad + (p.x - minX) * s; p.y = pad + (p.y - minY) * s }
+  return pos
+}
+
+// Fixed hues that read on both the light and dark modal background.
+const GROUP_HUE: Record<string, string> = { garden: '#10b981', skills: '#f59e0b', self: '#8b5cf6' }
+const REL_PHRASE: Record<string, string> = {
+  grew_from: 'grew from', responds_to: 'responds to', elaborates: 'elaborates',
+  contradicts: 'contradicts', abandons: 'abandons', uses_skill: 'uses skill',
+  learned_from: 'learned from',
+}
+const stemOf = (p: string) => (p.split('/').pop() || p).replace(/\.md$/, '')
+
+function MindGraph({ graph }: { graph: BeingGraph }) {
+  const [sel, setSel] = useState<string | null>(null)
+  const W = 900, H = 560
+  const pos = useMemo(() => layoutGraph(graph.nodes, graph.edges, W, H), [graph])
+  if (graph.nodes.length === 0) {
+    return <div className="flex h-full items-center justify-center p-8 text-sm text-zinc-500">No artifacts yet — nothing to map.</div>
+  }
+  const idx = new Map(graph.nodes.map((n, i) => [n.path, i]))
+  const selEdges = sel ? graph.edges.filter((e) => e.from === sel || e.to === sel) : []
+  const selSet = new Set<string>(sel ? [sel, ...selEdges.flatMap((e) => [e.from, e.to])] : [])
+  return (
+    <div className="flex h-full flex-col">
+      <svg viewBox={`0 0 ${W} ${H}`} className="min-h-0 w-full flex-1" onClick={() => setSel(null)}>
+        {graph.edges.map((e, i) => {
+          const a = pos[idx.get(e.from) ?? -1], b = pos[idx.get(e.to) ?? -1]
+          if (!a || !b) return null
+          const on = !!sel && (e.from === sel || e.to === sel)
+          return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+            stroke={on ? '#a78bfa' : '#71717a'} strokeOpacity={sel ? (on ? 0.9 : 0.12) : 0.4}
+            strokeWidth={on ? 2 : 1.2} />
+        })}
+        {graph.nodes.map((n, i) => {
+          const p = pos[i], r = 5 + Math.min(n.degree, 6) * 1.7
+          const dim = !!sel && !selSet.has(n.path)
+          return (
+            <g key={n.path} transform={`translate(${p.x},${p.y})`} opacity={dim ? 0.25 : 1}
+              className="cursor-pointer" onClick={(ev) => { ev.stopPropagation(); setSel(sel === n.path ? null : n.path) }}>
+              {sel === n.path && <circle r={r + 6} fill="#8b5cf6" fillOpacity={0.22} />}
+              <circle r={r} fill={GROUP_HUE[n.group] || '#8b5cf6'} />
+              <text x={r + 3} y={3.5} fontSize={10} fill="#71717a">{stemOf(n.path)}</text>
+            </g>
+          )
+        })}
+      </svg>
+      <div className="shrink-0 space-y-1 border-t border-zinc-800 px-4 py-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-zinc-500">
+          <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.self }} /> identity</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.garden }} /> garden</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.skills }} /> skills</span>
+          <span className="ml-auto">{graph.nodes.length} artifacts · {graph.edges.length} links · {Math.round(graph.connected_fraction * 100)}% connected</span>
+        </div>
+        {sel && (
+          <div className="text-zinc-400">
+            <span className="font-medium text-zinc-200">{stemOf(sel)}</span>
+            {selEdges.length === 0 ? ' — an island (no links yet)' : ' — ' + selEdges.map((e) =>
+              e.from === sel ? `${REL_PHRASE[e.rel] || e.rel} ${stemOf(e.to)}` : `${stemOf(e.from)} ${REL_PHRASE[e.rel] || e.rel} it`,
+            ).join('; ')}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Journal / ticks log / self-files modal — full markdown, fullscreen ──
 
 function selfFileLabel(path: string): string {
@@ -197,7 +305,7 @@ function groupSelfFiles(files: SelfFile[]): { key: string; label: string; files:
 function BeingLogModal({ slug, name, mode, onClose }: {
   slug: string
   name: string
-  mode: 'journal' | 'ticks' | 'self'
+  mode: 'journal' | 'ticks' | 'self' | 'mind'
   onClose: () => void
 }) {
   const today = new Date().toISOString().slice(0, 10)
@@ -205,6 +313,7 @@ function BeingLogModal({ slug, name, mode, onClose }: {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [markdown, setMarkdown] = useState('')
+  const [graph, setGraph] = useState<BeingGraph | null>(null)
   const [date, setDate] = useState(today)
   const [files, setFiles] = useState<SelfFile[]>([])
   const [activeFile, setActiveFile] = useState('')
@@ -272,7 +381,21 @@ function BeingLogModal({ slug, name, mode, onClose }: {
     }
   }, [slug])
 
-  const load = mode === 'journal' ? loadJournal : mode === 'ticks' ? loadTicks : loadSelf
+  const loadMind = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setGraph(await getBeingGraph(slug))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed to load')
+    } finally {
+      setLoading(false)
+    }
+  }, [slug])
+
+  const load = mode === 'journal' ? loadJournal
+    : mode === 'ticks' ? loadTicks
+      : mode === 'mind' ? loadMind : loadSelf
 
   useEffect(() => { void load() }, [load])
 
@@ -288,10 +411,10 @@ function BeingLogModal({ slug, name, mode, onClose }: {
     setDate(d.toISOString().slice(0, 10))
   }
 
-  const titles = { journal: 'Journal', ticks: 'Ticks log', self: 'Self files' } as const
+  const titles = { journal: 'Journal', ticks: 'Ticks log', self: 'Self files', mind: 'The Mind' } as const
   const sizeClass = maximized
     ? 'h-[95vh] w-[95vw]'
-    : mode === 'self' ? 'h-[80vh] w-[920px]' : 'w-[820px] max-h-[85vh]'
+    : mode === 'self' || mode === 'mind' ? 'h-[80vh] w-[920px]' : 'w-[820px] max-h-[85vh]'
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70" onClick={onClose}>
@@ -304,6 +427,7 @@ function BeingLogModal({ slug, name, mode, onClose }: {
             {mode === 'journal' && <ScrollText className="h-4 w-4 text-violet-500 dark:text-violet-400" />}
             {mode === 'ticks' && <History className="h-4 w-4 text-violet-500 dark:text-violet-400" />}
             {mode === 'self' && <Files className="h-4 w-4 text-violet-500 dark:text-violet-400" />}
+            {mode === 'mind' && <Network className="h-4 w-4 text-violet-500 dark:text-violet-400" />}
             <h3 className="text-sm font-semibold text-zinc-100">{name} — {titles[mode]}</h3>
             {mode === 'journal' && <span className="text-[11px] text-zinc-500">{date}</span>}
             {mode === 'self' && activeFile && <span className="text-[11px] text-zinc-500">{activeFile}</span>}
@@ -430,11 +554,13 @@ function BeingLogModal({ slug, name, mode, onClose }: {
               </div>
             )
           })()}
-          <div className="flex-1 overflow-auto">
+          <div className={`flex-1 ${mode === 'mind' ? 'overflow-hidden' : 'overflow-auto'}`}>
             {loading ? (
               <div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></div>
             ) : error ? (
               <div className="px-6 py-8 text-sm text-red-600 dark:text-red-400">{error}</div>
+            ) : mode === 'mind' ? (
+              graph ? <MindGraph graph={graph} /> : null
             ) : (
               <div className="fd-file-markdown p-6"><Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown></div>
             )}
@@ -717,7 +843,7 @@ function BeingCard({ item, meta, onChanged }: {
 }) {
   const [vitals, setVitals] = useState<BeingVitals | null>(null)
   const [events, setEvents] = useState<BeingEvent[]>([])
-  const [logView, setLogView] = useState<'journal' | 'ticks' | 'self' | null>(null)
+  const [logView, setLogView] = useState<'journal' | 'ticks' | 'self' | 'mind' | null>(null)
   const [busy, setBusy] = useState('')
   const [messaging, setMessaging] = useState(false)
   const [msgText, setMsgText] = useState('')
@@ -907,6 +1033,7 @@ function BeingCard({ item, meta, onChanged }: {
               <IconAction icon={ScrollText} label="Journal" onClick={() => setLogView('journal')} />
               <IconAction icon={History} label="Ticks log" onClick={() => setLogView('ticks')} />
               <IconAction icon={Files} label="Self files — SELF, VALUES, garden, skills…" onClick={() => setLogView('self')} />
+              <IconAction icon={Network} label="The Mind — how her work connects" onClick={() => setLogView('mind')} />
             </div>
             {/* Interact — talk to & steer her */}
             {item.state !== 'dead' && (

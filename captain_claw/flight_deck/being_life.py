@@ -30,7 +30,12 @@ from datetime import datetime, timedelta, timezone
 from captain_claw import vfs
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
-from captain_claw.flight_deck import being_earning, being_selfmod, being_society
+from captain_claw.flight_deck import (
+    being_earning,
+    being_mind,
+    being_selfmod,
+    being_society,
+)
 from captain_claw.flight_deck.being_society import COMMONS_PROJECT
 from captain_claw.flight_deck.beings import BeingError, BeingNotFound, BeingsStore
 from captain_claw.logging import get_logger
@@ -492,7 +497,8 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                         siblings: list[dict] | None = None,
                         letters_left: int | None = None,
                         last_changed: list[str] | None = None,
-                        last_mismatch: bool = False) -> str:
+                        last_mismatch: bool = False,
+                        mind_lines: list[str] | None = None) -> str:
     now = now or _utcnow()
     g = being["genome"]
     attrs = genome_mod.effective_attributes(g)
@@ -599,6 +605,8 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         lines += ["OPTIONAL EARNING FIELDS for your digest — tokens are your "
                   "food, but never claim work you cannot finish:",
                   *("  " + f for f in earning_fields)]
+    if mind_lines is not None:
+        lines += mind_lines
     if last_mismatch:
         lines.append(
             "REALITY CHECK: last tick your journal described writing a file, "
@@ -815,6 +823,18 @@ def parse_digest(text: str | None) -> dict | None:
             "price_tokens": pv_price, "cadence_days": pv_cadence}
     else:
         propose_venture = None
+    links = raw.get("links")
+    if isinstance(links, list):
+        clean_links = []
+        for lk in links[:6]:
+            if isinstance(lk, dict) and lk.get("from") and lk.get("to"):
+                clean_links.append({
+                    "from": str(lk["from"])[:200], "to": str(lk["to"])[:200],
+                    "rel": str(lk.get("rel") or "")[:40],
+                    "why": str(lk.get("why") or "")[:300]})
+        links = clean_links or None
+    else:
+        links = None
     procreate = raw.get("procreate")
     if isinstance(procreate, dict) and procreate.get("case"):
         procreate = {
@@ -845,6 +865,7 @@ def parse_digest(text: str | None) -> dict | None:
         "quest_deliver": quest_deliver,
         "propose_venture": propose_venture,
         "venture_deliver": venture_deliver,
+        "links": links,
     }
 
 
@@ -869,6 +890,7 @@ def fallback_digest(text: str | None, kind: str) -> dict:
         "quest_deliver": None,
         "propose_venture": None,
         "venture_deliver": None,
+        "links": None,
     }
 
 
@@ -1166,12 +1188,17 @@ async def _tick_locked(
                 break
     except Exception:  # noqa: BLE001
         pass
+    try:
+        mind_lines = being_mind.mind_prompt_lines(store, being)
+    except Exception:  # noqa: BLE001
+        mind_lines = None
     prompt = compose_tick_prompt(
         being, kind=kind, now=now,
         spent_today=store.spent_today(bid, now=now), wallet=view,
         percepts=senses, first_of_day=first_of_day,
         siblings=sibs, letters_left=letters_left,
-        last_changed=last_changed, last_mismatch=last_mismatch)
+        last_changed=last_changed, last_mismatch=last_mismatch,
+        mind_lines=mind_lines or None)
     t0 = now
     send = send_fn or _send_via_channel
     try:
@@ -1269,6 +1296,12 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("being earning handling failed", slug=being["slug"],
                         error=str(e))
+    if digest.get("links"):
+        try:
+            being_mind.handle_links_digest(store, being, digest, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("being mind handling failed", slug=being["slug"],
+                        error=str(e))
     if digest.get("self_mod"):
         try:
             being_selfmod.propose(
@@ -1318,6 +1351,10 @@ async def _tick_locked(
                            {"summary": digest["summary"][:200]}, now=now)
     if kind == "dream":
         store.milestone(bid, "first_dream", now=now)
+        try:
+            being_mind.prune_dangling(store, being, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("mind prune failed", slug=being["slug"], error=str(e))
     if digest["act_kind"] == "create" and changed:
         store.milestone(bid, "first_artifact", now=now)
     try:
@@ -1435,6 +1472,18 @@ def report_card(store: BeingsStore, being: dict, days: int = 7,
     if ticks and top / max(1, len(ticks)) > 0.7 and len(ticks) >= 5:
         concerns.append("one act dominates its days (monotony)")
     milestones = [e for e in events if e["kind"] == "milestone"]
+    try:
+        g = being_mind.graph(store, being)
+        mind = {"nodes": len(g["nodes"]), "edges": len(g["edges"]),
+                "density": g["density"],
+                "connected_fraction": g["connected_fraction"]}
+        # A mind of many artifacts with almost no connections is scattering.
+        if len(g["nodes"]) >= 6 and g["connected_fraction"] < 0.3:
+            concerns.append("its work is scattered — few files connect to any "
+                            "other (weave, don't only make)")
+    except Exception:  # noqa: BLE001
+        mind = {"nodes": 0, "edges": 0, "density": 0.0,
+                "connected_fraction": 0.0}
     return {
         "period_days": days,
         "ticks": len(ticks),
@@ -1444,6 +1493,7 @@ def report_card(store: BeingsStore, being: dict, days: int = 7,
         "messages_to_parent": spoke,
         "messages_suppressed": suppressed,
         "rut_score": rut,
+        "mind": mind,
         "concerns": concerns,
         "milestones": [m["data"].get("name") for m in milestones],
         "drives_trail": drives_trail[-30:],

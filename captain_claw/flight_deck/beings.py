@@ -281,6 +281,26 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_parent_msgs
                     ON being_parent_messages(being_id, read_at);
+
+                -- The Mind (plan §2.3.1): explicit, being-DECLARED edges over
+                -- its own artifacts — the deliberate structure that neither
+                -- the journal (temporal) nor embeddings (associative) capture.
+                -- Endpoints are verified to exist before an edge is stored, so
+                -- the graph is a real portrait, never narration. UNIQUE keeps
+                -- a re-declared edge idempotent.
+                CREATE TABLE IF NOT EXISTS being_links (
+                    id        TEXT PRIMARY KEY,
+                    owner_id  TEXT NOT NULL,
+                    being_id  TEXT NOT NULL,
+                    from_path TEXT NOT NULL,
+                    to_path   TEXT NOT NULL,
+                    rel       TEXT NOT NULL,
+                    why       TEXT NOT NULL DEFAULT '',
+                    at        TEXT NOT NULL,
+                    UNIQUE(being_id, from_path, to_path, rel)
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_links
+                    ON being_links(being_id);
                 """
             )
             # Lightweight migrations (columns added after first ship).
@@ -1605,6 +1625,53 @@ class BeingsStore:
                 [(_iso(now), mid) for mid in message_ids],
             )
             self._c().commit()
+
+    # ── The Mind: declared edges over the being's own artifacts ──────
+
+    def add_link(self, owner_id: str, being_id: str, from_path: str,
+                 to_path: str, rel: str, why: str = "",
+                 now: datetime | None = None) -> bool:
+        """Persist one verified edge. Idempotent (UNIQUE). Callers verify the
+        endpoints exist first (being_mind) — the store only conserves the row."""
+        now = now or _utcnow()
+        with self._lock:
+            cur = self._c().execute(
+                "INSERT OR IGNORE INTO being_links"
+                " (id, owner_id, being_id, from_path, to_path, rel, why, at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (uuid.uuid4().hex, owner_id, being_id, from_path, to_path,
+                 rel, why[:300], _iso(now)),
+            )
+            self._c().commit()
+            return cur.rowcount > 0
+
+    def links_for(self, owner_id: str, slug: str) -> list[dict]:
+        b = self.get(owner_id, slug)
+        rows = self._c().execute(
+            "SELECT from_path, to_path, rel, why, at FROM being_links"
+            " WHERE being_id = ? ORDER BY at", (b["id"],),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_links(self, being_id: str, existing_paths: set[str],
+                    now: datetime | None = None) -> list[dict]:
+        """Drop edges whose endpoints no longer exist. Returns the pruned rows
+        so the caller can record honest forgetting."""
+        rows = self._c().execute(
+            "SELECT id, from_path, to_path, rel FROM being_links"
+            " WHERE being_id = ?", (being_id,),
+        ).fetchall()
+        dangling = [dict(r) for r in rows
+                    if r["from_path"] not in existing_paths
+                    or r["to_path"] not in existing_paths]
+        if dangling:
+            with self._lock:
+                self._c().executemany(
+                    "DELETE FROM being_links WHERE id = ?",
+                    [(d["id"],) for d in dangling],
+                )
+                self._c().commit()
+        return dangling
 
     def message_thread(self, owner_id: str, slug: str,
                        limit: int = 200) -> list[dict]:

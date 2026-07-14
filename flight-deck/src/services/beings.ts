@@ -160,6 +160,15 @@ export interface ThreadItem {
 }
 export const getBeingMessages = (slug: string) =>
   fdFetch<{ thread: ThreadItem[] }>(`/beings/${slug}/messages`)
+
+export interface BeingGraph {
+  nodes: { path: string; group: string; degree: number }[]
+  edges: { from: string; to: string; rel: string; why: string }[]
+  density: number
+  connected_fraction: number
+}
+export const getBeingGraph = (slug: string) =>
+  fdFetch<BeingGraph>(`/beings/${slug}/graph`)
 export const getSelfFile = (slug: string, path: string) =>
   fdFetch<{ path: string; text: string }>(`/beings/${slug}/self/file?path=${encodeURIComponent(path)}`)
 export const getLiabilities = () =>

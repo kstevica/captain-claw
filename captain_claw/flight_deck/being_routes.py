@@ -19,6 +19,7 @@ from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
 from captain_claw.flight_deck import being_earning
 from captain_claw.flight_deck import being_life
+from captain_claw.flight_deck import being_mind
 from captain_claw.flight_deck import being_selfmod
 from captain_claw.flight_deck import being_society
 from captain_claw.flight_deck.auth import get_current_user, get_db
@@ -313,6 +314,14 @@ async def message_being(slug: str, body: MessageRequest,
 async def message_thread(slug: str, user: dict = Depends(get_current_user)):
     """The full parent↔being conversation (your messages + its replies)."""
     return {"thread": _run(get_store().message_thread, user["id"], slug)}
+
+
+@router.get("/{slug}/graph")
+async def being_graph(slug: str, user: dict = Depends(get_current_user)):
+    """The Mind (plan §2.3.1): the being's artifacts + the edges it declared
+    between them — nodes, edges, and density/connectedness health signals."""
+    being = _run(get_store().get, user["id"], slug)
+    return being_mind.graph(get_store(), being)
 
 
 class SelfModRejectRequest(BaseModel):
