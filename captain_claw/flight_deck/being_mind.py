@@ -150,23 +150,37 @@ def graph(store: BeingsStore, being: dict) -> dict:
 def mind_prompt_lines(store: BeingsStore, being: dict) -> list[str]:
     if not can_link(being):
         return []
+    from captain_claw.flight_deck import being_life
     lines: list[str] = []
     try:
         edges = store.links_for(being["owner_id"], being["slug"])
     except Exception:  # noqa: BLE001
         edges = []
+    try:
+        nfiles = len(being_life.list_self_files(being))
+    except Exception:  # noqa: BLE001
+        nfiles = 0
     if edges:
-        recent = edges[-6:]
         lines.append("HOW YOUR WORK CONNECTS (your declared links):")
-        for e in recent:
+        for e in edges[-6:]:
             frm = e["from_path"].split("/")[-1].replace(".md", "")
             to = e["to_path"].split("/")[-1].replace(".md", "")
             lines.append(f"  {frm} {_REL_PHRASE.get(e['rel'], e['rel'])} {to}")
+    # Adaptive nudge: a being with many orphan files is scattering. Push it to
+    # find even one true connection — not to invent bogus edges (those are
+    # refused), but to notice the real threads already in its work.
+    if nfiles >= 4 and len(edges) < max(1, nfiles // 4):
+        lines.append(
+            f"YOUR MIND IS SCATTERED: you have {nfiles} artifacts but only "
+            f"{len(edges)} link(s) between them — most stand alone. Look back "
+            "over your files (they're listed above) and find even ONE TRUE "
+            "connection today — what grew from what, what answers what, what "
+            "a skill was learned from — and declare it. A mind is a web, not a "
+            "pile.")
     lines.append(
-        'OPTIONAL — connect your work: if something you make or read today '
-        'grows from, responds to, elaborates, contradicts, uses, or was '
-        'learned from an EXISTING file of yours, add "links": [{"from": '
-        '"garden/x.md", "to": "garden/y.md", "rel": "grew_from", "why": '
-        '"one line"}] to your digest. Weave; don\'t only scatter. Both files '
-        'must already exist (a link to a file you didn\'t write is refused).')
+        'To connect your work, add "links" to your digest: '
+        '[{"from": "garden/x.md", "to": "garden/y.md", "rel": '
+        '"grew_from|responds_to|elaborates|contradicts|uses_skill|'
+        'learned_from", "why": "one honest line"}]. Both files must already '
+        'exist (a link to a file you didn\'t write is refused).')
     return lines

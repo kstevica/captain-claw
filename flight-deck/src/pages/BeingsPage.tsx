@@ -59,6 +59,17 @@ function fmtAt(iso: string): string {
   return iso.length >= 16 ? `${iso.slice(5, 10)} ${iso.slice(11, 16)}` : iso
 }
 
+function fmtRelTime(iso: string): string {
+  const t = new Date(iso).getTime()
+  if (!t) return ''
+  const s = (Date.now() - t) / 1000
+  if (s < 60) return 'now'
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86400) return `${Math.floor(s / 3600)}h`
+  if (s < 86400 * 7) return `${Math.floor(s / 86400)}d`
+  return iso.slice(5, 10) // MM-DD
+}
+
 function summarizeEventData(e: BeingEvent): string {
   const d = e.data as Record<string, unknown>
   switch (e.kind) {
@@ -430,7 +441,12 @@ function BeingLogModal({ slug, name, mode, onClose }: {
             {mode === 'mind' && <Network className="h-4 w-4 text-violet-500 dark:text-violet-400" />}
             <h3 className="text-sm font-semibold text-zinc-100">{name} — {titles[mode]}</h3>
             {mode === 'journal' && <span className="text-[11px] text-zinc-500">{date}</span>}
-            {mode === 'self' && activeFile && <span className="text-[11px] text-zinc-500">{activeFile}</span>}
+            {mode === 'self' && activeFile && (
+              <span className="text-[11px] text-zinc-500">
+                {activeFile}
+                {(() => { const m = files.find((f) => f.path === activeFile)?.mtime; return m ? ` · ${fmtAt(m)}` : '' })()}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-0.5">
             {mode === 'journal' && (
@@ -537,14 +553,15 @@ function BeingLogModal({ slug, name, mode, onClose }: {
                           <button
                             key={f.path}
                             onClick={() => void loadFile(f.path)}
-                            className={`block w-full truncate rounded-md py-1 pl-8 pr-2 text-left text-xs ${
+                            className={`flex w-full items-baseline gap-2 rounded-md py-1 pl-8 pr-2 text-left text-xs ${
                               activeFile === f.path
                                 ? 'bg-violet-500/10 font-medium text-violet-700 dark:bg-violet-500/20 dark:text-violet-200'
                                 : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
                             }`}
-                            title={f.path}
+                            title={`${f.path} · ${f.mtime.slice(0, 16).replace('T', ' ')}`}
                           >
-                            {fileStem(f.path)}
+                            <span className="truncate">{fileStem(f.path)}</span>
+                            <span className="ml-auto shrink-0 text-[9px] tabular-nums text-zinc-500">{fmtRelTime(f.mtime)}</span>
                           </button>
                         ))}
                       </div>

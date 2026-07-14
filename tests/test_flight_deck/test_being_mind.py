@@ -181,10 +181,19 @@ async def test_tick_offers_field_shows_shape_and_routes_declaration(store):
 
     await life.tick(db, store, store.get(OWNER, b["slug"]),
                     now=NOW + timedelta(hours=1), send_fn=send, usage_fn=_usage)
-    assert "OPTIONAL — connect your work" in seen["prompt"]
+    assert 'To connect your work, add "links"' in seen["prompt"]
     assert "HOW YOUR WORK CONNECTS" in seen["prompt"]
     assert "seed grew from poem" in seen["prompt"]
     assert len(store.links_for(OWNER, b["slug"])) == 2
+
+
+def test_prompt_nudges_when_scattered(store):
+    import asyncio
+    b = asyncio.get_event_loop().run_until_complete(_being(store))
+    for i in range(6):
+        _mk(b, f"garden/orphan-{i}.md")
+    lines = mind.mind_prompt_lines(store, b)
+    assert any("YOUR MIND IS SCATTERED" in ln for ln in lines)
 
 
 async def test_report_card_flags_scattered_work(store):
