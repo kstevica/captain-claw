@@ -75,7 +75,7 @@ function appendAttachmentRefs(text: string, uploadedFiles: Attachment[]): string
       : `[Attached file: ${a.name} → ${a.uploadedPath}]`,
   ).join('\n')
   const hint = hasImage
-    ? '\n(To view the image(s), call the image_vision tool with the path. Do NOT use read on an image.)'
+    ? '\n(To view/understand the image(s), call image_vision (to describe or answer questions) or image_ocr (to read text) with the path. Do NOT use read on an image, and do NOT use the "vision" tool for this — "vision" does pixel ops only (measure/diff/detect regions) and cannot read text or say what an image shows.)'
     : ''
   return text ? `${text}\n\n${fileRefs}${hint}` : `${fileRefs}${hint}`
 }

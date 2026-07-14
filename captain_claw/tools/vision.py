@@ -347,8 +347,11 @@ class VisionTool(Tool):
     name = "vision"
     timeout_seconds = 120.0
     description = (
-        "Local, deterministic computer vision (OpenCV) — the cheap pixel-exact layer "
-        "under image_vision/image_ocr. Spends NO tokens. Operations (op=...): "
+        "Local, deterministic OpenCV pixel/geometry operations. Spends NO tokens. "
+        "NOT for looking at, reading, or understanding a picture — to DESCRIBE an image "
+        "or answer questions about what it shows use image_vision; to READ the text in "
+        "an image use image_ocr. This tool cannot read text or say what an image depicts; "
+        "it only measures and manipulates pixels. Operations (op=...): "
         "'diff' (SSIM + changed-region boxes between two images), "
         "'dedupe' (group near-duplicate images by perceptual hash), "
         "'measure' (size, dominant colors, blur/sharpness, brightness), "
@@ -357,7 +360,8 @@ class VisionTool(Tool):
         "'locate' (find a small template image inside a larger one → coordinates), "
         "'annotate' (draw boxes/labels on an image), "
         "'keyframes' (pick scene-change frames of a video), "
-        "'detect' (find faces / text-regions / objects via small local ONNX models). "
+        "'detect' (find WHERE faces/text/objects are → boxes; for text this gives regions, "
+        "NOT the words — use image_ocr to read them). "
         "Paths may be real files or vfs: paths; derived images are written to the VFS/saved."
     )
     parameters = {
