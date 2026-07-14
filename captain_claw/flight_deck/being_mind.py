@@ -39,6 +39,12 @@ _REL_PHRASE = {
 }
 MAX_LINKS_PER_TICK = 6
 
+# Curation (§2.3.2). The always-on tick prompt shows self/* plus this many of
+# the most-recently-touched artifacts; older ones become a count, greppable and
+# consolidate-able but not dumped into every heartbeat.
+WORKING_SET = 12
+MAX_CONSOLIDATE_SOURCES = 12
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -147,7 +153,8 @@ def graph(store: BeingsStore, being: dict) -> dict:
 
 # ── Prompt: offer the field + show the current shape (nudge to weave) ────
 
-def mind_prompt_lines(store: BeingsStore, being: dict) -> list[str]:
+def mind_prompt_lines(store: BeingsStore, being: dict,
+                      kind: str = "wake") -> list[str]:
     if not can_link(being):
         return []
     from captain_claw.flight_deck import being_life
@@ -183,4 +190,181 @@ def mind_prompt_lines(store: BeingsStore, being: dict) -> list[str]:
         '"grew_from|responds_to|elaborates|contradicts|uses_skill|'
         'learned_from", "why": "one honest line"}]. Both files must already '
         'exist (a link to a file you didn\'t write is refused).')
+    lines += _curation_offer(being, kind)
     return lines
+
+
+# ── Curation (§2.3.2): working set, index, consolidation ─────────────────
+
+def _read_index(being: dict) -> str | None:
+    """The being's own table of contents, if it keeps one."""
+    from captain_claw.flight_deck import being_life
+    try:
+        return being_life.read_self_file(being, "garden/INDEX.md")
+    except Exception:  # noqa: BLE001 — no index yet is fine
+        return None
+
+
+def _group_names(files: list[dict]) -> dict[str, list[str]]:
+    by: dict[str, list[str]] = {}
+    for f in files:
+        top, _, name = f["path"].partition("/")
+        by.setdefault(top, []).append(name or f["path"])
+    return by
+
+
+def working_manifest_lines(being: dict) -> list[str]:
+    """The bounded, recency-ranked view of the home for the tick prompt — the
+    replacement for the old flat every-filename dump (§2.3.2). Small corpora
+    are still listed in full (the false-memory antidote is unchanged for young
+    beings); once garden/skills exceeds WORKING_SET, only the most-recent are
+    shown and the rest become an honest count (real, greppable, foldable)."""
+    from captain_claw.flight_deck import being_life
+    header = ("WHAT IS REALLY IN YOUR HOME RIGHT NOW (ground truth from disk — "
+              "NOT your journal):")
+    try:
+        files = being_life.list_self_files(being)
+    except Exception:  # noqa: BLE001
+        return []
+    if not files:
+        return [header, "  (your home is empty — nothing is written yet.)"]
+    self_files = [f for f in files if f["path"].startswith("self/")]
+    rest = [f for f in files if not f["path"].startswith("self/")]
+    lines = [header]
+    for top, names in _group_names(self_files).items():
+        lines.append(f"  {top}/: " + ", ".join(names))
+    small = len(rest) <= WORKING_SET
+    if small:
+        by = _group_names(rest)
+        for top in sorted(by):
+            lines.append(f"  {top}/: " + ", ".join(sorted(by[top])))
+        if not rest:
+            lines.append("  garden/: (empty)")
+    else:
+        recent = sorted(rest, key=lambda f: f["mtime"], reverse=True)[:WORKING_SET]
+        lines.append(
+            f"  your {WORKING_SET} most-recently-touched artifacts (of "
+            f"{len(rest)} — the {len(rest) - WORKING_SET} older ones are REAL "
+            "and still yours, just not listed here; grep to recall one, or fold "
+            "several at dream time):")
+        lines += [f"    {f['path']}" for f in recent]
+    idx = _read_index(being)
+    if idx and idx.strip():
+        lines.append("  YOUR OWN MAP (garden/INDEX.md — keep it honest):")
+        lines += ["    " + ln for ln in idx.strip().splitlines()[:15]
+                  if ln.strip()]
+    if small:
+        lines.append(
+            "If a file is NOT listed here it does NOT exist — your journal may "
+            "say you wrote it, but you did not. Write it for real with your "
+            "tools this tick to make it appear.")
+    else:
+        lines.append(
+            "What you make or change THIS tick appears here next time. A file "
+            "you remember but don't see is either archived (grep to recall) or "
+            "was never written — the record beside your journal shows which.")
+    return lines
+
+
+def _curation_offer(being: dict, kind: str) -> list[str]:
+    """Offer consolidation — at dream (sleep consolidates), and on any wake once
+    the pile is large enough that folding threads is real curation, not busywork."""
+    from captain_claw.flight_deck import being_life
+    try:
+        rest = [f for f in being_life.list_self_files(being)
+                if not f["path"].startswith("self/")]
+    except Exception:  # noqa: BLE001
+        rest = []
+    if len(rest) < 2:
+        return []
+    if kind != "dream" and len(rest) <= WORKING_SET:
+        return []
+    return [
+        "CURATION — your work is growing; a mind is tended, not hoarded. If two "
+        "or more of your artifacts truly belong to ONE thread, you may fold "
+        "them into a single distilled file: WRITE that new file for real this "
+        "tick, then declare the fold. The originals move to archive/ — out of "
+        "your active mind, never destroyed, still on disk. Add to your digest: "
+        '"consolidate": {"into": "garden/<distilled>.md", "sources": '
+        '["garden/a.md", "garden/b.md"], "why": "one honest line"}. The '
+        "distilled file must be one you actually wrote this tick, or the fold "
+        "is refused. Keep garden/INDEX.md as your own short map — update it "
+        "when you consolidate."
+    ]
+
+
+def _archive_sources(being: dict, sources: list[str]) -> list[str]:
+    """Move consolidated sources into archive/ (honest forgetting: out of the
+    active mind, still on disk). The next journal commit's `git add -A` records
+    the move; list_self_files excludes archive/ so they leave the graph."""
+    from captain_claw.flight_deck import being_life
+    archived: list[str] = []
+    for rel in sources:
+        src = being_life._home_path(being, rel)
+        if not src.exists():
+            continue
+        dst = being_life._home_path(being, "archive/" + rel)
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.replace(dst)
+            archived.append(rel)
+        except OSError as e:  # noqa: PERF203
+            log.warning("archive move failed", slug=being["slug"], path=rel,
+                        error=str(e))
+    return archived
+
+
+def handle_consolidate_digest(store: BeingsStore, being: dict, digest: dict,
+                              changed: list[str] | None,
+                              now: datetime | None = None) -> list[str]:
+    """Fold fragments into one distilled artifact, then archive the sources.
+    Verified like every act: the distilled `into` must have been really written
+    THIS tick (present in the git diff `changed`) and each source must exist,
+    else refused to a ``consolidate_unverified`` event. Never raises. Returns
+    the archived source paths."""
+    now = now or _utcnow()
+    con = digest.get("consolidate")
+    if not isinstance(con, dict):
+        return []
+    into = str(con.get("into") or "").strip().lstrip("/")
+    raw_sources = con.get("sources")
+    why = str(con.get("why") or "").strip()
+    if not into or not isinstance(raw_sources, list):
+        return []
+    # Sources: never journal/, archive/, or the spine (self/), never `into`.
+    sources = []
+    for s in raw_sources[:MAX_CONSOLIDATE_SOURCES]:
+        s = str(s or "").strip().lstrip("/")
+        if (s and s != into and s.endswith(".md")
+                and not s.startswith(("journal/", "archive/", "self/"))):
+            sources.append(s)
+    if not sources:
+        return []
+    try:
+        paths = _existing_paths(being)
+    except Exception as e:  # noqa: BLE001
+        log.warning("consolidate paths failed", slug=being["slug"], error=str(e))
+        return []
+    # The distilled file must be real AND freshly written this tick (no fold
+    # without a genuine synthesis — same contract as act_unverified).
+    wrote_into = into in (set(changed) if changed is not None else {into})
+    if into not in paths or not wrote_into:
+        store.record_event(
+            being["id"], "consolidate_unverified",
+            {"into": into,
+             "reason": "distilled file was not written this tick"}, now=now)
+        return []
+    real = [s for s in sources if s in paths]
+    if not real:
+        store.record_event(
+            being["id"], "consolidate_unverified",
+            {"into": into, "reason": "no real source files"}, now=now)
+        return []
+    archived = _archive_sources(being, real)
+    if archived:
+        store.record_event(being["id"], "consolidated",
+                           {"into": into, "sources": archived,
+                            "count": len(archived), "why": why[:160]}, now=now)
+        store.milestone(being["id"], "first_consolidation",
+                        {"into": into}, now=now)
+    return archived

@@ -131,15 +131,16 @@ def home_root(being: dict):
 
 def list_self_files(being: dict) -> list[dict]:
     """Every markdown file in the being's home — self/, garden/, skills/,
-    and anything else it grows over time — except journal/, which has its
-    own dated viewer. Core selfhood files sort first."""
+    and anything else it grows over time — except journal/ (its own dated
+    viewer) and archive/ (consolidated-away work: still on disk, out of the
+    active mind, §2.3.2). Core selfhood files sort first."""
     root = home_root(being)
     if not root.exists():
         return []
     out = []
     for p in sorted(root.rglob("*.md")):
         rel = p.relative_to(root).as_posix()
-        if rel.startswith("journal/"):
+        if rel.startswith("journal/") or rel.startswith("archive/"):
             continue
         try:
             stat = p.stat()
@@ -534,22 +535,12 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         f"YOUR HOME is vfs:{proj}/ — self/, journal/, garden/, skills/. "
         f"All writes belong inside your home.",
     ]
+    # The bounded, recency-ranked working set (§2.3.2) — stays cheap as the
+    # corpus grows past hundreds of files; small corpora still list in full.
     try:
-        manifest = home_manifest(being)
+        lines += being_mind.working_manifest_lines(being)
     except Exception:  # noqa: BLE001
-        manifest = {}
-    if manifest:
-        lines.append("WHAT IS REALLY IN YOUR HOME RIGHT NOW (ground truth from "
-                     "disk — NOT your journal):")
-        for sub in ("self", "garden", "skills"):
-            files = manifest.get(sub)
-            if files is not None:
-                lines.append(f"  {sub}/: "
-                             + (", ".join(files) if files else "(empty)"))
-        lines.append("If a file is NOT in this list it does NOT exist — your "
-                     "journal may say you wrote it, but you did not. To make or "
-                     "change something, use your write tool THIS tick; then it "
-                     "will appear here next time.")
+        pass
     persona = (being.get("persona") or "").strip()
     if persona:
         lines += ["", "YOUR PERSONA — you wrote this; it passed the gate and "
@@ -835,6 +826,17 @@ def parse_digest(text: str | None) -> dict | None:
         links = clean_links or None
     else:
         links = None
+    consolidate = raw.get("consolidate")
+    if (isinstance(consolidate, dict) and consolidate.get("into")
+            and isinstance(consolidate.get("sources"), list)):
+        srcs = [str(s)[:200] for s in consolidate["sources"][:12]
+                if s and str(s).strip()]
+        consolidate = ({"into": str(consolidate["into"])[:200],
+                        "sources": srcs,
+                        "why": str(consolidate.get("why") or "")[:300]}
+                       if srcs else None)
+    else:
+        consolidate = None
     procreate = raw.get("procreate")
     if isinstance(procreate, dict) and procreate.get("case"):
         procreate = {
@@ -866,6 +868,7 @@ def parse_digest(text: str | None) -> dict | None:
         "propose_venture": propose_venture,
         "venture_deliver": venture_deliver,
         "links": links,
+        "consolidate": consolidate,
     }
 
 
@@ -891,6 +894,7 @@ def fallback_digest(text: str | None, kind: str) -> dict:
         "propose_venture": None,
         "venture_deliver": None,
         "links": None,
+        "consolidate": None,
     }
 
 
@@ -1189,7 +1193,7 @@ async def _tick_locked(
     except Exception:  # noqa: BLE001
         pass
     try:
-        mind_lines = being_mind.mind_prompt_lines(store, being)
+        mind_lines = being_mind.mind_prompt_lines(store, being, kind=kind)
     except Exception:  # noqa: BLE001
         mind_lines = None
     prompt = compose_tick_prompt(
@@ -1301,6 +1305,15 @@ async def _tick_locked(
             being_mind.handle_links_digest(store, being, digest, now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("being mind handling failed", slug=being["slug"],
+                        error=str(e))
+    if digest.get("consolidate"):
+        try:
+            # `changed` is the git diff computed above — the distilled file
+            # must be in it, else the fold is refused (§2.3.2 anti-theater).
+            being_mind.handle_consolidate_digest(store, being, digest, changed,
+                                                 now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("being consolidate handling failed", slug=being["slug"],
                         error=str(e))
     if digest.get("self_mod"):
         try:
@@ -1472,18 +1485,20 @@ def report_card(store: BeingsStore, being: dict, days: int = 7,
     if ticks and top / max(1, len(ticks)) > 0.7 and len(ticks) >= 5:
         concerns.append("one act dominates its days (monotony)")
     milestones = [e for e in events if e["kind"] == "milestone"]
+    consolidations = sum(1 for e in events if e["kind"] == "consolidated")
     try:
         g = being_mind.graph(store, being)
         mind = {"nodes": len(g["nodes"]), "edges": len(g["edges"]),
                 "density": g["density"],
-                "connected_fraction": g["connected_fraction"]}
+                "connected_fraction": g["connected_fraction"],
+                "consolidations": consolidations}
         # A mind of many artifacts with almost no connections is scattering.
         if len(g["nodes"]) >= 6 and g["connected_fraction"] < 0.3:
             concerns.append("its work is scattered — few files connect to any "
                             "other (weave, don't only make)")
     except Exception:  # noqa: BLE001
         mind = {"nodes": 0, "edges": 0, "density": 0.0,
-                "connected_fraction": 0.0}
+                "connected_fraction": 0.0, "consolidations": consolidations}
     return {
         "period_days": days,
         "ticks": len(ticks),

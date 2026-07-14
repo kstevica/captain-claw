@@ -149,6 +149,11 @@ function summarizeEventData(e: BeingEvent): string {
     case 'act_unverified': return `claimed ${d.claimed} but made no artifact — logged as reflection`
     case 'narration_mismatch': return `journal claimed a file write, but nothing changed on disk — “${d.summary}”`
     case 'drive_unearned': return `claimed to satisfy its ${d.drive} drive without making anything real`
+    case 'edge_declared': return `linked ${d.from} → ${d.to} (${d.rel})${d.why ? ` — ${d.why}` : ''}`
+    case 'edge_unverified': return `link ${d.from} → ${d.to} refused — ${d.reason}`
+    case 'edges_pruned': return `pruned ${d.count} dangling link(s) at dream`
+    case 'consolidated': return `consolidated ${Number(d.count) || 0} file(s) into ${d.into}${d.why ? ` — ${d.why}` : ''} (originals archived)`
+    case 'consolidate_unverified': return `consolidation refused — ${d.reason}`
     case 'woke_from_torpor': return 'revived by allowance'
     case 'collapsed_exhausted': return `overspent (${fmtTokens(Number(d.weighted) || 0)})`
     case 'resting_at_cap': return 'daily burn cap reached'

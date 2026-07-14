@@ -204,3 +204,133 @@ async def test_report_card_flags_scattered_work(store):
     assert card["mind"]["nodes"] >= 7
     assert card["mind"]["edges"] == 0
     assert any("scattered" in c for c in card["concerns"])
+
+
+# ── Curation §2.3.2: working set, index, consolidation ───────────────────
+
+def _run(coro):
+    import asyncio
+    return asyncio.get_event_loop().run_until_complete(coro)
+
+
+def test_working_manifest_small_lists_all_with_antidote(store):
+    b = _run(_being(store))
+    _mk(b, "garden/poem-question.md")
+    lines = mind.working_manifest_lines(b)
+    text = "\n".join(lines)
+    assert "WHAT IS REALLY IN YOUR HOME RIGHT NOW" in text
+    assert "poem-question.md" in text
+    assert "it does NOT exist" in text        # antidote intact for small corpora
+
+
+def test_working_manifest_large_is_bounded(store):
+    b = _run(_being(store))
+    for i in range(20):                        # well past WORKING_SET (12)
+        _mk(b, f"garden/frag-{i:02d}.md")
+    lines = mind.working_manifest_lines(b)
+    text = "\n".join(lines)
+    # only the most-recent WORKING_SET are enumerated, the rest are a count
+    shown = [ln for ln in lines if ln.strip().startswith("garden/frag-")]
+    assert len(shown) == mind.WORKING_SET
+    assert "older ones are REAL" in text
+    assert "it does NOT exist" not in text     # can't claim exhaustive at scale
+
+
+def test_working_manifest_surfaces_index(store):
+    b = _run(_being(store))
+    _mk(b, "garden/a.md")
+    life._home_path(b, "garden/INDEX.md").write_text(
+        "# Map\n- a.md: the first thing\n", encoding="utf-8")
+    lines = mind.working_manifest_lines(b)
+    text = "\n".join(lines)
+    assert "YOUR OWN MAP" in text
+    assert "the first thing" in text
+
+
+def test_consolidate_folds_archives_and_prunes_graph(store):
+    b = _run(_being(store))
+    _mk(b, "garden/a.md")
+    _mk(b, "garden/b.md")
+    _mk(b, "garden/distilled.md")
+    mind.handle_links_digest(store, b, {"links": [
+        {"from": "garden/a.md", "to": "garden/b.md", "rel": "grew_from"}]},
+        now=NOW)
+    digest = {"consolidate": {"into": "garden/distilled.md",
+                              "sources": ["garden/a.md", "garden/b.md"],
+                              "why": "one thread"}}
+    archived = mind.handle_consolidate_digest(
+        store, b, digest, changed=["garden/distilled.md"], now=NOW)
+    assert set(archived) == {"garden/a.md", "garden/b.md"}
+    files = {f["path"] for f in life.list_self_files(b)}
+    assert "garden/distilled.md" in files
+    assert "garden/a.md" not in files and "garden/b.md" not in files
+    assert life._home_path(b, "archive/garden/a.md").exists()   # not destroyed
+    ev = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "consolidated" in ev
+    assert "first_consolidation" in [
+        m["data"].get("name") for m in store.milestones(OWNER, b["slug"])]
+    assert mind.graph(store, b)["edges"] == []   # edge to archived files gone
+
+
+def test_consolidate_refused_when_distilled_not_written_this_tick(store):
+    b = _run(_being(store))
+    _mk(b, "garden/a.md")
+    _mk(b, "garden/b.md")
+    _mk(b, "garden/into.md")                    # exists, but NOT written this tick
+    digest = {"consolidate": {"into": "garden/into.md",
+                              "sources": ["garden/a.md", "garden/b.md"]}}
+    archived = mind.handle_consolidate_digest(
+        store, b, digest, changed=[], now=NOW)   # nothing written this tick
+    assert archived == []
+    files = {f["path"] for f in life.list_self_files(b)}
+    assert "garden/a.md" in files and "garden/b.md" in files   # untouched
+    assert "consolidate_unverified" in [
+        e["kind"] for e in store.events(OWNER, b["slug"])]
+
+
+def test_consolidate_refused_with_no_real_sources(store):
+    b = _run(_being(store))
+    _mk(b, "garden/into.md")
+    digest = {"consolidate": {"into": "garden/into.md",
+                              "sources": ["garden/ghost.md"]}}
+    archived = mind.handle_consolidate_digest(
+        store, b, digest, changed=["garden/into.md"], now=NOW)
+    assert archived == []
+    assert "consolidate_unverified" in [
+        e["kind"] for e in store.events(OWNER, b["slug"])]
+
+
+def test_consolidate_never_touches_the_spine(store):
+    b = _run(_being(store))
+    _mk(b, "garden/distilled.md")
+    # a being tries to fold its core selfhood file away — must be ignored
+    digest = {"consolidate": {"into": "garden/distilled.md",
+                              "sources": ["self/VALUES.md"]}}
+    archived = mind.handle_consolidate_digest(
+        store, b, digest, changed=["garden/distilled.md"], now=NOW)
+    assert archived == []
+    files = {f["path"] for f in life.list_self_files(b)}
+    assert "self/VALUES.md" in files            # spine untouched
+
+
+async def test_tick_consolidates_when_distilled_is_really_written(store):
+    db = FakeDB()
+    b = await _being(store)
+    _mk(b, "garden/frag-1.md")
+    _mk(b, "garden/frag-2.md")
+
+    async def send(being, prompt):
+        # the being writes the distilled file for real THIS tick
+        life._home_path(being, "garden/listening.md").write_text(
+            "# Listening\n", encoding="utf-8")
+        return _reply(act_kind="create", consolidate={
+            "into": "garden/listening.md",
+            "sources": ["garden/frag-1.md", "garden/frag-2.md"],
+            "why": "one thread"})
+
+    await life.tick(db, store, store.get(OWNER, b["slug"]),
+                    now=NOW + timedelta(hours=1), send_fn=send, usage_fn=_usage)
+    files = {f["path"] for f in life.list_self_files(store.get(OWNER, b["slug"]))}
+    assert "garden/listening.md" in files
+    assert "garden/frag-1.md" not in files and "garden/frag-2.md" not in files
+    assert "consolidated" in [e["kind"] for e in store.events(OWNER, b["slug"])]
