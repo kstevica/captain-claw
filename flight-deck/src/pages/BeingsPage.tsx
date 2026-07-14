@@ -109,6 +109,7 @@ function summarizeEventData(e: BeingEvent): string {
     case 'body': return `spawned on port ${d.port} (${d.tier})`
     case 'body_rebound': return `followed its body to port ${d.port}${d.was ? ` (was ${d.was})` : ''}`
     case 'body_unreachable': return `body not answering on port ${d.port} — restarting it`
+    case 'body_respawned': return `body back up on port ${d.port} — resuming`
     case 'stage': return `${d.from} → ${d.to}`
     case 'state': return `${d.from} → ${d.to}`
     case 'spoke_to_parent': return String(d.preview ?? '')

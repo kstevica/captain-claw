@@ -678,6 +678,7 @@ async def test_tick_restarts_unreachable_body(store, monkeypatch):
         return False
 
     monkeypatch.setattr(life, "_port_reachable", _dead)
+    monkeypatch.setattr(life, "_BODY_SPAWN_POLL_SECONDS", 0)   # don't sleep in test
     calls = {"spawn": 0, "stop": 0}
 
     async def _fake_spawn(db_, store_, being_):
@@ -688,7 +689,7 @@ async def test_tick_restarts_unreachable_body(store, monkeypatch):
     monkeypatch.setattr(life, "_stop_body",
                         lambda being: calls.__setitem__("stop", calls["stop"] + 1))
     out = await life.tick(db, store, b, now=NOW)
-    assert out["outcome"] == "body_unreachable"
+    assert out["outcome"] == "body_unreachable"      # body never came up
     assert calls["stop"] == 1 and calls["spawn"] == 1   # kicked the body
     assert "body_unreachable" in [e["kind"] for e in store.events(OWNER, b["slug"])]
     fresh = store.get(OWNER, b["slug"])
@@ -709,6 +710,7 @@ async def test_tick_regenerates_body_when_registry_entry_removed(store, monkeypa
 
     monkeypatch.setattr(
         "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token", _gone)
+    monkeypatch.setattr(life, "_BODY_SPAWN_POLL_SECONDS", 0)
     calls = {"spawn": 0}
 
     async def _fake_spawn(db_, store_, being_):
@@ -719,10 +721,57 @@ async def test_tick_regenerates_body_when_registry_entry_removed(store, monkeypa
     monkeypatch.setattr(life, "_stop_body", lambda being: None)
     out = await life.tick(db, store, b, now=NOW)
     assert calls["spawn"] == 1                        # it rebuilt its body
-    assert out["outcome"] == "body_unreachable"
+    assert out["outcome"] == "body_unreachable"       # (still binding this tick)
     assert "body_unreachable" in [e["kind"] for e in store.events(OWNER, b["slug"])]
     fresh = store.get(OWNER, b["slug"])
     assert fresh["next_wake_at"].startswith("2026-07-12T12:05")   # retry in 5 min
+
+
+async def test_tick_regenerates_then_thinks_same_tick(store, monkeypatch):
+    """The poke fix: after recreating a missing body, WAIT for it to bind and
+    actually think in the SAME tick — not bounce to a later heartbeat."""
+    db = FakeDB()
+    b = _born(store, port=24096)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+    state = {"up": False}
+
+    def _resolve(slug):                              # no body until spawned
+        if not state["up"]:
+            raise ValueError("no entry")
+        return (24096, "tok")
+
+    async def _spawn(db_, store_, being_):           # spawning brings it up
+        state["up"] = True
+        store_.set_agent(being_["id"], being_["slug"], 24096, "tok")
+        return {"port": 24096}
+
+    async def _reach(host, port, timeout=1.0):
+        return state["up"]
+
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token", _resolve)
+    monkeypatch.setattr(life, "spawn_body", _spawn)
+    monkeypatch.setattr(life, "_stop_body", lambda being: None)
+    monkeypatch.setattr(life, "_port_reachable", _reach)
+    monkeypatch.setattr(life, "_BODY_SPAWN_POLL_SECONDS", 0)
+    thought = {"n": 0}
+
+    async def _send(being, prompt):
+        thought["n"] += 1
+        return _digest_reply()
+
+    async def _usage(being, since):
+        return {"prompt_tokens": 10, "completion_tokens": 10,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+
+    monkeypatch.setattr(life, "_send_via_channel", _send)
+    monkeypatch.setattr(life, "_usage_since", _usage)
+    out = await life.tick(db, store, b, now=NOW)
+    assert thought["n"] == 1                          # it THOUGHT this tick
+    assert out["outcome"] == "ticked"
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "body_respawned" in kinds and "tick" in kinds
 
 
 async def test_never_bodied_being_does_not_spawn_in_tick(store, monkeypatch):

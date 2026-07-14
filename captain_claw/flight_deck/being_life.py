@@ -44,6 +44,11 @@ log = get_logger(__name__)
 
 TICK_TIMEOUT_SECONDS = 300.0
 DAILY_ATTENTION_CREDITS = 3
+# When a being regenerates its body mid-tick, wait up to TRIES×SECONDS for it to
+# bind so the SAME tick can think (spawn → boot → bind → maybe drift+announce),
+# rather than bouncing the poke to a later heartbeat.
+_BODY_SPAWN_POLL_TRIES = 20
+_BODY_SPAWN_POLL_SECONDS = 1.5
 DRIVE_DECAY_PER_HOUR = 0.02
 DRIVE_SERVED_BUMP = 0.25
 
@@ -1223,11 +1228,22 @@ async def _tick_locked(
             except Exception as e:  # noqa: BLE001
                 store.record_event(bid, "spawn_failed", {"error": str(e)},
                                    now=now)
-            being = store.get(owner, being["slug"])
-            live_port = _resolve_live_port(store, being)
-            being = store.get(owner, being["slug"])
-            reachable = (live_port is not None
-                         and await _port_reachable("127.0.0.1", live_port))
+            # WAIT for the fresh body to actually bind so THIS tick can think —
+            # recreating a body then bouncing to a later heartbeat wastes the
+            # poke. The body boots, may drift + re-announce, so re-resolve each
+            # probe to follow its real port.
+            for _ in range(_BODY_SPAWN_POLL_TRIES):
+                being = store.get(owner, being["slug"])
+                live_port = _resolve_live_port(store, being)
+                being = store.get(owner, being["slug"])
+                if live_port is not None and await _port_reachable(
+                        "127.0.0.1", live_port):
+                    reachable = True
+                    break
+                await asyncio.sleep(_BODY_SPAWN_POLL_SECONDS)
+            if reachable:
+                store.record_event(bid, "body_respawned", {"port": live_port},
+                                   now=now)
         if not reachable:
             # A freshly-restarted body may still be binding (reschedule soon to
             # reach it); a being that never had a body waits the normal beat.
