@@ -1091,6 +1091,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   const [days, setDays] = useState(7)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
+  const [tab, setTab] = useState<'report' | 'rules' | 'diet' | 'growth'>('report')
   const [ruleText, setRuleText] = useState('')
   const [dietAllow, setDietAllow] = useState('')
   const [dietDeny, setDietDeny] = useState('')
@@ -1129,6 +1130,9 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
   const stages = ['infant', 'child', 'adolescent', 'adult']
   const nextStage = v ? stages[stages.indexOf(v.stage) + 1] : undefined
+  const ruleCount = ruleText.split('\n').map((s) => s.trim()).filter(Boolean).length
+  const allowChips = dietAllow.split(',').map((s) => s.trim()).filter(Boolean)
+  const denyChips = dietDeny.split(',').map((s) => s.trim()).filter(Boolean)
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
@@ -1150,11 +1154,11 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
         ) : !v ? (
           <div className="py-12 text-center text-xs text-red-500 dark:text-red-400">Couldn't load {name}.</div>
         ) : (
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+          <div className="flex min-h-0 flex-1 flex-col">
 
-            {/* Awaiting your decision — rites that need the parent NOW */}
+            {/* Awaiting your decision — rites that need the parent NOW, pinned above the tabs */}
             {(v.pending_self_mod || v.pending_procreation) && (
-              <div className="space-y-2 rounded-lg border border-violet-500/30 bg-violet-500/[0.05] p-3">
+              <div className="shrink-0 space-y-2 border-b border-violet-500/20 bg-violet-500/[0.05] p-3">
                 <div className="text-[10px] font-semibold uppercase tracking-wider text-violet-600 dark:text-violet-300">Awaiting your decision</div>
                 {v.pending_self_mod && (
                   <div>
@@ -1188,10 +1192,24 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
               </div>
             )}
 
-            {/* Report card */}
+            {/* Tabs */}
+            <div className="flex shrink-0 gap-1 border-b border-zinc-800 px-3">
+              {([['report', 'Report'], ['rules', 'Rules'], ['diet', 'Diet'], ['growth', 'Growth']] as const).map(([k, lbl]) => (
+                <button key={k} onClick={() => setTab(k)}
+                  className={`relative px-3 py-2 text-xs font-medium transition-colors ${tab === k ? 'text-violet-600 dark:text-violet-300' : 'text-zinc-500 hover:text-zinc-300'}`}>
+                  {lbl}
+                  {tab === k && <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-violet-500" />}
+                </button>
+              ))}
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+
+            {/* Report tab */}
+            {tab === 'report' && (
             <div>
               <div className="mb-1.5 flex items-center gap-2">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Report card</span>
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">last {days} days</span>
                 <div className="flex overflow-hidden rounded border border-zinc-700 text-[10px]">
                   {[7, 30].map((d) => (
                     <button key={d} onClick={() => setDays(d)}
@@ -1246,36 +1264,62 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
               )}
             </div>
 
-            {/* Guidance: house rules + media diet */}
-            <div className="grid gap-3 md:grid-cols-2">
-              <div>
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">House rules</div>
-                <p className="mb-1.5 text-[10px] text-zinc-600">One per line — she rewrites them into her VALUES in her own words next tick.</p>
-                <textarea value={ruleText} onChange={(e) => setRuleText(e.target.value)} rows={4}
-                  placeholder="Be gentle with your siblings.&#10;Cite what you read." aria-label="House rules"
-                  className="w-full resize-none rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+            )}
+
+            {/* Rules tab */}
+            {tab === 'rules' && (
+            <div className="mx-auto max-w-lg space-y-2">
+              <div className="text-xs font-medium text-zinc-200">House rules</div>
+              <p className="text-[11px] leading-relaxed text-zinc-500">Short principles, one per line. Each tick she rewrites them into her own <span className="text-zinc-400">self/VALUES.md</span> in her own words — they shape who she becomes, not a hard filter.</p>
+              <textarea value={ruleText} onChange={(e) => setRuleText(e.target.value)} rows={9}
+                placeholder={"Be gentle with your siblings.\nCite what you read.\nFinish what you start."} aria-label="House rules"
+                className="w-full resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-zinc-600">{ruleCount} rule{ruleCount === 1 ? '' : 's'}</span>
                 <button onClick={() => run('rules', () => setHouseRules(slug, ruleText.split('\n')))} disabled={busy === 'rules'}
-                  className="mt-1.5 flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
+                  className="flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
                   {busy === 'rules' && <Loader2 className="h-3 w-3 animate-spin" />} Save rules
                 </button>
               </div>
-              <div>
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Media diet</div>
-                <p className="mb-1.5 text-[10px] text-zinc-600">Comma-separated domains. Allow empty = the open web.</p>
-                <input value={dietAllow} onChange={(e) => setDietAllow(e.target.value)} placeholder="allow: wikipedia.org, arxiv.org" aria-label="Allowed domains"
-                  className="mb-1.5 w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
-                <input value={dietDeny} onChange={(e) => setDietDeny(e.target.value)} placeholder="deny: reddit.com, x.com" aria-label="Denied domains"
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
-                <button onClick={() => run('diet', () => setMediaDiet(slug, dietAllow.split(',').map((s) => s.trim()).filter(Boolean), dietDeny.split(',').map((s) => s.trim()).filter(Boolean)))} disabled={busy === 'diet'}
-                  className="mt-1.5 flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">
-                  {busy === 'diet' && <Loader2 className="h-3 w-3 animate-spin" />} Save diet
-                </button>
-              </div>
             </div>
+            )}
 
-            {/* Growth: stage ceremony + persona + arrange offspring */}
+            {/* Diet tab */}
+            {tab === 'diet' && (
+            <div className="mx-auto max-w-lg space-y-4">
+              <p className="text-[11px] leading-relaxed text-zinc-500">Which parts of the web {name} may read once she can browse. Comma-separated domains.</p>
+              <div>
+                <div className="mb-1 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">Allowed</div>
+                <p className="mb-1.5 text-[10px] text-zinc-600">Only these domains. Leave empty to allow the whole open web.</p>
+                <input value={dietAllow} onChange={(e) => setDietAllow(e.target.value)} placeholder="wikipedia.org, arxiv.org" aria-label="Allowed domains"
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:border-emerald-500/40 focus:outline-none" />
+                {allowChips.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {allowChips.map((d) => <span key={d} className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-700 dark:text-emerald-300">{d}</span>)}
+                  </div>
+                )}
+              </div>
+              <div>
+                <div className="mb-1 text-[11px] font-medium text-red-600 dark:text-red-400">Blocked</div>
+                <p className="mb-1.5 text-[10px] text-zinc-600">Never these, even if the allow list is open.</p>
+                <input value={dietDeny} onChange={(e) => setDietDeny(e.target.value)} placeholder="reddit.com, x.com" aria-label="Denied domains"
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 placeholder-zinc-600 focus:border-red-500/40 focus:outline-none" />
+                {denyChips.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {denyChips.map((d) => <span key={d} className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] text-red-700 dark:text-red-300">{d}</span>)}
+                  </div>
+                )}
+              </div>
+              <button onClick={() => run('diet', () => setMediaDiet(slug, allowChips, denyChips))} disabled={busy === 'diet'}
+                className="flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+                {busy === 'diet' && <Loader2 className="h-3 w-3 animate-spin" />} Save diet
+              </button>
+            </div>
+            )}
+
+            {/* Growth tab */}
+            {tab === 'growth' && (
             <div>
-              <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Growth</div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[11px] text-zinc-400">stage <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-200">{v.stage}</span></span>
                 {nextStage && (
@@ -1294,6 +1338,9 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
               {v.persona && (
                 <p className="mt-2 line-clamp-3 border-l-2 border-zinc-800 pl-2 text-[11px] italic text-zinc-500">“{v.persona}”</p>
               )}
+            </div>
+            )}
+
             </div>
           </div>
         )}
