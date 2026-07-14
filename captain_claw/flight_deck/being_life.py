@@ -951,6 +951,39 @@ async def _usage_since(being: dict, since: datetime) -> dict:
     return total
 
 
+def _resolve_live_port(store: BeingsStore, being: dict) -> int | None:
+    """The being's agent port AS IT IS RIGHT NOW, from the live fleet registry —
+    the source of truth. A being caches (port, token) in its own row at birth,
+    but the agent process can drift to a fallback port on restart (a port clash
+    → /announce-port rewrites the registry, self-healing the fleet but NOT us).
+    Re-resolve every tick and re-pin the row when it moved, so the think + usage
+    calls never talk to a dead port. Returns the live port, or None if the body
+    isn't running/registered (caller may then respawn)."""
+    slug = being.get("agent_slug") or being["slug"]
+    try:
+        from captain_claw.flight_deck.dubina_agents import (
+            resolve_agent_port_token,
+        )
+        port, token = resolve_agent_port_token(slug)
+    except Exception:  # noqa: BLE001 — not in registry / no port = no live body
+        return None
+    if not port:
+        return None
+    port = int(port)
+    drifted = port != int(being.get("agent_port") or 0)
+    if drifted or (token and token != (being.get("agent_token") or "")):
+        try:
+            store.set_agent(being["id"], slug, port,
+                            token or being.get("agent_token") or "")
+            if drifted:
+                store.record_event(being["id"], "body_rebound",
+                                   {"port": port,
+                                    "was": being.get("agent_port")})
+        except Exception as e:  # noqa: BLE001
+            log.warning("being port re-pin failed", slug=slug, error=str(e))
+    return port
+
+
 # ── The tick ─────────────────────────────────────────────────────────────
 
 async def deliver_parent_message(db, being: dict, message: str) -> bool:
@@ -1144,13 +1177,22 @@ async def _tick_locked(
                            now=now)
         _start_body(being)
 
-    # 2. A body is required to think.
-    if not being.get("agent_port") and send_fn is None:
-        store.record_event(bid, "tick_skipped", {"reason": "no body"}, now=now)
-        store.tick_bookkeeping(bid, drives=being.get("drives") or {},
-                               next_wake_at=now + timedelta(hours=1), now=now)
-        out.update(outcome="no_body")
-        return out
+    # 2. A body is required to think — and it must be where it ACTUALLY is.
+    #    The agent process drifts to a fallback port on restart (announce-port
+    #    self-heals the fleet registry but not our cached copy), so re-resolve
+    #    the live port each tick and re-pin the row when it moved. A being with
+    #    no live body in the registry cleanly skips (as before) — a fresh body
+    #    is FD's reattach-on-boot / the parent's re-hatch, never an in-tick spawn.
+    if send_fn is None:
+        live_port = _resolve_live_port(store, being)
+        being = store.get(owner, being["slug"])   # pick up any re-pin
+        if live_port is None:
+            store.record_event(bid, "tick_skipped", {"reason": "no body"},
+                               now=now)
+            store.tick_bookkeeping(bid, drives=being.get("drives") or {},
+                                   next_wake_at=now + timedelta(hours=1), now=now)
+            out.update(outcome="no_body")
+            return out
 
     # 3. Think (over the channel bus — never the parent's chat thread).
     hours = 1.0

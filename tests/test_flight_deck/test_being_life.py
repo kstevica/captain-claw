@@ -591,3 +591,67 @@ async def test_loop_pass_wakes_due_and_dreams_at_night(store, monkeypatch):
     assert calls == []
     fresh = store.get(OWNER, a["slug"])
     assert fresh["next_wake_at"].startswith("2026-07-13T08:05")  # quiet end
+
+
+# ── Port drift: the being must follow its agent, not a stale cached port ──
+
+def test_resolve_live_port_repins_on_drift(store, monkeypatch):
+    """The body drifted to a new port (registry self-healed); the being's
+    cached copy must be re-pinned to it, with a body_rebound event."""
+    b = _born(store, port=1111)
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (2222, "tok2"))
+    assert life._resolve_live_port(store, b) == 2222
+    fresh = store.get(OWNER, b["slug"])
+    assert fresh["agent_port"] == 2222 and fresh["agent_token"] == "tok2"
+    assert "body_rebound" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+
+
+def test_resolve_live_port_stable_is_silent(store, monkeypatch):
+    b = _born(store, port=1234)
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (1234, "tok"))
+    assert life._resolve_live_port(store, b) == 1234
+    assert "body_rebound" not in [e["kind"] for e in store.events(OWNER, b["slug"])]
+
+
+def test_resolve_live_port_none_when_body_absent(store, monkeypatch):
+    b = _born(store, port=1111)
+
+    def _raise(slug):
+        raise ValueError("agent not found or has no port")
+
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token", _raise)
+    assert life._resolve_live_port(store, b) is None
+
+
+async def test_tick_follows_drifted_port(store, monkeypatch):
+    """End to end: with a stale cached port, the tick re-resolves and both the
+    think and the usage calls are handed the live port — the bug in the log."""
+    db = FakeDB()
+    b = _born(store, port=1111)                     # DB believes 1111 (dead)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (2222, "tok2"))                # registry says 2222 (live)
+    seen = {}
+
+    async def fake_send(being, prompt):
+        seen["send_port"] = being["agent_port"]
+        return _digest_reply()
+
+    async def fake_usage(being, since):
+        seen["usage_port"] = being["agent_port"]
+        return {"prompt_tokens": 10, "completion_tokens": 10,
+                "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+
+    monkeypatch.setattr(life, "_send_via_channel", fake_send)
+    monkeypatch.setattr(life, "_usage_since", fake_usage)
+    out = await life.tick(db, store, b, now=NOW)     # send_fn=None → resolve runs
+    assert out["ok"] is True
+    assert seen["send_port"] == 2222 and seen["usage_port"] == 2222
+    assert store.get(OWNER, b["slug"])["agent_port"] == 2222

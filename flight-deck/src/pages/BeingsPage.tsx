@@ -107,6 +107,7 @@ function summarizeEventData(e: BeingEvent): string {
   switch (e.kind) {
     case 'hatched': return 'egg → infant'
     case 'body': return `spawned on port ${d.port} (${d.tier})`
+    case 'body_rebound': return `followed its body to port ${d.port}${d.was ? ` (was ${d.was})` : ''}`
     case 'stage': return `${d.from} → ${d.to}`
     case 'state': return `${d.from} → ${d.to}`
     case 'spoke_to_parent': return String(d.preview ?? '')
