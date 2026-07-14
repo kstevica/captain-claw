@@ -168,6 +168,27 @@ pre-pass falls back to fixed-interval sampling when `cv2` is missing, so no regr
 - `pyproject.toml` — add a `cv` optional-extra (or bump the `faces`-shared pin) with
   `opencv-python-headless>=5.0`; keep it out of core deps.
 
+## Post-ship: tool/name disambiguation (2026-07-14)
+
+A live run surfaced a **naming collision**: a user said "use the vision tool on this
+image" with a non-vision model whose multimodal peer was down; the agent reached for
+this `vision` tool and ran `measure` + `detect what=text` — which found *where* text
+was (region boxes) but of course couldn't read it or describe the image. `vision` is
+easy to confuse with `image_vision`, and (being in `_ALWAYS_ENABLED`) is sometimes the
+only image tool present in a constrained session. Fix — sharpened the guidance so an
+agent picks the right tool, in three places:
+
+- **`vision` tool description** — leads with "NOT for looking at, reading, or
+  understanding a picture — use image_vision to describe, image_ocr to read text";
+  `detect what=text` now says it returns *regions, not the words*.
+- **Flight Deck attachment hint** (`ChatPanel.tsx`) and **web/WhatsApp hint**
+  (`chat_handler.py`) — both now name `image_ocr` for reading text and explicitly say
+  "do NOT use the 'vision' tool for this (pixel ops only)". FD bundle rebuilt.
+
+Root-cause option still open: **rename the tool** (e.g. `cv`/`imagecv`/`pixels`) to
+remove the collision with `image_vision` entirely — cheap now (branch not merged), but
+a product-naming call, so left to the user.
+
 ## Follow-ups / known limits
 
 - `cv2` is not importable in the current dev env — Phase 1 must add the extra and the
