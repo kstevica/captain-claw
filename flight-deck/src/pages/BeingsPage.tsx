@@ -11,16 +11,17 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
-  type Chore, type Quest, type ReportCard, type SelfFile, type Venture,
-  type VillageItem,
+  type Chore, type Quest, type ReportCard, type SelfFile, type ThreadItem,
+  type Venture, type VillageItem,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
-  hatchBeing, judgeChore, judgeQuest, listBeings, listChores, messageBeing,
-  pauseBeing, postChore, postQuest, rejectProcreation, rejectSelfMod,
-  rollbackPersona, setAllowance, setHouseRules, setMediaDiet, setStage,
-  setVentureState, tickBeing, wakeBeing,
+  getBeingMessages, hatchBeing, judgeChore, judgeQuest, listBeings,
+  listChores, messageBeing, pauseBeing, postChore, postQuest,
+  rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
+  setHouseRules, setMediaDiet, setStage, setVentureState, tickBeing,
+  wakeBeing,
 } from '../services/beings'
 
 const REFRESH_MS = 6000
@@ -522,6 +523,7 @@ function BeingCard({ item, meta, onChanged }: {
   const [busy, setBusy] = useState('')
   const [messaging, setMessaging] = useState(false)
   const [msgText, setMsgText] = useState('')
+  const [thread, setThread] = useState<ThreadItem[]>([])
   const [parenting, setParenting] = useState(false)
   const [chores, setChores] = useState<Chore[]>([])
   const [choreSpec, setChoreSpec] = useState('')
@@ -714,7 +716,11 @@ function BeingCard({ item, meta, onChanged }: {
             </button>
             {item.state !== 'dead' && item.stage !== 'egg' && (
               <button
-                onClick={() => setMessaging((m) => !m)}
+                onClick={() => {
+                  const next = !messaging
+                  setMessaging(next)
+                  if (next) void getBeingMessages(item.slug).then((r) => setThread(r.thread)).catch(() => {})
+                }}
                 className={`flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs hover:bg-zinc-800 ${messaging ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-400'}`}
                 title="Write to your being — she reads it on her next tick"
               >
@@ -757,6 +763,22 @@ function BeingCard({ item, meta, onChanged }: {
             <MessageCircle className="h-3.5 w-3.5 text-violet-400" /> Write to {item.name}
             <span className="text-[10px] font-normal text-zinc-600">she reads it on her next tick — reading is free, replying costs her a credit</span>
           </div>
+          {thread.length > 0 && (
+            <div className="mb-2 max-h-56 space-y-1.5 overflow-y-auto rounded border border-zinc-800/70 bg-zinc-900/40 p-2">
+              {thread.map((t, i) => (
+                <div key={i} className={`flex ${t.from === 'parent' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-lg px-2.5 py-1.5 text-[11px] ${t.from === 'parent' ? 'bg-violet-600/20 text-violet-100' : 'bg-zinc-800 text-zinc-300'}`}>
+                    <div className="mb-0.5 flex items-center gap-1.5 text-[9px] uppercase tracking-wide text-zinc-500">
+                      <span>{t.from === 'parent' ? 'you' : item.name}</span>
+                      <span>{fmtAt(t.at)}</span>
+                      {t.from === 'parent' && <span className={t.read ? 'text-emerald-400/70' : 'text-amber-400/70'}>{t.read ? 'read' : 'unread'}</span>}
+                    </div>
+                    {t.body}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
           <textarea
             value={msgText}
             onChange={(e) => setMsgText(e.target.value)}
@@ -769,7 +791,8 @@ function BeingCard({ item, meta, onChanged }: {
               disabled={busy === 'message' || !msgText.trim()}
               onClick={() => void act('message', async () => {
                 await messageBeing(item.slug, msgText.trim())
-                setMsgText(''); setMessaging(false)
+                setMsgText('')
+                setThread((await getBeingMessages(item.slug)).thread)
               })}
               className="flex items-center gap-1 rounded-md bg-violet-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
             >

@@ -152,6 +152,14 @@ export const messageBeing = (slug: string, body: string) =>
   fdFetch<{ message: { id: string; preview: string } }>(`/beings/${slug}/message`, {
     method: 'POST', body: JSON.stringify({ body }),
   })
+export interface ThreadItem {
+  from: 'parent' | 'being'
+  body: string
+  at: string
+  read: boolean
+}
+export const getBeingMessages = (slug: string) =>
+  fdFetch<{ thread: ThreadItem[] }>(`/beings/${slug}/messages`)
 export const getSelfFile = (slug: string, path: string) =>
   fdFetch<{ path: string; text: string }>(`/beings/${slug}/self/file?path=${encodeURIComponent(path)}`)
 export const getLiabilities = () =>

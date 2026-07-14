@@ -1606,6 +1606,28 @@ class BeingsStore:
             )
             self._c().commit()
 
+    def message_thread(self, owner_id: str, slug: str,
+                       limit: int = 200) -> list[dict]:
+        """The full parent↔being conversation, chronological: every message
+        the parent wrote (with read/unread) plus the being's replies."""
+        b = self.get(owner_id, slug)
+        items: list[dict] = []
+        rows = self._c().execute(
+            "SELECT body, at, read_at FROM being_parent_messages"
+            " WHERE being_id = ? ORDER BY at DESC LIMIT ?",
+            (b["id"], limit),
+        ).fetchall()
+        for r in rows:
+            items.append({"from": "parent", "body": r["body"], "at": r["at"],
+                          "read": r["read_at"] is not None})
+        for e in self.events(owner_id, slug, limit=limit):
+            if e["kind"] == "spoke_to_parent":
+                items.append({"from": "being",
+                              "body": e["data"].get("preview") or "",
+                              "at": e["at"], "read": True})
+        items.sort(key=lambda x: x["at"])
+        return items[-limit:]
+
     def add_publication(self, owner_id: str, being_id: str, title: str,
                         note: str, commons_path: str, price_tokens: int,
                         now: datetime | None = None) -> dict:

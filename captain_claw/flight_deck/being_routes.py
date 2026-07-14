@@ -309,6 +309,12 @@ async def message_being(slug: str, body: MessageRequest,
                             user["id"], slug, body.body)}
 
 
+@router.get("/{slug}/messages")
+async def message_thread(slug: str, user: dict = Depends(get_current_user)):
+    """The full parent↔being conversation (your messages + its replies)."""
+    return {"thread": _run(get_store().message_thread, user["id"], slug)}
+
+
 class SelfModRejectRequest(BaseModel):
     note: str = ""
 

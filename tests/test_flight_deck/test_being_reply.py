@@ -111,6 +111,25 @@ async def test_reply_reaches_next_tick_once_and_feeds_connect(store):
     assert "YOUR PARENT WROTE TO YOU" not in seen["p2"]
 
 
+async def test_message_thread_merges_both_sides_chronologically(store):
+    db = FakeDB()
+    b = await _being(store)
+    store.send_parent_message(OWNER, b["slug"], "First hello.", now=NOW)
+
+    async def send(being, prompt):
+        return _reply(message_to_parent="Hello back, parent.")
+
+    await life.tick(db, store, b, now=NOW + timedelta(minutes=1),
+                    send_fn=send, usage_fn=_usage)
+    store.send_parent_message(OWNER, b["slug"], "Second note.",
+                              now=NOW + timedelta(minutes=2))
+    thread = store.message_thread(OWNER, b["slug"])
+    assert [t["from"] for t in thread] == ["parent", "being", "parent"]
+    assert thread[0]["body"] == "First hello." and thread[0]["read"] is True
+    assert thread[1]["body"] == "Hello back, parent."
+    assert thread[2]["body"] == "Second note." and thread[2]["read"] is False
+
+
 async def test_reading_is_free_reply_still_spends_attention(store):
     db = FakeDB()
     b = await _being(store)
