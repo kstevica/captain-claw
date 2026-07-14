@@ -269,6 +269,10 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
     env_vars = list(owner_env or []) + [
         {"key": "CLAW_VFS_PROJECT", "value": home_project(being)},
         {"key": "CLAW_AGENT_LABEL", "value": being["slug"]},
+        # Mark the body as an FD-spawned worker: its tick prompt is fully framed
+        # by compose_tick_prompt, so skip the agent's own task-rephrase (which
+        # would rewrite/drift the digest contract) and the headless next-steps.
+        {"key": "CLAW_BEING_WORKER", "value": "1"},
         # Separation physics (plan §7): the body's file tools resolve ONLY
         # its own home and the family commons — sibling homes are not
         # addressable from inside, whatever the model asks for.

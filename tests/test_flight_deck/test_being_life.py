@@ -698,3 +698,23 @@ async def test_tick_restarts_unreachable_body(store, monkeypatch):
 async def test_port_reachable_false_on_dead_port(store):
     # nothing is listening on this port → not reachable, fast
     assert await life._port_reachable("127.0.0.1", 6) is False
+
+
+async def test_spawn_body_marks_being_as_fd_worker(store, monkeypatch):
+    """The body must carry CLAW_BEING_WORKER so the agent skips its own
+    task-rephrase (which would rewrite the tick's digest contract) + next-steps."""
+    from captain_claw.agent_reasoning_mixin import _FD_WORKER_MARKERS
+    assert "CLAW_BEING_WORKER" in _FD_WORKER_MARKERS   # gate recognizes it
+    b = _born(store, port=0)
+    captured = {}
+
+    async def fake_spawn(cfg, request, user):
+        captured["env"] = {e["key"]: e["value"] for e in cfg.env_vars}
+        return None
+
+    monkeypatch.setattr("captain_claw.flight_deck.server.spawn_process", fake_spawn)
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (24096, "tok"))
+    await life.spawn_body(None, store, b)               # db=None → tiers skipped
+    assert captured["env"].get("CLAW_BEING_WORKER") == "1"

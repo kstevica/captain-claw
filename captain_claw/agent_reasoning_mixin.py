@@ -17,6 +17,11 @@ from captain_claw.llm import Message
 # risk — we skip it for these workers.
 _FD_WORKER_MARKERS = (
     "CLAW_BASNA_WORKER", "CLAW_VATRA_WORKER", "CLAW_COUNCIL_WORKER", "CLAW_CODE_AGENT",
+    # An Iskra being's tick prompt is fully pre-framed by compose_tick_prompt
+    # (vitals, drives, task, digest schema) — a per-turn self-rephrase would
+    # rewrite that carefully-built prompt through a weaker pass and drift the
+    # digest contract, and next-steps is wasted on a headless being. Skip both.
+    "CLAW_BEING_WORKER",
 )
 
 
