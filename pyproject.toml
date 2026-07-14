@@ -71,6 +71,12 @@ vector = [
 vision = [
     "Pillow>=10.0.0",
 ]
+cv = [
+    # Deterministic local computer-vision ops (the `vision` tool). CPU-only,
+    # headless (no GUI deps). OpenCV 5 has the rewritten DNN engine for Phase 2.
+    "opencv-python-headless>=5.0",
+    "numpy>=1.24.0",
+]
 browser = [
     # Included in core deps; kept for backward compat with pip install captain-claw[browser].
     "playwright>=1.40.0",

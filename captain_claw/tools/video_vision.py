@@ -480,6 +480,21 @@ class VideoVisionTool(Tool):
         )
         if not frame_pairs:
             return ToolResult(success=False, error="Frame extraction produced no frames (ffmpeg failed?).")
+
+        # Keyframe pre-pass (OpenCV, optional): drop near-identical consecutive
+        # frames so the expensive per-frame vision loop only sees distinct ones.
+        # No-ops (keeps every frame) when OpenCV isn't installed — no regression.
+        frame_pairs.sort(key=lambda p: p[0])  # chronological, so dedupe compares neighbours
+        try:
+            from captain_claw.tools.vision import dedupe_frame_indices
+
+            keep_idx = dedupe_frame_indices([fp for _, fp in frame_pairs])
+            if 0 < len(keep_idx) < len(frame_pairs):
+                dropped = len(frame_pairs) - len(keep_idx)
+                log.info("video_vision: keyframe dedupe", kept=len(keep_idx), dropped=dropped)
+                frame_pairs = [frame_pairs[i] for i in keep_idx]
+        except Exception as exc:  # never let the pre-pass break the analysis
+            log.warning("video_vision: keyframe dedupe skipped: %s", exc)
         frames = [fp for _, fp in frame_pairs]
 
         agent_obj = kwargs.get("_agent")
