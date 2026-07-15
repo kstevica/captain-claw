@@ -7,8 +7,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowLeft, BookOpen, ChevronLeft, ChevronRight, Clock, Files, Loader2,
-  MessageCircle, Moon, Network, RefreshCw, Send, Sparkles, Sun, Users,
+  ArrowDownUp, ArrowLeft, BookOpen, CalendarDays, ChevronDown, ChevronLeft,
+  ChevronRight, Clock, Files, Fingerprint, Loader2, MessageCircle, Moon,
+  Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun, Users, Wrench, X,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -420,13 +421,78 @@ function JournalPane({ slug, name }: { slug: string; name: string }) {
   )
 }
 
-// ── Files browser ──
+// ── Files browser — grouped by folder, searchable, sortable, date-filtered ──
+// (Mirrors the parent's Self-files browser so the public view feels the same.)
+
+const DATE_BUCKETS = [
+  { key: 'all', label: 'All dates' },
+  { key: 'today', label: 'Today' },
+  { key: 'yesterday', label: 'Yesterday' },
+  { key: 'week', label: 'This week' },
+  { key: 'lastweek', label: 'Last week' },
+  { key: 'month', label: 'This month' },
+] as const
+type DateBucket = typeof DATE_BUCKETS[number]['key']
+
+function inDateBucket(iso: string, bucket: DateBucket): boolean {
+  if (bucket === 'all') return true
+  const t = new Date(iso).getTime()
+  if (!t) return false
+  const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime() }
+  const now = new Date()
+  const today = startOfDay(now)
+  const dow = (now.getDay() + 6) % 7 // 0 = Monday
+  const weekStart = today - dow * 86400000
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+  switch (bucket) {
+    case 'today': return t >= today
+    case 'yesterday': return t >= today - 86400000 && t < today
+    case 'week': return t >= weekStart
+    case 'lastweek': return t >= weekStart - 7 * 86400000 && t < weekStart
+    case 'month': return t >= monthStart
+    default: return true
+  }
+}
+
+const FILE_CORE_ORDER = ['SELF.md', 'VALUES.md', 'INTERESTS.md', 'RELATIONSHIPS.md', 'REFLECTIONS.md']
+const FILE_GROUP_ORDER = ['self', 'garden', 'skills']
+const FILE_GROUP_LABEL: Record<string, string> = { self: 'Identity', garden: 'Garden', skills: 'Skills' }
+const FILE_GROUP_ICON: Record<string, typeof Fingerprint> = { self: Fingerprint, garden: Sprout, skills: Wrench }
+
+const fileStem = (path: string) => (path.split('/').pop() || path).replace(/\.md$/i, '')
+const fileGroup = (path: string) => (path.includes('/') ? path.slice(0, path.indexOf('/')) : 'self')
+
+function groupFiles(files: PublicFile[]): { key: string; label: string; files: PublicFile[] }[] {
+  const byGroup = new Map<string, PublicFile[]>()
+  for (const f of files) {
+    const g = fileGroup(f.path)
+    if (!byGroup.has(g)) byGroup.set(g, [])
+    byGroup.get(g)!.push(f)
+  }
+  const rank = (arr: string[], v: string) => { const i = arr.indexOf(v); return i < 0 ? 99 : i }
+  return Array.from(byGroup.keys())
+    .sort((a, b) => rank(FILE_GROUP_ORDER, a) - rank(FILE_GROUP_ORDER, b) || a.localeCompare(b))
+    .map((k) => ({
+      key: k,
+      label: FILE_GROUP_LABEL[k] || k.charAt(0).toUpperCase() + k.slice(1),
+      files: [...byGroup.get(k)!].sort((a, b) =>
+        k === 'self'
+          ? rank(FILE_CORE_ORDER, a.path.split('/').pop() || '') - rank(FILE_CORE_ORDER, b.path.split('/').pop() || '') || a.path.localeCompare(b.path)
+          : a.path.localeCompare(b.path)),
+    }))
+}
 
 function FilesPane({ slug }: { slug: string }) {
   const [files, setFiles] = useState<PublicFile[] | null>(null)
   const [sel, setSel] = useState<string>('')
   const [text, setText] = useState('')
   const [loading, setLoading] = useState(false)
+  const [search, setSearch] = useState('')
+  const [filterGroup, setFilterGroup] = useState<string | null>(null)
+  const [dateFilter, setDateFilter] = useState<DateBucket>('all')
+  const [sortBy, setSortBy] = useState<'name' | 'newest' | 'oldest'>('name')
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+
   useEffect(() => {
     getPublicFiles(slug).then((r) => {
       setFiles(r.files)
@@ -438,22 +504,104 @@ function FilesPane({ slug }: { slug: string }) {
     setLoading(true)
     getPublicFile(slug, sel).then((r) => setText(r.text || '_empty_')).catch(() => setText('_could not read this file_')).finally(() => setLoading(false))
   }, [slug, sel])
+
   if (files && files.length === 0) return <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 py-12 text-center text-sm text-zinc-500">No files to show yet.</div>
+
+  const q = search.trim().toLowerCase()
+  const allGroups = files ? groupFiles(files) : []
+  const groups = allGroups
+    .filter((g) => !filterGroup || g.key === filterGroup)
+    .map((g) => {
+      let fs = g.files.filter((f) => inDateBucket(f.mtime, dateFilter))
+      if (q) fs = fs.filter((f) => fileStem(f.path).toLowerCase().includes(q) || f.path.toLowerCase().includes(q))
+      if (sortBy === 'newest') fs = [...fs].sort((a, b) => b.mtime.localeCompare(a.mtime))
+      else if (sortBy === 'oldest') fs = [...fs].sort((a, b) => a.mtime.localeCompare(b.mtime))
+      return { ...g, files: fs }
+    })
+    .filter((g) => g.files.length > 0)
+  const totalShown = groups.reduce((n, g) => n + g.files.length, 0)
+
   return (
-    <div className="grid gap-4 md:grid-cols-[220px_1fr]">
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-2">
-        {!files && <div className="p-3 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /></div>}
-        <ul className="space-y-0.5">
-          {files?.map((f) => (
-            <li key={f.path}>
-              <button onClick={() => setSel(f.path)}
-                className={`w-full truncate rounded-lg px-3 py-1.5 text-left text-xs transition ${sel === f.path ? 'bg-violet-600/20 text-violet-200' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
-                title={f.path}>
-                {f.path}
+    <div className="grid gap-4 md:grid-cols-[240px_1fr]">
+      <div className="flex max-h-[70vh] flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/60">
+        {/* Search + folder filter + sort/date */}
+        <div className="shrink-0 space-y-1.5 border-b border-zinc-800/70 p-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search files…"
+              className="w-full rounded-md border border-zinc-800 bg-zinc-950 py-1.5 pl-7 pr-6 text-xs text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500/50" />
+            {search && (
+              <button onClick={() => setSearch('')} className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-zinc-500 hover:text-zinc-300" title="Clear">
+                <X className="h-3 w-3" />
               </button>
-            </li>
-          ))}
-        </ul>
+            )}
+          </div>
+          {allGroups.length > 1 && (
+            <div className="flex flex-wrap gap-1">
+              {[{ key: null as string | null, label: 'All' }, ...allGroups.map((g) => ({ key: g.key, label: g.label }))].map((p) => {
+                const on = filterGroup === p.key
+                return (
+                  <button key={p.key ?? 'all'} onClick={() => setFilterGroup(p.key)}
+                    className={`rounded-full border px-2 py-0.5 text-[10px] transition ${on ? 'border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300' : 'border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}>
+                    {p.label}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+          <div className="flex gap-1">
+            <div className="relative flex-1">
+              <ArrowDownUp className="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-500" />
+              <select value={sortBy} onChange={(e) => setSortBy(e.target.value as typeof sortBy)} title="Sort files"
+                className="w-full appearance-none rounded-md border border-zinc-800 bg-zinc-950 py-1 pl-6 pr-1 text-[10px] text-zinc-300 outline-none focus:border-violet-500/50">
+                <option value="name">A–Z</option>
+                <option value="newest">Newest</option>
+                <option value="oldest">Oldest</option>
+              </select>
+            </div>
+            <div className="relative flex-1">
+              <CalendarDays className="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-500" />
+              <select value={dateFilter} onChange={(e) => setDateFilter(e.target.value as DateBucket)} title="Filter by date"
+                className="w-full appearance-none rounded-md border border-zinc-800 bg-zinc-950 py-1 pl-6 pr-1 text-[10px] text-zinc-300 outline-none focus:border-violet-500/50">
+                {DATE_BUCKETS.map((b) => <option key={b.key} value={b.key}>{b.label}</option>)}
+              </select>
+            </div>
+          </div>
+        </div>
+        {/* Grouped file list */}
+        <div className="flex-1 overflow-y-auto py-1.5">
+          {!files && <div className="px-3 py-3 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /></div>}
+          {files && files.length > 0 && totalShown === 0 && (
+            <div className="px-3 py-2 text-[11px] text-zinc-600">no files match</div>
+          )}
+          {groups.map((g) => {
+            const Icon = FILE_GROUP_ICON[g.key] ?? Files
+            const isCollapsed = !q && collapsed.has(g.key)
+            return (
+              <div key={g.key} className="mb-1">
+                <button onClick={() => setCollapsed((prev) => {
+                  const next = new Set(prev)
+                  next.has(g.key) ? next.delete(g.key) : next.add(g.key)
+                  return next
+                })}
+                  className="flex w-full items-center gap-1.5 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-300">
+                  {isCollapsed ? <ChevronRight className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
+                  <Icon className="h-3 w-3 shrink-0 text-violet-500 dark:text-violet-400" />
+                  <span className="truncate">{g.label}</span>
+                  <span className="ml-auto rounded bg-zinc-800 px-1 text-[9px] font-normal text-zinc-400">{g.files.length}</span>
+                </button>
+                {!isCollapsed && g.files.map((f) => (
+                  <button key={f.path} onClick={() => setSel(f.path)}
+                    className={`flex w-full items-baseline gap-2 rounded-md py-1 pl-8 pr-2 text-left text-xs transition ${sel === f.path ? 'bg-violet-500/15 font-medium text-violet-700 dark:text-violet-200' : 'text-zinc-400 hover:bg-zinc-800/60 hover:text-zinc-200'}`}
+                    title={`${f.path} · ${f.mtime.slice(0, 16).replace('T', ' ')}`}>
+                    <span className="truncate">{fileStem(f.path)}</span>
+                    <span className="ml-auto shrink-0 text-[9px] tabular-nums text-zinc-500">{relTime(f.mtime)}</span>
+                  </button>
+                ))}
+              </div>
+            )
+          })}
+        </div>
       </div>
       <div className="min-w-0 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
         {loading ? <div className="flex items-center gap-2 py-8 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> reading…</div>
