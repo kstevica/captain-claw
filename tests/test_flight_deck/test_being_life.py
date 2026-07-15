@@ -894,19 +894,6 @@ async def test_spawn_body_marks_being_as_fd_worker(store, monkeypatch):
         lambda slug: (24096, "tok"))
     await life.spawn_body(None, store, b)               # db=None → tiers skipped
     assert captured["env"].get("CLAW_BEING_WORKER") == "1"
-    # Lean body: skips the agent's redundant layered memory (the dominant
-    # per-call token cost of a faculties tick).
-    assert captured["env"].get("CLAW_LEAN_BODY") == "1"
-
-
-def test_lean_body_env_gate(monkeypatch):
-    from captain_claw import agent_context_mixin as acm
-    monkeypatch.delenv("CLAW_LEAN_BODY", raising=False)
-    assert acm._lean_body() is False
-    monkeypatch.setenv("CLAW_LEAN_BODY", "1")
-    assert acm._lean_body() is True
-    monkeypatch.setenv("CLAW_LEAN_BODY", "no")
-    assert acm._lean_body() is False
 
 
 # ── #2: per-being tick cadence the parent pins ───────────────────────────

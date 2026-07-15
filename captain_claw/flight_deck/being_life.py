@@ -319,12 +319,6 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
         # by compose_tick_prompt, so skip the agent's own task-rephrase (which
         # would rewrite/drift the digest contract) and the headless next-steps.
         {"key": "CLAW_BEING_WORKER", "value": "1"},
-        # Run the body LEAN: skip the agent's generic layered/deep memory. A
-        # being's memory is its VFS home + journal (surfaced in every tick
-        # prompt), so the semantic store is redundant, and re-retrieving it on
-        # each of a faculties tick's several calls is the dominant token cost
-        # (measured ~40k base/call). See docs/being-faculties-plan.md.
-        {"key": "CLAW_LEAN_BODY", "value": "1"},
         # Separation physics (plan §7): the body's file tools resolve ONLY
         # its own home and the family commons — sibling homes are not
         # addressable from inside, whatever the model asks for.

@@ -20,16 +20,6 @@ from captain_claw.tools.registry import Tool
 
 log = get_logger(__name__)
 
-
-def _lean_body() -> bool:
-    """A Flight-Deck being body (env ``CLAW_LEAN_BODY``) skips the agent's
-    generic layered/deep memory: a being's memory IS its VFS home + journal,
-    surfaced in every tick prompt, so the semantic store is redundant and its
-    per-call retrieval is the dominant token cost of a faculties tick."""
-    return str(os.environ.get("CLAW_LEAN_BODY", "")).strip().lower() in (
-        "1", "true", "yes")
-
-
 # ---------------------------------------------------------------------------
 # Tool prompt descriptions — used to build the dynamic tool list in the system
 # prompt.  Only tools that should appear in the textual list need an entry;
@@ -345,15 +335,6 @@ class AgentContextMixin:
     def _initialize_layered_memory(self) -> None:
         """Create layered memory manager for semantic retrieval."""
         if getattr(self, "memory", None) is not None:
-            return
-        if _lean_body():
-            # A Flight-Deck being runs lean: its memory IS its VFS home (self/,
-            # journal/, garden/), surfaced explicitly in every tick prompt, so
-            # the agent's generic layered/deep memory is redundant — and
-            # re-retrieving it on each of a faculties tick's several calls is the
-            # dominant token cost. Skip it (docs/being-faculties-plan.md).
-            self.memory = None
-            self._deep_memory = None
             return
         cfg = get_config()
         memory_cfg = getattr(cfg, "memory", None)
