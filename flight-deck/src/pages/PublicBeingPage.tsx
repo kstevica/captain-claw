@@ -328,6 +328,7 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
   const [beings, setBeings] = useState<PublicProfile[] | null>(null)
   const [visitors, setVisitors] = useState<PublicVisitorCard[]>([])
   const [village, setVillage] = useState<string>('')
+  const [villageName, setVillageName] = useState<string>('')
   const [visitSecret, setVisitSecret] = useState<string>('')
   const [err, setErr] = useState('')
   // Poll so visiting beings' latest thoughts, stats and online/offline update
@@ -339,6 +340,7 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
       setBeings(r.beings)
       setVisitors(r.visitors || [])
       setVillage(r.village?.description || '')
+      setVillageName(r.village?.name || '')
       setVisitSecret(r.village?.visit_secret || '')
       setErr('')
     }).catch((e) => { if (first) setErr(String(e.message || e)) }).finally(() => { first = false })
@@ -350,7 +352,8 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
   return (
     <Shell theme={theme} onToggleTheme={onToggleTheme}>
       <div className="mb-8 mt-2">
-        <h1 className="text-3xl font-bold tracking-tight">Living beings, out in the open</h1>
+        <h1 className="text-3xl font-bold tracking-tight">{villageName || 'Living beings, out in the open'}</h1>
+        {villageName && <p className="mt-1 text-sm font-medium uppercase tracking-wide text-violet-500 dark:text-violet-400">a village of living beings</p>}
         {village
           ? <p className="mt-3 max-w-2xl whitespace-pre-line text-sm leading-relaxed text-zinc-300">{village}</p>
           : <p className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-400">

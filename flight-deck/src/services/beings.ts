@@ -454,6 +454,7 @@ export const purgeBeing = (slug: string) =>
 // ── Village description (shown on the public /village page) ──
 
 export interface VillageMeta {
+  name: string
   description: string
   secret: string
   secret_public: boolean
@@ -463,9 +464,9 @@ export interface VillageMeta {
 export const getVillageMeta = () =>
   fdFetch<VillageMeta>('/beings/village-meta')
 
-export const setVillageMeta = (description: string) =>
-  fdFetch<{ description: string }>('/beings/village-meta', {
-    method: 'POST', body: JSON.stringify({ description }),
+export const setVillageMeta = (description: string, name: string) =>
+  fdFetch<{ name: string; description: string }>('/beings/village-meta', {
+    method: 'POST', body: JSON.stringify({ description, name }),
   })
 
 export const recommendVillageMeta = (being: string) =>

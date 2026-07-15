@@ -174,6 +174,7 @@ async def beings_liabilities(user: dict = Depends(get_current_user)):
 
 class VillageMetaRequest(BaseModel):
     description: str = ""
+    name: str = ""
 
 
 @router.get("/village-meta")
@@ -185,7 +186,8 @@ async def get_village_meta(user: dict = Depends(get_current_user)):
 @router.post("/village-meta")
 async def set_village_meta(body: VillageMetaRequest,
                            user: dict = Depends(get_current_user)):
-    return _run(get_store().set_village_meta, user["id"], body.description)
+    return _run(get_store().set_village_meta, user["id"], body.description,
+                body.name)
 
 
 class VillageFederationRequest(BaseModel):

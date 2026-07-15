@@ -79,6 +79,7 @@ export interface PublicThread {
 // ── Endpoints ──
 
 export interface PublicVillage {
+  name: string
   description: string
   visit_secret: string
 }

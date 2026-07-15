@@ -376,6 +376,7 @@ class BeingsStore:
                 -- public URL (so beings it sends elsewhere can be fetched back).
                 CREATE TABLE IF NOT EXISTS village_meta (
                     owner_id      TEXT PRIMARY KEY,
+                    name          TEXT NOT NULL DEFAULT '',
                     description   TEXT NOT NULL DEFAULT '',
                     secret        TEXT NOT NULL DEFAULT '',
                     secret_public INTEGER NOT NULL DEFAULT 0,
@@ -403,11 +404,12 @@ class BeingsStore:
                     ON being_visitors(owner_id, last_seen);
                 """
             )
-            # village_meta gained federation columns after first ship.
+            # village_meta gained federation columns + a name after first ship.
             for col, ddl in [
                 ("secret", "TEXT NOT NULL DEFAULT ''"),
                 ("secret_public", "INTEGER NOT NULL DEFAULT 0"),
                 ("public_url", "TEXT NOT NULL DEFAULT ''"),
+                ("name", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(
@@ -2346,12 +2348,13 @@ class BeingsStore:
 
     def get_village_meta(self, owner_id: str) -> dict:
         row = self._c().execute(
-            "SELECT description, secret, secret_public, public_url"
+            "SELECT name, description, secret, secret_public, public_url"
             " FROM village_meta WHERE owner_id = ?", (owner_id,)).fetchone()
         if not row:
-            return {"description": "", "secret": "", "secret_public": False,
-                    "public_url": ""}
-        return {"description": row["description"],
+            return {"name": "", "description": "", "secret": "",
+                    "secret_public": False, "public_url": ""}
+        return {"name": row["name"] or "",
+                "description": row["description"],
                 "secret": row["secret"] or "",
                 "secret_public": bool(row["secret_public"]),
                 "public_url": row["public_url"] or ""}
@@ -2363,22 +2366,30 @@ class BeingsStore:
         cur.update(fields)
         with self._lock:
             self._c().execute(
-                "INSERT INTO village_meta (owner_id, description, secret,"
-                " secret_public, public_url, updated_at) VALUES (?,?,?,?,?,?)"
-                " ON CONFLICT(owner_id) DO UPDATE SET description=excluded.description,"
-                " secret=excluded.secret, secret_public=excluded.secret_public,"
+                "INSERT INTO village_meta (owner_id, name, description, secret,"
+                " secret_public, public_url, updated_at) VALUES (?,?,?,?,?,?,?)"
+                " ON CONFLICT(owner_id) DO UPDATE SET name=excluded.name,"
+                " description=excluded.description, secret=excluded.secret,"
+                " secret_public=excluded.secret_public,"
                 " public_url=excluded.public_url, updated_at=excluded.updated_at",
-                (owner_id, cur["description"], cur["secret"],
+                (owner_id, cur["name"], cur["description"], cur["secret"],
                  1 if cur["secret_public"] else 0, cur["public_url"], _iso(now)),
             )
             self._c().commit()
 
     def set_village_meta(self, owner_id: str, description: str,
+                         name: str | None = None,
                          now: datetime | None = None) -> dict:
-        self._upsert_village_meta(
-            owner_id, {"description": (description or "").strip()[:self.VILLAGE_DESC_MAX]},
-            now=now)
-        return {"description": self.get_village_meta(owner_id)["description"]}
+        """Set the village description, and (when provided) its name. A None name
+        leaves the existing one untouched (so 'Recommend a description' doesn't
+        wipe the name)."""
+        fields: dict = {
+            "description": (description or "").strip()[:self.VILLAGE_DESC_MAX]}
+        if name is not None:
+            fields["name"] = (name or "").strip()[:80]
+        self._upsert_village_meta(owner_id, fields, now=now)
+        m = self.get_village_meta(owner_id)
+        return {"name": m["name"], "description": m["description"]}
 
     def set_village_federation(self, owner_id: str, *, secret: str,
                                secret_public: bool, public_url: str,
@@ -2414,9 +2425,10 @@ class BeingsStore:
                 " ORDER BY last_seen DESC LIMIT 1").fetchone()
             owner = r3["owner_id"] if r3 else None
         if not owner:
-            return {"description": "", "visit_secret": ""}
+            return {"name": "", "description": "", "visit_secret": ""}
         m = self.get_village_meta(owner)
-        return {"description": m["description"],
+        return {"name": m["name"],
+                "description": m["description"],
                 # Only expose the secret if the owner chose to publish it.
                 "visit_secret": m["secret"] if m["secret_public"] else ""}
 

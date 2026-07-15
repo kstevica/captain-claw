@@ -220,6 +220,15 @@ async def test_village_description_set_and_shown_publicly(store):
     assert store.public_village()["description"] == "A quiet garden of small minds."
     # scoped per owner — another owner's village is its own
     assert store.get_village_meta("someone-else")["description"] == ""
+    # the village also has a NAME, set + shown publicly, without wiping the desc
+    store.set_village_meta("user-1", "A quiet garden of small minds.",
+                           name="  Zvjezdano Selo  ")
+    assert store.get_village_meta("user-1")["name"] == "Zvjezdano Selo"   # trimmed
+    assert store.public_village()["name"] == "Zvjezdano Selo"
+    assert store.public_village()["description"] == "A quiet garden of small minds."
+    # a description-only save (name=None) leaves the name intact
+    store.set_village_meta("user-1", "New words for the garden.")
+    assert store.get_village_meta("user-1")["name"] == "Zvjezdano Selo"
     del b
 
 
