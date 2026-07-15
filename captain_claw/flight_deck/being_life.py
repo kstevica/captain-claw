@@ -1585,6 +1585,23 @@ def clamp_next_wake(stage: str, minutes: int) -> int:
     return max(lo, min(hi, minutes))
 
 
+def wake_reschedule(being: dict, now: datetime) -> datetime | None:
+    """On resume from a pause, the next wake time to use so the being simply
+    picks up its cadence — or None to keep the existing schedule. A wake still
+    in the future (a brief pause) is kept; one left in the PAST by the pause is
+    pushed a fresh interval out, so a missed tick is skipped, never replayed."""
+    nw = being.get("next_wake_at")
+    if nw:
+        try:
+            if datetime.fromisoformat(nw) > now:
+                return None                    # brief pause — resume on schedule
+        except ValueError:
+            pass
+    minutes = (being.get("tick_interval_minutes")
+               or clamp_next_wake(being["stage"], 0))
+    return now + timedelta(minutes=int(minutes))
+
+
 # ── Production transport (channel bus + usage API) ──────────────────────
 
 async def _send_via_channel(being: dict, prompt: str) -> str | None:

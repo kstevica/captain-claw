@@ -1264,6 +1264,15 @@ class BeingsStore:
             )
             self._c().commit()
 
+    def reschedule_wake(self, owner_id: str, slug: str, when: datetime,
+                        now: datetime | None = None) -> dict:
+        """Set the next wake time WITHOUT counting a tick. Used on resume so a
+        wake left in the past by a pause doesn't fire one stale catch-up tick."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now, next_wake_at=_iso(when))
+        return self.get(owner_id, slug)
+
     def due_beings(self, now: datetime | None = None) -> list[dict]:
         """Hatched, not paused/dead, wake time reached — across all owners."""
         now = now or _utcnow()

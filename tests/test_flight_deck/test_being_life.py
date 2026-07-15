@@ -931,6 +931,38 @@ def test_set_tick_interval_validates_and_clears(store):
 
 # ── The decomposed tick: faculties mode (docs/being-faculties-plan.md) ────
 
+def test_wake_reschedule_drops_stale_tick_keeps_future(store):
+    b = _born(store, port=0)
+    # A wake left in the PAST by a pause → pushed a fresh interval out (no
+    # stale catch-up tick fires on resume).
+    b = dict(b, next_wake_at=(NOW - timedelta(hours=3)).isoformat(),
+             tick_interval_minutes=10)
+    nw = life.wake_reschedule(b, NOW)
+    assert nw == NOW + timedelta(minutes=10)
+    # A wake still in the FUTURE (a brief pause) → kept as-is.
+    b2 = dict(b, next_wake_at=(NOW + timedelta(minutes=4)).isoformat())
+    assert life.wake_reschedule(b2, NOW) is None
+
+
+async def test_paused_being_never_ticks_and_resumes_clean(store):
+    db = FakeDB()
+    b = _born(store, port=0)
+    # Overdue wake, then paused — it must NOT be due (no accumulation), and on
+    # resume its wake is a fresh interval from now, not the stale past time.
+    store.reschedule_wake(OWNER, b["slug"], NOW - timedelta(hours=2))
+    store.set_state(OWNER, b["slug"], "paused")
+    assert all(x["slug"] != b["slug"] for x in store.due_beings(now=NOW))
+    n = await beings_loop._pass(db, now=NOW)
+    assert n == 0                                      # paused → zero ticks
+    # Simulate the wake route's reschedule on resume.
+    woken = store.set_state(OWNER, b["slug"], "alive")
+    nw = life.wake_reschedule(woken, NOW)
+    if nw is not None:
+        store.reschedule_wake(OWNER, b["slug"], nw)
+    fresh = store.get(OWNER, b["slug"])
+    assert datetime.fromisoformat(fresh["next_wake_at"]) > NOW   # not stale
+
+
 def test_set_cognition_flips_and_validates(store):
     import pytest as _pt
     b = _born(store)

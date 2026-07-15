@@ -769,9 +769,16 @@ async def pause(slug: str, user: dict = Depends(get_current_user)):
 
 @router.post("/{slug}/wake")
 async def wake(slug: str, user: dict = Depends(get_current_user)):
-    b = _run(get_store().set_state, user["id"], slug, "alive")
+    from datetime import datetime, timezone
+    store = get_store()
+    b = _run(store.set_state, user["id"], slug, "alive")
+    # Resume on the being's own cadence — a wake left in the past by the pause
+    # would otherwise fire one stale "catch-up" tick the instant the loop runs.
+    new_wake = being_life.wake_reschedule(b, datetime.now(timezone.utc))
+    if new_wake is not None:
+        _run(store.reschedule_wake, user["id"], slug, new_wake)
     being_life._start_body(b)
-    return _run(get_store().vitals, user["id"], slug)
+    return _run(store.vitals, user["id"], slug)
 
 
 @router.post("/{slug}/euthanize")
