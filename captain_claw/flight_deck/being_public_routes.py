@@ -68,7 +68,26 @@ def _public_profile(store, being: dict) -> dict:
         "mood": affect.get("mood", ""),
         "tick_interval_minutes": being.get("tick_interval_minutes"),
         "stats": store.public_stats(being["id"]),
+        "latest_thought": _latest_thought(store, being),
     }
+
+
+def _latest_thought(store, being: dict) -> dict | None:
+    """The being's newest one-line self-report from a tick (its latest 'thought')
+    with the UTC time it happened — the card shows a living pulse, not a static
+    profile. Skips FD-flavoured placeholder summaries."""
+    _skip = {"", "journal only", "(no structured digest — raw words kept)"}
+    try:
+        for e in store.events(being["owner_id"], being["slug"], limit=30):
+            if e["kind"] != "tick":
+                continue
+            text = (e["data"].get("summary") or "").strip()
+            if text and text not in _skip:
+                return {"text": text[:200], "at": e["at"],
+                        "act": e["data"].get("act", "")}
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 @router.get("")

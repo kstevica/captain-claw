@@ -194,6 +194,19 @@ async def test_tick_surfaces_visitors_not_as_parent_and_replies(store):
     assert "what does the tide teach?" not in seen["p2"]
 
 
+async def test_latest_thought_is_newest_real_tick_summary(store):
+    from captain_claw.flight_deck.being_public_routes import _latest_thought
+    b = await _being(store)
+    assert _latest_thought(store, b) is None          # no ticks yet
+    # a placeholder tick, then a real one — newest real summary wins
+    store.record_event(b["id"], "tick", {"act": "journal", "summary": "journal only"})
+    store.record_event(b["id"], "tick",
+                       {"act": "create", "summary": "I planted a poem in the garden."})
+    lt = _latest_thought(store, b)
+    assert lt["text"] == "I planted a poem in the garden."
+    assert lt["act"] == "create" and lt["at"]
+
+
 async def test_village_description_set_and_shown_publicly(store):
     b = await _being(store)          # a public being of owner 'user-1'
     # default: empty

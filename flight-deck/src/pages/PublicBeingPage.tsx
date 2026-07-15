@@ -63,6 +63,18 @@ function relTime(iso: string): string {
   if (h < 24) return `${h}h ago`
   return `${Math.floor(h / 24)}d ago`
 }
+// A stored UTC instant, rendered in the visitor's OWN local time + timezone
+// (so everyone reads it as their own clock, clearly labelled).
+function localTimeTz(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      timeZoneName: 'short',
+    }).format(d)
+  } catch { return d.toLocaleString() }
+}
 const stateTone: Record<string, string> = {
   alive: 'text-emerald-600 dark:text-emerald-400',
   paused: 'text-zinc-500',
@@ -317,6 +329,12 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
                   {b.interests.slice(0, 4).map((it) => (
                     <span key={it} className="rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400">{it}</span>
                   ))}
+                </div>
+              )}
+              {b.latest_thought && (
+                <div className="mt-3 border-l-2 border-violet-500/40 pl-2.5">
+                  <p className="line-clamp-2 text-xs italic leading-snug text-zinc-300">“{b.latest_thought.text}”</p>
+                  <p className="mt-0.5 text-[10px] text-zinc-500">{relTime(b.latest_thought.at)} · {localTimeTz(b.latest_thought.at)}</p>
                 </div>
               )}
               <div className="mt-4 flex items-center gap-4 text-[11px] text-zinc-500">

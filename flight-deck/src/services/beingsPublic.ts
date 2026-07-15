@@ -42,6 +42,7 @@ export interface PublicProfile {
   mood: string
   tick_interval_minutes: number | null
   stats: PublicStats
+  latest_thought: { text: string; at: string; act: string } | null
 }
 
 export interface PublicFile {
