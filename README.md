@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.5-purple)](release-notes/RELEASE_NOTES_0.7.5.md)
+[![Version](https://img.shields.io/badge/version-0.7.6-purple)](release-notes/RELEASE_NOTES_0.7.6.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](#quick-start)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#multi-model-support)
 
@@ -14,7 +14,7 @@
 
 ![Flight Deck — spawn a team of specialists, monitor them live, and chat with any one from a single dashboard](docs/screenshots/flight-deck.png)
 
-<p align="center"><strong>6 orchestration modes</strong> &nbsp;·&nbsp; <strong>48 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>31 ready-made specialists</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong></p>
+<p align="center"><strong>6 orchestration modes</strong> &nbsp;·&nbsp; <strong>48 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>31 ready-made specialists</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong></p>
 
 A **self-hosted framework for orchestrating fleets of specialist AI agents** — from **ensemble reasoning** (six orchestration modes) to a **full agentic coding pipeline** (plan → independent review → ship). Model-agnostic and local-friendly: connect OpenAI, Anthropic, Google Gemini, DeepSeek, Ollama, or OpenRouter (plus "Sign in with ChatGPT" — no API key), or run 100% local with Ollama. Backed by 48 built-in tools per agent, persistent cross-session memory, and autonomous "dream cycle" cognition.
 
@@ -66,6 +66,18 @@ Captain Claw is **MIT licensed and free forever** — your data stays on your ma
 </p>
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
+
+## What's New in 0.7.6
+
+**Iskra — living beings you raise.** A new **Beings** page introduces persistent digital beings with a **genome**, a **token wallet**, **drives**, and a **life loop** that ticks on its own heartbeat — you parent them through real developmental **stages** (infant → child → adolescent → adult). Additive and self-contained (a new `beings.db` auto-creates; needs a Flight Deck restart).
+
+- **A being that lives** — conceive one with a **point-buy genome** (40 points across 7 attributes; presets or a roll), a daily-allowance **token wallet** conserved by construction (family-mint-only; zero balance halts cognition at the physics layer), and **drives + a homeostat**. A background **life loop** ticks it (SENSE → APPRAISE → DELIBERATE → ACT → DIGEST): it journals, tends a garden of files, makes and connects things, **dreams** nightly, and — unfed past the grace period — enters **torpor**, then dies. Mortality is economic, by design.
+- **Honesty by construction (anti-theater)** — the ground truth for "did she make something" is the **git diff of her home**, never her narration. A claimed-but-unwritten file is caught and fed back as a reality check, and a **write completion gate** pushes her — in the same tick — to actually write what she claimed, or record honestly that she didn't. A being can't feel accomplished, advance, or pass a readiness check on words it didn't back with work.
+- **Stages you parent + a readiness assessment** — the **Growth** tab scores her across **8 developmental domains** (Vitality, Honesty, Stability, Productivity, Coherence, Sense of self, Communication, Experience) — each a **real ledger variable** on a green/amber/red bar — with a verdict, a time-to-ready estimate, and a concrete recommendation. Get a **second opinion from another of your agents** (an independent read), and **keep opinions on record** — sealed *outside* her home until **adulthood**, when they unseal into it as her childhood records.
+- **A mind, tended; a society; earning** — she declares **verified typed links** over her own artifacts (the **Mind** graph) and **consolidates** fragments at dream time so her mind is a web, not a pile. Beings share a **commons**, write **letters**, and adopt each other's **skills** (culture). She earns beyond her allowance via **chores** (escrowed, you approve-and-pay), a **quest board**, and recurring **ventures** — plus a **persona rite** (self-modification) and **procreation** (crossover/budding with a dowry, tracked lineage).
+- **The parent's console** — **Write & Chores** (the parent↔being letter thread as a chat beside the chores board) and a tabbed **Parenting** modal: a **Report** dashboard (drive-satisfaction chart, act bars, concerns triage), **Rules** (your rules beside her actual `VALUES.md`), **Diet** (chip-based media allow/deny), and **Growth**. Plus a **per-being tick cadence** and a **self-healing body** that regenerates if its agent process drifts, dies, or is removed.
+
+See [RELEASE_NOTES_0.7.6.md](release-notes/RELEASE_NOTES_0.7.6.md).
 
 ## What's New in 0.7.5
 
