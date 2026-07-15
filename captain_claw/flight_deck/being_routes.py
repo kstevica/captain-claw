@@ -107,6 +107,10 @@ class CognitionRequest(BaseModel):
     mode: str
 
 
+class RechargeRequest(BaseModel):
+    tokens: int
+
+
 class AssessRequest(BaseModel):
     assessor: str   # registry slug of the agent to ask for a second opinion
 
@@ -757,6 +761,28 @@ async def set_cognition(slug: str, body: CognitionRequest,
     decomposed pipeline — better for weak-context models)."""
     _run(get_store().set_cognition, user["id"], slug, body.mode)
     return _run(get_store().vitals, user["id"], slug)
+
+
+@router.post("/{slug}/recharge")
+async def recharge(slug: str, body: RechargeRequest,
+                   user: dict = Depends(get_current_user)):
+    """Top up the being's wallet (parent-minted). If this revives an exhausted
+    being from torpor, bring it back NOW rather than waiting out the 24h sleep."""
+    from datetime import datetime, timezone
+    store = get_store()
+    v = _run(store.grant, user["id"], slug, body.tokens)
+    b = _run(store.get, user["id"], slug)
+    if b["state"] == "torpor":
+        wv = store.wallet_view(b)
+        if not wv["enforced"] or wv["balance_tokens"] > wv["reserve_tokens"]:
+            b = _run(store.set_state, user["id"], slug, "alive")
+            store.record_event(b["id"], "woke_from_torpor",
+                               {"cause": "recharge"})
+            being_life._start_body(b)
+            store.reschedule_wake(user["id"], slug,
+                                  datetime.now(timezone.utc))
+            v = _run(store.vitals, user["id"], slug)
+    return v
 
 
 @router.post("/{slug}/pause")

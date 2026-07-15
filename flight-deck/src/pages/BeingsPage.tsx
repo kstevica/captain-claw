@@ -27,9 +27,9 @@ import {
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
   getBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
   listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
-  rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance, setCadence,
-  setCognition, setHouseRules, setMediaDiet, setStage, setVentureState, tickBeing,
-  wakeBeing, TICK_INTERVAL_CHOICES,
+  rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
+  setCadence, setCognition, setHouseRules, setMediaDiet, setStage, setVentureState,
+  tickBeing, wakeBeing, GRANT_AMOUNTS, TICK_INTERVAL_CHOICES,
 } from '../services/beings'
 
 const REFRESH_MS = 6000
@@ -2283,6 +2283,20 @@ function BeingCard({ item, meta, onChanged }: {
           </div>
           <div className="mb-2 h-1.5 overflow-hidden rounded bg-zinc-800">
             <div className="h-full rounded bg-violet-500/70" style={{ width: `${pct}%` }} />
+          </div>
+
+          <div className="mb-2 flex items-center gap-1.5 text-xs">
+            <span className="text-zinc-500">recharge</span>
+            {GRANT_AMOUNTS.map((amt) => (
+              <button
+                key={amt}
+                onClick={() => void act('recharge', () => rechargeBeing(item.slug, amt))}
+                title={`Mint ${fmtTokens(amt)} tokens into ${v.name}'s wallet`}
+                className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-zinc-300 hover:border-violet-500/50 hover:text-zinc-100 focus:outline-none"
+              >
+                +{amt / 1_000_000}M
+              </button>
+            ))}
           </div>
 
           <div className="mb-2 flex items-center gap-2 text-xs">

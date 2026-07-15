@@ -39,8 +39,11 @@ log = get_logger(__name__)
 STATES = ("alive", "paused", "torpor", "dead")
 TRANSFER_REASONS = (
     "allowance", "usage", "fee", "gift", "trade",
-    "procreation", "metamorphosis_burn", "self_mod_burn", "adjust",
+    "procreation", "metamorphosis_burn", "self_mod_burn", "adjust", "grant",
 )
+
+# Fixed parent top-up amounts (tokens) the UI offers to recharge a wallet.
+GRANT_AMOUNTS = (2_000_000, 5_000_000, 10_000_000, 20_000_000)
 
 # The public square (plan §9): a being the parent flags ``public`` gets an
 # un-gated page where strangers may leave it short notes. A note is a
@@ -1025,6 +1028,31 @@ class BeingsStore:
         self._apply(b["owner_id"], tokens=headroom, reason="allowance",
                     from_being=None, to_being=being_id, note=date_key, now=now)
         return headroom
+
+    def grant(self, owner_id: str, slug: str, tokens: int,
+              now: datetime | None = None) -> dict:
+        """A parent top-up: mint tokens straight into the wallet (the parent is
+        the only token source — plan §economy). Unlike the daily allowance this
+        is NOT stage-capped or once-per-day; it's how a parent revives an
+        exhausted being or funds it past its stage's daily cap. Conserved as one
+        ``grant`` ledger row. Reviving from torpor is the caller's job (it owns
+        the body). Returns fresh vitals."""
+        now = now or _utcnow()
+        tokens = int(tokens)
+        if tokens <= 0:
+            raise BeingError("a recharge must be a positive number of tokens")
+        if tokens > GRANT_AMOUNTS[-1]:
+            raise BeingError(
+                f"a single recharge is capped at {GRANT_AMOUNTS[-1]} tokens")
+        b = self.get(owner_id, slug)
+        if b["state"] == "dead":
+            raise BeingError("a dead being cannot be funded")
+        if b["stage"] == "egg":
+            raise BeingError("an egg has no wallet to recharge yet")
+        self._apply(owner_id, tokens=tokens, reason="grant",
+                    from_being=None, to_being=b["id"], note="parent", now=now)
+        self.record_event(b["id"], "granted", {"tokens": tokens}, now=now)
+        return self.vitals(owner_id, slug)
 
     def spent_today(self, being_id: str, now: datetime | None = None) -> int:
         now = now or _utcnow()

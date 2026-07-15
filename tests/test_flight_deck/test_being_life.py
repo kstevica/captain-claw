@@ -963,6 +963,22 @@ async def test_paused_being_never_ticks_and_resumes_clean(store):
     assert datetime.fromisoformat(fresh["next_wake_at"]) > NOW   # not stale
 
 
+def test_grant_recharges_wallet_ledgers_and_validates(store):
+    import pytest as _pt
+    b = _born(store, port=0)
+    start = store.vitals(OWNER, b["slug"])["wallet"]["balance_tokens"]
+    v = store.grant(OWNER, b["slug"], 5_000_000)
+    assert v["wallet"]["balance_tokens"] == start + 5_000_000       # minted
+    assert "granted" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+    # conserved as exactly one 'grant' ledger row
+    rows = [r for r in store.ledger(OWNER, b["slug"]) if r["reason"] == "grant"]
+    assert len(rows) == 1 and rows[0]["tokens"] == 5_000_000
+    with _pt.raises(BeingError):
+        store.grant(OWNER, b["slug"], 0)                            # not positive
+    with _pt.raises(BeingError):
+        store.grant(OWNER, b["slug"], 999_000_000)                  # over the cap
+
+
 def test_set_cognition_flips_and_validates(store):
     import pytest as _pt
     b = _born(store)

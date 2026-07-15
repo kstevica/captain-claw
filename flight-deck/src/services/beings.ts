@@ -387,6 +387,13 @@ export const setCognition = (slug: string, mode: Cognition) =>
     method: 'POST', body: JSON.stringify({ mode }),
   })
 
+// Fixed parent top-up amounts (tokens) — mirrors beings.GRANT_AMOUNTS.
+export const GRANT_AMOUNTS = [2_000_000, 5_000_000, 10_000_000, 20_000_000] as const
+export const rechargeBeing = (slug: string, tokens: number) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/recharge`, {
+    method: 'POST', body: JSON.stringify({ tokens }),
+  })
+
 // ── The public square (parent side) ──
 
 export const setBeingPublic = (slug: string, isPublic: boolean) =>
