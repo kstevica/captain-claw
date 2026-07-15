@@ -46,6 +46,12 @@ async def test_export_import_roundtrip_preserves_being(store):
     store.chore_done("alice", j["id"], "done", now=NOW)
     store.judge_chore("alice", j["id"], True, now=NOW)
     bal = store.wallet_view(store.get("alice", slug))["balance_tokens"]
+    # it has lived a few ticks today — its clock must survive the move so it
+    # doesn't relive "morning, tick #1" (the imported journal already has today).
+    for _ in range(3):
+        store.tick_bookkeeping(b["id"], drives=store.get("alice", slug)["drives"],
+                               next_wake_at=NOW, now=NOW)
+    assert store.get("alice", slug)["tick_count"] == 3
 
     manifest = await life.export_being(None, store, store.get("alice", slug))
     assert manifest["format"] == life.EXPORT_FORMAT
@@ -76,6 +82,13 @@ async def test_export_import_roundtrip_preserves_being(store):
     g = being_mind.graph(store, imp)
     assert len(g["edges"]) == 1
     assert g["edges"][0]["rel"] == "grew_from"
+    # clock continuity: tick count + last-tick carry over, so the next tick is
+    # NOT "first of day" and NOT "tick #1".
+    assert imp["tick_count"] == 3
+    assert imp["last_tick_at"] == manifest["last_tick_at"]
+    prompt = life.compose_tick_prompt(imp, wallet=store.wallet_view(imp),
+                                      first_of_day=False, now=NOW)
+    assert "tick #4" in prompt and "MORNING: a new day" not in prompt
 
 
 async def test_import_uses_original_slug_when_free(store):

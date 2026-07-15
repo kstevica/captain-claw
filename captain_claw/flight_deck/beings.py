@@ -591,7 +591,8 @@ class BeingsStore:
                 " genome, drives, attention_credits, born_at, hatched_at,"
                 " lineage, created_at, updated_at, birth_letter, media_diet,"
                 " house_rules, affect, persona, tick_interval_minutes, public,"
-                " body_config) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " body_config, tick_count, last_tick_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (bid, owner_id, slug, name, stage, state,
                  json.dumps(genome),
                  json.dumps(manifest.get("drives") or {}),
@@ -606,7 +607,9 @@ class BeingsStore:
                  str(manifest.get("persona") or ""),
                  manifest.get("tick_interval_minutes"),
                  1 if manifest.get("public") else 0,
-                 json.dumps(model) if model else ""),
+                 json.dumps(model) if model else "",
+                 int(manifest.get("tick_count") or 0),
+                 manifest.get("last_tick_at")),
             )
             c.execute(
                 "INSERT INTO being_wallets (being_id, allowance_preset,"

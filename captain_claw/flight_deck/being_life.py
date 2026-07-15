@@ -448,6 +448,10 @@ async def export_being(db, store: BeingsStore, being: dict,
         "public": bool(being.get("public")),
         "born_at": being.get("born_at"),
         "hatched_at": being.get("hatched_at"),
+        # Continuity of its clock: so it doesn't relive "morning, tick #1" after
+        # a move — the imported journal already holds today's earlier ticks.
+        "tick_count": being.get("tick_count"),
+        "last_tick_at": being.get("last_tick_at"),
         "wallet": {
             "balance_tokens": view["balance_tokens"],
             "allowance_preset": view["allowance_preset"],
