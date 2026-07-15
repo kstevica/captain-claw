@@ -39,6 +39,7 @@ import { VFSPage } from './pages/VFSPage'
 import { AgentFoldersPage } from './pages/AgentFoldersPage'
 import { SystemPage } from './pages/SystemPage'
 import { BeingsPage } from './pages/BeingsPage'
+import { PublicBeingPage } from './pages/PublicBeingPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -523,6 +524,14 @@ function App() {
   const authEnabled = useAuthStore((s) => s.authEnabled)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const [authChecked, setAuthChecked] = useState(false)
+
+  // The public square (plan §9) is the one surface that lives OUTSIDE auth:
+  // /village and /b/<slug> render for anyone, logged in or not, before the
+  // login gate below and without hydrating any of the app's stores.
+  const _path = window.location.pathname
+  if (_path === '/village' || _path.startsWith('/b/')) {
+    return <PublicBeingPage />
+  }
 
   // On mount: check if auth is enabled, try to refresh token
   useEffect(() => {

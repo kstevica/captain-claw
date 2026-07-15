@@ -116,6 +116,7 @@ export interface BeingVitals {
     letter: string; proposed_at: string
   } | null
   tick_interval_minutes: number | null
+  public: boolean
 }
 
 export const TICK_INTERVAL_CHOICES = [2, 5, 10, 15, 30, 60] as const
@@ -375,3 +376,28 @@ export const setCadence = (slug: string, minutes: number | null) =>
   fdFetch<BeingVitals>(`/beings/${slug}/cadence`, {
     method: 'POST', body: JSON.stringify({ minutes }),
   })
+
+// ── The public square (parent side) ──
+
+export const setBeingPublic = (slug: string, isPublic: boolean) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/public`, {
+    method: 'POST', body: JSON.stringify({ public: isPublic }),
+  })
+
+export interface PublicThreadMsg {
+  role: 'public' | 'being'
+  sender_name: string
+  body: string
+  at: string
+  read_at: string | null
+  answered_at: string | null
+}
+export interface ParentPublicThread {
+  thread_id: string
+  sender_name: string
+  created_at: string
+  updated_at: string
+  messages: PublicThreadMsg[]
+}
+export const getPublicThreads = (slug: string) =>
+  fdFetch<{ threads: ParentPublicThread[] }>(`/beings/${slug}/public-threads`)

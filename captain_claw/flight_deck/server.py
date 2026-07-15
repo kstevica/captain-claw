@@ -950,6 +950,7 @@ from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck.being_routes import router as being_router
+from captain_claw.flight_deck.being_public_routes import router as being_public_router
 from captain_claw.terminal.relay import router as pty_router
 
 app.include_router(auth_router)
@@ -993,6 +994,7 @@ app.include_router(agents_fs_router)
 app.include_router(system_router)
 app.include_router(share_router)
 app.include_router(being_router)
+app.include_router(being_public_router)
 app.include_router(pty_router)
 
 

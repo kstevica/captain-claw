@@ -42,6 +42,13 @@ TRANSFER_REASONS = (
     "procreation", "metamorphosis_burn", "self_mod_burn", "adjust",
 )
 
+# The public square (plan §9): a being the parent flags ``public`` gets an
+# un-gated page where strangers may leave it short notes. A note is a
+# suggestion/topic — a seed, never an order — capped this small so it stays a
+# provocation, not an instruction the model could mistake for guidance.
+PUBLIC_MSG_MAX_CHARS = 64
+PUBLIC_NAME_MAX_CHARS = 40
+
 
 class BeingError(Exception):
     """Base for being-domain failures; ``status`` maps to HTTP in routes."""
@@ -320,6 +327,41 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_assessments
                     ON being_assessments(being_id, at);
+
+                -- The public square (plan §9). A ``public`` being gets an
+                -- un-gated page; strangers leave short notes here. A thread is
+                -- one ongoing exchange with one visitor (identified only by the
+                -- thread id their browser keeps — no accounts, no tracking).
+                CREATE TABLE IF NOT EXISTS being_public_threads (
+                    id          TEXT PRIMARY KEY,
+                    being_id    TEXT NOT NULL,
+                    sender_name TEXT NOT NULL,
+                    created_at  TEXT NOT NULL,
+                    updated_at  TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_public_threads
+                    ON being_public_threads(being_id, updated_at);
+
+                -- Messages within a public thread. role='public' is a visitor's
+                -- note; role='being' is the being's optional reply. read_at =
+                -- a tick surfaced it (considered); answered_at = the being
+                -- actually replied. The being is NEVER obliged to answer — these
+                -- are provocations it may weigh, not parenting it must obey.
+                CREATE TABLE IF NOT EXISTS being_public_messages (
+                    id          TEXT PRIMARY KEY,
+                    thread_id   TEXT NOT NULL,
+                    being_id    TEXT NOT NULL,
+                    role        TEXT NOT NULL,
+                    sender_name TEXT NOT NULL DEFAULT '',
+                    body        TEXT NOT NULL,
+                    at          TEXT NOT NULL,
+                    read_at     TEXT,
+                    answered_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_public_messages
+                    ON being_public_messages(being_id, role, read_at);
+                CREATE INDEX IF NOT EXISTS idx_being_public_messages_thread
+                    ON being_public_messages(thread_id, at);
                 """
             )
             # Lightweight migrations (columns added after first ship).
@@ -339,6 +381,7 @@ class BeingsStore:
                 ("pending_procreation", "TEXT NOT NULL DEFAULT ''"),
                 ("torpor_since", "TEXT"),
                 ("tick_interval_minutes", "INTEGER"),
+                ("public", "INTEGER NOT NULL DEFAULT 0"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -876,6 +919,7 @@ class BeingsStore:
             "pending_self_mod": b["pending_self_mod"],
             "pending_procreation": b["pending_procreation"],
             "tick_interval_minutes": b.get("tick_interval_minutes"),
+            "public": bool(b.get("public")),
         }
 
     def ledger(self, owner_id: str, slug: str, limit: int = 100) -> list[dict]:
@@ -1720,6 +1764,224 @@ class BeingsStore:
                 [(_iso(now), mid) for mid in message_ids],
             )
             self._c().commit()
+
+    # ── The public square: strangers' notes (plan §9) ─────────────────
+
+    def _public_row(self, slug: str) -> sqlite3.Row:
+        """A being by slug ONLY if it is flagged public — the owner-less door
+        the un-gated public routes come through (a visitor has no owner_id)."""
+        row = self._c().execute(
+            "SELECT * FROM beings WHERE slug = ? AND public = 1", (slug,),
+        ).fetchone()
+        if not row:
+            raise BeingNotFound("no public being here")
+        return row
+
+    def get_public(self, slug: str) -> dict:
+        """Full being dict for a public being, resolved without an owner_id."""
+        row = self._public_row(slug)
+        return self.get(row["owner_id"], slug)
+
+    def public_beings(self) -> list[dict]:
+        """Every hatched public being across all families — the square's roster."""
+        rows = self._c().execute(
+            "SELECT owner_id, slug FROM beings"
+            " WHERE public = 1 AND stage != 'egg' ORDER BY born_at",
+        ).fetchall()
+        return [self.get(r["owner_id"], r["slug"]) for r in rows]
+
+    def set_public(self, owner_id: str, slug: str, public: bool,
+                   now: datetime | None = None) -> dict:
+        """The parent opens (or closes) the being's public page."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now, public=1 if public else 0)
+        self.record_event(b["id"], "public_toggled",
+                          {"public": bool(public)}, now=now)
+        return self.get(owner_id, slug)
+
+    def public_stats(self, being_id: str) -> dict:
+        c = self._c()
+        msgs = c.execute(
+            "SELECT COUNT(*) AS n FROM being_public_messages"
+            " WHERE being_id = ? AND role = 'public'", (being_id,),
+        ).fetchone()["n"]
+        threads = c.execute(
+            "SELECT COUNT(*) AS n FROM being_public_threads WHERE being_id = ?",
+            (being_id,),
+        ).fetchone()["n"]
+        answered = c.execute(
+            "SELECT COUNT(*) AS n FROM being_public_messages"
+            " WHERE being_id = ? AND role = 'being'", (being_id,),
+        ).fetchone()["n"]
+        return {"messages": int(msgs), "threads": int(threads),
+                "answered": int(answered)}
+
+    def post_public_message(self, slug: str, sender_name: str, body: str,
+                            thread_id: str | None = None,
+                            now: datetime | None = None) -> dict:
+        """A stranger leaves a note. New thread when thread_id is absent/unknown,
+        else a follow-up — but not before a tick has SEEN the prior one (so a
+        single visitor can't flood the being before it has weighed the last)."""
+        now = now or _utcnow()
+        row = self._public_row(slug)
+        being_id = row["id"]
+        if row["state"] == "dead":
+            raise BeingError(
+                "this being has died — its words remain, but it can answer no "
+                "more", 409)
+        name = (sender_name or "").strip()[:PUBLIC_NAME_MAX_CHARS]
+        if not name:
+            raise BeingError("please tell the being your name")
+        text = (body or "").strip()
+        if not text:
+            raise BeingError("an empty note says nothing")
+        text = text[:PUBLIC_MSG_MAX_CHARS]
+        c = self._c()
+        thread = None
+        if thread_id:
+            thread = c.execute(
+                "SELECT * FROM being_public_threads WHERE id = ? AND being_id = ?",
+                (thread_id, being_id),
+            ).fetchone()
+        if thread is not None:
+            pending = c.execute(
+                "SELECT 1 FROM being_public_messages WHERE thread_id = ?"
+                " AND role = 'public' AND read_at IS NULL LIMIT 1",
+                (thread_id,),
+            ).fetchone()
+            if pending:
+                raise BeingError(
+                    "the being hasn't taken in your last note yet — give it a "
+                    "tick", 429)
+        else:
+            thread_id = uuid.uuid4().hex
+        mid = uuid.uuid4().hex
+        with self._lock:
+            if thread is None:
+                c.execute(
+                    "INSERT INTO being_public_threads"
+                    " (id, being_id, sender_name, created_at, updated_at)"
+                    " VALUES (?,?,?,?,?)",
+                    (thread_id, being_id, name, _iso(now), _iso(now)),
+                )
+            c.execute(
+                "INSERT INTO being_public_messages"
+                " (id, thread_id, being_id, role, sender_name, body, at)"
+                " VALUES (?,?,?,'public',?,?,?)",
+                (mid, thread_id, being_id, name, text, _iso(now)),
+            )
+            c.execute(
+                "UPDATE being_public_threads SET updated_at = ?, sender_name = ?"
+                " WHERE id = ?", (_iso(now), name, thread_id),
+            )
+            c.commit()
+        self.record_event(being_id, "public_message",
+                          {"from": name, "preview": text,
+                           "thread": thread_id[:8]}, now=now)
+        return {"thread_id": thread_id, "message_id": mid}
+
+    def public_thread(self, slug: str, thread_id: str) -> dict:
+        """One visitor's own conversation (their browser holds the thread id)."""
+        row = self._public_row(slug)
+        t = self._c().execute(
+            "SELECT * FROM being_public_threads WHERE id = ? AND being_id = ?",
+            (thread_id, row["id"]),
+        ).fetchone()
+        if not t:
+            raise BeingNotFound("no such thread")
+        msgs = self._c().execute(
+            "SELECT role, sender_name, body, at, read_at, answered_at"
+            " FROM being_public_messages WHERE thread_id = ? ORDER BY at",
+            (thread_id,),
+        ).fetchall()
+        return {"thread_id": thread_id, "sender_name": t["sender_name"],
+                "messages": [dict(m) for m in msgs]}
+
+    def public_threads_for(self, owner_id: str, slug: str) -> list[dict]:
+        """Every thread on a being's public page — the PARENT-only overview."""
+        b = self.get(owner_id, slug)
+        threads = self._c().execute(
+            "SELECT * FROM being_public_threads WHERE being_id = ?"
+            " ORDER BY updated_at DESC", (b["id"],),
+        ).fetchall()
+        out = []
+        for t in threads:
+            msgs = self._c().execute(
+                "SELECT role, sender_name, body, at, read_at, answered_at"
+                " FROM being_public_messages WHERE thread_id = ? ORDER BY at",
+                (t["id"],),
+            ).fetchall()
+            out.append({"thread_id": t["id"], "sender_name": t["sender_name"],
+                        "created_at": t["created_at"],
+                        "updated_at": t["updated_at"],
+                        "messages": [dict(m) for m in msgs]})
+        return out
+
+    def unread_public_messages(self, being_id: str,
+                               limit: int = 3) -> list[dict]:
+        """The visitor notes a tick hasn't shown the being yet — oldest first."""
+        rows = self._c().execute(
+            "SELECT id, thread_id, sender_name, body, at FROM being_public_messages"
+            " WHERE being_id = ? AND role = 'public' AND read_at IS NULL"
+            " ORDER BY at LIMIT ?", (being_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_public_messages_read(self, message_ids: list[str],
+                                  now: datetime | None = None) -> None:
+        """A tick considered these — don't clog later prompts with them again."""
+        if not message_ids:
+            return
+        now = now or _utcnow()
+        with self._lock:
+            self._c().executemany(
+                "UPDATE being_public_messages SET read_at = ? WHERE id = ?",
+                [(_iso(now), mid) for mid in message_ids],
+            )
+            self._c().commit()
+
+    def answer_public_message(self, being_id: str, thread_id: str, reply: str,
+                              now: datetime | None = None) -> dict | None:
+        """The being's OPTIONAL reply to a visitor thread — stored as a
+        role='being' message; marks that thread's public notes answered."""
+        now = now or _utcnow()
+        reply = (reply or "").strip()[:1000]
+        if not reply:
+            return None
+        t = self._c().execute(
+            "SELECT 1 FROM being_public_threads WHERE id = ? AND being_id = ?",
+            (thread_id, being_id),
+        ).fetchone()
+        if not t:
+            return None
+        pend = self._c().execute(
+            "SELECT id FROM being_public_messages WHERE thread_id = ?"
+            " AND being_id = ? AND role = 'public' AND answered_at IS NULL"
+            " ORDER BY at", (thread_id, being_id),
+        ).fetchall()
+        rid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_public_messages"
+                " (id, thread_id, being_id, role, sender_name, body, at)"
+                " VALUES (?,?,?,'being','',?,?)",
+                (rid, thread_id, being_id, reply, _iso(now)),
+            )
+            if pend:
+                self._c().executemany(
+                    "UPDATE being_public_messages SET answered_at = ?"
+                    " WHERE id = ?", [(_iso(now), p["id"]) for p in pend],
+                )
+            self._c().execute(
+                "UPDATE being_public_threads SET updated_at = ? WHERE id = ?",
+                (_iso(now), thread_id),
+            )
+            self._c().commit()
+        self.record_event(being_id, "answered_visitor",
+                          {"thread": thread_id[:8], "preview": reply[:80]},
+                          now=now)
+        return {"reply_id": rid}
 
     # ── The Mind: declared edges over the being's own artifacts ──────
 

@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, Check, ChevronDown,
-  ChevronLeft, ChevronRight, ClipboardList, Coins, Egg, Files, Fingerprint, Gift,
-  GraduationCap, History, Loader2, Mail, Maximize2, MessageCircle, Minimize2,
-  Moon, Network, Pause, Play, Plus, RefreshCw, Search, ScrollText, Skull,
-  Sparkles, Sprout, Users, Wrench, X, Zap,
+  ChevronLeft, ChevronRight, ClipboardList, Coins, Egg, ExternalLink, Files,
+  Fingerprint, Gift, Globe, GraduationCap, History, Loader2, Mail, Maximize2,
+  MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus, RefreshCw, Search,
+  ScrollText, Skull, Sparkles, Sprout, Users, Wrench, X, Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -14,9 +14,9 @@ import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
   type Assessor, type BeingGraph, type Chore, type Quest, type Readiness,
   type ReportCard, type SavedAssessment, type SelfFile, type ThreadItem,
-  type Venture, type VillageItem,
+  type Venture, type VillageItem, type ParentPublicThread,
   deleteAssessment, getAssessors, getReadiness, listAssessments,
-  requestAssessment, saveAssessment,
+  requestAssessment, saveAssessment, setBeingPublic, getPublicThreads,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
@@ -1393,7 +1393,8 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   const [days, setDays] = useState(7)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
-  const [tab, setTab] = useState<'report' | 'rules' | 'diet' | 'growth'>('report')
+  const [tab, setTab] = useState<'report' | 'rules' | 'diet' | 'growth' | 'public'>('report')
+  const [threads, setThreads] = useState<ParentPublicThread[] | null>(null)
   const [rules, setRules] = useState<string[]>([])
   const [newRule, setNewRule] = useState('')
   const [allowList, setAllowList] = useState<string[]>([])
@@ -1440,6 +1441,10 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   useEffect(() => { void loadCard() }, [loadCard])
   // Lazily assess the moment the parent opens Growth (skips the cost otherwise).
   useEffect(() => { if (tab === 'growth' && !ready) void loadReady() }, [tab, ready, loadReady])
+  const loadThreads = useCallback(async () => {
+    try { setThreads((await getPublicThreads(slug)).threads) } catch { setThreads([]) }
+  }, [slug])
+  useEffect(() => { if (tab === 'public') void loadThreads() }, [tab, loadThreads])
   useEffect(() => {
     // Esc closes the top-most layer only — the confirm swallows it when open.
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !confirm) onClose() }
@@ -1575,7 +1580,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
             {/* Tabs */}
             <div className="flex shrink-0 gap-1 border-b border-zinc-800 px-3">
-              {([['report', 'Report'], ['rules', 'Rules'], ['diet', 'Diet'], ['growth', 'Growth']] as const).map(([k, lbl]) => (
+              {([['report', 'Report'], ['rules', 'Rules'], ['diet', 'Diet'], ['growth', 'Growth'], ['public', 'Public']] as const).map(([k, lbl]) => (
                 <button key={k} onClick={() => setTab(k)}
                   className={`relative px-3 py-2 text-xs font-medium transition-colors ${tab === k ? 'text-violet-600 dark:text-violet-300' : 'text-zinc-500 hover:text-zinc-300'}`}>
                   {lbl}
@@ -1964,6 +1969,77 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
             </div>
             )}
 
+            {/* Public tab — the square: toggle, link, visitor threads */}
+            {tab === 'public' && v && (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+                      <Globe className="h-4 w-4 text-violet-500 dark:text-violet-400" /> Public page
+                    </div>
+                    <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+                      A public being gets an un-gated page anyone can visit — to read its journal, files
+                      and mind, and leave a short note it may weigh (as a suggestion, never as parenting).
+                    </p>
+                  </div>
+                  <button onClick={() => run('public', () => setBeingPublic(slug, !v.public))} disabled={busy === 'public'}
+                    className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${v.public ? 'bg-violet-500' : 'bg-zinc-700'} disabled:opacity-50`}
+                    title={v.public ? 'Make private' : 'Make public'}>
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${v.public ? 'left-[22px]' : 'left-0.5'}`} />
+                  </button>
+                </div>
+                {v.public && (
+                  <a href={`/b/${slug}`} target="_blank" rel="noreferrer"
+                    className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-[11px] text-violet-600 hover:bg-zinc-800 dark:text-violet-300">
+                    <ExternalLink className="h-3.5 w-3.5" /> View public page — /b/{slug}
+                  </a>
+                )}
+              </div>
+
+              {v.public && (
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                      Visitor threads {threads ? `(${threads.length})` : ''}
+                    </div>
+                    <button onClick={() => void loadThreads()} className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300">
+                      <RefreshCw className="h-3 w-3" /> refresh
+                    </button>
+                  </div>
+                  {!threads && <div className="flex items-center gap-2 py-6 text-xs text-zinc-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> loading…</div>}
+                  {threads && threads.length === 0 && (
+                    <div className="rounded-xl border border-dashed border-zinc-800 py-8 text-center text-xs text-zinc-500">
+                      No one has left {name} a note yet.
+                    </div>
+                  )}
+                  <div className="space-y-3">
+                    {threads?.map((t) => (
+                      <div key={t.thread_id} className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3">
+                        <div className="mb-2 flex items-center gap-2 text-[11px] text-zinc-400">
+                          <span className="font-medium text-zinc-200">{t.sender_name}</span>
+                          <span className="text-zinc-600">· {t.messages.length} messages · updated {fmtRelTime(t.updated_at)}</span>
+                        </div>
+                        <div className="space-y-1.5">
+                          {t.messages.map((m, i) => (
+                            <div key={i} className={`flex ${m.role === 'being' ? 'justify-start' : 'justify-end'}`}>
+                              <div className={`max-w-[85%] rounded-lg px-2.5 py-1.5 text-[11px] ${m.role === 'being'
+                                ? 'bg-violet-500/10 text-zinc-200 ring-1 ring-violet-500/20'
+                                : 'bg-zinc-800 text-zinc-200'}`}>
+                                <span className="mr-1.5 text-[9px] uppercase tracking-wide text-zinc-500">{m.role === 'being' ? name : m.sender_name}</span>
+                                {m.body}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            )}
+
             </div>
           </div>
         )}
@@ -2082,6 +2158,13 @@ function BeingCard({ item, meta, onChanged }: {
           <span className="rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 text-[10px] text-zinc-300" title={(v.affect.notes || []).join('; ')}>
             {v.affect.mood}
           </span>
+        )}
+        {v?.public && (
+          <a href={`/b/${item.slug}`} target="_blank" rel="noreferrer"
+            title="This being has a public page — click to open it"
+            className="flex items-center gap-1 rounded border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-600 hover:bg-violet-500/20 dark:text-violet-300">
+            <Globe className="h-3 w-3" /> public
+          </a>
         )}
         <span className="ml-auto text-[10px] text-zinc-600">{item.slug}</span>
       </div>

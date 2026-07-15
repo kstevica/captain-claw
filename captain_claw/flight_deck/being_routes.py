@@ -73,6 +73,10 @@ class MessageRequest(BaseModel):
     body: str
 
 
+class PublicToggleRequest(BaseModel):
+    public: bool
+
+
 class AllowanceRequest(BaseModel):
     preset: str
     daily_burn_cap: int | None = None
@@ -346,6 +350,21 @@ async def message_being(slug: str, body: MessageRequest,
 async def message_thread(slug: str, user: dict = Depends(get_current_user)):
     """The full parent↔being conversation (your messages + its replies)."""
     return {"thread": _run(get_store().message_thread, user["id"], slug)}
+
+
+@router.post("/{slug}/public")
+async def set_public(slug: str, body: PublicToggleRequest,
+                     user: dict = Depends(get_current_user)):
+    """Open (or close) the being's un-gated public page (plan §9)."""
+    _run(get_store().set_public, user["id"], slug, body.public)
+    return _run(get_store().vitals, user["id"], slug)
+
+
+@router.get("/{slug}/public-threads")
+async def public_threads(slug: str, user: dict = Depends(get_current_user)):
+    """The parent's overview of every visitor thread on the public page —
+    only the parent sees all of them; a visitor sees only their own."""
+    return {"threads": _run(get_store().public_threads_for, user["id"], slug)}
 
 
 @router.get("/{slug}/graph")
