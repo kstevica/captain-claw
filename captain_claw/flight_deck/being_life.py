@@ -457,6 +457,15 @@ async def export_being(db, store: BeingsStore, being: dict,
         },
         "model": await _resolve_model_config(db, being["owner_id"], being),
         "events": events,
+        # The Mind: the being's DECLARED edges over its artifacts. Without these
+        # an imported being's graph is a pile of unconnected islands.
+        "links": store.links_for(being["owner_id"], being["slug"]),
+        # Sealed second opinions (its childhood records) travel too — stripped of
+        # the source ids, which are re-minted on import.
+        "assessments": [
+            {k: a.get(k) for k in ("assessor", "stage", "score", "verdict",
+                                   "content", "at", "released_at")}
+            for a in store.assessments_for(being["owner_id"], being["slug"])],
         "home": export_home(being),
     }
 

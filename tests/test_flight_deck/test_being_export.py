@@ -32,6 +32,9 @@ async def _being(store, owner="alice", name="Vesna"):
     home = life.home_root(being)
     (home / "garden" / "first.md").write_text("# First\nmade a thing\n")
     store.milestone(being["id"], "first_artifact", now=NOW)
+    # A declared Mind edge between two real files (survives the move).
+    store.add_link(owner, being["id"], "garden/first.md", "self/SELF.md",
+                   "grew_from", "it came from who I am", now=NOW)
     return store.get(owner, b["slug"])
 
 
@@ -49,6 +52,7 @@ async def test_export_import_roundtrip_preserves_being(store):
     assert manifest["genome"]["voice_seed"] == "I think first."
     assert "garden/first.md" in manifest["home"]
     assert any(e["kind"] == "milestone" for e in manifest["events"])
+    assert len(manifest["links"]) == 1     # the Mind travels too
 
     # import under another owner (same machine → slug is taken → suffixed)
     manifest["state"] = "paused"          # skip real body spawn in-test
@@ -67,6 +71,11 @@ async def test_export_import_roundtrip_preserves_being(store):
                for f in life.list_self_files(imp))
     assert "milestone" in [e["kind"]
                            for e in store.events("bob", imp["slug"], limit=99)]
+    # the Mind graph is restored (edge endpoints exist → the edge shows)
+    from captain_claw.flight_deck import being_mind
+    g = being_mind.graph(store, imp)
+    assert len(g["edges"]) == 1
+    assert g["edges"][0]["rel"] == "grew_from"
 
 
 async def test_import_uses_original_slug_when_free(store):

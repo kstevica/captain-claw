@@ -636,9 +636,33 @@ class BeingsStore:
                      e.get("at") or _iso(now)),
                 )
             c.commit()
+        # The Mind: replay declared edges (verified valid once the home lands).
+        for lk in (manifest.get("links") or []):
+            if isinstance(lk, dict) and lk.get("from_path") and lk.get("to_path"):
+                self.add_link(owner_id, bid, str(lk["from_path"]),
+                              str(lk["to_path"]), str(lk.get("rel") or ""),
+                              str(lk.get("why") or ""), now=now)
+        # Sealed second opinions (childhood records), released_at preserved.
+        with self._lock:
+            c = self._c()
+            for a in (manifest.get("assessments") or []):
+                if not isinstance(a, dict) or not a.get("content"):
+                    continue
+                c.execute(
+                    "INSERT INTO being_assessments (id, owner_id, being_id,"
+                    " assessor, stage, score, verdict, content, at, released_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (uuid.uuid4().hex, owner_id, bid,
+                     str(a.get("assessor") or "")[:120],
+                     str(a.get("stage") or ""), a.get("score"),
+                     str(a.get("verdict") or "")[:40], str(a["content"]),
+                     a.get("at") or _iso(now), a.get("released_at")),
+                )
+            c.commit()
         self.record_event(bid, "imported",
                           {"from_slug": manifest.get("slug"),
-                           "balance_tokens": balance}, now=now)
+                           "balance_tokens": balance,
+                           "links": len(manifest.get("links") or [])}, now=now)
         return self.get(owner_id, slug)
 
     def _row(self, owner_id: str, slug: str) -> sqlite3.Row:
