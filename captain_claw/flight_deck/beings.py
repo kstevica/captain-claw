@@ -382,6 +382,11 @@ class BeingsStore:
                 ("torpor_since", "TEXT"),
                 ("tick_interval_minutes", "INTEGER"),
                 ("public", "INTEGER NOT NULL DEFAULT 0"),
+                # Per-being model/connection override (provider/model/base_url/
+                # api_key/output_ctx). Empty for locally-conceived beings (they
+                # use the owner's tier config); set on IMPORT so a being carries
+                # its own connection across machines. See being_life.spawn_body.
+                ("body_config", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -553,6 +558,89 @@ class BeingsStore:
         }, now=now)
         return self.get(owner_id, slug)
 
+    def import_being_row(self, owner_id: str, manifest: dict,
+                         now: datetime | None = None) -> dict:
+        """Recreate a being (DB side) from an export manifest, under a new owner.
+        A fresh id + a free slug; the wallet balance is re-minted as one 'adjust'
+        row so conservation still holds on the target; events (incl. milestones)
+        are replayed. Home files + the body are handled by the caller."""
+        now = now or _utcnow()
+        genome = manifest.get("genome")
+        if not isinstance(genome, dict) or "attributes" not in genome:
+            raise BeingError("not a valid being export (missing genome)")
+        name = str(manifest.get("name") or "Imported").strip()[:80] or "Imported"
+        bid = uuid.uuid4().hex
+        # Prefer the original slug; fall back to a unique one if it's taken here.
+        slug = str(manifest.get("slug") or "").strip() or f"iskra-{_slugify(name)}"
+        if self._c().execute("SELECT 1 FROM beings WHERE slug = ?",
+                             (slug,)).fetchone():
+            slug = f"{slug}-{bid[:4]}"
+        stage = manifest.get("stage") or "infant"
+        if stage not in constitution.STAGE_ORDER or stage == "egg":
+            stage = "infant"
+        state = manifest.get("state") or "alive"
+        if state not in STATES:
+            state = "alive"
+        wallet = manifest.get("wallet") or {}
+        model = manifest.get("model") or {}
+        lineage = genome.get("lineage") or []
+        with self._lock:
+            c = self._c()
+            c.execute(
+                "INSERT INTO beings (id, owner_id, slug, name, stage, state,"
+                " genome, drives, attention_credits, born_at, hatched_at,"
+                " lineage, created_at, updated_at, birth_letter, media_diet,"
+                " house_rules, affect, persona, tick_interval_minutes, public,"
+                " body_config) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (bid, owner_id, slug, name, stage, state,
+                 json.dumps(genome),
+                 json.dumps(manifest.get("drives") or {}),
+                 int(manifest.get("attention_credits") or 3),
+                 manifest.get("born_at") or _iso(now),
+                 manifest.get("hatched_at") or _iso(now),
+                 json.dumps(lineage), _iso(now), _iso(now),
+                 str(manifest.get("birth_letter") or ""),
+                 json.dumps(manifest.get("media_diet") or {}),
+                 json.dumps(manifest.get("house_rules") or []),
+                 json.dumps(manifest.get("affect") or {}),
+                 str(manifest.get("persona") or ""),
+                 manifest.get("tick_interval_minutes"),
+                 1 if manifest.get("public") else 0,
+                 json.dumps(model) if model else ""),
+            )
+            c.execute(
+                "INSERT INTO being_wallets (being_id, allowance_preset,"
+                " daily_burn_cap, savings_ceiling, reserve_tokens, updated_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (bid, wallet.get("allowance_preset") or "2M",
+                 wallet.get("daily_burn_cap"), wallet.get("savings_ceiling"),
+                 int(wallet.get("reserve_tokens") or 0), _iso(now)),
+            )
+            c.commit()
+        balance = int(wallet.get("balance_tokens") or 0)
+        if balance > 0:
+            self._apply(owner_id, tokens=balance, reason="adjust",
+                        from_being=None, to_being=bid, note="import", now=now)
+        # Replay events (timeline + once-per-life milestones survive the move).
+        events = manifest.get("events") or []
+        with self._lock:
+            c = self._c()
+            for e in events[-1000:]:
+                if not isinstance(e, dict) or not e.get("kind"):
+                    continue
+                c.execute(
+                    "INSERT INTO being_events (id, being_id, kind, data, at)"
+                    " VALUES (?,?,?,?,?)",
+                    (uuid.uuid4().hex, bid, str(e["kind"]),
+                     json.dumps(e.get("data") or {}),
+                     e.get("at") or _iso(now)),
+                )
+            c.commit()
+        self.record_event(bid, "imported",
+                          {"from_slug": manifest.get("slug"),
+                           "balance_tokens": balance}, now=now)
+        return self.get(owner_id, slug)
+
     def _row(self, owner_id: str, slug: str) -> sqlite3.Row:
         row = self._c().execute(
             "SELECT * FROM beings WHERE owner_id = ? AND slug = ?",
@@ -570,6 +658,11 @@ class BeingsStore:
         b["media_diet"] = json.loads(b.get("media_diet") or "{}")
         b["house_rules"] = json.loads(b.get("house_rules") or "[]")
         b["affect"] = json.loads(b.get("affect") or "{}")
+        raw_bc = b.get("body_config") or ""
+        try:
+            b["body_config"] = json.loads(raw_bc) if raw_bc else None
+        except json.JSONDecodeError:
+            b["body_config"] = None
         for pending_col in ("pending_self_mod", "pending_procreation"):
             raw_pending = b.get(pending_col) or ""
             try:
@@ -650,6 +743,39 @@ class BeingsStore:
         self._update(b["id"], now, tick_interval_minutes=val)
         self.record_event(b["id"], "cadence_set", {"minutes": val}, now=now)
         return self.get(owner_id, slug)
+
+    def purge(self, owner_id: str, slug: str) -> dict:
+        """Erase a DEAD being completely — every row it owns across every table.
+        Only the dead can be purged (euthanize first); this is irreversible and
+        leaves no remains in the DB. The VFS home is removed by the caller.
+        Returns the removed being's identity for the caller (home cleanup)."""
+        b = self.get(owner_id, slug)
+        if b["state"] != "dead":
+            raise BeingError("only a dead being can be removed — euthanize it "
+                             "first", 409)
+        bid = b["id"]
+        with self._lock:
+            c = self._c()
+            # Rows keyed by being_id.
+            for tbl in ("being_wallets", "being_events", "being_jobs",
+                        "being_publications", "being_ventures",
+                        "being_parent_messages", "being_links",
+                        "being_assessments", "being_public_threads",
+                        "being_public_messages"):
+                c.execute(f"DELETE FROM {tbl} WHERE being_id = ?", (bid,))
+            # Rows that reference it from either side.
+            c.execute("DELETE FROM token_transfers WHERE from_being = ?"
+                      " OR to_being = ?", (bid, bid))
+            c.execute("DELETE FROM being_letters WHERE from_being = ?"
+                      " OR to_being = ?", (bid, bid))
+            # Open bounties it had claimed return to the board; paid history stays.
+            c.execute("UPDATE being_quests SET state = 'open', claimed_by = NULL,"
+                      " claimed_at = NULL, done_at = NULL WHERE claimed_by = ?"
+                      " AND state IN ('claimed', 'judging')", (bid,))
+            c.execute("DELETE FROM beings WHERE id = ?", (bid,))
+            c.commit()
+        return {"id": bid, "slug": b["slug"], "name": b["name"],
+                "owner_id": owner_id, "agent_slug": b.get("agent_slug")}
 
     def set_state(self, owner_id: str, slug: str, state: str,
                   now: datetime | None = None) -> dict:

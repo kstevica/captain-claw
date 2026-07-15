@@ -35,6 +35,16 @@ def _run(fn, *args, **kwargs):
         raise HTTPException(e.status, str(e)) from e
 
 
+def _db_optional():
+    """The FD DB if it's up, else None (auth-disabled standalone never inits it).
+    Export/import degrade gracefully without it — the model just isn't resolved
+    from the owner's tiers (an imported being carries its own body_config)."""
+    try:
+        return get_db()
+    except AssertionError:
+        return None
+
+
 class ConceiveRequest(BaseModel):
     name: str
     attributes: dict[str, int] | None = None
@@ -262,9 +272,32 @@ async def conceive(body: ConceiveRequest, user: dict = Depends(get_current_user)
     return {"ok": True, "being": _run(get_store().vitals, user["id"], being["slug"])}
 
 
+@router.post("/import")
+async def import_being(manifest: dict, user: dict = Depends(get_current_user)):
+    """Recreate a being from an export file on this machine (a new owner). The
+    body is respawned from the carried model connection; the source is untouched.
+    (Registered before /{slug} so 'import' isn't read as a slug.)"""
+    if not isinstance(manifest, dict) or "genome" not in manifest:
+        raise HTTPException(400, "not a being export file")
+    result = await being_life.import_being(_db_optional(), get_store(),
+                                           user["id"], manifest)
+    slug = result["being"]["slug"]
+    return {"ok": True, "warnings": result["warnings"],
+            "being": _run(get_store().vitals, user["id"], slug)}
+
+
 @router.get("/{slug}")
 async def being_vitals(slug: str, user: dict = Depends(get_current_user)):
     return _run(get_store().vitals, user["id"], slug)
+
+
+@router.get("/{slug}/export")
+async def export_being(slug: str, user: dict = Depends(get_current_user)):
+    """A portable snapshot of the being — identity, wallet, model connection,
+    history and its whole home, EXCLUDING the live body. Contains the model
+    API key (so it runs elsewhere): treat the file as a secret."""
+    being = _run(get_store().get, user["id"], slug)
+    return await being_life.export_being(_db_optional(), get_store(), being)
 
 
 @router.get("/{slug}/ledger")
@@ -634,6 +667,18 @@ async def euthanize(slug: str, body: EuthanizeRequest,
     b = _run(get_store().set_state, user["id"], slug, "dead")
     being_life._stop_body(b)
     return _run(get_store().vitals, user["id"], slug)
+
+
+@router.delete("/{slug}")
+async def purge(slug: str, user: dict = Depends(get_current_user)):
+    """Remove a DEAD being completely — its DB rows AND its VFS home. Forever.
+    Guarded to the dead (euthanize first). The body is already stopped."""
+    store = get_store()
+    being = _run(store.get, user["id"], slug)
+    being_life._stop_body(being)          # belt-and-suspenders; dead = stopped
+    removed = _run(store.purge, user["id"], slug)
+    home_gone = being_life.remove_home(being)
+    return {"ok": True, "removed": removed["slug"], "home_removed": home_gone}
 
 
 @router.post("/{slug}/metamorphose")

@@ -172,6 +172,25 @@ def list_self_files(being: dict) -> list[dict]:
     return out
 
 
+def remove_home(being: dict) -> bool:
+    """Delete the being's VFS home directory outright (used by purge). Best
+    effort, sandboxed to the resolved home root — returns True if it's gone."""
+    import shutil
+    try:
+        root = home_root(being).resolve()
+    except Exception:  # noqa: BLE001
+        return False
+    # Guard: only remove a path that actually looks like a being home.
+    if not root.exists() or f"being-{being['slug']}" not in root.as_posix():
+        return not root.exists()
+    try:
+        shutil.rmtree(root)
+        return True
+    except OSError as e:
+        log.warning("being home removal failed", slug=being["slug"], error=str(e))
+        return False
+
+
 def read_self_file(being: dict, rel_path: str) -> str:
     """Read one .md file from the being's home, sandboxed to that home."""
     root = home_root(being).resolve()
@@ -283,6 +302,12 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
     if db is not None:
         tiers_map, owner_env = await _load_owner_tiers(db, owner)
     tcfg = (tiers_map or {}).get(tier) or {}
+    # An IMPORTED being carries its own connection (body_config) so it works on
+    # a machine that never configured a matching tier — it wins over the owner's
+    # tier config for every non-empty field.
+    bc = being.get("body_config") or {}
+    if bc:
+        tcfg = {**tcfg, **{k: v for k, v in bc.items() if v}}
     env_vars = list(owner_env or []) + [
         {"key": "CLAW_VFS_PROJECT", "value": home_project(being)},
         {"key": "CLAW_AGENT_LABEL", "value": being["slug"]},
@@ -342,6 +367,146 @@ async def birth(db, store: BeingsStore, owner_id: str, slug: str) -> dict:
         store.record_event(being["id"], "spawn_failed", {"error": str(e)})
         log.warning("being body spawn failed", slug=slug, error=str(e))
     return result
+
+
+# ── Export / import: move a being between machines (body excluded) ───────
+
+EXPORT_FORMAT = "iskra-being/v1"
+# Guard the export size — home is text, but journals can grow; skip anything
+# that isn't a sane text artifact so an export stays a portable JSON.
+_EXPORT_TEXT_SUFFIXES = (".md", ".txt", ".json", ".jsonl", ".keep", ".csv")
+_EXPORT_MAX_FILE_BYTES = 2_000_000
+
+
+def export_home(being: dict) -> dict[str, str]:
+    """Every text file under the being's home, as {relpath: content} — its
+    whole selfhood (self/, journal/, garden/, skills/, archive/, assessments/),
+    minus git internals. This IS the being's memory; the body is not included."""
+    root = home_root(being)
+    out: dict[str, str] = {}
+    if not root.exists():
+        return out
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root).as_posix()
+        if rel.startswith(".git/") or rel in _IGNORED_CHANGES:
+            continue
+        if p.suffix.lower() not in _EXPORT_TEXT_SUFFIXES:
+            continue
+        try:
+            if p.stat().st_size > _EXPORT_MAX_FILE_BYTES:
+                continue
+            out[rel] = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return out
+
+
+async def _resolve_model_config(db, owner: str, being: dict) -> dict:
+    """The provider/model/api_key the being's body uses right now, so an import
+    on another machine spawns the same model without reconfiguring a tier."""
+    if being.get("body_config"):
+        return dict(being["body_config"])
+    if db is None:
+        return {}
+    try:
+        from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+        tiers_map, _ = await _load_owner_tiers(db, owner)
+    except Exception:  # noqa: BLE001
+        return {}
+    tcfg = (tiers_map or {}).get(_stage_tier(being["stage"])) or {}
+    keep = ("provider", "model", "base_url", "api_key", "output_ctx")
+    return {k: tcfg[k] for k in keep if tcfg.get(k)}
+
+
+async def export_being(db, store: BeingsStore, being: dict,
+                       now: datetime | None = None) -> dict:
+    """A portable, self-contained snapshot of a being: identity, wallet, model
+    connection, full event history, and its whole home — everything EXCEPT the
+    live body/agent process. Import it on another machine to continue the life."""
+    now = now or _utcnow()
+    view = store.wallet_view(being)
+    events = list(reversed(store.events(being["owner_id"], being["slug"],
+                                        limit=1000)))
+    return {
+        "format": EXPORT_FORMAT,
+        "exported_at": now.isoformat(),
+        "name": being["name"],
+        "slug": being["slug"],
+        "genome": being["genome"],
+        "stage": being["stage"],
+        "state": being["state"],
+        "drives": being.get("drives") or {},
+        "affect": being.get("affect") or {},
+        "persona": being.get("persona") or "",
+        "house_rules": being.get("house_rules") or [],
+        "media_diet": being.get("media_diet") or {},
+        "birth_letter": being.get("birth_letter") or "",
+        "attention_credits": being.get("attention_credits"),
+        "tick_interval_minutes": being.get("tick_interval_minutes"),
+        "public": bool(being.get("public")),
+        "born_at": being.get("born_at"),
+        "hatched_at": being.get("hatched_at"),
+        "wallet": {
+            "balance_tokens": view["balance_tokens"],
+            "allowance_preset": view["allowance_preset"],
+            "daily_burn_cap": view["daily_burn_cap"],
+            "savings_ceiling": view["savings_ceiling"],
+            "reserve_tokens": view["reserve_tokens"],
+        },
+        "model": await _resolve_model_config(db, being["owner_id"], being),
+        "events": events,
+        "home": export_home(being),
+    }
+
+
+async def import_home(being: dict, files: dict) -> None:
+    """Write an exported home back to a fresh VFS home + init/commit the repo."""
+    from captain_claw.flight_deck import code_git
+    wrote = False
+    for rel, content in (files or {}).items():
+        rel = str(rel).lstrip("/")
+        if ".." in rel.split("/") or not rel:
+            continue
+        try:
+            p = _home_path(being, rel)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content if isinstance(content, str) else str(content),
+                         encoding="utf-8")
+            wrote = True
+        except Exception as e:  # noqa: BLE001 — one bad file never fails the move
+            log.warning("import home file failed", slug=being["slug"],
+                        path=rel, error=str(e))
+    if not wrote:
+        # No home in the manifest — still give it the birth scaffold to live in.
+        await build_home(being)
+        return
+    root = home_root(being)
+    try:
+        await code_git.git_init(root)
+        await code_git.git_commit(root, "[import] restored home")
+    except Exception as e:  # noqa: BLE001
+        log.warning("import home commit failed", slug=being["slug"], error=str(e))
+
+
+async def import_being(db, store: BeingsStore, owner_id: str,
+                       manifest: dict) -> dict:
+    """Create a being from an export manifest under *owner_id*: DB rows, home
+    files, then (if alive) a fresh body using the carried model connection."""
+    if not isinstance(manifest, dict) or "genome" not in manifest:
+        raise BeingError("not a being export file")
+    being = store.import_being_row(owner_id, manifest)
+    await import_home(being, manifest.get("home") or {})
+    being_society.ensure_commons(owner_id)
+    warnings: list[str] = []
+    if being["state"] == "alive":
+        try:
+            await spawn_body(db, store, being)
+        except Exception as e:  # noqa: BLE001 — imported bodiless still lives
+            warnings.append(f"body spawn failed: {e}")
+            store.record_event(being["id"], "spawn_failed", {"error": str(e)})
+    return {"being": store.get(owner_id, being["slug"]), "warnings": warnings}
 
 
 # ── Drives (FD-side arithmetic — the ledger of feeling) ─────────────────

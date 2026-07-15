@@ -401,3 +401,18 @@ export interface ParentPublicThread {
 }
 export const getPublicThreads = (slug: string) =>
   fdFetch<{ threads: ParentPublicThread[] }>(`/beings/${slug}/public-threads`)
+
+// ── Export / import / hard-remove ──
+
+export type BeingExport = Record<string, unknown>
+
+export const exportBeing = (slug: string) =>
+  fdFetch<BeingExport>(`/beings/${slug}/export`)
+
+export const importBeing = (manifest: BeingExport) =>
+  fdFetch<{ ok: boolean; warnings: string[]; being: BeingVitals }>(
+    '/beings/import', { method: 'POST', body: JSON.stringify(manifest) })
+
+export const purgeBeing = (slug: string) =>
+  fdFetch<{ ok: boolean; removed: string; home_removed: boolean }>(
+    `/beings/${slug}`, { method: 'DELETE' })

@@ -281,7 +281,7 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
 
 // ── Visitor composer + their own thread ──
 
-function Composer({ slug, state }: { slug: string; state: string }) {
+function Composer({ slug, state, beingName }: { slug: string; state: string; beingName: string }) {
   const [name, setName] = useState(savedName())
   const [body, setBody] = useState('')
   const [thread, setThread] = useState<PublicThread | null>(null)
@@ -371,7 +371,7 @@ function Composer({ slug, state }: { slug: string; state: string }) {
                   ? 'rounded-tl-sm bg-violet-600/15 text-zinc-100 ring-1 ring-violet-500/20'
                   : 'rounded-tr-sm bg-zinc-800 text-zinc-100'}`}>
                   <div className="mb-0.5 flex items-center gap-2 text-[10px] uppercase tracking-wide text-zinc-500">
-                    <span>{m.role === 'being' ? 'the being' : m.sender_name || 'you'}</span>
+                    <span>{m.role === 'being' ? beingName : m.sender_name || 'you'}</span>
                     <span>·</span><span>{relTime(m.at)}</span>
                   </div>
                   <div>{m.body}</div>
@@ -722,7 +722,7 @@ function BeingView({ slug, theme, onToggleTheme }: { slug: string; theme: 'dark'
       </div>
 
       <div className="mt-5">
-        {tab === 'note' && <Composer slug={slug} state={p.state} />}
+        {tab === 'note' && <Composer slug={slug} state={p.state} beingName={p.name} />}
         {tab === 'journal' && <JournalPane slug={slug} name={p.name} />}
         {tab === 'files' && <FilesPane slug={slug} />}
         {tab === 'mind' && (

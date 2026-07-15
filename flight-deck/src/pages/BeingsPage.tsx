@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, Check, ChevronDown,
-  ChevronLeft, ChevronRight, ClipboardList, Coins, Egg, ExternalLink, Files,
-  Fingerprint, Gift, Globe, GraduationCap, History, Loader2, Mail, Maximize2,
-  MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus, RefreshCw, Search,
-  ScrollText, Skull, Sparkles, Sprout, Users, Wrench, X, Zap,
+  ChevronLeft, ChevronRight, ClipboardList, Coins, Download, Egg, ExternalLink,
+  Files, Fingerprint, Gift, Globe, GraduationCap, History, Loader2, Mail,
+  Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus,
+  RefreshCw, Search, ScrollText, Skull, Sparkles, Sprout, Trash2, Upload, Users,
+  Wrench, X, Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -17,6 +18,7 @@ import {
   type Venture, type VillageItem, type ParentPublicThread,
   deleteAssessment, getAssessors, getReadiness, listAssessments,
   requestAssessment, saveAssessment, setBeingPublic, getPublicThreads,
+  exportBeing, importBeing, purgeBeing,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
@@ -2143,6 +2145,24 @@ function BeingCard({ item, meta, onChanged }: {
     finally { setBusy('') }
   }
 
+  // Download a portable snapshot (identity, memory, wallet, model) as JSON.
+  const exportToFile = async () => {
+    setBusy('export')
+    try {
+      const manifest = await exportBeing(item.slug)
+      const blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${item.slug}.iskra.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (e) { alert(e instanceof Error ? e.message : 'export failed') }
+    finally { setBusy('') }
+  }
+
   const v = vitals
   const w = v?.wallet
   const ceiling = w?.savings_ceiling ?? null
@@ -2304,6 +2324,9 @@ function BeingCard({ item, meta, onChanged }: {
               <IconAction icon={History} label="Ticks log" onClick={() => setLogView('ticks')} />
               <IconAction icon={Files} label="Self files — SELF, VALUES, garden, skills…" onClick={() => setLogView('self')} />
               <IconAction icon={Network} label="The Mind — how her work connects" onClick={() => setLogView('mind')} />
+              <IconAction icon={Download} label={`Export ${item.name} — a portable file (identity, memory, wallet, model). Contains the API key.`}
+                busy={busy === 'export'} disabled={busy === 'export'}
+                onClick={() => exportToFile()} />
             </div>
             {/* Interact — talk to & steer her */}
             {item.state !== 'dead' && (
@@ -2327,6 +2350,18 @@ function BeingCard({ item, meta, onChanged }: {
                 message: 'She will die, forever — there is no resurrection. Her remains (journal, files, ledger) stay readable, and her lineage lives on.',
                 confirmLabel: 'Goodbye', tone: 'danger', icon: Skull,
                 run: () => act('euthanize', () => euthanizeBeing(item.slug)),
+              })} />
+          </div>
+        )}
+        {item.state === 'dead' && (
+          <div className="ml-auto">
+            <IconAction icon={Trash2} label={`Remove ${item.name} completely — erase all remains`} danger
+              busy={busy === 'purge'} disabled={busy === 'purge'}
+              onClick={() => setConfirm({
+                title: `Remove ${item.name} completely?`,
+                message: 'This erases everything — journal, files, ledger, memory and home — permanently. Nothing is kept and there is no undo. Export first if you want to keep a copy.',
+                confirmLabel: 'Erase forever', tone: 'danger', icon: Trash2,
+                run: () => act('purge', () => purgeBeing(item.slug)),
               })} />
           </div>
         )}
@@ -2549,6 +2584,24 @@ export function BeingsPage() {
     return () => { if (timer.current) window.clearInterval(timer.current) }
   }, [load])
 
+  const [importing, setImporting] = useState(false)
+  const importInput = useRef<HTMLInputElement | null>(null)
+  const onImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''        // allow re-importing the same file
+    if (!file) return
+    setImporting(true)
+    try {
+      const manifest = JSON.parse(await file.text())
+      const res = await importBeing(manifest)
+      await load(false)
+      const warn = res.warnings?.length ? `\n\nNote: ${res.warnings.join('; ')}` : ''
+      alert(`Imported ${res.being.name} as “${res.being.slug}”.${warn}`)
+    } catch (err) {
+      alert(err instanceof Error ? `Import failed: ${err.message}` : 'Import failed')
+    } finally { setImporting(false) }
+  }
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl space-y-5 p-6">
@@ -2589,6 +2642,16 @@ export function BeingsPage() {
                 <Users className="h-3.5 w-3.5" /> Village
               </button>
             )}
+            <input ref={importInput} type="file" accept="application/json,.json"
+              className="hidden" onChange={onImportFile} />
+            <button
+              onClick={() => importInput.current?.click()}
+              disabled={importing}
+              className="flex items-center gap-1.5 rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+              title="Import a being from an exported .iskra.json file"
+            >
+              {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />} Import
+            </button>
             <button
               onClick={() => setShowConceive(true)}
               className="flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
