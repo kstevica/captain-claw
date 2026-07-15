@@ -102,6 +102,11 @@ class CadenceRequest(BaseModel):
     minutes: int | None = None
 
 
+class CognitionRequest(BaseModel):
+    # 'monolith' (one prompt → one digest) or 'faculties' (decomposed pipeline)
+    mode: str
+
+
 class AssessRequest(BaseModel):
     assessor: str   # registry slug of the agent to ask for a second opinion
 
@@ -742,6 +747,15 @@ async def set_cadence(slug: str, body: CadenceRequest,
         raise HTTPException(
             400, f"minutes must be one of {list(being_life.TICK_INTERVAL_CHOICES)} or null")
     _run(get_store().set_tick_interval, user["id"], slug, body.minutes)
+    return _run(get_store().vitals, user["id"], slug)
+
+
+@router.post("/{slug}/cognition")
+async def set_cognition(slug: str, body: CognitionRequest,
+                        user: dict = Depends(get_current_user)):
+    """Choose how this being thinks a tick: 'monolith' or 'faculties' (the
+    decomposed pipeline — better for weak-context models)."""
+    _run(get_store().set_cognition, user["id"], slug, body.mode)
     return _run(get_store().vitals, user["id"], slug)
 
 

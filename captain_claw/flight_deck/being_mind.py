@@ -336,6 +336,30 @@ def link_gate_prompt(store: BeingsStore, being: dict, digest: dict) -> str:
     )
 
 
+def connect_prompt(store: BeingsStore, being: dict,
+                   last_refusals: list[dict] | None = None,
+                   kind: str = "wake") -> str:
+    """The standalone CONNECT faculty (decomposed tick): ONLY the weaving task,
+    the current shape, last tick's refusals, and the exact linkable paths — one
+    job, small context. Reuses mind_prompt_lines so the guidance stays in sync
+    with the monolithic path."""
+    lines = ["[LIFE TICK — connect] You are " + being["name"] + ". One focused "
+             "step: weave your work into a web. Nothing else this turn."]
+    lines += mind_prompt_lines(store, being, kind=kind, last_refusals=last_refusals)
+    lines += [
+        "",
+        "Reply with ONE fenced json, nothing else:",
+        '```json',
+        '{"links":[{"from":"<exact path>","to":"<exact path>","rel":'
+        '"grew_from|responds_to|elaborates|contradicts|uses_skill|learned_from",'
+        '"why":"one honest line"}]}',
+        '```',
+        'Declare only TRUE links between files that ALREADY exist. If none truly '
+        'connect, reply {"links": []} — never force one.',
+    ]
+    return "\n".join(lines)
+
+
 # ── Curation (§2.3.2): working set, index, consolidation ─────────────────
 
 def _read_index(being: dict) -> str | None:

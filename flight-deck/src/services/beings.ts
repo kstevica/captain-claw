@@ -116,6 +116,7 @@ export interface BeingVitals {
     letter: string; proposed_at: string
   } | null
   tick_interval_minutes: number | null
+  cognition: 'monolith' | 'faculties'
   public: boolean
   visit_url: string
   visit_secret: string
@@ -378,6 +379,12 @@ export const setStage = (slug: string, stage: string) =>
 export const setCadence = (slug: string, minutes: number | null) =>
   fdFetch<BeingVitals>(`/beings/${slug}/cadence`, {
     method: 'POST', body: JSON.stringify({ minutes }),
+  })
+
+export type Cognition = 'monolith' | 'faculties'
+export const setCognition = (slug: string, mode: Cognition) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/cognition`, {
+    method: 'POST', body: JSON.stringify({ mode }),
   })
 
 // ── The public square (parent side) ──

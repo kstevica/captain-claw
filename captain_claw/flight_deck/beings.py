@@ -437,6 +437,11 @@ class BeingsStore:
                 ("visit_url", "TEXT NOT NULL DEFAULT ''"),
                 ("visit_secret", "TEXT NOT NULL DEFAULT ''"),
                 ("visit_last_announce", "TEXT"),
+                # How the being THINKS a tick: 'monolith' (one prompt → one
+                # digest, the default) or 'faculties' (decomposed pipeline —
+                # orient/act/journal/connect, small context per call, better for
+                # weak-context models). See docs/being-faculties-plan.md.
+                ("cognition", "TEXT NOT NULL DEFAULT 'monolith'"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -821,6 +826,19 @@ class BeingsStore:
         self.record_event(b["id"], "cadence_set", {"minutes": val}, now=now)
         return self.get(owner_id, slug)
 
+    def set_cognition(self, owner_id: str, slug: str, mode: str,
+                      now: datetime | None = None) -> dict:
+        """Choose how the being THINKS a tick: 'monolith' (one prompt → one
+        digest) or 'faculties' (decomposed pipeline — better for weak-context
+        models). See docs/being-faculties-plan.md."""
+        now = now or _utcnow()
+        if mode not in ("monolith", "faculties"):
+            raise BeingError("cognition must be 'monolith' or 'faculties'")
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now, cognition=mode)
+        self.record_event(b["id"], "cognition_set", {"mode": mode}, now=now)
+        return self.get(owner_id, slug)
+
     def purge(self, owner_id: str, slug: str) -> dict:
         """Erase a DEAD being completely — every row it owns across every table.
         Only the dead can be purged (euthanize first); this is irreversible and
@@ -1122,6 +1140,7 @@ class BeingsStore:
             "pending_self_mod": b["pending_self_mod"],
             "pending_procreation": b["pending_procreation"],
             "tick_interval_minutes": b.get("tick_interval_minutes"),
+            "cognition": b.get("cognition") or "monolith",
             "public": bool(b.get("public")),
             "visit_url": b.get("visit_url") or "",
             "visit_secret": b.get("visit_secret") or "",

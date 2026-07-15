@@ -28,7 +28,7 @@ import {
   getBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
   listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
   rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance, setCadence,
-  setHouseRules, setMediaDiet, setStage, setVentureState, tickBeing,
+  setCognition, setHouseRules, setMediaDiet, setStage, setVentureState, tickBeing,
   wakeBeing, TICK_INTERVAL_CHOICES,
 } from '../services/beings'
 
@@ -2312,6 +2312,22 @@ function BeingCard({ item, meta, onChanged }: {
                 <option key={m} value={m}>every {m} min</option>
               ))}
             </select>
+          </div>
+
+          <div className="mb-2 flex items-center gap-2 text-xs">
+            <span className="text-zinc-500">thinks</span>
+            <select
+              value={v.cognition ?? 'monolith'}
+              onChange={(e) => void act('cognition', () => setCognition(
+                item.slug, e.target.value as 'monolith' | 'faculties'))}
+              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
+            >
+              <option value="monolith">One prompt (default)</option>
+              <option value="faculties">Faculties (focused steps)</option>
+            </select>
+            {v.cognition === 'faculties' && (
+              <span className="text-[10px] text-zinc-500">small-context: orient · act · journal · connect</span>
+            )}
           </div>
 
           {events.length > 0 && (

@@ -927,3 +927,152 @@ def test_set_tick_interval_validates_and_clears(store):
     assert store.get(OWNER, b["slug"])["tick_interval_minutes"] is None
     with _pt.raises(BeingError):
         store.set_tick_interval(OWNER, b["slug"], 99999)          # out of range
+
+
+# ── The decomposed tick: faculties mode (docs/being-faculties-plan.md) ────
+
+def test_cognition_defaults_monolith_and_validates(store):
+    import pytest as _pt
+    b = _born(store)
+    assert store.get(OWNER, b["slug"])["cognition"] == "monolith"    # default
+    store.set_cognition(OWNER, b["slug"], "faculties")
+    assert store.get(OWNER, b["slug"])["cognition"] == "faculties"
+    with _pt.raises(BeingError):
+        store.set_cognition(OWNER, b["slug"], "telepathy")
+
+
+def _orient(**over):
+    d = {"act_kind": "tend", "target": "garden/a.md", "served_drive": "grow",
+         "intent": "tend the first sprout", "next_wake_minutes": 60,
+         "message_to_parent": None}
+    d.update(over)
+    return "here is my choice\n```json\n" + json.dumps(d) + "\n```"
+
+
+def _journal_reply(**over):
+    d = {"journal_entry": "I tended the sprout and sat with it.",
+         "mood": "calm", "served_drive": "grow"}
+    d.update(over)
+    return "```json\n" + json.dumps(d) + "\n```"
+
+
+def _links_reply(links):
+    return "```json\n" + json.dumps({"links": links}) + "\n```"
+
+
+def _faculty_send(handlers):
+    """A send_fn that dispatches by the faculty marker in each prompt, so a test
+    can answer orient / act / journal / connect (and the repair push) each with
+    its own small reply. Records how many times each faculty was called."""
+    calls: dict = {}
+
+    async def send(being, prompt):
+        if "[LIFE TICK — orient]" in prompt:
+            key = "orient"
+        elif "[LIFE TICK — act]" in prompt:
+            key = "act"
+        elif "[LIFE TICK — journal]" in prompt:
+            key = "journal"
+        elif "[LIFE TICK — connect]" in prompt:
+            key = "connect"
+        elif "valid self-report" in prompt.lower():
+            key = "repair"
+        else:
+            key = "other"
+        calls[key] = calls.get(key, 0) + 1
+        h = handlers.get(key)
+        return h(being, prompt) if h else None
+
+    return send, calls
+
+
+async def _usage_fn(being, since):
+    return _usage(40_000)
+
+
+async def test_faculties_tick_composes_one_digest(store):
+    """orient → act → journal, composed into one digest — a real create counts,
+    and the journal reflects what actually happened."""
+    db = FakeDB()
+    b = _born(store, stage="child", port=0)
+    await life.build_home(b)
+    store.set_cognition(OWNER, b["slug"], "faculties")
+    b = store.get(OWNER, b["slug"])
+
+    def act(being, prompt):
+        p = life._home_path(being, "garden/a.md")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("# a\n", encoding="utf-8")
+        return "wrote garden/a.md"
+
+    send, calls = _faculty_send({
+        "orient": lambda be, pr: _orient(act_kind="tend", target="garden/a.md"),
+        "act": act,
+        "journal": lambda be, pr: _journal_reply(),
+        "connect": lambda be, pr: _links_reply([]),   # declines to force a link
+    })
+    out = await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=_usage_fn)
+    assert out["ok"] and out["act"] == "tend"          # real write → not downgraded
+    assert calls["orient"] == 1 and calls["act"] >= 1 and calls["journal"] == 1
+    day = life._home_path(
+        b, f"journal/{NOW.strftime('%Y-%m-%d')}.md").read_text(encoding="utf-8")
+    assert "tended the sprout" in day
+    assert "garden/a.md" in day                        # the real diff, stamped
+
+
+async def test_faculties_connect_creates_edges(store):
+    """The whole point: in faculties mode the CONNECT step reliably lands edges,
+    routed through the same handle_links_digest the monolith uses."""
+    db = FakeDB()
+    b = _born(store, stage="child", port=0)
+    await life.build_home(b)
+    for f in ("garden/a.md", "garden/b.md"):
+        p = life._home_path(b, f)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"# {f}\n", encoding="utf-8")
+    store.set_cognition(OWNER, b["slug"], "faculties")
+    b = store.get(OWNER, b["slug"])
+
+    send, calls = _faculty_send({
+        "orient": lambda be, pr: _orient(act_kind="read", target=None,
+                                         intent="reread my garden"),
+        "act": lambda be, pr: "read my files",
+        "journal": lambda be, pr: _journal_reply(
+            journal_entry="I reread my two sprouts and saw one grew from the "
+                          "other — I will connect them."),
+        "connect": lambda be, pr: _links_reply([
+            {"from": "garden/a.md", "to": "garden/b.md", "rel": "grew_from",
+             "why": "b grew from a"}]),
+    })
+    await life.tick(db, store, b, now=NOW + timedelta(hours=1),
+                    send_fn=send, usage_fn=_usage_fn)
+    assert calls.get("connect") == 1
+    links = store.links_for(OWNER, b["slug"])
+    assert len(links) == 1 and links[0]["rel"] == "grew_from"
+
+
+async def test_faculties_orient_repair_rescues_formatless(store):
+    """A weak model returns prose for orient; one repair push recovers the
+    decision instead of losing the whole tick."""
+    db = FakeDB()
+    b = _born(store, stage="child", port=0)
+    await life.build_home(b)
+    store.set_cognition(OWNER, b["slug"], "faculties")
+    b = store.get(OWNER, b["slug"])
+
+    send, calls = _faculty_send({
+        "orient": lambda be, pr: "I think I'll just rest and reflect today.",
+        "repair": lambda be, pr: _orient(act_kind="journal", target=None,
+                                         intent="reflect quietly"),
+        "journal": lambda be, pr: _journal_reply(
+            journal_entry="I rested and reflected.", mood="quiet"),
+        "connect": lambda be, pr: _links_reply([]),
+    })
+    out = await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=_usage_fn)
+    assert out["ok"]
+    assert calls.get("repair") == 1
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "digest_repair_retry" in kinds
+    day = life._home_path(
+        b, f"journal/{NOW.strftime('%Y-%m-%d')}.md").read_text(encoding="utf-8")
+    assert "rested and reflected" in day
