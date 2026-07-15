@@ -1473,24 +1473,43 @@ async def _safe_send(send, being: dict, prompt: str, store, bid: str,
 
 async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
                          senses, view, spent_today, first_of_day, siblings,
-                         letters_left, visitors, last_refusals, drives
+                         letters_left, visitors, last_refusals, drives,
+                         resolve_port: bool = False
                          ) -> tuple[str | None, dict, list | None]:
     """The decomposed tick. Returns the SAME ``(reply, digest, changed)`` triple
-    the monolithic path yields, so every downstream router is unchanged."""
+    the monolithic path yields, so every downstream router is unchanged.
+
+    A tick here is several sequential calls; on a slow local model it can span
+    minutes, long enough for the body to drift to a new port (a crash-restart
+    re-pins the fleet registry). So each faculty call re-resolves the LIVE port
+    first and NEVER overlaps another — one LLM request in flight at a time."""
     bid = being["id"]
+
+    async def _fac_send(prompt: str, faculty: str) -> str | None:
+        # Follow the body: re-resolve its port right before every call so a
+        # mid-tick drift is tracked, not fatal (the stale-port "connection
+        # refused" that made replies never come back). Only for the real
+        # channel — an injected send_fn (tests) has no registry to consult.
+        if resolve_port:
+            try:
+                p = _resolve_live_port(store, being)
+                if p:
+                    being["agent_port"] = p
+            except Exception:  # noqa: BLE001 — keep the last-known port
+                pass
+        return await _safe_send(send, being, prompt, store, bid, now, faculty)
 
     # 1) ORIENT — the one holistic decision (small json). One repair push if a
     #    weak model returns prose with no json.
-    reply = await _safe_send(send, being, compose_orient_prompt(
+    reply = await _fac_send(compose_orient_prompt(
         being, kind=kind, now=now, spent_today=spent_today, wallet=view,
         percepts=senses, first_of_day=first_of_day, siblings=siblings,
-        letters_left=letters_left, visitors=visitors), store, bid, now, "orient")
+        letters_left=letters_left, visitors=visitors), "orient")
     raw = _extract_raw(reply, require_act=True)
     if raw is None and reply is not None and kind != "dream":
         store.record_event(bid, "digest_repair_retry", {"faculty": "orient"},
                            now=now)
-        reply = await _safe_send(send, being, compose_digest_repair_prompt(being),
-                                 store, bid, now, "orient")
+        reply = await _fac_send(compose_digest_repair_prompt(being), "orient")
         raw = _extract_raw(reply, require_act=True)
     if raw is None:
         if reply is None:
@@ -1512,7 +1531,7 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
         gate_prompt = compose_act_prompt(being, act_kind=act_kind,
                                          intent=intent, target=target)
         for attempt in range(GATE_RETRIES + 1):
-            await _safe_send(send, being, gate_prompt, store, bid, now, "act")
+            await _fac_send(gate_prompt, "act")
             try:
                 changed = await _tick_changed_files(being)
             except Exception as e:  # noqa: BLE001
@@ -1537,9 +1556,9 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
             changed = None
 
     # 3) JOURNAL — grounded self-report (prose + a tiny json).
-    jreply = await _safe_send(send, being, compose_journal_prompt(
+    jreply = await _fac_send(compose_journal_prompt(
         being, intent=intent, act_kind=act_kind, changed=changed,
-        visitors=visitors), store, bid, now, "journal")
+        visitors=visitors), "journal")
     jraw = _extract_raw(jreply) or {}
     if jraw.get("journal_entry"):
         merged["journal_entry"] = jraw["journal_entry"]
@@ -1566,9 +1585,8 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
             weave = False
     if weave:
         store.record_event(bid, "connect_faculty", {}, now=now)
-        creply = await _safe_send(send, being, being_mind.connect_prompt(
-            store, being, last_refusals=last_refusals, kind=kind),
-            store, bid, now, "connect")
+        creply = await _fac_send(being_mind.connect_prompt(
+            store, being, last_refusals=last_refusals, kind=kind), "connect")
         craw = _extract_raw(creply) or {}
         if isinstance(craw.get("links"), list):
             merged["links"] = craw["links"]
@@ -2027,7 +2045,8 @@ async def _tick_locked(
             store, being, kind=kind, now=now, send=send, senses=senses,
             view=view, spent_today=store.spent_today(bid, now=now),
             first_of_day=first_of_day, siblings=sibs, letters_left=letters_left,
-            visitors=visitors, last_refusals=last_refusals, drives=drives)
+            visitors=visitors, last_refusals=last_refusals, drives=drives,
+            resolve_port=(send_fn is None))
     else:
         try:
             mind_lines = being_mind.mind_prompt_lines(

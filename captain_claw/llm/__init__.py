@@ -844,9 +844,23 @@ def _extract_usage(usage_obj: Any) -> dict[str, int]:
     if total_tokens <= 0:
         total_tokens = prompt_tokens + completion_tokens
 
-    # Anthropic cache tokens (passed through by LiteLLM)
+    # Anthropic cache tokens (passed through by LiteLLM): here cache_read is a
+    # SEPARATE bucket from prompt_tokens (input = the non-cached portion).
     cache_creation = int(_obj_get(usage_obj, "cache_creation_input_tokens", 0) or 0)
     cache_read = int(_obj_get(usage_obj, "cache_read_input_tokens", 0) or 0)
+
+    # OpenAI-compatible caching (OpenAI, and openai-served local models like the
+    # beings' MLX server) reports cached prompt tokens under
+    # ``prompt_tokens_details.cached_tokens`` — and there they are INCLUDED in
+    # prompt_tokens. Normalise to the Anthropic shape (input = non-cached,
+    # cache_read = cached) so pricing/costing counts them once, at the cache
+    # rate, instead of missing the discount entirely.
+    if not cache_read:
+        details = _obj_get(usage_obj, "prompt_tokens_details", None)
+        oa_cached = int(_obj_get(details, "cached_tokens", 0) or 0) if details else 0
+        if oa_cached > 0:
+            cache_read = oa_cached
+            prompt_tokens = max(0, prompt_tokens - oa_cached)
 
     return {
         "prompt_tokens": prompt_tokens,

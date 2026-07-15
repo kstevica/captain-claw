@@ -1047,6 +1047,32 @@ async def _usage_fn(being, since):
     return _usage(40_000)
 
 
+async def test_faculties_reresolve_follows_body_port_drift(store, monkeypatch):
+    """On a slow model a tick spans minutes; if the body drifts to a new port
+    mid-tick, every faculty call must re-resolve and follow it — not keep
+    hitting the dead port (the 'nothing gets back to the being' bug)."""
+    b = _born(store, stage="child", port=24000)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+    monkeypatch.setattr(life, "_resolve_live_port", lambda s, being: 24999)
+    seen_ports = []
+
+    async def send(being, prompt):
+        seen_ports.append(being["agent_port"])           # what the call would hit
+        if "[LIFE TICK — orient]" in prompt:
+            return _orient(act_kind="journal", target=None)
+        if "[LIFE TICK — journal]" in prompt:
+            return _journal_reply()
+        return _links_reply([])
+
+    await life._run_faculties(
+        store, b, kind="wake", now=NOW, send=send, senses=[],
+        view=store.wallet_view(b), spent_today=0, first_of_day=False,
+        siblings=[], letters_left=None, visitors=[], last_refusals=[],
+        drives=b["drives"], resolve_port=True)
+    assert seen_ports and all(p == 24999 for p in seen_ports)   # every call followed
+
+
 async def test_faculties_tick_composes_one_digest(store):
     """orient → act → journal, composed into one digest — a real create counts,
     and the journal reflects what actually happened."""

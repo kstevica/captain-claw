@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -193,6 +194,14 @@ class LayeredMemory:
         return self.semantic.get_history(history_id=history_id)
 
     def schedule_background_sync(self, reason: str = "manual") -> None:
+        # A Flight-Deck being body must run ONE LLM request at a time: its tick
+        # is a sequence of think calls, and background memory summarization is a
+        # PARALLEL LLM call that contends with them on the same (often single,
+        # local) model — starving the tick and drifting its body. A being's
+        # memory is its VFS home + journal, not this semantic store, so skip it.
+        if os.environ.get("CLAW_BEING_WORKER", "").strip().lower() in (
+                "1", "true", "yes"):
+            return
         if self.semantic is not None:
             self.semantic.schedule_sync(reason)
 
