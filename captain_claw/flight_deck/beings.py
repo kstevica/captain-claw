@@ -48,6 +48,9 @@ TRANSFER_REASONS = (
 # provocation, not an instruction the model could mistake for guidance.
 PUBLIC_MSG_MAX_CHARS = 64
 PUBLIC_NAME_MAX_CHARS = 40
+# How a newly-conceived being thinks a tick (docs/being-faculties-plan.md).
+# Read at call time so tests can pin the legacy 'monolith' path via conftest.
+DEFAULT_COGNITION = "faculties"
 
 
 class BeingError(Exception):
@@ -437,16 +440,24 @@ class BeingsStore:
                 ("visit_url", "TEXT NOT NULL DEFAULT ''"),
                 ("visit_secret", "TEXT NOT NULL DEFAULT ''"),
                 ("visit_last_announce", "TEXT"),
-                # How the being THINKS a tick: 'monolith' (one prompt → one
-                # digest, the default) or 'faculties' (decomposed pipeline —
-                # orient/act/journal/connect, small context per call, better for
-                # weak-context models). See docs/being-faculties-plan.md.
-                ("cognition", "TEXT NOT NULL DEFAULT 'monolith'"),
+                # How the being THINKS a tick: 'faculties' (decomposed pipeline —
+                # orient/act/journal/connect, small context per call, the
+                # default) or 'monolith' (one prompt → one digest, legacy).
+                # See docs/being-faculties-plan.md.
+                ("cognition", "TEXT NOT NULL DEFAULT 'faculties'"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError:
                     pass
+            # One-time flip: the decomposed tick is now the default, so beings
+            # that were auto-defaulted to 'monolith' by the first cut move to
+            # 'faculties'. Guarded by user_version so it runs exactly once — a
+            # parent who LATER chooses 'monolith' is never re-flipped.
+            if self._c().execute("PRAGMA user_version").fetchone()[0] < 1:
+                self._c().execute("UPDATE beings SET cognition = 'faculties'"
+                                  " WHERE cognition = 'monolith'")
+                self._c().execute("PRAGMA user_version = 1")
             self._c().commit()
 
     # ── Registry ─────────────────────────────────────────────────────
@@ -492,10 +503,11 @@ class BeingsStore:
             c = self._c()
             c.execute(
                 "INSERT INTO beings (id, owner_id, slug, name, stage, state, genome,"
-                " born_at, created_at, updated_at, birth_letter)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " born_at, created_at, updated_at, birth_letter, cognition)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (bid, owner_id, slug, name, "egg", "alive", json.dumps(g),
-                 _iso(now), _iso(now), _iso(now), birth_letter),
+                 _iso(now), _iso(now), _iso(now), birth_letter,
+                 DEFAULT_COGNITION),
             )
             c.execute(
                 "INSERT INTO being_wallets (being_id, allowance_preset, updated_at)"
@@ -584,10 +596,10 @@ class BeingsStore:
             c = self._c()
             c.execute(
                 "INSERT INTO beings (id, owner_id, slug, name, stage, state, genome,"
-                " born_at, created_at, updated_at, birth_letter)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " born_at, created_at, updated_at, birth_letter, cognition)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (bid, owner_id, slug, name, "egg", "alive", json.dumps(g),
-                 _iso(now), _iso(now), _iso(now), letter),
+                 _iso(now), _iso(now), _iso(now), letter, DEFAULT_COGNITION),
             )
             c.execute(
                 "INSERT INTO being_wallets (being_id, allowance_preset, updated_at)"
@@ -646,8 +658,8 @@ class BeingsStore:
                 " genome, drives, attention_credits, born_at, hatched_at,"
                 " lineage, created_at, updated_at, birth_letter, media_diet,"
                 " house_rules, affect, persona, tick_interval_minutes, public,"
-                " body_config, tick_count, last_tick_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " body_config, tick_count, last_tick_at, cognition)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (bid, owner_id, slug, name, stage, state,
                  json.dumps(genome),
                  json.dumps(manifest.get("drives") or {}),
@@ -664,7 +676,8 @@ class BeingsStore:
                  1 if manifest.get("public") else 0,
                  json.dumps(model) if model else "",
                  int(manifest.get("tick_count") or 0),
-                 manifest.get("last_tick_at")),
+                 manifest.get("last_tick_at"),
+                 manifest.get("cognition") or DEFAULT_COGNITION),
             )
             c.execute(
                 "INSERT INTO being_wallets (being_id, allowance_preset,"
@@ -1140,7 +1153,7 @@ class BeingsStore:
             "pending_self_mod": b["pending_self_mod"],
             "pending_procreation": b["pending_procreation"],
             "tick_interval_minutes": b.get("tick_interval_minutes"),
-            "cognition": b.get("cognition") or "monolith",
+            "cognition": b.get("cognition") or "faculties",
             "public": bool(b.get("public")),
             "visit_url": b.get("visit_url") or "",
             "visit_secret": b.get("visit_secret") or "",

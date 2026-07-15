@@ -449,6 +449,7 @@ async def export_being(db, store: BeingsStore, being: dict,
         "birth_letter": being.get("birth_letter") or "",
         "attention_credits": being.get("attention_credits"),
         "tick_interval_minutes": being.get("tick_interval_minutes"),
+        "cognition": being.get("cognition") or "monolith",
         "public": bool(being.get("public")),
         "born_at": being.get("born_at"),
         "hatched_at": being.get("hatched_at"),
@@ -2000,7 +2001,7 @@ async def _tick_locked(
                         error=str(e))
     t0 = now
     send = send_fn or _send_via_channel
-    if (being.get("cognition") or "monolith") == "faculties":
+    if (being.get("cognition") or "faculties") == "faculties":
         # 3b-alt. The DECOMPOSED tick (docs/being-faculties-plan.md): one being,
         # a short pipeline of small focused calls (orient → act → journal →
         # connect), composed into the same digest so everything below is

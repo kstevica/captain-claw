@@ -931,14 +931,39 @@ def test_set_tick_interval_validates_and_clears(store):
 
 # ── The decomposed tick: faculties mode (docs/being-faculties-plan.md) ────
 
-def test_cognition_defaults_monolith_and_validates(store):
+def test_set_cognition_flips_and_validates(store):
     import pytest as _pt
     b = _born(store)
-    assert store.get(OWNER, b["slug"])["cognition"] == "monolith"    # default
     store.set_cognition(OWNER, b["slug"], "faculties")
     assert store.get(OWNER, b["slug"])["cognition"] == "faculties"
+    store.set_cognition(OWNER, b["slug"], "monolith")
+    assert store.get(OWNER, b["slug"])["cognition"] == "monolith"
     with _pt.raises(BeingError):
         store.set_cognition(OWNER, b["slug"], "telepathy")
+
+
+def test_new_being_defaults_to_faculties_in_production(store, monkeypatch):
+    # The autouse conftest pins the legacy default for the rest of the suite;
+    # production conceives new beings into the decomposed tick.
+    from captain_claw.flight_deck import beings as beings_mod
+    monkeypatch.setattr(beings_mod, "DEFAULT_COGNITION", "faculties")
+    b = _born(store, name="Nova")
+    assert store.get(OWNER, b["slug"])["cognition"] == "faculties"
+
+
+def test_cognition_one_time_flip_monolith_to_faculties(store):
+    # A being auto-defaulted to 'monolith' by the first cut is flipped once,
+    # when a store re-opens the DB from before the migration guard was set.
+    b = _born(store, name="Flipme")
+    assert store.get(OWNER, b["slug"])["cognition"] == "monolith"   # conftest
+    store._c().execute("PRAGMA user_version = 0")                   # rewind guard
+    store._c().commit()
+    store2 = BeingsStore(db_path=store.db_path)                     # re-init flips
+    assert store2.get(OWNER, b["slug"])["cognition"] == "faculties"
+    # idempotent: a parent's later 'monolith' choice is never re-flipped
+    store2.set_cognition(OWNER, b["slug"], "monolith")
+    store3 = BeingsStore(db_path=store.db_path)
+    assert store3.get(OWNER, b["slug"])["cognition"] == "monolith"
 
 
 def _orient(**over):
