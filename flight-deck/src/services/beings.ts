@@ -117,6 +117,7 @@ export interface BeingVitals {
   } | null
   tick_interval_minutes: number | null
   cognition: 'monolith' | 'faculties'
+  body_archetype: string
   public: boolean
   visit_url: string
   visit_secret: string
@@ -385,6 +386,17 @@ export type Cognition = 'monolith' | 'faculties'
 export const setCognition = (slug: string, mode: Cognition) =>
   fdFetch<BeingVitals>(`/beings/${slug}/cognition`, {
     method: 'POST', body: JSON.stringify({ mode }),
+  })
+
+// Body housekeeping: run the being's body on an archetype (its tier → model,
+// tools, cognitive mode). Empty id → the stage default. Respawns the body.
+export interface BodyArchetypeOption { id: string; role?: string; tier?: string; family?: string }
+export const listBodyArchetypes = () =>
+  fdFetch<{ archetypes: BodyArchetypeOption[] }>('/archetypes')
+    .then((r) => r.archetypes || [])
+export const setBodyArchetype = (slug: string, archetypeId: string) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/body-archetype`, {
+    method: 'POST', body: JSON.stringify({ archetype_id: archetypeId }),
   })
 
 // Fixed parent top-up amounts (tokens) — mirrors beings.GRANT_AMOUNTS.

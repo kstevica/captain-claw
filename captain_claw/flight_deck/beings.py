@@ -448,6 +448,10 @@ class BeingsStore:
                 # default) or 'monolith' (one prompt → one digest, legacy).
                 # See docs/being-faculties-plan.md.
                 ("cognition", "TEXT NOT NULL DEFAULT 'faculties'"),
+                # Optional archetype the body runs on (its tier → model/provider,
+                # tools, cognitive_mode). Empty → the stage tier + owner config.
+                # Changing it respawns the body. See being_life.spawn_body.
+                ("body_archetype", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -661,8 +665,9 @@ class BeingsStore:
                 " genome, drives, attention_credits, born_at, hatched_at,"
                 " lineage, created_at, updated_at, birth_letter, media_diet,"
                 " house_rules, affect, persona, tick_interval_minutes, public,"
-                " body_config, tick_count, last_tick_at, cognition)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " body_config, tick_count, last_tick_at, cognition,"
+                " body_archetype)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (bid, owner_id, slug, name, stage, state,
                  json.dumps(genome),
                  json.dumps(manifest.get("drives") or {}),
@@ -680,7 +685,8 @@ class BeingsStore:
                  json.dumps(model) if model else "",
                  int(manifest.get("tick_count") or 0),
                  manifest.get("last_tick_at"),
-                 manifest.get("cognition") or DEFAULT_COGNITION),
+                 manifest.get("cognition") or DEFAULT_COGNITION,
+                 str(manifest.get("body_archetype") or "")),
             )
             c.execute(
                 "INSERT INTO being_wallets (being_id, allowance_preset,"
@@ -840,6 +846,18 @@ class BeingsStore:
                 raise BeingError("tick interval must be 1–1440 minutes")
         self._update(b["id"], now, tick_interval_minutes=val)
         self.record_event(b["id"], "cadence_set", {"minutes": val}, now=now)
+        return self.get(owner_id, slug)
+
+    def set_body_archetype(self, owner_id: str, slug: str, archetype_id: str,
+                           now: datetime | None = None) -> dict:
+        """Point the being's BODY at an archetype (its tier→model/provider,
+        tools, cognitive_mode), or '' to return to the stage tier + owner
+        config. The caller respawns the body so the change takes effect."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now, body_archetype=(archetype_id or "").strip())
+        self.record_event(b["id"], "body_archetype_set",
+                          {"archetype": (archetype_id or "").strip()}, now=now)
         return self.get(owner_id, slug)
 
     def set_cognition(self, owner_id: str, slug: str, mode: str,
@@ -1195,6 +1213,7 @@ class BeingsStore:
             "pending_procreation": b["pending_procreation"],
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "cognition": b.get("cognition") or "faculties",
+            "body_archetype": b.get("body_archetype") or "",
             "public": bool(b.get("public")),
             "visit_url": b.get("visit_url") or "",
             "visit_secret": b.get("visit_secret") or "",

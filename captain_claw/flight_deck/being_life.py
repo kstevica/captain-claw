@@ -302,6 +302,22 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
 
     owner = being["owner_id"]
     tier = _stage_tier(being["stage"])
+    # A being can run its BODY on an archetype: the archetype's tier drives the
+    # model/provider (via the owner's tier config), and its tools + cognitive
+    # mode shape the agent. Empty → the stage tier + owner config (the default).
+    archetype = None
+    arch_id = (being.get("body_archetype") or "").strip()
+    if arch_id and db is not None:
+        try:
+            from captain_claw.flight_deck.archetypes import merged_archetypes
+            archetype = next(
+                (a for a in await merged_archetypes(db, owner)
+                 if a.get("id") == arch_id), None)
+        except Exception as e:  # noqa: BLE001 — a bad/missing id falls back
+            log.warning("being body archetype resolve failed",
+                        slug=being["slug"], archetype=arch_id, error=str(e))
+    if archetype and archetype.get("tier"):
+        tier = str(archetype["tier"])
     tiers_map, owner_env = ({}, [])
     if db is not None:
         tiers_map, owner_env = await _load_owner_tiers(db, owner)
@@ -340,13 +356,23 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
     )
     if tcfg.get("output_ctx"):
         cfg.max_tokens = int(tcfg["output_ctx"])
+    # Apply the archetype's cognitive mode + tools, but always keep the file
+    # tools a being needs to tend its home, whatever the archetype declares.
+    if archetype:
+        cfg.cognitive_mode = archetype.get("cognitive_mode") or cfg.cognitive_mode
+        atools = archetype.get("tools")
+        if isinstance(atools, list) and atools:
+            essential = ["read", "write", "edit", "glob"]
+            cfg.tools = list(dict.fromkeys([str(t) for t in atools] + essential))
     request = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     await spawn_process(cfg, request, None)
     port, token = resolve_agent_port_token(being["slug"])
     if not port:
         raise RuntimeError("agent spawned but not resolvable in registry")
     store.set_agent(being["id"], being["slug"], int(port), token or "")
-    store.record_event(being["id"], "body", {"port": int(port), "tier": tier})
+    store.record_event(being["id"], "body",
+                       {"port": int(port), "tier": tier,
+                        "archetype": arch_id or None})
     return {"agent_slug": being["slug"], "port": int(port)}
 
 
@@ -450,6 +476,7 @@ async def export_being(db, store: BeingsStore, being: dict,
         "attention_credits": being.get("attention_credits"),
         "tick_interval_minutes": being.get("tick_interval_minutes"),
         "cognition": being.get("cognition") or "monolith",
+        "body_archetype": being.get("body_archetype") or "",
         "public": bool(being.get("public")),
         "born_at": being.get("born_at"),
         "hatched_at": being.get("hatched_at"),

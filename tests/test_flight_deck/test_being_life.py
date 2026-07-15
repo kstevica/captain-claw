@@ -941,6 +941,54 @@ async def test_spawn_body_marks_being_as_fd_worker(store, monkeypatch):
     assert captured["env"].get("CLAW_BEING_WORKER") == "1"
 
 
+def test_set_body_archetype_stores_and_vitals(store):
+    b = _born(store, port=0)
+    assert store.vitals(OWNER, b["slug"])["body_archetype"] == ""     # default
+    store.set_body_archetype(OWNER, b["slug"], "deep-researcher")
+    assert store.get(OWNER, b["slug"])["body_archetype"] == "deep-researcher"
+    assert store.vitals(OWNER, b["slug"])["body_archetype"] == "deep-researcher"
+    assert "body_archetype_set" in [
+        e["kind"] for e in store.events(OWNER, b["slug"])]
+    store.set_body_archetype(OWNER, b["slug"], "")                    # back to default
+    assert store.get(OWNER, b["slug"])["body_archetype"] == ""
+
+
+async def test_spawn_body_runs_on_archetype_tier_tools_mode(store, monkeypatch):
+    """Selecting an archetype drives the body's model (via its tier), tools, and
+    cognitive mode — while the file tools a being needs are always kept."""
+    b = _born(store, port=0)
+    store.set_body_archetype(OWNER, b["slug"], "deep-researcher")
+    b = store.get(OWNER, b["slug"])
+    captured = {}
+
+    async def fake_spawn(cfg, request, user):
+        captured["cfg"] = cfg
+        return None
+
+    async def fake_merged(db, owner):
+        return [{"id": "deep-researcher", "tier": "reason",
+                 "tools": ["web_search", "read"], "cognitive_mode": "lydia"}]
+
+    async def fake_tiers(db, owner):
+        return ({"reason": {"provider": "openai", "model": "gpt-x",
+                            "base_url": "http://x", "api_key": "k"}}, [])
+
+    monkeypatch.setattr("captain_claw.flight_deck.server.spawn_process", fake_spawn)
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (24096, "tok"))
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.archetypes.merged_archetypes", fake_merged)
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.basna_routes._load_owner_tiers", fake_tiers)
+    await life.spawn_body(FakeDB(), store, b)
+    cfg = captured["cfg"]
+    assert cfg.model == "gpt-x"                          # archetype tier → model
+    assert cfg.cognitive_mode == "lydia"
+    assert "web_search" in cfg.tools                     # archetype tool applied
+    assert all(t in cfg.tools for t in ("read", "write", "edit", "glob"))
+
+
 # ── #2: per-being tick cadence the parent pins ───────────────────────────
 
 async def test_parent_pinned_cadence_overrides_next_wake(store):

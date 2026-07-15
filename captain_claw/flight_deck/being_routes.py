@@ -111,6 +111,11 @@ class RechargeRequest(BaseModel):
     tokens: int
 
 
+class BodyArchetypeRequest(BaseModel):
+    # archetype id, or "" to return the body to the stage tier + owner config
+    archetype_id: str = ""
+
+
 class AssessRequest(BaseModel):
     assessor: str   # registry slug of the agent to ask for a second opinion
 
@@ -761,6 +766,24 @@ async def set_cognition(slug: str, body: CognitionRequest,
     decomposed pipeline — better for weak-context models)."""
     _run(get_store().set_cognition, user["id"], slug, body.mode)
     return _run(get_store().vitals, user["id"], slug)
+
+
+@router.post("/{slug}/body-archetype")
+async def set_body_archetype(slug: str, body: BodyArchetypeRequest,
+                             user: dict = Depends(get_current_user)):
+    """Run the being's BODY on an archetype (its tier → model/provider, tools,
+    cognitive mode), or "" for the stage default. Respawns an alive being's body
+    so the new connection takes effect at once; otherwise it applies on the next
+    spawn."""
+    store = get_store()
+    being = _run(store.set_body_archetype, user["id"], slug, body.archetype_id)
+    if being["state"] == "alive" and being.get("agent_slug"):
+        try:
+            being_life._stop_body(being)
+            await being_life.spawn_body(get_db(), store, being)
+        except Exception as e:  # noqa: BLE001 — heals on next tick
+            store.record_event(being["id"], "spawn_failed", {"error": str(e)})
+    return _run(store.vitals, user["id"], slug)
 
 
 @router.post("/{slug}/recharge")

@@ -28,6 +28,7 @@ import {
   getBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
   listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
+  setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption,
   setCadence, setCognition, setHouseRules, setMediaDiet, setStage, setVentureState,
   tickBeing, wakeBeing, GRANT_AMOUNTS, TICK_INTERVAL_CHOICES,
 } from '../services/beings'
@@ -2174,11 +2175,17 @@ function ConfirmModal({ title, message, confirmLabel, tone = 'default', icon: Ic
   )
 }
 
+// The archetype list is identical for every card — fetch once, share.
+let _archCache: Promise<BodyArchetypeOption[]> | null = null
+const loadBodyArchetypes = () => (_archCache ??= listBodyArchetypes().catch(() => []))
+
 function BeingCard({ item, meta, onChanged }: {
   item: BeingListItem
   meta: BeingsMeta
   onChanged: () => void
 }) {
+  const [archetypes, setArchetypes] = useState<BodyArchetypeOption[]>([])
+  useEffect(() => { void loadBodyArchetypes().then(setArchetypes) }, [])
   const [vitals, setVitals] = useState<BeingVitals | null>(null)
   const [events, setEvents] = useState<BeingEvent[]>([])
   const [logView, setLogView] = useState<'journal' | 'ticks' | 'self' | 'mind' | null>(null)
@@ -2341,6 +2348,23 @@ function BeingCard({ item, meta, onChanged }: {
             </select>
             {v.cognition === 'faculties' && (
               <span className="text-[10px] text-zinc-500">small-context: orient · act · journal · connect</span>
+            )}
+          </div>
+
+          <div className="mb-2 flex items-center gap-2 text-xs">
+            <span className="text-zinc-500">body</span>
+            <select
+              value={v.body_archetype ?? ''}
+              onChange={(e) => void act('body', () => setBodyArchetype(item.slug, e.target.value))}
+              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
+            >
+              <option value="">Default (stage tier)</option>
+              {archetypes.map((a) => (
+                <option key={a.id} value={a.id}>{a.role || a.id}{a.tier ? ` · ${a.tier}` : ''}</option>
+              ))}
+            </select>
+            {v.body_archetype && (
+              <span className="text-[10px] text-zinc-500">archetype model · respawns on change</span>
             )}
           </div>
 
