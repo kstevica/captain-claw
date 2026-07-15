@@ -741,13 +741,24 @@ async def set_allowance(slug: str, body: AllowanceRequest,
 @router.post("/{slug}/stage")
 async def set_stage(slug: str, body: StageRequest,
                     user: dict = Depends(get_current_user)):
-    _run(get_store().set_stage, user["id"], slug, body.stage)
+    store = get_store()
+    _run(store.set_stage, user["id"], slug, body.stage)
     if body.stage == "adult":
         # The unsealing rite: her childhood assessment records become hers.
         from captain_claw.flight_deck import being_assessment
-        being = _run(get_store().get, user["id"], slug)
-        _run(being_assessment.release_assessments, get_store(), being)
-    return _run(get_store().vitals, user["id"], slug)
+        being = _run(store.get, user["id"], slug)
+        _run(being_assessment.release_assessments, store, being)
+    # Metamorphosis reaches the BODY too: the stage sets the model tier and
+    # the capability env (CLAW_BEING_CAPS — fleet/organ tool containment), so
+    # respawn a living body now rather than letting it run on outgrown physics.
+    being = _run(store.get, user["id"], slug)
+    if being["state"] == "alive" and being.get("agent_slug"):
+        try:
+            being_life._stop_body(being)
+            await being_life.spawn_body(get_db(), store, being)
+        except Exception as e:  # noqa: BLE001 — heals on next tick
+            store.record_event(being["id"], "spawn_failed", {"error": str(e)})
+    return _run(store.vitals, user["id"], slug)
 
 
 @router.post("/{slug}/cadence")

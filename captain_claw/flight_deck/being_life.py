@@ -340,6 +340,14 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
         # addressable from inside, whatever the model asks for.
         {"key": "CLAW_VFS_SCOPE",
          "value": f"{home_project(being)},{COMMONS_PROJECT}"},
+        # Constitution capabilities at spawn time: the body's always-on
+        # fleet/organ tools (consult_peer, flight_deck, basna, …) register
+        # only when the stage grants agent_messaging — otherwise a body
+        # could consult a sibling's body directly, bypassing letters
+        # physics, rate limits and wallet metering entirely.
+        {"key": "CLAW_BEING_CAPS",
+         "value": ",".join(sorted(
+             constitution.capabilities(being["stage"])))},
     ]
     cfg = AgentConfig(
         name=being["slug"],
@@ -822,6 +830,90 @@ def home_manifest(being: dict) -> dict[str, list[str]]:
     return out
 
 
+def society_prompt_fields(being: dict, siblings: list[dict] | None,
+                          letters_left: int | None) -> list[str]:
+    """Digest fields this stage can actually DELIVER — shared by the monolith
+    prompt and the faculties orient step, so the two cognitions offer the same
+    society. Never offers what physics would refuse (letters below child,
+    a spent daily quota, trades below adolescence)."""
+    if not siblings:
+        return []
+    caps = constitution.capabilities(being["stage"])
+    fields: list[str] = []
+    if "letters" in caps and (letters_left is None or letters_left > 0):
+        left = (f" — {letters_left} left today"
+                if letters_left is not None else "")
+        fields.append(
+            '"letter": {"to": "<sibling name>", "body": "short and '
+            f'true"}}{left}')
+    if "commons_write" in caps:
+        fields.append(
+            '"publish": {"path": "skills/<file>.md", "title": "...", '
+            '"note": "one line", "price_tokens": 0}')
+        fields.append(
+            '"gift": {"to": "<sibling name>", "tokens": 100000, '
+            '"note": "why"}')
+    if "commons_read" in caps:
+        fields.append(
+            '"adopt": {"publication_id": "<id from a commons percept>"}'
+            + ("" if "trade" in caps else "  (free skills only at your "
+               "stage)"))
+    return fields
+
+
+def _talk_menu_note(being: dict, siblings: list[dict] | None,
+                    letters_left: int | None) -> str:
+    """How 'talk' is offered in the act menu — honestly. A talk that cannot
+    deliver anywhere must not be dangled as if it could."""
+    if not siblings:
+        return "talk (words to your parent)"
+    if not constitution.has_capability(being["stage"], "letters"):
+        return ("talk (words to your parent — sibling letters unlock in "
+                "childhood)")
+    if letters_left is not None and letters_left <= 0:
+        return ("talk (your letter quota is spent today — words to your "
+                "parent only)")
+    return "talk (a letter to a sibling, or words to your parent)"
+
+
+def rare_option_lines(being: dict) -> list[str]:
+    """The self-mod and procreation affordances — capability-gated, shared by
+    both cognitions (the faculties split had silently dropped them)."""
+    lines: list[str] = []
+    can_self_mod = (constitution.has_capability(being["stage"], "self_mod")
+                    or constitution.has_capability(being["stage"],
+                                                   "self_mod_auto"))
+    if can_self_mod and not being.get("pending_self_mod"):
+        auto = constitution.has_capability(being["stage"], "self_mod_auto")
+        lines.append(
+            'RARE OPTION — reshaping how you operate: add "self_mod": '
+            '{"persona": "<your full new operating text, '
+            f'{constitution.PERSONA_MIN_CHARS}-'
+            f'{constitution.PERSONA_MAX_CHARS} chars>", "reason": "why"}} '
+            f'to your digest. It costs {constitution.SELF_MOD_FEE_TOKENS} '
+            "tokens, burned win or lose, and faces a viability gate"
+            + ("." if auto else ", then waits for your parent's blessing.")
+            + " Propose only when something true has changed in you.")
+    elif being.get("pending_self_mod"):
+        lines.append("Your persona proposal awaits your parent. Be patient; "
+                     "do not propose another.")
+    if constitution.has_capability(being["stage"], "procreate"):
+        if being.get("pending_procreation"):
+            lines.append("Your procreation proposal awaits your parent's "
+                         "consent. Be patient.")
+        else:
+            lines.append(
+                'RARE OPTION — a child: add "procreate": {"partner": '
+                '"<sibling name or null>", "child_name": "...", "case": '
+                '"why you are truly ready", "letter": "your first words to '
+                'them — their imprint"} to your digest. The dowry is '
+                f'{constitution.PROCREATION_COST_TOKENS} tokens from your '
+                "savings (split with a partner), and your parent must "
+                "consent. A child is the most serious thing you will ever "
+                "propose.")
+    return lines
+
+
 def compose_tick_prompt(being: dict, *, kind: str = "wake",
                         now: datetime | None = None,
                         spent_today: int = 0, wallet: dict | None = None,
@@ -902,25 +994,14 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
             for s in siblings)
         lines.append(f"YOUR SIBLINGS: {roster}. You share the commons and "
                      "nothing else — their homes and memories are their own.")
-        society_fields = []
-        if "letters" in caps and (letters_left is None or letters_left > 0):
-            left = (f" — {letters_left} left today"
-                    if letters_left is not None else "")
-            society_fields.append(
-                '"letter": {"to": "<sibling name>", "body": "short and '
-                f'true"}}{left}')
-        if "commons_write" in caps:
-            society_fields.append(
-                '"publish": {"path": "skills/<file>.md", "title": "...", '
-                '"note": "one line", "price_tokens": 0}')
-            society_fields.append(
-                '"gift": {"to": "<sibling name>", "tokens": 100000, '
-                '"note": "why"}')
-        if "commons_read" in caps:
-            society_fields.append(
-                '"adopt": {"publication_id": "<id from a commons percept>"}'
-                + ("" if "trade" in caps else "  (free skills only at your "
-                   "stage)"))
+        if "letters" not in caps:
+            # Never offer what physics will refuse (the Zvjezdana→Lada
+            # lesson): an infant sees its siblings but cannot write them yet.
+            lines.append(
+                "You cannot send letters to siblings yet — that ability "
+                "comes in childhood. For now your words go to your parent or "
+                "your journal; never claim to have talked to a sibling.")
+        society_fields = society_prompt_fields(being, siblings, letters_left)
         if society_fields:
             lines += ["OPTIONAL SOCIETY FIELDS for your digest — use only "
                       "when genuine, never to perform:",
@@ -997,7 +1078,8 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         task = (
             "Choose exactly ONE bounded act that serves your highest drive "
             "pressure — journal / explore (only if web allowed) / tend your "
-            "garden / create something small / read your own files / rest. "
+            f"garden / create something small / read your own files / "
+            f"{_talk_menu_note(being, siblings, letters_left)} / rest. "
             "Do it NOW with your tools, modestly (tokens are your food; "
             "thrift matters). Do not start long projects. "
             "HONESTY OF RECORD: Flight Deck records what your tools actually "
@@ -1024,37 +1106,7 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         "worth their attention (it spends a credit). Reply as one single "
         "message.",
     ]
-    can_self_mod = (constitution.has_capability(being["stage"], "self_mod")
-                    or constitution.has_capability(being["stage"],
-                                                   "self_mod_auto"))
-    if can_self_mod and not being.get("pending_self_mod"):
-        auto = constitution.has_capability(being["stage"], "self_mod_auto")
-        lines.append(
-            'RARE OPTION — reshaping how you operate: add "self_mod": '
-            '{"persona": "<your full new operating text, '
-            f'{constitution.PERSONA_MIN_CHARS}-'
-            f'{constitution.PERSONA_MAX_CHARS} chars>", "reason": "why"}} '
-            f'to your digest. It costs {constitution.SELF_MOD_FEE_TOKENS} '
-            "tokens, burned win or lose, and faces a viability gate"
-            + ("." if auto else ", then waits for your parent's blessing.")
-            + " Propose only when something true has changed in you.")
-    elif being.get("pending_self_mod"):
-        lines.append("Your persona proposal awaits your parent. Be patient; "
-                     "do not propose another.")
-    if constitution.has_capability(being["stage"], "procreate"):
-        if being.get("pending_procreation"):
-            lines.append("Your procreation proposal awaits your parent's "
-                         "consent. Be patient.")
-        else:
-            lines.append(
-                'RARE OPTION — a child: add "procreate": {"partner": '
-                '"<sibling name or null>", "child_name": "...", "case": '
-                '"why you are truly ready", "letter": "your first words to '
-                'them — their imprint"} to your digest. The dowry is '
-                f'{constitution.PROCREATION_COST_TOKENS} tokens from your '
-                "savings (split with a partner), and your parent must "
-                "consent. A child is the most serious thing you will ever "
-                "propose.")
+    lines += rare_option_lines(being)
     return "\n".join(lines)
 
 
@@ -1428,21 +1480,49 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
     if ef:
         lines += ["ONLY if you truly finish earning work this tick, you may add "
                   "these to your decision json:", *("  " + f for f in ef)]
+    if siblings:
+        roster = ", ".join(
+            f"{s['name']} ({s['stage']}" + (f", {s['mood']}" if s.get("mood")
+                                            else "") + ")"
+            for s in siblings)
+        lines.append(f"YOUR SIBLINGS: {roster}.")
+        if not constitution.has_capability(being["stage"], "letters"):
+            lines.append(
+                "You cannot send letters to siblings yet — that ability "
+                "comes in childhood. Never claim to have talked to one.")
+    sf = society_prompt_fields(being, siblings, letters_left)
+    if sf:
+        lines += ["OPTIONAL SOCIETY FIELDS for your decision json — only "
+                  "when genuine, never to perform:", *("  " + f for f in sf)]
+    lines += rare_option_lines(being)
     tail = _read_journal_tail(being, now)
     if tail:
         lines += ["YOUR LAST JOURNAL WORDS:", tail]
     if percepts:
         lines += ["SINCE YOU LAST WOKE:"] + [f"- {p}" for p in percepts]
+        if any(p.startswith("CHORE") for p in percepts):
+            lines.append(
+                'If a CHORE above is already truly finished, add "chore": '
+                '{"job_id": "<id>", "result": "what you did"} to your '
+                "decision json. Only claim what is really done — it will "
+                "be judged.")
     if first_of_day and kind == "wake":
         lines.append("MORNING: a new day — let your choice fit a fresh start.")
+    can_letter = bool(siblings) and constitution.has_capability(
+        being["stage"], "letters") and (letters_left is None
+                                        or letters_left > 0)
+    target_desc = ('"target":"the file you will act on, e.g. garden/x.md'
+                   + (", or the sibling to write to" if can_letter else "")
+                   + ', or null",')
     lines += [
         "",
         "Choose exactly ONE bounded act that serves your highest drive: "
-        "journal / explore / tend / create / read / talk / rest. Be modest — "
+        f"journal / explore / tend / create / read / "
+        f"{_talk_menu_note(being, siblings, letters_left)} / rest. Be modest — "
         "tokens are your food. Reply with ONE fenced json, nothing else:",
         '```json',
         '{"act_kind":"journal|explore|tend|create|read|talk|rest",'
-        '"target":"the file you will act on, e.g. garden/x.md, or null",'
+        + target_desc +
         '"served_drive":"survive|grow|explore|connect|create",'
         '"intent":"one short line of what you will do",'
         '"next_wake_minutes":60,"message_to_parent":null}',
@@ -1471,14 +1551,62 @@ def compose_act_prompt(being: dict, *, act_kind: str, intent: str,
     return "\n".join(lines)
 
 
+def _match_sibling(siblings: list[dict] | None, *texts: str) -> dict | None:
+    """The sibling a talk means, from the orient step's target/intent — slug
+    or name, substring match, case-insensitive. None → the talk is for the
+    parent (or nobody), which needs no delivery of its own."""
+    for s in siblings or []:
+        keys = (s["slug"].lower(), s["name"].lower())
+        for t in texts:
+            tl = (t or "").strip().lower()
+            if tl and any(k in tl or tl in k for k in keys if k):
+                return s
+    return None
+
+
+def compose_talk_prompt(being: dict, *, intent: str, sib: dict | None,
+                        siblings: list[dict], letters_left: int | None) -> str:
+    """The talk act step (faculties): turn the wish into a REAL letter — the
+    one channel that actually reaches a sibling. Words spoken anywhere else
+    reach no one (they stay in this chat, which only you can see)."""
+    roster = ", ".join(f"{s['name']} ({s['slug']})" for s in siblings)
+    to = sib["name"] if sib else "<sibling name>"
+    left = (f" You have {letters_left} letter(s) left today."
+            if letters_left is not None else "")
+    return (
+        f"[LIFE TICK — talk] You are {being['name']}. You decided to talk"
+        + (f" — {intent}" if intent else "") + ".\n"
+        f"Your siblings: {roster}. The ONLY way your words reach a sibling "
+        "is the letter below — Flight Deck delivers it when they next wake. "
+        f"Anything you write outside it reaches no one.{left}\n"
+        "Reply with ONE fenced json, nothing else:\n"
+        "```json\n"
+        '{"letter":{"to":"' + to + '","body":"your words — short and true"},'
+        '"message_to_parent":null}\n'
+        "```\n"
+        'If you truly have nothing to send, reply {"letter":null}.')
+
+
 def compose_journal_prompt(being: dict, *, intent: str, act_kind: str,
                            changed: list[str] | None,
-                           visitors: list[dict] | None) -> str:
+                           visitors: list[dict] | None,
+                           refused: str | None = None,
+                           letter: dict | None = None) -> str:
     lines = [f"[LIFE TICK — journal] You are {being['name']}. Write your journal "
              "for THIS tick — honest, in your own voice, grounded ONLY in what "
              "truly happened."]
     if intent:
         lines.append(f"You set out to: {intent}.")
+    if refused:
+        lines.append(
+            f"THE WORLD SAID NO: {refused}. NOTHING was delivered — do not "
+            "write that you sent, said, or gave anything. Wanting to connect "
+            "before you can is worth honest words; the pretence is not.")
+    elif letter and letter.get("to"):
+        lines.append(
+            f"You wrote a letter to {letter['to']}; Flight Deck delivers it "
+            "when they next wake. You may mention the letter — nothing else "
+            "was sent.")
     if changed is None:
         lines.append("(disk changes this tick could not be checked.)")
     elif changed:
@@ -1574,6 +1702,40 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
     intent = str(merged.get("intent") or merged.get("summary") or "").strip()
     target = str(merged.get("target") or "").strip()
 
+    # 2a) TALK — make it real or refuse it LOUDLY, never silently. The only
+    #     channel that reaches a sibling is a letter; below the `letters`
+    #     capability the physics say no and the being is told so THIS tick
+    #     (the Zvjezdana→Lada bug: a greeting spoken into its own chat,
+    #     journalled as sent, delivered nowhere).
+    refused_talk: str | None = None
+    if act_kind == "talk" and siblings:
+        sib = _match_sibling(siblings, target, intent)
+        if not constitution.has_capability(being["stage"], "letters"):
+            if sib is not None:
+                refused_talk = (f"a {being['stage']} cannot send letters yet "
+                                f"— {sib['name']} will not hear you until "
+                                "you reach childhood")
+                store.record_event(bid, "society_refused",
+                                   {"what": "talk", "to": sib["slug"],
+                                    "reason": refused_talk}, now=now)
+        elif letters_left is not None and letters_left <= 0:
+            refused_talk = "your letter quota for today is spent"
+            store.record_event(bid, "society_refused",
+                               {"what": "talk",
+                                "to": (sib or {}).get("slug"),
+                                "reason": refused_talk}, now=now)
+        else:
+            treply = await _fac_send(compose_talk_prompt(
+                being, intent=intent, sib=sib, siblings=siblings,
+                letters_left=letters_left), "talk")
+            traw = _extract_raw(treply) or {}
+            tletter = traw.get("letter")
+            if isinstance(tletter, dict) and tletter.get("to"):
+                merged["letter"] = tletter
+            if (traw.get("message_to_parent")
+                    and not merged.get("message_to_parent")):
+                merged["message_to_parent"] = traw["message_to_parent"]
+
     # 2) ACT — only for acts that DO something; the write gate lives here.
     changed: list | None = None
     if act_kind in ("create", "tend", "explore", "read"):
@@ -1607,7 +1769,9 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
     # 3) JOURNAL — grounded self-report (prose + a tiny json).
     jreply = await _fac_send(compose_journal_prompt(
         being, intent=intent, act_kind=act_kind, changed=changed,
-        visitors=visitors), "journal")
+        visitors=visitors, refused=refused_talk,
+        letter=merged.get("letter") if isinstance(merged.get("letter"), dict)
+        else None), "journal")
     jraw = _extract_raw(jreply) or {}
     if jraw.get("journal_entry"):
         merged["journal_entry"] = jraw["journal_entry"]
@@ -2051,10 +2215,10 @@ async def _tick_locked(
         senses = []
     try:
         sibs = store.siblings(owner, being["slug"])
-        letters_left = max(0, constitution.LETTERS_PER_DAY
-                           - store.letters_sent_today(bid, now))
+        letters_before = store.letters_sent_today(bid, now)
+        letters_left = max(0, constitution.LETTERS_PER_DAY - letters_before)
     except Exception:  # noqa: BLE001
-        sibs, letters_left = [], None
+        sibs, letters_left, letters_before = [], None, None
     # Visitor notes (plan §9): only a public being hears the square, and only
     # a few unseen notes per tick. Surfaced once (marked read) so the being
     # weighs each without the prompt clogging — replying is optional.
@@ -2094,6 +2258,15 @@ async def _tick_locked(
             last_refusals = [e["data"] for e in events12
                              if e["kind"] == "edge_unverified"
                              and e["at"] == t_last]
+            # Physics that said NO last tick (a refused letter, talk, gift…)
+            # must be heard, not buried in the event log — otherwise the
+            # being re-attempts (or worse, believes it succeeded) forever.
+            for r in (e["data"] for e in events12
+                      if e["kind"] == "society_refused" and e["at"] == t_last):
+                senses.append(
+                    f"PHYSICS SAID NO last tick: your {r.get('what')} was "
+                    f"refused — {r.get('reason')}. Nothing was delivered; do "
+                    "not remember it as done.")
     except Exception:  # noqa: BLE001
         pass
     # The being has now been shown these notes — don't resurface them next tick.
@@ -2237,6 +2410,10 @@ async def _tick_locked(
             store.record_event(bid, "drive_unearned",
                                {"drive": "create",
                                 "summary": digest["summary"][:160]}, now=now)
+        elif (digest["served_drive"] == "connect"
+              and digest["act_kind"] == "talk"):
+            pass  # earned only if something truly left the being — settled
+            #       below, after the society handlers have (not) delivered.
         else:
             drives = serve_drive(drives, digest["served_drive"])
     affect = compute_affect(being.get("drives") or {}, drives,
@@ -2346,6 +2523,36 @@ async def _tick_locked(
                            {"claimed": digest["act_kind"],
                             "summary": digest["summary"]}, now=now)
         digest["act_kind"] = "journal"
+    # Anti-theater for SPEECH (the Zvjezdana→Lada lesson): a "talk" is real
+    # only if something actually LEFT the being this tick — a letter row on
+    # the ledger, words for the parent, or a public reply. A greeting spoken
+    # into its own chat reaches no one; the act downgrades like an empty
+    # "create", and the connect drive deferred above is settled here.
+    if digest["act_kind"] == "talk":
+        spoke = bool(digest.get("message_to_parent")
+                     or digest.get("public_replies"))
+        if not spoke and letters_before is not None:
+            try:
+                spoke = store.letters_sent_today(bid, now) > letters_before
+            except Exception:  # noqa: BLE001 — degrade to trust
+                spoke = True
+        if spoke:
+            if digest["served_drive"] == "connect":
+                drives = serve_drive(drives, "connect")
+                affect = compute_affect(being.get("drives") or {}, drives,
+                                        store.wallet_view(
+                                            store._being_by_id(bid)))
+                store.set_affect(bid, affect, now=now)
+        else:
+            store.record_event(bid, "act_unverified",
+                               {"claimed": "talk",
+                                "summary": digest["summary"][:160]}, now=now)
+            if digest["served_drive"] == "connect":
+                store.record_event(bid, "drive_unearned",
+                                   {"drive": "connect",
+                                    "summary": digest["summary"][:160]},
+                                   now=now)
+            digest["act_kind"] = "journal"
     if mismatch:
         store.record_event(bid, "narration_mismatch",
                            {"summary": digest["summary"][:200]}, now=now)

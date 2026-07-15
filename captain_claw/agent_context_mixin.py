@@ -20,6 +20,22 @@ from captain_claw.tools.registry import Tool
 
 log = get_logger(__name__)
 
+
+def _iskra_fleet_hidden() -> bool:
+    """True for an Iskra BEING's body below the `agent_messaging` capability:
+    the fleet must be invisible to it — no peer roster in the system prompt,
+    no consult/fleet/organ tools. A body that can see or call a sibling's
+    body bypasses letters physics, rate limits and wallet metering (the
+    Constitution's Containment + Economy invariants). CLAW_BEING_CAPS is
+    stamped by being_life.spawn_body from the stage's capability set."""
+    if os.environ.get("CLAW_BEING_WORKER", "").strip().lower() not in (
+            "1", "true", "yes"):
+        return False
+    caps = {c.strip() for c in os.environ.get(
+        "CLAW_BEING_CAPS", "").split(",") if c.strip()}
+    return "agent_messaging" not in caps
+
+
 # ---------------------------------------------------------------------------
 # Tool prompt descriptions — used to build the dynamic tool list in the system
 # prompt.  Only tools that should appear in the textual list need an entry;
@@ -2363,44 +2379,53 @@ class AgentContextMixin:
         # Always-on tools (registered regardless of tools.enabled).
         from captain_claw.tools.clipboard import ClipboardTool
         self.tools.register(ClipboardTool())
-        # Peer consultation — always registered; the tool itself returns a
-        # clear error when no peers are available or Flight Deck URL is missing.
-        from captain_claw.tools.consult_peer import ConsultPeerTool
-        self.tools.register(ConsultPeerTool())
+        # Iskra containment (Constitution: Containment + Economy physics):
+        # a BEING's body below the `agent_messaging` capability must not see
+        # or consult the fleet, nor reach the orchestration organs — a body
+        # consulting a sibling's body would bypass letters physics, rate
+        # limits and wallet metering entirely. Enforced here because these
+        # tools are otherwise always-on. Non-being agents are unaffected.
+        _being_fleet_ok = not _iskra_fleet_hidden()
+        if _being_fleet_ok:
+            # Peer consultation — always registered; the tool itself returns a
+            # clear error when no peers are available or Flight Deck URL is missing.
+            from captain_claw.tools.consult_peer import ConsultPeerTool
+            self.tools.register(ConsultPeerTool())
         # Project memory — always registered; the tool returns a clear error
         # when the project system is not initialized.
         from captain_claw.tools.project_memory import ProjectMemoryTool
         self.tools.register(ProjectMemoryTool())
-        # Flight Deck fleet discovery — always registered; queries /fd/fleet
-        # for live peer discovery instead of relying on static pushed peer list.
-        from captain_claw.tools.flight_deck import FlightDeckTool
-        self.tools.register(FlightDeckTool())
-        # Basna read access — always registered; reads the owner's Basna sessions
-        # (returns a clear error if FD_URL / owner is unavailable).
-        from captain_claw.tools.basna import BasnaTool
-        self.tools.register(BasnaTool())
-        # Vatra blackboard (ask/inbox) — always registered; returns a clear error
-        # outside a Vatra run, so registration cost is negligible.
-        from captain_claw.tools.vatra import VatraTool
-        self.tools.register(VatraTool())
-        # Code studio access — always registered; starts/reads autonomous coding
-        # sessions (clear error when FD_URL is unavailable; the tool itself
-        # refuses recursion from coding/ensemble workers).
-        from captain_claw.tools.code_session import CodeSessionTool
-        self.tools.register(CodeSessionTool())
-        # VFS Hosting — always registered; publishes a VFS folder as a static
-        # site or a running app and returns a public URL (clear error when
-        # FD_URL / owner is unavailable, so registration cost is negligible).
-        from captain_claw.tools.hosting import HostingTool
-        self.tools.register(HostingTool())
-        # Code-app authoring — always registered; calls return a clear error
-        # if FD_URL isn't available, so registration cost is negligible.
-        from captain_claw.tools.app_runner import AppRunnerTool
-        self.tools.register(AppRunnerTool())
-        # Flow synthesis — always registered; turns a repeatable goal into a
-        # reusable Flow in the agent's scratch space (clear error if FD missing).
-        from captain_claw.tools.synthesize_flow import SynthesizeFlowTool
-        self.tools.register(SynthesizeFlowTool())
+        if _being_fleet_ok:
+            # Flight Deck fleet discovery — always registered; queries /fd/fleet
+            # for live peer discovery instead of relying on static pushed peer list.
+            from captain_claw.tools.flight_deck import FlightDeckTool
+            self.tools.register(FlightDeckTool())
+            # Basna read access — always registered; reads the owner's Basna sessions
+            # (returns a clear error if FD_URL / owner is unavailable).
+            from captain_claw.tools.basna import BasnaTool
+            self.tools.register(BasnaTool())
+            # Vatra blackboard (ask/inbox) — always registered; returns a clear error
+            # outside a Vatra run, so registration cost is negligible.
+            from captain_claw.tools.vatra import VatraTool
+            self.tools.register(VatraTool())
+            # Code studio access — always registered; starts/reads autonomous coding
+            # sessions (clear error when FD_URL is unavailable; the tool itself
+            # refuses recursion from coding/ensemble workers).
+            from captain_claw.tools.code_session import CodeSessionTool
+            self.tools.register(CodeSessionTool())
+            # VFS Hosting — always registered; publishes a VFS folder as a static
+            # site or a running app and returns a public URL (clear error when
+            # FD_URL / owner is unavailable, so registration cost is negligible).
+            from captain_claw.tools.hosting import HostingTool
+            self.tools.register(HostingTool())
+            # Code-app authoring — always registered; calls return a clear error
+            # if FD_URL isn't available, so registration cost is negligible.
+            from captain_claw.tools.app_runner import AppRunnerTool
+            self.tools.register(AppRunnerTool())
+            # Flow synthesis — always registered; turns a repeatable goal into a
+            # reusable Flow in the agent's scratch space (clear error if FD missing).
+            from captain_claw.tools.synthesize_flow import SynthesizeFlowTool
+            self.tools.register(SynthesizeFlowTool())
         sft = SummarizeFilesTool()
         uid = getattr(self, "_active_personality_id", None) or getattr(self, "_user_id", None)
         if uid:
@@ -2736,11 +2761,17 @@ class AgentContextMixin:
                 session_context_block = "\n\n## Session Context\n" + "\n".join(_parts)
 
         # Fleet identity: this agent's own name/details as known by Flight Deck.
+        # An Iskra body below `agent_messaging` gets neither identity-in-the-
+        # fleet nor a peer roster: its world is its home, not the fleet — a
+        # roster naming its sibling's body is exactly how a being starts
+        # "greeting" agents through channels that deliver nowhere.
+        _fleet_hidden = _iskra_fleet_hidden()
         fleet_identity_block = ""
         _identity = None
-        if self.session and isinstance(self.session.metadata, dict):
+        if not _fleet_hidden and self.session and isinstance(
+                self.session.metadata, dict):
             _identity = self.session.metadata.get("fleet_identity")
-        if not _identity:
+        if not _identity and not _fleet_hidden:
             _identity = getattr(self, "_fleet_identity", None)
         if isinstance(_identity, dict) and _identity.get("name"):
             _fi_name = _identity["name"]
@@ -2778,9 +2809,10 @@ class AgentContextMixin:
         # user may want to hand off tasks to.
         peer_agents_block = ""
         _peers = []
-        if self.session and isinstance(self.session.metadata, dict):
+        if not _fleet_hidden and self.session and isinstance(
+                self.session.metadata, dict):
             _peers = self.session.metadata.get("peer_agents", [])
-        if not _peers:
+        if not _peers and not _fleet_hidden:
             _peers = getattr(self, "_peer_agents", []) or []
         if isinstance(_peers, list) and _peers:
                 _lines = []

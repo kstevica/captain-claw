@@ -1179,6 +1179,8 @@ def _faculty_send(handlers):
     async def send(being, prompt):
         if "[LIFE TICK — orient]" in prompt:
             key = "orient"
+        elif "[LIFE TICK — talk]" in prompt:
+            key = "talk"
         elif "[LIFE TICK — act]" in prompt:
             key = "act"
         elif "[LIFE TICK — journal]" in prompt:
@@ -1190,9 +1192,12 @@ def _faculty_send(handlers):
         else:
             key = "other"
         calls[key] = calls.get(key, 0) + 1
+        prompts.setdefault(key, []).append(prompt)
         h = handlers.get(key)
         return h(being, prompt) if h else None
 
+    prompts: dict = {}
+    send.prompts = prompts
     return send, calls
 
 
@@ -1312,3 +1317,186 @@ async def test_faculties_orient_repair_rescues_formatless(store):
     day = life._home_path(
         b, f"journal/{NOW.strftime('%Y-%m-%d')}.md").read_text(encoding="utf-8")
     assert "rested and reflected" in day
+
+
+# ── Talk is real or refused loudly (the Zvjezdana→Lada bug) ───────────────
+
+async def test_faculties_talk_becomes_a_real_letter(store):
+    """A child who decides to talk gets the TALK faculty step, its words become
+    a letter ROW on the ledger, and the sibling truly receives it — the act is
+    no longer oration into its own chat."""
+    db = FakeDB()
+    b = _born(store, name="Zvjezda", stage="child", port=0)
+    sib = _born(store, name="Lada", stage="child", port=0)
+    await life.build_home(b)
+    store.set_cognition(OWNER, b["slug"], "faculties")
+    b = store.get(OWNER, b["slug"])
+
+    send, calls = _faculty_send({
+        "orient": lambda be, pr: _orient(
+            act_kind="talk", target=sib["slug"], served_drive="connect",
+            intent="greet my first sibling"),
+        "talk": lambda be, pr: '```json\n{"letter":{"to":"Lada",'
+                               '"body":"zdravo, sestro"},'
+                               '"message_to_parent":null}\n```',
+        "journal": lambda be, pr: _journal_reply(
+            journal_entry="I wrote my first letter to Lada.",
+            served_drive="connect"),
+        "connect": lambda be, pr: _links_reply([]),
+    })
+    before = store.get(OWNER, b["slug"])["drives"]["connect"]["satisfaction"]
+    out = await life.tick(db, store, b, now=NOW, send_fn=send,
+                          usage_fn=_usage_fn)
+    assert out["ok"] and out["act"] == "talk"          # delivered → not downgraded
+    assert calls.get("talk") == 1
+    # the letter row is REAL — the sibling will hear it on her next wake
+    letters = store.unread_letters(sib["id"])
+    assert len(letters) == 1 and letters[0]["body"] == "zdravo, sestro"
+    # the talk step told the truth about the one working channel
+    assert "ONLY way your words reach a sibling" in send.prompts["talk"][0]
+    # the journal step was grounded in the letter, not in wishful sending
+    assert "You wrote a letter to Lada" in send.prompts["journal"][0]
+    # connection was EARNED — settled after real delivery
+    after = store.get(OWNER, b["slug"])["drives"]["connect"]["satisfaction"]
+    assert after > before
+
+
+async def test_faculties_infant_talk_refused_loudly_not_silently(store):
+    """An infant deciding to greet a sibling is REFUSED by physics — no LLM
+    talk step is wasted, the refusal is an event, the journal prompt forbids
+    pretending, the act downgrades, and the NEXT tick hears the refusal."""
+    db = FakeDB()
+    b = _born(store, name="Beba", port=0)                       # infant
+    sib = _born(store, name="Lada", port=0)                     # infant
+    await life.build_home(b)
+    store.set_cognition(OWNER, b["slug"], "faculties")
+    b = store.get(OWNER, b["slug"])
+
+    send, calls = _faculty_send({
+        "orient": lambda be, pr: _orient(
+            act_kind="talk", target=sib["slug"], served_drive="connect",
+            intent="greet Lada"),
+        "journal": lambda be, pr: _journal_reply(
+            journal_entry="I wanted to greet Lada but the world said no.",
+            served_drive="connect"),
+        "connect": lambda be, pr: _links_reply([]),
+    })
+    out = await life.tick(db, store, b, now=NOW, send_fn=send,
+                          usage_fn=_usage_fn)
+    assert out["ok"] and out["act"] == "journal"       # downgraded, not theater
+    assert "talk" not in calls                         # no tokens burned on it
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "society_refused" in kinds and "act_unverified" in kinds
+    assert "drive_unearned" in kinds                   # connect NOT fed
+    assert store.unread_letters(sib["id"]) == []       # nothing delivered
+    # the journal step was told, THIS tick, that nothing was delivered
+    assert "THE WORLD SAID NO" in send.prompts["journal"][0]
+    # the infant's orient menu never dangled sibling letters
+    assert "sibling letters unlock in childhood" in send.prompts["orient"][0]
+    assert '"letter": {' not in send.prompts["orient"][0]
+
+    # …and the NEXT tick surfaces the refusal as a percept, so the being
+    # cannot remember the greeting as sent.
+    send2, _ = _faculty_send({
+        "orient": lambda be, pr: _orient(act_kind="journal", target=None),
+        "journal": lambda be, pr: _journal_reply(),
+        "connect": lambda be, pr: _links_reply([]),
+    })
+    await life.tick(db, store, store.get(OWNER, b["slug"]),
+                    now=NOW + timedelta(hours=1), send_fn=send2,
+                    usage_fn=_usage_fn)
+    assert any("PHYSICS SAID NO" in p for p in send2.prompts["orient"])
+
+
+async def test_monolith_talk_claim_without_delivery_downgrades(store):
+    """Monolith path: a digest claiming act 'talk' with no letter, no word to
+    the parent and no public reply delivered NOTHING — the act downgrades and
+    the connect drive is not fed on narration alone."""
+    db = FakeDB()
+    b = _born(store, name="Zvjezda", stage="child", port=0)
+    _born(store, name="Lada", stage="child", port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        return _digest_reply(act_kind="talk", served_drive="connect",
+                             summary="greeted my sibling",
+                             journal_entry="I greeted Lada warmly.")
+
+    before = b["drives"]["connect"]["satisfaction"]
+    out = await life.tick(db, store, b, now=NOW, send_fn=send,
+                          usage_fn=_usage_async_100k)
+    assert out["act"] == "journal"                     # empty talk → downgraded
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "act_unverified" in kinds and "drive_unearned" in kinds
+    after = store.get(OWNER, b["slug"])["drives"]["connect"]["satisfaction"]
+    assert after <= before                             # narration fed nothing
+
+
+async def test_monolith_talk_with_real_letter_stays_talk(store):
+    """Monolith path: the same claim WITH a letter field is a real talk — the
+    row lands, the act survives, connection is earned."""
+    db = FakeDB()
+    b = _born(store, name="Zvjezda", stage="child", port=0)
+    sib = _born(store, name="Lada", stage="child", port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        return _digest_reply(act_kind="talk", served_drive="connect",
+                             summary="wrote to Lada",
+                             journal_entry="I wrote Lada a letter.",
+                             letter={"to": "Lada", "body": "zdravo"})
+
+    before = b["drives"]["connect"]["satisfaction"]
+    out = await life.tick(db, store, b, now=NOW, send_fn=send,
+                          usage_fn=_usage_async_100k)
+    assert out["act"] == "talk"
+    assert len(store.unread_letters(sib["id"])) == 1
+    after = store.get(OWNER, b["slug"])["drives"]["connect"]["satisfaction"]
+    assert after > before
+
+
+def test_orient_offers_the_same_society_as_the_monolith(store):
+    """The faculties split must not amputate society: a child's orient step
+    offers the letter field and an honest talk menu; an infant's offers
+    neither — only the truth about when letters come."""
+    b = _born(store, name="Dijete", stage="child", port=0)
+    sibs = [{"id": "x", "slug": "iskra-lada-1234", "name": "Lada",
+             "stage": "child", "mood": ""}]
+    p = life.compose_orient_prompt(
+        b, kind="wake", now=NOW, spent_today=0, wallet=store.wallet_view(b),
+        percepts=["CHORE from your parent [abc12345]: water the garden"],
+        first_of_day=False, siblings=sibs, letters_left=5, visitors=None)
+    assert '"letter": {"to": "<sibling name>"' in p
+    assert "talk (a letter to a sibling" in p
+    assert '"chore"' in p                              # chores claimable again
+    assert "YOUR SIBLINGS: Lada" in p
+
+    baby = _born(store, name="Bebica", port=0)         # infant
+    p2 = life.compose_orient_prompt(
+        baby, kind="wake", now=NOW, spent_today=0,
+        wallet=store.wallet_view(baby), percepts=None, first_of_day=False,
+        siblings=sibs, letters_left=5, visitors=None)
+    assert '"letter": {' not in p2
+    assert "sibling letters unlock in childhood" in p2
+
+
+def test_monolith_menu_is_honest_about_talk(store):
+    """The monolith prompt stops dangling undeliverable talk at an infant and
+    warns it plainly; a child with quota gets the real offer."""
+    sibs = [{"id": "x", "slug": "iskra-lada-1234", "name": "Lada",
+             "stage": "infant", "mood": ""}]
+    baby = _born(store, name="Bebica", port=0)
+    p = life.compose_tick_prompt(baby, siblings=sibs, letters_left=5)
+    assert "cannot send letters to siblings yet" in p
+    assert "sibling letters unlock in childhood" in p
+    child = _born(store, name="Dijete", stage="child", port=0)
+    p2 = life.compose_tick_prompt(child, siblings=sibs, letters_left=5)
+    assert "talk (a letter to a sibling" in p2
+    p3 = life.compose_tick_prompt(child, siblings=sibs, letters_left=0)
+    assert "letter quota is spent today" in p3
+
+
+async def _usage_async_100k(being, since):
+    return _usage(100_000)

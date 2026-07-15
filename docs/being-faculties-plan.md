@@ -76,3 +76,43 @@ default and every existing test/being is byte-identical.
   a short Vatra (collaborative) or Basna (ensemble) run over the being's own
   VFS home, then collapse the result back into one digest. The being thinks
   with a team when it matters, alone when it doesn't.
+
+## Addendum (2026-07-15): the talk faculty — speech is real or refused loudly
+
+The Zvjezdana→Lada bug: an infant, with her parent's blessing, "greeted" her
+sibling by choosing `act_kind: "talk"` — and the greeting went nowhere. The
+act was in every menu but wired to nothing; the only real channel (the
+`letter` digest field) was monolith-only AND child+; the journal gate checks
+only disk, so she journalled the greeting as sent. Physics neither delivered
+nor refused — it just evaporated, and both the being and the parent believed.
+
+What changed:
+
+- **TALK is a faculty step now.** `orient` picking `talk` at a sibling runs a
+  tiny `[LIFE TICK — talk]` call whose only output is `{"letter": {to, body}}`
+  — the one channel that actually reaches a sibling. Below the `letters`
+  capability (or with the day's quota spent) the step is SKIPPED — no tokens
+  burned — and a `society_refused` event is recorded instead.
+- **Refusals are loud.** The journal step is told THE WORLD SAID NO this same
+  tick (no pretending), and the NEXT tick's percepts carry "PHYSICS SAID NO
+  last tick" so the refusal cannot be remembered as success.
+- **Speech anti-theater.** A `talk` digest that produced no letter row, no
+  word to the parent and no public reply downgrades to `journal`
+  (`act_unverified`), and a claimed `connect` drive is `drive_unearned` — the
+  connect drive is settled only after real delivery, mirroring how `create`
+  is settled against the git diff.
+- **Society restored to faculties.** The orient step now offers the same
+  capability-gated society fields (letter/publish/gift/adopt), chore claims
+  and rare options (self_mod, procreate) as the monolith — the split had
+  silently amputated all of them.
+- **Menus stop lying.** Every act menu renders talk honestly per stage:
+  "sibling letters unlock in childhood" for infants, "quota spent" at the
+  daily cap, the real offer otherwise.
+- **Fleet containment.** A being's body below `agent_messaging` (adolescent)
+  no longer registers consult_peer / flight_deck / basna / vatra /
+  code_session / hosting / app_runner / synthesize_flow, and its system
+  prompt carries no fleet identity or peer roster (`CLAW_BEING_CAPS`, stamped
+  by `spawn_body`; `_iskra_fleet_hidden` in agent_context_mixin). A body that
+  can consult a sibling's body would bypass letters physics, rate limits and
+  wallet metering. Stage advancement now respawns a living body so the new
+  physics (tier + caps) take hold at once.
