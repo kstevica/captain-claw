@@ -768,6 +768,12 @@ async def set_cognition(slug: str, body: CognitionRequest,
     return _run(get_store().vitals, user["id"], slug)
 
 
+@router.post("/{slug}/mark-read")
+async def mark_read(slug: str, user: dict = Depends(get_current_user)):
+    """The parent opened this being's thread — clear its unread-message cue."""
+    return _run(get_store().mark_being_read, user["id"], slug)
+
+
 @router.post("/{slug}/body-archetype")
 async def set_body_archetype(slug: str, body: BodyArchetypeRequest,
                              user: dict = Depends(get_current_user)):

@@ -118,6 +118,7 @@ export interface BeingVitals {
   tick_interval_minutes: number | null
   cognition: 'monolith' | 'faculties'
   body_archetype: string
+  unread_from_being: number
   public: boolean
   visit_url: string
   visit_secret: string
@@ -398,6 +399,10 @@ export const setBodyArchetype = (slug: string, archetypeId: string) =>
   fdFetch<BeingVitals>(`/beings/${slug}/body-archetype`, {
     method: 'POST', body: JSON.stringify({ archetype_id: archetypeId }),
   })
+
+// Clear the "unread messages from the being" cue — the parent opened its thread.
+export const markBeingRead = (slug: string) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/mark-read`, { method: 'POST' })
 
 // Fixed parent top-up amounts (tokens) — mirrors beings.GRANT_AMOUNTS.
 export const GRANT_AMOUNTS = [2_000_000, 5_000_000, 10_000_000, 20_000_000] as const

@@ -452,6 +452,9 @@ class BeingsStore:
                 # tools, cognitive_mode). Empty → the stage tier + owner config.
                 # Changing it respawns the body. See being_life.spawn_body.
                 ("body_archetype", "TEXT NOT NULL DEFAULT ''"),
+                # When the parent last opened this being's thread — messages it
+                # spoke after this are "unread from the being" (a badge cue).
+                ("parent_read_at", "TEXT"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -848,6 +851,29 @@ class BeingsStore:
         self.record_event(b["id"], "cadence_set", {"minutes": val}, now=now)
         return self.get(owner_id, slug)
 
+    def unread_from_being(self, being_id: str) -> int:
+        """How many messages the being has spoken to the parent since the parent
+        last opened its thread — ``spoke_to_parent`` events after parent_read_at."""
+        row0 = self._c().execute(
+            "SELECT parent_read_at FROM beings WHERE id = ?", (being_id,)
+        ).fetchone()
+        read_at = row0["parent_read_at"] if row0 else None
+        q = ("SELECT COUNT(*) AS c FROM being_events WHERE being_id = ?"
+             " AND kind = 'spoke_to_parent'")
+        params: list = [being_id]
+        if read_at:
+            q += " AND at > ?"
+            params.append(read_at)
+        return int(self._c().execute(q, params).fetchone()["c"])
+
+    def mark_being_read(self, owner_id: str, slug: str,
+                        now: datetime | None = None) -> dict:
+        """Mark the being's thread read up to now (the parent opened it)."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now, parent_read_at=_iso(now))
+        return self.get(owner_id, slug)
+
     def set_body_archetype(self, owner_id: str, slug: str, archetype_id: str,
                            now: datetime | None = None) -> dict:
         """Point the being's BODY at an archetype (its tier→model/provider,
@@ -1214,6 +1240,7 @@ class BeingsStore:
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "cognition": b.get("cognition") or "faculties",
             "body_archetype": b.get("body_archetype") or "",
+            "unread_from_being": self.unread_from_being(b["id"]),
             "public": bool(b.get("public")),
             "visit_url": b.get("visit_url") or "",
             "visit_secret": b.get("visit_secret") or "",

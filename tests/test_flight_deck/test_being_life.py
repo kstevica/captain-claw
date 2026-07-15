@@ -941,6 +941,24 @@ async def test_spawn_body_marks_being_as_fd_worker(store, monkeypatch):
     assert captured["env"].get("CLAW_BEING_WORKER") == "1"
 
 
+def test_unread_from_being_counts_and_clears(store):
+    b = _born(store, port=0)
+    bid = b["id"]
+    assert store.vitals(OWNER, b["slug"])["unread_from_being"] == 0
+    store.record_event(bid, "spoke_to_parent", {"preview": "hi"}, now=NOW)
+    store.record_event(bid, "spoke_to_parent", {"preview": "again"},
+                       now=NOW + timedelta(minutes=1))
+    assert store.unread_from_being(bid) == 2
+    assert store.vitals(OWNER, b["slug"])["unread_from_being"] == 2
+    # the parent opens the thread → cleared
+    store.mark_being_read(OWNER, b["slug"], now=NOW + timedelta(minutes=2))
+    assert store.unread_from_being(bid) == 0
+    # a NEW message after reading counts again
+    store.record_event(bid, "spoke_to_parent", {"preview": "new"},
+                       now=NOW + timedelta(minutes=3))
+    assert store.unread_from_being(bid) == 1
+
+
 def test_set_body_archetype_stores_and_vitals(store):
     b = _born(store, port=0)
     assert store.vitals(OWNER, b["slug"])["body_archetype"] == ""     # default

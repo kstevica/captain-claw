@@ -28,7 +28,7 @@ import {
   getBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
   listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
-  setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption,
+  setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
   setCadence, setCognition, setHouseRules, setMediaDiet, setStage, setVentureState,
   tickBeing, wakeBeing, GRANT_AMOUNTS, TICK_INTERVAL_CHOICES,
 } from '../services/beings'
@@ -855,7 +855,7 @@ function ConceiveModal({ meta, onClose, onDone }: {
 // (life / windows / interact / danger) replace the old wrapping label row.
 // variant 'solid' + iconClass give the consequential life controls a
 // distinct, filled, colour-accented look vs the flat read-only toolbar.
-function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy, variant = 'ghost', iconClass }: {
+function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy, variant = 'ghost', iconClass, badge }: {
   icon: typeof Zap
   label: string
   onClick: () => void
@@ -865,23 +865,32 @@ function IconAction({ icon: Icon, label, onClick, active, danger, disabled, busy
   busy?: boolean
   variant?: 'ghost' | 'solid'
   iconClass?: string
+  badge?: number
 }) {
+  const hasBadge = (badge ?? 0) > 0
   const tone = danger
     ? 'border-red-500/30 text-red-500/80 hover:bg-red-500/10 dark:text-red-400/80'
     : active
       ? 'border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300'
-      : variant === 'solid'
-        ? 'border-transparent bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
-        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+      : hasBadge
+        ? 'border-violet-500/60 bg-violet-500/15 text-violet-600 dark:text-violet-300'
+        : variant === 'solid'
+          ? 'border-transparent bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
+          : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
   return (
     <button
       onClick={onClick}
       disabled={disabled}
       title={label}
       aria-label={label}
-      className={`flex items-center justify-center rounded-md border p-1.5 transition-colors disabled:opacity-40 disabled:hover:bg-transparent ${tone}`}
+      className={`relative flex items-center justify-center rounded-md border p-1.5 transition-colors disabled:opacity-40 disabled:hover:bg-transparent ${tone}`}
     >
       {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className={`h-3.5 w-3.5 ${iconClass ?? ''}`} />}
+      {hasBadge && (
+        <span className="absolute -right-1 -top-1 flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-violet-500 px-1 text-[9px] font-semibold leading-none text-white">
+          {(badge ?? 0) > 9 ? '9+' : badge}
+        </span>
+      )}
     </button>
   )
 }
@@ -2216,6 +2225,13 @@ function BeingCard({ item, meta, onChanged }: {
     finally { setBusy('') }
   }
 
+  // Open the thread and clear the "unread from the being" cue (quiet on error).
+  const openTalk = () => {
+    setTalkOpen(true)
+    if ((vitals?.unread_from_being ?? 0) > 0)
+      void markBeingRead(item.slug).then(() => void load()).catch(() => {})
+  }
+
   // Download a portable snapshot (identity, memory, wallet, model) as JSON.
   const exportToFile = async () => {
     setBusy('export')
@@ -2451,8 +2467,12 @@ function BeingCard({ item, meta, onChanged }: {
               <>
                 <div className="mx-0.5 h-5 w-px bg-zinc-800" />
                 <div className="flex items-center gap-1">
-                  <IconAction icon={MessageCircle} label="Write & chores — talk to her, give her work"
-                    onClick={() => setTalkOpen(true)} />
+                  <IconAction icon={MessageCircle}
+                    label={(v?.unread_from_being ?? 0) > 0
+                      ? `${v?.unread_from_being} unread from ${item.name} — talk to her, give her work`
+                      : 'Write & chores — talk to her, give her work'}
+                    badge={v?.unread_from_being ?? 0}
+                    onClick={openTalk} />
                   <IconAction icon={GraduationCap} label="Parenting — report card, rules, diet, growth"
                     onClick={() => setParentingOpen(true)} />
                 </div>
