@@ -374,11 +374,10 @@ async def handle_chat(
     )
 
     async def _name_and_store() -> None:
-        if _naming_provider_class == "ChatGPTResponsesProvider":
-            log.info(
-                "Task naming: skipped (chatgpt oauth provider)",
-                model=_naming_model,
-            )
+        # A headless FD worker (Basna/Vatra/Council/Code, or an Iskra being) has
+        # no conversation to name — skip the extra, concurrent naming LLM call.
+        from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+        if _is_fd_spawned_worker() or _naming_provider_class == "ChatGPTResponsesProvider":
             agent._current_task_name = ""
             return
         name = await _generate_task_name(
@@ -789,48 +788,57 @@ async def _run_agent(
                 **server._session_info(),
             })
 
-        # Auto-reflection (admin only).
-        if not is_public:
+        # Consciousness background jobs — reflection, insight extraction,
+        # dreaming, topic classification, proactive intentions. Each is an EXTRA,
+        # CONCURRENT LLM call fired after the turn (create_task, not awaited).
+        # Skip ALL of them for FD-spawned workers (Basna/Vatra/Council/Code and
+        # Iskra beings): they're headless and orchestrated, a being already has
+        # its OWN dream/reflection/journal, and on a shared (often single, local)
+        # model these would just be parallel generations starving the next tick.
+        from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+        if not _is_fd_spawned_worker():
+            # Auto-reflection (admin only).
+            if not is_public:
+                try:
+                    import asyncio as _asyncio
+                    from captain_claw.reflections import maybe_auto_reflect
+                    _asyncio.create_task(maybe_auto_reflect(agent))
+                except Exception:
+                    pass
+
+            # Auto-extract insights (periodic trigger).
             try:
-                import asyncio as _asyncio
-                from captain_claw.reflections import maybe_auto_reflect
-                _asyncio.create_task(maybe_auto_reflect(agent))
+                import asyncio as _asyncio2
+                from captain_claw.insights import maybe_extract_insights
+                _asyncio2.create_task(maybe_extract_insights(agent, trigger="periodic"))
             except Exception:
                 pass
 
-        # Auto-extract insights (periodic trigger).
-        try:
-            import asyncio as _asyncio2
-            from captain_claw.insights import maybe_extract_insights
-            _asyncio2.create_task(maybe_extract_insights(agent, trigger="periodic"))
-        except Exception:
-            pass
-
-        # Nervous system dreaming (background synthesis).
-        try:
-            import asyncio as _asyncio3
-            from captain_claw.nervous_system import maybe_dream
-            _asyncio3.create_task(maybe_dream(agent))
-        except Exception:
-            pass
-
-        # Conversation topic classification (background; clusters comms traffic
-        # into persistent topics the agent can recall via the `topics` tool).
-        try:
-            import asyncio as _asyncio_tc
-            from captain_claw.conversation_topics import maybe_classify_topics
-            _asyncio_tc.create_task(maybe_classify_topics(agent))
-        except Exception:
-            pass
-
-        # Proactive intentions generator (admin only; opt-in via config).
-        if not is_public:
+            # Nervous system dreaming (background synthesis).
             try:
-                import asyncio as _asyncio4
-                from captain_claw.intentions_generator import maybe_auto_propose
-                _asyncio4.create_task(maybe_auto_propose(agent, trigger="periodic"))
+                import asyncio as _asyncio3
+                from captain_claw.nervous_system import maybe_dream
+                _asyncio3.create_task(maybe_dream(agent))
             except Exception:
                 pass
+
+            # Conversation topic classification (background; clusters comms
+            # traffic into persistent topics recalled via the `topics` tool).
+            try:
+                import asyncio as _asyncio_tc
+                from captain_claw.conversation_topics import maybe_classify_topics
+                _asyncio_tc.create_task(maybe_classify_topics(agent))
+            except Exception:
+                pass
+
+            # Proactive intentions generator (admin only; opt-in via config).
+            if not is_public:
+                try:
+                    import asyncio as _asyncio4
+                    from captain_claw.intentions_generator import maybe_auto_propose
+                    _asyncio4.create_task(maybe_auto_propose(agent, trigger="periodic"))
+                except Exception:
+                    pass
 
         # Record cognitive tempo metric (non-blocking).
         try:
