@@ -81,42 +81,63 @@ def test_set_being_visit_and_list(store):
     assert store.beings_visiting() == []
 
 
-async def test_announce_one_ships_a_snapshot(store, monkeypatch):
+async def test_handle_link_request_serves_being_data_unstuck_from_public(store):
+    """The sender answers a host's requests from its own store — no public flag
+    required (visiting IS the consent), incl. accepting a note."""
+    import asyncio
+    from captain_claw.flight_deck import being_federation as fed
     b = _being(store, owner="sender")
-    store.set_being_visit("sender", b["slug"], "https://target.example",
-                          "sesame", now=NOW)
-    store.set_village_federation("sender", secret="", secret_public=False,
-                                 public_url="https://me.example")
-    posted: list = []
+    await life.build_home(store.get("sender", b["slug"]))
+    slug = b["slug"]
+    assert not store.get("sender", slug).get("public")        # not locally public
+    files = await fed.handle_link_request(store, "sender", slug, "files", {})
+    assert any(f["path"] == "self/SELF.md" for f in files["files"])
+    prof = await fed.handle_link_request(store, "sender", slug, "profile", {})
+    assert prof["name"] == "Zephyr" and "temperament" in prof
+    # a note lands even though the being isn't flagged public
+    r = await fed.handle_link_request(store, "sender", slug, "message",
+                                      {"name": "Kai", "body": "hello there"})
+    th = await fed.handle_link_request(store, "sender", slug, "thread",
+                                       {"thread_id": r["thread_id"]})
+    assert th["messages"][0]["body"] == "hello there"
+    del asyncio
 
-    class _Resp:
-        status_code = 200
-        def json(self): return {"ok": True, "visitor_id": "v1"}
 
-    class _Client:
-        def __init__(self, *a, **k): pass
-        async def __aenter__(self): return self
+def _fake_connect(welcome, raise_exc=None):
+    import json as _json
+
+    class _WS:
+        def __init__(self): self.sent = []
+        async def send(self, s): self.sent.append(s)
+        async def recv(self): return _json.dumps(welcome)
+
+    class _CM:
+        def __init__(self, *a, **k):
+            if raise_exc:
+                raise raise_exc
+        async def __aenter__(self): return _WS()
         async def __aexit__(self, *a): return False
-        async def post(self, url, json=None):
-            posted.append((url, json)); return _Resp()
-
-    monkeypatch.setattr("httpx.AsyncClient", _Client)
-    res = await life.announce_one(store, store.get("sender", b["slug"]), now=NOW)
-    assert res["ok"] is True
-    url, payload = posted[0]
-    assert url == "https://target.example/fd/public/village/announce"
-    assert payload["secret"] == "sesame"
-    assert payload["origin"] == "https://me.example"
-    assert payload["slug"] == b["slug"]
-    assert payload["profile"]["name"] == "Zephyr"           # full snapshot
-    assert "temperament" in payload["profile"]
-    # the being is marked announced
-    assert store.get("sender", b["slug"])["visit_last_announce"] is not None
+    return _CM
 
 
-async def test_announce_one_refuses_without_public_url(store):
+async def test_probe_links_and_reports(store, monkeypatch):
+    from captain_claw.flight_deck import being_federation as fed
     b = _being(store, owner="sender")
-    store.set_being_visit("sender", b["slug"], "https://target.example", "x",
+    store.set_being_visit("sender", b["slug"], "https://host.example", "sesame",
                           now=NOW)
-    res = await life.announce_one(store, store.get("sender", b["slug"]), now=NOW)
-    assert res["ok"] is False and "public URL" in res["error"]
+    being = store.get("sender", b["slug"])
+    # success
+    monkeypatch.setattr("websockets.asyncio.client.connect",
+                        _fake_connect({"t": "welcome", "visitor_id": "v1"}))
+    assert (await fed.village_client.probe(store, being))["ok"] is True
+    assert store.get("sender", b["slug"])["visit_last_announce"] is not None
+    # rejected (bad secret) → surfaces the village's message
+    monkeypatch.setattr("websockets.asyncio.client.connect",
+                        _fake_connect({"t": "error", "message": "invalid village secret"}))
+    res = await fed.village_client.probe(store, being)
+    assert res["ok"] is False and "invalid village secret" in res["error"]
+    # unreachable
+    monkeypatch.setattr("websockets.asyncio.client.connect",
+                        _fake_connect({}, raise_exc=OSError("refused")))
+    res = await fed.village_client.probe(store, being)
+    assert res["ok"] is False and "couldn't reach" in res["error"]

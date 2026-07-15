@@ -104,16 +104,24 @@ async def beings_loop(db, stop_event: asyncio.Event) -> None:
                 log.info("beings loop pass", ticked=n)
         except Exception as e:  # noqa: BLE001
             log.warning("beings loop pass error", error=str(e))
-        # Federation heartbeat (§9.1): announce our visiting beings to their
-        # target villages, and drop visitors of ours that stopped checking in.
+        # Federation (§9.1): keep an outbound WS link alive for each visiting
+        # being (NAT-friendly), and drop visitors of ours that stopped checking
+        # in. reconcile() only starts/stops maintainers — the links themselves
+        # persist and reconnect on their own.
         try:
-            await being_life.announce_visits(get_store())
+            from captain_claw.flight_deck import being_federation
+            await being_federation.village_client.reconcile(get_store())
             get_store().expire_visitors(
                 ttl_minutes=being_life.VISITOR_TTL_MINUTES)
         except Exception as e:  # noqa: BLE001
-            log.warning("federation heartbeat error", error=str(e))
+            log.warning("federation reconcile error", error=str(e))
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=POLL_SECONDS)
         except asyncio.TimeoutError:
             continue
+    try:
+        from captain_claw.flight_deck import being_federation
+        await being_federation.village_client.stop_all()
+    except Exception:  # noqa: BLE001
+        pass
     log.info("beings loop stopped")

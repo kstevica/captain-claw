@@ -84,8 +84,10 @@ export interface PublicVillage {
 }
 
 // A visitor as it appears in the roster: a public profile + where it lives.
+// `linked` = its home machine is connected right now; `origin` may be empty
+// (a NAT'd private village that set no public URL).
 export type PublicVisitorCard = PublicProfile & {
-  id: string; origin: string
+  id: string; origin: string; linked: boolean
 }
 
 export const listPublicBeings = () =>
@@ -122,7 +124,7 @@ export const getPublicThread = (slug: string, threadId: string) =>
 // ── Visitors: beings from other machines, proxied through this village ──
 
 export type PublicVisitorProfile = PublicProfile & {
-  id: string; origin: string; visitor: true; last_seen: string
+  id: string; origin: string; visitor: true; last_seen: string; linked: boolean
 }
 
 export const getVisitorProfile = (id: string) =>

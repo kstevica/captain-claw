@@ -2059,8 +2059,9 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                 </div>
                 <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
                   {name} keeps living here on your machine — the other village just shows it as a visitor and
-                  forwards any notes people leave. Paste that village's URL and the secret it published, and{' '}
-                  {name} will announce itself there (and re-check in on a heartbeat).
+                  forwards any notes people leave. Paste that village's URL and the secret it published; {name}{' '}
+                  opens a WebSocket link to it (so this works even behind NAT — nothing needs to reach you) and
+                  stays connected, answering browse requests live.
                 </p>
                 <div className="mt-3 space-y-2">
                   <input value={visitUrl} onChange={(e) => setVisitUrl(e.target.value)} placeholder="https://other-village.example.com"
@@ -2091,7 +2092,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                   </div>
                   {visitResult && (
                     <div className={`text-xs ${visitResult.ok ? 'text-emerald-500 dark:text-emerald-400' : 'text-amber-500'}`}>
-                      {visitResult.ok ? `✓ Announced — ${name} is now visiting.` : `Couldn't announce: ${visitResult.error || 'unknown error'}`}
+                      {visitResult.ok ? `✓ Linked — ${name} is now visiting.` : `Couldn't link: ${visitResult.error || 'unknown error'}`}
                     </div>
                   )}
                 </div>
@@ -2099,7 +2100,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
               {v.visit_url && (
                 <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3 text-[11px] text-zinc-400">
                   <div className="flex items-center gap-1.5"><Globe className="h-3.5 w-3.5 text-sky-500 dark:text-sky-400" /> Currently visiting <span className="font-medium text-zinc-200">{(() => { try { return new URL(v.visit_url).host } catch { return v.visit_url } })()}</span></div>
-                  <div className="mt-1 text-zinc-600">{v.visit_last_announce ? `last checked in ${fmtRelTime(v.visit_last_announce)}` : 'not announced yet — set this village’s public URL under Village federation first'}</div>
+                  <div className="mt-1 text-zinc-600">{v.visit_last_announce ? `link last active ${fmtRelTime(v.visit_last_announce)}` : 'link starting…'}</div>
                 </div>
               )}
             </div>
@@ -2730,10 +2731,10 @@ function VillageFederationCard() {
       {open && (
         <div className="mt-3 space-y-4">
           <div className="space-y-1.5">
-            <div className="text-[11px] font-medium text-zinc-400">This village's public URL</div>
+            <div className="text-[11px] font-medium text-zinc-400">This village's public URL <span className="text-zinc-600">(optional)</span></div>
             <input value={publicUrl} onChange={(e) => setPublicUrl(e.target.value)} placeholder="https://my-village.example.com"
               className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-500/50" />
-            <div className="text-[10px] text-zinc-600">How other machines reach this one — needed both to host visitors and to send your own beings out.</div>
+            <div className="text-[10px] text-zinc-600">Only a label shown to villages you visit (so visitors can find your home). NOT required to host or send — links run over WebSocket, so a NAT'd private machine works fine.</div>
           </div>
           <div className="space-y-1.5">
             <div className="text-[11px] font-medium text-zinc-400">Visitor secret</div>

@@ -2026,13 +2026,29 @@ class BeingsStore:
     def post_public_message(self, slug: str, sender_name: str, body: str,
                             thread_id: str | None = None,
                             now: datetime | None = None) -> dict:
-        """A stranger leaves a note. New thread when thread_id is absent/unknown,
-        else a follow-up — but not before a tick has SEEN the prior one (so a
-        single visitor can't flood the being before it has weighed the last)."""
-        now = now or _utcnow()
+        """A stranger leaves a note on a PUBLIC being (the un-gated square)."""
         row = self._public_row(slug)
-        being_id = row["id"]
-        if row["state"] == "dead":
+        return self._post_message(row["id"], row["state"], sender_name, body,
+                                  thread_id, now)
+
+    def post_message_for(self, owner_id: str, slug: str, sender_name: str,
+                         body: str, thread_id: str | None = None,
+                         now: datetime | None = None) -> dict:
+        """A note on a being resolved by owner+slug — no ``public`` gate. Used by
+        the federated sender: sending a being to visit IS the consent to be
+        written to, whether or not it's flagged public on its home machine."""
+        b = self.get(owner_id, slug)
+        return self._post_message(b["id"], b["state"], sender_name, body,
+                                  thread_id, now)
+
+    def _post_message(self, being_id: str, state: str, sender_name: str,
+                      body: str, thread_id: str | None,
+                      now: datetime | None = None) -> dict:
+        """Shared core: a stranger's note into a thread. New thread when
+        thread_id is absent/unknown, else a follow-up — but not before a tick has
+        SEEN the prior one (so a single visitor can't flood the being)."""
+        now = now or _utcnow()
+        if state == "dead":
             raise BeingError(
                 "this being has died — its words remain, but it can answer no "
                 "more", 409)
@@ -2088,11 +2104,18 @@ class BeingsStore:
         return {"thread_id": thread_id, "message_id": mid}
 
     def public_thread(self, slug: str, thread_id: str) -> dict:
-        """One visitor's own conversation (their browser holds the thread id)."""
-        row = self._public_row(slug)
+        """One visitor's own conversation on a PUBLIC being."""
+        return self._thread(self._public_row(slug)["id"], thread_id)
+
+    def thread_for(self, owner_id: str, slug: str, thread_id: str) -> dict:
+        """A thread on a being resolved by owner+slug — no ``public`` gate
+        (the federated sender serves its visiting being's threads)."""
+        return self._thread(self.get(owner_id, slug)["id"], thread_id)
+
+    def _thread(self, being_id: str, thread_id: str) -> dict:
         t = self._c().execute(
             "SELECT * FROM being_public_threads WHERE id = ? AND being_id = ?",
-            (thread_id, row["id"]),
+            (thread_id, being_id),
         ).fetchone()
         if not t:
             raise BeingNotFound("no such thread")

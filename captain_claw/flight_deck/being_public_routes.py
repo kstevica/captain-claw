@@ -17,10 +17,10 @@ into unbounded token burn on the parent's wallet.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket
 from pydantic import BaseModel
 
-from captain_claw.flight_deck import being_life, being_mind
+from captain_claw.flight_deck import being_federation, being_life, being_mind
 from captain_claw.flight_deck.beings import (
     PUBLIC_MSG_MAX_CHARS,
     BeingError,
@@ -70,7 +70,8 @@ async def list_public_beings():
         "village": store.public_village(),
         "visitors": [
             {"id": v["id"], "origin": v["origin"], "slug": v["slug"],
-             "name": v["name"], **v["profile"]}
+             "name": v["name"], "linked": being_federation.is_linked(v["id"]),
+             **v["profile"]}
             for v in store.public_visitors(
                 ttl_minutes=being_life.VISITOR_TTL_MINUTES)],
     }
@@ -138,111 +139,66 @@ async def public_thread(slug: str, thread_id: str):
     return _run(get_store().public_thread, slug, thread_id)
 
 
-# ── Federation: visitors from other machines (§9.1) ──────────────────────
-
-class AnnounceRequest(BaseModel):
-    secret: str
-    origin: str          # the sender machine's public base URL
-    slug: str
-    name: str = ""
-    profile: dict = {}
+# ── Federation: visitors from other machines, over WebSocket (§9.1) ──────
+# The sender dials in (NAT-friendly) and holds the socket; we push data
+# requests down it. All the machinery lives in being_federation.
 
 
-@village_router.post("/announce")
-async def announce_visit(body: AnnounceRequest):
-    """A remote machine announces one of its beings as a visitor here. Gated by
-    this village's secret; refreshes the cached snapshot + heartbeat. The being
-    is never copied — only where to fetch it live (origin+slug) is kept."""
-    store = get_store()
-    owner = store.owner_by_secret(body.secret)
-    if not owner:
-        raise HTTPException(403, "invalid or missing village secret")
-    origin = (body.origin or "").strip().rstrip("/")
-    if not (origin.startswith("http://") or origin.startswith("https://")):
-        raise HTTPException(400, "origin must be an http(s) URL")
-    if not (body.slug or "").strip():
-        raise HTTPException(400, "a visiting being needs a slug")
-    v = _run(store.upsert_visitor, owner, origin, body.slug.strip(),
-             body.name or body.slug, body.profile or {})
-    return {"ok": True, "visitor_id": v["id"]}
+@village_router.websocket("/link")
+async def village_link(ws: WebSocket):
+    """A sending village dials in, presents the secret, and stays connected so
+    we can proxy browsing over its socket. Un-gated (the secret is the gate)."""
+    await being_federation.village_link_ws(ws)
 
 
-def _visitor_origin(vid: str) -> tuple[dict, str]:
-    v = _run(get_store().get_visitor, vid)
-    origin = (v["origin"] or "").rstrip("/")
-    if not (origin.startswith("http://") or origin.startswith("https://")):
-        raise HTTPException(502, "visitor has an invalid origin")
-    return v, origin
-
-
-async def _relay(method: str, url: str, *, params=None, json=None):
-    """Proxy one request to a visitor's home machine (only the fixed public
-    being paths are ever built here, so the origin can't be steered elsewhere)."""
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=12, follow_redirects=False) as c:
-            r = await c.request(method, url, params=params, json=json)
-    except Exception:  # noqa: BLE001
-        raise HTTPException(502, "the visitor's home village didn't answer")
-    if r.status_code >= 400:
-        try:
-            detail = r.json().get("detail", "")
-        except Exception:  # noqa: BLE001
-            detail = ""
-        raise HTTPException(502 if r.status_code >= 500 else r.status_code,
-                            detail or "the visitor's home village returned an error")
-    try:
-        return r.json()
-    except Exception:  # noqa: BLE001
-        raise HTTPException(502, "the visitor sent back something unreadable")
+def _visitor(vid: str) -> dict:
+    return _run(get_store().get_visitor, vid)   # 404 if unknown
 
 
 @village_router.get("/visitors/{vid}")
 async def visitor_profile(vid: str):
-    """The visitor's cached profile snapshot (fast; refreshed by heartbeats)."""
-    v, origin = _visitor_origin(vid)
-    return {**v["profile"], "id": v["id"], "origin": origin, "slug": v["slug"],
-            "visitor": True, "last_seen": v["last_seen"]}
+    """The visitor's cached profile snapshot (refreshed by heartbeats over the
+    link); `linked` tells whether its home machine is connected right now."""
+    v = _visitor(vid)
+    return {**v["profile"], "id": v["id"], "origin": v["origin"],
+            "slug": v["slug"], "visitor": True, "last_seen": v["last_seen"],
+            "linked": being_federation.is_linked(vid)}
 
 
 @village_router.get("/visitors/{vid}/files")
 async def visitor_files(vid: str):
-    v, origin = _visitor_origin(vid)
-    return await _relay("GET", f"{origin}/fd/public/beings/{v['slug']}/files")
+    _visitor(vid)
+    return await being_federation.link_request(vid, "files")
 
 
 @village_router.get("/visitors/{vid}/file")
 async def visitor_file(vid: str, path: str):
-    v, origin = _visitor_origin(vid)
-    return await _relay("GET", f"{origin}/fd/public/beings/{v['slug']}/file",
-                        params={"path": path})
+    _visitor(vid)
+    return await being_federation.link_request(vid, "file", path=path)
 
 
 @village_router.get("/visitors/{vid}/journal")
 async def visitor_journal(vid: str, date: str = ""):
-    v, origin = _visitor_origin(vid)
-    return await _relay("GET", f"{origin}/fd/public/beings/{v['slug']}/journal",
-                        params={"date": date} if date else None)
+    _visitor(vid)
+    return await being_federation.link_request(vid, "journal", date=date)
 
 
 @village_router.get("/visitors/{vid}/graph")
 async def visitor_graph(vid: str):
-    v, origin = _visitor_origin(vid)
-    return await _relay("GET", f"{origin}/fd/public/beings/{v['slug']}/graph")
+    _visitor(vid)
+    return await being_federation.link_request(vid, "graph")
 
 
 @village_router.post("/visitors/{vid}/message")
 async def visitor_message(vid: str, body: PublicMessageRequest):
-    """Leave a note on a visitor — forwarded to its home machine (proxied write),
-    so the being weighs it on its own tick just like a local note."""
-    v, origin = _visitor_origin(vid)
-    return await _relay("POST", f"{origin}/fd/public/beings/{v['slug']}/message",
-                        json={"name": body.name, "body": body.body,
-                              "thread_id": body.thread_id})
+    """Leave a note on a visitor — pushed down its link so its being weighs it on
+    its own tick at home, just like a local note."""
+    _visitor(vid)
+    return await being_federation.link_request(
+        vid, "message", name=body.name, body=body.body, thread_id=body.thread_id)
 
 
 @village_router.get("/visitors/{vid}/thread/{thread_id}")
 async def visitor_thread(vid: str, thread_id: str):
-    v, origin = _visitor_origin(vid)
-    return await _relay(
-        "GET", f"{origin}/fd/public/beings/{v['slug']}/thread/{thread_id}")
+    _visitor(vid)
+    return await being_federation.link_request(vid, "thread", thread_id=thread_id)

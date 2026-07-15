@@ -481,12 +481,15 @@ class VisitRequest(BaseModel):
 async def set_being_visit(slug: str, body: VisitRequest,
                           user: dict = Depends(get_current_user)):
     """Send this being to visit another village (or clear it with an empty URL).
-    Announces immediately so it appears there right away (result surfaced)."""
+    Opens a WebSocket link so it works from behind NAT; probes it immediately for
+    instant feedback, then hands off to the persistent link maintainer."""
+    from captain_claw.flight_deck import being_federation
     store = get_store()
     being = _run(store.set_being_visit, user["id"], slug, body.url, body.secret)
     announced = {"ok": None}
     if being.get("visit_url"):
-        announced = await being_life.announce_one(store, being)
+        announced = await being_federation.village_client.probe(store, being)
+    await being_federation.village_client.reconcile(store)
     return {"vitals": _run(store.vitals, user["id"], slug),
             "announced": announced}
 

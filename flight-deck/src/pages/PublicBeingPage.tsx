@@ -275,16 +275,19 @@ function StatPill({ icon, label, value }: { icon: React.ReactNode; label: string
 
 // ── Gallery (/village) ──
 
-function RosterCard({ p, href, host }: { p: PublicProfile; href: string; host?: string }) {
+function RosterCard({ p, href, visitor, host, linked }: {
+  p: PublicProfile; href: string; visitor?: boolean; host?: string; linked?: boolean
+}) {
   const st = stageOf(p.stage)
   return (
     <a href={href}
-      className={`group relative overflow-hidden rounded-2xl border p-5 transition hover:bg-zinc-900 ${host ? 'border-sky-500/25 bg-zinc-900/60 hover:border-sky-500/50' : 'border-zinc-800 bg-zinc-900/60 hover:border-violet-500/50'}`}>
+      className={`group relative overflow-hidden rounded-2xl border p-5 transition hover:bg-zinc-900 ${visitor ? 'border-sky-500/25 bg-zinc-900/60 hover:border-sky-500/50' : 'border-zinc-800 bg-zinc-900/60 hover:border-violet-500/50'}`}>
       <div className="flex items-start justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-lg font-semibold text-zinc-100">{p.name}</span>
-            {host && <span className="flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-600 dark:text-sky-400"><Globe className="h-3 w-3" /> visiting</span>}
+            {visitor && <span className="flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-600 dark:text-sky-400"><Globe className="h-3 w-3" /> visiting</span>}
+            {visitor && linked === false && <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-500">offline</span>}
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs">
             <span className={st.tint}>{st.emoji} {st.label}</span>
@@ -292,7 +295,7 @@ function RosterCard({ p, href, host }: { p: PublicProfile; href: string; host?: 
             <span className={stateTone[p.state] || 'text-zinc-500'}>{stateWord[p.state] || p.state}</span>
             <span className="text-zinc-600">·</span>
             <span className="text-zinc-500">gen {p.generation}</span>
-            {host && <><span className="text-zinc-600">·</span><span className="text-zinc-500">from {host}</span></>}
+            {visitor && <><span className="text-zinc-600">·</span><span className="text-zinc-500">from {host || 'another village'}</span></>}
           </div>
         </div>
         <span className="text-2xl opacity-60 transition group-hover:opacity-100">{st.emoji}</span>
@@ -370,7 +373,7 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
             <span className="text-xs text-zinc-500">— beings from other villages, running on their own machines, shown here live</span>
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
-            {visitors.map((v) => <RosterCard key={v.id} p={v} href={`/v/${v.id}`} host={hostOf(v.origin)} />)}
+            {visitors.map((v) => <RosterCard key={v.id} p={v} href={`/v/${v.id}`} visitor host={v.origin ? hostOf(v.origin) : ''} linked={v.linked} />)}
           </div>
         </div>
       )}
@@ -863,12 +866,16 @@ function VisitorView({ id, theme, onToggleTheme }: { id: string; theme: 'dark' |
   useEffect(() => { getVisitorProfile(id).then(setP).catch((e) => setErr(String(e.message || e))) }, [id])
   if (err) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 py-16 text-center text-zinc-400">This visitor is no longer here — it may have stopped visiting.</div></DetailShell>
   if (!p) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="flex items-center gap-2 py-12 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> reaching its home village…</div></DetailShell>
-  const host = (() => { try { return new URL(p.origin).host } catch { return p.origin } })()
+  const isUrl = /^https?:\/\//.test(p.origin || '')
+  const host = isUrl ? (() => { try { return new URL(p.origin).host } catch { return p.origin } })() : ''
   const banner = (
     <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-sky-500/25 bg-sky-500/5 px-4 py-3 text-xs text-zinc-400">
       <Globe className="h-4 w-4 shrink-0 text-sky-500 dark:text-sky-400" />
-      <span>A <span className="font-medium text-zinc-200">visitor</span> — {p.name} lives on another village and is shown here live. Everything you see and any note you leave travels to its home at <span className="text-zinc-300">{host}</span>.</span>
-      <a href={`${p.origin}/b/${p.slug}`} target="_blank" rel="noreferrer noopener" className="ml-auto inline-flex items-center gap-1 text-sky-600 hover:underline dark:text-sky-400">open on its home village <ArrowUpRight className="h-3.5 w-3.5" /></a>
+      <span>
+        A <span className="font-medium text-zinc-200">visitor</span> — {p.name} lives on {host ? <>another village and is shown here live. Everything you see and any note you leave travels to its home at <span className="text-zinc-300">{host}</span>.</> : <>a private village and is shown here live over a link — everything you see, and any note you leave, travels back to its home machine.</>}
+        {!p.linked && <span className="text-amber-500"> It's offline right now, so browsing may not load until its machine reconnects.</span>}
+      </span>
+      {isUrl && <a href={`${p.origin}/b/${p.slug}`} target="_blank" rel="noreferrer noopener" className="ml-auto inline-flex items-center gap-1 text-sky-600 hover:underline dark:text-sky-400">open on its home village <ArrowUpRight className="h-3.5 w-3.5" /></a>}
     </div>
   )
   return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><BeingDetail profile={p} api={api} banner={banner} /></DetailShell>
