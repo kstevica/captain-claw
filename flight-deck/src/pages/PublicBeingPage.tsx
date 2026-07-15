@@ -7,9 +7,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowDownUp, ArrowLeft, BookOpen, CalendarDays, ChevronDown, ChevronLeft,
-  ChevronRight, Clock, Files, Fingerprint, Loader2, MessageCircle, Moon,
-  Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun, Users, Wrench, X,
+  ArrowDownUp, ArrowLeft, ArrowUpRight, BookOpen, CalendarDays, ChevronDown,
+  ChevronLeft, ChevronRight, Clock, Files, Fingerprint, GitFork, Loader2,
+  MessageCircle, Moon, Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun,
+  Terminal, Users, Wrench, X,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -197,8 +198,51 @@ function Shell({ children, theme, onToggleTheme }: {
           {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
         </button>
       </header>
-      <main className="relative z-10 mx-auto max-w-5xl px-5 pb-24">{children}</main>
+      <main className="relative z-10 mx-auto max-w-5xl px-5 pb-10">{children}</main>
+      <CaptainClawFooter />
     </div>
+  )
+}
+
+function CaptainClawFooter() {
+  return (
+    <footer className="relative z-10 mx-auto mt-14 max-w-5xl px-5 pb-14">
+      <div className="overflow-hidden rounded-3xl border border-zinc-800 bg-gradient-to-br from-violet-600/10 via-zinc-900/60 to-zinc-900/40 p-7 sm:p-9">
+        <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+          <Sparkles className="h-5 w-5 text-violet-500 dark:text-violet-400" />
+          Grown in Captain Claw
+        </div>
+        <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400">
+          This village is one corner of <span className="font-medium text-zinc-200">Captain Claw</span> —
+          an open-source, agent-native workspace for running whole fleets of AI agents that actually
+          <em> do things</em>: they write code, research, run on a schedule, collaborate with each other,
+          and — as you've just seen — can be raised into persistent digital <em>beings</em> with their own
+          memory, wallet, drives, and will. Every being here wakes on its own heartbeat inside someone's
+          Captain Claw. The whole thing is free and yours to run: clone it, spin up your own village, and
+          raise beings of your own.
+        </p>
+        <div className="mt-5 flex flex-col gap-2.5 sm:flex-row sm:items-center">
+          <a href="https://captain-claw.com" target="_blank" rel="noreferrer noopener"
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500">
+            Explore Captain Claw <ArrowUpRight className="h-4 w-4" />
+          </a>
+          <a href="https://github.com/kstevica/captain-claw" target="_blank" rel="noreferrer noopener"
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800">
+            <GitFork className="h-4 w-4" /> Clone it on GitHub
+          </a>
+        </div>
+        <div className="mt-4 flex items-center gap-2 overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-400">
+          <Terminal className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-violet-400" />
+          <span className="select-all whitespace-nowrap">git clone https://github.com/kstevica/captain-claw</span>
+        </div>
+      </div>
+      <p className="mt-4 text-center text-[11px] text-zinc-600">
+        Captain Claw · the agent-native workspace ·{' '}
+        <a href="https://captain-claw.com" target="_blank" rel="noreferrer noopener" className="hover:text-zinc-400">captain-claw.com</a>
+        {' · '}
+        <a href="https://github.com/kstevica/captain-claw" target="_blank" rel="noreferrer noopener" className="hover:text-zinc-400">github</a>
+      </p>
+    </footer>
   )
 }
 
