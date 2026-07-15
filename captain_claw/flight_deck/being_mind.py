@@ -18,6 +18,7 @@ beings.py owns the being_links table. being_life is imported lazily.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from captain_claw.flight_deck import being_constitution as constitution
@@ -25,6 +26,14 @@ from captain_claw.flight_deck.beings import BeingsStore
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
+
+# Prose that means the being is TALKING about connecting its work — used to
+# decide when to push it (like the write gate) to actually declare an edge.
+_LINK_INTENT = re.compile(
+    r"\b(connect(?:s|ed|ing|ion|ions)?|link(?:s|ed|ing)?|weav\w*|woven|"
+    r"a web|web of|thread(?:s)?\s+(?:together|through)|tie(?:s|d)?\s+together|"
+    r"interconnect\w*|grew from|grows from|responds? to|relate(?:s|d)?)\b",
+    re.IGNORECASE)
 
 # Typed relations a being may declare (plan §2.3.1). Directed: from → to.
 REL_TYPES = frozenset({
@@ -64,44 +73,90 @@ def _existing_paths(being: dict) -> set[str]:
 
 # ── Digest routing (verify + store) ──────────────────────────────────────
 
-def handle_links_digest(store: BeingsStore, being: dict, digest: dict,
-                        now: datetime | None = None) -> None:
-    """Route the digest's optional ``links``. Each edge is verified: both
-    endpoints must be real files and the relation known, else it's refused to
-    an ``edge_unverified`` event. Never raises."""
-    now = now or _utcnow()
-    links = digest.get("links")
+def _resolve_endpoint(raw: str, paths: set[str]) -> str | None:
+    """Best-effort match of a being-declared endpoint to a REAL file path.
+    Exact first; then tolerant of a dropped ``.md`` extension or a being that
+    named the file by its bare basename ("first-sprout" → "garden/first-sprout.md")
+    — the mistakes weak models make constantly. NEVER invents a file: an
+    ambiguous or absent basename returns None, so a dangling edge is still
+    refused (§ anti-theater: a link to a file you didn't write is refused)."""
+    raw = (raw or "").strip().lstrip("/")
+    if not raw:
+        return None
+    if raw in paths:
+        return raw
+    cand = raw if raw.endswith(".md") else raw + ".md"
+    if cand in paths:
+        return cand
+    base = cand.rsplit("/", 1)[-1].lower()
+    hits = [p for p in paths if p.rsplit("/", 1)[-1].lower() == base]
+    return hits[0] if len(hits) == 1 else None      # unique basename only
+
+
+def verify_links(being: dict, links: list | None
+                 ) -> tuple[list[dict], list[dict]]:
+    """Pure check (no writes): split declared links into ``accepted`` (both
+    endpoints resolve to real files, relation known, not a self-edge) and
+    ``refused`` (with a human reason). Endpoints in ``accepted`` are the
+    RESOLVED canonical paths. Shared by the router and the link gate."""
+    accepted: list[dict] = []
+    refused: list[dict] = []
     if not isinstance(links, list):
-        return
-    try:
-        paths = _existing_paths(being)
-    except Exception as e:  # noqa: BLE001
-        log.warning("mind link paths failed", slug=being["slug"], error=str(e))
-        return
+        return accepted, refused
+    paths = _existing_paths(being)
     for raw in links[:MAX_LINKS_PER_TICK]:
         if not isinstance(raw, dict):
             continue
-        frm = str(raw.get("from") or "").strip()
-        to = str(raw.get("to") or "").strip()
+        frm_raw = str(raw.get("from") or "").strip()
+        to_raw = str(raw.get("to") or "").strip()
         rel = str(raw.get("rel") or "").strip()
         why = str(raw.get("why") or "").strip()
-        if rel not in REL_TYPES or not frm or not to or frm == to:
-            store.record_event(being["id"], "edge_unverified",
-                               {"from": frm, "to": to, "rel": rel,
-                                "reason": "bad relation or self-edge"}, now=now)
+        if rel not in REL_TYPES or not frm_raw or not to_raw:
+            refused.append({"from": frm_raw, "to": to_raw, "rel": rel,
+                            "reason": "unknown relation or missing endpoint"})
             continue
-        if frm not in paths or to not in paths:
-            missing = frm if frm not in paths else to
-            store.record_event(being["id"], "edge_unverified",
-                               {"from": frm, "to": to, "rel": rel,
-                                "reason": f"no such file: {missing}"}, now=now)
+        frm = _resolve_endpoint(frm_raw, paths)
+        to = _resolve_endpoint(to_raw, paths)
+        if frm is None or to is None:
+            missing = to_raw if frm is not None else frm_raw
+            refused.append({"from": frm_raw, "to": to_raw, "rel": rel,
+                            "reason": f"no such file: {missing}"})
             continue
-        added = store.add_link(being["owner_id"], being["id"], frm, to, rel,
-                               why, now=now)
-        if added:
+        if frm == to:
+            refused.append({"from": frm_raw, "to": to_raw, "rel": rel,
+                            "reason": "a file cannot link to itself"})
+            continue
+        accepted.append({"from": frm, "to": to, "rel": rel, "why": why})
+    return accepted, refused
+
+
+def handle_links_digest(store: BeingsStore, being: dict, digest: dict,
+                        now: datetime | None = None) -> int:
+    """Route the digest's optional ``links``. Each edge is verified (endpoints
+    fuzzily resolved to real files, relation known), else refused to an
+    ``edge_unverified`` event. Returns the count of NEW edges stored. Never
+    raises."""
+    now = now or _utcnow()
+    links = digest.get("links")
+    if not isinstance(links, list):
+        return 0
+    try:
+        accepted, refused = verify_links(being, links)
+    except Exception as e:  # noqa: BLE001
+        log.warning("mind link verify failed", slug=being["slug"], error=str(e))
+        return 0
+    added = 0
+    for edge in accepted:
+        if store.add_link(being["owner_id"], being["id"], edge["from"],
+                          edge["to"], edge["rel"], edge["why"], now=now):
+            added += 1
             store.record_event(being["id"], "edge_declared",
-                               {"from": frm, "to": to, "rel": rel,
-                                "why": why[:120]}, now=now)
+                               {"from": edge["from"], "to": edge["to"],
+                                "rel": edge["rel"], "why": edge["why"][:120]},
+                               now=now)
+    for r in refused:
+        store.record_event(being["id"], "edge_unverified", r, now=now)
+    return added
 
 
 def prune_dangling(store: BeingsStore, being: dict,
@@ -154,7 +209,8 @@ def graph(store: BeingsStore, being: dict) -> dict:
 # ── Prompt: offer the field + show the current shape (nudge to weave) ────
 
 def mind_prompt_lines(store: BeingsStore, being: dict,
-                      kind: str = "wake") -> list[str]:
+                      kind: str = "wake",
+                      last_refusals: list[dict] | None = None) -> list[str]:
     if not can_link(being):
         return []
     from captain_claw.flight_deck import being_life
@@ -164,15 +220,27 @@ def mind_prompt_lines(store: BeingsStore, being: dict,
     except Exception:  # noqa: BLE001
         edges = []
     try:
-        nfiles = len(being_life.list_self_files(being))
+        real = sorted(f["path"] for f in being_life.list_self_files(being))
     except Exception:  # noqa: BLE001
-        nfiles = 0
+        real = []
+    nfiles = len(real)
     if edges:
         lines.append("HOW YOUR WORK CONNECTS (your declared links):")
         for e in edges[-6:]:
             frm = e["from_path"].split("/")[-1].replace(".md", "")
             to = e["to_path"].split("/")[-1].replace(".md", "")
             lines.append(f"  {frm} {_REL_PHRASE.get(e['rel'], e['rel'])} {to}")
+    # Close the feedback loop (§ anti-theater): show what got REFUSED last tick
+    # so a being stops re-declaring the same dead edge for ticks on end.
+    if last_refusals:
+        lines.append("LAST TICK these links were REFUSED — fix or drop them, "
+                     "do NOT repeat them:")
+        for r in last_refusals[:3]:
+            lines.append(f'  {r.get("from", "?")} → {r.get("to", "?")}: '
+                         f'{r.get("reason", "refused")}')
+        lines.append("A link needs BOTH files to ALREADY exist. If you meant a "
+                     "file you haven't written, WRITE it for real this tick "
+                     "first, then link it.")
     # Adaptive nudge: a being with many orphan files is scattering. Push it to
     # find even one true connection — not to invent bogus edges (those are
     # refused), but to notice the real threads already in its work.
@@ -190,8 +258,82 @@ def mind_prompt_lines(store: BeingsStore, being: dict,
         '"grew_from|responds_to|elaborates|contradicts|uses_skill|'
         'learned_from", "why": "one honest line"}]. Both files must already '
         'exist (a link to a file you didn\'t write is refused).')
+    # Hand the being the EXACT paths it may link, so it copies them verbatim
+    # instead of guessing basenames the verifier can't match.
+    if real:
+        shown = real[:WORKING_SET]
+        more = (f" (+{len(real) - len(shown)} more — grep to recall one)"
+                if len(real) > len(shown) else "")
+        lines.append("FILES YOU CAN LINK RIGHT NOW — copy these EXACT paths: "
+                     + ", ".join(shown) + more)
     lines += _curation_offer(being, kind)
     return lines
+
+
+# ── The link gate (§2.3.1): make talk of connecting into a real edge ─────
+
+def should_link_gate(store: BeingsStore, being: dict, digest: dict) -> bool:
+    """True when this tick should be pushed to make a REAL edge. Two triggers,
+    both anti-theater:
+
+    * it TRIED to link but every edge was refused (dangling/mangled) — always
+      push, so a being stops re-declaring the same dead edge tick after tick;
+    * it only SPOKE of connecting ("a mind is a web") while its graph is still
+      a pile — push, but only when genuinely scattered, so a well-connected
+      being musing about connection isn't billed an extra turn.
+
+    Returns False the moment a real edge already landed. Mirrors the write
+    gate: one push, same tick, make it real or drop it."""
+    if not can_link(being):
+        return False
+    try:
+        paths = _existing_paths(being)
+    except Exception:  # noqa: BLE001
+        return False
+    if len(paths) < 2:
+        return False                           # nothing to connect yet
+    accepted, refused = verify_links(being, digest.get("links"))
+    if accepted:
+        return False                           # it already landed a real edge
+    if refused:
+        return True                            # tried and failed → push now
+    try:
+        edges = len(store.links_for(being["owner_id"], being["slug"]))
+    except Exception:  # noqa: BLE001
+        edges = 0
+    scattered = len(paths) >= 4 and edges < max(1, len(paths) // 4)
+    if not scattered:
+        return False
+    text = f"{digest.get('journal_entry', '')} {digest.get('summary', '')}"
+    return bool(_LINK_INTENT.search(text))
+
+
+def link_gate_prompt(store: BeingsStore, being: dict, digest: dict) -> str:
+    """The completion gate for links: you spoke of connecting but made no edge.
+    Show the being the exact linkable files (and why its attempt, if any, was
+    refused) and push it to declare one true edge THIS tick — or drop it."""
+    try:
+        real = sorted(_existing_paths(being))
+    except Exception:  # noqa: BLE001
+        real = []
+    files = ", ".join(real[:WORKING_SET]) if real else "(too few files yet)"
+    _, refused = verify_links(being, digest.get("links"))
+    why = ""
+    if refused:
+        r = refused[0]
+        why = (f' Your attempt {r.get("from", "?")} → {r.get("to", "?")} was '
+               f'refused: {r.get("reason", "")}.')
+    return (
+        "STOP — you spoke of connecting your work, but NO real link was made "
+        "this tick." + why + " A thought about connection is not a connection. "
+        "Do it FOR REAL NOW: choose TWO files that BOTH already exist and name "
+        "the true relation between them. Add to your one fenced json digest: "
+        '"links": [{"from": "<exact path>", "to": "<exact path>", "rel": '
+        '"grew_from|responds_to|elaborates|contradicts|uses_skill|'
+        'learned_from", "why": "one honest line"}]. Files you can link RIGHT '
+        f"NOW (copy these EXACT paths): {files}. If two files do not truly "
+        "connect, do not force it — say so plainly and make no link claim."
+    )
 
 
 # ── Curation (§2.3.2): working set, index, consolidation ─────────────────

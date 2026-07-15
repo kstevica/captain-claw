@@ -116,6 +116,28 @@ def test_parse_digest_takes_last_valid_block_and_clamps():
     assert life.parse_digest(None) is None
 
 
+def test_parse_digest_recovers_unfenced_json():
+    # Weak-model failure: the digest arrives with NO code fences at all.
+    text = ('I rested and thought.\n'
+            '{"act_kind": "journal", "summary": "no fences", "mood": "ok"}')
+    d = life.parse_digest(text)
+    assert d is not None
+    assert d["act_kind"] == "journal" and d["summary"] == "no fences"
+
+
+def test_parse_digest_tolerates_trailing_commas():
+    text = '```json\n{"act_kind": "rest", "summary": "x", "mood": "calm",}\n```'
+    d = life.parse_digest(text)
+    assert d is not None and d["act_kind"] == "rest"
+
+
+def test_parse_digest_unfenced_ignores_braces_in_strings():
+    # A stray "}" inside a string must not truncate the recovered object.
+    text = '{"act_kind": "journal", "summary": "a } brace", "mood": "ok"}'
+    d = life.parse_digest(text)
+    assert d is not None and d["summary"] == "a } brace"
+
+
 def test_clamp_next_wake_bounds():
     assert life.clamp_next_wake("infant", 0) == 60      # default
     assert life.clamp_next_wake("infant", 5) == 30      # floor

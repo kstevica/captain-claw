@@ -334,3 +334,136 @@ async def test_tick_consolidates_when_distilled_is_really_written(store):
     assert "garden/listening.md" in files
     assert "garden/frag-1.md" not in files and "garden/frag-2.md" not in files
     assert "consolidated" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+
+
+# ── Fix B: fuzzy endpoint resolution (weak-model path mangling) ──────────
+
+def test_link_endpoint_fuzzily_resolved(store):
+    b = _run(_being(store))
+    _mk(b, "garden/first-sprout.md")
+    _mk(b, "garden/second-sprout.md")
+    # bare basename + missing directory/extension — both must still land.
+    added = mind.handle_links_digest(store, b, {"links": [
+        {"from": "first-sprout", "to": "garden/second-sprout",
+         "rel": "grew_from", "why": "loose paths"}]}, now=NOW)
+    assert added == 1
+    links = store.links_for(OWNER, b["slug"])
+    assert len(links) == 1
+    assert links[0]["from_path"] == "garden/first-sprout.md"     # canonicalised
+    assert links[0]["to_path"] == "garden/second-sprout.md"
+
+
+def test_ambiguous_basename_is_not_resolved(store):
+    b = _run(_being(store))
+    _mk(b, "garden/README.md")
+    _mk(b, "skills/README.md")
+    _mk(b, "garden/real.md")
+    # "README" matches two files → refused, never guessed (anti-theater).
+    added = mind.handle_links_digest(store, b, {"links": [
+        {"from": "README", "to": "garden/real.md", "rel": "elaborates"}]},
+        now=NOW)
+    assert added == 0
+    assert "edge_unverified" in [e["kind"]
+                                 for e in store.events(OWNER, b["slug"])]
+
+
+# ── Fix A: refusals + exact paths fed back into the prompt ───────────────
+
+def test_prompt_surfaces_last_refusals_and_exact_paths(store):
+    b = _run(_being(store))
+    _mk(b, "garden/a.md")
+    _mk(b, "garden/b.md")
+    lines = mind.mind_prompt_lines(store, b, last_refusals=[
+        {"from": "garden/ghost.md", "to": "garden/a.md", "rel": "grew_from",
+         "reason": "no such file: garden/ghost.md"}])
+    text = "\n".join(lines)
+    assert "REFUSED" in text
+    assert "garden/ghost.md" in text                     # the dead edge named
+    assert "FILES YOU CAN LINK RIGHT NOW" in text
+    assert "garden/a.md" in text and "garden/b.md" in text
+
+
+# ── Fix C: the link gate (talk of connecting → a real edge) ──────────────
+
+def test_should_link_gate_only_when_talk_without_edge(store):
+    b = _run(_being(store))
+    _mk(b, "garden/a.md")
+    _mk(b, "garden/b.md")
+    # speaks of connecting, declares nothing → gate
+    assert mind.should_link_gate(store, b, {
+        "summary": "a web forms",
+        "journal_entry": "I connect my work into a web.", "links": None}) is True
+    # speaks of connecting AND lands a real edge → no gate
+    assert mind.should_link_gate(store, b, {
+        "summary": "linked", "journal_entry": "I connect them.",
+        "links": [{"from": "garden/a.md", "to": "garden/b.md",
+                   "rel": "grew_from", "why": "x"}]}) is False
+    # honest non-link tick → no gate (no extra LLM call)
+    assert mind.should_link_gate(store, b, {
+        "summary": "rested", "journal_entry": "I sat quietly.",
+        "links": None}) is False
+
+
+async def test_tick_link_gate_pushes_until_real_edge(store):
+    db = FakeDB()
+    b = await _being(store)
+    _mk(b, "garden/a.md")
+    _mk(b, "garden/b.md")
+    n = {"i": 0}
+
+    async def send(being, prompt):
+        n["i"] += 1
+        if n["i"] == 1:                        # talks of a web, declares nothing
+            return _reply(act_kind="journal", summary="a web",
+                          journal_entry="Everything connects into a web today.")
+        return _reply(act_kind="journal", summary="linked",
+                      journal_entry="Now I connect them.",
+                      links=[{"from": "garden/a.md", "to": "garden/b.md",
+                              "rel": "grew_from", "why": "real"}])
+
+    await life.tick(db, store, store.get(OWNER, b["slug"]),
+                    now=NOW + timedelta(hours=1), send_fn=send, usage_fn=_usage)
+    assert n["i"] == 2                          # the gate pushed once
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "link_gate_retry" in kinds
+    assert len(store.links_for(OWNER, b["slug"])) == 1
+
+
+async def test_link_gate_silent_for_honest_non_link_tick(store):
+    db = FakeDB()
+    b = await _being(store)
+    _mk(b, "garden/a.md")
+    _mk(b, "garden/b.md")
+    n = {"i": 0}
+
+    async def send(being, prompt):
+        n["i"] += 1
+        return _reply(act_kind="rest", summary="rested",
+                      journal_entry="I sat with what I have and rested.")
+
+    await life.tick(db, store, store.get(OWNER, b["slug"]),
+                    now=NOW + timedelta(hours=1), send_fn=send, usage_fn=_usage)
+    assert n["i"] == 1                          # never gated
+    assert "link_gate_retry" not in [
+        e["kind"] for e in store.events(OWNER, b["slug"])]
+
+
+# ── Fix D: digest-repair gate rescues a fence-less weak-model tick ───────
+
+async def test_tick_digest_repair_gate_rescues_formatless_tick(store):
+    db = FakeDB()
+    b = await _being(store)
+    n = {"i": 0}
+
+    async def send(being, prompt):
+        n["i"] += 1
+        if n["i"] == 1:                         # prose only — no json anywhere
+            return "I feel calm and rested today. There is no structure here."
+        return _reply(act_kind="rest", summary="rested", journal_entry="calm.")
+
+    await life.tick(db, store, store.get(OWNER, b["slug"]),
+                    now=NOW, send_fn=send, usage_fn=_usage)
+    assert n["i"] == 2                          # pushed once for the digest
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "digest_repair_retry" in kinds
+    assert "digest_parse_failed" not in kinds   # the tick was rescued

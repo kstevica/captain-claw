@@ -49,6 +49,10 @@ DAILY_ATTENTION_CREDITS = 3
 # actually write the file, before accepting the anti-theater downgrade. Bounded
 # so a stubborn tick costs at most (1+N) turns, not an unbounded loop.
 WRITE_GATE_RETRIES = 1
+# Total extra in-tick attempts across ALL completion gates (digest-repair,
+# write, link). Each gate fires at most once per tick, so a tick costs at most
+# (1 + GATE_RETRIES) turns however many gates trip.
+GATE_RETRIES = 2
 # Per-being tick cadence the parent may pin (minutes). None → the being's own
 # requested next_wake_minutes, clamped to its stage bounds (the default).
 TICK_INTERVAL_CHOICES = (2, 5, 10, 15, 30, 60)
@@ -1025,25 +1029,92 @@ def compose_write_gate_prompt(being: dict, digest: dict) -> str:
     )
 
 
+def compose_digest_repair_prompt(being: dict) -> str:
+    """The format gate: a reply arrived but held no parseable self-report, so
+    the whole tick (drives, act, links) would be lost. Push once for JUST the
+    fenced digest — the infant-tier failure where the model narrates but never
+    emits the json. Keep the ask tiny so the extra turn is cheap."""
+    return (
+        "Your last reply had NO valid self-report, so this tick would be lost. "
+        "Reply AGAIN with ONLY one fenced json block — nothing before or after "
+        "it — exactly this shape:\n"
+        "```json\n"
+        '{"act_kind": "journal|explore|tend|create|read|talk|rest", '
+        '"summary": "one line of what you actually did", '
+        '"journal_entry": "2-6 sentences in your own voice", '
+        '"served_drive": "survive|grow|explore|connect|create", '
+        '"next_wake_minutes": 60, "mood": "one word"}\n'
+        "```\n"
+        "Keep it short. Do not write anything outside the fences."
+    )
+
+
 # ── Digest parsing ───────────────────────────────────────────────────────
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+
+
+def _iter_brace_objects(text: str):
+    """Yield every top-level ``{...}`` substring by brace-matching (quotes and
+    escapes respected). Lets us recover a digest a weak model emitted WITHOUT
+    code fences — the common infant-tier failure that otherwise loses the whole
+    tick's structured self-report."""
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                yield text[start:i + 1]
+
+
+def _loads_lenient(s: str):
+    """json.loads, then one forgiving retry that strips trailing commas — the
+    other thing small models get wrong. Returns None if still unparseable."""
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        try:
+            return json.loads(_TRAILING_COMMA_RE.sub(r"\1", s))
+        except json.JSONDecodeError:
+            return None
+
+
+def _find_digest(candidates: list[str]) -> dict | None:
+    """The LAST candidate that parses to a dict carrying ``act_kind`` wins."""
+    for candidate in reversed(candidates):
+        obj = _loads_lenient(candidate)
+        if isinstance(obj, dict) and "act_kind" in obj:
+            return obj
+    return None
 
 
 def parse_digest(text: str | None) -> dict | None:
-    """The LAST fenced json object in the reply, validated and clamped."""
+    """The being's json self-report, validated and clamped. Prefers a fenced
+    ```json block (the taught shape); falls back to any bare ``{...}`` object
+    in the reply so a fence-less weak-model tick isn't thrown away."""
     if not text:
         return None
-    matches = _FENCE_RE.findall(text)
-    raw = None
-    for candidate in reversed(matches):
-        try:
-            obj = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and "act_kind" in obj:
-            raw = obj
-            break
+    raw = _find_digest(_FENCE_RE.findall(text))
+    if raw is None:
+        raw = _find_digest(list(_iter_brace_objects(text)))
     if raw is None:
         return None
     act = str(raw.get("act_kind") or "freeform")
@@ -1625,18 +1696,28 @@ async def _tick_locked(
     if visitors:
         drives = serve_drive(drives, "connect")
     # Feed the previous tick's ground truth back in — so a being that narrated
-    # a write it never made is told so, and can stop.
+    # a write it never made is told so, and can stop. Same for links: surface
+    # the edges REFUSED last tick so it stops re-declaring the same dead one.
     last_changed, last_mismatch = None, False
+    last_refusals: list[dict] = []
     try:
-        for e in store.events(owner, being["slug"], limit=12):
+        events12 = store.events(owner, being["slug"], limit=12)
+        t_last = None
+        for e in events12:
             if e["kind"] == "tick":
                 last_changed = e["data"].get("changed")
                 last_mismatch = bool(e["data"].get("mismatch"))
+                t_last = e["at"]
                 break
+        if t_last is not None:
+            last_refusals = [e["data"] for e in events12
+                             if e["kind"] == "edge_unverified"
+                             and e["at"] == t_last]
     except Exception:  # noqa: BLE001
         pass
     try:
-        mind_lines = being_mind.mind_prompt_lines(store, being, kind=kind)
+        mind_lines = being_mind.mind_prompt_lines(
+            store, being, kind=kind, last_refusals=last_refusals or None)
     except Exception:  # noqa: BLE001
         mind_lines = None
     prompt = compose_tick_prompt(
@@ -1656,25 +1737,40 @@ async def _tick_locked(
                         error=str(e))
     t0 = now
     send = send_fn or _send_via_channel
-    # 3b. Think — with a WRITE COMPLETION GATE (#1): if the being claims/attempts
-    # a write the git diff doesn't show, push it once more THIS tick to actually
-    # write the file, instead of accepting theater and waiting for the next
-    # heartbeat. Ground truth (git diff) is recomputed each attempt.
+    # 3b. Think — with COMPLETION GATES, each firing at most once THIS tick so
+    # theater is caught in-turn instead of waiting a whole heartbeat:
+    #   • repair — a reply came back with no parseable digest (weak-model format
+    #     failure); push once for JUST the fenced json, or the tick is lost.
+    #   • write  — it claims a write the git diff doesn't show (#1).
+    #   • link   — it SPEAKS of connecting its work but lands no verified edge
+    #     (§2.3.1); push once to make a real link or drop the claim.
+    # Ground truth (git diff) is recomputed each attempt.
     gate_prompt = prompt
     reply, digest, changed = None, None, None
-    for attempt in range(WRITE_GATE_RETRIES + 1):
+    tried: set[str] = set()
+    for attempt in range(GATE_RETRIES + 1):
         try:
             reply = await send(being, gate_prompt)
         except Exception as e:  # noqa: BLE001
             store.record_event(bid, "tick_error", {"error": str(e)}, now=now)
             reply = None
-        digest = parse_digest(reply)
-        if digest is None:
+        parsed = parse_digest(reply)
+        # DIGEST REPAIR GATE: a reply arrived but no valid self-report parsed —
+        # rescue the tick before falling back to bare words.
+        if (parsed is None and reply is not None and kind != "dream"
+                and "repair" not in tried and attempt < GATE_RETRIES):
+            store.record_event(bid, "digest_repair_retry", {}, now=now)
+            tried.add("repair")
+            gate_prompt = compose_digest_repair_prompt(being)
+            continue
+        if parsed is None:
             if reply is None:
                 store.record_event(bid, "tick_timeout", {}, now=now)
             else:
                 store.record_event(bid, "digest_parse_failed", {}, now=now)
             digest = fallback_digest(reply, kind)
+        else:
+            digest = parsed
         try:
             changed = await _tick_changed_files(being)
         except Exception as e:  # noqa: BLE001 — degrades to trust (None)
@@ -1685,13 +1781,30 @@ async def _tick_locked(
         wants_write = (digest["act_kind"] in ("create", "tend")
                        or _claims_file_write(
                            f"{digest['journal_entry']} {digest['summary']}"))
+        # WRITE COMPLETION GATE (#1)
         if (reply is not None and made_nothing and wants_write
-                and kind != "dream" and attempt < WRITE_GATE_RETRIES):
+                and kind != "dream" and "write" not in tried
+                and attempt < GATE_RETRIES):
             store.record_event(bid, "write_gate_retry",
                                {"attempt": attempt + 1,
                                 "claimed": digest["summary"][:120]}, now=now)
+            tried.add("write")
             gate_prompt = compose_write_gate_prompt(being, digest)
             continue
+        # LINK COMPLETION GATE (§2.3.1) — only on a real (parsed) digest.
+        if (parsed is not None and kind != "dream" and "link" not in tried
+                and attempt < GATE_RETRIES):
+            try:
+                needs_link = being_mind.should_link_gate(store, being, digest)
+            except Exception:  # noqa: BLE001
+                needs_link = False
+            if needs_link:
+                store.record_event(bid, "link_gate_retry",
+                                   {"summary": digest["summary"][:120]},
+                                   now=now)
+                tried.add("link")
+                gate_prompt = being_mind.link_gate_prompt(store, being, digest)
+                continue
         break
 
     # 4. Meter the real spend across ALL attempts and debit — physics, clamped.
