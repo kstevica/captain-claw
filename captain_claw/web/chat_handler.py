@@ -788,15 +788,19 @@ async def _run_agent(
                 **server._session_info(),
             })
 
-        # Consciousness background jobs — reflection, insight extraction,
-        # dreaming, topic classification, proactive intentions. Each is an EXTRA,
-        # CONCURRENT LLM call fired after the turn (create_task, not awaited).
-        # Skip ALL of them for FD-spawned workers (Basna/Vatra/Council/Code and
-        # Iskra beings): they're headless and orchestrated, a being already has
-        # its OWN dream/reflection/journal, and on a shared (often single, local)
-        # model these would just be parallel generations starving the next tick.
+        # Consciousness background jobs — each an EXTRA, CONCURRENT LLM call
+        # fired after the turn (create_task, not awaited).
+        import os as _os_w
         from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
-        if not _is_fd_spawned_worker():
+        _worker = _is_fd_spawned_worker()
+        _being_worker = str(_os_w.environ.get("CLAW_BEING_WORKER", "")).strip(
+            ).lower() in ("1", "true", "yes")
+
+        # Reflection / insight / dreaming / topic-classification feed each agent's
+        # OWN memory and would just be parallel generations for a headless worker
+        # — skip for ALL FD workers (Basna/Vatra/Council/Code + beings). A being
+        # already dreams and reflects through its tick engine.
+        if not _worker:
             # Auto-reflection (admin only).
             if not is_public:
                 try:
@@ -831,14 +835,18 @@ async def _run_agent(
             except Exception:
                 pass
 
-            # Proactive intentions generator (admin only; opt-in via config).
-            if not is_public:
-                try:
-                    import asyncio as _asyncio4
-                    from captain_claw.intentions_generator import maybe_auto_propose
-                    _asyncio4.create_task(maybe_auto_propose(agent, trigger="periodic"))
-                except Exception:
-                    pass
+        # Proactive intentions — a BEING's autonomous nervous system: the way it
+        # surfaces observations/proposals to its parent on its own. Kept for
+        # beings (and normal agents) but NOT other FD task workers. Internally
+        # throttled (cooldown + max/day + quiet hours), so it fires rarely, not
+        # the per-faculty-call thrash — one occasional generation is acceptable.
+        if (not _worker or _being_worker) and not is_public:
+            try:
+                import asyncio as _asyncio4
+                from captain_claw.intentions_generator import maybe_auto_propose
+                _asyncio4.create_task(maybe_auto_propose(agent, trigger="periodic"))
+            except Exception:
+                pass
 
         # Record cognitive tempo metric (non-blocking).
         try:
