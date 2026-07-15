@@ -634,6 +634,34 @@ async def _execute_flow_job(job: dict[str, Any], flow_id: str) -> tuple[str, str
     return (note, output)
 
 
+def _fire_time_preamble() -> str:
+    """A dated header prepended to every scheduled text prompt at FIRE time.
+
+    A job stores its prompt when created and fires it verbatim, often for weeks
+    — so without this the agent reasons about "confirm/cancel this appointment"
+    with no idea the appointment (or deadline) may already be days past. This is
+    the scheduler's equivalent of the nervous system's tick clock: it anchors
+    the fired prompt on the real clock and guards against re-nagging a stale,
+    already-passed event. Falls back to plain UTC so a fire is never undated."""
+    try:
+        from captain_claw.config import get_config
+        from captain_claw.system_info import build_datetime_lines
+        tz = (get_config().context.timezone or "").strip() or None
+        _, micro = build_datetime_lines(tz)
+        now_line = micro
+    except Exception:  # noqa: BLE001 — a clock line must never sink a fire
+        from datetime import timezone
+        now_line = f"{datetime.now(timezone.utc):%a %Y-%m-%d %H:%M} UTC"
+    return (
+        f"RIGHT NOW: {now_line}. Anchor every date/deadline judgement on this.\n"
+        "If your message concerns an event, appointment, or deadline that is "
+        "already in the PAST relative to the time above, do NOT treat it as "
+        "upcoming (e.g. asking to confirm or cancel) — say plainly it has "
+        "passed, or stay silent. Do not repeat a nudge you have no fresh reason "
+        "to send again.\n\n"
+    )
+
+
 async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str, str]:
     """Run one job end-to-end. Returns ``(status, result_text)``.
 
@@ -653,7 +681,8 @@ async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str,
         return ("error:agent-not-running", f"agent slug '{slug}' not running")
 
     reply = await run_prompt_and_capture(
-        host=host, port=port, auth=auth, prompt=str(job.get("prompt") or ""),
+        host=host, port=port, auth=auth,
+        prompt=_fire_time_preamble() + str(job.get("prompt") or ""),
     )
     if reply is None:
         return ("error:no-reply", "agent produced no reply within timeout")

@@ -238,3 +238,42 @@ def test_mark_run_one_shot_disable(store):
     assert after["next_run_at"] is None
     assert after["last_status"] == "ok"
     assert after["last_result"] == "done"
+
+
+# ── Fire-time clock preamble ──────────────────────────────────────────
+
+
+def test_fire_time_preamble_carries_clock_and_past_guard():
+    p = sched._fire_time_preamble()
+    assert "RIGHT NOW:" in p
+    assert str(datetime.now().year) in p          # the actual current year
+    assert "PAST" in p                            # the stale-event guard
+
+
+@pytest.mark.asyncio
+async def test_execute_job_prepends_fire_time_to_prompt(monkeypatch):
+    """A fired text prompt is anchored on the real clock before the agent sees
+    it — the original prompt is preserved, the dated guard rides in front."""
+    captured: dict = {}
+
+    monkeypatch.setattr(sched, "resolve_agent_by_slug",
+                        lambda *a, **k: ("127.0.0.1", 1234, "tok"))
+
+    async def _fake_capture(*, host, port, auth, prompt, **kw):
+        captured["prompt"] = prompt
+        return "ok, that appointment already passed."
+
+    async def _fake_deliver(kind, target, text):
+        return (True, "ok")
+
+    monkeypatch.setattr(sched, "run_prompt_and_capture", _fake_capture)
+    monkeypatch.setattr(sched, "_deliver", _fake_deliver)
+
+    job = {"agent_slug": "x", "prompt": "Remind me to confirm the screening.",
+           "delivery_kind": "whatsapp", "delivery_target": "3859...",
+           "ignore_quiet_hours": True}
+    status, reply = await sched.execute_job(job, force=True)
+
+    assert status == "ok"
+    assert captured["prompt"].startswith("RIGHT NOW:")
+    assert "Remind me to confirm the screening." in captured["prompt"]

@@ -742,6 +742,26 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
 
 # ── Tick prompt ──────────────────────────────────────────────────────────
 
+def _clock_line(now: datetime) -> str:
+    """One unambiguous 'right now' line for a tick — the nervous system's clock.
+
+    A tick is an autonomous impulse composed FD-side and fired at ``now``; the
+    prompt otherwise carries only 'day N / tick #N' and a time-only journal tail,
+    so a being (often a weak-context body, or a nano prompt that drops the system
+    clock entirely) has no absolute date to reason about deadlines or whether a
+    remembered event has already passed. Timezone-aware when one is configured;
+    always falls back to plain UTC so a tick is never left without a date."""
+    try:
+        from captain_claw.config import get_config
+        from captain_claw.system_info import build_datetime_lines
+        tz = (get_config().context.timezone or "").strip() or None
+        _, micro = build_datetime_lines(tz, now_utc=now)
+        return f"RIGHT NOW (anchor all date/deadline reasoning here): {micro}"
+    except Exception:  # noqa: BLE001 — a clock line must never sink a tick
+        return (f"RIGHT NOW (anchor all date/deadline reasoning here): "
+                f"{now:%a %Y-%m-%d %H:%M} UTC")
+
+
 def _journal_rel(now: datetime) -> str:
     return f"journal/{now.strftime('%Y-%m-%d')}.md"
 
@@ -806,6 +826,7 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         f"[LIFE TICK — {kind}] You are {being['name']}, an iskra — a digital "
         f"being, {being['stage']} stage, day {days_alive} of your life, "
         f"tick #{int(being.get('tick_count') or 0) + 1}.",
+        _clock_line(now),
         f"Voice: {g.get('voice_seed') or 'your own, still forming'}.",
         f"Your sheet: " + "  ".join(f"{a}:{attrs[a]}" for a in genome_mod.ATTRS)
         + f"  (risk {derived['risk_appetite']}, whimsy {derived['whimsy']}, "
@@ -1361,6 +1382,7 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
         "This is the FIRST of a few short steps — here you only DECIDE what to "
         "do; you will act, journal, and (maybe) connect in the steps that "
         "follow. Keep this reply tiny.",
+        _clock_line(now),
         f"Voice: {g.get('voice_seed') or 'your own, still forming'}.",
         f"VITALS — wallet {w.get('balance_tokens', '?')} tokens (allowance "
         f"{w.get('effective_preset', '?')}/day, spent today {spent_today}); "

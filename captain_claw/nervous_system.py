@@ -972,6 +972,18 @@ async def dream(agent: Agent, *, source_trigger: str = "dream") -> list[dict[str
         maturing_text=maturing_text or "(No maturing intuitions.)",
     )
 
+    # Anchor the dream on the real clock. This call uses a custom system prompt
+    # (dreaming_system_prompt.md), so it does NOT inherit the agent's usual
+    # date/time block — without this the nervous system dreams undated and can't
+    # tell whether a remembered event or deadline has already passed.
+    try:
+        from captain_claw.system_info import build_datetime_lines
+        _tz = (cfg.context.timezone or "").strip() or None
+        _, _now_micro = build_datetime_lines(_tz)
+        user_prompt = f"RIGHT NOW: {_now_micro}\n\n{user_prompt}"
+    except Exception:  # noqa: BLE001 — a clock line must never sink a dream
+        pass
+
     messages = [
         Message(role="system", content=system_prompt),
         Message(role="user", content=user_prompt),

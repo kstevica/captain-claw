@@ -46,7 +46,9 @@ def user_local_now(tz_name: str | None = None) -> datetime:
     return now_utc.astimezone(zone) if zone is not None else now_utc
 
 
-def build_datetime_lines(tz_name: str | None = None) -> tuple[list[str], str]:
+def build_datetime_lines(
+    tz_name: str | None = None, now_utc: datetime | None = None
+) -> tuple[list[str], str]:
     """Build unambiguous current-date/time lines for the system prompt.
 
     Always anchors on timezone-aware UTC and labels it explicitly. When a
@@ -55,9 +57,15 @@ def build_datetime_lines(tz_name: str | None = None) -> tuple[list[str], str]:
     that as "now" — so agents stop confusing the UTC server clock with the
     user's calendar.
 
+    ``now_utc`` lets a caller anchor on a specific instant (e.g. a being tick's
+    ``now``) instead of the wall clock; a naive value is assumed to be UTC.
+
     Returns ``(normal_lines, micro_str)``.
     """
-    now_utc = datetime.now(timezone.utc)
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
     label, zone = _resolve_timezone(tz_name)
 
     if zone is None:

@@ -102,6 +102,19 @@ def test_dream_prompt_differs(store):
     assert "This is your DREAM" in p
 
 
+def test_tick_and_orient_prompts_carry_the_current_timestamp(store):
+    """The nervous system's clock: every autonomous impulse states 'now' as an
+    absolute date so a being never re-nags about an event that has passed."""
+    b = _born(store)
+    tick = life.compose_tick_prompt(b, now=NOW, wallet=store.wallet_view(b))
+    assert "RIGHT NOW" in tick and NOW.strftime("%Y-%m-%d") in tick
+    orient = life.compose_orient_prompt(
+        b, kind="wake", now=NOW, spent_today=0, wallet=store.wallet_view(b),
+        percepts=None, first_of_day=True, siblings=None, letters_left=None,
+        visitors=None)
+    assert "RIGHT NOW" in orient and NOW.strftime("%Y-%m-%d") in orient
+
+
 # ── Digest parsing ───────────────────────────────────────────────────────
 
 def test_parse_digest_takes_last_valid_block_and_clamps():
