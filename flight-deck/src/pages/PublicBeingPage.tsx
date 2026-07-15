@@ -186,8 +186,11 @@ function Shell({ children, theme, onToggleTheme }: {
   children: React.ReactNode; theme: 'dark' | 'light'; onToggleTheme: () => void
 }) {
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="pointer-events-none fixed inset-x-0 top-0 h-72 bg-gradient-to-b from-violet-600/15 via-fuchsia-500/5 to-transparent" />
+    <div className="relative min-h-screen bg-zinc-950 text-zinc-100">
+      {/* Ambient wash: absolute (not fixed) so it spans the FULL document and
+          grows all the way down as content gets taller, instead of a fixed band
+          stuck at the top of the viewport. */}
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-violet-600/15 via-fuchsia-500/[0.05] to-transparent" />
       <header className="relative z-10 mx-auto flex max-w-5xl items-center justify-between px-5 py-4">
         <a href="/village" className="flex items-center gap-2 text-sm font-semibold tracking-tight">
           <Sparkles className="h-5 w-5 text-violet-500 dark:text-violet-400" />
