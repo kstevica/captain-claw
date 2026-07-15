@@ -777,6 +777,38 @@ async def test_tick_restarts_unreachable_body(store, monkeypatch):
     assert fresh["next_wake_at"].startswith("2026-07-12T12:05")   # retry in 5 min
 
 
+async def test_tick_does_not_respawn_a_live_but_busy_body(store, monkeypatch):
+    """A LIVE body that just missed the probe (busy on a saturated local model)
+    must NOT be respawned — that's what orphans ghost processes that keep
+    calling the model. Wait and retry instead."""
+    db = FakeDB()
+    b = _born(store, port=24096)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (24096, "tok"))
+
+    async def _dead(host, port, timeout=1.0):        # probe misses...
+        return False
+
+    monkeypatch.setattr(life, "_port_reachable", _dead)
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.server._process_is_alive",
+        lambda slug: True)                           # ...but the PROCESS is alive
+    calls = {"spawn": 0, "stop": 0}
+    monkeypatch.setattr(life, "spawn_body",
+                        lambda *a: calls.__setitem__("spawn", calls["spawn"] + 1))
+    monkeypatch.setattr(life, "_stop_body",
+                        lambda being: calls.__setitem__("stop", calls["stop"] + 1))
+    out = await life.tick(db, store, b, now=NOW)
+    assert out["outcome"] == "body_busy"
+    assert calls["spawn"] == 0 and calls["stop"] == 0   # left alone, no ghost
+    assert "body_busy" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert store.get(OWNER, b["slug"])["next_wake_at"].startswith(
+        "2026-07-12T12:02")                             # retry in 2 min
+
+
 async def test_tick_regenerates_body_when_registry_entry_removed(store, monkeypatch):
     """The body was fully REMOVED (no registry entry → resolve returns None), not
     just killed. An alive being that once had a body must still regenerate it —

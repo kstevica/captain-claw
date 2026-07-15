@@ -1926,6 +1926,26 @@ async def _tick_locked(
         reachable = (live_port is not None
                      and await _port_reachable("127.0.0.1", live_port))
         if not reachable and had_body and db is not None:
+            # Guard against the GHOST-body spiral: a local model can saturate the
+            # box mid-generation, so a LIVE body may miss the 1s TCP probe. If we
+            # respawned it we'd orphan a still-running process that keeps calling
+            # the model — piling on load → more probe misses → more ghosts, all
+            # thrashing one GPU. So only respawn a body whose PROCESS is actually
+            # DEAD; a live-but-busy one is left to finish and retried shortly.
+            slug = being.get("agent_slug") or being["slug"]
+            alive = False
+            try:
+                from captain_claw.flight_deck.server import _process_is_alive
+                alive = _process_is_alive(slug)
+            except Exception:  # noqa: BLE001 — treat unknown as dead (recover)
+                alive = False
+            if alive:
+                store.record_event(bid, "body_busy", {"port": live_port}, now=now)
+                store.tick_bookkeeping(
+                    bid, drives=being.get("drives") or {},
+                    next_wake_at=now + timedelta(minutes=2), now=now)
+                out.update(outcome="body_busy")
+                return out
             store.record_event(bid, "body_unreachable", {"port": live_port},
                                now=now)
             try:
