@@ -772,16 +772,20 @@ async def recharge(slug: str, body: RechargeRequest,
     store = get_store()
     v = _run(store.grant, user["id"], slug, body.tokens)
     b = _run(store.get, user["id"], slug)
+    now = datetime.now(timezone.utc)
     if b["state"] == "torpor":
         wv = store.wallet_view(b)
         if not wv["enforced"] or wv["balance_tokens"] > wv["reserve_tokens"]:
             b = _run(store.set_state, user["id"], slug, "alive")
-            store.record_event(b["id"], "woke_from_torpor",
-                               {"cause": "recharge"})
+            store.record_event(b["id"], "woke_from_torpor", {"cause": "recharge"})
             being_life._start_body(b)
-            store.reschedule_wake(user["id"], slug,
-                                  datetime.now(timezone.utc))
+            store.reschedule_wake(user["id"], slug, now)
             v = _run(store.vitals, user["id"], slug)
+    elif b["state"] == "alive":
+        # A recharge is "keep going": pull the next tick forward so a being that
+        # rested at its daily burn cap (next wake could be tomorrow) resumes now
+        # — the grant just raised today's burn headroom, so it can spend again.
+        store.reschedule_wake(user["id"], slug, now)
     return v
 
 

@@ -1011,6 +1011,32 @@ def test_grant_recharges_wallet_ledgers_and_validates(store):
         store.grant(OWNER, b["slug"], 999_000_000)                  # over the cap
 
 
+def test_grant_extends_todays_burn_headroom(store):
+    """A recharge is a deliberate 'keep going', so today's burn cap stretches by
+    the granted amount — the being can spend past the daily cap it was resting
+    at, instead of sleeping until tomorrow."""
+    b = _born(store, allowance="2M", port=0)
+    bid = b["id"]
+    store.set_allowance(OWNER, b["slug"], "2M", daily_burn_cap=1_000_000)  # 1M cap
+    tier = life._stage_tier(store.get(OWNER, b["slug"])["stage"])
+    tiny = {"prompt_tokens": 100_000, "completion_tokens": 0,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+
+    store.grant(OWNER, b["slug"], 5_000_000, now=NOW)    # +5M balance & headroom
+    assert store.granted_today(bid, now=NOW) == 5_000_000
+    # already spent 1.5M today — over the 1M base cap, under 1M+5M
+    store._apply(OWNER, tokens=1_500_000, reason="usage", from_being=bid,
+                 to_being=None, note="t", now=NOW)
+    out = store.debit_usage_clamped(bid, tier, tiny, now=NOW)
+    assert out["burn_cap_hit"] is False                  # grant extended the cap
+
+    # spend past 1M+5M = 6M → now it DOES rest at cap
+    store._apply(OWNER, tokens=5_000_000, reason="usage", from_being=bid,
+                 to_being=None, note="t", now=NOW)
+    out2 = store.debit_usage_clamped(bid, tier, tiny, now=NOW)
+    assert out2["burn_cap_hit"] is True                  # 6.5M ≥ 6M headroom
+
+
 def test_set_cognition_flips_and_validates(store):
     import pytest as _pt
     b = _born(store)

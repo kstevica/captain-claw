@@ -1063,6 +1063,18 @@ class BeingsStore:
         ).fetchone()
         return int(row["s"])
 
+    def granted_today(self, being_id: str, now: datetime | None = None) -> int:
+        """Tokens the parent minted into this wallet TODAY (recharges). A grant
+        is a deliberate 'keep going', so it raises today's burn headroom — the
+        being may spend the daily cap PLUS what it was granted today."""
+        now = now or _utcnow()
+        row = self._c().execute(
+            "SELECT COALESCE(SUM(tokens), 0) AS s FROM token_transfers"
+            " WHERE to_being = ? AND reason = 'grant' AND at LIKE ?",
+            (being_id, _iso(now)[:10] + "%"),
+        ).fetchone()
+        return int(row["s"])
+
     def debit_usage(
         self, being_id: str, tier: str, usage: dict,
         note: str | None = None, now: datetime | None = None,
@@ -1086,7 +1098,8 @@ class BeingsStore:
         if view["balance_tokens"] < weighted:
             raise InsufficientTokens("wallet empty")
         if view["daily_burn_cap"] is not None:
-            if self.spent_today(being_id, now=now) + weighted > view["daily_burn_cap"]:
+            cap = view["daily_burn_cap"] + self.granted_today(being_id, now=now)
+            if self.spent_today(being_id, now=now) + weighted > cap:
                 raise BurnCapExceeded("daily burn cap reached")
         self._apply(b["owner_id"], tokens=weighted, reason="usage",
                     from_being=being_id, to_being=None, note=note or tier, now=now)
@@ -2637,8 +2650,10 @@ class BeingsStore:
         out["debited"] = debit
         out["overdraft"] = debit < weighted
         cap = view["daily_burn_cap"]
-        if cap is not None and self.spent_today(being_id, now=now) >= cap:
-            out["burn_cap_hit"] = True
+        if cap is not None:
+            cap += self.granted_today(being_id, now=now)   # recharges extend it
+            if self.spent_today(being_id, now=now) >= cap:
+                out["burn_cap_hit"] = True
         return out
 
 
