@@ -157,12 +157,19 @@ def _visitor(vid: str) -> dict:
 
 @village_router.get("/visitors/{vid}")
 async def visitor_profile(vid: str):
-    """The visitor's cached profile snapshot (refreshed by heartbeats over the
-    link); `linked` tells whether its home machine is connected right now."""
+    """The visitor's profile — fetched LIVE over the link when its home machine
+    is connected (so the detail page updates as the being ticks), falling back
+    to the last cached snapshot when it's offline."""
     v = _visitor(vid)
-    return {**v["profile"], "id": v["id"], "origin": v["origin"],
-            "slug": v["slug"], "visitor": True, "last_seen": v["last_seen"],
-            "linked": being_federation.is_linked(vid)}
+    linked = being_federation.is_linked(vid)
+    prof = v["profile"]
+    if linked:
+        try:
+            prof = await being_federation.link_request(vid, "profile")
+        except Exception:  # noqa: BLE001 — link hiccup → show the cached snapshot
+            prof = v["profile"]
+    return {**prof, "id": v["id"], "origin": v["origin"], "slug": v["slug"],
+            "visitor": True, "last_seen": v["last_seen"], "linked": linked}
 
 
 @village_router.get("/visitors/{vid}/files")

@@ -330,13 +330,21 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
   const [village, setVillage] = useState<string>('')
   const [visitSecret, setVisitSecret] = useState<string>('')
   const [err, setErr] = useState('')
+  // Poll so visiting beings' latest thoughts, stats and online/offline update
+  // live as they tick — cards reconcile by key, no flicker. A poll failure
+  // keeps the last good roster (only the first load can surface an error).
   useEffect(() => {
-    listPublicBeings().then((r) => {
+    let first = true
+    const load = () => listPublicBeings().then((r) => {
       setBeings(r.beings)
       setVisitors(r.visitors || [])
       setVillage(r.village?.description || '')
       setVisitSecret(r.village?.visit_secret || '')
-    }).catch((e) => setErr(String(e.message || e)))
+      setErr('')
+    }).catch((e) => { if (first) setErr(String(e.message || e)) }).finally(() => { first = false })
+    load()
+    const h = setInterval(load, 15000)
+    return () => clearInterval(h)
   }, [])
   const origin = typeof window !== 'undefined' ? window.location.origin : ''
   return (
@@ -853,7 +861,13 @@ function BeingView({ slug, theme, onToggleTheme }: { slug: string; theme: 'dark'
   const [p, setP] = useState<PublicProfile | null>(null)
   const [err, setErr] = useState('')
   const api = useMemo(() => makeBeingApi(slug), [slug])
-  useEffect(() => { getPublicBeing(slug).then(setP).catch((e) => setErr(String(e.message || e))) }, [slug])
+  useEffect(() => {
+    let first = true
+    const load = () => getPublicBeing(slug).then(setP).catch((e) => { if (first) setErr(String(e.message || e)) }).finally(() => { first = false })
+    load()
+    const h = setInterval(load, 15000)   // live hero: stats, mood, state
+    return () => clearInterval(h)
+  }, [slug])
   if (err) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 py-16 text-center text-zinc-400">This being isn't here — it may be private, or it never existed.</div></DetailShell>
   if (!p) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="flex items-center gap-2 py-12 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> waking the page…</div></DetailShell>
   return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><BeingDetail profile={p} api={api} /></DetailShell>
@@ -863,7 +877,13 @@ function VisitorView({ id, theme, onToggleTheme }: { id: string; theme: 'dark' |
   const [p, setP] = useState<PublicVisitorProfile | null>(null)
   const [err, setErr] = useState('')
   const api = useMemo(() => makeVisitorApi(id), [id])
-  useEffect(() => { getVisitorProfile(id).then(setP).catch((e) => setErr(String(e.message || e))) }, [id])
+  useEffect(() => {
+    let first = true
+    const load = () => getVisitorProfile(id).then(setP).catch((e) => { if (first) setErr(String(e.message || e)) }).finally(() => { first = false })
+    load()
+    const h = setInterval(load, 15000)   // live over the link as the being ticks
+    return () => clearInterval(h)
+  }, [id])
   if (err) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 py-16 text-center text-zinc-400">This visitor is no longer here — it may have stopped visiting.</div></DetailShell>
   if (!p) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="flex items-center gap-2 py-12 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> reaching its home village…</div></DetailShell>
   const isUrl = /^https?:\/\//.test(p.origin || '')

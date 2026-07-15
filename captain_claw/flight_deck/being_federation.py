@@ -30,7 +30,8 @@ from captain_claw.logging import get_logger
 log = get_logger(__name__)
 
 LINK_REQUEST_TIMEOUT = 20.0     # host waits this long for a visitor's answer
-BEAT_SECONDS = 45.0             # sender → host snapshot heartbeat
+BEAT_SECONDS = 15.0             # sender → host snapshot heartbeat (keeps the
+                                # roster's cached snapshot live; tiny frame)
 _MAX_FRAME = 4_000_000          # a file/journal can be biggish; cap generously
 
 
