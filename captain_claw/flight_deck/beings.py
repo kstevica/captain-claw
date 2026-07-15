@@ -365,13 +365,49 @@ class BeingsStore:
 
                 -- The village's own words: a per-owner description the parent
                 -- writes on the Beings page, shown atop their public /village.
+                -- Also the federation settings (plan §9.1): a secret others must
+                -- present to send a visiting being here, and this machine's own
+                -- public URL (so beings it sends elsewhere can be fetched back).
                 CREATE TABLE IF NOT EXISTS village_meta (
-                    owner_id    TEXT PRIMARY KEY,
-                    description TEXT NOT NULL DEFAULT '',
-                    updated_at  TEXT NOT NULL
+                    owner_id      TEXT PRIMARY KEY,
+                    description   TEXT NOT NULL DEFAULT '',
+                    secret        TEXT NOT NULL DEFAULT '',
+                    secret_public INTEGER NOT NULL DEFAULT 0,
+                    public_url    TEXT NOT NULL DEFAULT '',
+                    updated_at    TEXT NOT NULL
                 );
+
+                -- Visitors (plan §9.1): beings that live on ANOTHER machine and
+                -- were sent to visit this village. They are NEVER copied — only a
+                -- cached profile snapshot + where to fetch their data live
+                -- (origin + slug) is stored; browsing proxies to the origin. A
+                -- valid village secret is required to register/refresh one.
+                CREATE TABLE IF NOT EXISTS being_visitors (
+                    id         TEXT PRIMARY KEY,
+                    owner_id   TEXT NOT NULL,
+                    origin     TEXT NOT NULL,
+                    slug       TEXT NOT NULL,
+                    name       TEXT NOT NULL DEFAULT '',
+                    profile    TEXT NOT NULL DEFAULT '{}',
+                    first_seen TEXT NOT NULL,
+                    last_seen  TEXT NOT NULL,
+                    UNIQUE(owner_id, origin, slug)
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_visitors
+                    ON being_visitors(owner_id, last_seen);
                 """
             )
+            # village_meta gained federation columns after first ship.
+            for col, ddl in [
+                ("secret", "TEXT NOT NULL DEFAULT ''"),
+                ("secret_public", "INTEGER NOT NULL DEFAULT 0"),
+                ("public_url", "TEXT NOT NULL DEFAULT ''"),
+            ]:
+                try:
+                    self._c().execute(
+                        f"ALTER TABLE village_meta ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass
             # Lightweight migrations (columns added after first ship).
             for col, ddl in [
                 ("birth_letter", "TEXT NOT NULL DEFAULT ''"),
@@ -395,6 +431,12 @@ class BeingsStore:
                 # use the owner's tier config); set on IMPORT so a being carries
                 # its own connection across machines. See being_life.spawn_body.
                 ("body_config", "TEXT NOT NULL DEFAULT ''"),
+                # Federation (plan §9.1): a being sent to visit another village
+                # — the target village's URL + its secret, and when we last
+                # announced this being there.
+                ("visit_url", "TEXT NOT NULL DEFAULT ''"),
+                ("visit_secret", "TEXT NOT NULL DEFAULT ''"),
+                ("visit_last_announce", "TEXT"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -1081,6 +1123,9 @@ class BeingsStore:
             "pending_procreation": b["pending_procreation"],
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "public": bool(b.get("public")),
+            "visit_url": b.get("visit_url") or "",
+            "visit_secret": b.get("visit_secret") or "",
+            "visit_last_announce": b.get("visit_last_announce"),
         }
 
     def ledger(self, owner_id: str, slug: str, limit: int = 100) -> list[dict]:
@@ -2150,35 +2195,196 @@ class BeingsStore:
 
     def get_village_meta(self, owner_id: str) -> dict:
         row = self._c().execute(
-            "SELECT description FROM village_meta WHERE owner_id = ?",
-            (owner_id,)).fetchone()
-        return {"description": (row["description"] if row else "")}
+            "SELECT description, secret, secret_public, public_url"
+            " FROM village_meta WHERE owner_id = ?", (owner_id,)).fetchone()
+        if not row:
+            return {"description": "", "secret": "", "secret_public": False,
+                    "public_url": ""}
+        return {"description": row["description"],
+                "secret": row["secret"] or "",
+                "secret_public": bool(row["secret_public"]),
+                "public_url": row["public_url"] or ""}
+
+    def _upsert_village_meta(self, owner_id: str, fields: dict,
+                             now: datetime | None = None) -> None:
+        now = now or _utcnow()
+        cur = self.get_village_meta(owner_id)
+        cur.update(fields)
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO village_meta (owner_id, description, secret,"
+                " secret_public, public_url, updated_at) VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(owner_id) DO UPDATE SET description=excluded.description,"
+                " secret=excluded.secret, secret_public=excluded.secret_public,"
+                " public_url=excluded.public_url, updated_at=excluded.updated_at",
+                (owner_id, cur["description"], cur["secret"],
+                 1 if cur["secret_public"] else 0, cur["public_url"], _iso(now)),
+            )
+            self._c().commit()
 
     def set_village_meta(self, owner_id: str, description: str,
                          now: datetime | None = None) -> dict:
-        now = now or _utcnow()
-        text = (description or "").strip()[:self.VILLAGE_DESC_MAX]
-        with self._lock:
-            self._c().execute(
-                "INSERT INTO village_meta (owner_id, description, updated_at)"
-                " VALUES (?,?,?) ON CONFLICT(owner_id) DO UPDATE SET"
-                " description = excluded.description, updated_at = excluded.updated_at",
-                (owner_id, text, _iso(now)),
-            )
-            self._c().commit()
-        return {"description": text}
+        self._upsert_village_meta(
+            owner_id, {"description": (description or "").strip()[:self.VILLAGE_DESC_MAX]},
+            now=now)
+        return {"description": self.get_village_meta(owner_id)["description"]}
+
+    def set_village_federation(self, owner_id: str, *, secret: str,
+                               secret_public: bool, public_url: str,
+                               now: datetime | None = None) -> dict:
+        """The host settings: the secret a visiting being must present, whether
+        it's shown publicly, and this machine's own public URL (for sending)."""
+        self._upsert_village_meta(owner_id, {
+            "secret": (secret or "").strip()[:200],
+            "secret_public": bool(secret_public),
+            "public_url": (public_url or "").strip().rstrip("/")[:400],
+        }, now=now)
+        return self.get_village_meta(owner_id)
 
     def public_village(self) -> dict:
-        """The description shown on the (global) public square — resolved from
-        the owner with the most public beings (deterministic; the common case is
-        a single self-hosted owner, so it's simply their words)."""
-        row = self._c().execute(
+        """The description + (if opted in) the visit secret shown on the public
+        square. Resolved from the owner with the most public beings; falls back
+        to an owner advertising a public secret, then one that hosts visitors —
+        so a pure-host village (no local public beings) still shows its words."""
+        c = self._c()
+        row = c.execute(
             "SELECT owner_id FROM beings WHERE public = 1 AND stage != 'egg'"
             " GROUP BY owner_id ORDER BY COUNT(*) DESC, owner_id LIMIT 1",
         ).fetchone()
+        owner = row["owner_id"] if row else None
+        if not owner:
+            r2 = c.execute(
+                "SELECT owner_id FROM village_meta"
+                " WHERE secret_public = 1 AND secret != '' LIMIT 1").fetchone()
+            owner = r2["owner_id"] if r2 else None
+        if not owner:
+            r3 = c.execute(
+                "SELECT owner_id FROM being_visitors"
+                " ORDER BY last_seen DESC LIMIT 1").fetchone()
+            owner = r3["owner_id"] if r3 else None
+        if not owner:
+            return {"description": "", "visit_secret": ""}
+        m = self.get_village_meta(owner)
+        return {"description": m["description"],
+                # Only expose the secret if the owner chose to publish it.
+                "visit_secret": m["secret"] if m["secret_public"] else ""}
+
+    # ── Federation: visitors (beings from other machines) ─────────────
+
+    def owner_by_secret(self, secret: str) -> str | None:
+        """The host owner whose village secret matches — the gate for registering
+        a visitor. Empty secrets never match (a village with no secret set is not
+        accepting visitors)."""
+        secret = (secret or "").strip()
+        if not secret:
+            return None
+        row = self._c().execute(
+            "SELECT owner_id FROM village_meta WHERE secret = ? AND secret != ''"
+            " LIMIT 1", (secret,)).fetchone()
+        return row["owner_id"] if row else None
+
+    def upsert_visitor(self, owner_id: str, origin: str, slug: str,
+                       name: str, profile: dict,
+                       now: datetime | None = None) -> dict:
+        """Register or refresh a visiting being under the HOST owner. Dedup by
+        (owner, origin, slug); last_seen drives heartbeat expiry."""
+        now = now or _utcnow()
+        origin = (origin or "").strip().rstrip("/")
+        existing = self._c().execute(
+            "SELECT id, first_seen FROM being_visitors WHERE owner_id = ?"
+            " AND origin = ? AND slug = ?", (owner_id, origin, slug)).fetchone()
+        vid = existing["id"] if existing else uuid.uuid4().hex
+        first_seen = existing["first_seen"] if existing else _iso(now)
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_visitors (id, owner_id, origin, slug, name,"
+                " profile, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(owner_id, origin, slug) DO UPDATE SET"
+                " name=excluded.name, profile=excluded.profile,"
+                " last_seen=excluded.last_seen",
+                (vid, owner_id, origin, slug, name[:80], json.dumps(profile),
+                 first_seen, _iso(now)),
+            )
+            self._c().commit()
+        return self.get_visitor(vid)
+
+    def get_visitor(self, visitor_id: str) -> dict:
+        row = self._c().execute(
+            "SELECT * FROM being_visitors WHERE id = ?", (visitor_id,)).fetchone()
         if not row:
-            return {"description": ""}
-        return self.get_village_meta(row["owner_id"])
+            raise BeingNotFound("no such visitor")
+        v = dict(row)
+        try:
+            v["profile"] = json.loads(v["profile"] or "{}")
+        except json.JSONDecodeError:
+            v["profile"] = {}
+        return v
+
+    def public_visitors(self, ttl_minutes: int = 30,
+                        now: datetime | None = None) -> list[dict]:
+        """Live visitors (seen within the TTL) for the public roster — cards from
+        cached snapshots, newest arrivals first."""
+        now = now or _utcnow()
+        cutoff = _iso(now - timedelta(minutes=ttl_minutes))
+        rows = self._c().execute(
+            "SELECT * FROM being_visitors WHERE last_seen >= ?"
+            " ORDER BY last_seen DESC", (cutoff,)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                prof = json.loads(r["profile"] or "{}")
+            except json.JSONDecodeError:
+                prof = {}
+            out.append({"id": r["id"], "origin": r["origin"], "slug": r["slug"],
+                        "name": r["name"], "profile": prof,
+                        "last_seen": r["last_seen"]})
+        return out
+
+    def visitors_for(self, owner_id: str) -> list[dict]:
+        """A host owner's visitors (all, for their parent view)."""
+        rows = self._c().execute(
+            "SELECT id, origin, slug, name, first_seen, last_seen"
+            " FROM being_visitors WHERE owner_id = ? ORDER BY last_seen DESC",
+            (owner_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_visitor(self, owner_id: str, visitor_id: str) -> None:
+        with self._lock:
+            self._c().execute(
+                "DELETE FROM being_visitors WHERE id = ? AND owner_id = ?",
+                (visitor_id, owner_id))
+            self._c().commit()
+
+    def expire_visitors(self, ttl_minutes: int = 30,
+                        now: datetime | None = None) -> int:
+        now = now or _utcnow()
+        cutoff = _iso(now - timedelta(minutes=ttl_minutes))
+        with self._lock:
+            cur = self._c().execute(
+                "DELETE FROM being_visitors WHERE last_seen < ?", (cutoff,))
+            self._c().commit()
+            return cur.rowcount or 0
+
+    # ── Federation: sending beings out to visit (sender side) ─────────
+
+    def set_being_visit(self, owner_id: str, slug: str, url: str, secret: str,
+                        now: datetime | None = None) -> dict:
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now or _utcnow(),
+                     visit_url=(url or "").strip().rstrip("/")[:400],
+                     visit_secret=(secret or "").strip()[:200])
+        return self.get(owner_id, slug)
+
+    def beings_visiting(self) -> list[dict]:
+        """Every being configured to visit somewhere — the announce loop's list."""
+        rows = self._c().execute(
+            "SELECT owner_id, slug FROM beings WHERE visit_url != ''"
+            " AND state != 'dead' AND stage != 'egg'").fetchall()
+        return [self.get(r["owner_id"], r["slug"]) for r in rows]
+
+    def mark_announced(self, being_id: str, now: datetime | None = None) -> None:
+        self._update(being_id, now or _utcnow(),
+                     visit_last_announce=_iso(now or _utcnow()))
 
     # ── The Mind: declared edges over the being's own artifacts ──────
 

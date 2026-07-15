@@ -529,7 +529,7 @@ function App() {
   // /village and /b/<slug> render for anyone, logged in or not, before the
   // login gate below and without hydrating any of the app's stores.
   const _path = window.location.pathname
-  if (_path === '/village' || _path.startsWith('/b/')) {
+  if (_path === '/village' || _path.startsWith('/b/') || _path.startsWith('/v/')) {
     return <PublicBeingPage />
   }
 

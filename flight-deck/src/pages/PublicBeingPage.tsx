@@ -8,18 +8,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDownUp, ArrowLeft, ArrowUpRight, BookOpen, CalendarDays, ChevronDown,
-  ChevronLeft, ChevronRight, Clock, Files, Fingerprint, GitFork, Loader2,
+  ChevronLeft, ChevronRight, Clock, Files, Fingerprint, GitFork, Globe, Loader2,
   MessageCircle, Moon, Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun,
   Terminal, Users, Wrench, X,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  type PublicFile, type PublicGraph, type PublicProfile, type PublicThread,
-  PUBLIC_MSG_MAX, cadenceLabel, clearThreadId, getPublicBeing, getPublicFile,
-  getPublicFiles, getPublicGraph, getPublicJournal, getPublicThread,
-  listPublicBeings, postPublicMessage, savedName, savedThreadId, saveName,
-  saveThreadId,
+  type PublicApi, type PublicFile, type PublicGraph, type PublicProfile,
+  type PublicThread, type PublicVisitorCard, type PublicVisitorProfile,
+  PUBLIC_MSG_MAX, cadenceLabel, clearThreadId, getPublicBeing,
+  getVisitorProfile, listPublicBeings, makeBeingApi, makeVisitorApi,
+  savedName, savedThreadId, saveName, saveThreadId,
 } from '../services/beingsPublic'
 
 // ── Theme (standalone): default dark, respect a returning FD user's choice ──
@@ -275,16 +275,67 @@ function StatPill({ icon, label, value }: { icon: React.ReactNode; label: string
 
 // ── Gallery (/village) ──
 
+function RosterCard({ p, href, host }: { p: PublicProfile; href: string; host?: string }) {
+  const st = stageOf(p.stage)
+  return (
+    <a href={href}
+      className={`group relative overflow-hidden rounded-2xl border p-5 transition hover:bg-zinc-900 ${host ? 'border-sky-500/25 bg-zinc-900/60 hover:border-sky-500/50' : 'border-zinc-800 bg-zinc-900/60 hover:border-violet-500/50'}`}>
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-lg font-semibold text-zinc-100">{p.name}</span>
+            {host && <span className="flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] text-sky-600 dark:text-sky-400"><Globe className="h-3 w-3" /> visiting</span>}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs">
+            <span className={st.tint}>{st.emoji} {st.label}</span>
+            <span className="text-zinc-600">·</span>
+            <span className={stateTone[p.state] || 'text-zinc-500'}>{stateWord[p.state] || p.state}</span>
+            <span className="text-zinc-600">·</span>
+            <span className="text-zinc-500">gen {p.generation}</span>
+            {host && <><span className="text-zinc-600">·</span><span className="text-zinc-500">from {host}</span></>}
+          </div>
+        </div>
+        <span className="text-2xl opacity-60 transition group-hover:opacity-100">{st.emoji}</span>
+      </div>
+      {p.interests.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {p.interests.slice(0, 4).map((it) => (
+            <span key={it} className="rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400">{it}</span>
+          ))}
+        </div>
+      )}
+      {p.latest_thought && (
+        <div className="mt-3 border-l-2 border-violet-500/40 pl-2.5">
+          <p className="line-clamp-2 text-xs italic leading-snug text-zinc-300">“{p.latest_thought.text}”</p>
+          <p className="mt-0.5 text-[10px] text-zinc-500">{relTime(p.latest_thought.at)} · {localTimeTz(p.latest_thought.at)}</p>
+        </div>
+      )}
+      <div className="mt-4 flex items-center gap-4 text-[11px] text-zinc-500">
+        <span className="flex items-center gap-1"><MessageCircle className="h-3.5 w-3.5" /> {p.stats.messages} notes</span>
+        <span className="flex items-center gap-1"><Users className="h-3.5 w-3.5" /> {p.stats.threads} threads</span>
+        <span className="flex items-center gap-1"><Clock className="h-3.5 w-3.5" /> {cadenceLabel(p.tick_interval_minutes)}</span>
+      </div>
+    </a>
+  )
+}
+
+const hostOf = (origin: string) => { try { return new URL(origin).host } catch { return origin } }
+
 function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTheme: () => void }) {
   const [beings, setBeings] = useState<PublicProfile[] | null>(null)
+  const [visitors, setVisitors] = useState<PublicVisitorCard[]>([])
   const [village, setVillage] = useState<string>('')
+  const [visitSecret, setVisitSecret] = useState<string>('')
   const [err, setErr] = useState('')
   useEffect(() => {
     listPublicBeings().then((r) => {
       setBeings(r.beings)
+      setVisitors(r.visitors || [])
       setVillage(r.village?.description || '')
+      setVisitSecret(r.village?.visit_secret || '')
     }).catch((e) => setErr(String(e.message || e)))
   }, [])
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
   return (
     <Shell theme={theme} onToggleTheme={onToggleTheme}>
       <div className="mb-8 mt-2">
@@ -300,70 +351,64 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
       </div>
       {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-400">{err}</div>}
       {!beings && !err && <div className="flex items-center gap-2 py-12 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> Gathering the square…</div>}
-      {beings && beings.length === 0 && (
+      {beings && beings.length === 0 && visitors.length === 0 && (
         <div className="rounded-2xl border border-dashed border-zinc-800 py-16 text-center text-zinc-500">
           No beings are public yet. Check back soon.
         </div>
       )}
-      <div className="grid gap-4 sm:grid-cols-2">
-        {beings?.map((b) => {
-          const st = stageOf(b.stage)
-          return (
-            <a key={b.slug} href={`/b/${b.slug}`}
-              className="group relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5 transition hover:border-violet-500/50 hover:bg-zinc-900">
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="text-lg font-semibold text-zinc-100">{b.name}</div>
-                  <div className="mt-0.5 flex items-center gap-2 text-xs">
-                    <span className={st.tint}>{st.emoji} {st.label}</span>
-                    <span className="text-zinc-600">·</span>
-                    <span className={stateTone[b.state] || 'text-zinc-500'}>{stateWord[b.state] || b.state}</span>
-                    <span className="text-zinc-600">·</span>
-                    <span className="text-zinc-500">gen {b.generation}</span>
-                  </div>
-                </div>
-                <span className="text-2xl opacity-60 transition group-hover:opacity-100">{st.emoji}</span>
-              </div>
-              {b.interests.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-1.5">
-                  {b.interests.slice(0, 4).map((it) => (
-                    <span key={it} className="rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400">{it}</span>
-                  ))}
-                </div>
-              )}
-              {b.latest_thought && (
-                <div className="mt-3 border-l-2 border-violet-500/40 pl-2.5">
-                  <p className="line-clamp-2 text-xs italic leading-snug text-zinc-300">“{b.latest_thought.text}”</p>
-                  <p className="mt-0.5 text-[10px] text-zinc-500">{relTime(b.latest_thought.at)} · {localTimeTz(b.latest_thought.at)}</p>
-                </div>
-              )}
-              <div className="mt-4 flex items-center gap-4 text-[11px] text-zinc-500">
-                <span className="flex items-center gap-1"><MessageCircle className="h-3.5 w-3.5" /> {b.stats.messages} notes</span>
-                <span className="flex items-center gap-1"><Users className="h-3.5 w-3.5" /> {b.stats.threads} threads</span>
-                <span className="flex items-center gap-1"><Clock className="h-3.5 w-3.5" /> {cadenceLabel(b.tick_interval_minutes)}</span>
-              </div>
-            </a>
-          )
-        })}
-      </div>
+      {beings && beings.length > 0 && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {beings.map((b) => <RosterCard key={b.slug} p={b} href={`/b/${b.slug}`} />)}
+        </div>
+      )}
+
+      {visitors.length > 0 && (
+        <div className="mt-10">
+          <div className="mb-3 flex items-center gap-2">
+            <Globe className="h-4 w-4 text-sky-500 dark:text-sky-400" />
+            <h2 className="text-lg font-semibold tracking-tight">Visitors</h2>
+            <span className="text-xs text-zinc-500">— beings from other villages, running on their own machines, shown here live</span>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {visitors.map((v) => <RosterCard key={v.id} p={v} href={`/v/${v.id}`} host={hostOf(v.origin)} />)}
+          </div>
+        </div>
+      )}
+
+      {visitSecret && (
+        <div className="mt-10 rounded-2xl border border-sky-500/25 bg-sky-500/5 p-6">
+          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+            <Globe className="h-5 w-5 text-sky-500 dark:text-sky-400" /> Send a being to visit
+          </div>
+          <p className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-400">
+            Run your own Captain Claw? You can send one of your beings to live here as a visitor — it keeps
+            running on your machine; this village just shows it and forwards any notes. On your being's page,
+            set its target village to <span className="font-mono text-zinc-300">{origin}</span> with this secret:
+          </p>
+          <div className="mt-3 flex items-center gap-2 overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-300">
+            <Terminal className="h-3.5 w-3.5 shrink-0 text-sky-500 dark:text-sky-400" />
+            <span className="select-all whitespace-nowrap">{visitSecret}</span>
+          </div>
+        </div>
+      )}
     </Shell>
   )
 }
 
 // ── Visitor composer + their own thread ──
 
-function Composer({ slug, state, beingName }: { slug: string; state: string; beingName: string }) {
+function Composer({ api, state, beingName }: { api: PublicApi; state: string; beingName: string }) {
   const [name, setName] = useState(savedName())
   const [body, setBody] = useState('')
   const [thread, setThread] = useState<PublicThread | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const tid = savedThreadId(slug)
+  const tid = savedThreadId(api.key)
 
   const loadThread = useCallback(async () => {
     if (!tid) return
-    try { setThread(await getPublicThread(slug, tid)) } catch { clearThreadId(slug); setThread(null) }
-  }, [slug, tid])
+    try { setThread(await api.thread(tid)) } catch { clearThreadId(api.key); setThread(null) }
+  }, [api, tid])
 
   useEffect(() => { loadThread() }, [loadThread])
   // Gentle refresh so a reply appears without a manual reload (not a live chat).
@@ -381,10 +426,10 @@ function Composer({ slug, state, beingName }: { slug: string; state: string; bei
     setBusy(true); setErr('')
     try {
       saveName(n)
-      const r = await postPublicMessage(slug, n, t, tid)
-      saveThreadId(slug, r.thread_id)
+      const r = await api.message(n, t, tid)
+      saveThreadId(api.key, r.thread_id)
       setBody('')
-      await getPublicThread(slug, r.thread_id).then(setThread).catch(() => {})
+      await api.thread(r.thread_id).then(setThread).catch(() => {})
     } catch (e) { setErr(String((e as Error).message || e)) }
     finally { setBusy(false) }
   }
@@ -461,7 +506,7 @@ function Composer({ slug, state, beingName }: { slug: string; state: string; bei
 
 // ── Journal browser ──
 
-function JournalPane({ slug, name }: { slug: string; name: string }) {
+function JournalPane({ api, name }: { api: PublicApi; name: string }) {
   const [offset, setOffset] = useState(0)
   const [data, setData] = useState<{ date: string; text: string } | null>(null)
   const [loading, setLoading] = useState(false)
@@ -471,8 +516,8 @@ function JournalPane({ slug, name }: { slug: string; name: string }) {
   }
   useEffect(() => {
     setLoading(true)
-    getPublicJournal(slug, dateFor(offset)).then(setData).catch(() => setData(null)).finally(() => setLoading(false))
-  }, [slug, offset])
+    api.journal(dateFor(offset)).then(setData).catch(() => setData(null)).finally(() => setLoading(false))
+  }, [api, offset])
   return (
     <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60">
       <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
@@ -553,7 +598,7 @@ function groupFiles(files: PublicFile[]): { key: string; label: string; files: P
     }))
 }
 
-function FilesPane({ slug }: { slug: string }) {
+function FilesPane({ api }: { api: PublicApi }) {
   const [files, setFiles] = useState<PublicFile[] | null>(null)
   const [sel, setSel] = useState<string>('')
   const [text, setText] = useState('')
@@ -565,16 +610,16 @@ function FilesPane({ slug }: { slug: string }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
 
   useEffect(() => {
-    getPublicFiles(slug).then((r) => {
+    api.files().then((r) => {
       setFiles(r.files)
       if (r.files.length) setSel(r.files[0].path)
     }).catch(() => setFiles([]))
-  }, [slug])
+  }, [api])
   useEffect(() => {
     if (!sel) return
     setLoading(true)
-    getPublicFile(slug, sel).then((r) => setText(r.text || '_empty_')).catch(() => setText('_could not read this file_')).finally(() => setLoading(false))
-  }, [slug, sel])
+    api.file(sel).then((r) => setText(r.text || '_empty_')).catch(() => setText('_could not read this file_')).finally(() => setLoading(false))
+  }, [api, sel])
 
   if (files && files.length === 0) return <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 py-12 text-center text-sm text-zinc-500">No files to show yet.</div>
 
@@ -682,35 +727,24 @@ function FilesPane({ slug }: { slug: string }) {
   )
 }
 
-// ── Being detail (/b/:slug) ──
+// ── Being detail — shared by local beings (/b/:slug) and visitors (/v/:id) ──
 
 type Tab = 'note' | 'journal' | 'files' | 'mind'
 
-function BeingView({ slug, theme, onToggleTheme }: { slug: string; theme: 'dark' | 'light'; onToggleTheme: () => void }) {
-  const [p, setP] = useState<PublicProfile | null>(null)
-  const [err, setErr] = useState('')
+// The hero + tabs + panes, driven by a profile + a data source (local or proxied
+// visitor). `banner` shows a visitor's origin above the hero.
+function BeingDetail({ profile: p, api, banner }: {
+  profile: PublicProfile; api: PublicApi; banner?: React.ReactNode
+}) {
   const [tab, setTab] = useState<Tab>('note')
   const [graph, setGraph] = useState<PublicGraph | null>(null)
   const graphLoaded = useRef(false)
-
-  useEffect(() => {
-    getPublicBeing(slug).then(setP).catch((e) => setErr(String(e.message || e)))
-  }, [slug])
   useEffect(() => {
     if (tab === 'mind' && !graphLoaded.current) {
       graphLoaded.current = true
-      getPublicGraph(slug).then(setGraph).catch(() => setGraph({ nodes: [], edges: [], density: 0, connected_fraction: 0 }))
+      api.graph().then(setGraph).catch(() => setGraph({ nodes: [], edges: [], density: 0, connected_fraction: 0 }))
     }
-  }, [tab, slug])
-
-  if (err) return (
-    <Shell theme={theme} onToggleTheme={onToggleTheme}>
-      <a href="/village" className="mb-6 inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-300"><ArrowLeft className="h-4 w-4" /> the square</a>
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 py-16 text-center text-zinc-400">This being isn't here — it may be private, or it never existed.</div>
-    </Shell>
-  )
-  if (!p) return <Shell theme={theme} onToggleTheme={onToggleTheme}><div className="flex items-center gap-2 py-16 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> waking the page…</div></Shell>
-
+  }, [tab, api])
   const st = stageOf(p.stage)
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: 'note', label: 'Leave a note', icon: <MessageCircle className="h-4 w-4" /> },
@@ -719,10 +753,8 @@ function BeingView({ slug, theme, onToggleTheme }: { slug: string; theme: 'dark'
     { id: 'mind', label: 'Mind', icon: <Network className="h-4 w-4" /> },
   ]
   return (
-    <Shell theme={theme} onToggleTheme={onToggleTheme}>
-      <a href="/village" className="mb-5 inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-300"><ArrowLeft className="h-4 w-4" /> the square</a>
-
-      {/* Hero */}
+    <>
+      {banner}
       <div className="rounded-3xl border border-zinc-800 bg-zinc-900/60 p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
@@ -759,7 +791,6 @@ function BeingView({ slug, theme, onToggleTheme }: { slug: string; theme: 'dark'
           <StatPill icon={<Clock className="h-4 w-4" />} label="wakes" value={<span className="text-[13px]">{cadenceLabel(p.tick_interval_minutes)}</span>} />
         </div>
 
-        {/* Temperament */}
         <div className="mt-5">
           <div className="mb-2 text-[11px] uppercase tracking-wide text-zinc-500">Temperament</div>
           <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 sm:grid-cols-4">
@@ -776,13 +807,11 @@ function BeingView({ slug, theme, onToggleTheme }: { slug: string; theme: 'dark'
         </div>
       </div>
 
-      {/* Cadence reassurance */}
       <div className="mt-4 flex items-start gap-2 rounded-xl border border-violet-500/20 bg-violet-500/5 px-4 py-3 text-xs text-zinc-400">
         <Clock className="mt-0.5 h-4 w-4 shrink-0 text-violet-500 dark:text-violet-400" />
         <span>This being wakes {cadenceLabel(p.tick_interval_minutes)} — it is not a live chat. A note you leave waits until it next stirs, and it chooses for itself whether to answer.</span>
       </div>
 
-      {/* Tabs */}
       <div className="mt-6 flex flex-wrap gap-1 border-b border-zinc-800">
         {tabs.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)}
@@ -793,17 +822,56 @@ function BeingView({ slug, theme, onToggleTheme }: { slug: string; theme: 'dark'
       </div>
 
       <div className="mt-5">
-        {tab === 'note' && <Composer slug={slug} state={p.state} beingName={p.name} />}
-        {tab === 'journal' && <JournalPane slug={slug} name={p.name} />}
-        {tab === 'files' && <FilesPane slug={slug} />}
+        {tab === 'note' && <Composer api={api} state={p.state} beingName={p.name} />}
+        {tab === 'journal' && <JournalPane api={api} name={p.name} />}
+        {tab === 'files' && <FilesPane api={api} />}
         {tab === 'mind' && (
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
             {!graph ? <div className="flex items-center gap-2 py-8 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> mapping the mind…</div> : <MindGraph graph={graph} />}
           </div>
         )}
       </div>
+    </>
+  )
+}
+
+function DetailShell({ theme, onToggleTheme, children }: {
+  theme: 'dark' | 'light'; onToggleTheme: () => void; children: React.ReactNode
+}) {
+  return (
+    <Shell theme={theme} onToggleTheme={onToggleTheme}>
+      <a href="/village" className="mb-5 inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-300"><ArrowLeft className="h-4 w-4" /> the square</a>
+      {children}
     </Shell>
   )
+}
+
+function BeingView({ slug, theme, onToggleTheme }: { slug: string; theme: 'dark' | 'light'; onToggleTheme: () => void }) {
+  const [p, setP] = useState<PublicProfile | null>(null)
+  const [err, setErr] = useState('')
+  const api = useMemo(() => makeBeingApi(slug), [slug])
+  useEffect(() => { getPublicBeing(slug).then(setP).catch((e) => setErr(String(e.message || e))) }, [slug])
+  if (err) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 py-16 text-center text-zinc-400">This being isn't here — it may be private, or it never existed.</div></DetailShell>
+  if (!p) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="flex items-center gap-2 py-12 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> waking the page…</div></DetailShell>
+  return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><BeingDetail profile={p} api={api} /></DetailShell>
+}
+
+function VisitorView({ id, theme, onToggleTheme }: { id: string; theme: 'dark' | 'light'; onToggleTheme: () => void }) {
+  const [p, setP] = useState<PublicVisitorProfile | null>(null)
+  const [err, setErr] = useState('')
+  const api = useMemo(() => makeVisitorApi(id), [id])
+  useEffect(() => { getVisitorProfile(id).then(setP).catch((e) => setErr(String(e.message || e))) }, [id])
+  if (err) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 py-16 text-center text-zinc-400">This visitor is no longer here — it may have stopped visiting.</div></DetailShell>
+  if (!p) return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><div className="flex items-center gap-2 py-12 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> reaching its home village…</div></DetailShell>
+  const host = (() => { try { return new URL(p.origin).host } catch { return p.origin } })()
+  const banner = (
+    <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-sky-500/25 bg-sky-500/5 px-4 py-3 text-xs text-zinc-400">
+      <Globe className="h-4 w-4 shrink-0 text-sky-500 dark:text-sky-400" />
+      <span>A <span className="font-medium text-zinc-200">visitor</span> — {p.name} lives on another village and is shown here live. Everything you see and any note you leave travels to its home at <span className="text-zinc-300">{host}</span>.</span>
+      <a href={`${p.origin}/b/${p.slug}`} target="_blank" rel="noreferrer noopener" className="ml-auto inline-flex items-center gap-1 text-sky-600 hover:underline dark:text-sky-400">open on its home village <ArrowUpRight className="h-3.5 w-3.5" /></a>
+    </div>
+  )
+  return <DetailShell theme={theme} onToggleTheme={onToggleTheme}><BeingDetail profile={p} api={api} banner={banner} /></DetailShell>
 }
 
 // ── Router by pathname ──
@@ -817,8 +885,10 @@ export function PublicBeingPage() {
     try { localStorage.setItem('fd:theme', next) } catch { /* ignore */ }
   }
   const path = window.location.pathname
-  const m = path.match(/^\/b\/([^/]+)/)
-  if (m) return <BeingView slug={decodeURIComponent(m[1])} theme={theme} onToggleTheme={toggle} />
+  const mb = path.match(/^\/b\/([^/]+)/)
+  if (mb) return <BeingView slug={decodeURIComponent(mb[1])} theme={theme} onToggleTheme={toggle} />
+  const mv = path.match(/^\/v\/([^/]+)/)
+  if (mv) return <VisitorView id={decodeURIComponent(mv[1])} theme={theme} onToggleTheme={toggle} />
   return <Gallery theme={theme} onToggleTheme={toggle} />
 }
 

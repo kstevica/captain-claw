@@ -104,6 +104,14 @@ async def beings_loop(db, stop_event: asyncio.Event) -> None:
                 log.info("beings loop pass", ticked=n)
         except Exception as e:  # noqa: BLE001
             log.warning("beings loop pass error", error=str(e))
+        # Federation heartbeat (§9.1): announce our visiting beings to their
+        # target villages, and drop visitors of ours that stopped checking in.
+        try:
+            await being_life.announce_visits(get_store())
+            get_store().expire_visitors(
+                ttl_minutes=being_life.VISITOR_TTL_MINUTES)
+        except Exception as e:  # noqa: BLE001
+            log.warning("federation heartbeat error", error=str(e))
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=POLL_SECONDS)
         except asyncio.TimeoutError:

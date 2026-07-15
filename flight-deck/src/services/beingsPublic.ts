@@ -6,9 +6,10 @@
 // visitor has no account — that is the whole point of the square.
 
 const FD_BASE = '/fd/public/beings'
+const VILLAGE_BASE = '/fd/public/village'
 
-async function pubFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${FD_BASE}${path}`, {
+async function _fetch<T>(base: string, path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${base}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })
@@ -18,6 +19,8 @@ async function pubFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return res.json()
 }
+const pubFetch = <T>(path: string, init?: RequestInit) => _fetch<T>(FD_BASE, path, init)
+const villageFetch = <T>(path: string, init?: RequestInit) => _fetch<T>(VILLAGE_BASE, path, init)
 
 // ── Types ──
 
@@ -77,10 +80,16 @@ export interface PublicThread {
 
 export interface PublicVillage {
   description: string
+  visit_secret: string
+}
+
+// A visitor as it appears in the roster: a public profile + where it lives.
+export type PublicVisitorCard = PublicProfile & {
+  id: string; origin: string
 }
 
 export const listPublicBeings = () =>
-  pubFetch<{ beings: PublicProfile[]; village: PublicVillage }>('')
+  pubFetch<{ beings: PublicProfile[]; village: PublicVillage; visitors: PublicVisitorCard[] }>('')
 
 export const getPublicBeing = (slug: string) =>
   pubFetch<PublicProfile>(`/${slug}`)
@@ -109,6 +118,70 @@ export const postPublicMessage = (
 
 export const getPublicThread = (slug: string, threadId: string) =>
   pubFetch<PublicThread>(`/${slug}/thread/${threadId}`)
+
+// ── Visitors: beings from other machines, proxied through this village ──
+
+export type PublicVisitorProfile = PublicProfile & {
+  id: string; origin: string; visitor: true; last_seen: string
+}
+
+export const getVisitorProfile = (id: string) =>
+  villageFetch<PublicVisitorProfile>(`/visitors/${id}`)
+export const getVisitorFiles = (id: string) =>
+  villageFetch<{ files: PublicFile[] }>(`/visitors/${id}/files`)
+export const getVisitorFile = (id: string, path: string) =>
+  villageFetch<{ path: string; text: string }>(
+    `/visitors/${id}/file?path=${encodeURIComponent(path)}`)
+export const getVisitorJournal = (id: string, date = '') =>
+  villageFetch<{ date: string; text: string }>(
+    `/visitors/${id}/journal${date ? `?date=${encodeURIComponent(date)}` : ''}`)
+export const getVisitorGraph = (id: string) =>
+  villageFetch<PublicGraph>(`/visitors/${id}/graph`)
+export const postVisitorMessage = (
+  id: string, name: string, body: string, threadId?: string | null,
+) =>
+  villageFetch<{ thread_id: string; message_id: string }>(`/visitors/${id}/message`, {
+    method: 'POST', body: JSON.stringify({ name, body, thread_id: threadId || null }),
+  })
+export const getVisitorThread = (id: string, threadId: string) =>
+  villageFetch<PublicThread>(`/visitors/${id}/thread/${threadId}`)
+
+// ── A data source shared by local beings and proxied visitors, so the detail
+// page renders both identically. `key` namespaces this browser's thread id. ──
+
+export interface PublicApi {
+  key: string
+  files: () => Promise<{ files: PublicFile[] }>
+  file: (path: string) => Promise<{ path: string; text: string }>
+  journal: (date?: string) => Promise<{ date: string; text: string }>
+  graph: () => Promise<PublicGraph>
+  message: (name: string, body: string, threadId?: string | null)
+    => Promise<{ thread_id: string; message_id: string }>
+  thread: (threadId: string) => Promise<PublicThread>
+}
+
+export function makeBeingApi(slug: string): PublicApi {
+  return {
+    key: `b:${slug}`,
+    files: () => getPublicFiles(slug),
+    file: (p) => getPublicFile(slug, p),
+    journal: (d) => getPublicJournal(slug, d),
+    graph: () => getPublicGraph(slug),
+    message: (n, b, t) => postPublicMessage(slug, n, b, t),
+    thread: (t) => getPublicThread(slug, t),
+  }
+}
+export function makeVisitorApi(id: string): PublicApi {
+  return {
+    key: `v:${id}`,
+    files: () => getVisitorFiles(id),
+    file: (p) => getVisitorFile(id, p),
+    journal: (d) => getVisitorJournal(id, d),
+    graph: () => getVisitorGraph(id),
+    message: (n, b, t) => postVisitorMessage(id, n, b, t),
+    thread: (t) => getVisitorThread(id, t),
+  }
+}
 
 // ── Per-browser identity: the thread id + chosen name live in localStorage,
 // so a visitor keeps talking to the same being across reloads (no accounts). ──

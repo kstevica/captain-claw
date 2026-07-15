@@ -174,6 +174,35 @@ async def set_village_meta(body: VillageMetaRequest,
     return _run(get_store().set_village_meta, user["id"], body.description)
 
 
+class VillageFederationRequest(BaseModel):
+    secret: str = ""
+    secret_public: bool = False
+    public_url: str = ""
+
+
+@router.post("/village-federation")
+async def set_village_federation(body: VillageFederationRequest,
+                                 user: dict = Depends(get_current_user)):
+    """Host settings (§9.1): the secret a visiting being must present, whether
+    it's shown on the public page, and this machine's own public URL."""
+    return _run(get_store().set_village_federation, user["id"],
+                secret=body.secret, secret_public=body.secret_public,
+                public_url=body.public_url)
+
+
+@router.get("/visitors")
+async def list_visitors(user: dict = Depends(get_current_user)):
+    """The parent's view of who is visiting this village."""
+    return {"visitors": _run(get_store().visitors_for, user["id"])}
+
+
+@router.delete("/visitors/{visitor_id}")
+async def remove_visitor(visitor_id: str,
+                         user: dict = Depends(get_current_user)):
+    _run(get_store().remove_visitor, user["id"], visitor_id)
+    return {"ok": True}
+
+
 class VillageRecommendRequest(BaseModel):
     being: str   # slug of the being whose agent should write the description
 
@@ -441,6 +470,25 @@ async def set_public(slug: str, body: PublicToggleRequest,
     """Open (or close) the being's un-gated public page (plan §9)."""
     _run(get_store().set_public, user["id"], slug, body.public)
     return _run(get_store().vitals, user["id"], slug)
+
+
+class VisitRequest(BaseModel):
+    url: str = ""
+    secret: str = ""
+
+
+@router.post("/{slug}/visit")
+async def set_being_visit(slug: str, body: VisitRequest,
+                          user: dict = Depends(get_current_user)):
+    """Send this being to visit another village (or clear it with an empty URL).
+    Announces immediately so it appears there right away (result surfaced)."""
+    store = get_store()
+    being = _run(store.set_being_visit, user["id"], slug, body.url, body.secret)
+    announced = {"ok": None}
+    if being.get("visit_url"):
+        announced = await being_life.announce_one(store, being)
+    return {"vitals": _run(store.vitals, user["id"], slug),
+            "announced": announced}
 
 
 @router.get("/{slug}/public-threads")

@@ -522,6 +522,119 @@ async def import_being(db, store: BeingsStore, owner_id: str,
     return {"being": store.get(owner_id, being["slug"]), "warnings": warnings}
 
 
+# ── Federation: the public snapshot + announcing visiting beings (§9.1) ──
+
+VISIT_ANNOUNCE_EVERY_MINUTES = 5    # sender heartbeat throttle
+VISITOR_TTL_MINUTES = 30            # host drops visitors unseen this long
+
+
+def latest_thought(store: BeingsStore, being: dict) -> dict | None:
+    """The being's newest meaningful one-line tick summary (its latest thought),
+    with the UTC time — skips FD placeholder summaries."""
+    _skip = {"", "journal only", "(no structured digest — raw words kept)"}
+    try:
+        for e in store.events(being["owner_id"], being["slug"], limit=30):
+            if e["kind"] != "tick":
+                continue
+            text = (e["data"].get("summary") or "").strip()
+            if text and text not in _skip:
+                return {"text": text[:200], "at": e["at"],
+                        "act": e["data"].get("act", "")}
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def public_profile(store: BeingsStore, being: dict) -> dict:
+    """The curated public face of a being — no wallet/ledger/owner. Shared by the
+    public routes AND the federation snapshot a sender ships to a host village."""
+    g = being.get("genome") or {}
+    affect = being.get("affect") or {}
+    return {
+        "slug": being["slug"], "name": being["name"], "stage": being["stage"],
+        "state": being["state"], "generation": g.get("generation", 1),
+        "born_at": being.get("born_at"), "hatched_at": being.get("hatched_at"),
+        "died_at": being.get("died_at"),
+        "voice": g.get("voice_seed", ""),
+        "interests": g.get("interest_seeds", []),
+        "temperament": genome_mod.effective_attributes(g),
+        "mood": affect.get("mood", ""),
+        "tick_interval_minutes": being.get("tick_interval_minutes"),
+        "stats": store.public_stats(being["id"]),
+        "latest_thought": latest_thought(store, being),
+    }
+
+
+async def announce_one(store: BeingsStore, being: dict,
+                       now: datetime | None = None) -> dict:
+    """Announce a single being to its target village NOW (bypasses the throttle;
+    used on save for instant feedback). Returns {ok, error?}. Needs this owner's
+    public_url set (so the host can fetch the being's data back)."""
+    import httpx
+    now = now or _utcnow()
+    target = (being.get("visit_url") or "").rstrip("/")
+    if not target:
+        return {"ok": False, "error": "no target village set"}
+    my_url = (store.get_village_meta(being["owner_id"]).get("public_url")
+              or "").rstrip("/")
+    if not my_url:
+        return {"ok": False, "error": "set this village's public URL first — "
+                "a host can only show a visitor it can fetch back"}
+    payload = {
+        "secret": being.get("visit_secret") or "",
+        "origin": my_url,
+        "slug": being["slug"],
+        "name": being["name"],
+        "profile": public_profile(store, being),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                f"{target}/fd/public/village/announce", json=payload)
+    except Exception as e:  # noqa: BLE001
+        store.record_event(being["id"], "visit_unreachable",
+                           {"target": target}, now=now)
+        return {"ok": False, "error": f"couldn't reach {target}: {e}"}
+    if r.status_code < 400:
+        store.mark_announced(being["id"], now=now)
+        return {"ok": True}
+    detail = ""
+    try:
+        detail = r.json().get("detail", "")
+    except Exception:  # noqa: BLE001
+        pass
+    store.record_event(being["id"], "visit_rejected",
+                       {"target": target, "status": r.status_code}, now=now)
+    return {"ok": False, "error": detail or f"the village said no ({r.status_code})"}
+
+
+async def announce_visits(store: BeingsStore,
+                          now: datetime | None = None) -> None:
+    """Sender heartbeat: announce every visiting being whose throttle has elapsed
+    to its target village so the host keeps a fresh snapshot. One target being
+    down never blocks the others."""
+    now = now or _utcnow()
+    try:
+        beings = store.beings_visiting()
+    except Exception as e:  # noqa: BLE001
+        log.warning("announce list failed", error=str(e))
+        return
+    for being in beings:
+        last = being.get("visit_last_announce")
+        if last:
+            try:
+                if (now - datetime.fromisoformat(last)).total_seconds() < \
+                        VISIT_ANNOUNCE_EVERY_MINUTES * 60:
+                    continue
+            except ValueError:
+                pass
+        try:
+            await announce_one(store, being, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("visit announce failed", slug=being["slug"],
+                        error=str(e))
+
+
 def village_recommend_prompt(store: BeingsStore, owner: str,
                              being: dict) -> str:
     """Ask a being's own agent to write the village's public description — in

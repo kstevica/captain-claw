@@ -117,6 +117,9 @@ export interface BeingVitals {
   } | null
   tick_interval_minutes: number | null
   public: boolean
+  visit_url: string
+  visit_secret: string
+  visit_last_announce: string | null
 }
 
 export const TICK_INTERVAL_CHOICES = [2, 5, 10, 15, 30, 60] as const
@@ -419,8 +422,15 @@ export const purgeBeing = (slug: string) =>
 
 // ── Village description (shown on the public /village page) ──
 
+export interface VillageMeta {
+  description: string
+  secret: string
+  secret_public: boolean
+  public_url: string
+}
+
 export const getVillageMeta = () =>
-  fdFetch<{ description: string }>('/beings/village-meta')
+  fdFetch<VillageMeta>('/beings/village-meta')
 
 export const setVillageMeta = (description: string) =>
   fdFetch<{ description: string }>('/beings/village-meta', {
@@ -431,4 +441,29 @@ export const recommendVillageMeta = (being: string) =>
   fdFetch<{ description: string; by: string; by_slug: string }>(
     '/beings/village-meta/recommend', {
       method: 'POST', body: JSON.stringify({ being }),
+    })
+
+// ── Federation: hosting visitors + sending beings out ──
+
+export const setVillageFederation = (
+  secret: string, secretPublic: boolean, publicUrl: string,
+) =>
+  fdFetch<VillageMeta>('/beings/village-federation', {
+    method: 'POST',
+    body: JSON.stringify({ secret, secret_public: secretPublic, public_url: publicUrl }),
+  })
+
+export interface Visitor {
+  id: string; origin: string; slug: string; name: string
+  first_seen: string; last_seen: string
+}
+export const getVisitors = () =>
+  fdFetch<{ visitors: Visitor[] }>('/beings/visitors')
+export const removeVisitor = (id: string) =>
+  fdFetch<{ ok: boolean }>(`/beings/visitors/${id}`, { method: 'DELETE' })
+
+export const setBeingVisit = (slug: string, url: string, secret: string) =>
+  fdFetch<{ vitals: BeingVitals; announced: { ok: boolean | null; error?: string } }>(
+    `/beings/${slug}/visit`, {
+      method: 'POST', body: JSON.stringify({ url, secret }),
     })

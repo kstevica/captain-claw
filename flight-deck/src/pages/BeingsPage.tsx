@@ -19,7 +19,8 @@ import {
   deleteAssessment, getAssessors, getReadiness, listAssessments,
   requestAssessment, saveAssessment, setBeingPublic, getPublicThreads,
   exportBeing, importBeing, purgeBeing, getVillageMeta, setVillageMeta,
-  recommendVillageMeta,
+  recommendVillageMeta, type VillageMeta, type Visitor,
+  setVillageFederation, getVisitors, removeVisitor, setBeingVisit,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
@@ -1396,8 +1397,12 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
   const [days, setDays] = useState(7)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
-  const [tab, setTab] = useState<'report' | 'rules' | 'diet' | 'growth' | 'public'>('report')
+  const [tab, setTab] = useState<'report' | 'rules' | 'diet' | 'growth' | 'public' | 'visit'>('report')
   const [threads, setThreads] = useState<ParentPublicThread[] | null>(null)
+  const [visitUrl, setVisitUrl] = useState('')
+  const [visitSecret, setVisitSecret] = useState('')
+  const [visitBusy, setVisitBusy] = useState(false)
+  const [visitResult, setVisitResult] = useState<{ ok: boolean | null; error?: string } | null>(null)
   const [rules, setRules] = useState<string[]>([])
   const [newRule, setNewRule] = useState('')
   const [allowList, setAllowList] = useState<string[]>([])
@@ -1427,6 +1432,8 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
       setRules(vit.house_rules || [])
       setAllowList(vit.media_diet?.allow || [])
       setDenyList(vit.media_diet?.deny || [])
+      setVisitUrl(vit.visit_url || '')
+      setVisitSecret(vit.visit_secret || '')
     } catch { /* stays empty */ } finally { setLoading(false) }
   }, [slug])
 
@@ -1583,7 +1590,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
             {/* Tabs */}
             <div className="flex shrink-0 gap-1 border-b border-zinc-800 px-3">
-              {([['report', 'Report'], ['rules', 'Rules'], ['diet', 'Diet'], ['growth', 'Growth'], ['public', 'Public']] as const).map(([k, lbl]) => (
+              {([['report', 'Report'], ['rules', 'Rules'], ['diet', 'Diet'], ['growth', 'Growth'], ['public', 'Public'], ['visit', 'Visit']] as const).map(([k, lbl]) => (
                 <button key={k} onClick={() => setTab(k)}
                   className={`relative px-3 py-2 text-xs font-medium transition-colors ${tab === k ? 'text-violet-600 dark:text-violet-300' : 'text-zinc-500 hover:text-zinc-300'}`}>
                   {lbl}
@@ -2038,6 +2045,61 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+            </div>
+            )}
+
+            {/* Visit tab — send this being to visit another village (§9.1) */}
+            {tab === 'visit' && v && (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+                  <Globe className="h-4 w-4 text-sky-500 dark:text-sky-400" /> Send {name} to visit another village
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+                  {name} keeps living here on your machine — the other village just shows it as a visitor and
+                  forwards any notes people leave. Paste that village's URL and the secret it published, and{' '}
+                  {name} will announce itself there (and re-check in on a heartbeat).
+                </p>
+                <div className="mt-3 space-y-2">
+                  <input value={visitUrl} onChange={(e) => setVisitUrl(e.target.value)} placeholder="https://other-village.example.com"
+                    className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-500/50" />
+                  <input value={visitSecret} onChange={(e) => setVisitSecret(e.target.value)} placeholder="the village's visitor secret"
+                    className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-500/50" />
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={async () => {
+                        setVisitBusy(true); setVisitResult(null)
+                        try { const r = await setBeingVisit(slug, visitUrl.trim(), visitSecret.trim()); setVisitResult(r.announced); await load(); onChanged() }
+                        catch (e) { alert(e instanceof Error ? e.message : 'failed') } finally { setVisitBusy(false) }
+                      }}
+                      disabled={visitBusy || !visitUrl.trim()}
+                      className="flex items-center gap-1.5 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40">
+                      {visitBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe className="h-3.5 w-3.5" />} Send visiting
+                    </button>
+                    {v.visit_url && (
+                      <button
+                        onClick={async () => {
+                          setVisitBusy(true); setVisitResult(null)
+                          try { await setBeingVisit(slug, '', ''); setVisitUrl(''); setVisitSecret(''); await load(); onChanged() }
+                          catch (e) { alert(e instanceof Error ? e.message : 'failed') } finally { setVisitBusy(false) }
+                        }}
+                        disabled={visitBusy}
+                        className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Stop visiting</button>
+                    )}
+                  </div>
+                  {visitResult && (
+                    <div className={`text-xs ${visitResult.ok ? 'text-emerald-500 dark:text-emerald-400' : 'text-amber-500'}`}>
+                      {visitResult.ok ? `✓ Announced — ${name} is now visiting.` : `Couldn't announce: ${visitResult.error || 'unknown error'}`}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {v.visit_url && (
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3 text-[11px] text-zinc-400">
+                  <div className="flex items-center gap-1.5"><Globe className="h-3.5 w-3.5 text-sky-500 dark:text-sky-400" /> Currently visiting <span className="font-medium text-zinc-200">{(() => { try { return new URL(v.visit_url).host } catch { return v.visit_url } })()}</span></div>
+                  <div className="mt-1 text-zinc-600">{v.visit_last_announce ? `last checked in ${fmtRelTime(v.visit_last_announce)}` : 'not announced yet — set this village’s public URL under Village federation first'}</div>
                 </div>
               )}
             </div>
@@ -2626,6 +2688,99 @@ function VillageDescriptionCard({ beings }: { beings: BeingListItem[] }) {
   )
 }
 
+// Federation (§9.1): host settings — the secret a visiting being must present,
+// whether it's public, this machine's own URL — plus who is visiting.
+function VillageFederationCard() {
+  const [meta, setMeta] = useState<VillageMeta | null>(null)
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [visitors, setVisitors] = useState<Visitor[]>([])
+  const [secret, setSecret] = useState('')
+  const [secretPublic, setSecretPublic] = useState(false)
+  const [publicUrl, setPublicUrl] = useState('')
+  const load = useCallback(async () => {
+    try {
+      const m = await getVillageMeta()
+      setMeta(m); setSecret(m.secret); setSecretPublic(m.secret_public); setPublicUrl(m.public_url)
+    } catch { /* stays null */ }
+    try { setVisitors((await getVisitors()).visitors) } catch { /* none */ }
+  }, [])
+  useEffect(() => { void load() }, [load])
+  if (!meta) return null
+  const dirty = secret !== meta.secret || secretPublic !== meta.secret_public || publicUrl !== meta.public_url
+  const save = async () => {
+    setBusy(true)
+    try { const m = await setVillageFederation(secret.trim(), secretPublic, publicUrl.trim()); setMeta(m) }
+    catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    finally { setBusy(false) }
+  }
+  const gen = () => setSecret(`${Math.random().toString(36).slice(2, 10)}-${Math.random().toString(36).slice(2, 6)}`)
+  const drop = async (id: string) => {
+    try { await removeVisitor(id); setVisitors((vs) => vs.filter((v) => v.id !== id)) } catch { /* ignore */ }
+  }
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center gap-2 text-left">
+        <Globe className="h-4 w-4 shrink-0 text-sky-500 dark:text-sky-400" />
+        <span className="shrink-0 text-sm font-medium text-zinc-200">Village federation</span>
+        <span className="hidden shrink-0 text-[11px] text-zinc-500 sm:inline">— host beings from other machines</span>
+        {visitors.length > 0 && <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] text-sky-600 dark:text-sky-300">{visitors.length} visiting</span>}
+        <ChevronDown className={`ml-auto h-4 w-4 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="mt-3 space-y-4">
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-medium text-zinc-400">This village's public URL</div>
+            <input value={publicUrl} onChange={(e) => setPublicUrl(e.target.value)} placeholder="https://my-village.example.com"
+              className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-500/50" />
+            <div className="text-[10px] text-zinc-600">How other machines reach this one — needed both to host visitors and to send your own beings out.</div>
+          </div>
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-medium text-zinc-400">Visitor secret</div>
+            <div className="flex gap-1.5">
+              <input value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="a shared secret others present to send a being here"
+                className="min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-500/50" />
+              <button onClick={gen} className="shrink-0 rounded-md border border-zinc-700 px-2.5 text-xs text-zinc-300 hover:bg-zinc-800">Generate</button>
+            </div>
+            <label className="flex items-center gap-2 pt-1 text-[11px] text-zinc-400">
+              <button onClick={() => setSecretPublic((s) => !s)}
+                className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${secretPublic ? 'bg-sky-500' : 'bg-zinc-700'}`}>
+                <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all ${secretPublic ? 'left-[14px]' : 'left-0.5'}`} />
+              </button>
+              Show this secret on my public /village page (so anyone can send a being to visit)
+            </label>
+          </div>
+          <div className="flex justify-end">
+            <button onClick={save} disabled={busy || !dirty}
+              className="flex items-center gap-1.5 rounded-md bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40">
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} Save
+            </button>
+          </div>
+          <div>
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Currently visiting ({visitors.length})</div>
+              <button onClick={() => void load()} className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300"><RefreshCw className="h-3 w-3" /> refresh</button>
+            </div>
+            {visitors.length === 0
+              ? <div className="rounded-lg border border-dashed border-zinc-800 py-6 text-center text-[11px] text-zinc-600">No one is visiting yet. Share your URL + secret with another village.</div>
+              : <div className="space-y-1.5">
+                {visitors.map((v) => (
+                  <div key={v.id} className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs">
+                    <Globe className="h-3.5 w-3.5 shrink-0 text-sky-500 dark:text-sky-400" />
+                    <span className="font-medium text-zinc-200">{v.name}</span>
+                    <span className="truncate text-zinc-500">from {(() => { try { return new URL(v.origin).host } catch { return v.origin } })()}</span>
+                    <span className="ml-auto shrink-0 text-[10px] text-zinc-600">seen {fmtRelTime(v.last_seen)}</span>
+                    <button onClick={() => void drop(v.id)} title="Remove this visitor" className="shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-red-400"><Trash2 className="h-3.5 w-3.5" /></button>
+                  </div>
+                ))}
+              </div>}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function BeingsPage() {
   const [meta, setMeta] = useState<BeingsMeta | null>(null)
   const [beings, setBeings] = useState<BeingListItem[]>([])
@@ -2748,6 +2903,7 @@ export function BeingsPage() {
         )}
 
         <VillageDescriptionCard beings={beings} />
+        <VillageFederationCard />
 
         {showBoard && <EarningBoard onChanged={() => void load(false)} />}
 
