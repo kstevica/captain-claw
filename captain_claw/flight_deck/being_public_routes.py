@@ -73,9 +73,11 @@ def _public_profile(store, being: dict) -> dict:
 
 @router.get("")
 async def list_public_beings():
-    """The square's roster — every public being across every family."""
+    """The square's roster — every public being across every family — plus the
+    village's own description (the parent's words, set on the Beings page)."""
     store = get_store()
-    return {"beings": [_public_profile(store, b) for b in store.public_beings()]}
+    return {"beings": [_public_profile(store, b) for b in store.public_beings()],
+            "village": store.public_village()}
 
 
 @router.get("/{slug}")

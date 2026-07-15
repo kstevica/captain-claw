@@ -158,6 +158,22 @@ async def beings_liabilities(user: dict = Depends(get_current_user)):
     return _run(get_store().liabilities, user["id"])
 
 
+class VillageMetaRequest(BaseModel):
+    description: str = ""
+
+
+@router.get("/village-meta")
+async def get_village_meta(user: dict = Depends(get_current_user)):
+    """The village description the parent set — shown on their public /village."""
+    return _run(get_store().get_village_meta, user["id"])
+
+
+@router.post("/village-meta")
+async def set_village_meta(body: VillageMetaRequest,
+                           user: dict = Depends(get_current_user)):
+    return _run(get_store().set_village_meta, user["id"], body.description)
+
+
 @router.get("/village")
 async def village(limit: int = 40, user: dict = Depends(get_current_user)):
     """The observer view of society: letters, publications, adoptions,

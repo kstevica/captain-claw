@@ -18,7 +18,7 @@ import {
   type Venture, type VillageItem, type ParentPublicThread,
   deleteAssessment, getAssessors, getReadiness, listAssessments,
   requestAssessment, saveAssessment, setBeingPublic, getPublicThreads,
-  exportBeing, importBeing, purgeBeing,
+  exportBeing, importBeing, purgeBeing, getVillageMeta, setVillageMeta,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
@@ -2544,6 +2544,53 @@ function EarningBoard({ onChanged }: { onChanged: () => void }) {
   )
 }
 
+// The village's own words — a per-owner description shown atop the public
+// /village page. Collapsed by default; self-contained load/save.
+function VillageDescriptionCard() {
+  const [desc, setDesc] = useState<string | null>(null)   // null = loading
+  const [saved, setSaved] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    getVillageMeta()
+      .then((r) => { setDesc(r.description); setSaved(r.description) })
+      .catch(() => { setDesc(''); setSaved('') })
+  }, [])
+  if (desc === null) return null
+  const dirty = desc !== saved
+  const save = async () => {
+    setBusy(true)
+    try { const r = await setVillageMeta(desc); setSaved(r.description); setDesc(r.description) }
+    catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    finally { setBusy(false) }
+  }
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center gap-2 text-left">
+        <Globe className="h-4 w-4 shrink-0 text-violet-500 dark:text-violet-400" />
+        <span className="shrink-0 text-sm font-medium text-zinc-200">Village description</span>
+        <span className="hidden shrink-0 text-[11px] text-zinc-500 sm:inline">— shown atop your public /village page</span>
+        {saved && !open && <span className="truncate text-[11px] italic text-zinc-500">“{saved.slice(0, 80)}{saved.length > 80 ? '…' : ''}”</span>}
+        <ChevronDown className={`ml-auto h-4 w-4 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="mt-3 space-y-2">
+          <textarea value={desc} onChange={(e) => setDesc(e.target.value.slice(0, 4000))} rows={4}
+            placeholder="Introduce your village — who these beings are, what this place is, why a visitor might leave one of them a note…"
+            className="w-full resize-y rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-500/50" />
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-zinc-600">{desc.length}/4000 · plain text, line breaks kept · replaces the default intro when set</span>
+            <button onClick={save} disabled={busy || !dirty}
+              className="flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} Save
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function BeingsPage() {
   const [meta, setMeta] = useState<BeingsMeta | null>(null)
   const [beings, setBeings] = useState<BeingListItem[]>([])
@@ -2664,6 +2711,8 @@ export function BeingsPage() {
         {error && (
           <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
         )}
+
+        <VillageDescriptionCard />
 
         {showBoard && <EarningBoard onChanged={() => void load(false)} />}
 

@@ -74,8 +74,12 @@ export interface PublicThread {
 
 // ── Endpoints ──
 
+export interface PublicVillage {
+  description: string
+}
+
 export const listPublicBeings = () =>
-  pubFetch<{ beings: PublicProfile[] }>('')
+  pubFetch<{ beings: PublicProfile[]; village: PublicVillage }>('')
 
 export const getPublicBeing = (slug: string) =>
   pubFetch<PublicProfile>(`/${slug}`)

@@ -362,6 +362,14 @@ class BeingsStore:
                     ON being_public_messages(being_id, role, read_at);
                 CREATE INDEX IF NOT EXISTS idx_being_public_messages_thread
                     ON being_public_messages(thread_id, at);
+
+                -- The village's own words: a per-owner description the parent
+                -- writes on the Beings page, shown atop their public /village.
+                CREATE TABLE IF NOT EXISTS village_meta (
+                    owner_id    TEXT PRIMARY KEY,
+                    description TEXT NOT NULL DEFAULT '',
+                    updated_at  TEXT NOT NULL
+                );
                 """
             )
             # Lightweight migrations (columns added after first ship).
@@ -2135,6 +2143,42 @@ class BeingsStore:
                           {"thread": thread_id[:8], "preview": reply[:80]},
                           now=now)
         return {"reply_id": rid}
+
+    # ── The village's own words (shown on the public square) ──────────
+
+    VILLAGE_DESC_MAX = 4000
+
+    def get_village_meta(self, owner_id: str) -> dict:
+        row = self._c().execute(
+            "SELECT description FROM village_meta WHERE owner_id = ?",
+            (owner_id,)).fetchone()
+        return {"description": (row["description"] if row else "")}
+
+    def set_village_meta(self, owner_id: str, description: str,
+                         now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        text = (description or "").strip()[:self.VILLAGE_DESC_MAX]
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO village_meta (owner_id, description, updated_at)"
+                " VALUES (?,?,?) ON CONFLICT(owner_id) DO UPDATE SET"
+                " description = excluded.description, updated_at = excluded.updated_at",
+                (owner_id, text, _iso(now)),
+            )
+            self._c().commit()
+        return {"description": text}
+
+    def public_village(self) -> dict:
+        """The description shown on the (global) public square — resolved from
+        the owner with the most public beings (deterministic; the common case is
+        a single self-hosted owner, so it's simply their words)."""
+        row = self._c().execute(
+            "SELECT owner_id FROM beings WHERE public = 1 AND stage != 'egg'"
+            " GROUP BY owner_id ORDER BY COUNT(*) DESC, owner_id LIMIT 1",
+        ).fetchone()
+        if not row:
+            return {"description": ""}
+        return self.get_village_meta(row["owner_id"])
 
     # ── The Mind: declared edges over the being's own artifacts ──────
 

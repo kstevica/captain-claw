@@ -416,3 +416,13 @@ export const importBeing = (manifest: BeingExport) =>
 export const purgeBeing = (slug: string) =>
   fdFetch<{ ok: boolean; removed: string; home_removed: boolean }>(
     `/beings/${slug}`, { method: 'DELETE' })
+
+// ── Village description (shown on the public /village page) ──
+
+export const getVillageMeta = () =>
+  fdFetch<{ description: string }>('/beings/village-meta')
+
+export const setVillageMeta = (description: string) =>
+  fdFetch<{ description: string }>('/beings/village-meta', {
+    method: 'POST', body: JSON.stringify({ description }),
+  })
