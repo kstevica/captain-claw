@@ -426,3 +426,9 @@ export const setVillageMeta = (description: string) =>
   fdFetch<{ description: string }>('/beings/village-meta', {
     method: 'POST', body: JSON.stringify({ description }),
   })
+
+export const recommendVillageMeta = (being: string) =>
+  fdFetch<{ description: string; by: string; by_slug: string }>(
+    '/beings/village-meta/recommend', {
+      method: 'POST', body: JSON.stringify({ being }),
+    })

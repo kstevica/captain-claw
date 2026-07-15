@@ -174,6 +174,40 @@ async def set_village_meta(body: VillageMetaRequest,
     return _run(get_store().set_village_meta, user["id"], body.description)
 
 
+class VillageRecommendRequest(BaseModel):
+    being: str   # slug of the being whose agent should write the description
+
+
+@router.post("/village-meta/recommend")
+async def recommend_village_meta(body: VillageRecommendRequest,
+                                 user: dict = Depends(get_current_user)):
+    """Have one of your beings write the village description in its own voice.
+    Dispatches to that being's agent (it must be awake) and returns the draft —
+    the parent reviews and saves it, nothing is stored automatically."""
+    from captain_claw.flight_deck.dubina_agents import resolve_agent_port_token
+    from captain_claw.flight_deck.fd_scheduler import run_prompt_and_capture
+    store = get_store()
+    being = _run(store.get, user["id"], body.being)
+    if being["state"] in ("dead", "torpor") or being["stage"] == "egg":
+        raise HTTPException(409, f"{being['name']} isn't awake to write right now")
+    try:
+        port, token = resolve_agent_port_token(being.get("agent_slug")
+                                               or being["slug"])
+    except Exception:
+        port, token = None, None
+    if not port:
+        raise HTTPException(409, f"{being['name']} has no body awake to write")
+    prompt = being_life.village_recommend_prompt(store, user["id"], being)
+    reply = await run_prompt_and_capture(
+        host="127.0.0.1", port=int(port), auth=token or "", prompt=prompt,
+        timeout=120)
+    if not reply:
+        raise HTTPException(502, f"{being['name']} didn't reply in time")
+    # Strip stray wrapping quotes / whitespace the model may add anyway.
+    text = reply.strip().strip('"').strip()
+    return {"description": text, "by": being["name"], "by_slug": being["slug"]}
+
+
 @router.get("/village")
 async def village(limit: int = 40, user: dict = Depends(get_current_user)):
     """The observer view of society: letters, publications, adoptions,

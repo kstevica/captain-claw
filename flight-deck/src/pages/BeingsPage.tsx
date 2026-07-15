@@ -19,6 +19,7 @@ import {
   deleteAssessment, getAssessors, getReadiness, listAssessments,
   requestAssessment, saveAssessment, setBeingPublic, getPublicThreads,
   exportBeing, importBeing, purgeBeing, getVillageMeta, setVillageMeta,
+  recommendVillageMeta,
   acceptVenture, approveProcreation, approveSelfMod, approveVenture,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
@@ -2545,17 +2546,26 @@ function EarningBoard({ onChanged }: { onChanged: () => void }) {
 }
 
 // The village's own words — a per-owner description shown atop the public
-// /village page. Collapsed by default; self-contained load/save.
-function VillageDescriptionCard() {
+// /village page. Collapsed by default; self-contained load/save. Can be drafted
+// by one of the beings' own agents (in its voice) via "Recommend a description".
+function VillageDescriptionCard({ beings }: { beings: BeingListItem[] }) {
   const [desc, setDesc] = useState<string | null>(null)   // null = loading
   const [saved, setSaved] = useState('')
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState(false)
+  // Beings that are awake enough to write (hatched, not dead/egg).
+  const writers = beings.filter((b) => b.state !== 'dead' && b.stage !== 'egg')
+  const [writer, setWriter] = useState('')
+  const [recommending, setRecommending] = useState(false)
+  const [recBy, setRecBy] = useState('')
   useEffect(() => {
     getVillageMeta()
       .then((r) => { setDesc(r.description); setSaved(r.description) })
       .catch(() => { setDesc(''); setSaved('') })
   }, [])
+  useEffect(() => {
+    setWriter((cur) => cur || (writers[0]?.slug ?? ''))
+  }, [writers])
   if (desc === null) return null
   const dirty = desc !== saved
   const save = async () => {
@@ -2563,6 +2573,16 @@ function VillageDescriptionCard() {
     try { const r = await setVillageMeta(desc); setSaved(r.description); setDesc(r.description) }
     catch (e) { alert(e instanceof Error ? e.message : 'failed') }
     finally { setBusy(false) }
+  }
+  const recommend = async () => {
+    if (!writer) return
+    setRecommending(true); setRecBy('')
+    try {
+      const r = await recommendVillageMeta(writer)
+      setDesc(r.description)          // dirty → Save enabled; parent reviews first
+      setRecBy(r.by)
+    } catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    finally { setRecommending(false) }
   }
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
@@ -2575,16 +2595,31 @@ function VillageDescriptionCard() {
       </button>
       {open && (
         <div className="mt-3 space-y-2">
-          <textarea value={desc} onChange={(e) => setDesc(e.target.value.slice(0, 4000))} rows={4}
+          <textarea value={desc} onChange={(e) => { setDesc(e.target.value.slice(0, 4000)); setRecBy('') }} rows={4}
             placeholder="Introduce your village — who these beings are, what this place is, why a visitor might leave one of them a note…"
             className="w-full resize-y rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-500/50" />
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] text-zinc-600">{desc.length}/4000 · plain text, line breaks kept · replaces the default intro when set</span>
+          {recBy && <div className="text-[11px] text-violet-500 dark:text-violet-400">Drafted by {recBy} — review it, then Save.</div>}
+          <div className="flex flex-wrap items-center gap-2">
+            {writers.length > 0 && (
+              <>
+                <select value={writer} onChange={(e) => setWriter(e.target.value)}
+                  className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 outline-none focus:border-violet-500/50"
+                  title="Which being writes the description (in its own voice)">
+                  {writers.map((b) => <option key={b.slug} value={b.slug}>{b.name}</option>)}
+                </select>
+                <button onClick={recommend} disabled={recommending || !writer}
+                  className="flex items-center gap-1.5 rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+                  title="Ask this being's agent to draft the description (it must be awake)">
+                  {recommending ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Asking {writers.find((b) => b.slug === writer)?.name}…</> : <><Sparkles className="h-3.5 w-3.5" /> Recommend a description</>}
+                </button>
+              </>
+            )}
             <button onClick={save} disabled={busy || !dirty}
-              className="flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+              className="ml-auto flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} Save
             </button>
           </div>
+          <span className="block text-[11px] text-zinc-600">{desc.length}/4000 · plain text, line breaks kept · replaces the default intro when set</span>
         </div>
       )}
     </div>
@@ -2712,7 +2747,7 @@ export function BeingsPage() {
           <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
         )}
 
-        <VillageDescriptionCard />
+        <VillageDescriptionCard beings={beings} />
 
         {showBoard && <EarningBoard onChanged={() => void load(false)} />}
 

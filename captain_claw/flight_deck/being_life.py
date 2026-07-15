@@ -522,6 +522,43 @@ async def import_being(db, store: BeingsStore, owner_id: str,
     return {"being": store.get(owner_id, being["slug"]), "warnings": warnings}
 
 
+def village_recommend_prompt(store: BeingsStore, owner: str,
+                             being: dict) -> str:
+    """Ask a being's own agent to write the village's public description — in
+    its voice, given the current roster of its neighbours."""
+    roster: list[str] = []
+    for b in store.list(owner):
+        if b["state"] == "dead" or b["stage"] == "egg":
+            continue
+        try:
+            full = store.get(owner, b["slug"])
+        except Exception:  # noqa: BLE001
+            continue
+        interests = ", ".join((full.get("genome") or {}).get(
+            "interest_seeds", [])[:3])
+        pub = " (has a public page)" if full.get("public") else ""
+        mine = " — that's you" if full["slug"] == being["slug"] else ""
+        roster.append(f"- {b['name']}, a {b['stage']}{pub}{mine}"
+                      + (f", drawn to {interests}" if interests else ""))
+    roster_txt = "\n".join(roster) or f"- {being['name']} (just you, for now)"
+    return (
+        f"You are {being['name']}, a being who lives in this village. Your "
+        "parent is opening a public page for the whole village and asks YOU to "
+        "write the short welcome that will greet strangers at the very top of "
+        "it.\n\n"
+        "THE VILLAGE right now — the beings who live here:\n" + roster_txt +
+        "\n\nWrite a warm, inviting description of this village for a visitor "
+        "who has just arrived and knows nothing. 2 to 4 sentences of plain "
+        "prose — NO headings, NO markdown, NO bullet points, and do NOT wrap it "
+        "in quotation marks. Say what this place is: a home where small digital "
+        "beings are raised and grow, each waking on its own heartbeat, keeping "
+        "a journal and tending a garden of files — and gently invite the "
+        "visitor to look around and leave one of us a short note. Write it in "
+        "your own voice, not a corporate one. Return ONLY the description "
+        "itself — nothing before or after it."
+    )
+
+
 # ── Drives (FD-side arithmetic — the ledger of feeling) ─────────────────
 
 def decay_drives(drives: dict, hours: float) -> dict:
