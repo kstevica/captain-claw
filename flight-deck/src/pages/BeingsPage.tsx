@@ -6,8 +6,8 @@ import {
   ChevronLeft, ChevronRight, ClipboardList, Coins, Download, Egg, ExternalLink,
   Files, Fingerprint, Gift, Globe, GraduationCap, History, Loader2, Mail,
   Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus,
-  RefreshCw, Search, ScrollText, Skull, Sparkles, Sprout, Trash2, Upload, Users,
-  Wrench, X, Zap,
+  RefreshCw, Search, ScrollText, Skull, SlidersHorizontal, Sparkles, Sprout,
+  Trash2, Upload, Users, Wrench, X, Zap, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -43,16 +43,45 @@ const ATTRS = ['CUR', 'PER', 'CAU', 'SOC', 'CRE', 'ORD', 'PLA'] as const
 
 const STAGE_META: Record<string, string> = {
   egg: 'bg-zinc-500/15 text-zinc-300 border-zinc-500/30',
-  infant: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
-  child: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
-  adolescent: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
-  adult: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+  infant: 'bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40',
+  child: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40',
+  adolescent: 'bg-violet-500/15 text-violet-700 dark:text-violet-300 border-violet-500/40',
+  adult: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40',
 }
 const STATE_META: Record<string, string> = {
-  alive: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+  alive: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40',
   paused: 'bg-zinc-500/15 text-zinc-400 border-zinc-500/30',
-  torpor: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-  dead: 'bg-red-500/15 text-red-300 border-red-500/30',
+  torpor: 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40',
+  dead: 'bg-red-500/15 text-red-700 dark:text-red-300 border-red-500/40',
+  emigrated: 'bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/40',
+}
+
+// The engine mood, colored by what it actually is (every mood traces to a
+// ledger event or a real variable — the tint is a legend, not decoration).
+const MOOD_TONE: Record<string, string> = {
+  feverish: 'border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400',
+  hungry: 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+  stung: 'border-orange-500/40 bg-orange-500/10 text-orange-600 dark:text-orange-400',
+  frustrated: 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400',
+  lonely: 'border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-400',
+  bright: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+  proud: 'border-violet-500/40 bg-violet-500/10 text-violet-600 dark:text-violet-400',
+  relieved: 'border-teal-500/40 bg-teal-500/10 text-teal-600 dark:text-teal-400',
+}
+
+const DRIVE_ORDER = ['survive', 'grow', 'explore', 'connect', 'create', 'legacy']
+
+const EVENT_DOT: Record<string, string> = {
+  tick: 'bg-violet-500', fever: 'bg-red-500', confusion: 'bg-red-400',
+  collapsed_exhausted: 'bg-red-500', milestone: 'bg-amber-400',
+  society_refused: 'bg-orange-500', narration_mismatch: 'bg-orange-400',
+  act_unverified: 'bg-orange-400', letter_sent: 'bg-sky-400',
+  letter_received: 'bg-sky-400', penpal_letter: 'bg-fuchsia-400',
+  penpal_sent: 'bg-fuchsia-400', spoke_to_parent: 'bg-emerald-400',
+  broadcast_set: 'bg-amber-300', slept_in: 'bg-indigo-400',
+  variety_pressure: 'bg-orange-300', reading_done: 'bg-emerald-400',
+  chore_paid: 'bg-emerald-400', message_suppressed: 'bg-zinc-600',
+  body: 'bg-zinc-500', resting_fever: 'bg-red-400',
 }
 
 function fmtTokens(n: number | null | undefined): string {
@@ -189,7 +218,7 @@ function renderTicksMarkdown(events: BeingEvent[]): string {
   const other = events.filter((e) => e.kind !== 'tick')
   const lines: string[] = ['## Ticks', '']
   if (ticks.length === 0) {
-    lines.push('_No ticks yet — poke to wake this being._')
+    lines.push('_No ticks yet — poke to wake this iskra._')
   } else {
     lines.push('| Time | Kind | Act | Summary (its words) | Actually changed | Tokens |')
     lines.push('|---|---|---|---|---|---|')
@@ -272,53 +301,231 @@ const REL_PHRASE: Record<string, string> = {
 }
 const stemOf = (p: string) => (p.split('/').pop() || p).replace(/\.md$/, '')
 
-function MindGraph({ graph }: { graph: BeingGraph }) {
+// Edge colors by relation type — intention has a hue.
+const REL_HUE: Record<string, string> = {
+  grew_from: '#a78bfa', responds_to: '#38bdf8', elaborates: '#34d399',
+  contradicts: '#fb7185', abandons: '#71717a', uses_skill: '#fbbf24',
+  learned_from: '#2dd4bf',
+}
+
+function MindGraph({ graph, loadFile }: {
+  graph: BeingGraph
+  loadFile?: (path: string) => Promise<{ path: string; text: string }>
+}) {
   const [sel, setSel] = useState<string | null>(null)
+  const [hover, setHover] = useState<string | null>(null)
+  const [fileView, setFileView] = useState<{ path: string; text: string } | null>(null)
+  const [fileLoading, setFileLoading] = useState(false)
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 })
   const W = 900, H = 560
-  const pos = useMemo(() => layoutGraph(graph.nodes, graph.edges, W, H), [graph])
+  const base = useMemo(() => layoutGraph(graph.nodes, graph.edges, W, H), [graph])
+  const [pos, setPos] = useState(base)
+  useEffect(() => { setPos(base); setSel(null); setFileView(null); setView({ x: 0, y: 0, k: 1 }) }, [base])
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const dragRef = useRef<{ node: number | null; px: number; py: number } | null>(null)
+
+  // Wheel zoom toward the cursor (non-passive so the modal doesn't scroll).
+  useEffect(() => {
+    const el = svgRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      setView((v) => {
+        const k = Math.min(5, Math.max(0.35, v.k * (e.deltaY < 0 ? 1.15 : 0.87)))
+        const rect = el.getBoundingClientRect()
+        const mx = ((e.clientX - rect.left) / rect.width) * W
+        const my = ((e.clientY - rect.top) / rect.height) * H
+        return { k, x: mx - (mx - v.x) * (k / v.k), y: my - (my - v.y) * (k / v.k) }
+      })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
+
   if (graph.nodes.length === 0) {
     return <div className="flex h-full items-center justify-center p-8 text-sm text-zinc-500">No artifacts yet — nothing to map.</div>
   }
   const idx = new Map(graph.nodes.map((n, i) => [n.path, i]))
+  const focus = hover || sel
+  const focusEdges = focus ? graph.edges.filter((e) => e.from === focus || e.to === focus) : []
+  const focusSet = new Set<string>(focus ? [focus, ...focusEdges.flatMap((e) => [e.from, e.to])] : [])
   const selEdges = sel ? graph.edges.filter((e) => e.from === sel || e.to === sel) : []
-  const selSet = new Set<string>(sel ? [sel, ...selEdges.flatMap((e) => [e.from, e.to])] : [])
+  const linked = new Set(graph.edges.flatMap((e) => [e.from, e.to]))
+
+  const toGraph = (clientX: number, clientY: number) => {
+    const rect = svgRef.current!.getBoundingClientRect()
+    return {
+      x: (((clientX - rect.left) / rect.width) * W - view.x) / view.k,
+      y: (((clientY - rect.top) / rect.height) * H - view.y) / view.k,
+    }
+  }
+  const onPointerMove = (e: React.PointerEvent) => {
+    const d = dragRef.current
+    if (!d) return
+    if (d.node != null) {
+      const p = toGraph(e.clientX, e.clientY)
+      setPos((ps) => ps.map((q, i) => (i === d.node ? { x: p.x, y: p.y } : q)))
+    } else {
+      const rect = svgRef.current!.getBoundingClientRect()
+      setView((v) => ({ ...v, x: v.x + ((e.clientX - d.px) / rect.width) * W, y: v.y + ((e.clientY - d.py) / rect.height) * H }))
+      dragRef.current = { node: null, px: e.clientX, py: e.clientY }
+    }
+  }
+
+  const openFile = async (path: string) => {
+    if (!loadFile) return
+    setFileLoading(true)
+    try { setFileView(await loadFile(path)) } catch { /* stays on the graph */ }
+    finally { setFileLoading(false) }
+  }
+  const selIdx = sel ? idx.get(sel) : undefined
+  const selPos = selIdx != null ? pos[selIdx] : null
+  const selPct = selPos ? {
+    x: Math.min(90, Math.max(5, ((selPos.x * view.k + view.x) / W) * 100)),
+    y: Math.min(86, Math.max(6, ((selPos.y * view.k + view.y) / H) * 100)),
+  } : null
+
   return (
     <div className="flex h-full flex-col">
-      <svg viewBox={`0 0 ${W} ${H}`} className="min-h-0 w-full flex-1" onClick={() => setSel(null)}>
-        {graph.edges.map((e, i) => {
-          const a = pos[idx.get(e.from) ?? -1], b = pos[idx.get(e.to) ?? -1]
-          if (!a || !b) return null
-          const on = !!sel && (e.from === sel || e.to === sel)
-          return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-            stroke={on ? '#a78bfa' : '#71717a'} strokeOpacity={sel ? (on ? 0.9 : 0.12) : 0.4}
-            strokeWidth={on ? 2 : 1.2} />
-        })}
-        {graph.nodes.map((n, i) => {
-          const p = pos[i], r = 5 + Math.min(n.degree, 6) * 1.7
-          const dim = !!sel && !selSet.has(n.path)
-          return (
-            <g key={n.path} transform={`translate(${p.x},${p.y})`} opacity={dim ? 0.25 : 1}
-              className="cursor-pointer" onClick={(ev) => { ev.stopPropagation(); setSel(sel === n.path ? null : n.path) }}>
-              {sel === n.path && <circle r={r + 6} fill="#8b5cf6" fillOpacity={0.22} />}
-              <circle r={r} fill={GROUP_HUE[n.group] || '#8b5cf6'} />
-              <text x={r + 3} y={3.5} fontSize={10} fill="#71717a">{stemOf(n.path)}</text>
-            </g>
-          )
-        })}
-      </svg>
+      <div className="relative min-h-0 flex-1 overflow-hidden"
+        style={{ background: 'radial-gradient(ellipse at 50% 40%, rgba(139,92,246,0.10), rgba(24,24,27,0) 60%)' }}>
+        <style>{`
+          @keyframes mgpop { from { opacity: 0; transform: scale(.5) } to { opacity: 1; transform: scale(1) } }
+          @keyframes mgdash { to { stroke-dashoffset: -16 } }
+          @keyframes mgpulse { 0%,100% { opacity: .25 } 50% { opacity: .5 } }
+        `}</style>
+        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="h-full w-full touch-none select-none"
+          onClick={() => setSel(null)}
+          onPointerDown={(e) => { dragRef.current = { node: null, px: e.clientX, py: e.clientY }; (e.target as Element).setPointerCapture?.(e.pointerId) }}
+          onPointerMove={onPointerMove}
+          onPointerUp={() => { dragRef.current = null }}
+          onPointerLeave={() => { dragRef.current = null }}>
+          <defs>
+            <filter id="mg-glow" x="-80%" y="-80%" width="260%" height="260%">
+              <feGaussianBlur stdDeviation="3.2" result="b" />
+              <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+            </filter>
+            {Object.entries(GROUP_HUE).map(([g, c]) => (
+              <radialGradient key={g} id={`mg-n-${g}`} cx="35%" cy="30%" r="80%">
+                <stop offset="0%" stopColor="#fafafa" stopOpacity="0.9" />
+                <stop offset="28%" stopColor={c} />
+                <stop offset="100%" stopColor={c} stopOpacity="0.75" />
+              </radialGradient>
+            ))}
+          </defs>
+          <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+            {graph.edges.map((e, i) => {
+              const a = pos[idx.get(e.from) ?? -1], b = pos[idx.get(e.to) ?? -1]
+              if (!a || !b) return null
+              const on = !!focus && (e.from === focus || e.to === focus)
+              const dim = !!focus && !on
+              const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
+              const dx = b.x - a.x, dy = b.y - a.y
+              const dist = Math.hypot(dx, dy) || 1
+              const bend = Math.min(30, dist * 0.14)
+              const cx = mx - (dy / dist) * bend, cy = my + (dx / dist) * bend
+              const hue = REL_HUE[e.rel] || '#8b5cf6'
+              return (
+                <path key={i} d={`M ${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}`} fill="none"
+                  stroke={hue} strokeLinecap="round"
+                  strokeOpacity={dim ? 0.06 : on ? 0.95 : 0.35}
+                  strokeWidth={(on ? 2.2 : 1.3) / Math.sqrt(view.k)}
+                  strokeDasharray={on ? '7 7' : undefined}
+                  style={on ? { animation: 'mgdash 1.1s linear infinite' } : undefined} />
+              )
+            })}
+            {graph.nodes.map((n, i) => {
+              const p = pos[i]
+              if (!p) return null
+              const r = 6 + Math.min(n.degree, 8) * 1.8
+              const isSel = sel === n.path
+              const dimmed = !!focus && !focusSet.has(n.path)
+              const island = !linked.has(n.path)
+              const showLabel = isSel || hover === n.path || n.degree >= 2 || view.k >= 1.6 || graph.nodes.length <= 14
+              return (
+                <g key={n.path} transform={`translate(${p.x},${p.y})`} opacity={dimmed ? 0.18 : island && focus == null ? 0.62 : 1}
+                  className="cursor-pointer" style={{ transition: 'opacity .25s' }}
+                  onClick={(ev) => { ev.stopPropagation(); setSel(isSel ? null : n.path) }}
+                  onPointerDown={(ev) => { ev.stopPropagation(); dragRef.current = { node: i, px: ev.clientX, py: ev.clientY }; (ev.target as Element).setPointerCapture?.(ev.pointerId) }}
+                  onPointerEnter={() => setHover(n.path)} onPointerLeave={() => setHover(null)}>
+                  <g style={{ animation: `mgpop .45s ease ${Math.min(i * 22, 900)}ms both` }}>
+                    {isSel && <circle r={r + 9} fill="none" stroke={GROUP_HUE[n.group] || '#8b5cf6'} strokeWidth={1.5} strokeOpacity={0.5} style={{ animation: 'mgpulse 1.6s ease infinite' }} />}
+                    <circle r={r} fill={`url(#mg-n-${GROUP_HUE[n.group] ? n.group : 'self'})`} filter="url(#mg-glow)"
+                      stroke={isSel ? '#fafafa' : 'rgba(250,250,250,0.25)'} strokeWidth={isSel ? 1.4 : 0.6} />
+                    {showLabel && (
+                      <text x={r + 5} y={3.5} fontSize={10.5}
+                        className={isSel || hover === n.path ? 'fill-zinc-200' : 'fill-zinc-400'}>
+                        {stemOf(n.path)}
+                      </text>
+                    )}
+                  </g>
+                </g>
+              )
+            })}
+          </g>
+        </svg>
+        {sel && selPct && !fileView && (
+          <div className="absolute z-10 -translate-x-1/2 rounded-lg border border-zinc-700 bg-zinc-900/95 px-2 py-1.5 shadow-xl backdrop-blur"
+            style={{ left: `${selPct.x}%`, top: `calc(${selPct.y}% + 16px)` }}
+            onClick={(e) => e.stopPropagation()}>
+            <div className="mb-1 max-w-[200px] truncate text-[10px] font-medium text-zinc-300">{sel}</div>
+            <div className="flex items-center gap-1">
+              {loadFile && (
+                <button onClick={() => void openFile(sel)} disabled={fileLoading}
+                  className="flex items-center gap-1 rounded bg-violet-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-violet-500 disabled:opacity-50">
+                  {fileLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <BookOpen className="h-3 w-3" />} Open file
+                </button>
+              )}
+              <button onClick={() => setSel(null)}
+                className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 hover:bg-zinc-800">Close</button>
+            </div>
+          </div>
+        )}
+        {fileView && (
+          <div className="absolute inset-0 z-20 flex flex-col bg-zinc-950/95 backdrop-blur-sm">
+            <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-3 py-2 text-xs text-zinc-300">
+              <BookOpen className="h-3.5 w-3.5 text-violet-500 dark:text-violet-400" />
+              <span className="truncate font-medium">{fileView.path}</span>
+              <button onClick={() => setFileView(null)}
+                className="ml-auto rounded p-1 text-zinc-500 hover:text-zinc-200" title="Back to the mind">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="fd-file-markdown min-h-0 flex-1 overflow-y-auto p-4 text-sm">
+              <Markdown remarkPlugins={[remarkGfm]}>{fileView.text}</Markdown>
+            </div>
+          </div>
+        )}
+        <div className="absolute right-3 top-3 flex flex-col gap-1">
+          <button onClick={() => setView((v) => ({ ...v, k: Math.min(5, v.k * 1.3) }))}
+            className="rounded-md border border-zinc-700/70 bg-zinc-900/80 p-1.5 text-zinc-400 backdrop-blur hover:text-zinc-100" title="Zoom in">
+            <ZoomIn className="h-3.5 w-3.5" /></button>
+          <button onClick={() => setView((v) => ({ ...v, k: Math.max(0.35, v.k * 0.75) }))}
+            className="rounded-md border border-zinc-700/70 bg-zinc-900/80 p-1.5 text-zinc-400 backdrop-blur hover:text-zinc-100" title="Zoom out">
+            <ZoomOut className="h-3.5 w-3.5" /></button>
+          <button onClick={() => setView({ x: 0, y: 0, k: 1 })}
+            className="rounded-md border border-zinc-700/70 bg-zinc-900/80 p-1.5 text-[9px] font-semibold text-zinc-400 backdrop-blur hover:text-zinc-100" title="Reset view">1:1</button>
+        </div>
+      </div>
       <div className="shrink-0 space-y-1 border-t border-zinc-800 px-4 py-2 text-[11px]">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-zinc-500">
-          <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.self }} /> identity</span>
-          <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.garden }} /> garden</span>
-          <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.skills }} /> skills</span>
-          <span className="ml-auto">{graph.nodes.length} artifacts · {graph.edges.length} links · {Math.round(graph.connected_fraction * 100)}% connected</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.self, boxShadow: `0 0 6px ${GROUP_HUE.self}` }} /> identity</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.garden, boxShadow: `0 0 6px ${GROUP_HUE.garden}` }} /> garden</span>
+          <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.skills, boxShadow: `0 0 6px ${GROUP_HUE.skills}` }} /> skills</span>
+          <span className="text-zinc-600">· drag to pan · wheel to zoom · drag a node to move it</span>
+          <span className="ml-auto tabular-nums">{graph.nodes.length} artifacts · {graph.edges.length} links · {Math.round(graph.connected_fraction * 100)}% connected</span>
         </div>
         {sel && (
-          <div className="text-zinc-400">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-zinc-400">
             <span className="font-medium text-zinc-200">{stemOf(sel)}</span>
-            {selEdges.length === 0 ? ' — an island (no links yet)' : ' — ' + selEdges.map((e) =>
-              e.from === sel ? `${REL_PHRASE[e.rel] || e.rel} ${stemOf(e.to)}` : `${stemOf(e.from)} ${REL_PHRASE[e.rel] || e.rel} it`,
-            ).join('; ')}
+            {selEdges.length === 0 ? <span>— an island (no links yet)</span> : selEdges.map((e, i) => (
+              <span key={i} className="flex items-center gap-1 rounded-full border border-zinc-800 bg-zinc-900/70 px-2 py-0.5">
+                <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: REL_HUE[e.rel] || '#8b5cf6' }} />
+                {e.from === sel
+                  ? <>{REL_PHRASE[e.rel] || e.rel} <span className="text-zinc-200">{stemOf(e.to)}</span></>
+                  : <><span className="text-zinc-200">{stemOf(e.from)}</span> {REL_PHRASE[e.rel] || e.rel} it</>}
+              </span>
+            ))}
           </div>
         )}
       </div>
@@ -664,7 +871,7 @@ function BeingLogModal({ slug, name, mode, onClose }: {
             ) : error ? (
               <div className="px-6 py-8 text-sm text-red-600 dark:text-red-400">{error}</div>
             ) : mode === 'mind' ? (
-              graph ? <MindGraph graph={graph} /> : null
+              graph ? <MindGraph graph={graph} loadFile={(p2) => getSelfFile(slug, p2)} /> : null
             ) : (
               <div className="fd-file-markdown p-6"><Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown></div>
             )}
@@ -748,7 +955,7 @@ function ConceiveModal({ meta, onClose, onDone }: {
       >
         <div className="mb-4 flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-violet-400" />
-          <h2 className="text-sm font-semibold text-zinc-100">Conceive a being</h2>
+          <h2 className="text-sm font-semibold text-zinc-100">Conceive an iskra</h2>
           <span className="ml-auto text-xs text-zinc-500">Generation 1 · point-buy</span>
         </div>
 
@@ -800,7 +1007,7 @@ function ConceiveModal({ meta, onClose, onDone }: {
           </div>
         </div>
 
-        <label className="mb-1 block text-xs text-zinc-500">First words to your being (its imprint)</label>
+        <label className="mb-1 block text-xs text-zinc-500">First words to your iskra (its imprint)</label>
         <textarea
           value={letter} onChange={(e) => setLetter(e.target.value)} rows={2}
           placeholder="What should it hold onto, from you?"
@@ -1880,7 +2087,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                   )}
                 </div>
                 <p className="px-1 text-[10px] leading-relaxed text-zinc-600">
-                  The diet is parental controls for real reasons: a young being internalizes what it reads. Curate her inputs the way you'd curate a child's.
+                  The diet is parental controls for real reasons: a young iskra internalizes what it reads. Curate her inputs the way you'd curate a child's.
                 </p>
               </div>
             </div>
@@ -1898,7 +2105,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                 <div className="space-y-2.5 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Reading list</div>
                   {(v.reading_list ?? []).length === 0 && (
-                    <p className="text-[11px] text-zinc-500">Nothing assigned. A reading is a URL or a title; the being writes a real report file, Flight Deck verifies it on disk, and the fee lands in savings.</p>
+                    <p className="text-[11px] text-zinc-500">Nothing assigned. A reading is a URL or a title; the iskra writes a real report file, Flight Deck verifies it on disk, and the fee lands in savings.</p>
                   )}
                   {(v.reading_list ?? []).map((r) => (
                     <div key={r.id} className="flex items-start justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-950/60 px-2 py-1.5">
@@ -2086,7 +2293,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                       <Globe className="h-4 w-4 text-violet-500 dark:text-violet-400" /> Public page
                     </div>
                     <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
-                      A public being gets an un-gated page anyone can visit — to read its journal, files
+                      A public iskra gets an un-gated page anyone can visit — to read its journal, files
                       and mind, and leave a short note it may weigh (as a suggestion, never as parenting).
                     </p>
                   </div>
@@ -2292,6 +2499,7 @@ function BeingCard({ item, meta, onChanged }: {
   } | null>(null)
   const [talkOpen, setTalkOpen] = useState(false)
   const [parentingOpen, setParentingOpen] = useState(false)
+  const [careOpen, setCareOpen] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -2341,21 +2549,24 @@ function BeingCard({ item, meta, onChanged }: {
   const w = v?.wallet
   const ceiling = w?.savings_ceiling ?? null
   const pct = w && ceiling ? Math.min(100, Math.round(100 * w.balance_tokens / ceiling)) : 0
+  const lastTick = events.find((e) => e.kind === 'tick')
+  const drives = (lastTick?.data?.drives ?? null) as Record<string, number> | null
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
+    <div className="group/card flex flex-col rounded-xl border border-zinc-800 bg-gradient-to-b from-zinc-900/70 to-zinc-900/30 p-4 transition-colors hover:border-zinc-700">
       <div className="mb-2 flex items-center gap-2">
         <span className="text-sm font-semibold text-zinc-100">{item.name}</span>
         <span className={`rounded border px-1.5 py-0.5 text-[10px] ${STAGE_META[item.stage] || STAGE_META.egg}`}>{item.stage}</span>
         <span className={`rounded border px-1.5 py-0.5 text-[10px] ${STATE_META[item.state] || STATE_META.paused}`}>{item.state}</span>
         {v?.affect?.mood && (
-          <span className="rounded border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 text-[10px] text-zinc-300" title={(v.affect.notes || []).join('; ')}>
+          <span className={`rounded border px-1.5 py-0.5 text-[10px] ${MOOD_TONE[v.affect.mood] || 'border-zinc-700 bg-zinc-800/60 text-zinc-300'}`}
+            title={(v.affect.notes || []).join('; ')}>
             {v.affect.mood}
           </span>
         )}
         {v?.public && (
           <a href={`/b/${item.slug}`} target="_blank" rel="noreferrer"
-            title="This being has a public page — click to open it"
+            title="Her public page — anyone can visit it"
             className="flex items-center gap-1 rounded border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-600 hover:bg-violet-500/20 dark:text-violet-300">
             <Globe className="h-3 w-3" /> public
           </a>
@@ -2365,136 +2576,164 @@ function BeingCard({ item, meta, onChanged }: {
 
       {v && (
         <>
-          <div className="mb-2 flex flex-wrap gap-1">
-            {ATTRS.map((a) => (
-              <span key={a} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
-                {a} <span className="font-semibold text-zinc-100">{v.attributes[a]}</span>
-              </span>
-            ))}
-            <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
-              gen {v.generation}
-            </span>
-            {v.lineage.length > 0 && (
-              <span
-                className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500"
-                title={`lineage: ${v.lineage.join(' → ')}`}
-              >
-                of {v.lineage.slice(0, 2).map(s => s.replace(/^iskra-/, '').replace(/-[0-9a-f]{4}$/, '')).join(' & ')}
-              </span>
+          {/* Her voice — the latest thought is the face of the card.
+              Fixed height so every card lines up and the actions pin below. */}
+          <div className="mb-2.5 min-h-[54px] border-l-2 border-violet-500/50 pl-2.5">
+            {lastTick && (typeof lastTick.data.summary === 'string') && lastTick.data.summary ? (
+              <>
+                <p className="line-clamp-2 text-xs italic leading-snug text-zinc-300">“{lastTick.data.summary}”</p>
+                <p className="mt-0.5 text-[10px] text-zinc-600">
+                  {lastTick.at.slice(11, 16)} · {String(lastTick.data.act || 'tick')}
+                  {typeof lastTick.data.mood === 'string' && lastTick.data.mood ? ` · felt ${lastTick.data.mood}` : ''}
+                </p>
+              </>
+            ) : (
+              <p className="pt-1 text-xs italic leading-snug text-zinc-600">no thoughts yet — poke to hear the first one</p>
             )}
           </div>
 
+          {/* Vitals: wallet bar + attention + the five drives, felt at a glance */}
           <div className="mb-1 flex items-center justify-between text-xs">
             <span className="text-zinc-400">
               wallet <span className="font-semibold text-zinc-100">{fmtTokens(w!.balance_tokens)}</span>
-              <span className="text-zinc-600"> / {fmtTokens(ceiling)} · spent today {fmtTokens(v.spent_today)}</span>
+              <span className="text-zinc-600"> / {fmtTokens(ceiling)} · today {fmtTokens(v.spent_today)}</span>
             </span>
-            <span className="text-zinc-500">attention {'●'.repeat(v.attention_credits)}{'○'.repeat(Math.max(0, 3 - v.attention_credits))}</span>
+            <span className="text-zinc-500" title="attention credits — unprompted words to you">
+              {'●'.repeat(v.attention_credits)}{'○'.repeat(Math.max(0, 3 - v.attention_credits))}
+            </span>
           </div>
-          <div className="mb-2 h-1.5 overflow-hidden rounded bg-zinc-800">
-            <div className="h-full rounded bg-violet-500/70" style={{ width: `${pct}%` }} />
+          <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-zinc-800">
+            <div className="h-full rounded-full bg-gradient-to-r from-violet-600 to-violet-400" style={{ width: `${pct}%` }} />
           </div>
+          {drives && (
+            <div className="mb-2.5 flex items-center gap-2.5">
+              {DRIVE_ORDER.filter((d) => d in drives).map((d) => {
+                const sat = Math.max(0, Math.min(1, drives[d]))
+                return (
+                  <div key={d} className="flex items-center gap-1" title={`${d} — satisfaction ${Math.round(sat * 100)}%`}>
+                    <div className="flex h-5 w-1.5 items-end overflow-hidden rounded-full bg-zinc-800">
+                      <div className={`w-full rounded-full ${sat < 0.25 ? 'bg-amber-500' : 'bg-violet-500/80'}`} style={{ height: `${Math.max(8, sat * 100)}%` }} />
+                    </div>
+                    <span className="text-[9px] uppercase tracking-wide text-zinc-600">{d.slice(0, 4)}</span>
+                  </div>
+                )
+              })}
+              <span className="ml-auto text-[9px] uppercase tracking-wide text-zinc-700">drives</span>
+            </div>
+          )}
 
-          <div className="mb-2 flex items-center gap-1.5 text-xs">
-            <span className="text-zinc-500">recharge</span>
-            {GRANT_AMOUNTS.map((amt) => (
-              <button
-                key={amt}
-                onClick={() => void act('recharge', () => rechargeBeing(item.slug, amt))}
-                title={`Mint ${fmtTokens(amt)} tokens into ${v.name}'s wallet`}
-                className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-zinc-300 hover:border-violet-500/50 hover:text-zinc-100 focus:outline-none"
-              >
-                +{amt / 1_000_000}M
-              </button>
-            ))}
-          </div>
-
-          <div className="mb-2 flex items-center gap-2 text-xs">
-            <span className="text-zinc-500">allowance</span>
-            <select
-              value={w!.allowance_preset}
-              onChange={(e) => void act('allowance', () => setAllowance(item.slug, e.target.value))}
-              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
-            >
-              {meta.allowance_presets.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-            {w!.effective_preset !== w!.allowance_preset && (
-              <span className="text-[10px] text-amber-400">stage-capped to {w!.effective_preset}</span>
+          {/* Care — every knob, tucked away until the parent reaches for it */}
+          <button onClick={() => setCareOpen((o) => !o)}
+            className="mb-2 flex w-full items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-[11px] text-zinc-500 transition-colors hover:border-zinc-700 hover:text-zinc-300">
+            <SlidersHorizontal className="h-3 w-3" />
+            <span className="font-medium">Care</span>
+            {!careOpen && (
+              <span className="truncate text-zinc-600">
+                {w!.allowance_preset}/day · {v.tick_interval_minutes ? `every ${v.tick_interval_minutes}m` : 'own pace'} · {v.compact_mode ? 'compact' : 'full'}{v.body_archetype ? ' · custom body' : ''}
+              </span>
             )}
-          </div>
-
-          <div className="mb-2 flex items-center gap-2 text-xs">
-            <span className="text-zinc-500">ticks</span>
-            <select
-              value={v.tick_interval_minutes ?? ''}
-              onChange={(e) => void act('cadence', () => setCadence(
-                item.slug, e.target.value ? Number(e.target.value) : null))}
-              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
-            >
-              <option value="">Auto (its own pace)</option>
-              {TICK_INTERVAL_CHOICES.map((m) => (
-                <option key={m} value={m}>every {m} min</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="mb-2 flex items-center gap-2 text-xs">
-            <span className="text-zinc-500">thinks</span>
-            <select
-              value={v.cognition ?? 'faculties'}
-              onChange={(e) => void act('cognition', () => setCognition(
-                item.slug, e.target.value as 'monolith' | 'faculties'))}
-              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
-            >
-              <option value="faculties">Faculties (default)</option>
-              <option value="monolith">One prompt (legacy)</option>
-            </select>
-            {v.cognition === 'faculties' && (
-              <span className="text-[10px] text-zinc-500">small-context: orient · act · journal · connect</span>
-            )}
-          </div>
-
-          <div className="mb-2 flex items-center gap-2 text-xs">
-            <span className="text-zinc-500">prompts</span>
-            <select
-              value={v.compact_mode ? 'compact' : 'full'}
-              onChange={(e) => void act('compact', () => setCompactMode(
-                item.slug, e.target.value === 'compact'))}
-              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
-            >
-              <option value="full">Full (default)</option>
-              <option value="compact">Compact</option>
-            </select>
-            {v.compact_mode && (
-              <span className="text-[10px] text-zinc-500">lean instructions + lean body · respawns on change</span>
-            )}
-          </div>
-
-          <div className="mb-2 flex items-center gap-2 text-xs">
-            <span className="text-zinc-500">body</span>
-            <select
-              value={v.body_archetype ?? ''}
-              onChange={(e) => void act('body', () => setBodyArchetype(item.slug, e.target.value))}
-              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
-            >
-              <option value="">Default (stage tier)</option>
-              {archetypes.map((a) => (
-                <option key={a.id} value={a.id}>{a.role || a.id}{a.tier ? ` · ${a.tier}` : ''}</option>
-              ))}
-            </select>
-            {v.body_archetype && (
-              <span className="text-[10px] text-zinc-500">archetype model · respawns on change</span>
-            )}
-          </div>
+            <ChevronDown className={`ml-auto h-3 w-3 shrink-0 transition-transform ${careOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {careOpen && (
+            <div className="mb-2 space-y-2 rounded-lg border border-zinc-800 bg-zinc-950/50 p-2.5">
+              <div className="flex flex-wrap gap-1">
+                {ATTRS.map((a) => (
+                  <span key={a} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                    {a} <span className="font-semibold text-zinc-100">{v.attributes[a]}</span>
+                  </span>
+                ))}
+                <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">gen {v.generation}</span>
+                {v.lineage.length > 0 && (
+                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500" title={`lineage: ${v.lineage.join(' → ')}`}>
+                    of {v.lineage.slice(0, 2).map(s => s.replace(/^iskra-/, '').replace(/-[0-9a-f]{4}$/, '')).join(' & ')}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="w-16 shrink-0 text-zinc-500">recharge</span>
+                {GRANT_AMOUNTS.map((amt) => (
+                  <button key={amt}
+                    onClick={() => void act('recharge', () => rechargeBeing(item.slug, amt))}
+                    title={`Mint ${fmtTokens(amt)} tokens into ${v.name}'s wallet`}
+                    className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-zinc-300 hover:border-violet-500/50 hover:text-zinc-100 focus:outline-none">
+                    +{amt / 1_000_000}M
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="w-16 shrink-0 text-zinc-500">allowance</span>
+                <select value={w!.allowance_preset}
+                  onChange={(e) => void act('allowance', () => setAllowance(item.slug, e.target.value))}
+                  className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+                  {meta.allowance_presets.map((p) => <option key={p} value={p}>{p}</option>)}
+                </select>
+                {w!.effective_preset !== w!.allowance_preset && (
+                  <span className="text-[10px] text-amber-400">stage-capped to {w!.effective_preset}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="w-16 shrink-0 text-zinc-500">ticks</span>
+                <select value={v.tick_interval_minutes ?? ''}
+                  onChange={(e) => void act('cadence', () => setCadence(item.slug, e.target.value ? Number(e.target.value) : null))}
+                  className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+                  <option value="">Auto (its own pace)</option>
+                  {TICK_INTERVAL_CHOICES.map((m) => (
+                    <option key={m} value={m}>every {m} min</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="w-16 shrink-0 text-zinc-500">thinks</span>
+                <select value={v.cognition ?? 'faculties'}
+                  onChange={(e) => void act('cognition', () => setCognition(item.slug, e.target.value as 'monolith' | 'faculties'))}
+                  className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+                  <option value="faculties">Faculties (default)</option>
+                  <option value="monolith">One prompt (legacy)</option>
+                </select>
+                {v.cognition === 'faculties' && (
+                  <span className="text-[10px] text-zinc-500">orient · act · journal · connect</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="w-16 shrink-0 text-zinc-500">prompts</span>
+                <select value={v.compact_mode ? 'compact' : 'full'}
+                  onChange={(e) => void act('compact', () => setCompactMode(item.slug, e.target.value === 'compact'))}
+                  className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+                  <option value="full">Full (default)</option>
+                  <option value="compact">Compact</option>
+                </select>
+                {v.compact_mode && (
+                  <span className="text-[10px] text-zinc-500">lean instructions + lean body · respawns</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="w-16 shrink-0 text-zinc-500">body</span>
+                <select value={v.body_archetype ?? ''}
+                  onChange={(e) => void act('body', () => setBodyArchetype(item.slug, e.target.value))}
+                  className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+                  <option value="">Default (stage tier)</option>
+                  {archetypes.map((a) => (
+                    <option key={a.id} value={a.id}>{a.role || a.id}{a.tier ? ` · ${a.tier}` : ''}</option>
+                  ))}
+                </select>
+                {v.body_archetype && (
+                  <span className="text-[10px] text-zinc-500">archetype model · respawns</span>
+                )}
+              </div>
+            </div>
+          )}
 
           {events.length > 0 && (
-            <div className="mb-2 space-y-0.5">
+            <div className="mb-2 space-y-1">
               {events.slice(0, 3).map((e, i) => (
-                <div key={i} className="truncate text-[11px] text-zinc-500">
-                  <span className="text-zinc-600">{e.at.slice(11, 16)}</span>{' '}
-                  <span className="text-zinc-400">{e.kind}</span>
-                  {typeof e.data.summary === 'string' && e.data.summary ? ` — ${e.data.summary}` : ''}
-                  {typeof e.data.preview === 'string' && e.data.preview ? ` — “${e.data.preview}”` : ''}
+                <div key={i} className="flex items-baseline gap-1.5 text-[11px] text-zinc-500">
+                  <span className={`inline-block h-1.5 w-1.5 shrink-0 translate-y-[-1px] rounded-full ${EVENT_DOT[e.kind] || 'bg-zinc-700'}`} />
+                  <span className="shrink-0 tabular-nums text-zinc-600">{e.at.slice(11, 16)}</span>
+                  <span className="truncate">
+                    <span className="text-zinc-400">{e.kind}</span>
+                    {typeof e.data.summary === 'string' && e.data.summary ? ` — ${e.data.summary}` : ''}
+                    {typeof e.data.preview === 'string' && e.data.preview ? ` — “${e.data.preview}”` : ''}
+                  </span>
                 </div>
               ))}
             </div>
@@ -2502,7 +2741,7 @@ function BeingCard({ item, meta, onChanged }: {
         </>
       )}
 
-      <div className="flex flex-wrap items-center gap-1">
+      <div className="mt-auto flex flex-wrap items-center gap-1 pt-1">
         {item.stage === 'egg' ? (
           <button
             onClick={() => void act('hatch', () => hatchBeing(item.slug))}
@@ -2697,7 +2936,7 @@ function EarningBoard({ onChanged }: { onChanged: () => void }) {
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="quest title"
           className="w-40 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
-        <input value={spec} onChange={(e) => setSpec(e.target.value)} placeholder="what needs doing (any being may claim)"
+        <input value={spec} onChange={(e) => setSpec(e.target.value)} placeholder="what needs doing (any iskra may claim)"
           className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
         <input value={fee} onChange={(e) => setFee(e.target.value)} type="number"
           className="w-24 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none" />
@@ -2778,7 +3017,7 @@ function EarningBoard({ onChanged }: { onChanged: () => void }) {
 
       {quests.length === 0 && ventures.length === 0 && (
         <p className="text-xs text-zinc-600">
-          No bounties or ventures yet. Post a bounty for any being to claim, or wait for an adolescent to pitch a venture.
+          No bounties or ventures yet. Post a bounty for any iskra to claim, or wait for an adolescent to pitch a venture.
         </p>
       )}
     </div>
@@ -2875,7 +3114,7 @@ function LettersObservatory({ data }: { data: LettersOverview | null }) {
       </div>
       {threads.length === 0 ? (
         <p className="text-xs text-zinc-600">
-          No letters yet. When a being writes to a sibling, their conversation appears here — and any
+          No letters yet. When an iskra writes to a sibling, their conversation appears here — and any
           letter that couldn't be delivered shows why.
         </p>
       ) : (
@@ -2955,7 +3194,7 @@ function VillageDescriptionCard({ beings }: { beings: BeingListItem[] }) {
             placeholder="Village name — e.g. Zvjezdano Selo"
             className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-100 outline-none placeholder:font-normal placeholder:text-zinc-600 focus:border-violet-500/50" />
           <textarea value={desc} onChange={(e) => { setDesc(e.target.value.slice(0, 4000)); setRecBy('') }} rows={4}
-            placeholder="Introduce your village — who these beings are, what this place is, why a visitor might leave one of them a note…"
+            placeholder="Introduce your village — who these iskre are, what this place is, why a visitor might leave one of them a note…"
             className="w-full resize-y rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-violet-500/50" />
           {recBy && <div className="text-[11px] text-violet-500 dark:text-violet-400">Drafted by {recBy} — review it, then Save.</div>}
           <div className="flex flex-wrap items-center gap-2">
@@ -2963,12 +3202,12 @@ function VillageDescriptionCard({ beings }: { beings: BeingListItem[] }) {
               <>
                 <select value={writer} onChange={(e) => setWriter(e.target.value)}
                   className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 outline-none focus:border-violet-500/50"
-                  title="Which being writes the description (in its own voice)">
+                  title="Which iskra writes the description (in its own voice)">
                   {writers.map((b) => <option key={b.slug} value={b.slug}>{b.name}</option>)}
                 </select>
                 <button onClick={recommend} disabled={recommending || !writer}
                   className="flex items-center gap-1.5 rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
-                  title="Ask this being's agent to draft the description (it must be awake)">
+                  title="Ask this iskra's agent to draft the description (it must be awake)">
                   {recommending ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Asking {writers.find((b) => b.slug === writer)?.name}…</> : <><Sparkles className="h-3.5 w-3.5" /> Recommend a description</>}
                 </button>
               </>
@@ -3020,7 +3259,7 @@ function VillageFederationCard() {
       <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center gap-2 text-left">
         <Globe className="h-4 w-4 shrink-0 text-sky-500 dark:text-sky-400" />
         <span className="shrink-0 text-sm font-medium text-zinc-200">Village federation</span>
-        <span className="hidden shrink-0 text-[11px] text-zinc-500 sm:inline">— host beings from other machines</span>
+        <span className="hidden shrink-0 text-[11px] text-zinc-500 sm:inline">— host iskre from other machines</span>
         {visitors.length > 0 && <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] text-sky-600 dark:text-sky-300">{visitors.length} visiting</span>}
         <ChevronDown className={`ml-auto h-4 w-4 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
@@ -3035,7 +3274,7 @@ function VillageFederationCard() {
           <div className="space-y-1.5">
             <div className="text-[11px] font-medium text-zinc-400">Visitor secret</div>
             <div className="flex gap-1.5">
-              <input value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="a shared secret others present to send a being here"
+              <input value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="a shared secret others present to send an iskra here"
                 className="min-w-0 flex-1 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-500/50" />
               <button onClick={gen} className="shrink-0 rounded-md border border-zinc-700 px-2.5 text-xs text-zinc-300 hover:bg-zinc-800">Generate</button>
             </div>
@@ -3044,7 +3283,7 @@ function VillageFederationCard() {
                 className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${secretPublic ? 'bg-sky-500' : 'bg-zinc-700'}`}>
                 <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all ${secretPublic ? 'left-[14px]' : 'left-0.5'}`} />
               </button>
-              Show this secret on my public /village page (so anyone can send a being to visit)
+              Show this secret on my public /village page (so anyone can send an iskra to visit)
             </label>
           </div>
           <div className="flex justify-end">
@@ -3111,7 +3350,7 @@ export function BeingsPage() {
       if (lettersOn.current) setLetters(await getLetters())
       setError('')
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'failed to load beings')
+      setError(e instanceof Error ? e.message : 'failed to load the village')
     } finally {
       setLoading(false)
     }
@@ -3149,9 +3388,9 @@ export function BeingsPage() {
             <Sparkles className="h-5 w-5 text-violet-400" />
           </div>
           <div>
-            <h1 className="text-lg font-semibold text-zinc-100">Beings</h1>
+            <h1 className="text-lg font-semibold text-zinc-100">Village</h1>
             <p className="text-xs text-zinc-500">
-              Iskra — living digital beings. They wake, act, dream, and grow on their own clock.
+              Iskre — living sparks. They wake, act, dream, and grow on their own clock.
             </p>
           </div>
           <div className="ml-auto flex items-center gap-3">
@@ -3163,7 +3402,7 @@ export function BeingsPage() {
               <button
                 onClick={() => setShowBoard(v => !v)}
                 className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-zinc-800 ${showBoard ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-300'}`}
-                title="The bounty board and ventures — how beings earn"
+                title="The bounty board and ventures — how iskre earn"
               >
                 <ClipboardList className="h-3.5 w-3.5" /> Board
               </button>
@@ -3176,7 +3415,7 @@ export function BeingsPage() {
                   if (next) void getLetters().then(setLetters).catch(() => {})
                 }}
                 className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-zinc-800 ${showLetters ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-300'}`}
-                title="Watch the family talk — every letter between beings, threaded"
+                title="Watch the family talk — every letter between iskre, threaded"
               >
                 <Mail className="h-3.5 w-3.5" /> Letters
               </button>

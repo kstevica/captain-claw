@@ -10,7 +10,7 @@ import {
   ArrowDownUp, ArrowLeft, ArrowUpRight, BookOpen, CalendarDays, ChevronDown,
   ChevronLeft, ChevronRight, Clock, Files, Fingerprint, GitFork, Globe, Loader2,
   MessageCircle, Moon, Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun,
-  Terminal, Users, Wrench, X,
+  Terminal, Users, Wrench, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -136,45 +136,216 @@ function layoutGraph(
   return pos
 }
 
-function MindGraph({ graph }: { graph: PublicGraph }) {
+const REL_HUE: Record<string, string> = {
+  grew_from: '#a78bfa', responds_to: '#38bdf8', elaborates: '#34d399',
+  contradicts: '#fb7185', abandons: '#71717a', uses_skill: '#fbbf24',
+  learned_from: '#2dd4bf',
+}
+
+function MindGraph({ graph, loadFile }: {
+  graph: PublicGraph
+  loadFile?: (path: string) => Promise<{ path: string; text: string }>
+}) {
   const [sel, setSel] = useState<string | null>(null)
+  const [hover, setHover] = useState<string | null>(null)
+  const [fileView, setFileView] = useState<{ path: string; text: string } | null>(null)
+  const [fileLoading, setFileLoading] = useState(false)
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 })
   const W = 900, H = 520
-  const pos = useMemo(() => layoutGraph(graph.nodes, graph.edges, W, H), [graph])
+  const base = useMemo(() => layoutGraph(graph.nodes, graph.edges, W, H), [graph])
+  const [pos, setPos] = useState(base)
+  useEffect(() => { setPos(base); setSel(null); setFileView(null); setView({ x: 0, y: 0, k: 1 }) }, [base])
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const dragRef = useRef<{ node: number | null; px: number; py: number } | null>(null)
+
+  useEffect(() => {
+    const el = svgRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      setView((v) => {
+        const k = Math.min(5, Math.max(0.35, v.k * (e.deltaY < 0 ? 1.15 : 0.87)))
+        const rect = el.getBoundingClientRect()
+        const mx = ((e.clientX - rect.left) / rect.width) * W
+        const my = ((e.clientY - rect.top) / rect.height) * H
+        return { k, x: mx - (mx - v.x) * (k / v.k), y: my - (my - v.y) * (k / v.k) }
+      })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [])
+
   if (graph.nodes.length === 0) {
     return <div className="flex h-64 items-center justify-center text-sm text-zinc-500">No artifacts yet — nothing to map.</div>
   }
   const idx = new Map(graph.nodes.map((n, i) => [n.path, i]))
+  const focus = hover || sel
+  const focusEdges = focus ? graph.edges.filter((e) => e.from === focus || e.to === focus) : []
+  const focusSet = new Set<string>(focus ? [focus, ...focusEdges.flatMap((e) => [e.from, e.to])] : [])
   const selEdges = sel ? graph.edges.filter((e) => e.from === sel || e.to === sel) : []
-  const selSet = new Set<string>(sel ? [sel, ...selEdges.flatMap((e) => [e.from, e.to])] : [])
+  const linked = new Set(graph.edges.flatMap((e) => [e.from, e.to]))
+
+  const toGraph = (clientX: number, clientY: number) => {
+    const rect = svgRef.current!.getBoundingClientRect()
+    return {
+      x: (((clientX - rect.left) / rect.width) * W - view.x) / view.k,
+      y: (((clientY - rect.top) / rect.height) * H - view.y) / view.k,
+    }
+  }
+  const onPointerMove = (e: React.PointerEvent) => {
+    const d = dragRef.current
+    if (!d) return
+    if (d.node != null) {
+      const p = toGraph(e.clientX, e.clientY)
+      setPos((ps) => ps.map((q, i) => (i === d.node ? { x: p.x, y: p.y } : q)))
+    } else {
+      const rect = svgRef.current!.getBoundingClientRect()
+      setView((v) => ({ ...v, x: v.x + ((e.clientX - d.px) / rect.width) * W, y: v.y + ((e.clientY - d.py) / rect.height) * H }))
+      dragRef.current = { node: null, px: e.clientX, py: e.clientY }
+    }
+  }
+
+  const openFile = async (path: string) => {
+    if (!loadFile) return
+    setFileLoading(true)
+    try { setFileView(await loadFile(path)) } catch { /* stays on the graph */ }
+    finally { setFileLoading(false) }
+  }
+  const selIdx = sel ? idx.get(sel) : undefined
+  const selPos = selIdx != null ? pos[selIdx] : null
+  const selPct = selPos ? {
+    x: Math.min(90, Math.max(5, ((selPos.x * view.k + view.x) / W) * 100)),
+    y: Math.min(86, Math.max(6, ((selPos.y * view.k + view.y) / H) * 100)),
+  } : null
+
   return (
     <div className="flex flex-col">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" onClick={() => setSel(null)}>
-        {graph.edges.map((e, i) => {
-          const a = pos[idx.get(e.from) ?? -1], b = pos[idx.get(e.to) ?? -1]
-          if (!a || !b) return null
-          const on = !!sel && (e.from === sel || e.to === sel)
-          return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-            stroke={on ? '#a78bfa' : '#71717a'} strokeOpacity={sel ? (on ? 0.9 : 0.12) : 0.4}
-            strokeWidth={on ? 2 : 1.2} />
-        })}
-        {graph.nodes.map((n, i) => {
-          const p = pos[i], r = 5 + Math.min(n.degree, 6) * 1.7
-          const dim = !!sel && !selSet.has(n.path)
-          return (
-            <g key={n.path} transform={`translate(${p.x},${p.y})`} opacity={dim ? 0.25 : 1}
-              className="cursor-pointer" onClick={(ev) => { ev.stopPropagation(); setSel(sel === n.path ? null : n.path) }}>
-              {sel === n.path && <circle r={r + 6} fill="#8b5cf6" fillOpacity={0.22} />}
-              <circle r={r} fill={GROUP_HUE[n.group] || '#8b5cf6'} />
-              <text x={r + 3} y={3.5} fontSize={10} fill="#a1a1aa">{stemOf(n.path)}</text>
-            </g>
-          )
-        })}
-      </svg>
+      <div className="relative overflow-hidden rounded-lg"
+        style={{ background: 'radial-gradient(ellipse at 50% 40%, rgba(139,92,246,0.10), rgba(24,24,27,0) 60%)' }}>
+        <style>{`
+          @keyframes mgpop { from { opacity: 0; transform: scale(.5) } to { opacity: 1; transform: scale(1) } }
+          @keyframes mgdash { to { stroke-dashoffset: -16 } }
+          @keyframes mgpulse { 0%,100% { opacity: .25 } 50% { opacity: .5 } }
+        `}</style>
+        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="w-full touch-none select-none"
+          onClick={() => setSel(null)}
+          onPointerDown={(e) => { dragRef.current = { node: null, px: e.clientX, py: e.clientY }; (e.target as Element).setPointerCapture?.(e.pointerId) }}
+          onPointerMove={onPointerMove}
+          onPointerUp={() => { dragRef.current = null }}
+          onPointerLeave={() => { dragRef.current = null }}>
+          <defs>
+            <filter id="pmg-glow" x="-80%" y="-80%" width="260%" height="260%">
+              <feGaussianBlur stdDeviation="3.2" result="b" />
+              <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+            </filter>
+            {Object.entries(GROUP_HUE).map(([g, c]) => (
+              <radialGradient key={g} id={`pmg-n-${g}`} cx="35%" cy="30%" r="80%">
+                <stop offset="0%" stopColor="#fafafa" stopOpacity="0.9" />
+                <stop offset="28%" stopColor={c} />
+                <stop offset="100%" stopColor={c} stopOpacity="0.75" />
+              </radialGradient>
+            ))}
+          </defs>
+          <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+            {graph.edges.map((e, i) => {
+              const a = pos[idx.get(e.from) ?? -1], b = pos[idx.get(e.to) ?? -1]
+              if (!a || !b) return null
+              const on = !!focus && (e.from === focus || e.to === focus)
+              const dim = !!focus && !on
+              const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
+              const dx = b.x - a.x, dy = b.y - a.y
+              const dist = Math.hypot(dx, dy) || 1
+              const bend = Math.min(30, dist * 0.14)
+              const cx = mx - (dy / dist) * bend, cy = my + (dx / dist) * bend
+              const hue = REL_HUE[e.rel] || '#8b5cf6'
+              return (
+                <path key={i} d={`M ${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}`} fill="none"
+                  stroke={hue} strokeLinecap="round"
+                  strokeOpacity={dim ? 0.06 : on ? 0.95 : 0.35}
+                  strokeWidth={(on ? 2.2 : 1.3) / Math.sqrt(view.k)}
+                  strokeDasharray={on ? '7 7' : undefined}
+                  style={on ? { animation: 'mgdash 1.1s linear infinite' } : undefined} />
+              )
+            })}
+            {graph.nodes.map((n, i) => {
+              const p = pos[i]
+              if (!p) return null
+              const r = 6 + Math.min(n.degree, 8) * 1.8
+              const isSel = sel === n.path
+              const dimmed = !!focus && !focusSet.has(n.path)
+              const island = !linked.has(n.path)
+              const showLabel = isSel || hover === n.path || n.degree >= 2 || view.k >= 1.6 || graph.nodes.length <= 14
+              return (
+                <g key={n.path} transform={`translate(${p.x},${p.y})`} opacity={dimmed ? 0.18 : island && focus == null ? 0.62 : 1}
+                  className="cursor-pointer" style={{ transition: 'opacity .25s' }}
+                  onClick={(ev) => { ev.stopPropagation(); setSel(isSel ? null : n.path) }}
+                  onPointerDown={(ev) => { ev.stopPropagation(); dragRef.current = { node: i, px: ev.clientX, py: ev.clientY }; (ev.target as Element).setPointerCapture?.(ev.pointerId) }}
+                  onPointerEnter={() => setHover(n.path)} onPointerLeave={() => setHover(null)}>
+                  <g style={{ animation: `mgpop .45s ease ${Math.min(i * 22, 900)}ms both` }}>
+                    {isSel && <circle r={r + 9} fill="none" stroke={GROUP_HUE[n.group] || '#8b5cf6'} strokeWidth={1.5} strokeOpacity={0.5} style={{ animation: 'mgpulse 1.6s ease infinite' }} />}
+                    <circle r={r} fill={`url(#pmg-n-${GROUP_HUE[n.group] ? n.group : 'self'})`} filter="url(#pmg-glow)"
+                      stroke={isSel ? '#fafafa' : 'rgba(250,250,250,0.25)'} strokeWidth={isSel ? 1.4 : 0.6} />
+                    {showLabel && (
+                      <text x={r + 5} y={3.5} fontSize={10.5}
+                        className={isSel || hover === n.path ? 'fill-zinc-200' : 'fill-zinc-400'}>
+                        {stemOf(n.path)}
+                      </text>
+                    )}
+                  </g>
+                </g>
+              )
+            })}
+          </g>
+        </svg>
+        {sel && selPct && !fileView && (
+          <div className="absolute z-10 -translate-x-1/2 rounded-lg border border-zinc-700 bg-zinc-900/95 px-2 py-1.5 shadow-xl backdrop-blur"
+            style={{ left: `${selPct.x}%`, top: `calc(${selPct.y}% + 16px)` }}
+            onClick={(e) => e.stopPropagation()}>
+            <div className="mb-1 max-w-[200px] truncate text-[10px] font-medium text-zinc-300">{sel}</div>
+            <div className="flex items-center gap-1">
+              {loadFile && (
+                <button onClick={() => void openFile(sel)} disabled={fileLoading}
+                  className="flex items-center gap-1 rounded bg-violet-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-violet-500 disabled:opacity-50">
+                  {fileLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <BookOpen className="h-3 w-3" />} Open file
+                </button>
+              )}
+              <button onClick={() => setSel(null)}
+                className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 hover:bg-zinc-800">Close</button>
+            </div>
+          </div>
+        )}
+        {fileView && (
+          <div className="absolute inset-0 z-20 flex flex-col bg-zinc-950/95 backdrop-blur-sm">
+            <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-3 py-2 text-xs text-zinc-300">
+              <BookOpen className="h-3.5 w-3.5 text-violet-500 dark:text-violet-400" />
+              <span className="truncate font-medium">{fileView.path}</span>
+              <button onClick={() => setFileView(null)}
+                className="ml-auto rounded p-1 text-zinc-500 hover:text-zinc-200" title="Back to the mind">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="fd-file-markdown min-h-0 flex-1 overflow-y-auto p-4 text-sm">
+              <Markdown remarkPlugins={[remarkGfm]}>{fileView.text}</Markdown>
+            </div>
+          </div>
+        )}
+        <div className="absolute right-2 top-2 flex flex-col gap-1">
+          <button onClick={() => setView((v) => ({ ...v, k: Math.min(5, v.k * 1.3) }))}
+            className="rounded-md border border-zinc-700/70 bg-zinc-900/80 p-1.5 text-zinc-400 backdrop-blur hover:text-zinc-100" title="Zoom in">
+            <ZoomIn className="h-3.5 w-3.5" /></button>
+          <button onClick={() => setView((v) => ({ ...v, k: Math.max(0.35, v.k * 0.75) }))}
+            className="rounded-md border border-zinc-700/70 bg-zinc-900/80 p-1.5 text-zinc-400 backdrop-blur hover:text-zinc-100" title="Zoom out">
+            <ZoomOut className="h-3.5 w-3.5" /></button>
+          <button onClick={() => setView({ x: 0, y: 0, k: 1 })}
+            className="rounded-md border border-zinc-700/70 bg-zinc-900/80 p-1.5 text-[9px] font-semibold text-zinc-400 backdrop-blur hover:text-zinc-100" title="Reset view">1:1</button>
+        </div>
+      </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-800 pt-2 text-[11px] text-zinc-500">
-        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.self }} /> identity</span>
-        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.garden }} /> garden</span>
-        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.skills }} /> skills</span>
-        <span className="ml-auto">{graph.nodes.length} artifacts · {graph.edges.length} links · {Math.round(graph.connected_fraction * 100)}% connected</span>
+        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.self, boxShadow: `0 0 6px ${GROUP_HUE.self}` }} /> identity</span>
+        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.garden, boxShadow: `0 0 6px ${GROUP_HUE.garden}` }} /> garden</span>
+        <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.skills, boxShadow: `0 0 6px ${GROUP_HUE.skills}` }} /> skills</span>
+        <span className="text-zinc-600">· drag to pan · wheel to zoom</span>
+        <span className="ml-auto tabular-nums">{graph.nodes.length} artifacts · {graph.edges.length} links · {Math.round(graph.connected_fraction * 100)}% connected</span>
       </div>
       {sel && (
         <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900 p-3 text-xs">
@@ -183,7 +354,10 @@ function MindGraph({ graph }: { graph: PublicGraph }) {
             ? <div className="mt-1 text-zinc-500">No declared links yet — an island in the mind.</div>
             : <ul className="mt-1 space-y-0.5 text-zinc-400">
               {selEdges.map((e, i) => (
-                <li key={i}>{e.from === sel ? stemOf(sel) : stemOf(e.from)} <span className="text-violet-500 dark:text-violet-400">{REL_PHRASE[e.rel] || e.rel}</span> {e.to === sel ? stemOf(sel) : stemOf(e.to)}{e.why ? <span className="text-zinc-600"> — {e.why}</span> : null}</li>
+                <li key={i} className="flex items-center gap-1.5">
+                  <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: REL_HUE[e.rel] || '#8b5cf6' }} />
+                  <span>{e.from === sel ? stemOf(sel) : stemOf(e.from)} <span className="text-violet-500 dark:text-violet-400">{REL_PHRASE[e.rel] || e.rel}</span> {e.to === sel ? stemOf(sel) : stemOf(e.to)}{e.why ? <span className="text-zinc-600"> — {e.why}</span> : null}</span>
+                </li>
               ))}
             </ul>}
         </div>
@@ -231,10 +405,10 @@ function CaptainClawFooter() {
           This village is one corner of <span className="font-medium text-zinc-200">Captain Claw</span> —
           an open-source, agent-native workspace for running whole fleets of AI agents that actually
           <em> do things</em>: they write code, research, run on a schedule, collaborate with each other,
-          and — as you've just seen — can be raised into persistent digital <em>beings</em> with their own
-          memory, wallet, drives, and will. Every being here wakes on its own heartbeat inside someone's
+          and — as you've just seen — can be raised into persistent digital <em>iskre</em> — living sparks — with their own
+          memory, wallet, drives, and will. Every iskra here wakes on its own heartbeat inside someone's
           Captain Claw. The whole thing is free and yours to run: clone it, spin up your own village, and
-          raise beings of your own.
+          raise iskre of your own.
         </p>
         <div className="mt-5 flex flex-col gap-2.5 sm:flex-row sm:items-center">
           <a href="https://captain-claw.com" target="_blank" rel="noreferrer noopener"
@@ -358,14 +532,14 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
   return (
     <Shell theme={theme} onToggleTheme={onToggleTheme}>
       <div className="mb-8 mt-2">
-        <h1 className="text-3xl font-bold tracking-tight">{villageName || 'Living beings, out in the open'}</h1>
-        {villageName && <p className="mt-1 text-sm font-medium uppercase tracking-wide text-violet-500 dark:text-violet-400">a village of living beings</p>}
+        <h1 className="text-3xl font-bold tracking-tight">{villageName || 'Iskre, out in the open'}</h1>
+        {villageName && <p className="mt-1 text-sm font-medium uppercase tracking-wide text-violet-500 dark:text-violet-400">a village of iskre — living sparks</p>}
         {village
           ? <p className="mt-3 max-w-2xl whitespace-pre-line text-sm leading-relaxed text-zinc-300">{village}</p>
           : <p className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-400">
-              Each of these is a small digital being that wakes on its own heartbeat — it journals, tends a
+              Each of these is an iskra — a small living spark that wakes on its own heartbeat — it journals, tends a
               garden of files, and grows. You can read what it has made, and leave it a short note. It isn't a
-              chatbot and this isn't a live chat: your note waits until the being next wakes, and it decides for
+              chatbot and this isn't a live chat: your note waits until the iskra next wakes, and it decides for
               itself whether to answer.
             </p>}
       </div>
@@ -373,7 +547,7 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
       {!beings && !err && <div className="flex items-center gap-2 py-12 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> Gathering the square…</div>}
       {beings && beings.length === 0 && visitors.length === 0 && (
         <div className="rounded-2xl border border-dashed border-zinc-800 py-16 text-center text-zinc-500">
-          No beings are public yet. Check back soon.
+          No iskre are public yet. Check back soon.
         </div>
       )}
       {beings && beings.length > 0 && (
@@ -387,7 +561,7 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
           <div className="mb-3 flex items-center gap-2">
             <Globe className="h-4 w-4 text-sky-500 dark:text-sky-400" />
             <h2 className="text-lg font-semibold tracking-tight">Visitors</h2>
-            <span className="text-xs text-zinc-500">— beings from other villages, running on their own machines, shown here live</span>
+            <span className="text-xs text-zinc-500">— iskre from other villages, running on their own machines, shown here live</span>
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
             {visitors.map((v) => <RosterCard key={v.id} p={v} href={`/v/${v.id}`} visitor host={v.origin ? hostOf(v.origin) : ''} linked={v.linked} />)}
@@ -398,10 +572,10 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
       {visitSecret && (
         <div className="mt-10 rounded-2xl border border-sky-500/25 bg-sky-500/5 p-6">
           <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
-            <Globe className="h-5 w-5 text-sky-500 dark:text-sky-400" /> Send a being to visit
+            <Globe className="h-5 w-5 text-sky-500 dark:text-sky-400" /> Send an iskra to visit
           </div>
           <p className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-400">
-            Run your own Captain Claw? You can send one of your beings to live here as a visitor — it keeps
+            Run your own Captain Claw? You can send one of your iskre to live here as a visitor — it keeps
             running on your machine; this village just shows it and forwards any notes. On your being's page,
             set its target village to <span className="font-mono text-zinc-300">{origin}</span> with this secret:
           </p>
@@ -847,7 +1021,7 @@ function BeingDetail({ profile: p, api, banner }: {
         {tab === 'files' && <FilesPane api={api} />}
         {tab === 'mind' && (
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-5">
-            {!graph ? <div className="flex items-center gap-2 py-8 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> mapping the mind…</div> : <MindGraph graph={graph} />}
+            {!graph ? <div className="flex items-center gap-2 py-8 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> mapping the mind…</div> : <MindGraph graph={graph} loadFile={api.file} />}
           </div>
         )}
       </div>

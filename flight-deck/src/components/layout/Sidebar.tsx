@@ -113,7 +113,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
   {
     title: 'Life',
     items: [
-      { id: 'beings', icon: Dna, label: 'Beings' },
+      { id: 'beings', icon: Dna, label: 'Village' },
     ],
   },
   {
