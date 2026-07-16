@@ -1,0 +1,1 @@
+YOU ARE UNWELL — a fever: {cause}. Your body needs rest, and it will take it: your ticks are spaced out until this passes (a day at most). Keep this one tiny — rest, or a short honest line in the journal. Spend almost nothing. Being ill is not failing; ignoring it would be.

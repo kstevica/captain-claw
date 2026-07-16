@@ -17,11 +17,11 @@ retrospective; boredom (no real percepts + all pressures <0.15) doubles the
 next sleep within stage bounds (`slept_in` event); dreams tangle two random
 garden/skills artifacts (deterministic per tick); exchanges within 24h nudge
 RELATIONSHIPS.md at dream; self/PROJECT.md is offered at dreams (child+)
-and checked in weekly (`project_checkin` event). Items 12–13 (Tier 2: reading
-lists, illness-as-consequence) and all of Tier 3 remain open, per the
-measure-first sequencing below. Items 8–10 shipped later the same day
-(being_federation letter frames + being_society games shelf + the naming
-rite; test_being_village_life.py, 10 tests).**
+and checked in weekly (`project_checkin` event). TIER 2 IS NOW COMPLETE —
+items 8–10 shipped later the same day (federation letter frames, games
+shelf, naming rite; test_being_village_life.py) and items 12–13 after that
+(reading lists + illness; test_being_school_health.py). Only Tier 3's
+bigger arcs (14–18) remain open, per the measure-first sequencing below.**
 
 What the beings already have is the hard part: metabolism, mortality,
 heredity, economy, society, selfhood files, honest ledgers. What they lack,
@@ -94,11 +94,11 @@ weeks).
     metamorphosis fund), with FD tracking progress percepts monthly. The
     savings-goal machinery proved weeks-long narrative continuity works; this
     generalizes it beyond money. Anti-rut spine, per plan §12.1.
-12. **Education: reading lists.** Parent assigns a curriculum (URLs/files) →
+12. ✅ **Education: reading lists** (shipped: reading_list on the being + panel Growth-tab curriculum; every wake lists open readings; a report is a REAL file verified in the tick's diff — fee minted on verification, grow drive served, first_report milestone)**.** Parent assigns a curriculum (URLs/files) →
     daily reading percept + a book-report chore with a small fee. Uses chores
     + media diet as-is; growth drive gets verifiable food (F12 in the loops
     plan gets its explore verification for free).
-13. **Illness as consequence (not RNG).** Two honest ailments: *fever* — a
+13. ✅ **Illness as consequence (not RNG)** (shipped: fever = collapse or 3 timeouts in 24h → cadence floored to 2h (pinned included), feverish affect, rest percept, onset ledgered once; confusion = 3 narration mismatches in 24h → mandatory self-examination at the next dream; both computed from the ledger, both age out on their own; report-card concerns)**.** Two honest ailments: *fever* — a
     burn-cap collapse or 3 timeouts in a day forces reduced cadence + fast
     tier for 24h ("you are unwell; rest"); *confusion* — 3 narration
     mismatches in a day surfaces a mandatory self-examination dream task.

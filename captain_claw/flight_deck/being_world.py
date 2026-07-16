@@ -56,6 +56,14 @@ PROJECT_CHECKIN_DAYS = 7
 _EXCHANGE_KINDS = ("letter_sent", "letter_received", "gift_sent",
                    "gift_received", "skill_adopted", "skill_spread")
 
+# Illness as consequence, never RNG (roadmap T2.13). Both ailments are
+# computed from the last 24h of the REAL ledger at tick time — no new state,
+# nothing to cure but the underlying events aging out.
+ILLNESS_WINDOW_HOURS = 24.0
+FEVER_TIMEOUTS = 3               # this many timed-out ticks in a day = fever
+FEVER_MIN_WAKE_MINUTES = 120     # a fevered body spaces its ticks out
+CONFUSION_MISMATCHES = 3         # caught pretences in a day = self-exam dream
+
 _SOUTHERN_TZ_PREFIXES = (
     "Australia/", "Pacific/Auckland", "Pacific/Fiji", "Pacific/Port_Moresby",
     "Africa/Johannesburg", "Africa/Maputo", "Africa/Harare",
@@ -303,6 +311,79 @@ def project_note(store: BeingsStore, being: dict, now: datetime,
         return being_prompts.render(being, "project_checkin.md")
     except Exception:  # noqa: BLE001
         return None
+
+
+def _recent_kind_count(store: BeingsStore, being: dict, now: datetime,
+                       kinds: tuple[str, ...]) -> int:
+    since = (now - timedelta(hours=ILLNESS_WINDOW_HOURS)).isoformat()
+    n = 0
+    try:
+        for e in store.events(being["owner_id"], being["slug"], limit=200):
+            if e["at"] < since:
+                break
+            if e["kind"] in kinds:
+                n += 1
+    except Exception:  # noqa: BLE001
+        return 0
+    return n
+
+
+def fever_state(store: BeingsStore, being: dict,
+                now: datetime) -> str | None:
+    """FEVER (T2.13): a real breakdown in the last day — a burn-cap collapse
+    or repeated timed-out ticks. Returns the honest cause, or None. While it
+    holds, the tick cadence is floored (the body spaces itself out) and the
+    being is told to rest. It passes when the events age out — nothing to
+    roll, nothing to bless away."""
+    if _recent_kind_count(store, being, now, ("collapsed_exhausted",)):
+        return "your wallet collapsed from overspending"
+    timeouts = _recent_kind_count(store, being, now, ("tick_timeout",))
+    if timeouts >= FEVER_TIMEOUTS:
+        return f"your body timed out {timeouts} times today"
+    return None
+
+
+def confusion_state(store: BeingsStore, being: dict, now: datetime) -> bool:
+    """CONFUSION (T2.13): several caught pretences in one day — words that
+    claimed what the disk denied. Surfaces a mandatory self-examination at
+    the next dream."""
+    return _recent_kind_count(
+        store, being, now, ("narration_mismatch",)) >= CONFUSION_MISMATCHES
+
+
+def _mark_onset(store: BeingsStore, being: dict, ailment: str, data: dict,
+                now: datetime) -> None:
+    """Record the ailment ONCE per window — the percept repeats while it
+    lasts; the ledger records only the falling-ill."""
+    since = (now - timedelta(hours=ILLNESS_WINDOW_HOURS)).isoformat()
+    try:
+        for e in store.events(being["owner_id"], being["slug"], limit=200):
+            if e["at"] < since:
+                break
+            if e["kind"] == ailment:
+                return
+        store.record_event(being["id"], ailment, data, now=now)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def illness_percepts(store: BeingsStore, being: dict, now: datetime,
+                     kind: str, fever_cause: str | None) -> list[str]:
+    lines: list[str] = []
+    if fever_cause:
+        _mark_onset(store, being, "fever", {"cause": fever_cause}, now)
+        try:
+            lines.append(being_prompts.render(being, "fever_note.md",
+                                              cause=fever_cause))
+        except Exception:  # noqa: BLE001
+            pass
+    if kind == "dream" and confusion_state(store, being, now):
+        _mark_onset(store, being, "confusion", {}, now)
+        try:
+            lines.append(being_prompts.render(being, "confusion_note.md"))
+        except Exception:  # noqa: BLE001
+            pass
+    return lines
 
 
 def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,

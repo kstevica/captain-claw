@@ -116,6 +116,10 @@ export interface BeingVitals {
     letter: string; proposed_at: string
   } | null
   pending_name: { name: string; why: string; proposed_at: string } | null
+  reading_list: {
+    id: string; ref: string; note: string; fee_tokens: number
+    assigned_at: string; done_at: string | null; report_path: string | null
+  }[]
   tick_interval_minutes: number | null
   cognition: 'monolith' | 'faculties'
   compact_mode: boolean
@@ -290,6 +294,14 @@ export const rejectChosenName = (slug: string, note = '') =>
   fdFetch<BeingVitals>(`/beings/${slug}/name/reject`, {
     method: 'POST', body: JSON.stringify({ note }),
   })
+
+// Education: the reading list (fee paid on a verified report file).
+export const addReading = (slug: string, ref: string, note = '', feeTokens = 0) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/reading`, {
+    method: 'POST', body: JSON.stringify({ ref, note, fee_tokens: feeTokens }),
+  })
+export const removeReading = (slug: string, itemId: string) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/reading/${itemId}`, { method: 'DELETE' })
 
 export const approveProcreation = (slug: string, name = '') =>
   fdFetch<{ ok: boolean; child: BeingVitals }>(`/beings/${slug}/procreate/approve`, {

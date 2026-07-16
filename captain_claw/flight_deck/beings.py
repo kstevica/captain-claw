@@ -466,6 +466,10 @@ class BeingsStore:
                 # ONE chosen display name; it waits here for the parent's
                 # blessing. JSON {name, why, proposed_at}; slug never changes.
                 ("pending_name", "TEXT NOT NULL DEFAULT ''"),
+                # Education (roadmap T2.12): the parent-assigned curriculum.
+                # JSON list of {id, ref, note, fee_tokens, assigned_at,
+                # done_at, report_path} — reports are FD-verified real files.
+                ("reading_list", "TEXT NOT NULL DEFAULT '[]'"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -776,6 +780,10 @@ class BeingsStore:
         b["media_diet"] = json.loads(b.get("media_diet") or "{}")
         b["house_rules"] = json.loads(b.get("house_rules") or "[]")
         b["affect"] = json.loads(b.get("affect") or "{}")
+        try:
+            b["reading_list"] = json.loads(b.get("reading_list") or "[]")
+        except json.JSONDecodeError:
+            b["reading_list"] = []
         raw_bc = b.get("body_config") or ""
         try:
             b["body_config"] = json.loads(raw_bc) if raw_bc else None
@@ -965,6 +973,76 @@ class BeingsStore:
         self.record_event(b["id"], "name_rejected", {"note": note[:300]},
                           now=now)
         return self.get(owner_id, slug)
+
+    # ── Education: the reading list (roadmap T2.12) ───────────────────
+
+    READING_MAX_FEE_TOKENS = 2_000_000
+
+    def add_reading(self, owner_id: str, slug: str, ref: str, note: str = "",
+                    fee_tokens: int = 0, now: datetime | None = None) -> dict:
+        """The parent assigns one reading (a URL or anything nameable) with a
+        small fee for a verified report. Media diet applies to web refs at
+        read time exactly as to any other fetch."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        ref = (ref or "").strip()
+        if not ref:
+            raise BeingError("a reading needs something to read")
+        fee = max(0, min(int(fee_tokens or 0), self.READING_MAX_FEE_TOKENS))
+        item = {"id": uuid.uuid4().hex[:8], "ref": ref[:400],
+                "note": (note or "").strip()[:200], "fee_tokens": fee,
+                "assigned_at": _iso(now), "done_at": None,
+                "report_path": None}
+        items = list(b.get("reading_list") or []) + [item]
+        self._update(b["id"], now, reading_list=json.dumps(items))
+        self.record_event(b["id"], "reading_assigned",
+                          {"id": item["id"], "ref": ref[:200],
+                           "fee_tokens": fee}, now=now)
+        return self.get(owner_id, slug)
+
+    def remove_reading(self, owner_id: str, slug: str, item_id: str,
+                       now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        items = [i for i in (b.get("reading_list") or [])
+                 if i.get("id") != item_id]
+        if len(items) == len(b.get("reading_list") or []):
+            raise BeingNotFound("no such reading")
+        self._update(b["id"], now, reading_list=json.dumps(items))
+        return self.get(owner_id, slug)
+
+    def complete_reading(self, owner_id: str, slug: str, item_id: str,
+                         path: str, now: datetime | None = None) -> dict:
+        """Mark a reading done against a VERIFIED report file (the caller
+        checked the disk) and pay the fee — the only mint here, same
+        conservation as a judged chore. Returns the completed item."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        items = list(b.get("reading_list") or [])
+        match = next((i for i in items
+                      if i.get("id", "").startswith(item_id)
+                      and not i.get("done_at")), None)
+        if match is None:
+            raise BeingNotFound("no open reading by that id")
+        match["done_at"] = _iso(now)
+        match["report_path"] = path[:200]
+        self._update(b["id"], now, reading_list=json.dumps(items))
+        fee = int(match.get("fee_tokens") or 0)
+        if fee > 0:
+            view = self.wallet_view(b)
+            if view["savings_ceiling"] is not None:
+                fee = min(fee, max(0, view["savings_ceiling"]
+                                   - view["balance_tokens"]))
+            if fee > 0:
+                self._apply(owner_id, tokens=fee, reason="fee",
+                            from_being=None, to_being=b["id"],
+                            note=f"reading:{match['id']}", now=now)
+        self.record_event(b["id"], "reading_done",
+                          {"id": match["id"], "ref": match["ref"][:200],
+                           "path": path[:200], "fee_tokens": fee}, now=now)
+        self.milestone(b["id"], "first_report",
+                       {"ref": match["ref"][:120]}, now=now)
+        return match
 
     def penpals_sent_today(self, being_id: str,
                            now: datetime | None = None) -> int:
@@ -1319,6 +1397,7 @@ class BeingsStore:
             "pending_self_mod": b["pending_self_mod"],
             "pending_procreation": b["pending_procreation"],
             "pending_name": b.get("pending_name"),
+            "reading_list": b.get("reading_list") or [],
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "cognition": b.get("cognition") or "faculties",
             "compact_mode": bool(b.get("compact_mode")),

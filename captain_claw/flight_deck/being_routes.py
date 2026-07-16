@@ -795,6 +795,29 @@ async def set_cognition(slug: str, body: CognitionRequest,
     return _run(get_store().vitals, user["id"], slug)
 
 
+class ReadingRequest(BaseModel):
+    ref: str
+    note: str = ""
+    fee_tokens: int = 0
+
+
+@router.post("/{slug}/reading")
+async def add_reading(slug: str, body: ReadingRequest,
+                      user: dict = Depends(get_current_user)):
+    """Assign one reading (roadmap T2.12): a URL or anything nameable, with
+    a small fee paid when a REAL report file is verified on disk."""
+    _run(get_store().add_reading, user["id"], slug, body.ref, body.note,
+         body.fee_tokens)
+    return _run(get_store().vitals, user["id"], slug)
+
+
+@router.delete("/{slug}/reading/{item_id}")
+async def remove_reading(slug: str, item_id: str,
+                         user: dict = Depends(get_current_user)):
+    _run(get_store().remove_reading, user["id"], slug, item_id)
+    return _run(get_store().vitals, user["id"], slug)
+
+
 class NameRejectRequest(BaseModel):
     note: str = ""
 

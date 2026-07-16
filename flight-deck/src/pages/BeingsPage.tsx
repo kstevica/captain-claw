@@ -23,8 +23,8 @@ import {
   exportBeing, importBeing, purgeBeing, getVillageMeta, setVillageMeta,
   recommendVillageMeta, type VillageMeta, type Visitor,
   setVillageFederation, getVisitors, removeVisitor, setBeingVisit,
-  acceptVenture, approveChosenName, approveProcreation, approveSelfMod,
-  approveVenture, rejectChosenName,
+  acceptVenture, addReading, approveChosenName, approveProcreation,
+  approveSelfMod, approveVenture, rejectChosenName, removeReading,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
@@ -1893,6 +1893,46 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
 
               {/* Right — second opinion, sealed records, rites */}
               <div className="space-y-4">
+                {/* Reading list — the curriculum; fee paid on a verified report file */}
+                <div className="space-y-2.5 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Reading list</div>
+                  {(v.reading_list ?? []).length === 0 && (
+                    <p className="text-[11px] text-zinc-500">Nothing assigned. A reading is a URL or a title; the being writes a real report file, Flight Deck verifies it on disk, and the fee lands in savings.</p>
+                  )}
+                  {(v.reading_list ?? []).map((r) => (
+                    <div key={r.id} className="flex items-start justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-950/60 px-2 py-1.5">
+                      <div className="min-w-0">
+                        <div className={`truncate text-[11px] ${r.done_at ? 'text-zinc-500 line-through' : 'text-zinc-200'}`}>{r.ref}</div>
+                        <div className="text-[10px] text-zinc-600">
+                          {r.note && <span>{r.note} · </span>}
+                          {r.done_at ? <>report: {r.report_path}</> : <>open · fee {fmtTokens(r.fee_tokens)}</>}
+                        </div>
+                      </div>
+                      {!r.done_at && (
+                        <button onClick={() => run('reading', () => removeReading(slug, r.id))} disabled={busy === 'reading'}
+                          className="shrink-0 rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800">withdraw</button>
+                      )}
+                    </div>
+                  ))}
+                  <div className="flex items-center gap-1.5">
+                    <input id={`read-ref-${slug}`} placeholder="URL or title to read"
+                      className="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200 focus:border-violet-500/50 focus:outline-none" />
+                    <select id={`read-fee-${slug}`} defaultValue="100000"
+                      className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[10px] text-zinc-300 focus:outline-none">
+                      <option value="0">no fee</option>
+                      <option value="50000">50k</option>
+                      <option value="100000">100k</option>
+                      <option value="250000">250k</option>
+                    </select>
+                    <button onClick={() => {
+                      const ref = (document.getElementById(`read-ref-${slug}`) as HTMLInputElement | null)?.value.trim()
+                      const fee = Number((document.getElementById(`read-fee-${slug}`) as HTMLSelectElement | null)?.value || 0)
+                      if (ref) void run('reading', async () => { await addReading(slug, ref, '', fee); const el = document.getElementById(`read-ref-${slug}`) as HTMLInputElement | null; if (el) el.value = '' })
+                    }} disabled={busy === 'reading'}
+                      className="shrink-0 rounded-md bg-violet-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40">Assign</button>
+                  </div>
+                </div>
+
                 <div className="space-y-2.5 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Second opinion</div>
                   {assessors.length === 0 ? (

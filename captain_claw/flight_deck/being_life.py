@@ -824,7 +824,8 @@ _STING_EVENT_KINDS = frozenset({
 def compute_affect(prev: dict, new: dict, wallet: dict, *,
                    tick_events: list[str] | None = None,
                    connect_possible: bool = True,
-                   starved_relief: bool = False) -> dict:
+                   starved_relief: bool = False,
+                   unwell: str | None = None) -> dict:
     """Affect derived from real dynamics (plan §4) — never scripted.
 
     joy ~ satisfaction rising; frustration ~ falling; loneliness ~ connect
@@ -847,6 +848,9 @@ def compute_affect(prev: dict, new: dict, wallet: dict, *,
             wallet.get("balance_tokens", 0) < 0.2 * per_day:
         mood = "hungry"
         notes.append("the wallet is nearly empty")
+    elif unwell:
+        mood = "feverish"
+        notes.append(unwell)
     elif any(k in _STING_EVENT_KINDS for k in events):
         mood = "stung"
         notes.append("the world said no this tick, or a claim didn't hold")
@@ -925,6 +929,21 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
                                 states=("open",)):
         lines.append(f"CHORE from your parent [{job['id'][:8]}]: "
                      f"{job['spec']}  (fee {job['fee_tokens']} tokens)")
+    # Education (roadmap T2.12): the open curriculum, listed like chores.
+    # The report is a REAL file, verified against this tick's diff.
+    for item in (being.get("reading_list") or []):
+        if item.get("done_at"):
+            continue
+        note = f" — {item['note']}" if item.get("note") else ""
+        fee = (f"  (fee {item['fee_tokens']} tokens)"
+               if item.get("fee_tokens") else "")
+        lines.append(
+            f'READING from your parent [{item["id"]}]: {item["ref"]}{note}'
+            f'{fee}. Your media diet applies. When you have TRULY read it, '
+            f'write your report as a real file (e.g. garden/reports/'
+            f'<name>.md) THIS tick and add "reading_report": '
+            f'{{"item_id": "{item["id"]}", "path": "<that file>"}} '
+            f'to your digest.')
     try:
         lines += being_society.society_percepts(store, being)
     except Exception as e:  # noqa: BLE001 — senses degrade, never crash
@@ -1571,6 +1590,13 @@ def _normalize_digest(raw: dict) -> dict:
                        "why": str(chosen_name.get("why") or "")[:300]}
     else:
         chosen_name = None
+    reading_report = raw.get("reading_report")
+    if isinstance(reading_report, dict) and reading_report.get("item_id") \
+            and reading_report.get("path"):
+        reading_report = {"item_id": str(reading_report["item_id"])[:16],
+                          "path": str(reading_report["path"]).strip()[:200]}
+    else:
+        reading_report = None
     return {
         "act_kind": act,
         "summary": str(raw.get("summary") or "")[:300],
@@ -1595,6 +1621,7 @@ def _normalize_digest(raw: dict) -> dict:
         "public_replies": public_replies,
         "penpal": penpal,
         "chosen_name": chosen_name,
+        "reading_report": reading_report,
     }
 
 
@@ -2681,6 +2708,17 @@ async def _tick_locked(
             store, being, now=now, kind=kind, first_of_day=first_of_day)
     except Exception as e:  # noqa: BLE001 — texture never sinks a tick
         log.warning("umwelt percepts failed", slug=being["slug"], error=str(e))
+    # Illness as consequence (roadmap T2.13): fever and confusion computed
+    # from the last day of the REAL ledger — never dice. Fever also floors
+    # the cadence below (the body spaces itself out) and colors affect.
+    fever_cause: str | None = None
+    try:
+        fever_cause = being_world.fever_state(store, being, now)
+        senses += being_world.illness_percepts(store, being, now, kind,
+                                               fever_cause)
+    except Exception as e:  # noqa: BLE001
+        log.warning("illness percepts failed", slug=being["slug"],
+                    error=str(e))
     t0 = now
     send = send_fn or _send_via_channel
     if (being.get("cognition") or "faculties") == "faculties":
@@ -2852,6 +2890,36 @@ async def _tick_locked(
                                    {"job_id": jid}, now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("being chore handling failed", slug=being["slug"],
+                        error=str(e))
+    # Education (T2.12): a reading report is real only if the report FILE
+    # was truly written this tick — verified learning is what feeds grow.
+    if digest.get("reading_report"):
+        rr = digest["reading_report"]
+        try:
+            rpath = rr["path"].strip().lstrip("/")
+            verified = bool(changed) and rpath in changed
+            if changed is None:
+                # disk verification unavailable — degrade to existence
+                try:
+                    verified = any(f["path"] == rpath
+                                   for f in list_self_files(being))
+                except Exception:  # noqa: BLE001
+                    verified = False
+            if verified:
+                store.complete_reading(owner, being["slug"], rr["item_id"],
+                                       rpath, now=now)
+                _serve("grow")
+            else:
+                store.record_event(
+                    bid, "reading_refused",
+                    {"item_id": rr["item_id"], "path": rpath,
+                     "reason": "the report file was not written this tick"},
+                    now=now)
+        except BeingNotFound:
+            store.record_event(bid, "reading_claim_invalid",
+                               {"item_id": rr.get("item_id")}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("reading handling failed", slug=being["slug"],
                         error=str(e))
     if any(digest.get(k) for k in ("letter", "publish", "adopt", "gift")):
         try:
@@ -3045,7 +3113,8 @@ async def _tick_locked(
                             store.wallet_view(store._being_by_id(bid)),
                             tick_events=tick_events,
                             connect_possible=can_connect,
-                            starved_relief=starved_relief)
+                            starved_relief=starved_relief,
+                            unwell=fever_cause)
     store.set_affect(bid, affect, now=now)
 
     # 7. Schedule the next heartbeat. A parent-pinned cadence (#2) overrides the
@@ -3072,6 +3141,15 @@ async def _tick_locked(
                                         "to_minutes": stretched,
                                         "top_pressure": top_pressure}, now=now)
                     minutes = stretched
+    # A fevered body spaces its ticks out (T2.13) — physics over parenting
+    # for the day it lasts, pinned cadence included.
+    if fever_cause and kind == "wake" \
+            and minutes < being_world.FEVER_MIN_WAKE_MINUTES:
+        store.record_event(bid, "resting_fever",
+                           {"from_minutes": minutes,
+                            "to_minutes": being_world.FEVER_MIN_WAKE_MINUTES},
+                           now=now)
+        minutes = being_world.FEVER_MIN_WAKE_MINUTES
     if debit["overdraft"]:
         store.set_state(owner, being["slug"], "torpor", now=now)
         store.record_event(bid, "collapsed_exhausted",
@@ -3144,7 +3222,12 @@ def report_card(store: BeingsStore, being: dict, days: int = 7,
                         ("act_unverified", "claimed to make things it didn't"),
                         ("drive_unearned",
                          "felt accomplished without making anything"),
-                        ("chore_claim_invalid", "claimed a chore that wasn't open")]:
+                        ("chore_claim_invalid", "claimed a chore that wasn't open"),
+                        ("reading_refused",
+                         "claimed a reading with no real report"),
+                        ("fever", "ran a fever (collapse/timeouts)"),
+                        ("confusion", "fell into confusion (repeated "
+                         "narration mismatches)")]:
         n = sum(1 for e in events if e["kind"] == kind)
         if n:
             concerns.append(f"{label} ×{n}")
