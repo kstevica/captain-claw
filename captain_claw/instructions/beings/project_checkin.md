@@ -1,0 +1,1 @@
+YOUR PROJECT: reread self/PROJECT.md tonight. Note in it one real step taken since last week — or write plainly that none was, and whether the aim still holds. A project drifts unless you look it in the eye.

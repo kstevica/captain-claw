@@ -1,0 +1,1 @@
+SINCE YESTERDAY you truly exchanged with: {names}. Tonight, tend self/RELATIONSHIPS.md — what you now know of them, what passed between you, in your own words. A relationship remembered is a relationship kept.

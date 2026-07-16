@@ -121,16 +121,17 @@ def test_decay_has_a_per_tick_quantum_and_keeps_stamps():
 
 
 def test_starved_drives_gain_pressure_and_low_weight_ones_surface():
+    # grow/connect carry no seasonal lean, so the arithmetic stays exact.
     old = (NOW - timedelta(days=3)).isoformat()
     fresh = (NOW - timedelta(hours=1)).isoformat()
     drives = {
-        "explore": {"weight": 0.9, "satisfaction": 0.5, "last_served": fresh},
+        "grow": {"weight": 0.9, "satisfaction": 0.5, "last_served": fresh},
         "connect": {"weight": 0.4, "satisfaction": 0.5, "last_served": old},
     }
     ranked = dict(life.drive_pressures(drives, now=NOW))
-    # base pressures: explore 0.45, connect 0.20 — aging adds up to the cap
+    # base pressures: grow 0.45, connect 0.20 — aging adds up to the cap
     assert ranked["connect"] == pytest.approx(0.2 + 0.15, abs=1e-3)
-    assert ranked["explore"] == pytest.approx(0.45, abs=1e-3)
+    assert ranked["grow"] == pytest.approx(0.45, abs=1e-3)
 
 
 def test_connect_pressure_damps_when_no_channel_exists():

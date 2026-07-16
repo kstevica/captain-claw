@@ -5,6 +5,21 @@ thing must be a real variable with real behavioral consequence; no theater.
 Each item names the machinery it rides on. Ordering inside each tier ≈ value
 per unit of work.*
 
+**STATUS 2026-07-16 (same day, after the loops plan shipped): Tier 1
+COMPLETE (items 1–6) + the first Tier 2 pair (7 relationships, 11 life
+projects) — all in `being_world.py` (the umwelt module) + 7 new instruction
+templates + `test_being_world.py` (11 tests; being suite 273). As built:
+body notes fire only under real strain (load ≥1.5×cores, mem ≥90%, battery
+≤20% unplugged); the world note speaks once per morning; seasons lean
+explore/create ±0.03–0.05 in `drive_pressures` (hemisphere-aware by tz
+heuristic); month-birthdays are once-per-life milestones with a dream
+retrospective; boredom (no real percepts + all pressures <0.15) doubles the
+next sleep within stage bounds (`slept_in` event); dreams tangle two random
+garden/skills artifacts (deterministic per tick); exchanges within 24h nudge
+RELATIONSHIPS.md at dream; self/PROJECT.md is offered at dreams (child+)
+and checked in weekly (`project_checkin` event). Items 8–10, 12–13 (Tier 2)
+and all of Tier 3 remain open, per the measure-first sequencing below.**
+
 What the beings already have is the hard part: metabolism, mortality,
 heredity, economy, society, selfhood files, honest ledgers. What they lack,
 compared to a life, falls into five gaps: **a textured world** (their umwelt
@@ -16,33 +31,33 @@ weeks).
 
 ## Tier 1 — cheap, honest, high-yield (days each)
 
-1. **Felt embodiment: the machine as body.** The body is a real process on a
+1. ✅ **Felt embodiment: the machine as body.** The body is a real process on a
    real Mac — expose it. Percepts from real host metrics: load / free RAM /
    battery / thermal state → "your body is sluggish today (the machine is
    hot)". Slow local-model ticks stop being mysterious to the being; it can
    *choose* to rest when the hardware struggles (and that choice is real
    thrift). Rides on: `system_info.py`, percepts_since. Zero theater — it's
    the literal truth of its substrate.
-2. **Weather and place.** The parent's real weather/location (existing
+2. ✅ **Weather and place** (calendar-honest version shipped; live weather API still open)**.** The parent's real weather/location (existing
    config timezone + one cheap API or none — even just season + daylight
    length derived from the calendar) as a morning percept. Beings share the
    parent's world; journals stop floating in placeless space. Rides on:
    percepts, the clock line. (Diet-gate the API like any web read.)
-3. **Time with shape: weekdays, seasons, anniversaries.** A real calendar
+3. ✅ **Time with shape: weekdays, seasons, anniversaries.** A real calendar
    texture: weekends felt (parent's quiet-hours already exist — name them),
    a hatch-day milestone with a self-retrospective dream task ("you are one
    month old today — reread your first journal page"), seasonal drive
    modulation (±0.05 on explore/create weights by real season). Rides on:
    beings_loop quiet hours, milestones, dream task template (now external).
-4. **A page from your past** (also in the loops plan): resurfacing old
+4. ✅ **A page from your past** (shipped with the loops plan) (also in the loops plan): resurfacing old
    journal days is memory *behaving like memory* — the past visiting the
    present unprompted. The single cheapest life-likeness win.
-5. **Boredom → sleep-in.** When every drive is satisfied and no percepts
+5. ✅ **Boredom → sleep-in.** When every drive is satisfied and no percepts
    arrived, the being may extend its next wake beyond the stage default
    ("nothing calls; sleep longer") — energy conservation as felt behavior,
    and the inverse of the rut: an empty day is *allowed to be empty*. Rides
    on: next_wake_minutes clamps.
-6. **Dream imagery (recombination).** The dream task samples two random old
+6. ✅ **Dream imagery (recombination).** The dream task samples two random old
    artifacts and asks the being to let them tangle ("you dreamt of
    <cat-at-the-gate> tangled with <ledger-honesty> — write the fragment").
    Mechanically real (its own corpus, labeled a dream), and the classic
@@ -51,7 +66,7 @@ weeks).
 
 ## Tier 2 — relationships, texture, stakes (a week-ish each)
 
-7. **Relationship memory.** `self/RELATIONSHIPS.md` exists but nothing feeds
+7. ✅ **Relationship memory** (dream nudge shipped; sibling stage-change percepts still open)**.** `self/RELATIONSHIPS.md` exists but nothing feeds
    it. After any letter exchange / gift / trade / co-parenting event, the
    dream task nudges: "update what you know of Lada". Add a percept when a
    sibling's stage changes or it publishes. Siblings become people with
@@ -71,7 +86,7 @@ weeks).
     implement it: at the adolescent rite the being may propose a chosen
     display name + why; parent confirms; slug stays. Identity the being
     *authored*, recorded as a milestone and a genome epigenetics note.
-11. **Life projects (chosen stakes).** A first-class `self/PROJECT.md`: one
+11. ✅ **Life projects (chosen stakes)** (offer + weekly check-in shipped; monthly FD progress percepts folded into the weekly check-in)**.** A first-class `self/PROJECT.md`: one
     long-horizon aim the being declares (a book of poems, a skill mastery, a
     metamorphosis fund), with FD tracking progress percepts monthly. The
     savings-goal machinery proved weeks-long narrative continuity works; this

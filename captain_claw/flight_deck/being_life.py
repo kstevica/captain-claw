@@ -36,6 +36,7 @@ from captain_claw.flight_deck import (
     being_prompts,
     being_selfmod,
     being_society,
+    being_world,
 )
 from captain_claw.flight_deck.being_society import COMMONS_PROJECT
 from captain_claw.flight_deck.beings import BeingError, BeingNotFound, BeingsStore
@@ -105,6 +106,10 @@ VARIETY_RUT_THRESHOLD = 0.6
 # Every Nth wake the journal tail is an OLD page, not the echo of the last
 # hour (loops plan F5) — sampled memory instead of a rut seed.
 PAST_PAGE_EVERY_TICKS = 5
+# Boredom → sleep in (roadmap T1.5): a wake with nothing new in the senses
+# and every drive pressure this low may stretch its next sleep — an empty
+# day is allowed to be empty, and idling costs the wallet nothing.
+BOREDOM_PRESSURE_MAX = 0.15
 
 # next_wake_minutes clamps per stage: (min, max, default)
 WAKE_BOUNDS = {
@@ -765,7 +770,11 @@ def drive_pressures(drives: dict, now: datetime | None = None,
     now = now or _utcnow()
     ranked = []
     for n, d in (drives or {}).items():
-        p = float(d.get("weight", 0.5)) * (1.0 - float(d.get("satisfaction", 0.7)))
+        # The season leans on explore/create a little (roadmap T1.3) —
+        # the real calendar, hemisphere-aware, never more than a lean.
+        weight = (float(d.get("weight", 0.5))
+                  + being_world.seasonal_weight_shift(n, now))
+        p = weight * (1.0 - float(d.get("satisfaction", 0.7)))
         ls = d.get("last_served")
         if ls:
             try:
@@ -2483,6 +2492,17 @@ async def _tick_locked(
     # Is there any channel connection could flow through this tick? Feeds the
     # pressure damp in the prompts and keeps 'lonely' honest (loops plan F9).
     can_connect = connect_outlets(being, sibs, letters_left, senses)
+    # Was there anything CALLING before the world's ambient texture? Boredom
+    # (T1.5) is judged on real stimulation, not on the weather report.
+    stimulated = bool(senses) or bool(visitors)
+    # The umwelt (roadmap Tier 1 + 2): the calendar each morning, the machine
+    # as felt body under strain, and at dreams — month-birthdays, a tangle of
+    # two old works, exchanged-with siblings, the life project.
+    try:
+        senses += being_world.umwelt_percepts(
+            store, being, now=now, kind=kind, first_of_day=first_of_day)
+    except Exception as e:  # noqa: BLE001 — texture never sinks a tick
+        log.warning("umwelt percepts failed", slug=being["slug"], error=str(e))
     t0 = now
     send = send_fn or _send_via_channel
     if (being.get("cognition") or "faculties") == "faculties":
@@ -2827,6 +2847,23 @@ async def _tick_locked(
         minutes = int(interval)
     else:
         minutes = clamp_next_wake(being["stage"], digest["next_wake_minutes"])
+        # Boredom → sleep in (roadmap T1.5): nothing called this tick and
+        # every drive is quiet — the next sleep stretches (within the stage
+        # ceiling). An empty day is allowed to be empty; idling is thrift.
+        if kind == "wake" and not stimulated:
+            top_pressure = max(
+                (p for _, p in drive_pressures(drives, now=now,
+                                               connect_possible=can_connect)),
+                default=1.0)
+            if top_pressure < BOREDOM_PRESSURE_MAX:
+                hi = WAKE_BOUNDS.get(being["stage"], (30, 480, 60))[1]
+                stretched = min(hi, minutes * 2)
+                if stretched > minutes:
+                    store.record_event(bid, "slept_in",
+                                       {"from_minutes": minutes,
+                                        "to_minutes": stretched,
+                                        "top_pressure": top_pressure}, now=now)
+                    minutes = stretched
     if debit["overdraft"]:
         store.set_state(owner, being["slug"], "torpor", now=now)
         store.record_event(bid, "collapsed_exhausted",

@@ -1,0 +1,1 @@
+IN TONIGHT'S DREAM two of your works tangle: {a} and {b}. If the tangle moves you, write the small strange fragment where they meet (a real file, e.g. vfs:{proj}/garden/<name>.md) — dreams are allowed to be odd; only the writing must be real.
