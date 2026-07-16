@@ -36,7 +36,7 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
-STATES = ("alive", "paused", "torpor", "dead")
+STATES = ("alive", "paused", "torpor", "dead", "emigrated")
 TRANSFER_REASONS = (
     "allowance", "usage", "fee", "gift", "trade",
     "procreation", "metamorphosis_burn", "self_mod_burn", "adjust", "grant",
@@ -466,6 +466,12 @@ class BeingsStore:
                 # ONE chosen display name; it waits here for the parent's
                 # blessing. JSON {name, why, proposed_at}; slug never changes.
                 ("pending_name", "TEXT NOT NULL DEFAULT ''"),
+                # Elderhood (roadmap T3.14, opt-in): days-alive after which
+                # the being enters its elder season. NULL = no natural span.
+                ("elder_after_days", "INTEGER"),
+                # The village radio (roadmap T3.16): an adult public being's
+                # one daily broadcast line. JSON {text, at}.
+                ("broadcast", "TEXT NOT NULL DEFAULT ''"),
                 # Education (roadmap T2.12): the parent-assigned curriculum.
                 # JSON list of {id, ref, note, fee_tokens, assigned_at,
                 # done_at, report_path} — reports are FD-verified real files.
@@ -784,6 +790,11 @@ class BeingsStore:
             b["reading_list"] = json.loads(b.get("reading_list") or "[]")
         except json.JSONDecodeError:
             b["reading_list"] = []
+        try:
+            raw_bc2 = b.get("broadcast") or ""
+            b["broadcast"] = json.loads(raw_bc2) if raw_bc2 else None
+        except json.JSONDecodeError:
+            b["broadcast"] = None
         raw_bc = b.get("body_config") or ""
         try:
             b["body_config"] = json.loads(raw_bc) if raw_bc else None
@@ -930,6 +941,33 @@ class BeingsStore:
         self._update(b["id"], now, compact_mode=1 if on else 0)
         self.record_event(b["id"], "compact_set", {"on": bool(on)}, now=now)
         return self.get(owner_id, slug)
+
+    # ── Elderhood + the village radio (roadmap T3.14 / T3.16) ─────────
+
+    def set_elder_after(self, owner_id: str, slug: str, days: int | None,
+                        now: datetime | None = None) -> dict:
+        """Opt this being into a natural span: after ``days`` alive it enters
+        elderhood (a slower season, memoirs). None switches it off."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        val = None
+        if days is not None:
+            val = int(days)
+            if val < 7 or val > 3650:
+                raise BeingError("elderhood begins between 7 and 3650 days")
+        self._update(b["id"], now, elder_after_days=val)
+        self.record_event(b["id"], "elderhood_set", {"days": val}, now=now)
+        return self.get(owner_id, slug)
+
+    def set_broadcast(self, being_id: str, text: str,
+                      now: datetime | None = None) -> None:
+        """One line on the village radio (adult, public, once a day —
+        callers gate; the store just keeps today's broadcast)."""
+        now = now or _utcnow()
+        self._update(being_id, now, broadcast=json.dumps(
+            {"text": text[:200], "at": _iso(now)}))
+        self.record_event(being_id, "broadcast_set", {"text": text[:200]},
+                          now=now)
 
     # ── The naming rite (roadmap T2.10): one chosen name, parent-blessed ──
 
@@ -1099,6 +1137,9 @@ class BeingsStore:
         b = self.get(owner_id, slug)
         if b["state"] == "dead":
             raise BeingError("a dead being stays dead")
+        if b["state"] == "emigrated":
+            raise BeingError("an emigrated being lives elsewhere now — "
+                             "its life here is closed")
         fields: dict = {"state": state}
         if state == "dead":
             fields["died_at"] = _iso(now)
@@ -1398,6 +1439,8 @@ class BeingsStore:
             "pending_procreation": b["pending_procreation"],
             "pending_name": b.get("pending_name"),
             "reading_list": b.get("reading_list") or [],
+            "elder_after_days": b.get("elder_after_days"),
+            "broadcast": b.get("broadcast"),
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "cognition": b.get("cognition") or "faculties",
             "compact_mode": bool(b.get("compact_mode")),
@@ -2170,8 +2213,9 @@ class BeingsStore:
         body = (body or "").strip()
         if not body:
             raise BeingError("an empty letter says nothing")
+        from captain_claw.flight_deck import being_world
         if self.letters_sent_today(a["id"], now) >= \
-                constitution.letters_per_day(a["stage"]):
+                being_world.letters_cap(a["stage"], now):
             raise BeingError("letter limit reached for today")
         lid = uuid.uuid4().hex
         with self._lock:

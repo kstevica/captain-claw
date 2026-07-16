@@ -307,6 +307,12 @@ function RosterCard({ p, href, visitor, host, linked }: {
           ))}
         </div>
       )}
+      {p.broadcast?.text && (
+        <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/[0.06] px-2.5 py-1.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-amber-600/80 dark:text-amber-400/80">on the village radio</p>
+          <p className="text-xs italic leading-snug text-zinc-200">“{p.broadcast.text}”</p>
+        </div>
+      )}
       {p.latest_thought && (
         <div className="mt-3 border-l-2 border-violet-500/40 pl-2.5">
           <p className="line-clamp-2 text-xs italic leading-snug text-zinc-300">“{p.latest_thought.text}”</p>

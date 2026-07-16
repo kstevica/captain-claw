@@ -139,7 +139,14 @@ def games_note(being: dict, siblings: list[dict] | None,
         return None
     derived = genome_mod.derive(genome_mod.effective_attributes(
         being["genome"]))
-    if derived.get("whimsy", 0.0) < 0.5:
+    whimsy = derived.get("whimsy", 0.0)
+    try:
+        from captain_claw.flight_deck import being_world
+        if being_world.is_elder(being, _utcnow()):
+            whimsy += being_world.ELDER_WHIMSY_BONUS   # T3.14: play is cheap now
+    except Exception:  # noqa: BLE001
+        pass
+    if whimsy < 0.5:
         return None
     if int(being.get("tick_count") or 0) % 5 != 2:
         return None

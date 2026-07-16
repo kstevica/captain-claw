@@ -25,7 +25,8 @@ import {
   setVillageFederation, getVisitors, removeVisitor, setBeingVisit,
   acceptVenture, addReading, approveChosenName, approveProcreation,
   approveSelfMod, approveVenture, rejectChosenName, removeReading,
-  arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
+  arrangeOffspring, cancelQuest, conceiveBeing, emigrateBeing,
+  euthanizeBeing, setElderhood,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
   getBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
@@ -2038,6 +2039,33 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                     {!v.pending_procreation && v.capabilities.includes('procreate') && (
                       <button onClick={() => { const cn = window.prompt(`Name for ${name}'s child?`); if (!cn) return; const partner = window.prompt('Co-parent (sibling name), or leave empty for budding:') || null; void run('procreate', () => arrangeOffspring(slug, cn, partner)) }} disabled={busy === 'procreate'}
                         className="rounded-md border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Arrange offspring</button>
+                    )}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-zinc-800/70 pt-2">
+                    <span className="text-[11px] text-zinc-500">elderhood</span>
+                    <select value={v.elder_after_days ?? ''}
+                      onChange={(e) => void run('elder', () => setElderhood(slug, e.target.value ? Number(e.target.value) : null))}
+                      className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[11px] text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+                      <option value="">no natural span</option>
+                      {[30, 60, 90, 180, 365].map((d) => <option key={d} value={d}>after {d} days</option>)}
+                    </select>
+                    <span className="text-[10px] text-zinc-600">a season: slower pace, higher whimsy, the memoirs</span>
+                    {v.state !== 'dead' && v.state !== 'emigrated' && (
+                      <button onClick={() => setConfirm({
+                        title: `Let ${name} emigrate?`,
+                        message: 'Its whole life exports as a manifest (downloaded now) and this life CLOSES here — one life, one place. The receiving deck imports the manifest and its parent adopts. There is no return.',
+                        confirmLabel: 'Emigrate', tone: 'danger',
+                        run: () => run('emigrate', async () => {
+                          const out = await emigrateBeing(slug)
+                          const blob = new Blob([JSON.stringify(out.manifest, null, 2)], { type: 'application/json' })
+                          const a = document.createElement('a')
+                          a.href = URL.createObjectURL(blob)
+                          a.download = `${slug}-emigration.json`
+                          a.click()
+                          URL.revokeObjectURL(a.href)
+                        }),
+                      })} disabled={busy === 'emigrate'}
+                        className="ml-auto rounded-md border border-red-900/50 px-2.5 py-1 text-[11px] text-red-600/80 hover:bg-red-500/10 dark:text-red-400/80">Emigrate…</button>
                     )}
                   </div>
                   {v.persona && (

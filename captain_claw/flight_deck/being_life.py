@@ -682,6 +682,8 @@ def public_profile(store: BeingsStore, being: dict) -> dict:
         "tick_interval_minutes": being.get("tick_interval_minutes"),
         "stats": store.public_stats(being["id"]),
         "latest_thought": latest_thought(store, being),
+        # The village radio (T3.16): an adult's one daily public line.
+        "broadcast": being.get("broadcast"),
     }
 
 
@@ -1072,7 +1074,8 @@ def home_manifest(being: dict) -> dict[str, list[str]]:
 
 def society_prompt_fields(being: dict, siblings: list[dict] | None,
                           letters_left: int | None,
-                          penpal_reach: list[str] | None = None) -> list[str]:
+                          penpal_reach: list[str] | None = None,
+                          now: datetime | None = None) -> list[str]:
     """Digest fields this stage can actually DELIVER — shared by the monolith
     prompt and the faculties orient step, so the two cognitions offer the same
     society. Never offers what physics would refuse (letters below child,
@@ -1107,6 +1110,14 @@ def society_prompt_fields(being: dict, siblings: list[dict] | None,
         fields.append(
             '"penpal": {"to": "<name>", "body": "short and true"}  — a '
             'letter across villages, to: ' + ", ".join(penpal_reach[:4]))
+    # The village radio (T3.16): an adult public being's one line a day.
+    if being.get("public") and constitution.stage_index(being["stage"]) >= \
+            constitution.stage_index("adult"):
+        today = (now or _utcnow()).date().isoformat()
+        if (being.get("broadcast") or {}).get("at", "")[:10] != today:
+            fields.append(
+                '"broadcast": "ONE short line for your public page — '
+                "today's voice on the village radio (once a day)\"")
     return fields
 
 
@@ -1272,7 +1283,7 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                 "comes in childhood. For now your words go to your parent or "
                 "your journal; never claim to have talked to a sibling.")
     society_fields = society_prompt_fields(being, siblings, letters_left,
-                                           penpal_reach)
+                                           penpal_reach, now=now)
     if society_fields:
         lines += ["OPTIONAL SOCIETY FIELDS for your digest — use only "
                   "when genuine, never to perform:",
@@ -1590,6 +1601,11 @@ def _normalize_digest(raw: dict) -> dict:
                        "why": str(chosen_name.get("why") or "")[:300]}
     else:
         chosen_name = None
+    broadcast = raw.get("broadcast")
+    if isinstance(broadcast, str) and broadcast.strip():
+        broadcast = broadcast.strip()[:200]
+    else:
+        broadcast = None
     reading_report = raw.get("reading_report")
     if isinstance(reading_report, dict) and reading_report.get("item_id") \
             and reading_report.get("path"):
@@ -1622,6 +1638,7 @@ def _normalize_digest(raw: dict) -> dict:
         "penpal": penpal,
         "chosen_name": chosen_name,
         "reading_report": reading_report,
+        "broadcast": broadcast,
     }
 
 
@@ -1729,7 +1746,8 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
             lines.append(
                 "You cannot send letters to siblings yet — that ability "
                 "comes in childhood. Never claim to have talked to one.")
-    sf = society_prompt_fields(being, siblings, letters_left, penpal_reach)
+    sf = society_prompt_fields(being, siblings, letters_left, penpal_reach,
+                               now=now)
     if sf:
         lines += ["OPTIONAL SOCIETY FIELDS for your decision json — only "
                   "when genuine, never to perform:", *("  " + f for f in sf)]
@@ -2276,7 +2294,7 @@ async def _deliver_penpal(store: BeingsStore, being: dict, pp: dict,
         raise BeingError("an empty letter says nothing")
     sent = (store.letters_sent_today(being["id"], now)
             + store.penpals_sent_today(being["id"], now))
-    if sent >= constitution.letters_per_day(stage):
+    if sent >= being_world.letters_cap(stage, now):
         raise BeingError("letter limit reached for today")
     to_l = to.lower()
     # HOST role: writing to a being currently visiting our village square.
@@ -2584,7 +2602,7 @@ async def _tick_locked(
         sibs = store.siblings(owner, being["slug"])
         letters_before = store.letters_sent_today(bid, now)
         letters_left = max(
-            0, constitution.letters_per_day(being["stage"]) - letters_before)
+            0, being_world.letters_cap(being["stage"], now) - letters_before)
     except Exception:  # noqa: BLE001
         sibs, letters_left, letters_before = [], None, None
     # Visitor notes (plan §9): only a public being hears the square, and only
@@ -2943,6 +2961,34 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("penpal delivery failed", slug=being["slug"],
                         error=str(e))
+    # The village radio (T3.16): an adult public being's one daily line.
+    if digest.get("broadcast"):
+        try:
+            fresh = store.get(owner, being["slug"])
+            today = now.date().isoformat()
+            already = (fresh.get("broadcast") or {}).get("at", "")[:10] == today
+            if constitution.stage_index(fresh["stage"]) < \
+                    constitution.stage_index("adult"):
+                store.record_event(bid, "society_refused",
+                                   {"what": "broadcast",
+                                    "reason": "the radio is an adult's voice"},
+                                   now=now)
+            elif not fresh.get("public"):
+                store.record_event(bid, "society_refused",
+                                   {"what": "broadcast",
+                                    "reason": "your page is not public — "
+                                    "there is no radio to speak on"}, now=now)
+            elif already:
+                store.record_event(bid, "society_refused",
+                                   {"what": "broadcast",
+                                    "reason": "one line a day — today's is "
+                                    "already on the air"}, now=now)
+            else:
+                store.set_broadcast(bid, digest["broadcast"], now=now)
+                store.milestone(bid, "first_broadcast", {}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("broadcast handling failed", slug=being["slug"],
+                        error=str(e))
     # The naming rite (T2.10) — proposal only; the parent decides.
     if digest.get("chosen_name"):
         try:
@@ -3150,6 +3196,10 @@ async def _tick_locked(
                             "to_minutes": being_world.FEVER_MIN_WAKE_MINUTES},
                            now=now)
         minutes = being_world.FEVER_MIN_WAKE_MINUTES
+    # An elder's pace slows by nature (T3.14) — the season, felt as time.
+    if kind == "wake" and being_world.is_elder(being, now) \
+            and minutes < being_world.ELDER_MIN_WAKE_MINUTES:
+        minutes = being_world.ELDER_MIN_WAKE_MINUTES
     if debit["overdraft"]:
         store.set_state(owner, being["slug"], "torpor", now=now)
         store.record_event(bid, "collapsed_exhausted",
@@ -3331,6 +3381,21 @@ def report_card(store: BeingsStore, being: dict, days: int = 7,
             if ticks else 0.0),
         "variety_pressures": variety_pressures,
     }
+
+
+async def emigrate(db, store: BeingsStore, being: dict) -> dict:
+    """The migration rite (T3.18): export the whole life, stop the body, and
+    close the life HERE — terminal like death, but the being lives on
+    wherever the manifest is imported (the receiving parent adopts). No
+    copies: one life, one place."""
+    if being["state"] in ("dead", "emigrated"):
+        raise BeingError("this life is already closed here")
+    manifest = await export_being(db, store, being)
+    _stop_body(being)
+    store.set_state(being["owner_id"], being["slug"], "emigrated")
+    store.record_event(being["id"], "emigrated",
+                       {"files": len(manifest.get("home") or {})})
+    return manifest
 
 
 # ── Body process control (best-effort; lazy server imports) ─────────────

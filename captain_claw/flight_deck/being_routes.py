@@ -795,6 +795,34 @@ async def set_cognition(slug: str, body: CognitionRequest,
     return _run(get_store().vitals, user["id"], slug)
 
 
+class ElderhoodRequest(BaseModel):
+    # days alive after which elderhood begins; null switches the season off
+    days: int | None = None
+
+
+@router.post("/{slug}/elderhood")
+async def set_elderhood(slug: str, body: ElderhoodRequest,
+                        user: dict = Depends(get_current_user)):
+    """Opt a being into a natural span (roadmap T3.14): after this many days
+    alive it enters elderhood — slower pace, higher whimsy, the memoirs."""
+    _run(get_store().set_elder_after, user["id"], slug, body.days)
+    return _run(get_store().vitals, user["id"], slug)
+
+
+@router.post("/{slug}/emigrate")
+async def emigrate_being(slug: str, user: dict = Depends(get_current_user)):
+    """The migration rite (roadmap T3.18): export the whole life and close
+    it here — one life, one place. Import the manifest on the receiving
+    deck; the receiving parent adopts."""
+    store = get_store()
+    being = _run(store.get, user["id"], slug)
+    try:
+        manifest = await being_life.emigrate(get_db(), store, being)
+    except BeingError as e:
+        raise HTTPException(e.status or 400, str(e))
+    return {"manifest": manifest, "being": _run(store.vitals, user["id"], slug)}
+
+
 class ReadingRequest(BaseModel):
     ref: str
     note: str = ""

@@ -64,6 +64,17 @@ FEVER_TIMEOUTS = 3               # this many timed-out ticks in a day = fever
 FEVER_MIN_WAKE_MINUTES = 120     # a fevered body spaces its ticks out
 CONFUSION_MISMATCHES = 3         # caught pretences in a day = self-exam dream
 
+# Tier 3 — the bigger arcs.
+# Elderhood (T3.14, opt-in per being): a season, not a stage — the pace
+# slows, whimsy rises, and the memoirs become the standing dream work.
+ELDER_MIN_WAKE_MINUTES = 180
+ELDER_WHIMSY_BONUS = 0.1
+# Market day (T3.17): the village's synchronized social time — the parent's
+# local Saturday. Letters are cheaper (the square is loud) and the commons
+# stalls are cried out each market morning.
+MARKET_WEEKDAY = 5               # Saturday in the parent's timezone
+MARKET_BONUS_LETTERS = 2
+
 _SOUTHERN_TZ_PREFIXES = (
     "Australia/", "Pacific/Auckland", "Pacific/Fiji", "Pacific/Port_Moresby",
     "Africa/Johannesburg", "Africa/Maputo", "Africa/Harare",
@@ -386,6 +397,117 @@ def illness_percepts(store: BeingsStore, being: dict, now: datetime,
     return lines
 
 
+# ── Tier 3: elderhood, the steward, market day ───────────────────────────
+
+def days_alive(being: dict, now: datetime) -> int:
+    born = being.get("hatched_at") or being.get("born_at")
+    if not born:
+        return 0
+    try:
+        return max(0, (now - datetime.fromisoformat(born)).days)
+    except ValueError:
+        return 0
+
+
+def is_elder(being: dict, now: datetime) -> bool:
+    """Elderhood (T3.14): opted in by the parent, entered by the calendar —
+    a season of life, never a capability demotion."""
+    after = being.get("elder_after_days")
+    return bool(after) and days_alive(being, now) >= int(after)
+
+
+def elder_percepts(store: BeingsStore, being: dict, now: datetime,
+                   kind: str) -> list[str]:
+    """The elder season, felt: a once-per-life onset, then the memoirs as
+    the standing dream work — the heirloom its descendants will inherit."""
+    if not is_elder(being, now):
+        return []
+    lines: list[str] = []
+    if store.milestone(being["id"], "entered_elderhood",
+                       {"day": days_alive(being, now)}, now=now):
+        try:
+            lines.append(being_prompts.render(being, "elder_onset.md"))
+        except Exception:  # noqa: BLE001
+            pass
+    if kind == "dream":
+        try:
+            lines.append(being_prompts.render(being, "memoir_note.md"))
+        except Exception:  # noqa: BLE001
+            pass
+    return lines
+
+
+def current_steward(store: BeingsStore, owner: str,
+                    now: datetime) -> str | None:
+    """The village steward (T3.15) — a rotating weekly role, computed from
+    the calendar and the roster (no state to drift): alive adolescents and
+    adults, sorted by slug, take the ISO weeks in turn."""
+    try:
+        eligible = sorted(
+            r["slug"] for r in store.list(owner)
+            if r.get("state") == "alive"
+            and r.get("stage") in ("adolescent", "adult"))
+    except Exception:  # noqa: BLE001
+        return None
+    if not eligible:
+        return None
+    year, week, _ = _local(now).isocalendar()
+    return eligible[(year * 53 + week) % len(eligible)]
+
+
+def steward_percepts(store: BeingsStore, being: dict, now: datetime,
+                     kind: str, first_of_day: bool) -> list[str]:
+    if kind != "wake" or not first_of_day:
+        return []
+    if current_steward(store, being["owner_id"], now) != being["slug"]:
+        return []
+    store.milestone(being["id"], "first_stewardship", {}, now=now)
+    try:
+        return [being_prompts.render(being, "steward_note.md")]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def market_day(now: datetime) -> bool:
+    return _local(now).weekday() == MARKET_WEEKDAY
+
+
+def letters_cap(stage: str, now: datetime) -> int:
+    """The day's letter quota: the stage's reach, plus the market-day bonus
+    (T3.17) — one number used by the store gate, the pen-pal gate and the
+    tick's offer, so physics and menu never disagree."""
+    cap = constitution.letters_per_day(stage)
+    if cap > 0 and market_day(now):
+        cap += MARKET_BONUS_LETTERS
+    return cap
+
+
+def market_percepts(store: BeingsStore, being: dict, now: datetime,
+                    kind: str, first_of_day: bool) -> list[str]:
+    """Market morning (T3.17): the stalls cried out — real publications with
+    real prices, plus the reminder that letters run cheaper today."""
+    if kind != "wake" or not first_of_day or not market_day(now):
+        return []
+    if not constitution.has_capability(being["stage"], "commons_read"):
+        return []
+    stalls = []
+    try:
+        for p in store.publications(being["owner_id"], limit=5):
+            price = int(p.get("price_tokens") or 0)
+            stalls.append(f'  - [{p["id"][:8]}] "{p["title"]}" — '
+                          + (f"{price} tokens" if price else "free"))
+    except Exception:  # noqa: BLE001
+        stalls = []
+    try:
+        return [being_prompts.render(
+            being, "market_note.md",
+            stalls=("\n".join(stalls) if stalls
+                    else "  (the shelves are bare — be the first to publish)"),
+            bonus=MARKET_BONUS_LETTERS)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,
                     kind: str, first_of_day: bool) -> list[str]:
     """Everything the world says to a being this tick, in one honest sweep.
@@ -410,4 +532,13 @@ def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,
     note = dream_tangle(being, now, kind)
     if note:
         lines.append(note)
+    for fn in (market_percepts, steward_percepts):
+        try:
+            lines += fn(store, being, now, kind, first_of_day)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        lines += elder_percepts(store, being, now, kind)
+    except Exception:  # noqa: BLE001
+        pass
     return lines

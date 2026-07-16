@@ -120,6 +120,8 @@ export interface BeingVitals {
     id: string; ref: string; note: string; fee_tokens: number
     assigned_at: string; done_at: string | null; report_path: string | null
   }[]
+  elder_after_days: number | null
+  broadcast: { text: string; at: string } | null
   tick_interval_minutes: number | null
   cognition: 'monolith' | 'faculties'
   compact_mode: boolean
@@ -293,6 +295,18 @@ export const approveChosenName = (slug: string) =>
 export const rejectChosenName = (slug: string, note = '') =>
   fdFetch<BeingVitals>(`/beings/${slug}/name/reject`, {
     method: 'POST', body: JSON.stringify({ note }),
+  })
+
+// Elderhood: opt into a natural span (days alive; null = off).
+export const setElderhood = (slug: string, days: number | null) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/elderhood`, {
+    method: 'POST', body: JSON.stringify({ days }),
+  })
+
+// The migration rite: export the whole life and close it here.
+export const emigrateBeing = (slug: string) =>
+  fdFetch<{ manifest: unknown; being: BeingVitals }>(`/beings/${slug}/emigrate`, {
+    method: 'POST',
   })
 
 // Education: the reading list (fee paid on a verified report file).

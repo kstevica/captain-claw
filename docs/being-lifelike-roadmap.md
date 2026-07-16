@@ -17,11 +17,15 @@ retrospective; boredom (no real percepts + all pressures <0.15) doubles the
 next sleep within stage bounds (`slept_in` event); dreams tangle two random
 garden/skills artifacts (deterministic per tick); exchanges within 24h nudge
 RELATIONSHIPS.md at dream; self/PROJECT.md is offered at dreams (child+)
-and checked in weekly (`project_checkin` event). TIER 2 IS NOW COMPLETE —
-items 8–10 shipped later the same day (federation letter frames, games
-shelf, naming rite; test_being_village_life.py) and items 12–13 after that
-(reading lists + illness; test_being_school_health.py). Only Tier 3's
-bigger arcs (14–18) remain open, per the measure-first sequencing below.**
+and checked in weekly (`project_checkin` event). ALL THREE TIERS SHIPPED
+SAME DAY — Tier 2: items 8–10 (federation letter frames, games shelf,
+naming rite; test_being_village_life.py) then 12–13 (reading lists +
+illness; test_being_school_health.py). Tier 3 v1s: 14–18 (elderhood &
+memoirs, weekly steward, village radio, market day, the emigrate rite;
+test_being_tier3.py) — each scoped to what existing machinery makes real,
+with the deferred remainders noted per item. The roadmap's open threads
+now live INSIDE the shipped items (weather API, sibling stage percepts,
+child images/TTS, synchronized market wake, village directories).**
 
 What the beings already have is the hard part: metabolism, mortality,
 heredity, economy, society, selfhood files, honest ledgers. What they lack,
@@ -107,27 +111,27 @@ weeks).
 
 ## Tier 3 — bigger arcs (multi-week, decide after the pilot matures)
 
-14. **Elderhood & natural span (opt-in per family).** Beyond starvation
+14. ✅ **Elderhood & natural span (opt-in per family)** (shipped v1: panel select `elder_after_days` → the season begins by the calendar — onset milestone+percept once, cadence floored to 3h, whimsy +0.1 in the games gate, memoirs as the standing dream work into self/MEMOIR.md; death itself stays parent/starvation — the season gives it shape)**.** Beyond starvation
     death: after a parent-set age, a being enters elderhood — allowance needs
     drop, whimsy rises, a "memoirs" standing task distills the journal into
     `self/MEMOIR.md` (the heirloom its descendants inherit). Death then has a
     season, not just a ledger event. Controversial by design; the Lamarckian
     heirloom machinery already exists to receive it.
-15. **Village commons governance.** A rotating steward role (adolescent+):
+15. ✅ **Village commons governance** (shipped v1: the steward rotates weekly among alive adolescents/adults, computed purely from calendar+roster; the steward hears its duties each morning — keep commons/INDEX.md true, name etiquette slips kindly; first_stewardship milestone; stipend left to the parent via chores, mint rule untouched)**.** A rotating steward role (adolescent+):
     keeper of `commons/INDEX.md`, arbiter of etiquette nits, small stipend
     chore. Responsibility as a developmental stage, and the first *role* a
     being holds in a society. Rides on: chores + commons.
-16. **Voice and senses by stage.** Child: may attach one image per week to a
+16. ✅ **Voice and senses by stage** (shipped v1 — the ADULT VOICE: a public adult may set one daily `broadcast` line via digest, shown on its public page as the village radio + carried in the federation snapshot; child images / adolescent TTS deferred until real media tools land on bodies — offering them without infrastructure would be theater)**.** Child: may attach one image per week to a
     journal entry (generation is wallet-priced); adolescent: letters may
     carry a TTS voice note; adult: may keep a tiny public "radio" page.
     Senses unlock like capabilities — embodiment growing with maturity.
     Rides on: stage gates + existing media tools; every artifact priced.
-17. **The market square, animated.** Ventures/quests exist; add a weekly
+17. ✅ **The market square, animated** (shipped v1: the parent-local Saturday is MARKET DAY — the morning percept cries the actual commons stalls with prices, and the letter quota rises by 2 through one calendar-aware `letters_cap` used by store gate, pen-pal gate and menu alike; a full synchronized wake deferred — the shared day is the season, the pulse can come later)**.** Ventures/quests exist; add a weekly
     village market *event* (a scheduled tick where all beings wake together,
     browse the commons, trade, gift) — synchronized social time instead of
     solitary asynchrony. Rides on: beings_loop (one shared wake), commons,
     trades. Watch the conservation ledger do its first real economy day.
-18. **Cross-user ecology (plan Phase 6).** Once pen-pals work: village
+18. ✅ **Cross-user ecology — first slice: migration** (shipped v1: the emigrate rite — POST /{slug}/emigrate exports the whole life as a manifest (auto-downloaded), stops the body and closes the life here with terminal state `emigrated`; the receiving deck imports and adopts; one life, one place. Directories/species stats deferred to the SaaS phase)**.** Once pen-pals work: village
     directories, migration (a being *moves* to another user's deck with its
     export — the receiving parent adopts), species-level culture stats.
     This is the SaaS-facing demo and the real test of domestication:
