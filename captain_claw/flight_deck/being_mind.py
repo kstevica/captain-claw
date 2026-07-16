@@ -161,10 +161,56 @@ def handle_links_digest(store: BeingsStore, being: dict, digest: dict,
 
 def prune_dangling(store: BeingsStore, being: dict,
                    now: datetime | None = None) -> int:
-    """Dream-time honest forgetting: drop edges whose endpoints were deleted."""
+    """Dream-time honest forgetting: drop edges whose endpoints were deleted.
+
+    Guarded against catastrophic over-pruning. Honest forgetting must observe a
+    file is *actually* gone — but a being's home is enumerated live from disk,
+    and a body that rebounds mid-tick (crash + port drift) can leave the home
+    transiently empty or half-checked-out. A prune reading that partial state
+    would delete edges to files that still exist. That is exactly how Zvjezdana
+    lost her whole mind map: two timed-out dreams during a body rebound each
+    read a bad home and wiped every edge (19 + 6 of 25, all endpoints intact).
+
+    So we abstain whenever the read looks unreliable: an empty enumeration
+    (nothing to compare against) or a prune that would remove most of the graph
+    at once (the fingerprint of a bad read, never of real forgetting — a
+    consolidation archives a handful of sources, not the whole mind). Abstaining
+    is free: ``graph`` already filters edges to live endpoints at read time, so
+    a stale row is invisible until a later, clean dream removes it."""
     now = now or _utcnow()
     try:
-        pruned = store.prune_links(being["id"], _existing_paths(being), now=now)
+        existing = _existing_paths(being)
+    except Exception as e:  # noqa: BLE001
+        log.warning("mind prune skipped — home unreadable",
+                    slug=being["slug"], error=str(e))
+        return 0
+    if not existing:
+        # Zero artifacts enumerated ≠ the being deleted its whole self; the home
+        # was unreadable this instant. Never let that wipe the graph.
+        log.warning("mind prune skipped — no artifacts enumerated",
+                    slug=being["slug"])
+        return 0
+    try:
+        edges = store.links_for(being["owner_id"], being["slug"])
+    except Exception as e:  # noqa: BLE001
+        log.warning("mind prune failed reading edges", slug=being["slug"],
+                    error=str(e))
+        return 0
+    dangling = [e for e in edges
+                if e["from_path"] not in existing or e["to_path"] not in existing]
+    # Safety valve: a healthy prune trims a few edges. One that would erase most
+    # of the graph in a single pass is a bad read — abstain, let a clean dream
+    # do it. (Read-time filtering means these rows stay invisible meanwhile.)
+    if edges and len(dangling) > max(3, len(edges) // 2):
+        store.record_event(being["id"], "prune_abstained",
+                           {"would_prune": len(dangling),
+                            "of": len(edges)}, now=now)
+        log.warning("mind prune abstained — mass prune looks like a bad read",
+                    slug=being["slug"], would_prune=len(dangling),
+                    of=len(edges))
+        return 0
+    try:
+        pruned = store.prune_links(being["id"], existing, now=now)
     except Exception as e:  # noqa: BLE001
         log.warning("mind prune failed", slug=being["slug"], error=str(e))
         return 0

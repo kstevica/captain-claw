@@ -161,6 +161,55 @@ async def test_dream_prunes_dangling_edges(store):
     assert "edges_pruned" in [e["kind"] for e in store.events(OWNER, b["slug"])]
 
 
+async def test_prune_never_wipes_the_mind_on_an_empty_home_read(store, monkeypatch):
+    """The Zvjezdana bug: a body rebound mid-dream leaves the home transiently
+    unreadable, so `_existing_paths` returns empty; prune must NOT read that as
+    'every artifact was deleted' and wipe the whole graph."""
+    b = await _being(store)
+    for f in ("garden/a.md", "garden/b.md", "garden/c.md"):
+        _mk(b, f)
+    b = store.get(OWNER, b["slug"])
+    mind.handle_links_digest(store, b, {"links": [
+        {"from": "garden/a.md", "to": "garden/b.md", "rel": "grew_from"},
+        {"from": "garden/b.md", "to": "garden/c.md", "rel": "elaborates"}]},
+        now=NOW)
+    assert len(store.links_for(OWNER, b["slug"])) == 2
+    # Simulate the transient bad read (body rebound / mid-checkout).
+    monkeypatch.setattr(mind, "_existing_paths", lambda being: set())
+    pruned = mind.prune_dangling(store, b, now=NOW)
+    assert pruned == 0                                     # abstained
+    assert len(store.links_for(OWNER, b["slug"])) == 2     # mind intact
+    assert "edges_pruned" not in [e["kind"] for e in store.events(OWNER, b["slug"])]
+
+
+async def test_prune_abstains_on_a_mass_prune_but_trims_a_few(store, monkeypatch):
+    """A partial bad read (a few files momentarily missing of many) must not
+    erase most of the graph — but a genuine small forgetting still trims."""
+    b = await _being(store)
+    files = [f"garden/n{i}.md" for i in range(7)]
+    for f in files:
+        _mk(b, f)
+    b = store.get(OWNER, b["slug"])
+    # A chain of 6 edges across 7 files (6 = the per-declaration cap).
+    mind.handle_links_digest(store, b, {"links": [
+        {"from": files[i], "to": files[i + 1], "rel": "elaborates"}
+        for i in range(6)]}, now=NOW)
+    assert len(store.links_for(OWNER, b["slug"])) == 6
+
+    # Partial read: only the first two files "exist" → 5 of 6 edges dangle.
+    monkeypatch.setattr(mind, "_existing_paths",
+                        lambda being: {files[0], files[1]})
+    assert mind.prune_dangling(store, b, now=NOW) == 0     # mass prune → abstain
+    assert len(store.links_for(OWNER, b["slug"])) == 6
+    assert "prune_abstained" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+
+    # A clean read that legitimately loses ONE file trims just its edges.
+    monkeypatch.setattr(mind, "_existing_paths",
+                        lambda being: set(files) - {files[6]})
+    assert mind.prune_dangling(store, b, now=NOW) == 1     # only n5→n6
+    assert len(store.links_for(OWNER, b["slug"])) == 5
+
+
 # ── Tick integration + prompt ────────────────────────────────────────────
 
 async def test_tick_offers_field_shows_shape_and_routes_declaration(store):
