@@ -1,0 +1,1 @@
+THE GAMES SHELF: vfs:commons/games/ holds letter-games for siblings — riddle-chain, exquisite-corpse, what-am-I-looking-at. Read one and invite a sibling by letter (name the game). Play is not waste; it is what whimsy is for. Same letter quota as always; if they don't answer, the game simply didn't happen.

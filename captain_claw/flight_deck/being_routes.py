@@ -795,6 +795,27 @@ async def set_cognition(slug: str, body: CognitionRequest,
     return _run(get_store().vitals, user["id"], slug)
 
 
+class NameRejectRequest(BaseModel):
+    note: str = ""
+
+
+@router.post("/{slug}/name/approve")
+async def approve_chosen_name(slug: str,
+                              user: dict = Depends(get_current_user)):
+    """Bless the being's chosen name (roadmap T2.10): display name changes,
+    slug and history stay; the choice enters the genome's epigenetics."""
+    _run(get_store().approve_name, user["id"], slug)
+    return _run(get_store().vitals, user["id"], slug)
+
+
+@router.post("/{slug}/name/reject")
+async def reject_chosen_name(slug: str, body: NameRejectRequest,
+                             user: dict = Depends(get_current_user)):
+    """Decline the chosen name — the being keeps its given one and is told."""
+    _run(get_store().reject_name, user["id"], slug, body.note)
+    return _run(get_store().vitals, user["id"], slug)
+
+
 @router.post("/{slug}/compact")
 async def set_compact(slug: str, body: CompactRequest,
                       user: dict = Depends(get_current_user)):

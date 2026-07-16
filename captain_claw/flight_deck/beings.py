@@ -462,6 +462,10 @@ class BeingsStore:
                 # body runs lean (eco/micro system prompt + capped context).
                 # Same narrative and physics, fewer tokens per heartbeat.
                 ("compact_mode", "INTEGER NOT NULL DEFAULT 0"),
+                # The naming rite (roadmap T2.10): an adolescent may propose
+                # ONE chosen display name; it waits here for the parent's
+                # blessing. JSON {name, why, proposed_at}; slug never changes.
+                ("pending_name", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -777,7 +781,8 @@ class BeingsStore:
             b["body_config"] = json.loads(raw_bc) if raw_bc else None
         except json.JSONDecodeError:
             b["body_config"] = None
-        for pending_col in ("pending_self_mod", "pending_procreation"):
+        for pending_col in ("pending_self_mod", "pending_procreation",
+                            "pending_name"):
             raw_pending = b.get(pending_col) or ""
             try:
                 b[pending_col] = json.loads(raw_pending) if raw_pending else None
@@ -917,6 +922,63 @@ class BeingsStore:
         self._update(b["id"], now, compact_mode=1 if on else 0)
         self.record_event(b["id"], "compact_set", {"on": bool(on)}, now=now)
         return self.get(owner_id, slug)
+
+    # ── The naming rite (roadmap T2.10): one chosen name, parent-blessed ──
+
+    def set_pending_name(self, being_id: str, pending: dict | None,
+                         now: datetime | None = None) -> None:
+        now = now or _utcnow()
+        self._update(being_id, now,
+                     pending_name=json.dumps(pending) if pending else "")
+
+    def approve_name(self, owner_id: str, slug: str,
+                     now: datetime | None = None) -> dict:
+        """The parent blesses the chosen name: the display name changes (the
+        slug never does), the choice enters the genome's epigenetics (the
+        being's own mark, not inherited), and the milestone lands."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        pending = b.get("pending_name")
+        if not pending or not pending.get("name"):
+            raise BeingError("no chosen name awaits a blessing")
+        old, new = b["name"], str(pending["name"])[:60].strip()
+        genome = dict(b["genome"])
+        epi = dict(genome.get("epigenetics") or {})
+        epi["chosen_name"] = new
+        epi["chosen_name_why"] = str(pending.get("why") or "")[:200]
+        genome["epigenetics"] = epi
+        self._update(b["id"], now, name=new, pending_name="",
+                     genome=json.dumps(genome))
+        self.record_event(b["id"], "name_chosen",
+                          {"from": old, "to": new,
+                           "why": str(pending.get("why") or "")[:300]}, now=now)
+        self.milestone(b["id"], "chose_name", {"name": new}, now=now)
+        return self.get(owner_id, slug)
+
+    def reject_name(self, owner_id: str, slug: str, note: str = "",
+                    now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if not b.get("pending_name"):
+            raise BeingError("no chosen name awaits a decision")
+        self.set_pending_name(b["id"], None, now=now)
+        self.record_event(b["id"], "name_rejected", {"note": note[:300]},
+                          now=now)
+        return self.get(owner_id, slug)
+
+    def penpals_sent_today(self, being_id: str,
+                           now: datetime | None = None) -> int:
+        """Pen-pal letters sent today (events, not being_letters rows) — they
+        share the stage's daily letter quota (roadmap T2.8)."""
+        now = now or _utcnow()
+        day = _iso(now)[:10]
+        n = 0
+        for e in self._c().execute(
+                "SELECT data, at FROM being_events WHERE being_id = ?"
+                " AND kind = 'penpal_sent' AND at >= ? ORDER BY at DESC",
+                (being_id, day)).fetchall():
+            n += 1
+        return n
 
     def purge(self, owner_id: str, slug: str) -> dict:
         """Erase a DEAD being completely — every row it owns across every table.
@@ -1256,6 +1318,7 @@ class BeingsStore:
             "persona": b["persona"],
             "pending_self_mod": b["pending_self_mod"],
             "pending_procreation": b["pending_procreation"],
+            "pending_name": b.get("pending_name"),
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "cognition": b.get("cognition") or "faculties",
             "compact_mode": bool(b.get("compact_mode")),

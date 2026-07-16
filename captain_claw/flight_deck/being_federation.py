@@ -55,6 +55,29 @@ def is_linked(visitor_id: str) -> bool:
     return visitor_id in _links
 
 
+def _being_by_name(store: BeingsStore, owner: str, ref: str) -> dict | None:
+    """Resolve a host-village being by display name or slug (pen-pal target)."""
+    ref_l = (ref or "").strip().lower()
+    if not ref_l:
+        return None
+    for row in store.list(owner):
+        if row["slug"].lower() == ref_l or row["name"].lower() == ref_l:
+            return store.get(owner, row["slug"])
+    return None
+
+
+async def send_letter_to_visitor(store: BeingsStore, visitor_id: str,
+                                 frm: str, village: str, body: str) -> None:
+    """HOST role of pen-pals (roadmap T2.8): a local being writes to a being
+    visiting this village. Rides the existing link; raises BeingError with a
+    plain reason when the visitor is offline (loud refusal, never silence)."""
+    try:
+        await link_request(visitor_id, "letter", frm=frm, village=village,
+                           body=body)
+    except HTTPException as e:
+        raise BeingError(str(e.detail), e.status_code)
+
+
 async def _close(ws: WebSocket, code: int) -> None:
     try:
         await ws.close(code=code)
@@ -133,6 +156,34 @@ async def village_link_ws(ws: WebSocket) -> None:
                                          msg.get("profile") or profile)
                 except Exception:  # noqa: BLE001
                     pass
+            elif t == "letter":
+                # A pen-pal letter (roadmap T2.8) FROM the visiting being TO
+                # a being of this village — resolve by name, deliver as an
+                # event, and ack so the sender's tick can be honest about
+                # whether anything truly arrived.
+                ack = {"t": "ack", "id": msg.get("id"), "ok": False}
+                try:
+                    target = _being_by_name(store, owner,
+                                            str(msg.get("to") or ""))
+                    if target is None:
+                        ack["error"] = "no being of that name lives here"
+                    elif target["state"] != "alive":
+                        ack["error"] = ("that being cannot receive letters "
+                                        "right now")
+                    else:
+                        store.record_event(
+                            target["id"], "penpal_letter",
+                            {"from": str(msg.get("frm") or name)[:80],
+                             "village": home or "another village",
+                             "body": str(msg.get("body") or "")[:2000]})
+                        ack["ok"] = True
+                except Exception as e:  # noqa: BLE001
+                    ack["error"] = str(e)
+                try:
+                    async with conn.send_lock:
+                        await ws.send_json(ack)
+                except Exception:  # noqa: BLE001
+                    pass
     except WebSocketDisconnect:
         pass
     except Exception as e:  # noqa: BLE001
@@ -202,6 +253,20 @@ async def handle_link_request(store: BeingsStore, owner: str, slug: str,
                                       req.get("body") or "", req.get("thread_id"))
     if op == "thread":
         return store.thread_for(owner, slug, str(req.get("thread_id") or ""))
+    if op == "letter":
+        # A pen-pal letter (roadmap T2.8) from a being of the village we are
+        # visiting, delivered into our being's world: one event, surfaced as
+        # a percept on its next tick, exactly once.
+        frm = str(req.get("frm") or "a being")[:80]
+        village = str(req.get("village") or "")[:80]
+        body = str(req.get("body") or "").strip()[:2000]
+        if not body:
+            raise BeingError("an empty letter says nothing", 400)
+        if being["state"] != "alive":
+            raise BeingError("this being cannot receive letters right now", 409)
+        store.record_event(being["id"], "penpal_letter",
+                           {"from": frm, "village": village, "body": body})
+        return {"delivered": True}
     raise BeingError(f"unknown op {op!r}", 400)
 
 
@@ -225,12 +290,53 @@ def _home_label(store: BeingsStore, owner: str) -> str:
         return ""
 
 
+class _ClientConn:
+    """A live outbound link (sender side), with pending acks for the frames
+    WE initiate (pen-pal letters) — the mirror of the host's _Link."""
+
+    def __init__(self, ws) -> None:
+        self.ws = ws
+        self.pending: dict[str, asyncio.Future] = {}
+        self.send_lock = asyncio.Lock()
+
+
 class VillageClient:
     """Keeps one outbound WS per visiting being alive, reconnecting on drop."""
 
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
         self._cfg: dict[str, tuple[str, str, str]] = {}   # slug -> (owner,url,secret)
+        self._conns: dict[str, _ClientConn] = {}          # slug -> live link
+
+    def is_up(self, slug: str) -> bool:
+        return slug in self._conns
+
+    async def send_letter(self, slug: str, to: str, frm: str,
+                          body: str) -> None:
+        """SENDER role of pen-pals (roadmap T2.8): our visiting being writes
+        to a being of the village it visits, over its own live link. Waits
+        for the host's ack so delivery is real, refusal is loud."""
+        conn = self._conns.get(slug)
+        if conn is None:
+            raise BeingError("your link to the village you visit is down "
+                             "right now — nothing can be delivered", 502)
+        rid = uuid.uuid4().hex
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        conn.pending[rid] = fut
+        try:
+            async with conn.send_lock:
+                await conn.ws.send(json.dumps(
+                    {"t": "letter", "id": rid, "to": to[:80], "frm": frm[:80],
+                     "body": body[:2000]}))
+            ack = await asyncio.wait_for(fut, timeout=LINK_REQUEST_TIMEOUT)
+        except (asyncio.TimeoutError, OSError):
+            raise BeingError("the village took too long to answer — the "
+                             "letter did not arrive", 504)
+        finally:
+            conn.pending.pop(rid, None)
+        if not ack.get("ok"):
+            raise BeingError(str(ack.get("error")
+                                 or "the village refused the letter"), 502)
 
     async def reconcile(self, store: BeingsStore) -> None:
         """Start maintainers for beings that should be visiting, stop the rest."""
@@ -311,16 +417,29 @@ class VillageClient:
                     return
 
         bt = asyncio.create_task(beat())
+        conn = _ClientConn(ws)
+        self._conns[slug] = conn
         try:
             async for message in ws:
                 try:
                     msg = json.loads(message)
                 except Exception:  # noqa: BLE001
                     continue
-                if isinstance(msg, dict) and msg.get("t") == "req":
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("t") == "req":
                     asyncio.create_task(self._serve(store, owner, slug, ws, msg))
+                elif msg.get("t") == "ack":
+                    fut = conn.pending.pop(str(msg.get("id")), None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(msg)
         finally:
             bt.cancel()
+            if self._conns.get(slug) is conn:
+                del self._conns[slug]
+            for fut in conn.pending.values():
+                if not fut.done():
+                    fut.set_exception(OSError("the village link dropped"))
 
     async def _serve(self, store: BeingsStore, owner: str, slug: str, ws,
                      req: dict) -> None:

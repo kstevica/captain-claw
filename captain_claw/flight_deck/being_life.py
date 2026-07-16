@@ -905,6 +905,22 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
             lines.append(f"A chore was judged not done: {d.get('note') or ''}")
         elif k == "woke_from_torpor":
             lines.append("You survived torpor — the allowance revived you.")
+        elif k == "penpal_letter":
+            lines.append(
+                f'A LETTER FROM AFAR — {d.get("from")} of '
+                f'{d.get("village") or "another village"}: '
+                f'"{(d.get("body") or "")[:300]}"  (write back with '
+                f'"penpal": {{"to": "{d.get("from")}", "body": "short and '
+                'true"}} — it spends a letter, like any other)')
+        elif k == "name_chosen":
+            lines.append(
+                f"YOUR PARENT BLESSED YOUR CHOSEN NAME — you are now "
+                f"{d.get('to')}. Rewrite the heading of self/SELF.md in "
+                "your own hand; the name is yours.")
+        elif k == "name_rejected":
+            note = f' — "{d.get("note")}"' if d.get("note") else ""
+            lines.append("Your parent said not yet to your chosen name"
+                         f"{note}. The name you carry remains.")
     for job in store.chores_for(being["owner_id"], being["slug"],
                                 states=("open",)):
         lines.append(f"CHORE from your parent [{job['id'][:8]}]: "
@@ -1036,33 +1052,42 @@ def home_manifest(being: dict) -> dict[str, list[str]]:
 
 
 def society_prompt_fields(being: dict, siblings: list[dict] | None,
-                          letters_left: int | None) -> list[str]:
+                          letters_left: int | None,
+                          penpal_reach: list[str] | None = None) -> list[str]:
     """Digest fields this stage can actually DELIVER — shared by the monolith
     prompt and the faculties orient step, so the two cognitions offer the same
     society. Never offers what physics would refuse (letters below child,
-    a spent daily quota, trades below adolescence)."""
-    if not siblings:
-        return []
+    a spent daily quota, trades below adolescence, pen-pals with no live
+    link within reach)."""
     caps = constitution.capabilities(being["stage"])
     fields: list[str] = []
-    if "letters" in caps and (letters_left is None or letters_left > 0):
-        left = (f" — {letters_left} left today"
-                if letters_left is not None else "")
+    if siblings:
+        if "letters" in caps and (letters_left is None or letters_left > 0):
+            left = (f" — {letters_left} left today"
+                    if letters_left is not None else "")
+            fields.append(
+                '"letter": {"to": "<sibling name>", "body": "short and '
+                f'true"}}{left}')
+        if "commons_write" in caps:
+            fields.append(
+                '"publish": {"path": "skills/<file>.md", "title": "...", '
+                '"note": "one line", "price_tokens": 0}')
+            fields.append(
+                '"gift": {"to": "<sibling name>", "tokens": 100000, '
+                '"note": "why"}')
+        if "commons_read" in caps:
+            fields.append(
+                '"adopt": {"publication_id": "<id from a commons percept>"}'
+                + ("" if "trade" in caps else "  (free skills only at your "
+                   "stage)"))
+    # Pen-pals (roadmap T2.8): beings of OTHER villages, within real reach
+    # right now (a linked visitor on the square, or the village this being
+    # is out visiting). Shares the sibling letter quota.
+    if penpal_reach and "letters" in caps \
+            and (letters_left is None or letters_left > 0):
         fields.append(
-            '"letter": {"to": "<sibling name>", "body": "short and '
-            f'true"}}{left}')
-    if "commons_write" in caps:
-        fields.append(
-            '"publish": {"path": "skills/<file>.md", "title": "...", '
-            '"note": "one line", "price_tokens": 0}')
-        fields.append(
-            '"gift": {"to": "<sibling name>", "tokens": 100000, '
-            '"note": "why"}')
-    if "commons_read" in caps:
-        fields.append(
-            '"adopt": {"publication_id": "<id from a commons percept>"}'
-            + ("" if "trade" in caps else "  (free skills only at your "
-               "stage)"))
+            '"penpal": {"to": "<name>", "body": "short and true"}  — a '
+            'letter across villages, to: ' + ", ".join(penpal_reach[:4]))
     return fields
 
 
@@ -1118,6 +1143,15 @@ def rare_option_lines(being: dict) -> list[str]:
             lines.append(being_prompts.render(
                 being, "procreate_offer.md",
                 cost=constitution.PROCREATION_COST_TOKENS))
+    # The naming rite (roadmap T2.10): once in a life, adolescence on.
+    if constitution.stage_index(being["stage"]) >= \
+            constitution.stage_index("adolescent"):
+        epi = (being["genome"].get("epigenetics") or {})
+        if being.get("pending_name"):
+            lines.append("Your chosen name awaits your parent's blessing. "
+                         "Be patient.")
+        elif not epi.get("chosen_name"):
+            lines.append(being_prompts.render(being, "chosen_name_offer.md"))
     return lines
 
 
@@ -1131,7 +1165,8 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                         last_changed: list[str] | None = None,
                         last_mismatch: bool = False,
                         visitors: list[dict] | None = None,
-                        mind_lines: list[str] | None = None) -> str:
+                        mind_lines: list[str] | None = None,
+                        penpal_reach: list[str] | None = None) -> str:
     now = now or _utcnow()
     g = being["genome"]
     attrs = genome_mod.effective_attributes(g)
@@ -1217,11 +1252,18 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                 "You cannot send letters to siblings yet — that ability "
                 "comes in childhood. For now your words go to your parent or "
                 "your journal; never claim to have talked to a sibling.")
-        society_fields = society_prompt_fields(being, siblings, letters_left)
-        if society_fields:
-            lines += ["OPTIONAL SOCIETY FIELDS for your digest — use only "
-                      "when genuine, never to perform:",
-                      *("  " + f for f in society_fields)]
+    society_fields = society_prompt_fields(being, siblings, letters_left,
+                                           penpal_reach)
+    if society_fields:
+        lines += ["OPTIONAL SOCIETY FIELDS for your digest — use only "
+                  "when genuine, never to perform:",
+                  *("  " + f for f in society_fields)]
+    try:
+        gn = being_society.games_note(being, siblings, letters_left)
+        if gn:
+            lines.append(gn)
+    except Exception:  # noqa: BLE001 — play must never sink a tick
+        pass
     earning_fields = being_earning.earning_prompt_fields(being)
     if earning_fields:
         lines += ["OPTIONAL EARNING FIELDS for your digest — tokens are your "
@@ -1517,6 +1559,18 @@ def _normalize_digest(raw: dict) -> dict:
         }
     else:
         procreate = None
+    penpal = raw.get("penpal")
+    if isinstance(penpal, dict) and penpal.get("to") and penpal.get("body"):
+        penpal = {"to": str(penpal["to"])[:80],
+                  "body": str(penpal.get("body") or "")[:2000]}
+    else:
+        penpal = None
+    chosen_name = raw.get("chosen_name")
+    if isinstance(chosen_name, dict) and chosen_name.get("name"):
+        chosen_name = {"name": str(chosen_name["name"]).strip()[:60],
+                       "why": str(chosen_name.get("why") or "")[:300]}
+    else:
+        chosen_name = None
     return {
         "act_kind": act,
         "summary": str(raw.get("summary") or "")[:300],
@@ -1539,6 +1593,8 @@ def _normalize_digest(raw: dict) -> dict:
         "links": links,
         "consolidate": consolidate,
         "public_replies": public_replies,
+        "penpal": penpal,
+        "chosen_name": chosen_name,
     }
 
 
@@ -1597,7 +1653,8 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
                           spent_today: int, wallet: dict | None,
                           percepts: list[str] | None, first_of_day: bool,
                           siblings: list[dict] | None, letters_left: int | None,
-                          visitors: list[dict] | None) -> str:
+                          visitors: list[dict] | None,
+                          penpal_reach: list[str] | None = None) -> str:
     g = being["genome"]
     can_connect = connect_outlets(being, siblings, letters_left, percepts)
     pressures = drive_pressures(being.get("drives") or {}, now=now,
@@ -1645,10 +1702,16 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
             lines.append(
                 "You cannot send letters to siblings yet — that ability "
                 "comes in childhood. Never claim to have talked to one.")
-    sf = society_prompt_fields(being, siblings, letters_left)
+    sf = society_prompt_fields(being, siblings, letters_left, penpal_reach)
     if sf:
         lines += ["OPTIONAL SOCIETY FIELDS for your decision json — only "
                   "when genuine, never to perform:", *("  " + f for f in sf)]
+    try:
+        gn = being_society.games_note(being, siblings, letters_left)
+        if gn:
+            lines.append(gn)
+    except Exception:  # noqa: BLE001
+        pass
     lines += rare_option_lines(being)
     tail_label, tail = journal_tail_for_tick(being, now, kind=kind)
     if tail:
@@ -1780,7 +1843,8 @@ async def _safe_send(send, being: dict, prompt: str, store, bid: str,
 async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
                          senses, view, spent_today, first_of_day, siblings,
                          letters_left, visitors, last_refusals, drives,
-                         resolve_port: bool = False
+                         resolve_port: bool = False,
+                         penpal_reach: list[str] | None = None
                          ) -> tuple[str | None, dict, list | None]:
     """The decomposed tick. Returns the SAME ``(reply, digest, changed)`` triple
     the monolithic path yields, so every downstream router is unchanged.
@@ -1810,7 +1874,8 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
     reply = await _fac_send(compose_orient_prompt(
         being, kind=kind, now=now, spent_today=spent_today, wallet=view,
         percepts=senses, first_of_day=first_of_day, siblings=siblings,
-        letters_left=letters_left, visitors=visitors), "orient")
+        letters_left=letters_left, visitors=visitors,
+        penpal_reach=penpal_reach), "orient")
     raw = _extract_raw(reply, require_act=True)
     if raw is None and reply is not None and kind != "dream":
         store.record_event(bid, "digest_repair_retry", {"faculty": "orient"},
@@ -2167,6 +2232,100 @@ async def _write_journal(being: dict, digest: dict, kind: str,
                     error=str(e))
 
 
+async def _deliver_penpal(store: BeingsStore, being: dict, pp: dict,
+                          now: datetime) -> None:
+    """Pen-pals (roadmap T2.8): a letter across villages, riding the live
+    federation link — delivered for real (the far side acks) or refused
+    LOUDLY. Consent is the parent's: the being must be flagged public (its
+    world is open to strangers) or itself be out visiting (the parent sent
+    it). Shares the stage's daily letter quota."""
+    from captain_claw.flight_deck import being_federation
+    stage = being["stage"]
+    if not constitution.has_capability(stage, "letters"):
+        raise BeingError(f"a {stage} cannot send letters yet")
+    body = (pp.get("body") or "").strip()
+    to = (pp.get("to") or "").strip()
+    if not body or not to:
+        raise BeingError("an empty letter says nothing")
+    sent = (store.letters_sent_today(being["id"], now)
+            + store.penpals_sent_today(being["id"], now))
+    if sent >= constitution.letters_per_day(stage):
+        raise BeingError("letter limit reached for today")
+    to_l = to.lower()
+    # HOST role: writing to a being currently visiting our village square.
+    if being.get("public"):
+        try:
+            visitors = store.visitors_for(being["owner_id"])
+        except Exception:  # noqa: BLE001
+            visitors = []
+        for v in visitors:
+            if to_l in (str(v.get("name") or "").lower(),
+                        str(v.get("slug") or "").lower()) \
+                    and being_federation.is_linked(v["id"]):
+                village = ""
+                try:
+                    village = store.get_village_meta(
+                        being["owner_id"]).get("name") or ""
+                except Exception:  # noqa: BLE001
+                    pass
+                await being_federation.send_letter_to_visitor(
+                    store, v["id"], frm=being["name"], village=village,
+                    body=body)
+                store.record_event(being["id"], "penpal_sent",
+                                   {"to": v.get("name") or to,
+                                    "via": "visitor", "preview": body[:120]},
+                                   now=now)
+                store.milestone(being["id"], "first_penpal",
+                                {"to": v.get("name") or to}, now=now)
+                return
+    # SENDER role: we are out visiting a village; write to a being there.
+    if being.get("visit_url") and \
+            being_federation.village_client.is_up(being["slug"]):
+        await being_federation.village_client.send_letter(
+            being["slug"], to=to, frm=being["name"], body=body)
+        store.record_event(being["id"], "penpal_sent",
+                           {"to": to, "via": "visit", "preview": body[:120]},
+                           now=now)
+        store.milestone(being["id"], "first_penpal", {"to": to}, now=now)
+        return
+    if not being.get("public") and not being.get("visit_url"):
+        raise BeingError("pen-pals need your parent to open a door — a "
+                         "public page, or being sent to visit a village")
+    raise BeingError(f"no one called {to!r} is within reach — pen-pals are "
+                     "the beings visiting your square, or those of the "
+                     "village you are visiting")
+
+
+def _propose_name(store: BeingsStore, being: dict, cn: dict,
+                  now: datetime) -> None:
+    """The naming rite (roadmap T2.10): once in a life, at adolescence or
+    later, a being may propose the name it chooses for itself. The parent
+    blesses or declines; the slug never changes."""
+    if constitution.stage_index(being["stage"]) < \
+            constitution.stage_index("adolescent"):
+        raise BeingError(f"a {being['stage']} cannot choose its name yet — "
+                         "the naming rite comes at adolescence")
+    epi = (being["genome"].get("epigenetics") or {})
+    if epi.get("chosen_name"):
+        raise BeingError("you have already chosen your name once — "
+                         "it is yours for life")
+    if being.get("pending_name"):
+        raise BeingError("your chosen name already awaits your parent")
+    name = (cn.get("name") or "").strip()
+    why = (cn.get("why") or "").strip()
+    if not (2 <= len(name) <= 60):
+        raise BeingError("a name needs 2–60 characters")
+    if not why:
+        raise BeingError("a chosen name needs its why")
+    if name.lower() == str(being["name"]).lower():
+        raise BeingError("that is already your name")
+    store.set_pending_name(being["id"],
+                           {"name": name, "why": why[:300],
+                            "proposed_at": now.isoformat()}, now=now)
+    store.record_event(being["id"], "name_proposed",
+                       {"name": name, "why": why[:300]}, now=now)
+
+
 def _recent_journal_entries(being: dict, now: datetime,
                             days: int = 3) -> list[str]:
     entries: list[str] = []
@@ -2489,6 +2648,25 @@ async def _tick_locked(
             store.record_event(bid, "variety_pressure",
                                {"act": dominant_act or "",
                                 "note": variety_note[:200]}, now=now)
+    # Pen-pal reach (T2.8): who across villages could a letter truly REACH
+    # right now — linked visitors on our square (if the parent opened the
+    # world: public), or the village this being is out visiting.
+    penpal_reach: list[str] = []
+    try:
+        if being.get("public") and constitution.has_capability(
+                being["stage"], "letters"):
+            from captain_claw.flight_deck import being_federation
+            penpal_reach += [
+                v.get("name") or v.get("slug") or "?"
+                for v in store.visitors_for(owner)
+                if being_federation.is_linked(v["id"])]
+        if being.get("visit_url"):
+            from captain_claw.flight_deck import being_federation
+            if being_federation.village_client.is_up(being["slug"]):
+                penpal_reach.append("any being of the village you are "
+                                    "visiting (address it by name)")
+    except Exception:  # noqa: BLE001 — reach is an offer, never oxygen
+        penpal_reach = []
     # Is there any channel connection could flow through this tick? Feeds the
     # pressure damp in the prompts and keeps 'lonely' honest (loops plan F9).
     can_connect = connect_outlets(being, sibs, letters_left, senses)
@@ -2515,7 +2693,7 @@ async def _tick_locked(
             view=view, spent_today=store.spent_today(bid, now=now),
             first_of_day=first_of_day, siblings=sibs, letters_left=letters_left,
             visitors=visitors, last_refusals=last_refusals, drives=drives,
-            resolve_port=(send_fn is None))
+            resolve_port=(send_fn is None), penpal_reach=penpal_reach or None)
     else:
         try:
             mind_lines = being_mind.mind_prompt_lines(
@@ -2529,7 +2707,8 @@ async def _tick_locked(
             siblings=sibs, letters_left=letters_left,
             last_changed=last_changed, last_mismatch=last_mismatch,
             visitors=visitors or None,
-            mind_lines=mind_lines or None)
+            mind_lines=mind_lines or None,
+            penpal_reach=penpal_reach or None)
         # 3b. Think — with COMPLETION GATES, each firing at most once THIS tick
         # so theater is caught in-turn instead of waiting a whole heartbeat:
         #   • repair — a reply came back with no parseable digest (weak-model
@@ -2680,6 +2859,34 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("being society handling failed", slug=being["slug"],
                         error=str(e))
+    # Pen-pals (T2.8) — async delivery over the federation link; real or
+    # refused loudly (the refusal echoes into the next tick's senses).
+    penpal_delivered = False
+    if digest.get("penpal"):
+        pp = digest["penpal"]
+        try:
+            await _deliver_penpal(store, store.get(owner, being["slug"]),
+                                  pp, now=now)
+            penpal_delivered = True
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "penpal", "to": pp.get("to"),
+                                "reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("penpal delivery failed", slug=being["slug"],
+                        error=str(e))
+    # The naming rite (T2.10) — proposal only; the parent decides.
+    if digest.get("chosen_name"):
+        try:
+            _propose_name(store, store.get(owner, being["slug"]),
+                          digest["chosen_name"], now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "chosen_name", "reason": str(e)},
+                               now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("chosen-name handling failed", slug=being["slug"],
+                        error=str(e))
     if any(digest.get(k) for k in ("claim_quest", "quest_deliver",
                                    "propose_venture", "venture_deliver")):
         try:
@@ -2767,7 +2974,8 @@ async def _tick_locked(
     # "create", and the connect drive deferred above is settled here.
     if digest["act_kind"] == "talk":
         spoke = bool(digest.get("message_to_parent")
-                     or digest.get("public_replies"))
+                     or digest.get("public_replies")
+                     or penpal_delivered)
         if not spoke and letters_before is not None:
             try:
                 spoke = store.letters_sent_today(bid, now) > letters_before

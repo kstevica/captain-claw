@@ -115,6 +115,7 @@ export interface BeingVitals {
     partner: string | null; child_name: string; case: string
     letter: string; proposed_at: string
   } | null
+  pending_name: { name: string; why: string; proposed_at: string } | null
   tick_interval_minutes: number | null
   cognition: 'monolith' | 'faculties'
   compact_mode: boolean
@@ -281,6 +282,14 @@ export const rejectSelfMod = (slug: string, note = '') =>
   })
 export const rollbackPersona = (slug: string) =>
   fdFetch<{ persona: string }>(`/beings/${slug}/self-mod/rollback`, { method: 'POST' })
+
+// The naming rite: bless or decline the being's one chosen name.
+export const approveChosenName = (slug: string) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/name/approve`, { method: 'POST' })
+export const rejectChosenName = (slug: string, note = '') =>
+  fdFetch<BeingVitals>(`/beings/${slug}/name/reject`, {
+    method: 'POST', body: JSON.stringify({ note }),
+  })
 
 export const approveProcreation = (slug: string, name = '') =>
   fdFetch<{ ok: boolean; child: BeingVitals }>(`/beings/${slug}/procreate/approve`, {

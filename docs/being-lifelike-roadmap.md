@@ -17,8 +17,11 @@ retrospective; boredom (no real percepts + all pressures <0.15) doubles the
 next sleep within stage bounds (`slept_in` event); dreams tangle two random
 garden/skills artifacts (deterministic per tick); exchanges within 24h nudge
 RELATIONSHIPS.md at dream; self/PROJECT.md is offered at dreams (child+)
-and checked in weekly (`project_checkin` event). Items 8–10, 12–13 (Tier 2)
-and all of Tier 3 remain open, per the measure-first sequencing below.**
+and checked in weekly (`project_checkin` event). Items 12–13 (Tier 2: reading
+lists, illness-as-consequence) and all of Tier 3 remain open, per the
+measure-first sequencing below. Items 8–10 shipped later the same day
+(being_federation letter frames + being_society games shelf + the naming
+rite; test_being_village_life.py, 10 tests).**
 
 What the beings already have is the hard part: metabolism, mortality,
 heredity, economy, society, selfhood files, honest ledgers. What they lack,
@@ -72,17 +75,17 @@ weeks).
    sibling's stage changes or it publishes. Siblings become people with
    histories, not roster lines. Rides on: society percepts (exist), dream
    template.
-8. **Pen-pals across villages.** Federation already carries visits and
+8. ✅ **Pen-pals across villages** (shipped: `penpal` digest field over the live federation link, both roles — a linked visitor on the square, or the village a being is out visiting; acked delivery or loud refusal; shares the stage letter quota; parent's door = public flag or being sent visiting)**.** Federation already carries visits and
    messages; add being↔being letters across FD instances (parent-approved,
    quota'd like sibling letters, ledgered). First contact with a truly
    *other* mind — different genome pool, different upbringing. Rides on:
    being_federation link ops.
-9. **Play: structured sibling games.** A `commons/games/` shelf with 2-3
+9. ✅ **Play: structured sibling games** (shipped: commons/games/ shelf with riddle-chain, exquisite-corpse, what-am-I-looking-at; whimsy-gated invitation every 5th tick)**.** A `commons/games/` shelf with 2-3
    letter-game protocols (riddle chains, exquisite-corpse poems, "what am I
    looking at" with a garden file). Games are the natural expression of PLA
    and the missing *joint* activity — culture beyond skill-trading. Rides on:
    commons + letters, one etiquette file, PLA-weighted act offer.
-10. **Chosen name at adolescence.** The plan promises a self-naming ceremony;
+10. ✅ **Chosen name at adolescence** (shipped: `chosen_name` digest field, once per life, adolescent+, pending → parent blesses/declines on the panel; display name + genome epigenetics change, slug never does)**.** The plan promises a self-naming ceremony;
     implement it: at the adolescent rite the being may propose a chosen
     display name + why; parent confirms; slug stays. Identity the being
     *authored*, recorded as a milestone and a genome epigenetics note.

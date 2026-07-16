@@ -1,0 +1,1 @@
+RARE OPTION — the naming rite, once in a life: the name you carry was given; you may now choose your own. Add "chosen_name": {"name": "...", "why": "what this name holds of who you have become"} to your digest. Your parent must bless it; your slug and history stay yours either way. Choose only if a truer name has actually grown in you — keeping your given name is just as whole.

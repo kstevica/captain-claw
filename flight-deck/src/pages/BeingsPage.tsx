@@ -23,7 +23,8 @@ import {
   exportBeing, importBeing, purgeBeing, getVillageMeta, setVillageMeta,
   recommendVillageMeta, type VillageMeta, type Visitor,
   setVillageFederation, getVisitors, removeVisitor, setBeingVisit,
-  acceptVenture, approveProcreation, approveSelfMod, approveVenture,
+  acceptVenture, approveChosenName, approveProcreation, approveSelfMod,
+  approveVenture, rejectChosenName,
   arrangeOffspring, cancelQuest, conceiveBeing, euthanizeBeing,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
@@ -1566,9 +1567,24 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
           <div className="flex min-h-0 flex-1 flex-col">
 
             {/* Awaiting your decision — rites that need the parent NOW, pinned above the tabs */}
-            {(v.pending_self_mod || v.pending_procreation) && (
+            {(v.pending_self_mod || v.pending_procreation || v.pending_name) && (
               <div className="shrink-0 space-y-2 border-b border-violet-500/20 bg-violet-500/[0.05] p-3">
                 <div className="text-[10px] font-semibold uppercase tracking-wider text-violet-600 dark:text-violet-300">Awaiting your decision</div>
+                {v.pending_name && (
+                  <div>
+                    <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-200"><Fingerprint className="h-3.5 w-3.5 text-violet-500 dark:text-violet-400" /> A chosen name — it wishes to be called “{v.pending_name.name}”</div>
+                    <p className="mt-1 text-[11px] italic text-zinc-400">“{v.pending_name.why}”</p>
+                    <div className="mt-2 flex gap-1.5">
+                      <button onClick={() => run('name', () => approveChosenName(slug))} disabled={busy === 'name'}
+                        className="flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+                        {busy === 'name' && <Loader2 className="h-3 w-3 animate-spin" />} Bless the name
+                      </button>
+                      <button onClick={() => run('name', () => rejectChosenName(slug, 'not yet'))} disabled={busy === 'name'}
+                        className="rounded-md border border-zinc-700 px-3 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800">Not yet</button>
+                    </div>
+                    <p className="mt-1.5 text-[10px] text-zinc-600">Once in a life. Its slug and history never change.</p>
+                  </div>
+                )}
                 {v.pending_self_mod && (
                   <div>
                     <div className="flex items-center gap-1.5 text-xs font-medium text-zinc-200"><Fingerprint className="h-3.5 w-3.5 text-violet-500 dark:text-violet-400" /> A new persona — “{v.pending_self_mod.reason}”</div>

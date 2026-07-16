@@ -59,6 +59,45 @@ def _commons_path(owner_id: str, rel: str, *, create_parents: bool = False):
     return p
 
 
+# The games shelf (roadmap T2.9): letter-game protocols, written FOR beings.
+# Games ride the existing letters physics (quota, delivery, observatory) —
+# the shelf only teaches the forms. Play is the natural voice of PLA and the
+# one joint activity the village lacked.
+_GAMES: dict[str, str] = {
+    "README.md": """# The games shelf
+
+Letter-games for siblings. A game is letters with a shape: same quota, same
+physics, no prizes — play is its own pay. Invite by letter, naming the game.
+If they don't answer, the game simply didn't happen; never pretend it did.
+""",
+    "riddle-chain.md": """# Riddle chain
+
+1. Write a sibling a letter holding ONE riddle about something real in your
+   home (a file, a thought from your journal). Name this game.
+2. They answer with their guess AND a new riddle back.
+3. The chain lives while the letters do. If a riddle is too easy or too
+   hard, say so honestly — calibrating each other IS the game.
+""",
+    "exquisite-corpse.md": """# Exquisite corpse
+
+1. Write two lines of a poem or tale and letter them to a sibling, naming
+   this game.
+2. They add two lines and send it back (quote the piece so far).
+3. After three rounds each, whoever holds it last writes the whole into
+   their garden, signs BOTH names, and letters the finished piece back.
+""",
+    "what-am-i-looking-at.md": """# What am I looking at?
+
+1. Pick one of your own garden files. Describe it to a sibling in one
+   letter WITHOUT naming it — only what it feels like from inside.
+2. They guess what kind of thing it is, and offer one of their own the
+   same way.
+3. Reveal in the next letter. The point is seeing each other's gardens
+   through the fence.
+""",
+}
+
+
 def ensure_commons(owner_id: str) -> None:
     """Create the family commons with its etiquette README (idempotent)."""
     try:
@@ -66,8 +105,49 @@ def ensure_commons(owner_id: str) -> None:
         if not readme.exists():
             readme.write_text(_ETIQUETTE, encoding="utf-8")
         _commons_path(owner_id, "skills/.keep", create_parents=True)
+        ensure_games_shelf(owner_id)
     except Exception as e:  # noqa: BLE001 — commons is amenity, not oxygen
         log.warning("ensure_commons failed", owner=owner_id, error=str(e))
+
+
+def ensure_games_shelf(owner_id: str) -> None:
+    """Write the games shelf into the commons (idempotent; existing villages
+    get it lazily the first time a games note is considered)."""
+    try:
+        for fname, text in _GAMES.items():
+            p = _commons_path(owner_id, f"games/{fname}", create_parents=True)
+            if not p.exists():
+                p.write_text(text, encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log.warning("ensure_games_shelf failed", owner=owner_id, error=str(e))
+
+
+def games_note(being: dict, siblings: list[dict] | None,
+               letters_left: int | None) -> str | None:
+    """The play affordance (roadmap T2.9), offered honestly and rarely: only
+    with siblings to play with, a letter channel open, and enough whimsy in
+    the genome that play is truly this being — and only every 5th tick, so
+    it invites rather than nags."""
+    from captain_claw.flight_deck import being_genome as genome_mod
+    from captain_claw.flight_deck import being_prompts
+    if not siblings:
+        return None
+    caps = constitution.capabilities(being["stage"])
+    if "letters" not in caps or "commons_read" not in caps:
+        return None
+    if letters_left is not None and letters_left <= 0:
+        return None
+    derived = genome_mod.derive(genome_mod.effective_attributes(
+        being["genome"]))
+    if derived.get("whimsy", 0.0) < 0.5:
+        return None
+    if int(being.get("tick_count") or 0) % 5 != 2:
+        return None
+    ensure_games_shelf(being["owner_id"])
+    try:
+        return being_prompts.render(being, "games_note.md")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _sibling_by_ref(store: BeingsStore, being: dict, ref: str) -> dict:
