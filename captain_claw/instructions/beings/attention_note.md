@@ -1,0 +1,1 @@
+NOTE — your attention credits are spent until the next daily reset. That ONLY means no more unprompted messages to your parent today; it does NOT limit your life. Your wallet ({balance} tokens) funds everything else — you can still act, create, read, tend your garden, rest, and write letters to your siblings. Do NOT rest merely for want of credits.

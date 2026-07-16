@@ -31,7 +31,8 @@ import {
   listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
-  setCadence, setCognition, setHouseRules, setMediaDiet, setStage, setVentureState,
+  setCadence, setCognition, setCompactMode, setHouseRules, setMediaDiet,
+  setStage, setVentureState,
   tickBeing, wakeBeing, GRANT_AMOUNTS, TICK_INTERVAL_CHOICES,
 } from '../services/beings'
 
@@ -2366,6 +2367,22 @@ function BeingCard({ item, meta, onChanged }: {
             </select>
             {v.cognition === 'faculties' && (
               <span className="text-[10px] text-zinc-500">small-context: orient · act · journal · connect</span>
+            )}
+          </div>
+
+          <div className="mb-2 flex items-center gap-2 text-xs">
+            <span className="text-zinc-500">prompts</span>
+            <select
+              value={v.compact_mode ? 'compact' : 'full'}
+              onChange={(e) => void act('compact', () => setCompactMode(
+                item.slug, e.target.value === 'compact'))}
+              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
+            >
+              <option value="full">Full (default)</option>
+              <option value="compact">Compact</option>
+            </select>
+            {v.compact_mode && (
+              <span className="text-[10px] text-zinc-500">lean instructions + lean body · respawns on change</span>
             )}
           </div>
 

@@ -457,6 +457,11 @@ class BeingsStore:
                 # When the parent last opened this being's thread — messages it
                 # spoke after this are "unread from the being" (a badge cue).
                 ("parent_read_at", "TEXT"),
+                # Compact mode (panel toggle): tick prompts use the compact
+                # instruction set (instructions/beings/compact_*.md), and the
+                # body runs lean (eco/micro system prompt + capped context).
+                # Same narrative and physics, fewer tokens per heartbeat.
+                ("compact_mode", "INTEGER NOT NULL DEFAULT 0"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -901,6 +906,18 @@ class BeingsStore:
         self.record_event(b["id"], "cognition_set", {"mode": mode}, now=now)
         return self.get(owner_id, slug)
 
+    def set_compact_mode(self, owner_id: str, slug: str, on: bool,
+                         now: datetime | None = None) -> dict:
+        """Compact mode: tick prompts come from the compact instruction set
+        (instructions/beings/compact_*.md) and the body runs lean (eco/micro
+        system prompt + capped context window). Same narrative, same physics,
+        fewer tokens per heartbeat."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now, compact_mode=1 if on else 0)
+        self.record_event(b["id"], "compact_set", {"on": bool(on)}, now=now)
+        return self.get(owner_id, slug)
+
     def purge(self, owner_id: str, slug: str) -> dict:
         """Erase a DEAD being completely — every row it owns across every table.
         Only the dead can be purged (euthanize first); this is irreversible and
@@ -1241,6 +1258,7 @@ class BeingsStore:
             "pending_procreation": b["pending_procreation"],
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "cognition": b.get("cognition") or "faculties",
+            "compact_mode": bool(b.get("compact_mode")),
             "body_archetype": b.get("body_archetype") or "",
             "unread_from_being": self.unread_from_being(b["id"]),
             "public": bool(b.get("public")),
@@ -2010,7 +2028,8 @@ class BeingsStore:
         body = (body or "").strip()
         if not body:
             raise BeingError("an empty letter says nothing")
-        if self.letters_sent_today(a["id"], now) >= constitution.LETTERS_PER_DAY:
+        if self.letters_sent_today(a["id"], now) >= \
+                constitution.letters_per_day(a["stage"]):
             raise BeingError("letter limit reached for today")
         lid = uuid.uuid4().hex
         with self._lock:
@@ -2576,24 +2595,37 @@ class BeingsStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def dangling_links(self, being_id: str,
+                       existing_paths: set[str]) -> list[dict]:
+        """Edges whose endpoints no longer exist, OLDEST first, with ids —
+        a pure read; the mind decides what honest forgetting removes."""
+        rows = self._c().execute(
+            "SELECT id, from_path, to_path, rel, at FROM being_links"
+            " WHERE being_id = ? ORDER BY at", (being_id,),
+        ).fetchall()
+        return [dict(r) for r in rows
+                if r["from_path"] not in existing_paths
+                or r["to_path"] not in existing_paths]
+
+    def remove_links(self, being_id: str, link_ids: list[str]) -> int:
+        """Delete specific edges by id (bounded, caller-chosen prune)."""
+        if not link_ids:
+            return 0
+        with self._lock:
+            self._c().executemany(
+                "DELETE FROM being_links WHERE being_id = ? AND id = ?",
+                [(being_id, lid) for lid in link_ids],
+            )
+            self._c().commit()
+        return len(link_ids)
+
     def prune_links(self, being_id: str, existing_paths: set[str],
                     now: datetime | None = None) -> list[dict]:
         """Drop edges whose endpoints no longer exist. Returns the pruned rows
         so the caller can record honest forgetting."""
-        rows = self._c().execute(
-            "SELECT id, from_path, to_path, rel FROM being_links"
-            " WHERE being_id = ?", (being_id,),
-        ).fetchall()
-        dangling = [dict(r) for r in rows
-                    if r["from_path"] not in existing_paths
-                    or r["to_path"] not in existing_paths]
+        dangling = self.dangling_links(being_id, existing_paths)
         if dangling:
-            with self._lock:
-                self._c().executemany(
-                    "DELETE FROM being_links WHERE id = ?",
-                    [(d["id"],) for d in dangling],
-                )
-                self._c().commit()
+            self.remove_links(being_id, [d["id"] for d in dangling])
         return dangling
 
     def message_thread(self, owner_id: str, slug: str,

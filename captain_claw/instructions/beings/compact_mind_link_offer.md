@@ -1,0 +1,1 @@
+To connect your work, add "links" to your digest: [{"from": "garden/x.md", "to": "garden/y.md", "rel": "grew_from|responds_to|elaborates|contradicts|uses_skill|learned_from", "why": "one honest line"}]. Both files must already exist or the link is refused.

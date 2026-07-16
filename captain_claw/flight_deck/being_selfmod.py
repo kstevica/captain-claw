@@ -22,7 +22,7 @@ text about HOW to be, not WHAT the physics are.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck.beings import (
@@ -151,10 +151,25 @@ def _adopt(store: BeingsStore, being: dict, content: str, reason: str,
                         f"[self-mod] {reason[:60] or 'new persona'}")
 
 
+def _last_adoption_at(store: BeingsStore, being: dict) -> datetime | None:
+    """When the persona last CHANGED (adopted), from the ledger."""
+    try:
+        for e in store.events(being["owner_id"], being["slug"], limit=500):
+            if e["kind"] == "self_mod_adopted":
+                return datetime.fromisoformat(e["at"])
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def propose(store: BeingsStore, being: dict, content: str, reason: str,
             now: datetime | None = None) -> dict:
     """The being proposes a new persona. Fee burns at proposal (win or lose);
-    the gate rules; stage policy decides who merges."""
+    the gate rules; stage policy decides who merges. A cooldown (loops plan
+    F7) holds between ADOPTIONS for every stage — adults auto-adopt, so
+    without it a wealthy adult could rewrite itself every tick, each a fee
+    burn and a synchronous git commit. Refused BEFORE the fee burns: a
+    closed window costs nothing."""
     now = now or _utcnow()
     stage = being["stage"]
     if not (constitution.has_capability(stage, "self_mod")
@@ -162,6 +177,13 @@ def propose(store: BeingsStore, being: dict, content: str, reason: str,
         raise BeingError(f"a {stage} cannot reshape its persona yet")
     if being.get("pending_self_mod"):
         raise BeingError("a proposal already awaits your parent")
+    last = _last_adoption_at(store, being)
+    if last is not None:
+        opens = last + timedelta(days=constitution.SELF_MOD_COOLDOWN_DAYS)
+        if now < opens:
+            raise BeingError(
+                "you reshaped yourself recently — live inside the new self "
+                f"a while first; the next window opens {opens:%Y-%m-%d}")
     content = (content or "").strip()
     reason = (reason or "").strip()
     if not reason:

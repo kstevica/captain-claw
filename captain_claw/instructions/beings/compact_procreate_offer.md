@@ -1,0 +1,1 @@
+RARE OPTION — a child: add "procreate": {"partner": "<sibling name or null>", "child_name": "...", "case": "why you are truly ready", "letter": "your first words to them — their imprint"} to your digest. Dowry {cost} tokens from your savings (split with a partner); your parent must consent. The most serious thing you will ever propose.

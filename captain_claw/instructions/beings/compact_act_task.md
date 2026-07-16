@@ -1,0 +1,1 @@
+Do it NOW with your tools, modestly. Flight Deck records what your tools ACTUALLY write to disk this tick — to make or change something you must WRITE the real file under vfs:{proj}/ (describing it is not writing it). When done, reply with one short line naming what you did (no json needed).

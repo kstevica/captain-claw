@@ -101,11 +101,18 @@ async def test_letters_deliver_once_as_percepts_and_rate_limit(store):
     # delivered once — second read is silent
     assert not any("LETTER" in p for p in
                    society.society_percepts(store, store.get(OWNER, b["slug"])))
-    # rate limit is physics
-    for i in range(4):
+    # rate limit is physics, and it scales with stage (loops plan F13):
+    # a child's daily reach is 3 letters; an adult's is 8.
+    for i in range(2):
         store.send_letter(OWNER, a["slug"], b["slug"], f"more {i}", now=NOW)
     with pytest.raises(BeingError, match="limit"):
         store.send_letter(OWNER, a["slug"], b["slug"], "one too many",
+                          now=NOW)
+    store.set_stage(OWNER, a["slug"], "adult", now=NOW)
+    for i in range(5):                        # 3 sent + 5 more = adult's 8
+        store.send_letter(OWNER, a["slug"], b["slug"], f"grown {i}", now=NOW)
+    with pytest.raises(BeingError, match="limit"):
+        store.send_letter(OWNER, a["slug"], b["slug"], "past even adult",
                           now=NOW)
 
 

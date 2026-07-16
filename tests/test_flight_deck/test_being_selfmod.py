@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -227,9 +227,12 @@ async def test_rollback_restores_previous_self(store):
     b = await _being(store, stage="adult", pocket=10_000_000)
     selfmod.propose(store, b, GOOD_PERSONA, "v1", now=NOW)
     second = GOOD_PERSONA.replace("wanderer of maps", "keeper of hoards")
-    selfmod.propose(store, store.get(OWNER, b["slug"]), second, "v2", now=NOW)
+    # A second self-change must wait out the cooldown window (loops plan F7).
+    later = NOW + timedelta(days=constitution.SELF_MOD_COOLDOWN_DAYS + 1)
+    selfmod.propose(store, store.get(OWNER, b["slug"]), second, "v2",
+                    now=later)
     assert store.get(OWNER, b["slug"])["persona"] == second
-    rolled = selfmod.rollback(store, OWNER, b["slug"], now=NOW)
+    rolled = selfmod.rollback(store, OWNER, b["slug"], now=later)
     assert rolled["persona"] == GOOD_PERSONA
     kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
     assert "self_mod_rolled_back" in kinds

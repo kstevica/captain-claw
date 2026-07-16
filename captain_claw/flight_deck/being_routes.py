@@ -107,6 +107,11 @@ class CognitionRequest(BaseModel):
     mode: str
 
 
+class CompactRequest(BaseModel):
+    # True → compact instruction set + lean body (eco prompt, capped context)
+    on: bool
+
+
 class RechargeRequest(BaseModel):
     tokens: int
 
@@ -788,6 +793,29 @@ async def set_cognition(slug: str, body: CognitionRequest,
     decomposed pipeline — better for weak-context models)."""
     _run(get_store().set_cognition, user["id"], slug, body.mode)
     return _run(get_store().vitals, user["id"], slug)
+
+
+@router.post("/{slug}/compact")
+async def set_compact(slug: str, body: CompactRequest,
+                      user: dict = Depends(get_current_user)):
+    """Compact mode: this being's tick prompts use the compact instruction set
+    (same narrative and physics, fewer words), and its body runs lean — micro
+    system prompt (eco flag) + a capped context window. Respawns an alive body
+    so the lean physics take effect now; the compact prompts apply from the
+    very next tick either way."""
+    store = get_store()
+    being = _run(store.set_compact_mode, user["id"], slug, body.on)
+    # The body half applies through the agent dir (flag now, context cap at
+    # spawn) — flip the flag immediately so even a skipped respawn converges
+    # on the next natural prompt build.
+    being_life.set_body_eco_flag(being, body.on)
+    if being["state"] == "alive" and being.get("agent_slug"):
+        try:
+            being_life._stop_body(being)
+            await being_life.spawn_body(get_db(), store, being)
+        except Exception as e:  # noqa: BLE001 — heals on next tick
+            store.record_event(being["id"], "spawn_failed", {"error": str(e)})
+    return _run(store.vitals, user["id"], slug)
 
 
 @router.post("/{slug}/mark-read")

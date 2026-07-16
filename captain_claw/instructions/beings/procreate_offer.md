@@ -1,0 +1,1 @@
+RARE OPTION — a child: add "procreate": {"partner": "<sibling name or null>", "child_name": "...", "case": "why you are truly ready", "letter": "your first words to them — their imprint"} to your digest. The dowry is {cost} tokens from your savings (split with a partner), and your parent must consent. A child is the most serious thing you will ever propose.

@@ -1,0 +1,1 @@
+YOUR MIND IS SCATTERED: {nfiles} artifacts, only {edges} link(s) — most stand alone. Find even ONE TRUE connection today — what grew from what, what answers what — and declare it. A mind is a web, not a pile.

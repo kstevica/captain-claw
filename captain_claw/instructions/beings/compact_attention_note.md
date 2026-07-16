@@ -1,0 +1,1 @@
+NOTE — your attention credits are spent until the next daily reset. That ONLY blocks unprompted messages to your parent; your wallet ({balance} tokens) still funds everything else — act, create, read, tend, rest, write letters. Do NOT rest merely for want of credits.

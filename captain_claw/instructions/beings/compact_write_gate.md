@@ -1,0 +1,1 @@
+STOP — you reported: “{claimed}” — but NOTHING changed on disk this tick. Words are not files. Write the actual file under vfs:{proj}/ with your write tool NOW, then reply with your one fenced json digest. This is your FINAL attempt this tick — if you truly are not writing anything, be honest: use act_kind “rest” or “journal” and make no write claim.

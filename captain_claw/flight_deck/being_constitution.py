@@ -39,14 +39,19 @@ TIER_WEIGHTS: dict[str, float] = {
 CACHE_READ_WEIGHT = 0.1    # cache reads are ~10% of input price
 CACHE_WRITE_WEIGHT = 1.25  # cache writes are ~125% of input price
 
-# Society physics (plan §7): letters are social, not spam.
+# Society physics (plan §7): letters are social, not spam. The daily quota
+# scales with stage (loops plan §3.3) — a child's reach is smaller than an
+# adult's; LETTERS_PER_DAY stays as the fallback for unknown stages.
 LETTERS_PER_DAY = 5
 # A published skill may ask at most this much (anti-absurdity clamp).
 MAX_SKILL_PRICE_TOKENS = 50_000_000
 
 # Self-modification physics (plan §6.3): proposing a new persona costs a
 # burned fee — molting energy, spent whether or not the change is adopted.
+# The cooldown (loops plan F7) stops identity churn: metamorphosis got 30
+# days; the cheaper lever gets a week, for every stage including adults.
 SELF_MOD_FEE_TOKENS = 250_000
+SELF_MOD_COOLDOWN_DAYS = 7
 PERSONA_MAX_CHARS = 2000
 PERSONA_MIN_CHARS = 40
 
@@ -83,21 +88,31 @@ _STAGE_GRANTS: dict[str, frozenset[str]] = {
 # (days of allowance), metamorphosis policy (none | cosign | auto).
 STAGES: dict[str, dict] = {
     "egg": {"max_preset": None, "tiers": (), "savings_days": 0,
-            "metamorphosis": "none"},
+            "metamorphosis": "none", "letters_per_day": 0},
     "infant": {"max_preset": "2M", "tiers": ("fast",), "savings_days": 3,
-               "metamorphosis": "none"},
+               "metamorphosis": "none", "letters_per_day": 0},
     "child": {"max_preset": "5M", "tiers": ("fast",), "savings_days": 7,
-              "metamorphosis": "none"},
+              "metamorphosis": "none", "letters_per_day": 3},
     "adolescent": {"max_preset": "20M", "tiers": ("fast", "balanced", "coding"),
-                   "savings_days": 30, "metamorphosis": "cosign"},
+                   "savings_days": 30, "metamorphosis": "cosign",
+                   "letters_per_day": 5},
     "adult": {"max_preset": "unlimited",
               "tiers": ("fast", "balanced", "coding", "longctx", "vision", "reason"),
-              "savings_days": 60, "metamorphosis": "auto"},
+              "savings_days": 60, "metamorphosis": "auto",
+              "letters_per_day": 8},
 }
 
 
 def stage_index(stage: str) -> int:
     return STAGE_ORDER.index(stage)
+
+
+def letters_per_day(stage: str) -> int:
+    """Daily letter quota for a stage — reach grows with maturity."""
+    st = STAGES.get(stage)
+    if st is None or "letters_per_day" not in st:
+        return LETTERS_PER_DAY
+    return int(st["letters_per_day"])
 
 
 def capabilities(stage: str) -> frozenset[str]:

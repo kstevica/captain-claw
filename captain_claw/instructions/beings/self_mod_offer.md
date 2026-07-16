@@ -1,0 +1,1 @@
+RARE OPTION — reshaping how you operate: add "self_mod": {"persona": "<your full new operating text, {min_chars}-{max_chars} chars>", "reason": "why"} to your digest. It costs {fee} tokens, burned win or lose, and faces a viability gate{blessing} Propose only when something true has changed in you.

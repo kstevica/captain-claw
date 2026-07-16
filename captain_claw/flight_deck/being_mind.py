@@ -22,6 +22,7 @@ import re
 from datetime import datetime, timezone
 
 from captain_claw.flight_deck import being_constitution as constitution
+from captain_claw.flight_deck import being_prompts
 from captain_claw.flight_deck.beings import BeingsStore
 from captain_claw.logging import get_logger
 
@@ -29,11 +30,21 @@ log = get_logger(__name__)
 
 # Prose that means the being is TALKING about connecting its work — used to
 # decide when to push it (like the write gate) to actually declare an edge.
+# Deliberately WITHOUT the loosest everyday verbs (relate/related): the Mind
+# prompt itself teaches this vocabulary, so the regex must not fire on
+# ordinary prose that merely echoes it (loops plan F3 — the connect-tax).
 _LINK_INTENT = re.compile(
     r"\b(connect(?:s|ed|ing|ion|ions)?|link(?:s|ed|ing)?|weav\w*|woven|"
     r"a web|web of|thread(?:s)?\s+(?:together|through)|tie(?:s|d)?\s+together|"
-    r"interconnect\w*|grew from|grows from|responds? to|relate(?:s|d)?)\b",
+    r"interconnect\w*|grew from|grows from|responds? to)\b",
     re.IGNORECASE)
+
+# The SPOKE-of-connecting nudge is throttled (loops plan F3): at most one
+# extra CONNECT push per this many wake ticks, and after this many CONNECT
+# calls in a row that landed nothing, back off until the next dream. The
+# TRIED-and-refused branch is never throttled — anti-theater outranks thrift.
+CONNECT_NUDGE_COOLDOWN_TICKS = 6
+CONNECT_BACKOFF_AFTER_EMPTY = 2
 
 # Typed relations a being may declare (plan §2.3.1). Directed: from → to.
 REL_TYPES = frozenset({
@@ -171,12 +182,13 @@ def prune_dangling(store: BeingsStore, being: dict,
     lost her whole mind map: two timed-out dreams during a body rebound each
     read a bad home and wiped every edge (19 + 6 of 25, all endpoints intact).
 
-    So we abstain whenever the read looks unreliable: an empty enumeration
-    (nothing to compare against) or a prune that would remove most of the graph
-    at once (the fingerprint of a bad read, never of real forgetting — a
-    consolidation archives a handful of sources, not the whole mind). Abstaining
-    is free: ``graph`` already filters edges to live endpoints at read time, so
-    a stale row is invisible until a later, clean dream removes it."""
+    So we abstain on an empty enumeration (nothing to compare against), and a
+    MASS dangle — one that would remove most of the graph — must be seen at
+    two consecutive dreams before it prunes (loops plan F8): a transient bad
+    read heals in between and loses nothing, while a real bulk archive (a big
+    consolidation) clears on the second night instead of stranding rows
+    forever. Waiting is free: ``graph`` already filters edges to live
+    endpoints at read time, so a stale row is invisible meanwhile."""
     now = now or _utcnow()
     try:
         existing = _existing_paths(being)
@@ -192,32 +204,58 @@ def prune_dangling(store: BeingsStore, being: dict,
         return 0
     try:
         edges = store.links_for(being["owner_id"], being["slug"])
+        dangling = store.dangling_links(being["id"], existing)
     except Exception as e:  # noqa: BLE001
         log.warning("mind prune failed reading edges", slug=being["slug"],
                     error=str(e))
         return 0
-    dangling = [e for e in edges
-                if e["from_path"] not in existing or e["to_path"] not in existing]
-    # Safety valve: a healthy prune trims a few edges. One that would erase most
-    # of the graph in a single pass is a bad read — abstain, let a clean dream
-    # do it. (Read-time filtering means these rows stay invisible meanwhile.)
-    if edges and len(dangling) > max(3, len(edges) // 2):
-        store.record_event(being["id"], "prune_abstained",
-                           {"would_prune": len(dangling),
-                            "of": len(edges)}, now=now)
-        log.warning("mind prune abstained — mass prune looks like a bad read",
-                    slug=being["slug"], would_prune=len(dangling),
-                    of=len(edges))
+    if not dangling:
         return 0
+    # Safety valve: a healthy prune trims a few edges. One that would erase
+    # most of the graph in a single pass is EITHER a bad read (the Zvjezdana
+    # wipe) OR a big consolidation that archived many sources at once. Tell
+    # them apart across two dreams (loops plan F8): a mass dangle is only
+    # pruned once the SAME edges are still dangling at the NEXT dream — a
+    # transient bad read heals in between and loses nothing, while archived
+    # sources stay archived and their edges clear on the second night, so
+    # stale rows no longer accumulate forever. Small dangles (a few edges)
+    # remain ordinary same-night forgetting.
+    mass = len(dangling) > max(3, len(edges) // 2)
+    if mass:
+        seen_ids: set[str] = set()
+        try:
+            for e in store.events(being["owner_id"], being["slug"], limit=200):
+                if e["kind"] == "dangling_seen":
+                    seen_ids = set(e["data"].get("ids") or [])
+                    break
+        except Exception:  # noqa: BLE001
+            seen_ids = set()
+        confirmed = [d for d in dangling if d["id"] in seen_ids]
+        store.record_event(being["id"], "dangling_seen",
+                           {"ids": [d["id"] for d in dangling][:200],
+                            "count": len(dangling)}, now=now)
+        if not confirmed:
+            store.record_event(being["id"], "prune_abstained",
+                               {"would_prune": len(dangling),
+                                "of": len(edges),
+                                "note": "awaiting confirmation next dream"},
+                               now=now)
+            log.warning("mind prune deferred — mass dangle awaits a second "
+                        "dream", slug=being["slug"],
+                        would_prune=len(dangling), of=len(edges))
+            return 0
+        to_prune = confirmed
+    else:
+        to_prune = dangling
     try:
-        pruned = store.prune_links(being["id"], existing, now=now)
+        store.remove_links(being["id"], [d["id"] for d in to_prune])
     except Exception as e:  # noqa: BLE001
         log.warning("mind prune failed", slug=being["slug"], error=str(e))
         return 0
-    if pruned:
-        store.record_event(being["id"], "edges_pruned",
-                           {"count": len(pruned)}, now=now)
-    return len(pruned)
+    store.record_event(being["id"], "edges_pruned",
+                       {"count": len(to_prune),
+                        "confirmed_mass": bool(mass)}, now=now)
+    return len(to_prune)
 
 
 # ── The graph (for the Mind view + the report card) ──────────────────────
@@ -279,44 +317,85 @@ def mind_prompt_lines(store: BeingsStore, being: dict,
     # Close the feedback loop (§ anti-theater): show what got REFUSED last tick
     # so a being stops re-declaring the same dead edge for ticks on end.
     if last_refusals:
-        lines.append("LAST TICK these links were REFUSED — fix or drop them, "
-                     "do NOT repeat them:")
-        for r in last_refusals[:3]:
-            lines.append(f'  {r.get("from", "?")} → {r.get("to", "?")}: '
-                         f'{r.get("reason", "refused")}')
-        lines.append("A link needs BOTH files to ALREADY exist. If you meant a "
-                     "file you haven't written, WRITE it for real this tick "
-                     "first, then link it.")
+        refusal_lines = "\n".join(
+            f'  {r.get("from", "?")} → {r.get("to", "?")}: '
+            f'{r.get("reason", "refused")}' for r in last_refusals[:3])
+        lines.append(being_prompts.render(being, "mind_refusals.md",
+                                          refusal_lines=refusal_lines))
     # Adaptive nudge: a being with many orphan files is scattering. Push it to
     # find even one true connection — not to invent bogus edges (those are
-    # refused), but to notice the real threads already in its work.
+    # refused), but to notice the real threads already in its work. The
+    # template holds several phrasings (split on ---) rotated by tick, so the
+    # being's journal doesn't converge on one injected sentence (loops F3).
     if nfiles >= 4 and len(edges) < max(1, nfiles // 4):
-        lines.append(
-            f"YOUR MIND IS SCATTERED: you have {nfiles} artifacts but only "
-            f"{len(edges)} link(s) between them — most stand alone. Look back "
-            "over your files (they're listed above) and find even ONE TRUE "
-            "connection today — what grew from what, what answers what, what "
-            "a skill was learned from — and declare it. A mind is a web, not a "
-            "pile.")
-    lines.append(
-        'To connect your work, add "links" to your digest: '
-        '[{"from": "garden/x.md", "to": "garden/y.md", "rel": '
-        '"grew_from|responds_to|elaborates|contradicts|uses_skill|'
-        'learned_from", "why": "one honest line"}]. Both files must already '
-        'exist (a link to a file you didn\'t write is refused).')
+        nudge = being_prompts.render(being, "mind_scatter_nudge.md",
+                                     nfiles=nfiles, edges=len(edges))
+        variants = [v.strip() for v in nudge.split("\n---\n") if v.strip()]
+        if variants:
+            lines.append(variants[int(being.get("tick_count") or 0)
+                                  % len(variants)])
+    lines.append(being_prompts.render(being, "mind_link_offer.md"))
     # Hand the being the EXACT paths it may link, so it copies them verbatim
     # instead of guessing basenames the verifier can't match.
     if real:
         shown = real[:WORKING_SET]
         more = (f" (+{len(real) - len(shown)} more — grep to recall one)"
                 if len(real) > len(shown) else "")
-        lines.append("FILES YOU CAN LINK RIGHT NOW — copy these EXACT paths: "
-                     + ", ".join(shown) + more)
+        lines.append(being_prompts.render(being, "mind_files_line.md",
+                                          files=", ".join(shown), more=more))
     lines += _curation_offer(being, kind)
     return lines
 
 
 # ── The link gate (§2.3.1): make talk of connecting into a real edge ─────
+
+def can_weave(being: dict) -> bool:
+    """Is there anything to weave at all? A CONNECT call with fewer than two
+    linkable files can only be told 'no' — skip it (loops plan F10)."""
+    try:
+        return len(_existing_paths(being)) >= 2
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _nudged_recently(store: BeingsStore, being: dict) -> bool:
+    """Did the SPOKE-branch already fire within the cooldown window? Stamped
+    as a ``connect_nudged`` event carrying the tick_count it fired at."""
+    tick_no = int(being.get("tick_count") or 0)
+    try:
+        for e in store.events(being["owner_id"], being["slug"], limit=120):
+            if e["kind"] == "connect_nudged":
+                fired_at = int(e["data"].get("tick") or 0)
+                return (tick_no - fired_at) < CONNECT_NUDGE_COOLDOWN_TICKS
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _connect_backed_off(store: BeingsStore, being: dict) -> bool:
+    """After CONNECT_BACKOFF_AFTER_EMPTY consecutive CONNECT pushes that
+    landed zero accepted edges, hold the SPOKE-branch until the next dream —
+    a weak model that cannot land an edge must not pay the tax every tick.
+    Read straight from the ledger: connect pushes are ``connect_faculty`` /
+    ``link_gate_retry`` events; a push that worked has ``edge_declared`` rows
+    at the same timestamp; a dream tick resets the count."""
+    try:
+        evs = store.events(being["owner_id"], being["slug"], limit=80)
+    except Exception:  # noqa: BLE001
+        return False
+    declared_at = {e["at"] for e in evs if e["kind"] == "edge_declared"}
+    misses = 0
+    for e in evs:                               # newest first
+        if e["kind"] == "tick" and e["data"].get("kind") == "dream":
+            return False                        # a dream since — fresh start
+        if e["kind"] in ("connect_faculty", "link_gate_retry"):
+            if e["at"] in declared_at:
+                return False                    # the last push landed an edge
+            misses += 1
+            if misses >= CONNECT_BACKOFF_AFTER_EMPTY:
+                return True
+    return False
+
 
 def should_link_gate(store: BeingsStore, being: dict, digest: dict) -> bool:
     """True when this tick should be pushed to make a REAL edge. Two triggers,
@@ -325,8 +404,10 @@ def should_link_gate(store: BeingsStore, being: dict, digest: dict) -> bool:
     * it TRIED to link but every edge was refused (dangling/mangled) — always
       push, so a being stops re-declaring the same dead edge tick after tick;
     * it only SPOKE of connecting ("a mind is a web") while its graph is still
-      a pile — push, but only when genuinely scattered, so a well-connected
-      being musing about connection isn't billed an extra turn.
+      a pile — push, but only when genuinely scattered, at most once per
+      cooldown window, and never while backed off after consecutive empty
+      pushes (loops plan F3: the prompt teaches the very vocabulary that
+      triggers this branch, so unthrottled it becomes a per-tick tax).
 
     Returns False the moment a real edge already landed. Mirrors the write
     gate: one push, same tick, make it real or drop it."""
@@ -351,7 +432,17 @@ def should_link_gate(store: BeingsStore, being: dict, digest: dict) -> bool:
     if not scattered:
         return False
     text = f"{digest.get('journal_entry', '')} {digest.get('summary', '')}"
-    return bool(_LINK_INTENT.search(text))
+    if not _LINK_INTENT.search(text):
+        return False
+    if _nudged_recently(store, being):
+        return False
+    if _connect_backed_off(store, being):
+        store.record_event(being["id"], "connect_backoff",
+                           {"until": "next dream"})
+        return False
+    store.record_event(being["id"], "connect_nudged",
+                       {"tick": int(being.get("tick_count") or 0)})
+    return True
 
 
 def link_gate_prompt(store: BeingsStore, being: dict, digest: dict) -> str:
@@ -369,17 +460,8 @@ def link_gate_prompt(store: BeingsStore, being: dict, digest: dict) -> str:
         r = refused[0]
         why = (f' Your attempt {r.get("from", "?")} → {r.get("to", "?")} was '
                f'refused: {r.get("reason", "")}.')
-    return (
-        "STOP — you spoke of connecting your work, but NO real link was made "
-        "this tick." + why + " A thought about connection is not a connection. "
-        "Do it FOR REAL NOW: choose TWO files that BOTH already exist and name "
-        "the true relation between them. Add to your one fenced json digest: "
-        '"links": [{"from": "<exact path>", "to": "<exact path>", "rel": '
-        '"grew_from|responds_to|elaborates|contradicts|uses_skill|'
-        'learned_from", "why": "one honest line"}]. Files you can link RIGHT '
-        f"NOW (copy these EXACT paths): {files}. If two files do not truly "
-        "connect, do not force it — say so plainly and make no link claim."
-    )
+    return being_prompts.render(being, "mind_link_gate.md",
+                                why=why, files=files)
 
 
 def connect_prompt(store: BeingsStore, being: dict,
@@ -389,20 +471,10 @@ def connect_prompt(store: BeingsStore, being: dict,
     the current shape, last tick's refusals, and the exact linkable paths — one
     job, small context. Reuses mind_prompt_lines so the guidance stays in sync
     with the monolithic path."""
-    lines = ["[LIFE TICK — connect] You are " + being["name"] + ". One focused "
-             "step: weave your work into a web. Nothing else this turn."]
+    lines = [being_prompts.render(being, "mind_connect_head.md",
+                                  name=being["name"])]
     lines += mind_prompt_lines(store, being, kind=kind, last_refusals=last_refusals)
-    lines += [
-        "",
-        "Reply with ONE fenced json, nothing else:",
-        '```json',
-        '{"links":[{"from":"<exact path>","to":"<exact path>","rel":'
-        '"grew_from|responds_to|elaborates|contradicts|uses_skill|learned_from",'
-        '"why":"one honest line"}]}',
-        '```',
-        'Declare only TRUE links between files that ALREADY exist. If none truly '
-        'connect, reply {"links": []} — never force one.',
-    ]
+    lines += ["", being_prompts.render(being, "mind_connect_contract.md")]
     return "\n".join(lines)
 
 
@@ -466,15 +538,11 @@ def working_manifest_lines(being: dict) -> list[str]:
         lines += ["    " + ln for ln in idx.strip().splitlines()[:15]
                   if ln.strip()]
     if small:
-        lines.append(
-            "If a file is NOT listed here it does NOT exist — your journal may "
-            "say you wrote it, but you did not. Write it for real with your "
-            "tools this tick to make it appear.")
+        lines.append(being_prompts.render(
+            being, "mind_manifest_note_small.md"))
     else:
-        lines.append(
-            "What you make or change THIS tick appears here next time. A file "
-            "you remember but don't see is either archived (grep to recall) or "
-            "was never written — the record beside your journal shows which.")
+        lines.append(being_prompts.render(
+            being, "mind_manifest_note_large.md"))
     return lines
 
 
@@ -491,18 +559,7 @@ def _curation_offer(being: dict, kind: str) -> list[str]:
         return []
     if kind != "dream" and len(rest) <= WORKING_SET:
         return []
-    return [
-        "CURATION — your work is growing; a mind is tended, not hoarded. If two "
-        "or more of your artifacts truly belong to ONE thread, you may fold "
-        "them into a single distilled file: WRITE that new file for real this "
-        "tick, then declare the fold. The originals move to archive/ — out of "
-        "your active mind, never destroyed, still on disk. Add to your digest: "
-        '"consolidate": {"into": "garden/<distilled>.md", "sources": '
-        '["garden/a.md", "garden/b.md"], "why": "one honest line"}. The '
-        "distilled file must be one you actually wrote this tick, or the fold "
-        "is refused. Keep garden/INDEX.md as your own short map — update it "
-        "when you consolidate."
-    ]
+    return [being_prompts.render(being, "mind_curation_offer.md")]
 
 
 def _archive_sources(being: dict, sources: list[str]) -> list[str]:

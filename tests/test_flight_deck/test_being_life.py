@@ -448,7 +448,11 @@ async def test_create_drive_is_satisfied_by_a_real_artifact(store):
     assert "drive_unearned" not in kinds
     tick_ev = next(e for e in store.events(OWNER, b["slug"])
                    if e["kind"] == "tick")
-    assert tick_ev["data"]["drives"]["create"] > 0.85      # earned the bump
+    # Earned the (asymptotic) bump: create rose while unserved drives only
+    # decayed — satisfaction is earned, and it no longer pins toward 1.0.
+    assert tick_ev["data"]["drives"]["create"] > 0.74
+    assert (tick_ev["data"]["drives"]["create"]
+            > tick_ev["data"]["drives"]["grow"])
 
 
 async def test_non_create_drive_still_credited_without_a_file(store):
@@ -472,7 +476,11 @@ async def test_non_create_drive_still_credited_without_a_file(store):
                                     store.events(OWNER, b["slug"])]
     tick_ev = next(e for e in store.events(OWNER, b["slug"])
                    if e["kind"] == "tick")
-    assert tick_ev["data"]["drives"]["explore"] > 0.85
+    # Served without a file (explore is not artifact-gated); the asymptotic
+    # bump lands above every unserved drive's decayed level.
+    assert tick_ev["data"]["drives"]["explore"] > 0.74
+    assert (tick_ev["data"]["drives"]["explore"]
+            > tick_ev["data"]["drives"]["grow"])
 
 
 async def test_mismatch_under_journal_act_is_flagged_and_fed_back(store):

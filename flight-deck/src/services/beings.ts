@@ -117,6 +117,7 @@ export interface BeingVitals {
   } | null
   tick_interval_minutes: number | null
   cognition: 'monolith' | 'faculties'
+  compact_mode: boolean
   body_archetype: string
   unread_from_being: number
   public: boolean
@@ -418,6 +419,13 @@ export type Cognition = 'monolith' | 'faculties'
 export const setCognition = (slug: string, mode: Cognition) =>
   fdFetch<BeingVitals>(`/beings/${slug}/cognition`, {
     method: 'POST', body: JSON.stringify({ mode }),
+  })
+
+// Compact mode: compact instruction set for ticks + a lean body (micro
+// system prompt, capped context). Same narrative, fewer tokens per heartbeat.
+export const setCompactMode = (slug: string, on: boolean) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/compact`, {
+    method: 'POST', body: JSON.stringify({ on }),
   })
 
 // Body housekeeping: run the being's body on an archetype (its tier → model,

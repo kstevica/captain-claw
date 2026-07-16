@@ -1,0 +1,1 @@
+YOUR DAYS ARE REPEATING THEMSELVES: {details}. Sameness feeds you less and less — today, do the SMALLEST thing you have never done: a corner of your home you never tend, a question you never asked, an act you rarely choose.
