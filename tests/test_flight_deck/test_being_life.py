@@ -1500,3 +1500,28 @@ def test_monolith_menu_is_honest_about_talk(store):
 
 async def _usage_async_100k(being, since):
     return _usage(100_000)
+
+
+def test_attention_note_only_fires_when_spent_and_never_paralyses(store):
+    """The Zvjezdana rut: 0 attention credits beside a full wallet read as
+    'I'm broke, rest'. When credits are spent, both prompts must say plainly
+    that it ONLY blocks messaging the parent — never acting."""
+    b = _born(store, stage="child", port=0)
+    b = dict(b, attention_credits=0)
+    w = {"balance_tokens": 13_900_000, "effective_preset": "2M"}
+    note = life.attention_note(b, w)
+    assert note and "13900000" in note
+    assert "only" in note.lower() and "parent" in note.lower()
+    assert "act" in note.lower()
+    # it surfaces in BOTH cognition prompts…
+    mono = life.compose_tick_prompt(b, wallet=w, siblings=None)
+    orient = life.compose_orient_prompt(
+        b, kind="wake", now=NOW, spent_today=0, wallet=w, percepts=None,
+        first_of_day=False, siblings=None, letters_left=None, visitors=None)
+    assert "attention credits are spent" in mono
+    assert "attention credits are spent" in orient
+    # …and stays silent when she still has credits (no needless noise)
+    b2 = dict(b, attention_credits=2)
+    assert life.attention_note(b2, w) is None
+    assert "attention credits are spent" not in life.compose_tick_prompt(
+        b2, wallet=w, siblings=None)

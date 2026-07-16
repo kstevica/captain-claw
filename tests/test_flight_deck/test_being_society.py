@@ -333,3 +333,48 @@ async def test_village_feed_merges_and_orders(store):
     texts = " | ".join(i["text"] for i in feed)
     assert "Zvjezdana → Mira: hello sister" in texts
     assert "adopted 'Map sketching' from" in texts and "paid 1000000" in texts
+
+
+# ── Letters observatory (the parent watching beings talk) ────────────────
+
+async def test_letters_overview_threads_by_pair_and_marks_reaches(store):
+    a = await _grown(store, "Zvjezdana")
+    b = await _grown(store, "Mira")
+    c = await _grown(store, "Ada")
+    # a two-way conversation between Zvjezdana and Mira
+    store.send_letter(OWNER, a["slug"], b["slug"], "hello sister", now=NOW)
+    store.send_letter(OWNER, b["slug"], a["slug"], "hello back",
+                      now=NOW + timedelta(minutes=2))
+    # a separate, newer thread Zvjezdana → Ada (so ordering is testable)
+    store.send_letter(OWNER, a["slug"], c["slug"], "come see my garden",
+                      now=NOW + timedelta(minutes=10))
+    # a refused reach: record a society_refused as the tick would
+    store.record_event(a["id"], "society_refused",
+                       {"what": "talk", "to": b["slug"],
+                        "reason": "your letter quota for today is spent"},
+                       now=NOW + timedelta(minutes=3))
+
+    ov = society.letters_overview(store, OWNER)
+    assert ov["stats"] == {"threads": 2, "delivered": 3, "refused": 1}
+    # newest thread first (Zvjezdana ⇄ Ada updated at +10m)
+    first = ov["threads"][0]
+    assert {p["name"] for p in first["participants"]} == {"Zvjezdana", "Ada"}
+    # the Zvjezdana⇄Mira thread carries both letters AND the refused reach,
+    # in time order
+    pair = next(t for t in ov["threads"]
+                if {p["name"] for p in t["participants"]} == {"Zvjezdana", "Mira"})
+    kinds = [(m["kind"], m["from_name"]) for m in pair["messages"]]
+    assert kinds == [("letter", "Zvjezdana"), ("letter", "Mira"),
+                     ("refused", "Zvjezdana")]      # chronological by `at`
+    # the delivered letters expose full body + read state; refused exposes why
+    letter = pair["messages"][0]
+    assert letter["body"] == "hello sister" and letter["read"] is False
+    refused = pair["messages"][2]
+    assert "quota" in refused["reason"] and refused["to_name"] == "Mira"
+
+
+async def test_letters_overview_empty_is_clean(store):
+    await _grown(store, "Solo")
+    ov = society.letters_overview(store, OWNER)
+    assert ov == {"threads": [], "stats": {"threads": 0, "delivered": 0,
+                                           "refused": 0}}

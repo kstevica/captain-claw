@@ -293,3 +293,86 @@ def village_feed(store: BeingsStore, owner_id: str,
             items.append({"kind": e["kind"], "at": e["at"], "text": text})
     items.sort(key=lambda x: x["at"], reverse=True)
     return items[:limit]
+
+
+# ── Letters observatory (the parent watching beings talk to each other) ──
+
+def letters_overview(store: BeingsStore, owner_id: str,
+                     limit: int = 500) -> dict:
+    """Every being→being letter, grouped into per-pair conversation threads —
+    the parent's window onto how the family actually talks. Also surfaces
+    refused/undelivered attempts (a letter tried below stage, a talk that
+    reached no one) so silence is legible, not a mystery: the honest record of
+    who reached for whom, and whether the world let it through."""
+    roster = [store.get(owner_id, b["slug"]) for b in store.list(owner_id)]
+    idmap: dict[str, dict] = {
+        b["id"]: {"slug": b["slug"], "name": b["name"],
+                  "stage": b.get("stage", ""), "state": b.get("state", "")}
+        for b in roster
+    }
+
+    def who(bid: str) -> dict:
+        return idmap.get(bid, {"slug": bid, "name": "a lost being",
+                               "stage": "", "state": "gone"})
+
+    threads: dict[tuple, dict] = {}
+
+    def thread_for(a_slug: str, b_slug: str, parts: list[dict]) -> dict:
+        key = tuple(sorted((a_slug, b_slug)))
+        th = threads.get(key)
+        if th is None:
+            th = {"key": "::".join(key), "participants": parts,
+                  "messages": [], "last_at": ""}
+            threads[key] = th
+        return th
+
+    delivered = 0
+    for letter in store.village_letters(owner_id, limit=limit):
+        frm, to = who(letter["from_being"]), who(letter["to_being"])
+        th = thread_for(frm["slug"], to["slug"], [frm, to])
+        th["messages"].append({
+            "kind": "letter",
+            "from_slug": frm["slug"], "from_name": frm["name"],
+            "to_slug": to["slug"], "to_name": to["name"],
+            "body": letter["body"], "at": letter["at"],
+            "read": letter.get("read_at") is not None,
+        })
+        delivered += 1
+
+    # Refused/undelivered reaches (talk below stage, a spent quota, a bounced
+    # letter) — a being tried to speak but nothing landed. Recorded per sender.
+    refused = 0
+    for b in store.list(owner_id):
+        for e in store.events(owner_id, b["slug"], limit=80):
+            if e["kind"] != "society_refused":
+                continue
+            d = e["data"]
+            if d.get("what") not in ("letter", "talk"):
+                continue
+            to_ref = d.get("to")   # recorded as the target's slug (or name)
+            tgt = next((v for v in idmap.values()
+                        if v["slug"] == to_ref or v["name"] == to_ref), None)
+            partner = tgt or {"slug": to_ref or "someone",
+                              "name": to_ref or "someone", "stage": "",
+                              "state": ""}
+            frm = {"slug": b["slug"], "name": b["name"],
+                   "stage": b.get("stage", ""), "state": b.get("state", "")}
+            th = thread_for(frm["slug"], partner["slug"], [frm, partner])
+            th["messages"].append({
+                "kind": "refused",
+                "from_slug": frm["slug"], "from_name": frm["name"],
+                "to_slug": partner["slug"], "to_name": partner["name"],
+                "reason": d.get("reason") or "the world said no",
+                "at": e["at"], "read": True,
+            })
+            refused += 1
+
+    out: list[dict] = []
+    for th in threads.values():
+        th["messages"].sort(key=lambda m: m["at"])
+        th["last_at"] = th["messages"][-1]["at"] if th["messages"] else ""
+        out.append(th)
+    out.sort(key=lambda t: t["last_at"], reverse=True)
+    return {"threads": out,
+            "stats": {"threads": len(out), "delivered": delivered,
+                      "refused": refused}}

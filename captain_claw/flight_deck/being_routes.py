@@ -261,6 +261,15 @@ async def village(limit: int = 40, user: dict = Depends(get_current_user)):
                           user["id"], limit)}
 
 
+@router.get("/letters")
+async def letters(limit: int = 500, user: dict = Depends(get_current_user)):
+    """The letters observatory: every being→being letter grouped into per-pair
+    conversation threads (plus refused/undelivered reaches), so the parent can
+    watch the family talk. (Registered before /{slug}.)"""
+    return _run(being_society.letters_overview, get_store(),
+                user["id"], limit)
+
+
 class QuestRequest(BaseModel):
     title: str
     spec: str

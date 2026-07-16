@@ -16,6 +16,8 @@ import {
   type Assessor, type BeingGraph, type Chore, type Quest, type Readiness,
   type ReportCard, type SavedAssessment, type SelfFile, type ThreadItem,
   type Venture, type VillageItem, type ParentPublicThread,
+  getLetters, type LettersOverview, type LetterThread, type LetterMessage,
+  type LetterParticipant,
   deleteAssessment, getAssessors, getReadiness, listAssessments,
   requestAssessment, saveAssessment, setBeingPublic, getPublicThreads,
   exportBeing, importBeing, purgeBeing, getVillageMeta, setVillageMeta,
@@ -2682,6 +2684,108 @@ function EarningBoard({ onChanged }: { onChanged: () => void }) {
   )
 }
 
+// The letters observatory — the parent watching the family talk. One card per
+// being↔being conversation, threaded chronologically, with the full text of
+// each letter and read/unread state; refused reaches (a talk that landed
+// nowhere, a letter tried below stage) show as amber notes so silence is
+// legible rather than a mystery.
+function StageDot({ p }: { p: LetterParticipant }) {
+  return (
+    <span className={`rounded border px-1 py-0.5 text-[9px] ${STAGE_META[p.stage] || STAGE_META.egg}`}>
+      {p.stage || '—'}
+    </span>
+  )
+}
+
+function LetterBubble({ m, alignLeft }: { m: LetterMessage; alignLeft: boolean }) {
+  if (m.kind === 'refused') {
+    return (
+      <div className="flex justify-center">
+        <div className="max-w-[85%] rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-center text-[11px] text-amber-300/90">
+          <span className="font-medium">{m.from_name}</span> reached for{' '}
+          <span className="font-medium">{m.to_name}</span> — nothing landed: {m.reason}
+          <div className="mt-0.5 text-[9px] text-amber-400/60">{fmtAt(m.at)}</div>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className={`flex ${alignLeft ? 'justify-start' : 'justify-end'}`}>
+      <div className={`max-w-[80%] rounded-2xl px-3 py-2 ${alignLeft
+        ? 'rounded-bl-sm bg-zinc-800 text-zinc-200'
+        : 'rounded-br-sm bg-violet-600/90 text-white'}`}>
+        <div className={`text-[9px] font-medium ${alignLeft ? 'text-zinc-500' : 'text-violet-200/80'}`}>
+          {m.from_name} → {m.to_name}
+        </div>
+        <p className="mt-0.5 whitespace-pre-wrap text-[12px] leading-relaxed">{m.body}</p>
+        <div className={`mt-0.5 text-right text-[9px] ${alignLeft ? 'text-zinc-500' : 'text-violet-200/80'}`}>
+          {fmtAt(m.at)}{m.read ? ' · read' : ' · unread'}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LetterThreadCard({ t }: { t: LetterThread }) {
+  const [a, b] = t.participants
+  const leftSlug = a?.slug
+  const delivered = t.messages.filter((m) => m.kind === 'letter').length
+  const unread = t.messages.filter((m) => m.kind === 'letter' && !m.read).length
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40">
+      <div className="flex items-center gap-2 border-b border-zinc-800/70 px-3 py-2">
+        <Mail className="h-3.5 w-3.5 shrink-0 text-violet-400" />
+        <span className="text-xs font-medium text-zinc-200">{a?.name}</span>
+        {a && <StageDot p={a} />}
+        <span className="text-zinc-600">⇄</span>
+        <span className="text-xs font-medium text-zinc-200">{b?.name}</span>
+        {b && <StageDot p={b} />}
+        <span className="ml-auto text-[10px] text-zinc-500">
+          {delivered} letter{delivered === 1 ? '' : 's'}
+          {unread > 0 && <span className="ml-1 text-amber-400">· {unread} unread</span>}
+        </span>
+      </div>
+      <div className="max-h-72 space-y-2.5 overflow-y-auto p-3">
+        {t.messages.map((m, i) => (
+          <LetterBubble key={i} m={m} alignLeft={m.from_slug === leftSlug} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function LettersObservatory({ data }: { data: LettersOverview | null }) {
+  if (!data) {
+    return (
+      <div className="flex justify-center rounded-lg border border-zinc-800 bg-zinc-900/40 py-8">
+        <Loader2 className="h-5 w-5 animate-spin text-zinc-600" />
+      </div>
+    )
+  }
+  const { threads, stats } = data
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+        <Mail className="h-3.5 w-3.5 text-violet-400" /> Letters — the family talking
+        <span className="ml-2 text-[10px] font-normal text-zinc-500">
+          {stats.threads} conversation{stats.threads === 1 ? '' : 's'} · {stats.delivered} delivered
+          {stats.refused > 0 && ` · ${stats.refused} bounced`}
+        </span>
+      </div>
+      {threads.length === 0 ? (
+        <p className="text-xs text-zinc-600">
+          No letters yet. When a being writes to a sibling, their conversation appears here — and any
+          letter that couldn't be delivered shows why.
+        </p>
+      ) : (
+        <div className="space-y-2.5">
+          {threads.map((t) => <LetterThreadCard key={t.key} t={t} />)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // The village's own words — a per-owner description shown atop the public
 // /village page. Collapsed by default; self-contained load/save. Can be drafted
 // by one of the beings' own agents (in its voice) via "Recommend a description".
@@ -2883,9 +2987,13 @@ export function BeingsPage() {
   const [showBoard, setShowBoard] = useState(false)
   const [showVillage, setShowVillage] = useState(false)
   const [village, setVillage] = useState<VillageItem[]>([])
+  const [showLetters, setShowLetters] = useState(false)
+  const [letters, setLetters] = useState<LettersOverview | null>(null)
   const timer = useRef<number | null>(null)
   const villageOn = useRef(false)
   villageOn.current = showVillage
+  const lettersOn = useRef(false)
+  lettersOn.current = showLetters
 
   const load = useCallback(async (spinner = false) => {
     if (spinner) setLoading(true)
@@ -2899,6 +3007,7 @@ export function BeingsPage() {
       setBeings(b.beings)
       setLiabilities(l.total_tokens)
       if (villageOn.current) setVillage((await getVillage()).items)
+      if (lettersOn.current) setLetters(await getLetters())
       setError('')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'failed to load beings')
@@ -2961,12 +3070,25 @@ export function BeingsPage() {
             {beings.length >= 2 && (
               <button
                 onClick={() => {
+                  const next = !showLetters
+                  setShowLetters(next)
+                  if (next) void getLetters().then(setLetters).catch(() => {})
+                }}
+                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-zinc-800 ${showLetters ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-300'}`}
+                title="Watch the family talk — every letter between beings, threaded"
+              >
+                <Mail className="h-3.5 w-3.5" /> Letters
+              </button>
+            )}
+            {beings.length >= 2 && (
+              <button
+                onClick={() => {
                   const next = !showVillage
                   setShowVillage(next)
                   if (next) void getVillage().then((v) => setVillage(v.items)).catch(() => {})
                 }}
                 className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-zinc-800 ${showVillage ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-300'}`}
-                title="Letters, publications, trades and gifts across the family"
+                title="Publications, trades and gifts across the family"
               >
                 <Users className="h-3.5 w-3.5" /> Village
               </button>
@@ -2998,6 +3120,8 @@ export function BeingsPage() {
         <VillageFederationCard />
 
         {showBoard && <EarningBoard onChanged={() => void load(false)} />}
+
+        {showLetters && <LettersObservatory data={letters} />}
 
         {showVillage && (
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">

@@ -193,6 +193,37 @@ export interface VillageItem {
 export const getVillage = (limit = 40) =>
   fdFetch<{ items: VillageItem[] }>(`/beings/village?limit=${limit}`)
 
+// ── Letters observatory: being↔being conversations (+ refused reaches) ──
+export interface LetterParticipant {
+  slug: string
+  name: string
+  stage: string
+  state: string
+}
+export interface LetterMessage {
+  kind: 'letter' | 'refused'
+  from_slug: string
+  from_name: string
+  to_slug: string
+  to_name: string
+  body?: string
+  reason?: string
+  at: string
+  read: boolean
+}
+export interface LetterThread {
+  key: string
+  participants: LetterParticipant[]
+  messages: LetterMessage[]
+  last_at: string
+}
+export interface LettersOverview {
+  threads: LetterThread[]
+  stats: { threads: number; delivered: number; refused: number }
+}
+export const getLetters = (limit = 500) =>
+  fdFetch<LettersOverview>(`/beings/letters?limit=${limit}`)
+
 export interface Quest {
   id: string
   title: string

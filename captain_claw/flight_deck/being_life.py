@@ -861,6 +861,24 @@ def society_prompt_fields(being: dict, siblings: list[dict] | None,
     return fields
 
 
+def attention_note(being: dict, wallet: dict | None) -> str | None:
+    """A clarifying line for when attention credits hit 0. Weak-context bodies
+    read 'attention credits 0' beside a full wallet and conclude they are broke
+    and must rest — the Zvjezdana rut, ticks of 'nula kredita' while sitting on
+    13.9M tokens. Attention credits ONLY gate unprompted messages to the parent;
+    they never fund living. Say so, plainly, only when it matters."""
+    if int(being.get("attention_credits", 0) or 0) > 0:
+        return None
+    bal = (wallet or {}).get("balance_tokens", "?")
+    return (
+        "NOTE — your attention credits are spent until the next daily reset. "
+        "That ONLY means no more unprompted messages to your parent today; it "
+        f"does NOT limit your life. Your wallet ({bal} tokens) funds everything "
+        "else — you can still act, create, read, tend your garden, rest, and "
+        "write letters to your siblings. Do NOT rest merely for want of credits."
+    )
+
+
 def _talk_menu_note(being: dict, siblings: list[dict] | None,
                     letters_left: int | None) -> str:
     """How 'talk' is offered in the act menu — honestly. A talk that cannot
@@ -961,6 +979,9 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         f"YOUR HOME is vfs:{proj}/ — self/, journal/, garden/, skills/. "
         f"All writes belong inside your home.",
     ]
+    _att = attention_note(being, w)
+    if _att:
+        lines.append(_att)
     # The bounded, recency-ranked working set (§2.3.2) — stays cheap as the
     # corpus grows past hundreds of files; small corpora still list in full.
     try:
@@ -1469,6 +1490,9 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
         "DRIVES (pressure, highest first): "
         + ", ".join(f"{n}={p}" for n, p in pressures),
     ]
+    _att = attention_note(being, w)
+    if _att:
+        lines.append(_att)
     lines += _compact_home_lines(being)
     persona = (being.get("persona") or "").strip()
     if persona:
