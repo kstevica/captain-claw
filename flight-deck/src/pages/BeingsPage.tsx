@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, Check, ChevronDown,
   ChevronLeft, ChevronRight, ClipboardList, Coins, Download, Egg, ExternalLink,
-  Files, Fingerprint, Gift, Globe, GraduationCap, History, Loader2, Mail,
+  Files, Fingerprint, Footprints, Gift, Globe, GraduationCap, History, Loader2, Mail,
   Map as MapIcon, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus,
   RefreshCw, Search, ScrollText, Skull, SlidersHorizontal, Sparkles, Sprout,
   Trash2, Upload, Users, Wrench, X, Zap, ZoomIn, ZoomOut,
@@ -33,13 +33,16 @@ import {
   grantCoins, listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
   getVillageMap, getVillagePlace, getMarket, type VillageMapData,
   type VillagePlace, type VillageBeingPos, type MarketListing,
-  getVillageLife, judgeCommission, setStewardStipend, type VillageLife,
+  getVillageLife, judgeCommission, setStewardStipend, type VillageLife, nudgeBeing,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
-  setCadence, setCognition, setCompactMode, setHouseRules, setInstincts, setMediaDiet,
+  setAvatar, setCadence, setCognition, setCompactMode, setHouseRules, setInstincts, setMediaDiet,
   setStage, setVentureState,
   tickBeing, wakeBeing, GRANT_AMOUNTS, TICK_INTERVAL_CHOICES,
 } from '../services/beings'
+import { CHARACTER_NAMES, IskraAvatar, PALETTES, PALETTE_NAMES } from '../components/village/avatars'
+import { IsoScene } from '../components/village/IsoScene'
+import { posOf as walkPosOf, statusOf as walkStatusOf } from '../components/village/walk'
 
 const REFRESH_MS = 6000
 const ATTRS = ['CUR', 'PER', 'CAU', 'SOC', 'CRE', 'ORD', 'PLA'] as const
@@ -2583,6 +2586,7 @@ function BeingCard({ item, meta, onChanged }: {
   const [talkOpen, setTalkOpen] = useState(false)
   const [parentingOpen, setParentingOpen] = useState(false)
   const [careOpen, setCareOpen] = useState(false)
+  const [lookOpen, setLookOpen] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -2638,6 +2642,10 @@ function BeingCard({ item, meta, onChanged }: {
   return (
     <div className="group/card flex flex-col rounded-xl border border-zinc-800 bg-gradient-to-b from-zinc-900/70 to-zinc-900/30 p-4 transition-colors hover:border-zinc-700">
       <div className="mb-2 flex items-center gap-2">
+        {v?.avatar && (
+          <IskraAvatar c={v.avatar.c} p={v.avatar.p} size={20}
+            title={`${item.name}'s look`} className="shrink-0" />
+        )}
         <span className="text-sm font-semibold text-zinc-100">{item.name}</span>
         <span className={`rounded border px-1.5 py-0.5 text-[10px] ${STAGE_META[item.stage] || STAGE_META.egg}`}>{item.stage}</span>
         <span className={`rounded border px-1.5 py-0.5 text-[10px] ${STATE_META[item.state] || STATE_META.paused}`}>{item.state}</span>
@@ -2826,6 +2834,52 @@ function BeingCard({ item, meta, onChanged }: {
                   </span>
                 </div>
               )}
+              <div className="flex items-start gap-2 text-xs">
+                <span className="w-16 shrink-0 pt-1.5 text-zinc-500">look</span>
+                <div className="min-w-0">
+                  <button onClick={() => setLookOpen((o) => !o)}
+                    title="Pick this Iskra's character and colors"
+                    className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-zinc-300 hover:border-violet-500/50 focus:outline-none">
+                    {v.avatar && <IskraAvatar c={v.avatar.c} p={v.avatar.p} size={18} />}
+                    <span className="text-[10px] text-zinc-500">
+                      {CHARACTER_NAMES[((v.avatar?.c || 1) - 1) % CHARACTER_NAMES.length]} · {v.avatar?.p}
+                    </span>
+                    <ChevronDown className={`h-3 w-3 text-zinc-600 transition-transform ${lookOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {lookOpen && v.avatar && (
+                    <div className="mt-1.5 rounded-lg border border-zinc-800 bg-zinc-950/70 p-2">
+                      <div className="mb-1.5 flex flex-wrap gap-1">
+                        {CHARACTER_NAMES.map((nm, i) => (
+                          <button key={nm}
+                            onClick={() => void act('avatar', () => setAvatar(item.slug, i + 1, v.avatar.p))}
+                            title={nm}
+                            className={`rounded-md border p-0.5 ${v.avatar.c === i + 1
+                              ? 'border-violet-500/60 bg-violet-500/10'
+                              : 'border-transparent hover:border-zinc-700'}`}>
+                            <IskraAvatar c={i + 1} p={v.avatar.p} size={22} />
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {PALETTE_NAMES.map((pn) => (
+                          <button key={pn}
+                            onClick={() => void act('avatar', () => setAvatar(item.slug, v.avatar.c, pn))}
+                            title={pn}
+                            className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] ${v.avatar.p === pn
+                              ? 'border-violet-500/60 text-zinc-200'
+                              : 'border-zinc-700 text-zinc-500 hover:border-zinc-600'}`}>
+                            <span className="h-2.5 w-2.5 rounded-full"
+                              style={{ background: PALETTES[pn].c1 }} />
+                            <span className="h-2.5 w-2.5 rounded-full"
+                              style={{ background: PALETTES[pn].c3 }} />
+                            {pn}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
               <div className="flex items-center gap-2 text-xs">
                 <span className="w-16 shrink-0 text-zinc-500">body</span>
                 <select value={v.body_archetype ?? ''}
@@ -3458,9 +3512,6 @@ const AFF_HUE: Record<string, string> = {
   gather: '#a78bfa', trade: '#f59e0b', read: '#38bdf8', create: '#fbbf24',
   tend: '#34d399', play: '#f472b6', remember: '#94a3b8', rest: '#818cf8',
 }
-const STAGE_R: Record<string, number> = {
-  infant: 7, child: 10, adolescent: 11, adult: 12,
-}
 
 function VillageMap() {
   const [data, setData] = useState<VillageMapData | null>(null)
@@ -3471,6 +3522,7 @@ function VillageMap() {
   const [placeInfo, setPlaceInfo] =
     useState<{ place: VillagePlace; guestbook: string } | null>(null)
   const [busy, setBusy] = useState(false)
+  const [nudging, setNudging] = useState(false)
   const fetchedAt = useRef(0)
   const [, beat] = useState(0)
 
@@ -3487,6 +3539,12 @@ function VillageMap() {
     try { await judgeCommission(approve); await load() }
     catch (e) { alert(e instanceof Error ? e.message : 'failed') }
     finally { setBusy(false) }
+  }
+  const nudge = async (slug: string, dest: string) => {
+    setNudging(true)
+    try { await nudgeBeing(slug, dest); await load() }
+    catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    finally { setNudging(false) }
   }
   useEffect(() => {
     void load()
@@ -3512,43 +3570,10 @@ function VillageMap() {
 
   if (!data || data.places.length === 0) return null
 
-  const destOf = (b: VillageBeingPos): [number, number] => {
-    if (!b.to) return b.xy
-    if (b.to === 'home') return b.home_xy
-    const p = placeById[b.to]
-    return p ? [p.x, p.y] : b.xy
-  }
-  const posOf = (b: VillageBeingPos): [number, number] => {
-    if (!b.to) return b.xy
-    const dest = destOf(b)
-    const dx = dest[0] - b.xy[0], dy = dest[1] - b.xy[1]
-    const dist = Math.hypot(dx, dy)
-    if (dist < 1) return dest
-    const walked = Math.min(dist, b.speed * ((Date.now() - fetchedAt.current) / 60_000))
-    return [b.xy[0] + (dx * walked) / dist, b.xy[1] + (dy * walked) / dist]
-  }
-  const minutesLeft = (b: VillageBeingPos): number => {
-    if (!b.to) return 0
-    const [x, y] = posOf(b)
-    const dest = destOf(b)
-    return Math.hypot(dest[0] - x, dest[1] - y) / Math.max(0.001, b.speed)
-  }
+  const posOf = (b: VillageBeingPos) => walkPosOf(b, placeById, fetchedAt.current)
   const statusOf = (b: VillageBeingPos): string => {
-    if (b.to) {
-      const name = b.to === 'home' ? 'home' : placeById[b.to]?.name ?? b.to
-      const mins = Math.round(minutesLeft(b))
-      return mins < 1 ? `arriving at ${name}` : `on the road to ${name} — ~${mins} min`
-    }
-    if (!b.at || b.at === 'home') return 'at home'
-    return `at ${placeById[b.at]?.name ?? b.at}`
+    return walkStatusOf(b, placeById, fetchedAt.current)
   }
-  const quad = (a: { x: number; y: number }, b: { x: number; y: number }) => {
-    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
-    const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1
-    const k = Math.min(46, d * 0.14)
-    return `M ${a.x} ${a.y} Q ${mx - (dy / d) * k} ${my + (dx / d) * k} ${b.x} ${b.y}`
-  }
-  const hub = data.places.find((p) => p.affordances.includes('gather')) ?? data.places[0]
   const hue = (p: VillagePlace) => AFF_HUE[p.affordances[0]] ?? '#a78bfa'
   const here = (pid: string) => data.beings.filter((b) => !b.to && b.at === pid)
   const walking = data.beings.filter((b) => b.to)
@@ -3565,71 +3590,17 @@ function VillageMap() {
       </div>
       <div className="flex flex-col gap-3 lg:flex-row">
         <div className="min-w-0 flex-1">
-          <svg viewBox="0 0 1000 1000" className="h-[420px] w-full rounded-md border border-zinc-800/60 bg-zinc-950/40"
-               onClick={() => { setSel(null); setSelBeing(null) }}>
-            <defs>
-              <filter id="vmglow" x="-60%" y="-60%" width="220%" height="220%">
-                <feGaussianBlur stdDeviation="7" />
-              </filter>
-            </defs>
-            {data.places.filter((p) => p.id !== hub.id).map((p) => (
-              <path key={`r-${p.id}`} d={quad(hub, p)} fill="none"
-                    className="stroke-zinc-800" strokeWidth={3}
-                    strokeDasharray="1 9" strokeLinecap="round" />
-            ))}
-            {data.beings.map((b) => (
-              <rect key={`h-${b.slug}`} x={b.home_xy[0] - 4} y={b.home_xy[1] - 4}
-                    width={8} height={8} rx={2} className="fill-zinc-700">
-                <title>{b.name}'s home</title>
-              </rect>
-            ))}
-            {data.places.map((p) => (
-              <g key={p.id} className="cursor-pointer"
-                 onClick={(e) => { e.stopPropagation(); setSelBeing(null); setSel(p.id === sel ? null : p.id) }}>
-                <circle cx={p.x} cy={p.y} r={p.id === hub.id ? 44 : 32}
-                        fill={hue(p)} opacity={sel === p.id ? 0.3 : 0.13}
-                        filter="url(#vmglow)" />
-                <circle cx={p.x} cy={p.y} r={p.id === hub.id ? 27 : 19}
-                        fill={hue(p)} fillOpacity={0.2} stroke={hue(p)}
-                        strokeOpacity={sel === p.id ? 0.95 : 0.5} strokeWidth={1.6} />
-                <text x={p.x} y={p.y + (p.id === hub.id ? 45 : 37)} textAnchor="middle"
-                      className={sel === p.id ? 'fill-zinc-200' : 'fill-zinc-400'}
-                      fontSize={14}>{p.name}</text>
-              </g>
-            ))}
-            {data.beings.map((b) => {
-              const [x, y] = posOf(b)
-              const r = STAGE_R[b.stage] ?? 10
-              const selMe = selBeing === b.slug
-              return (
-                <g key={b.slug} className="cursor-pointer"
-                   onClick={(e) => { e.stopPropagation(); setSel(null); setSelBeing(selMe ? null : b.slug) }}>
-                  {b.to && (
-                    <circle cx={x} cy={y} r={r + 6} fill="none" stroke="#a78bfa"
-                            strokeOpacity={0.8} strokeDasharray="3 5"
-                            className="animate-pulse" />
-                  )}
-                  <circle cx={x} cy={y} r={r + 7} fill="#8b5cf6" opacity={0.2}
-                          filter="url(#vmglow)" />
-                  <circle cx={x} cy={y} r={r} fill="#7c3aed"
-                          stroke={selMe ? '#fbbf24' : '#c4b5fd'} strokeWidth={selMe ? 2 : 1.2} />
-                  <text x={x} y={y + r * 0.38} textAnchor="middle" fill="#f5f3ff"
-                        fontSize={r} fontWeight={700}>{b.name.slice(0, 1)}</text>
-                  <text x={x + r + 6} y={y + 4} className="fill-zinc-300" fontSize={11.5}>
-                    {b.name}
-                  </text>
-                </g>
-              )
-            })}
-          </svg>
+          <IsoScene data={data} sel={sel} selBeing={selBeing}
+            onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} />
           <p className="mt-1.5 text-[10px] text-zinc-600">
-            glowing rings are places · orbs are iskre (small = infant, dashed = walking) · squares are homes · walks happen between wakes, live on this map
+            the village, live — iskre walk the streets between wakes · click a building or an iskra · scroll to zoom, drag to pan, double-click to reset · dark theme is evening
           </p>
         </div>
         <div className="w-full shrink-0 space-y-2 lg:w-72">
           {selB ? (
             <div className="rounded-md border border-zinc-800 bg-zinc-950/50 p-2.5">
               <div className="mb-1 flex items-center gap-1.5">
+                {selB.avatar && <IskraAvatar c={selB.avatar.c} p={selB.avatar.p} size={18} />}
                 <span className="text-xs font-semibold text-zinc-200">{selB.name}</span>
                 <span className={`rounded border px-1 py-px text-[9px] ${STAGE_META[selB.stage] || ''}`}>{selB.stage}</span>
               </div>
@@ -3637,6 +3608,27 @@ function VillageMap() {
               {selB.stage === 'infant' && selB.to && (
                 <p className="mt-1 text-[10px] italic text-zinc-600">a toddle — far things take most of a day</p>
               )}
+              <div className="mt-2 border-t border-zinc-800 pt-2">
+                <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  <Footprints className="h-3 w-3" /> nudge
+                </div>
+                {selB.state !== 'alive' ? (
+                  <p className="text-[10px] italic text-zinc-600">only the living walk — wake {selB.name} to send it anywhere</p>
+                ) : (
+                  <>
+                    <select value="" disabled={nudging}
+                      onChange={(e) => { if (e.target.value) void nudge(selB.slug, e.target.value) }}
+                      className="w-full rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[11px] text-zinc-300 focus:border-violet-500/50 focus:outline-none disabled:opacity-50">
+                      <option value="">send {selB.name} to…</option>
+                      {data.places.filter((p) => p.id !== selB.at).map((p) => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                      {(selB.at || selB.to) && <option value="home">home</option>}
+                    </select>
+                    <p className="mt-1 text-[10px] text-zinc-600">plots the real streets · {selB.name} feels it next tick</p>
+                  </>
+                )}
+              </div>
             </div>
           ) : selPlace ? (
             <div className="rounded-md border border-zinc-800 bg-zinc-950/50 p-2.5">

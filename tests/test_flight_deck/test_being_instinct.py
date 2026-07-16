@@ -301,8 +301,10 @@ async def test_fulfilled_plan_surfaces_as_percept(store):
     store.add_plan_steps(b["id"], [{"kind": "go", "target": "library"}],
                          now=NOW - timedelta(hours=2))
     store.depart(OWNER, b["slug"], "library", now=NOW - timedelta(hours=2))
+    # streets made the course longer (world plan Phase 2) — settle well
+    # after any honest pace has arrived
     world.reflex_pass(store, store.get(OWNER, b["slug"]),
-                      NOW - timedelta(minutes=30))
+                      NOW + timedelta(hours=8))
     lines = life.percepts_since(store, store.get(OWNER, b["slug"]))
     assert any(ln.startswith("AS YOU PLANNED") for ln in lines)
 

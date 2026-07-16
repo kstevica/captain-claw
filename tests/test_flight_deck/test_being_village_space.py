@@ -304,12 +304,16 @@ async def test_position_is_a_pure_function_of_the_clock(store):
     store.depart(OWNER, b["slug"], "square", now=NOW)
     bb = store.get(OWNER, b["slug"])
     assert bb["location"].get("to") == "square"
-    sq = store.get_place(OWNER, "square")
-    hx, hy = world.home_xy(bb)
-    total = world.travel_minutes(bb, (hx, hy), (sq["x"], sq["y"]))
+    # the course was plotted once at depart (world plan Phase 2): position
+    # at any instant is the same pure read — halfway in time is halfway
+    # along the STORED path, not the beeline
+    loc = bb["location"]
+    total = float(loc["minutes"])
     pm = world.position_of(store, bb, NOW + timedelta(minutes=total / 2))
-    assert pm["xy"][0] == pytest.approx((hx + sq["x"]) / 2, abs=2)
-    assert pm["xy"][1] == pytest.approx((hy + sq["y"]) / 2, abs=2)
+    assert pm == world.position_of(store, bb,
+                                   NOW + timedelta(minutes=total / 2))
+    pts = [(float(p[0]), float(p[1])) for p in loc["path"]]
+    assert tuple(pm["xy"]) == world._along(pts, 0.5)
     pe = world.position_of(store, bb, NOW + timedelta(minutes=total + 1))
     assert pe["at"] == "square" and pe["minutes_left"] == 0.0
     # a pure read — the row itself still says "on the road"

@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDownUp, ArrowLeft, ArrowUpRight, BookOpen, CalendarDays, ChevronDown,
   ChevronLeft, ChevronRight, Clock, Files, Fingerprint, GitFork, Globe, Loader2,
-  MessageCircle, Moon, Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun,
+  Map as MapIcon, MessageCircle, Moon, Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun,
   Terminal, Users, Wrench, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
@@ -18,9 +18,13 @@ import {
   type PublicApi, type PublicFile, type PublicGraph, type PublicProfile,
   type PublicThread, type PublicVisitorCard, type PublicVisitorProfile,
   PUBLIC_MSG_MAX, cadenceLabel, clearThreadId, getPublicBeing,
-  getVisitorProfile, listPublicBeings, makeBeingApi, makeVisitorApi,
-  savedName, savedThreadId, saveName, saveThreadId,
+  getPublicVillageMap, getVisitorProfile, listPublicBeings, makeBeingApi,
+  makeVisitorApi, savedName, savedThreadId, saveName, saveThreadId,
 } from '../services/beingsPublic'
+import type { VillageBeingPos, VillageMapData, VillagePlace } from '../services/beings'
+import { IskraAvatar } from '../components/village/avatars'
+import { IsoScene } from '../components/village/IsoScene'
+import { posOf as walkPosOf, statusOf as walkStatusOf } from '../components/village/walk'
 
 // ── Theme (standalone): default dark, respect a returning FD user's choice ──
 
@@ -510,6 +514,92 @@ function RosterCard({ p, href, visitor, host, linked }: {
 
 const hostOf = (origin: string) => { try { return new URL(origin).host } catch { return origin } }
 
+// The observer map (village-world plan): the fronting village rendered
+// isometrically for anyone, read-only — no nudge, no mutation. Reuses the
+// exact IsoScene + walk math the parent map uses; `theme` forces a re-render
+// so the evening lights follow the toggle.
+function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
+  void theme
+  const [data, setData] = useState<VillageMapData | null>(null)
+  const [selBeing, setSelBeing] = useState<string | null>(null)
+  const [sel, setSel] = useState<string | null>(null)
+  const fetchedAt = useRef(0)
+  const [, beat] = useState(0)
+  useEffect(() => {
+    const load = () => getPublicVillageMap()
+      .then((m) => { setData(m); fetchedAt.current = Date.now() })
+      .catch(() => {})
+    load()
+    const t = window.setInterval(load, 60_000)
+    return () => window.clearInterval(t)
+  }, [])
+  useEffect(() => {
+    const t = window.setInterval(() => beat((x) => x + 1), 1000)
+    return () => window.clearInterval(t)
+  }, [])
+  const placeById = useMemo(() => {
+    const m: Record<string, VillagePlace> = {}
+    for (const p of data?.places ?? []) m[p.id] = p
+    return m
+  }, [data])
+  if (!data || data.places.length === 0) return null
+  const posOf = (b: VillageBeingPos) => walkPosOf(b, placeById, fetchedAt.current)
+  const statusOf = (b: VillageBeingPos) => walkStatusOf(b, placeById, fetchedAt.current)
+  const hue = (p: VillagePlace) => AFF_HUE[p.affordances[0]] ?? '#a78bfa'
+  const here = (pid: string) => data.beings.filter((b) => !b.to && b.at === pid)
+  const selPlace = sel ? placeById[sel] : null
+  const selB = selBeing ? data.beings.find((b) => b.slug === selBeing) : null
+  return (
+    <div className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-sm font-medium text-zinc-300">
+        <MapIcon className="h-4 w-4 text-violet-500 dark:text-violet-400" /> The village, live
+        <span className="ml-auto text-[11px] font-normal text-zinc-500">
+          {data.beings.filter((b) => b.to).length} walking
+        </span>
+      </div>
+      <div className="flex flex-col gap-3 lg:flex-row">
+        <div className="min-w-0 flex-1">
+          <IsoScene data={data} sel={sel} selBeing={selBeing}
+            onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} />
+          <p className="mt-1.5 text-[11px] text-zinc-500">
+            public iskre walk the streets on their own heartbeat · click a building or an iskra · scroll to zoom, drag to pan · dark is evening
+          </p>
+        </div>
+        <div className="w-full shrink-0 space-y-2 lg:w-64">
+          {selB ? (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
+              <a href={`/b/${selB.slug}`} className="mb-1 flex items-center gap-1.5 hover:underline">
+                {selB.avatar && <IskraAvatar c={selB.avatar.c} p={selB.avatar.p} size={18} />}
+                <span className="text-sm font-semibold text-zinc-100">{selB.name}</span>
+                <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500" />
+              </a>
+              <p className="text-xs text-zinc-400">{statusOf(selB)}</p>
+            </div>
+          ) : selPlace ? (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
+              <div className="mb-1 text-sm font-semibold text-zinc-100">{selPlace.name}</div>
+              <p className="mb-2 text-xs leading-snug text-zinc-400">{selPlace.description}</p>
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Here now</div>
+              <p className="text-xs text-zinc-300">
+                {here(selPlace.id).length === 0 ? 'no one right now' : here(selPlace.id).map((b) => b.name).join(', ')}
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-zinc-800 p-3 text-xs text-zinc-500">
+              A living village. Click a building for who's there, or an iskra to follow its road.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const AFF_HUE: Record<string, string> = {
+  gather: '#a78bfa', trade: '#f59e0b', read: '#38bdf8', create: '#fbbf24',
+  tend: '#34d399', play: '#f472b6', remember: '#94a3b8', rest: '#818cf8',
+}
+
 function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTheme: () => void }) {
   const [beings, setBeings] = useState<PublicProfile[] | null>(null)
   const [visitors, setVisitors] = useState<PublicVisitorCard[]>([])
@@ -549,6 +639,7 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
               itself whether to answer.
             </p>}
       </div>
+      {beings && beings.length > 0 && <PublicVillageMap theme={theme} />}
       {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-400">{err}</div>}
       {!beings && !err && <div className="flex items-center gap-2 py-12 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> Gathering the square…</div>}
       {beings && beings.length === 0 && visitors.length === 0 && (

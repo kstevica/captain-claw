@@ -131,6 +131,7 @@ export interface BeingVitals {
   instincts: boolean
   intent: { stay?: boolean; avoid?: string[] }
   plan: { id: string; kind: string; target: string }[]
+  avatar: { c: number; p: string }
   body_archetype: string
   unread_from_being: number
   public: boolean
@@ -478,6 +479,21 @@ export const setInstincts = (slug: string, on: boolean) =>
     method: 'POST', body: JSON.stringify({ on }),
   })
 
+// The look: one of 10 storybook characters in one of 4 palettes; a stable
+// slug-hash default applies until the parent's first pick.
+export const setAvatar = (slug: string, c: number, p: string) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/avatar`, {
+    method: 'POST', body: JSON.stringify({ c, p }),
+  })
+
+// The parent's nudge: send an alive being onto the road to a place (or
+// "home"). Plots the same A* course a mind- or feet-walk uses; only the
+// living walk (a paused/torpid being refuses).
+export const nudgeBeing = (slug: string, dest: string) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/go`, {
+    method: 'POST', body: JSON.stringify({ dest }),
+  })
+
 // Body housekeeping: run the being's body on an archetype (its tier → model,
 // tools, cognitive mode). Empty id → the stage default. Respawns the body.
 export interface BodyArchetypeOption { id: string; role?: string; tier?: string; family?: string }
@@ -513,14 +529,25 @@ export const grantCoins = (slug: string, coins: number, note = '') =>
 export interface VillagePlace {
   id: string; name: string; x: number; y: number
   affordances: string[]; description: string
+  // the world model (village-world plan): footprint in tiles + the door
+  w?: number; h?: number; kind?: string
+  door_x?: number | null; door_y?: number | null
 }
 export interface VillageBeingPos {
   slug: string; name: string; stage: string; state: string
   xy: [number, number]; at: string | null; to: string | null
   minutes_left: number; home_xy: [number, number]; speed: number
+  avatar?: { c: number; p: string }
+  // the plotted course (village-world plan Phase 2): walk it client-side
+  path?: [number, number][]; departed_at?: string; total_minutes?: number
 }
+export interface VillageProp { tile: [number, number]; kind: string }
 export interface VillageMapData {
   plot: number; places: VillagePlace[]; beings: VillageBeingPos[]
+  grid?: { plot_w: number; plot_h: number; tile_size: number }
+  terrain?: { default_elevation: number }
+  roads?: [number, number][]
+  props?: VillageProp[]
 }
 export const getVillageMap = () =>
   fdFetch<VillageMapData>('/beings/village-map')

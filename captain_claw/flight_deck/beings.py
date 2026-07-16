@@ -538,10 +538,35 @@ class BeingsStore:
                 # The steward's weekly pay in coins (space plan Phase 5) —
                 # a parent knob, default off; paid once per ISO week.
                 ("steward_stipend_coins", "INTEGER NOT NULL DEFAULT 0"),
+                # The world model (village-world plan Phase 1): plot size in
+                # units, tile size, the terrain hook (JSON; flat in v1 but
+                # 3D-ready), and the carved street tiles (JSON [[tx,ty],…]).
+                ("plot_w", "INTEGER NOT NULL DEFAULT 1000"),
+                ("plot_h", "INTEGER NOT NULL DEFAULT 1000"),
+                ("tile_size", "INTEGER NOT NULL DEFAULT 20"),
+                ("terrain", "TEXT NOT NULL DEFAULT ''"),
+                ("roads", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(
                         f"ALTER TABLE village_meta ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass
+            # village_places gained a body (village-world plan Phase 1):
+            # footprints in TILES (w×h around the preserved x/y anchor), a
+            # kind (building blocks walking except its door; grounds are
+            # walkable areas), and the door tile. 0/'' = not yet laid out —
+            # being_world.refresh_layout assigns deterministically.
+            for col, ddl in [
+                ("w", "INTEGER NOT NULL DEFAULT 0"),
+                ("h", "INTEGER NOT NULL DEFAULT 0"),
+                ("kind", "TEXT NOT NULL DEFAULT ''"),
+                ("door_x", "INTEGER"),
+                ("door_y", "INTEGER"),
+            ]:
+                try:
+                    self._c().execute(
+                        f"ALTER TABLE village_places ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError:
                     pass
             # Lightweight migrations (columns added after first ship).
@@ -620,6 +645,10 @@ class BeingsStore:
                 # JSON {"stay": bool, "avoid": [places]} — Phase 2's tiny
                 # decision brain honors these; the reflex pass stores them.
                 ("intent", "TEXT NOT NULL DEFAULT ''"),
+                # The parent-picked look (village-world plan Phase 3): JSON
+                # {"c": 1–10, "p": palette}. Empty → a stable default from
+                # the slug hash (being_world.default_avatar).
+                ("avatar", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -954,6 +983,11 @@ class BeingsStore:
             b["intent"] = {}
         if not isinstance(b["intent"], dict):
             b["intent"] = {}
+        try:
+            raw_av = b.get("avatar") or ""
+            b["avatar"] = json.loads(raw_av) if raw_av else None
+        except json.JSONDecodeError:
+            b["avatar"] = None
         raw_bc = b.get("body_config") or ""
         try:
             b["body_config"] = json.loads(raw_bc) if raw_bc else None
@@ -1111,6 +1145,25 @@ class BeingsStore:
         b = self.get(owner_id, slug)
         self._update(b["id"], now, instincts=1 if on else 0)
         self.record_event(b["id"], "instincts_set", {"on": bool(on)}, now=now)
+        return self.get(owner_id, slug)
+
+    def set_avatar(self, owner_id: str, slug: str, c: int, p: str,
+                   now: datetime | None = None) -> dict:
+        """The parent picks this Iskra's look (village-world plan Phase 3):
+        one of 10 characters in one of 4 palettes. The slug-hash default
+        applies until the first pick."""
+        from captain_claw.flight_deck import being_world
+        now = now or _utcnow()
+        c = int(c)
+        if not (1 <= c <= being_world.AVATAR_CHARACTERS):
+            raise BeingError(
+                f"characters run 1–{being_world.AVATAR_CHARACTERS}")
+        if p not in being_world.AVATAR_PALETTES:
+            raise BeingError("palettes are: "
+                             + ", ".join(being_world.AVATAR_PALETTES))
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now, avatar=json.dumps({"c": c, "p": p}))
+        self.record_event(b["id"], "avatar_set", {"c": c, "p": p}, now=now)
         return self.get(owner_id, slug)
 
     def set_intent(self, being_id: str, intent: dict | None,
@@ -1323,6 +1376,12 @@ class BeingsStore:
                      _iso(now)),
                 )
             c.commit()
+        # The ground gets its body (village-world plan Phase 1): footprints,
+        # doors, and streets — deterministic, never blocks the save.
+        try:
+            being_world.refresh_layout(self, owner_id, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("village layout failed", owner=owner_id, error=str(e))
         return self.village_places(owner_id)
 
     def resolve_place_ref(self, owner_id: str, ref: str) -> str | None:
@@ -1414,10 +1473,14 @@ class BeingsStore:
             return b
         pos = being_world.position_of(self, b, now)
         origin = [int(pos["xy"][0]), int(pos["xy"][1])]
-        dest_xy = being_world.place_xy(self, b, pid)
-        minutes = being_world.travel_minutes(b, origin, dest_xy)
+        # The course is plotted ONCE, here (village-world plan Phase 2):
+        # A* over the tile grid — streets cheaper, walls and trees blocked —
+        # stored as a waypoint polyline so position stays a pure function
+        # of this row and the clock. Buildings are walked to their DOOR.
+        path, minutes = being_world.plot_course(self, b, origin, pid)
         loc = {"to": pid, "from": cur.get("at"), "origin": origin,
-               "departed_at": _iso(now), "by": by}
+               "departed_at": _iso(now), "by": by,
+               "path": path, "minutes": round(float(minutes), 2)}
         self._update(b["id"], now, location=json.dumps(loc))
         data = {"from": cur.get("at") or "the road", "to": pid,
                 "minutes": int(round(minutes)), "by": by}
@@ -2128,6 +2191,12 @@ class BeingsStore:
                  str(place.get("description") or "").strip()[:300],
                  _iso(now)))
             self._c().commit()
+        # The new place gets its footprint + door, and the streets re-carve
+        # so it is connected the day it stands (village-world plan Phase 1).
+        try:
+            being_world.refresh_layout(self, owner_id, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("village layout failed", owner=owner_id, error=str(e))
         return self.get_place(owner_id, pid)
 
     def open_commission(self, owner_id: str) -> dict | None:
@@ -2256,7 +2325,8 @@ class BeingsStore:
             if c["state"] != "funded":
                 raise BeingError(f'"{c["name"]}" is not fully funded yet '
                                  f'({c["raised_coins"]}/{c["target_coins"]})')
-            spot = being_world.commission_spot(self, owner_id, c["id"])
+            spot = being_world.commission_spot(self, owner_id, c["id"],
+                                               affordance=c["affordance"])
             place = self.add_place(owner_id, {
                 "id": c["name"], "name": c["name"],
                 "x": spot[0], "y": spot[1],
@@ -2419,6 +2489,7 @@ class BeingsStore:
             "location": b.get("location") or {"at": "home"},
             "position": self._position_view(b),
             "coins": self.coin_balance(b["id"]),
+            "avatar": self._avatar_view(b),
             "instincts": bool(b.get("instincts")),
             "intent": b.get("intent") or {},
             "plan": self.open_plan_steps(b["id"]),
@@ -2432,6 +2503,15 @@ class BeingsStore:
             "visit_secret": b.get("visit_secret") or "",
             "visit_last_announce": b.get("visit_last_announce"),
         }
+
+    def _avatar_view(self, b: dict) -> dict:
+        """The picked look, or the stable slug-hash default — never empty,
+        so every consumer can just draw."""
+        av = b.get("avatar")
+        if isinstance(av, dict) and av.get("c") and av.get("p"):
+            return {"c": int(av["c"]), "p": str(av["p"])}
+        from captain_claw.flight_deck import being_world
+        return being_world.default_avatar(b)
 
     def _position_view(self, b: dict) -> dict | None:
         """The being's position right now, JSON-clean, as a pure read —
@@ -3584,19 +3664,37 @@ class BeingsStore:
     def get_village_meta(self, owner_id: str) -> dict:
         row = self._c().execute(
             "SELECT name, description, secret, secret_public, public_url,"
-            " steward_stipend_coins"
+            " steward_stipend_coins, plot_w, plot_h, tile_size, terrain,"
+            " roads"
             " FROM village_meta WHERE owner_id = ?", (owner_id,)).fetchone()
         if not row:
             return {"name": "", "description": "", "secret": "",
                     "secret_public": False, "public_url": "",
-                    "steward_stipend_coins": 0}
+                    "steward_stipend_coins": 0,
+                    "plot_w": 1000, "plot_h": 1000, "tile_size": 20,
+                    "terrain": {"default_elevation": 0, "elevation": {}},
+                    "roads": []}
+        try:
+            terrain = json.loads(row["terrain"]) if row["terrain"] else None
+        except json.JSONDecodeError:
+            terrain = None
+        try:
+            roads = json.loads(row["roads"]) if row["roads"] else []
+        except json.JSONDecodeError:
+            roads = []
         return {"name": row["name"] or "",
                 "description": row["description"],
                 "secret": row["secret"] or "",
                 "secret_public": bool(row["secret_public"]),
                 "public_url": row["public_url"] or "",
                 "steward_stipend_coins":
-                    int(row["steward_stipend_coins"] or 0)}
+                    int(row["steward_stipend_coins"] or 0),
+                "plot_w": int(row["plot_w"] or 1000),
+                "plot_h": int(row["plot_h"] or 1000),
+                "tile_size": int(row["tile_size"] or 20),
+                "terrain": terrain
+                or {"default_elevation": 0, "elevation": {}},
+                "roads": roads}
 
     def set_steward_stipend(self, owner_id: str, coins: int,
                             now: datetime | None = None) -> dict:
@@ -3619,17 +3717,52 @@ class BeingsStore:
             self._c().execute(
                 "INSERT INTO village_meta (owner_id, name, description, secret,"
                 " secret_public, public_url, steward_stipend_coins,"
-                " updated_at) VALUES (?,?,?,?,?,?,?,?)"
+                " plot_w, plot_h, tile_size, terrain, roads,"
+                " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(owner_id) DO UPDATE SET name=excluded.name,"
                 " description=excluded.description, secret=excluded.secret,"
                 " secret_public=excluded.secret_public,"
                 " public_url=excluded.public_url,"
                 " steward_stipend_coins=excluded.steward_stipend_coins,"
+                " plot_w=excluded.plot_w, plot_h=excluded.plot_h,"
+                " tile_size=excluded.tile_size, terrain=excluded.terrain,"
+                " roads=excluded.roads,"
                 " updated_at=excluded.updated_at",
                 (owner_id, cur["name"], cur["description"], cur["secret"],
                  1 if cur["secret_public"] else 0, cur["public_url"],
-                 int(cur.get("steward_stipend_coins") or 0), _iso(now)),
+                 int(cur.get("steward_stipend_coins") or 0),
+                 int(cur.get("plot_w") or 1000), int(cur.get("plot_h") or 1000),
+                 int(cur.get("tile_size") or 20),
+                 json.dumps(cur["terrain"]) if cur.get("terrain") else "",
+                 json.dumps(cur["roads"]) if cur.get("roads") else "",
+                 _iso(now)),
             )
+            self._c().commit()
+
+    def set_village_roads(self, owner_id: str, tiles: list,
+                          now: datetime | None = None) -> None:
+        """Persist the carved street tiles (village-world plan Phase 1) —
+        written only by being_world.refresh_layout, read by everyone."""
+        self._upsert_village_meta(
+            owner_id, {"roads": [[int(t[0]), int(t[1])] for t in tiles]},
+            now=now)
+
+    def set_place_layout(self, owner_id: str, place_id: str, *, w: int,
+                         h: int, kind: str,
+                         door: tuple[int, int] | None = None) -> None:
+        """Persist one place's body (village-world plan Phase 1): footprint
+        in tiles, kind, and the door tile. The x/y anchor never moves —
+        everything a being remembers about the ground stays true."""
+        if kind not in ("building", "grounds"):
+            raise BeingError("a place is a 'building' or 'grounds'")
+        with self._lock:
+            self._c().execute(
+                "UPDATE village_places SET w = ?, h = ?, kind = ?,"
+                " door_x = ?, door_y = ? WHERE owner_id = ? AND id = ?",
+                (max(1, int(w)), max(1, int(h)), kind,
+                 int(door[0]) if door else None,
+                 int(door[1]) if door else None,
+                 owner_id, place_id))
             self._c().commit()
 
     def set_village_meta(self, owner_id: str, description: str,
@@ -3658,27 +3791,34 @@ class BeingsStore:
         }, now=now)
         return self.get_village_meta(owner_id)
 
-    def public_village(self) -> dict:
-        """The description + (if opted in) the visit secret shown on the public
-        square. Resolved from the owner with the most public beings; falls back
-        to an owner advertising a public secret, then one that hosts visitors —
-        so a pure-host village (no local public beings) still shows its words."""
+    def public_village_owner(self) -> str | None:
+        """The owner whose village fronts the public square: the one with the
+        most public beings; else an owner advertising a public secret; else a
+        pure-host village. None when nothing public exists. The public
+        observer map draws THIS owner's ground and public beings."""
         c = self._c()
         row = c.execute(
             "SELECT owner_id FROM beings WHERE public = 1 AND stage != 'egg'"
             " GROUP BY owner_id ORDER BY COUNT(*) DESC, owner_id LIMIT 1",
         ).fetchone()
-        owner = row["owner_id"] if row else None
-        if not owner:
-            r2 = c.execute(
-                "SELECT owner_id FROM village_meta"
-                " WHERE secret_public = 1 AND secret != '' LIMIT 1").fetchone()
-            owner = r2["owner_id"] if r2 else None
-        if not owner:
-            r3 = c.execute(
-                "SELECT owner_id FROM being_visitors"
-                " ORDER BY last_seen DESC LIMIT 1").fetchone()
-            owner = r3["owner_id"] if r3 else None
+        if row:
+            return row["owner_id"]
+        r2 = c.execute(
+            "SELECT owner_id FROM village_meta"
+            " WHERE secret_public = 1 AND secret != '' LIMIT 1").fetchone()
+        if r2:
+            return r2["owner_id"]
+        r3 = c.execute(
+            "SELECT owner_id FROM being_visitors"
+            " ORDER BY last_seen DESC LIMIT 1").fetchone()
+        return r3["owner_id"] if r3 else None
+
+    def public_village(self) -> dict:
+        """The description + (if opted in) the visit secret shown on the public
+        square. Resolved from the owner with the most public beings; falls back
+        to an owner advertising a public secret, then one that hosts visitors —
+        so a pure-host village (no local public beings) still shows its words."""
+        owner = self.public_village_owner()
         if not owner:
             return {"name": "", "description": "", "visit_secret": ""}
         m = self.get_village_meta(owner)

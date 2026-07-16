@@ -144,6 +144,27 @@ async def public_thread(slug: str, thread_id: str):
 # requests down it. All the machinery lives in being_federation.
 
 
+@village_router.get("/map")
+async def public_village_map():
+    """Observer mode (village-world plan): the living isometric map for the
+    public /village page — the fronting village's ground and streets, with
+    only its PUBLIC beings placed on it and walking their courses. No owner
+    to scope by; nothing here mutates. A private being never appears."""
+    from datetime import datetime, timezone
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    owner = store.public_village_owner()
+    if not owner:
+        return {"plot": being_world.PLOT_SIZE, "grid": {}, "terrain": {},
+                "roads": [], "props": [], "places": [], "beings": []}
+    _run(being_world.ensure_village, store, owner)
+    slugs = {b["slug"] for b in store.public_beings()
+             if b.get("owner_id") == owner}
+    now = datetime.now(timezone.utc)
+    return being_world.village_map_payload(store, owner, now=now,
+                                           only_slugs=slugs)
+
+
 @village_router.websocket("/link")
 async def village_link(ws: WebSocket):
     """A sending village dials in, presents the secret, and stays connected so

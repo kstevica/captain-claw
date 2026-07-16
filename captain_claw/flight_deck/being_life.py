@@ -1010,8 +1010,9 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
             book = ("" if (d.get("place") or "home") == "home"
                     else ' The guestbook lies open — add "guestbook": '
                          '"one line" to your digest to leave a trace.')
-            walker = ("Your feet carried you to" if d.get("by") == "feet"
-                      else "You reached")
+            walker = {"feet": "Your feet carried you to",
+                      "nudge": "Your parent walked you to"}.get(
+                          d.get("by"), "You reached")
             lines.append(f"{walker} {where}{when} — the walk is done; "
                          f"you are here now.{book}")
         elif k == "crossed_paths":

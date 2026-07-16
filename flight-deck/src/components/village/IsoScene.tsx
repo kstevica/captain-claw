@@ -1,0 +1,238 @@
+// The village, playable (village-world plan Phase 4): an isometric 2:1
+// scene fed entirely by the village-map payload — ground, streets, grounds
+// decals, then buildings, cottages, props and Iskre depth-sorted by their
+// base, walking their plotted courses client-side (position is a pure
+// function of the clock, so one snapshot animates without polling).
+// Dark theme is evening: cooler ground, and the lamps come on.
+
+import { useCallback, useRef, useState } from 'react'
+import type { VillageBeingPos, VillageMapData, VillagePlace } from '../../services/beings'
+import { IskraAvatar } from './avatars'
+import { BUILDING_SPRITES, PROP_SPRITES, Conifer, spriteForPlace } from './buildings'
+
+const TILE = 20
+const GRID = 50
+const ISO_X = 1.6           // per world unit → a 20-unit tile spans 32 px
+const ISO_Y = 0.8           // …and 16 px tall: the classic 2:1 diamond
+
+const iso = (x: number, y: number): [number, number] =>
+  [(x - y) * ISO_X, (x + y) * ISO_Y]
+
+// Replicates the backend's footprint clamp (being_world._tiles_at) so the
+// picture and the physics agree on where every building stands.
+function footNW(p: VillagePlace): [number, number, number, number] {
+  const w = Math.max(1, p.w || 1), h = Math.max(1, p.h || 1)
+  const cx = Math.floor(p.x / TILE), cy = Math.floor(p.y / TILE)
+  const tx0 = Math.min(Math.max(1, cx - Math.floor(w / 2)), GRID - 1 - w)
+  const ty0 = Math.min(Math.max(1, cy - Math.floor(h / 2)), GRID - 1 - h)
+  return [tx0, ty0, w, h]
+}
+
+// …and the backend's home_tiles clamp: every cottage is 2×2.
+function homeNW(hxy: [number, number]): [number, number] {
+  return [Math.min(Math.max(0, Math.floor(hxy[0] / TILE)), GRID - 2),
+          Math.min(Math.max(0, Math.floor(hxy[1] / TILE)), GRID - 2)]
+}
+
+const tileDiamond = (tx: number, ty: number): string => {
+  const [sx, sy] = iso(tx * TILE, ty * TILE)
+  return `${sx},${sy} ${sx + 32},${sy + 16} ${sx},${sy + 32} ${sx - 32},${sy + 16}`
+}
+
+const footDiamond = (tx0: number, ty0: number, w: number, h: number): string => {
+  const [nx, ny] = iso(tx0 * TILE, ty0 * TILE)
+  return `${nx},${ny} ${nx + 32 * w},${ny + 16 * w} `
+    + `${nx + 32 * w - 32 * h},${ny + 16 * w + 16 * h} ${nx - 32 * h},${ny + 16 * h}`
+}
+
+const DAY = { grass: '#a8c586', grass2: '#9fbd7c', road: '#d3b489', roadEdge: '#c2a274' }
+const NIGHT = { grass: '#5f7259', grass2: '#57694f', road: '#8d7f68', roadEdge: '#7d705c'.slice(0, 7) }
+
+interface SceneProps {
+  data: VillageMapData
+  sel: string | null
+  selBeing: string | null
+  onPlace: (id: string | null) => void
+  onBeing: (slug: string | null) => void
+  posOf: (b: VillageBeingPos) => [number, number]
+  hue: (p: VillagePlace) => string
+}
+
+export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue }: SceneProps) {
+  const dark = typeof document !== 'undefined'
+    && document.documentElement.classList.contains('dark')
+  const C = dark ? NIGHT : DAY
+
+  // pan + zoom: a viewBox the wheel shrinks and the pointer drags
+  const HOME_VB: [number, number, number, number] = [-1660, -140, 3320, 1900]
+  const [vb, setVb] = useState(HOME_VB)
+  const drag = useRef<{ x: number; y: number; vb: typeof HOME_VB } | null>(null)
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const onWheel = useCallback((e: React.WheelEvent) => {
+    setVb((v) => {
+      const k = e.deltaY > 0 ? 1.12 : 1 / 1.12
+      const w = Math.min(3320, Math.max(500, v[2] * k))
+      const hgt = w * (1900 / 3320)
+      const cx = v[0] + v[2] / 2, cy = v[1] + v[3] / 2
+      return [cx - w / 2, cy - hgt / 2, w, hgt]
+    })
+  }, [])
+  const onDown = useCallback((e: React.PointerEvent) => {
+    drag.current = { x: e.clientX, y: e.clientY, vb }
+  }, [vb])
+  const onMove = useCallback((e: React.PointerEvent) => {
+    if (!drag.current || !svgRef.current) return
+    const scale = drag.current.vb[2] / svgRef.current.clientWidth
+    setVb([drag.current.vb[0] - (e.clientX - drag.current.x) * scale,
+           drag.current.vb[1] - (e.clientY - drag.current.y) * scale,
+           drag.current.vb[2], drag.current.vb[3]])
+  }, [])
+  const onUp = useCallback((e: React.PointerEvent) => {
+    const d = drag.current
+    drag.current = null
+    // a real drag swallows the click-to-deselect
+    if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 4) e.stopPropagation()
+  }, [])
+
+  const roads = (data.roads ?? []).map((t) => [t[0], t[1]] as [number, number])
+  const props = data.props ?? []
+  const places = data.places
+
+  // depth-sorted world: buildings, cottages, props, iskre — by base sy
+  type Piece = { depth: number; el: React.ReactNode }
+  const pieces: Piece[] = []
+
+  for (const p of places) {
+    const key = spriteForPlace(p)
+    const Sprite = BUILDING_SPRITES[key]
+    if (!Sprite) continue
+    const [tx0, ty0, w, h] = footNW(p)
+    const [nx, ny] = iso(tx0 * TILE, ty0 * TILE)
+    const isGrounds = (p.kind || '') === 'grounds'
+    const depth = isGrounds ? -1000 + ny : ny + (w + h) * 16
+    pieces.push({
+      depth,
+      el: (
+        <g key={`pl-${p.id}`} className="cursor-pointer"
+          onClick={(e) => { e.stopPropagation(); onBeing(null); onPlace(p.id === sel ? null : p.id) }}>
+          <polygon points={footDiamond(tx0, ty0, w, h)} fill={hue(p)}
+            opacity={sel === p.id ? 0.28 : 0} stroke={hue(p)}
+            strokeOpacity={sel === p.id ? 0.9 : 0} strokeWidth={3} />
+          <g transform={`translate(${nx} ${ny})`}><Sprite /></g>
+          <polygon points={footDiamond(tx0, ty0, w, h)} fill="transparent">
+            <title>{p.name}</title>
+          </polygon>
+        </g>
+      ),
+    })
+    const [lx, ly] = iso(p.x, p.y)
+    pieces.push({
+      depth: 1e6,           // labels float above the world
+      el: (
+        <text key={`lb-${p.id}`} x={lx} y={ly + (w + h) * 8 + 30}
+          textAnchor="middle" fontSize={30} pointerEvents="none"
+          className={sel === p.id ? 'fill-zinc-100' : 'fill-zinc-300'}
+          style={{ paintOrder: 'stroke', stroke: dark ? '#1b2118' : '#f4efdf',
+                   strokeWidth: 5, strokeLinejoin: 'round' }}>
+          {p.name}
+        </text>
+      ),
+    })
+  }
+
+  const Cottage = BUILDING_SPRITES.cottage
+  for (const b of data.beings) {
+    const [htx, hty] = homeNW(b.home_xy)
+    const [nx, ny] = iso(htx * TILE, hty * TILE)
+    pieces.push({
+      depth: ny + 4 * 16,
+      el: (
+        <g key={`hm-${b.slug}`} transform={`translate(${nx} ${ny}) scale(0.72)`}
+          style={{ transformBox: 'fill-box' }} opacity={0.96}>
+          <Cottage />
+          <title>{`${b.name}'s home`}</title>
+        </g>
+      ),
+    })
+  }
+
+  for (const pr of props) {
+    const [tx, ty] = pr.tile
+    const [bx, by] = iso((tx + 0.5) * TILE, (ty + 0.5) * TILE)
+    const Sprite = pr.kind === 'tree' && (tx + ty) % 3 === 0
+      ? Conifer : PROP_SPRITES[pr.kind]
+    if (!Sprite) continue
+    pieces.push({
+      depth: by,
+      el: (
+        <g key={`pr-${tx}-${ty}-${pr.kind}`} transform={`translate(${bx} ${by})`}
+          pointerEvents="none">
+          <Sprite />
+          {dark && pr.kind === 'lamp' && (
+            <circle cx="0" cy="-32" r="46" fill="#ffd98a" opacity="0.16" />
+          )}
+        </g>
+      ),
+    })
+  }
+
+  for (const b of data.beings) {
+    const [wx, wy] = posOf(b)
+    const [sx, sy] = iso(wx, wy)
+    const selMe = selBeing === b.slug
+    const size = b.stage === 'infant' ? 40 : 54
+    pieces.push({
+      depth: sy + 0.5,       // a hair in front of anything sharing the tile
+      el: (
+        <g key={`bg-${b.slug}`} className="cursor-pointer"
+          onClick={(e) => { e.stopPropagation(); onPlace(null); onBeing(selMe ? null : b.slug) }}>
+          {selMe && b.to && b.path && b.path.length >= 2 && (
+            <polyline points={b.path.map(([px, py]) => iso(px, py).join(',')).join(' ')}
+              fill="none" stroke="#a78bfa" strokeWidth={4} strokeOpacity={0.55}
+              strokeDasharray="8 10" strokeLinecap="round" />
+          )}
+          <ellipse cx={sx} cy={sy} rx={selMe ? 22 : 16} ry={selMe ? 11 : 8}
+            fill={selMe ? '#fbbf24' : '#8b5cf6'} opacity={selMe ? 0.4 : 0.18} />
+          {b.to && (
+            <ellipse cx={sx} cy={sy} rx={24} ry={12} fill="none" stroke="#a78bfa"
+              strokeOpacity={0.7} strokeDasharray="4 6" className="animate-pulse" />
+          )}
+          <g transform={`translate(${sx - size / 2} ${sy - (size * 64) / 48 + 4})`}>
+            <IskraAvatar c={b.avatar?.c ?? 1} p={b.avatar?.p ?? 'ember'}
+              size={size} title={b.name} />
+          </g>
+          <text x={sx} y={sy + 24} textAnchor="middle" fontSize={24}
+            pointerEvents="none" className="fill-zinc-200"
+            style={{ paintOrder: 'stroke', stroke: dark ? '#1b2118' : '#f4efdf',
+                     strokeWidth: 4, strokeLinejoin: 'round' }}>
+            {b.name}
+          </text>
+        </g>
+      ),
+    })
+  }
+
+  pieces.sort((a, z) => a.depth - z.depth)
+
+  return (
+    <svg ref={svgRef} viewBox={vb.join(' ')}
+      className={`h-[460px] w-full touch-none rounded-md border border-zinc-800/60 ${dark ? 'bg-[#20281e]' : 'bg-[#eae4cf]'}`}
+      onClick={() => { onPlace(null); onBeing(null) }}
+      onWheel={onWheel} onPointerDown={onDown} onPointerMove={onMove}
+      onPointerUp={onUp} onPointerLeave={() => { drag.current = null }}
+      onDoubleClick={() => setVb(HOME_VB)}>
+      <defs>
+        <pattern id="isoGrass" patternUnits="userSpaceOnUse" width="64" height="32">
+          <rect width="64" height="32" fill={C.grass} />
+          <polygon points="32,0 64,16 32,32 0,16" fill={C.grass2} />
+        </pattern>
+      </defs>
+      <polygon points={`0,0 1600,800 0,1600 -1600,800`} fill="url(#isoGrass)" />
+      {roads.map(([tx, ty]) => (
+        <polygon key={`rd-${tx}-${ty}`} points={tileDiamond(tx, ty)}
+          fill={C.road} stroke={C.roadEdge} strokeWidth={1} />
+      ))}
+      {pieces.map((p) => p.el)}
+    </svg>
+  )
+}

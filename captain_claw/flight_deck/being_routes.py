@@ -123,6 +123,17 @@ class InstinctsRequest(BaseModel):
     on: bool
 
 
+class AvatarRequest(BaseModel):
+    # one of 10 characters (1-10) in one of 4 palettes (ember/meadow/sea/dusk)
+    c: int
+    p: str
+
+
+class GoRequest(BaseModel):
+    # a place id or name (or "home") — the parent nudges the being onto the road
+    dest: str
+
+
 class RechargeRequest(BaseModel):
     tokens: int
 
@@ -287,26 +298,7 @@ async def village_map(user: dict = Depends(get_current_user)):
     store = get_store()
     _run(being_world.ensure_village, store, user["id"])
     now = datetime.now(timezone.utc)
-    beings = []
-    for row in _run(store.list, user["id"]):
-        if row.get("state") in ("dead", "emigrated"):
-            continue
-        b = _run(store.get, user["id"], row["slug"])
-        if b.get("stage") == "egg":
-            continue
-        pos = being_world.position_of(store, b, now)
-        beings.append({
-            "slug": b["slug"], "name": b["name"], "stage": b["stage"],
-            "state": b["state"],
-            "xy": [int(pos["xy"][0]), int(pos["xy"][1])],
-            "at": pos["at"], "to": pos["to"],
-            "minutes_left": round(float(pos["minutes_left"]), 1),
-            "home_xy": list(being_world.home_xy(b)),
-            "speed": being_world.speed_for(b),
-        })
-    return {"plot": being_world.PLOT_SIZE,
-            "places": _run(store.village_places, user["id"]),
-            "beings": beings}
+    return _run(being_world.village_map_payload, store, user["id"], now=now)
 
 
 @router.get("/village-map/place/{place_id}")
@@ -1053,6 +1045,31 @@ async def set_instincts(slug: str, body: InstinctsRequest,
     Pure Python, $0; Phase 2 adds the tiny capped-context decision brain."""
     store = get_store()
     _run(store.set_instincts, user["id"], slug, body.on)
+    return _run(store.vitals, user["id"], slug)
+
+
+@router.post("/{slug}/avatar")
+async def set_avatar(slug: str, body: AvatarRequest,
+                     user: dict = Depends(get_current_user)):
+    """The parent picks this Iskra's look (village-world plan Phase 3):
+    one of 10 storybook characters in one of 4 palettes. Until the first
+    pick, a stable slug-hash default applies."""
+    store = get_store()
+    _run(store.set_avatar, user["id"], slug, body.c, body.p)
+    return _run(store.vitals, user["id"], slug)
+
+
+@router.post("/{slug}/go")
+async def nudge_being(slug: str, body: GoRequest,
+                      user: dict = Depends(get_current_user)):
+    """The parent's nudge: send an ALIVE being onto the road to a place
+    (or 'home'). It plots the same A* course a mind- or feet-walk uses,
+    and the being feels it honestly next tick. Only the living walk —
+    a paused/torpid being refuses loudly. (Registered before /{slug}.)"""
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    _run(being_world.ensure_village, store, user["id"])
+    _run(store.depart, user["id"], slug, body.dest, by="nudge")
     return _run(store.vitals, user["id"], slug)
 
 

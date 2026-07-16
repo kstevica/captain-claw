@@ -619,6 +619,19 @@ def home_xy(being: dict) -> tuple[int, int]:
     return (40 + (h >> 16) % 80, 80 + h % 840)
 
 
+# The look (village-world plan Phase 3): 10 characters × 4 palettes, drawn
+# frontend-side as storybook-flat SVGs. Every being has a stable default
+# from its slug hash until the parent picks.
+AVATAR_CHARACTERS = 10
+AVATAR_PALETTES = ("ember", "meadow", "sea", "dusk")
+
+
+def default_avatar(being: dict) -> dict:
+    h = zlib.crc32(f"avatar:{being.get('slug') or ''}".encode("utf-8"))
+    return {"c": h % AVATAR_CHARACTERS + 1,
+            "p": AVATAR_PALETTES[(h >> 8) % len(AVATAR_PALETTES)]}
+
+
 def speed_for(being: dict) -> float:
     if being.get("stage") == "infant":
         return WALK_SPEED * INFANT_SPEED_FACTOR
@@ -671,28 +684,465 @@ def position_of(store: BeingsStore, being: dict, now: datetime) -> dict:
     except (TypeError, ValueError):
         return {"xy": dest_xy, "at": loc["to"], "to": None,
                 "minutes_left": 0.0, "arrived_at": now}
-    total = travel_minutes(being, origin, dest_xy)
+    # The plotted course (village-world plan Phase 2): legs follow the
+    # stored waypoints at the pace baked in at depart. Rows from before
+    # the world model (no path) fall back to the straight line.
+    pts: list | None = None
+    total = 0.0
+    raw = loc.get("path")
+    if isinstance(raw, list) and len(raw) >= 2:
+        try:
+            pts = [(float(p[0]), float(p[1])) for p in raw]
+            total = float(loc.get("minutes") or 0.0)
+        except (TypeError, ValueError, IndexError):
+            pts = None
+    if not pts or total <= 0.0:
+        pts = [origin, dest_xy]
+        total = travel_minutes(being, origin, dest_xy)
     elapsed = max(0.0, (now - t0).total_seconds() / 60.0)
     if elapsed >= total:
         return {"xy": dest_xy, "at": loc["to"], "to": None,
                 "minutes_left": 0.0,
                 "arrived_at": t0 + timedelta(minutes=total)}
-    f = elapsed / total if total > 0 else 1.0
-    xy = (int(round(origin[0] + (dest_xy[0] - origin[0]) * f)),
-          int(round(origin[1] + (dest_xy[1] - origin[1]) * f)))
+    xy = _along(pts, elapsed / total if total > 0 else 1.0)
     return {"xy": xy, "at": None, "to": loc["to"],
             "minutes_left": total - elapsed}
 
 
+# ── The world model (village-world plan Phase 1) ─────────────────────────
+# A 50×50 tile grid over the same 1000×1000 plot. Unit space stays
+# authoritative (all stored x/y, WALK_SPEED); the grid is the derived
+# overlay for footprints, streets, props, and (Phase 2) plotted courses.
+# Anchors never move: existing villages are dressed in place.
+
+TILE = 20                          # units per tile
+GRID_W = PLOT_SIZE // TILE
+GRID_H = PLOT_SIZE // TILE
+HOME_LANE_TX = 7                   # the street past the homes' doors
+                                   # (home_xy x ∈ 40..119 → tiles 2..6)
+
+# Footprints in tiles (w, h, kind): the known default places by id, then a
+# fallback by FIRST affordance for architect drafts and commissions. A
+# 'building' blocks walking except its door tile; 'grounds' are walkable.
+_ID_FOOTPRINTS = {
+    "square": (4, 4, "grounds"), "library": (3, 2, "building"),
+    "workshop": (2, 2, "building"), "garden": (3, 3, "grounds"),
+    "well": (1, 1, "building"), "meadow": (4, 3, "grounds"),
+    "old-bench": (1, 1, "building"),
+}
+_AFF_FOOTPRINTS = {
+    "rest": (1, 1, "building"), "read": (3, 2, "building"),
+    "create": (2, 2, "building"), "gather": (3, 3, "grounds"),
+    "trade": (2, 2, "building"), "tend": (3, 3, "grounds"),
+    "play": (3, 3, "grounds"), "remember": (1, 1, "building"),
+}
+
+
+def tile_of(x: float, y: float) -> tuple[int, int]:
+    return (min(GRID_W - 1, max(0, int(x) // TILE)),
+            min(GRID_H - 1, max(0, int(y) // TILE)))
+
+
+def tile_center(tx: int, ty: int) -> tuple[int, int]:
+    return (tx * TILE + TILE // 2, ty * TILE + TILE // 2)
+
+
+def footprint_for(place: dict) -> tuple[int, int, str]:
+    got = _ID_FOOTPRINTS.get(place.get("id"))
+    if got:
+        return got
+    aff = (place.get("affordances") or [""])[0]
+    return _AFF_FOOTPRINTS.get(aff, (2, 2, "building"))
+
+
+def _tiles_at(x: int, y: int, w: int, h: int) -> list[tuple[int, int]]:
+    """A w×h footprint centered on the (x, y) unit anchor, clamped one tile
+    inside the plot — pure geometry, no store."""
+    cx, cy = int(x) // TILE, int(y) // TILE
+    tx0 = min(max(1, cx - w // 2), GRID_W - 1 - w)
+    ty0 = min(max(1, cy - h // 2), GRID_H - 1 - h)
+    return [(tx0 + i, ty0 + j) for j in range(h) for i in range(w)]
+
+
+def footprint_tiles(place: dict) -> list[tuple[int, int]]:
+    """The tiles a place stands on — pure from its row (stored w/h, or the
+    defaults when the layout has not run yet)."""
+    w = int(place.get("w") or 0)
+    h = int(place.get("h") or 0)
+    if not (w and h):
+        w, h, _ = footprint_for(place)
+    return _tiles_at(place["x"], place["y"], w, h)
+
+
+def home_tiles(being: dict) -> list[tuple[int, int]]:
+    """Every being's cottage: 2×2 tiles at its computed home point — no
+    row, same pure function everywhere."""
+    hx, hy = home_xy(being)
+    tx = min(max(0, hx // TILE), GRID_W - 2)
+    ty = min(max(0, hy // TILE), GRID_H - 2)
+    return [(tx, ty), (tx + 1, ty), (tx, ty + 1), (tx + 1, ty + 1)]
+
+
+def _door_for(tiles: list[tuple[int, int]],
+              toward: tuple[int, int]) -> tuple[int, int]:
+    """The footprint-edge tile nearest `toward` (the square) — where the
+    road arrives and every walk to this building ends. Deterministic."""
+    tset = set(tiles)
+    edge = [t for t in tiles
+            if not all((t[0] + dx, t[1] + dy) in tset
+                       for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)))]
+    return min(edge or tiles,
+               key=lambda t: (abs(t[0] - toward[0]) + abs(t[1] - toward[1]),
+                              t))
+
+
+def _grid_path(blocked: set, start: tuple[int, int],
+               goals: set) -> list[tuple[int, int]]:
+    """Deterministic BFS over the tile grid (N/E/S/W, fixed order) from
+    `start` to the NEAREST tile in `goals`, never through `blocked`.
+    Returns the path including both ends; [] when there is no way."""
+    if start in goals:
+        return [start]
+    from collections import deque
+    prev: dict = {start: None}
+    q = deque([start])
+    while q:
+        cur = q.popleft()
+        for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+            nxt = (cur[0] + dx, cur[1] + dy)
+            if not (0 <= nxt[0] < GRID_W and 0 <= nxt[1] < GRID_H):
+                continue
+            if nxt in prev or (nxt in blocked and nxt not in goals):
+                continue
+            prev[nxt] = cur
+            if nxt in goals:
+                path = [nxt]
+                while prev[path[-1]] is not None:
+                    path.append(prev[path[-1]])
+                return list(reversed(path))
+            q.append(nxt)
+    return []
+
+
+def _square_of(places: list[dict]) -> dict:
+    return (next((p for p in places if p["id"] == "square"), None)
+            or next((p for p in places if "gather" in p["affordances"]),
+                    places[0]))
+
+
+def refresh_layout(store: BeingsStore, owner_id: str,
+                   now: datetime | None = None) -> None:
+    """The ground gets its body — deterministic, in place, never moving an
+    anchor: assign footprints (already-assigned places keep theirs; on a
+    collision the newcomer shrinks toward 1×1), give every building its
+    door facing the square, then carve the streets: the home lane first,
+    the square joined to it, and each place joined to the nearest carved
+    road tile (BFS, so streets route around buildings and homes)."""
+    places = store.village_places(owner_id)
+    if not places:
+        return
+    sq = _square_of(places)
+    sq_tile = tile_of(sq["x"], sq["y"])
+    homes: set = set()
+    try:
+        for r in store.list(owner_id):
+            homes |= set(home_tiles(r))
+    except Exception:  # noqa: BLE001
+        pass
+    lane = {(HOME_LANE_TX, ty) for ty in range(3, GRID_H - 3)}
+    order = sorted(places, key=lambda p: (p["id"] != sq["id"], p["id"]))
+    taken = set(homes) | lane
+    layouts: dict = {}
+    for p in order:
+        if int(p.get("w") or 0) and (p.get("kind") or "") in ("building",
+                                                              "grounds"):
+            w, h, kind = int(p["w"]), int(p["h"]), p["kind"]
+        else:
+            w, h, kind = footprint_for(p)
+        tiles = _tiles_at(p["x"], p["y"], w, h)
+        while (set(tiles) & taken) and (w > 1 or h > 1):
+            if w >= h and w > 1:
+                w -= 1
+            else:
+                h -= 1
+            tiles = _tiles_at(p["x"], p["y"], w, h)
+        taken |= set(tiles)
+        door = _door_for(tiles, sq_tile) if kind == "building" else None
+        layouts[p["id"]] = (w, h, kind, tiles, door)
+        store.set_place_layout(owner_id, p["id"], w=w, h=h, kind=kind,
+                               door=door)
+    blocked = set(homes)
+    doors = set()
+    for _pid, (_w, _h, kind, tiles, door) in layouts.items():
+        if kind == "building":
+            blocked |= set(tiles)
+            doors.add(door)
+    blocked -= doors
+    roads: set = set(lane)
+    for p in order:
+        _w, _h, kind, tiles, door = layouts[p["id"]]
+        start = door if kind == "building" else tile_of(p["x"], p["y"])
+        path = _grid_path(blocked, start, roads)
+        roads |= set(path)
+    store.set_village_roads(owner_id, sorted(roads), now=now)
+
+
+def village_props(store: BeingsStore, owner_id: str) -> list[dict]:
+    """Trees, bushes, flowers, lamps — a PURE per-tile function (crc32 of
+    owner + tile), never stored: raising a building clears its own ground
+    without reshuffling a single distant tree, and the same function feeds
+    the path cost grid and the renderer, so collision and picture can
+    never disagree. Trees block walking; the rest is dressing."""
+    meta = store.get_village_meta(owner_id)
+    roads = {(int(t[0]), int(t[1])) for t in (meta.get("roads") or [])}
+    used = set(roads)
+    for p in store.village_places(owner_id):
+        used |= set(footprint_tiles(p))
+    try:
+        for r in store.list(owner_id):
+            used |= set(home_tiles(r))
+    except Exception:  # noqa: BLE001
+        pass
+    props: list[dict] = []
+    for ty in range(1, GRID_H - 1):
+        for tx in range(HOME_LANE_TX + 1, GRID_W - 1):
+            if (tx, ty) in used:
+                continue
+            hv = zlib.crc32(f"{owner_id}:prop:{tx},{ty}"
+                            .encode("utf-8")) % 1000
+            if hv < 45:
+                props.append({"tile": [tx, ty], "kind": "tree"})
+            elif hv < 65:
+                props.append({"tile": [tx, ty], "kind": "bush"})
+            elif hv < 85:
+                props.append({"tile": [tx, ty], "kind": "flowers"})
+    for i, t in enumerate(sorted(roads)):
+        if i % 6 == 0:
+            props.append({"tile": [t[0], t[1]], "kind": "lamp"})
+    return props
+
+
+def village_map_payload(store: BeingsStore, owner_id: str, *,
+                        now: datetime,
+                        only_slugs: set | None = None) -> dict:
+    """The living map (village-world plan): places, streets, props, and
+    every walker's position — a pure function of the clock, so the client
+    animates walking with zero polling. `only_slugs` restricts which
+    beings are drawn (the public observer map passes the owner's PUBLIC
+    beings only). Shared by the parent map and the public /village map."""
+    beings: list[dict] = []
+    for row in store.list(owner_id):
+        if row.get("state") in ("dead", "emigrated"):
+            continue
+        if only_slugs is not None and row["slug"] not in only_slugs:
+            continue
+        b = store.get(owner_id, row["slug"])
+        if b.get("stage") == "egg":
+            continue
+        pos = position_of(store, b, now)
+        entry = {
+            "slug": b["slug"], "name": b["name"], "stage": b["stage"],
+            "state": b["state"],
+            "xy": [int(pos["xy"][0]), int(pos["xy"][1])],
+            "at": pos["at"], "to": pos["to"],
+            "minutes_left": round(float(pos["minutes_left"]), 1),
+            "home_xy": list(home_xy(b)),
+            "speed": speed_for(b),
+            "avatar": store._avatar_view(b),
+        }
+        loc = b.get("location") or {}
+        if pos.get("to") and isinstance(loc.get("path"), list):
+            entry["path"] = loc["path"]
+            entry["departed_at"] = loc.get("departed_at")
+            entry["total_minutes"] = loc.get("minutes")
+        beings.append(entry)
+    meta = store.get_village_meta(owner_id)
+    return {"plot": PLOT_SIZE,
+            "grid": {"plot_w": meta["plot_w"], "plot_h": meta["plot_h"],
+                     "tile_size": meta["tile_size"]},
+            "terrain": meta["terrain"],
+            "roads": meta["roads"],
+            "props": village_props(store, owner_id),
+            "places": store.village_places(owner_id),
+            "beings": beings}
+
+
+# ── Plotted courses (village-world plan Phase 2) ─────────────────────────
+
+ROAD_COST = 0.6                    # streets preferred, shortcuts allowed
+
+
+def walk_blocked(store: BeingsStore, owner_id: str,
+                 being: dict | None = None) -> set:
+    """Tiles legs may not cross: building walls (their doors stay open),
+    trees, and OTHER beings' cottages — your own home lets you in."""
+    blocked: set = set()
+    doors: set = set()
+    for p in store.village_places(owner_id):
+        kind = p.get("kind") or footprint_for(p)[2]
+        if kind == "building":
+            blocked |= set(footprint_tiles(p))
+            if p.get("door_x") is not None:
+                doors.add((p["door_x"], p["door_y"]))
+    blocked -= doors
+    my_slug = (being or {}).get("slug")
+    try:
+        for r in store.list(owner_id):
+            if r.get("slug") == my_slug:
+                continue
+            blocked |= set(home_tiles(r))
+    except Exception:  # noqa: BLE001
+        pass
+    for pr in village_props(store, owner_id):
+        if pr["kind"] == "tree":
+            blocked.add((pr["tile"][0], pr["tile"][1]))
+    return blocked
+
+
+def _astar(blocked: set, roads: set, start: tuple[int, int],
+           goal: tuple[int, int]) -> list[tuple[int, int]]:
+    """Weighted A* over the tile grid — stepping onto a street costs
+    ROAD_COST, open ground 1.0, blocked never (the goal tile itself is
+    always enterable, so a being boxed in by new construction can still
+    come home). Deterministic: fixed neighbor order + insertion tie-break.
+    [] when there is no way."""
+    import heapq
+    if start == goal:
+        return [start]
+    def h(t: tuple[int, int]) -> float:
+        return (abs(t[0] - goal[0]) + abs(t[1] - goal[1])) * ROAD_COST
+    best = {start: 0.0}
+    prev: dict = {start: None}
+    heap: list = [(h(start), 0, start)]
+    tick = 0
+    while heap:
+        _f, _n, cur = heapq.heappop(heap)
+        if cur == goal:
+            path = [cur]
+            while prev[path[-1]] is not None:
+                path.append(prev[path[-1]])
+            return list(reversed(path))
+        for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
+            nxt = (cur[0] + dx, cur[1] + dy)
+            if not (0 <= nxt[0] < GRID_W and 0 <= nxt[1] < GRID_H):
+                continue
+            if nxt in blocked and nxt != goal:
+                continue
+            g = best[cur] + (ROAD_COST if nxt in roads else 1.0)
+            if g < best.get(nxt, 1e18) - 1e-9:
+                best[nxt] = g
+                prev[nxt] = cur
+                tick += 1
+                heapq.heappush(heap, (g + h(nxt), tick, nxt))
+    return []
+
+
+def _collapse(tiles: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Waypoints: both ends and every turn; collinear runs drop out."""
+    if len(tiles) <= 2:
+        return list(tiles)
+    out = [tiles[0]]
+    for i in range(1, len(tiles) - 1):
+        d1 = (tiles[i][0] - tiles[i - 1][0], tiles[i][1] - tiles[i - 1][1])
+        d2 = (tiles[i + 1][0] - tiles[i][0], tiles[i + 1][1] - tiles[i][1])
+        if d1 != d2:
+            out.append(tiles[i])
+    out.append(tiles[-1])
+    return out
+
+
+def walk_target_xy(store: BeingsStore, being: dict,
+                   place_id: str) -> tuple[int, int]:
+    """Where legs aim: a building's DOOR, grounds' heart, or your own
+    doorstep. (At rest the being reports the place anchor as today —
+    stepping from the door to the heart of the place is the settle.)"""
+    if place_id == "home":
+        return home_xy(being)
+    p = store.get_place(being["owner_id"], place_id)
+    if (p.get("kind") or "") == "building" and p.get("door_x") is not None:
+        return tile_center(int(p["door_x"]), int(p["door_y"]))
+    return (int(p["x"]), int(p["y"]))
+
+
+def plot_course(store: BeingsStore, being: dict, origin_xy,
+                place_id: str) -> tuple[list[list[int]], float]:
+    """The course this being's legs will follow — plotted ONCE at depart
+    and stored, so position stays a pure function of the row + the clock.
+    Streets preferred, shortcuts allowed; exact endpoints in unit space;
+    falls back to the straight line rather than refusing to walk.
+    Returns (waypoints, minutes at THIS being's pace)."""
+    dest_xy = walk_target_xy(store, being, place_id)
+    origin = (int(origin_xy[0]), int(origin_xy[1]))
+    tiles: list[tuple[int, int]] = []
+    try:
+        meta = store.get_village_meta(being["owner_id"])
+        roads = {(int(t[0]), int(t[1])) for t in (meta.get("roads") or [])}
+        blocked = walk_blocked(store, being["owner_id"], being)
+        tiles = _astar(blocked, roads, tile_of(*origin), tile_of(*dest_xy))
+    except Exception as e:  # noqa: BLE001 — a walk must never crash
+        log.warning("course plotting failed", slug=being.get("slug"),
+                    error=str(e))
+    if len(tiles) >= 2:
+        centers = [tile_center(tx, ty) for tx, ty in _collapse(tiles)]
+        path = ([[origin[0], origin[1]]]
+                + [[int(p[0]), int(p[1])] for p in centers[1:-1]]
+                + [[int(dest_xy[0]), int(dest_xy[1])]])
+    else:
+        path = [[origin[0], origin[1]], [int(dest_xy[0]), int(dest_xy[1])]]
+    length = sum(math.dist(path[i], path[i + 1])
+                 for i in range(len(path) - 1))
+    return path, length / max(0.001, speed_for(being))
+
+
+def _along(pts: list, frac: float) -> tuple[int, int]:
+    """The point `frac` of the way along a polyline — pure geometry."""
+    total = sum(math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
+    if total <= 0:
+        return (int(round(pts[-1][0])), int(round(pts[-1][1])))
+    left = max(0.0, frac) * total
+    for i in range(len(pts) - 1):
+        seg = math.dist(pts[i], pts[i + 1])
+        if left <= seg or i == len(pts) - 2:
+            f = 0.0 if seg <= 0 else min(1.0, left / seg)
+            return (int(round(pts[i][0] + (pts[i + 1][0] - pts[i][0]) * f)),
+                    int(round(pts[i][1] + (pts[i + 1][1] - pts[i][1]) * f)))
+        left -= seg
+    return (int(round(pts[-1][0])), int(round(pts[-1][1])))
+
+
+def construction_taken(store: BeingsStore, owner_id: str) -> set:
+    """Every tile nothing new may be raised on: footprints, homes, the
+    home lane, and the streets themselves."""
+    taken: set = {(HOME_LANE_TX, ty) for ty in range(3, GRID_H - 3)}
+    meta = store.get_village_meta(owner_id)
+    taken |= {(int(t[0]), int(t[1])) for t in (meta.get("roads") or [])}
+    for p in store.village_places(owner_id):
+        taken |= set(footprint_tiles(p))
+    try:
+        for r in store.list(owner_id):
+            taken |= set(home_tiles(r))
+    except Exception:  # noqa: BLE001
+        pass
+    return taken
+
+
 def ensure_village(store: BeingsStore, owner_id: str,
                    now: datetime | None = None) -> None:
-    """Found the ground if none exists (idempotent, deterministic). The LLM
-    architect may redesign it later; physics never waits on a model."""
+    """Found the ground if none exists (idempotent, deterministic), and
+    dress a village from before the world model in place — footprints,
+    doors, streets — exactly once (cheap check every tick after that).
+    The LLM architect may redesign it later; physics never waits."""
     try:
-        if store.village_places(owner_id):
+        places = store.village_places(owner_id)
+        if not places:
+            store.save_village(owner_id, default_village(owner_id), now=now)
+            write_map_md(store, owner_id)
             return
-        store.save_village(owner_id, default_village(owner_id), now=now)
-        write_map_md(store, owner_id)
+        if any(not int(p.get("w") or 0) or (p.get("kind") or "")
+               not in ("building", "grounds") for p in places) \
+                or not store.get_village_meta(owner_id).get("roads"):
+            refresh_layout(store, owner_id, now=now)
+            write_map_md(store, owner_id)
     except Exception as e:  # noqa: BLE001 — ground is texture, never oxygen
         log.warning("ensure_village failed", owner=owner_id, error=str(e))
 
@@ -710,7 +1160,10 @@ def write_map_md(store: BeingsStore, owner_id: str) -> None:
         'The ground under your life. To walk somewhere, add "go_to": '
         '"<place>" to', "your decision json — your legs move between wakes, "
         f"at about {int(WALK_SPEED)} paces a", "minute (infants toddle at "
-        "about a third of that). Home is always a place", "you can name.", "",
+        "about a third of that). Home is always a place", "you can name. "
+        "Streets run from every door to the square; your legs", "follow "
+        "them, cutting across open ground only when it is truly shorter.",
+        "",
         f"| place | what it is for | from {sq['name']} |", "|---|---|---|",
     ]
     for p in places:
@@ -940,22 +1393,35 @@ def reflex_pass(store: BeingsStore, being: dict, now: datetime) -> int:
     return acted + reflex_encounters(store, being, now)
 
 
-def commission_spot(store: BeingsStore, owner_id: str,
-                    seed: str) -> tuple[int, int]:
+def commission_spot(store: BeingsStore, owner_id: str, seed: str,
+                    affordance: str = "") -> tuple[int, int]:
     """Where a commissioned building rises: deterministic (seeded by the
-    commission id), margin-safe, and as far from everything standing as a
-    seeded scatter can manage — new ground, not a crowd."""
+    commission id), margin-safe, and footprint-aware — a candidate whose
+    ground (by the affordance's footprint) would collide with anything
+    standing, a home, the lane, or the streets is rejected; among the
+    valid, the most open spot wins. Falls back to the old scatter when
+    nothing fits, rather than refusing to build."""
     rng = random.Random(zlib.crc32(seed.encode("utf-8")))
     places = store.village_places(owner_id)
-    best, best_d = (500, 500), -1.0
+    w, h, _kind = _AFF_FOOTPRINTS.get(affordance, (2, 2, "building"))
+    try:
+        taken = construction_taken(store, owner_id)
+    except Exception:  # noqa: BLE001
+        taken = set()
+    best, best_d = None, -1.0
+    fallback, fallback_d = (500, 500), -1.0
     for _ in range(64):
         x = rng.randint(80, PLOT_SIZE - 80)
         y = rng.randint(80, PLOT_SIZE - 80)
         d = min((math.dist((x, y), (p["x"], p["y"])) for p in places),
                 default=1e9)
+        if d > fallback_d:
+            fallback, fallback_d = (x, y), d
+        if set(_tiles_at(x, y, w, h)) & taken:
+            continue
         if d > best_d:
             best, best_d = (x, y), d
-    return best
+    return best or fallback
 
 
 def commission_percepts(store: BeingsStore, being: dict, now: datetime,

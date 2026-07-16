@@ -96,6 +96,12 @@ export type PublicVisitorCard = PublicProfile & {
 export const listPublicBeings = () =>
   pubFetch<{ beings: PublicProfile[]; village: PublicVillage; visitors: PublicVisitorCard[] }>('')
 
+// The observer map (village-world plan): the fronting village's living
+// isometric ground, with only its PUBLIC beings walking on it. Read-only —
+// no nudge, no mutation.
+export const getPublicVillageMap = () =>
+  villageFetch<import('./beings').VillageMapData>('/map')
+
 export const getPublicBeing = (slug: string) =>
   pubFetch<PublicProfile>(`/${slug}`)
 
