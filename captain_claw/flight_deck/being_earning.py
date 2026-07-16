@@ -35,6 +35,14 @@ def _utcnow() -> datetime:
 
 # ── Percepts (wired into the tick's senses) ──────────────────────────────
 
+def _quest_fee_txt(q: dict) -> str:
+    """The bounty in its true denomination (space plan Phase 2): coins are
+    money, tokens are food — say which one is on the table."""
+    if int(q.get("fee_coins") or 0) > 0:
+        return f"{q['fee_coins']} coins"
+    return f"{q['fee_tokens']} tokens"
+
+
 def earning_percepts(store: BeingsStore, being: dict) -> list[str]:
     lines: list[str] = []
     stage = being["stage"]
@@ -43,11 +51,11 @@ def earning_percepts(store: BeingsStore, being: dict) -> list[str]:
             if q["state"] == "claimed":
                 lines.append(
                     f"YOUR CLAIMED QUEST [{q['id'][:8]}]: {q['title']} — "
-                    f"deliver when ready ({q['fee_tokens']} tokens).")
+                    f"deliver when ready ({_quest_fee_txt(q)}).")
         for q in store.open_quests(being["owner_id"], limit=3):
             lines.append(
                 f"QUEST ON THE BOARD [{q['id'][:8]}]: {q['title']} — "
-                f"{q['fee_tokens']} tokens. {q['spec'][:140]} "
+                f"{_quest_fee_txt(q)}. {q['spec'][:140]} "
                 "Claim it only if you can truly deliver.")
     if constitution.has_capability(stage, "ventures"):
         for v in store.due_ventures_for(being["owner_id"], being["slug"]):

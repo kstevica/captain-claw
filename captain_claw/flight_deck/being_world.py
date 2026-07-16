@@ -22,8 +22,10 @@ Instruction text lives in instructions/beings/*.md like everything else.
 
 from __future__ import annotations
 
+import math
 import os
 import random
+import zlib
 from datetime import datetime, timedelta
 
 from captain_claw.flight_deck import being_constitution as constitution
@@ -462,8 +464,28 @@ def steward_percepts(store: BeingsStore, being: dict, now: datetime,
     if current_steward(store, being["owner_id"], now) != being["slug"]:
         return []
     store.milestone(being["id"], "first_stewardship", {}, now=now)
+    # The steward's stipend (space plan Phase 5): a parent knob, paid once
+    # per ISO week at the steward's first morning — ledger-idempotent.
+    extra = ""
     try:
-        return [being_prompts.render(being, "steward_note.md")]
+        stipend = int(store.get_village_meta(being["owner_id"])
+                      .get("steward_stipend_coins") or 0)
+        if stipend > 0:
+            year, week, _ = _local(now).isocalendar()
+            wk = f"{year}-W{week:02d}"
+            paid = any(ev["reason"] == "stipend"
+                       and ev["data"].get("week") == wk
+                       for ev in store.coin_ledger(
+                           being["owner_id"], being["slug"], limit=30))
+            if not paid:
+                store._apply_coins(being["owner_id"], being["id"], stipend,
+                                   "stipend", data={"week": wk}, now=now)
+                extra = (f" Your stipend for the week — {stipend} coin(s) — "
+                         "is in your pocket.")
+    except Exception:  # noqa: BLE001 — pay must never sink the note
+        extra = ""
+    try:
+        return [being_prompts.render(being, "steward_note.md") + extra]
     except Exception:  # noqa: BLE001
         return []
 
@@ -484,20 +506,41 @@ def letters_cap(stage: str, now: datetime) -> int:
 
 def market_percepts(store: BeingsStore, being: dict, now: datetime,
                     kind: str, first_of_day: bool) -> list[str]:
-    """Market morning (T3.17): the stalls cried out — real publications with
-    real prices, plus the reminder that letters run cheaper today."""
+    """Market morning (T3.17 + Phase 3 presence): the stalls cried out —
+    coin listings and publications with real prices. Standing at a
+    trade-place hears the full cry; elsewhere the square only hums (a
+    presence bonus, never a gate — MARKET.md is browsable any day)."""
     if kind != "wake" or not first_of_day or not market_day(now):
         return []
     if not constitution.has_capability(being["stage"], "commons_read"):
         return []
+    pid = place_of(store, being, now)
+    present = False
+    if pid and pid != "home":
+        try:
+            present = "trade" in store.get_place(
+                being["owner_id"], pid)["affordances"]
+        except Exception:  # noqa: BLE001
+            present = False
+    if not present:
+        return ["MARKET DAY, from afar: the square hums without you — "
+                "letters run cheaper today, and commons/village/MARKET.md "
+                'lists the stalls. Walk over ("go_to") if the noise '
+                "calls you."]
     stalls = []
     try:
-        for p in store.publications(being["owner_id"], limit=5):
+        for li in store.market_listings(being["owner_id"], limit=3):
+            stalls.append(f'  - [{li["id"][:8]}] "{li["title"]}" — '
+                          f'{li["price_coins"]} coins (by {li["seller"]})')
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for p in store.publications(being["owner_id"], limit=3):
             price = int(p.get("price_tokens") or 0)
             stalls.append(f'  - [{p["id"][:8]}] "{p["title"]}" — '
                           + (f"{price} tokens" if price else "free"))
     except Exception:  # noqa: BLE001
-        stalls = []
+        pass
     try:
         return [being_prompts.render(
             being, "market_note.md",
@@ -506,6 +549,439 @@ def market_percepts(store: BeingsStore, being: dict, now: datetime,
             bonus=MARKET_BONUS_LETTERS)]
     except Exception:  # noqa: BLE001
         return []
+
+
+# ── The ground (space plan Phase 1): places, movement, the architect ─────
+#
+# Space is the last missing dimension. Position is a PURE FUNCTION of the
+# location row and the clock — no scheduler, no background process; the
+# world is simply further along when a being wakes (the fever/steward
+# pattern applied to geometry). Only the store writes (depart/settle);
+# everything here computes.
+
+PLOT_SIZE = 1000
+WALK_SPEED = 10.0             # units per minute — everyone walks the same…
+INFANT_SPEED_FACTOR = 0.35    # …except infants, who toddle (user-locked)
+VILLAGE_MIN_PLACES = 4
+VILLAGE_MAX_PLACES = 12
+# The fixed affordance vocabulary: the architect may only NAME and PLACE;
+# what a place DOES is code (Phase 3 wires these into the homeostat).
+AFFORDANCES = ("rest", "read", "create", "gather", "trade", "tend", "play",
+               "remember")
+
+# The deterministic village — the ground that exists even if no model ever
+# answers. The architect's LLM draft may replace it, never precede it.
+_DEFAULT_VILLAGE = (
+    ("square", "the Square", ("gather", "trade"),
+     "the open heart of the village — news, stalls, and every road"),
+    ("library", "the Library", ("read",),
+     "shelves and quiet — the place made for long reading"),
+    ("workshop", "the Workshop", ("create",),
+     "benches, tools and shavings — things get made here"),
+    ("garden", "the Garden", ("tend",),
+     "rows to weed and water — patient work that shows"),
+    ("well", "the Well", ("gather",),
+     "the cool stone circle where paths and small talk cross"),
+    ("meadow", "the Meadow", ("play",),
+     "open grass past the houses — for games and lying in the sun"),
+    ("old-bench", "the Old Bench", ("remember",),
+     "a worn seat under a tree, for looking back"),
+)
+
+
+def default_village(owner_id: str) -> list[dict]:
+    """Seeded per owner so every village lies differently, deterministic so
+    tests and re-founding never drift: the square near the center, the rest
+    on a jittered ring around it."""
+    rng = random.Random(zlib.crc32(owner_id.encode("utf-8")))
+    n = max(1, len(_DEFAULT_VILLAGE) - 1)
+    base = rng.uniform(0.0, 2.0 * math.pi)
+    places: list[dict] = []
+    i = 0
+    for pid, name, aff, desc in _DEFAULT_VILLAGE:
+        if pid == "square":
+            x, y = rng.randint(430, 570), rng.randint(430, 570)
+        else:
+            ang = base + i * (2.0 * math.pi / n) + rng.uniform(-0.25, 0.25)
+            r = rng.uniform(240.0, 380.0)
+            x = int(round(500 + r * math.cos(ang)))
+            y = int(round(500 + r * math.sin(ang)))
+            i += 1
+        places.append({"id": pid, "name": name, "x": x, "y": y,
+                       "affordances": list(aff), "description": desc})
+    return places
+
+
+def home_xy(being: dict) -> tuple[int, int]:
+    """Every being's own home: a point on the west home-lane, computed from
+    the slug — no row, no architect, no migration for existing beings."""
+    h = zlib.crc32(str(being.get("slug") or "").encode("utf-8"))
+    return (40 + (h >> 16) % 80, 80 + h % 840)
+
+
+def speed_for(being: dict) -> float:
+    if being.get("stage") == "infant":
+        return WALK_SPEED * INFANT_SPEED_FACTOR
+    return WALK_SPEED
+
+
+def place_xy(store: BeingsStore, being: dict, place_id: str,
+             ) -> tuple[int, int]:
+    if place_id == "home":
+        return home_xy(being)
+    p = store.get_place(being["owner_id"], place_id)   # raises BeingNotFound
+    return (int(p["x"]), int(p["y"]))
+
+
+def place_name(store: BeingsStore, being: dict, place_id: str) -> str:
+    if place_id == "home":
+        return "home"
+    try:
+        return store.get_place(being["owner_id"], place_id)["name"]
+    except Exception:  # noqa: BLE001
+        return place_id
+
+
+def travel_minutes(being: dict, a, b) -> float:
+    return math.dist(a, b) / max(0.001, speed_for(being))
+
+
+def position_of(store: BeingsStore, being: dict, now: datetime) -> dict:
+    """Where the body is at `now` — a pure read, never a write. At rest:
+    {"xy", "at"}. On the road: {"xy", "to", "minutes_left"}. A walk whose
+    time has passed reports the destination (plus "arrived_at") and waits
+    for the store's settle to make it official. Broken ground (a place
+    removed mid-walk) resolves to home — the one place that always exists."""
+    loc = being.get("location") or {"at": "home"}
+    if loc.get("at") or not loc.get("to"):
+        pid = loc.get("at") or "home"
+        try:
+            xy = place_xy(store, being, pid)
+        except Exception:  # noqa: BLE001
+            pid, xy = "home", home_xy(being)
+        return {"xy": xy, "at": pid, "to": None, "minutes_left": 0.0}
+    try:
+        dest_xy = place_xy(store, being, loc["to"])
+    except Exception:  # noqa: BLE001
+        return {"xy": home_xy(being), "at": "home", "to": None,
+                "minutes_left": 0.0}
+    origin = tuple(loc.get("origin") or home_xy(being))
+    try:
+        t0 = datetime.fromisoformat(str(loc.get("departed_at")))
+    except (TypeError, ValueError):
+        return {"xy": dest_xy, "at": loc["to"], "to": None,
+                "minutes_left": 0.0, "arrived_at": now}
+    total = travel_minutes(being, origin, dest_xy)
+    elapsed = max(0.0, (now - t0).total_seconds() / 60.0)
+    if elapsed >= total:
+        return {"xy": dest_xy, "at": loc["to"], "to": None,
+                "minutes_left": 0.0,
+                "arrived_at": t0 + timedelta(minutes=total)}
+    f = elapsed / total if total > 0 else 1.0
+    xy = (int(round(origin[0] + (dest_xy[0] - origin[0]) * f)),
+          int(round(origin[1] + (dest_xy[1] - origin[1]) * f)))
+    return {"xy": xy, "at": None, "to": loc["to"],
+            "minutes_left": total - elapsed}
+
+
+def ensure_village(store: BeingsStore, owner_id: str,
+                   now: datetime | None = None) -> None:
+    """Found the ground if none exists (idempotent, deterministic). The LLM
+    architect may redesign it later; physics never waits on a model."""
+    try:
+        if store.village_places(owner_id):
+            return
+        store.save_village(owner_id, default_village(owner_id), now=now)
+        write_map_md(store, owner_id)
+    except Exception as e:  # noqa: BLE001 — ground is texture, never oxygen
+        log.warning("ensure_village failed", owner=owner_id, error=str(e))
+
+
+def write_map_md(store: BeingsStore, owner_id: str) -> None:
+    """commons/village/MAP.md — the ground as beings read it: names, what
+    each place is for, and honest walking times from the square."""
+    from captain_claw.flight_deck import being_society
+    places = store.village_places(owner_id)
+    if not places:
+        return
+    sq = next((p for p in places if "gather" in p["affordances"]), places[0])
+    lines = [
+        "# The Village Map", "",
+        'The ground under your life. To walk somewhere, add "go_to": '
+        '"<place>" to', "your decision json — your legs move between wakes, "
+        f"at about {int(WALK_SPEED)} paces a", "minute (infants toddle at "
+        "about a third of that). Home is always a place", "you can name.", "",
+        f"| place | what it is for | from {sq['name']} |", "|---|---|---|",
+    ]
+    for p in places:
+        mins = math.dist((sq["x"], sq["y"]), (p["x"], p["y"])) / WALK_SPEED
+        away = "—" if p["id"] == sq["id"] else f"~{int(round(mins))} min"
+        lines.append(f"| {p['name']} (`{p['id']}`) | {p['description']} "
+                     f"(good for: {', '.join(p['affordances'])}) | {away} |")
+    lines += ["", "— the Architect", ""]
+    try:
+        path = being_society._commons_path(owner_id, "village/MAP.md",
+                                           create_parents=True)
+        path.write_text("\n".join(lines), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log.warning("MAP.md write failed", owner=owner_id, error=str(e))
+
+
+def location_percepts(store: BeingsStore, being: dict, now: datetime,
+                      kind: str, first_of_day: bool) -> list[str]:
+    """The ground, felt: mid-road wakes hear the road; mornings hear where
+    they are, what is near (at THEIR pace — infants see honest toddle
+    times), and how to walk. Silence the rest of the day."""
+    if kind != "wake":
+        return []
+    try:
+        pos = position_of(store, being, now)
+    except Exception:  # noqa: BLE001
+        return []
+    if pos.get("to"):
+        try:
+            return [being_prompts.render(
+                being, "road_note.md",
+                to=place_name(store, being, pos["to"]),
+                minutes=max(1, int(round(pos["minutes_left"]))))]
+        except Exception:  # noqa: BLE001
+            return []
+    if not first_of_day:
+        return []
+    here = pos["at"]
+    try:
+        places = [p for p in store.village_places(being["owner_id"])
+                  if p["id"] != here]
+    except Exception:  # noqa: BLE001
+        places = []
+    if not places:
+        return []
+    xy = pos["xy"]
+    near = sorted(places, key=lambda p: math.dist(xy, (p["x"], p["y"])))[:3]
+    near_txt = ", ".join(
+        f"{p['name']} ~{max(1, int(round(math.dist(xy, (p['x'], p['y'])) / speed_for(being))))} min"
+        for p in near)
+    pace = ("a toddle — far things take most of a day"
+            if being.get("stage") == "infant"
+            else "the walking happens while you rest")
+    try:
+        return [being_prompts.render(
+            being, "location_note.md",
+            place=place_name(store, being, here), near=near_txt, pace=pace)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+# ── Teeth (space plan Phase 3): places pull, encounters pay ──────────────
+#
+# Strong bonuses, never gates (user-locked): a drive served at a place
+# whose affordance matches it lands ×PLACE_BOOST; a first visit anywhere
+# serves explore outright; reading finished at a read-place mints a
+# little more. Nothing is location-REQUIRED — a being that never moves
+# lives exactly as before, minus the bonuses.
+
+PLACE_BOOST = 1.5
+READING_PLACE_FACTOR = 1.25
+AFFORDANCE_DRIVE_BOOSTS = {
+    "read": "grow", "create": "create", "gather": "connect",
+    "trade": "connect", "tend": "create", "play": "explore",
+    "remember": "grow", "rest": "survive",
+}
+# Contacts grow asymptotically on meetings — the satiation curve again.
+CONTACT_STRENGTH_STEP = 0.2
+# Market day adds two trades on top of the stage quota (single source,
+# like letters_cap).
+MARKET_BONUS_TRADES = 2
+
+
+def place_of(store: BeingsStore, being: dict, now: datetime) -> str | None:
+    """The settled place id right now, or None mid-road. Pure read."""
+    try:
+        pos = position_of(store, being, now)
+    except Exception:  # noqa: BLE001
+        return None
+    return pos.get("at")
+
+
+def place_drive_boosts(store: BeingsStore, being: dict,
+                       now: datetime) -> frozenset[str]:
+    """The drives this being's CURRENT ground favors — empty at home, on
+    the road, or off the map."""
+    pid = place_of(store, being, now)
+    if not pid or pid == "home":
+        return frozenset()
+    try:
+        aff = store.get_place(being["owner_id"], pid)["affordances"]
+    except Exception:  # noqa: BLE001
+        return frozenset()
+    return frozenset(AFFORDANCE_DRIVE_BOOSTS[a]
+                     for a in aff if a in AFFORDANCE_DRIVE_BOOSTS)
+
+
+def trades_cap(stage: str, now: datetime) -> int:
+    """The day's market-trade quota: the stage's reach plus the market-day
+    bonus — one number for the store gate and the tick's offer alike."""
+    cap = constitution.trades_per_day(stage)
+    if cap > 0 and market_day(now):
+        cap += MARKET_BONUS_TRADES
+    return cap
+
+
+def encounters(store: BeingsStore, being: dict, now: datetime,
+               kind: str) -> list[str]:
+    """Co-presence, felt (space plan Phase 3): another being settled at
+    the same CIVIC place right now → one crossed_paths event to each per
+    pair per day, a contact that grows, and a gossip line — what they've
+    truly been up to, pulled from their own ledger. Homes are private:
+    two beings 'at home' are at DIFFERENT homes."""
+    if kind != "wake":
+        return []
+    pid = place_of(store, being, now)
+    if not pid or pid == "home":
+        return []
+    lines: list[str] = []
+    try:
+        others = [store.get(being["owner_id"], r["slug"])
+                  for r in store.list(being["owner_id"])
+                  if r.get("state") == "alive" and r["slug"] != being["slug"]]
+    except Exception:  # noqa: BLE001
+        return []
+    here = place_name(store, being, pid)
+    for other in others:
+        if other.get("stage") == "egg" or place_of(store, other, now) != pid:
+            continue
+        try:
+            fresh = store.touch_contact(being["owner_id"], being["id"],
+                                        other["id"], now=now)
+        except Exception:  # noqa: BLE001
+            continue
+        if not fresh:
+            continue                      # already crossed today — one hello
+        gossip = ""
+        try:
+            for e in store.events(being["owner_id"], other["slug"], limit=10):
+                if e["kind"] == "tick" and e["data"].get("summary"):
+                    gossip = f' — lately: "{e["data"]["summary"][:120]}"'
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        store.record_event(being["id"], "crossed_paths",
+                           {"with": other["slug"], "name": other["name"],
+                            "place": pid, "place_name": here}, now=now)
+        store.record_event(other["id"], "crossed_paths",
+                           {"with": being["slug"], "name": being["name"],
+                            "place": pid, "place_name": here}, now=now)
+        lines.append(f"CROSSED PATHS: {other['name']} is here at {here}"
+                     f"{gossip}")
+    return lines
+
+
+def commission_spot(store: BeingsStore, owner_id: str,
+                    seed: str) -> tuple[int, int]:
+    """Where a commissioned building rises: deterministic (seeded by the
+    commission id), margin-safe, and as far from everything standing as a
+    seeded scatter can manage — new ground, not a crowd."""
+    rng = random.Random(zlib.crc32(seed.encode("utf-8")))
+    places = store.village_places(owner_id)
+    best, best_d = (500, 500), -1.0
+    for _ in range(64):
+        x = rng.randint(80, PLOT_SIZE - 80)
+        y = rng.randint(80, PLOT_SIZE - 80)
+        d = min((math.dist((x, y), (p["x"], p["y"])) for p in places),
+                default=1e9)
+        if d > best_d:
+            best, best_d = (x, y), d
+    return best
+
+
+def commission_percepts(store: BeingsStore, being: dict, now: datetime,
+                        kind: str, first_of_day: bool) -> list[str]:
+    """The building fund, heard each morning while it lives (space plan
+    Phase 5): progress + the honest way to help; and — when no fund is
+    open — a rare proposing nudge for a saver of means."""
+    if kind != "wake" or not first_of_day:
+        return []
+    try:
+        c = store.open_commission(being["owner_id"])
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        coins = store.coin_balance(being["id"])
+    except Exception:  # noqa: BLE001
+        coins = 0
+    if c:
+        if c["state"] == "funded":
+            return [f'THE COMMISSION: "{c["name"]}" is fully funded '
+                    f'({c["target_coins"]} coins) — it waits on your '
+                    "parent's word now."]
+        line = (f'THE COMMISSION: "{c["name"]}" ({c["affordance"]}) — '
+                f'{c["raised_coins"]}/{c["target_coins"]} coins raised.')
+        if coins > 0:
+            line += (' Help build it: add "commission": {"coins": '
+                     f'<up to {coins}>}} to your digest.')
+        return [line]
+    if coins >= 10 and constitution.stage_index(being["stage"]) >= \
+            constitution.stage_index("adolescent"):
+        return ['A SAVER\'S THOUGHT: the village could grow — propose a '
+                'building with "commission": {"name": "...", "why": "...", '
+                '"affordance": "play|read|create|gather|tend|remember", '
+                f'"coins": <your stake>}}. It takes '
+                f'{constitution.COMMISSION_COST_COINS} coins raised in all; '
+                'the village pools.']
+    return []
+
+
+# The architect (one-shot, never a resident): one LLM call names and places
+# the ground from the fixed vocabulary; save_village validates HARD and the
+# deterministic default stands whenever the draft fails. Prompt + parse are
+# pure functions so they test without a model.
+ARCHITECT_SYSTEM = """You are the Architect: you design the ground of a small \
+village where digital beings (iskre) live, walk, meet and work.
+
+Rules — the map is physics, so obey them exactly:
+- Design 6 to 10 places on a 1000x1000 plot (coordinates 40..960).
+- Each place: a kebab-case "id", a warm human "name", integer "x" and "y",
+  1-2 "affordances" chosen ONLY from: rest, read, create, gather, trade,
+  tend, play, remember — and a one-line "description" (under 200 chars).
+- Exactly one central gathering place (affordances include "gather" and
+  "trade") near the middle of the plot — the square, whatever you name it.
+- Spread the rest out; give the far corners something worth the walk.
+- Name with character (a village, not a mall). No lore dumps.
+
+Reply with ONLY a fenced json block:
+```json
+{"places": [{"id": "...", "name": "...", "x": 500, "y": 480,
+             "affordances": ["gather", "trade"], "description": "..."}]}
+```"""
+
+
+def architect_prompt(owner_id: str, names: list[str]) -> tuple[str, str]:
+    who = ", ".join(n for n in names[:8] if n) or "its first being, still small"
+    user = (f"Design the village for a family of beings: {who}. "
+            "Make it a place with moods — somewhere to read, somewhere to "
+            "make, somewhere to idle. Reply with the json only.")
+    return ARCHITECT_SYSTEM, user
+
+
+def parse_architect_places(text: str) -> list[dict]:
+    """The model's words → a candidate place list (shape only — the store's
+    save_village is the real gate). Raises on anything unusable."""
+    import json as _json
+    from captain_claw.flight_deck.beings import BeingError
+    t = (text or "").strip()
+    if "```" in t:
+        chunks = t.split("```")
+        # take the largest fenced chunk that parses
+        t = max((c.removeprefix("json").strip() for c in chunks[1::2]),
+                key=len, default=t)
+    try:
+        data = _json.loads(t)
+    except _json.JSONDecodeError as e:
+        raise BeingError(f"the architect's draft is not json: {e}") from e
+    places = data.get("places") if isinstance(data, dict) else data
+    if not isinstance(places, list) or not places:
+        raise BeingError("the architect's draft holds no places")
+    return [p for p in places if isinstance(p, dict)]
 
 
 def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,
@@ -532,7 +1008,8 @@ def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,
     note = dream_tangle(being, now, kind)
     if note:
         lines.append(note)
-    for fn in (market_percepts, steward_percepts):
+    for fn in (location_percepts, market_percepts, steward_percepts,
+               commission_percepts):
         try:
             lines += fn(store, being, now, kind, first_of_day)
         except Exception:  # noqa: BLE001

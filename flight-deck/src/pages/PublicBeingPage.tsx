@@ -469,6 +469,12 @@ function RosterCard({ p, href, visitor, host, linked }: {
             <span className={stateTone[p.state] || 'text-zinc-500'}>{stateWord[p.state] || p.state}</span>
             <span className="text-zinc-600">·</span>
             <span className="text-zinc-500">gen {p.generation}</span>
+            {p.place && p.place.kind !== 'home' && (
+              <><span className="text-zinc-600">·</span>
+              <span className="text-teal-600 dark:text-teal-400">
+                {p.place.kind === 'road' ? `walking to ${p.place.name}` : `at ${p.place.name}`}
+              </span></>
+            )}
             {visitor && <><span className="text-zinc-600">·</span><span className="text-zinc-500">from {host || 'another village'}</span></>}
           </div>
         </div>
@@ -965,6 +971,14 @@ function BeingDetail({ profile: p, api, banner }: {
                   <span className="text-zinc-600">·</span>
                   <span className="text-zinc-500">day {daysAlive(p)} of life</span>
                   {p.mood && <><span className="text-zinc-600">·</span><span className="text-zinc-400">feeling {p.mood}</span></>}
+                  {p.place && p.place.kind !== 'home' && (
+                    <><span className="text-zinc-600">·</span>
+                    <span className="text-teal-600 dark:text-teal-400">
+                      {p.place.kind === 'road'
+                        ? `walking to ${p.place.name}${p.place.minutes_left ? ` — ~${p.place.minutes_left} min` : ''}`
+                        : `last seen at ${p.place.name}`}
+                    </span></>
+                  )}
                 </div>
               </div>
             </div>

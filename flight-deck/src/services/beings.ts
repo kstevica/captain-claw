@@ -122,6 +122,9 @@ export interface BeingVitals {
   }[]
   elder_after_days: number | null
   broadcast: { text: string; at: string } | null
+  location?: { at?: string | null; to?: string | null } | null
+  position?: { xy: [number, number]; at: string | null; to: string | null; minutes_left: number } | null
+  coins?: number
   tick_interval_minutes: number | null
   cognition: 'monolith' | 'faculties'
   compact_mode: boolean
@@ -237,6 +240,7 @@ export interface Quest {
   title: string
   spec: string
   fee_tokens: number
+  fee_coins?: number
   origin: string
   state: string
   claimant: string
@@ -257,9 +261,9 @@ export interface Venture {
 }
 export const getBoard = () =>
   fdFetch<{ quests: Quest[]; ventures: Venture[] }>('/beings/board')
-export const postQuest = (title: string, spec: string, fee_tokens: number) =>
+export const postQuest = (title: string, spec: string, fee_tokens: number, fee_coins = 0) =>
   fdFetch<{ quest: Quest }>('/beings/quests', {
-    method: 'POST', body: JSON.stringify({ title, spec, fee_tokens }),
+    method: 'POST', body: JSON.stringify({ title, spec, fee_tokens, fee_coins }),
   })
 export const judgeQuest = (questId: string, approve: boolean, note = '') =>
   fdFetch<{ quest: Quest }>(`/beings/quests/${questId}/judge`, {
@@ -359,6 +363,7 @@ export interface Chore {
   id: string
   spec: string
   fee_tokens: number
+  fee_coins?: number
   escrow_state: 'open' | 'judging' | 'paid' | 'failed'
   result_text: string
   judge_note: string
@@ -382,9 +387,9 @@ export interface ReportCard {
   drives_trail?: Array<Record<string, number | string>>
 }
 
-export const postChore = (slug: string, spec: string, fee_tokens: number) =>
+export const postChore = (slug: string, spec: string, fee_tokens: number, fee_coins = 0) =>
   fdFetch<{ chore: Chore }>(`/beings/${slug}/chores`, {
-    method: 'POST', body: JSON.stringify({ spec, fee_tokens }),
+    method: 'POST', body: JSON.stringify({ spec, fee_tokens, fee_coins }),
   })
 export const listChores = (slug: string) =>
   fdFetch<{ chores: Chore[] }>(`/beings/${slug}/chores`)
@@ -483,6 +488,62 @@ export const GRANT_AMOUNTS = [2_000_000, 5_000_000, 10_000_000, 20_000_000] as c
 export const rechargeBeing = (slug: string, tokens: number) =>
   fdFetch<BeingVitals>(`/beings/${slug}/recharge`, {
     method: 'POST', body: JSON.stringify({ tokens }),
+  })
+// Pocket money (space plan Phase 2): coins are money, not food — a second
+// ledger beside tokens; a being may convert one-way from adolescence.
+export const grantCoins = (slug: string, coins: number, note = '') =>
+  fdFetch<BeingVitals>(`/beings/${slug}/coins`, {
+    method: 'POST', body: JSON.stringify({ coins, note }),
+  })
+
+// ── The living map (space plan Phase 4) ──
+// Position is a pure function of the clock, so the client animates walking
+// from one snapshot — zero polling beyond a lazy refresh.
+
+export interface VillagePlace {
+  id: string; name: string; x: number; y: number
+  affordances: string[]; description: string
+}
+export interface VillageBeingPos {
+  slug: string; name: string; stage: string; state: string
+  xy: [number, number]; at: string | null; to: string | null
+  minutes_left: number; home_xy: [number, number]; speed: number
+}
+export interface VillageMapData {
+  plot: number; places: VillagePlace[]; beings: VillageBeingPos[]
+}
+export const getVillageMap = () =>
+  fdFetch<VillageMapData>('/beings/village-map')
+export const getVillagePlace = (placeId: string) =>
+  fdFetch<{ place: VillagePlace; guestbook: string }>(
+    `/beings/village-map/place/${placeId}`)
+export interface MarketListing {
+  id: string; title: string; path: string; price_coins: number
+  state: string; seller: string; seller_slug: string; created_at: string
+}
+export const getMarket = () =>
+  fdFetch<{ listings: MarketListing[] }>('/beings/market')
+
+// ── The civic layer (space plan Phase 5) ──
+export interface VillageCommission {
+  id: string; name: string; why: string; affordance: string
+  target_coins: number; raised_coins: number; state: string
+  contributors: { being_id: string; name: string; coins: number }[]
+}
+export interface VillageLife {
+  commission: VillageCommission | null
+  steward: string | null
+  steward_stipend_coins: number
+}
+export const getVillageLife = () =>
+  fdFetch<VillageLife>('/beings/village-life')
+export const judgeCommission = (approve: boolean, note = '') =>
+  fdFetch<unknown>('/beings/commission/judge', {
+    method: 'POST', body: JSON.stringify({ approve, note }),
+  })
+export const setStewardStipend = (coins: number) =>
+  fdFetch<{ steward_stipend_coins: number }>('/beings/village-stipend', {
+    method: 'POST', body: JSON.stringify({ coins }),
   })
 
 // ── The public square (parent side) ──

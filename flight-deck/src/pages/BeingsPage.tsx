@@ -5,7 +5,7 @@ import {
   ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, Check, ChevronDown,
   ChevronLeft, ChevronRight, ClipboardList, Coins, Download, Egg, ExternalLink,
   Files, Fingerprint, Gift, Globe, GraduationCap, History, Loader2, Mail,
-  Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus,
+  Map as MapIcon, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus,
   RefreshCw, Search, ScrollText, Skull, SlidersHorizontal, Sparkles, Sprout,
   Trash2, Upload, Users, Wrench, X, Zap, ZoomIn, ZoomOut,
 } from 'lucide-react'
@@ -30,7 +30,10 @@ import {
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
   getBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
-  listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
+  grantCoins, listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
+  getVillageMap, getVillagePlace, getMarket, type VillageMapData,
+  type VillagePlace, type VillageBeingPos, type MarketListing,
+  getVillageLife, judgeCommission, setStewardStipend, type VillageLife,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
   setCadence, setCognition, setCompactMode, setHouseRules, setMediaDiet,
@@ -82,7 +85,20 @@ const EVENT_DOT: Record<string, string> = {
   variety_pressure: 'bg-orange-300', reading_done: 'bg-emerald-400',
   chore_paid: 'bg-emerald-400', message_suppressed: 'bg-zinc-600',
   body: 'bg-zinc-500', resting_fever: 'bg-red-400',
+  coins_granted: 'bg-amber-400', coins_converted: 'bg-amber-400',
+  departed: 'bg-teal-400', arrived: 'bg-teal-400',
+  crossed_paths: 'bg-sky-400', guestbook_signed: 'bg-teal-300',
+  market_listed: 'bg-amber-400', market_sold: 'bg-emerald-400',
+  market_bought: 'bg-amber-400', introduced: 'bg-fuchsia-400',
+  made_introduction: 'bg-fuchsia-400', commission_proposed: 'bg-amber-400',
+  commission_contributed: 'bg-amber-400', commission_funded: 'bg-amber-300',
+  commission_built: 'bg-emerald-400', commission_refunded: 'bg-zinc-500',
 }
+
+// Coins are money, not food (space plan Phase 2) — say which one is on the
+// table wherever a fee shows.
+const feeLabel = (x: { fee_tokens: number; fee_coins?: number }) =>
+  (x.fee_coins ?? 0) > 0 ? `${x.fee_coins} coins` : fmtTokens(x.fee_tokens)
 
 function fmtTokens(n: number | null | undefined): string {
   if (n == null) return '∞'
@@ -157,9 +173,9 @@ function summarizeEventData(e: BeingEvent): string {
     case 'spoke_to_parent': return String(d.preview ?? '')
     case 'parent_message': return `you wrote to it: “${d.preview ?? ''}”`
     case 'message_suppressed': return String(d.reason ?? 'no attention credits')
-    case 'chore_posted': return `${d.spec} (fee ${fmtTokens(Number(d.fee_tokens) || 0)})`
+    case 'chore_posted': return `${d.spec} (fee ${Number(d.fee_coins) ? `${d.fee_coins} coins` : fmtTokens(Number(d.fee_tokens) || 0)})`
     case 'chore_done': return String(d.result ?? '')
-    case 'chore_paid': return `paid ${fmtTokens(Number(d.fee_tokens) || 0)}`
+    case 'chore_paid': return `paid ${Number(d.fee_coins) ? `${d.fee_coins} coins` : fmtTokens(Number(d.fee_tokens) || 0)}`
     case 'chore_failed': return String(d.note ?? 'rejected')
     case 'milestone': return String(d.name ?? '')
     case 'rules_updated': return `${d.count} rule(s)`
@@ -180,10 +196,26 @@ function summarizeEventData(e: BeingEvent): string {
     case 'had_child': return `had a child: ${d.name}${d.with ? ` (with ${d.with})` : ''} — dowry ${fmtTokens(Number(d.dowry_share) || 0)}`
     case 'endowed': return `endowed: ${(d.skills as string[] | undefined)?.join(', ') || 'nothing'}${Number(d.heirlooms) ? ` + ${d.heirlooms} heirloom(s)` : ''}`
     case 'died': return `died — ${d.cause}${d.asleep_days ? ` after ${d.asleep_days} days of torpor` : ''}`
-    case 'quest_claimed': return `claimed quest '${d.title}' (${fmtTokens(Number(d.fee_tokens) || 0)})`
+    case 'quest_claimed': return `claimed quest '${d.title}' (${Number(d.fee_coins) ? `${d.fee_coins} coins` : fmtTokens(Number(d.fee_tokens) || 0)})`
     case 'quest_delivered': return `delivered quest '${d.title}'`
-    case 'quest_paid': return `paid for quest '${d.title}' — ${fmtTokens(Number(d.fee_tokens) || 0)}`
+    case 'quest_paid': return `paid for quest '${d.title}' — ${Number(d.fee_coins) ? `${d.fee_coins} coins` : fmtTokens(Number(d.fee_tokens) || 0)}`
     case 'quest_failed': return `quest '${d.title}' rejected${d.note ? ` — ${d.note}` : ''}`
+    case 'coins_granted': return `pocket money: +${d.coins} coin(s)${d.note ? ` — ${d.note}` : ''}`
+    case 'coins_converted': return `converted ${d.coins} coin(s) → ${fmtTokens(Number(d.tokens) || 0)} tokens`
+    case 'departed': return `set out for ${d.to} — ~${d.minutes} min walk${d.reason ? ` (${d.reason})` : ''}`
+    case 'arrived': return `arrived at ${d.name || d.place}${d.hhmm ? ` at ${d.hhmm}` : ''}`
+    case 'crossed_paths': return `crossed paths with ${d.name} at ${d.place_name || d.place}`
+    case 'introduced': return `was introduced to ${d.to} (via ${d.via})`
+    case 'made_introduction': return `introduced ${d.for} to ${d.to}`
+    case 'commission_proposed': return `proposed '${d.name}' — ${d.coins}/${d.target} coins down`
+    case 'commission_contributed': return `gave ${d.coins} coin(s) to '${d.name}' (${d.raised}/${d.target})`
+    case 'commission_funded': return `'${d.name}' fully funded`
+    case 'commission_built': return `'${d.name}' built — ${d.coins} coin(s) in its walls`
+    case 'commission_refunded': return `'${d.name}' declined — ${d.coins} coin(s) refunded`
+    case 'guestbook_signed': return `signed the guestbook at ${d.place_name || d.place}: “${d.line ?? ''}”`
+    case 'market_listed': return `stall up: '${d.title}' — ${d.price_coins} coins`
+    case 'market_sold': return `sold '${d.title}' to ${d.to} — ${d.price_coins} coins`
+    case 'market_bought': return `bought '${d.title}' from ${d.from} — ${d.price_coins} coins`
     case 'venture_proposed': return `proposed venture '${d.title}' (${fmtTokens(Number(d.price_tokens) || 0)}/${d.cadence_days}d)`
     case 'venture_approved': return `venture '${d.title}' approved at ${fmtTokens(Number(d.price_tokens) || 0)}`
     case 'venture_delivered': return `delivered venture '${d.title}'`
@@ -1114,6 +1146,11 @@ const CHORE_FEES = [
   { v: '100000', label: '100k' }, { v: '500000', label: '500k' },
   { v: '1000000', label: '1M' }, { v: '2000000', label: '2M' },
 ] as const
+// Coin rewards (space plan Phase 2): money, not food — small on purpose.
+const CHORE_COIN_FEES = [
+  { v: '1', label: '1 coin' }, { v: '3', label: '3' },
+  { v: '5', label: '5' }, { v: '10', label: '10' },
+] as const
 
 function TalkModal({ slug, name, onClose, onChanged }: {
   slug: string; name: string; onClose: () => void; onChanged: () => void
@@ -1125,6 +1162,8 @@ function TalkModal({ slug, name, onClose, onChanged }: {
   const [busy, setBusy] = useState('')
   const [spec, setSpec] = useState('')
   const [fee, setFee] = useState('500000')
+  const [payIn, setPayIn] = useState<'tokens' | 'coins'>('tokens')
+  const [coinFee, setCoinFee] = useState('3')
   const [rejectingId, setRejectingId] = useState<string | null>(null)
   const [rejectNote, setRejectNote] = useState('')
   const [msg, setMsg] = useState('')
@@ -1156,7 +1195,10 @@ function TalkModal({ slug, name, onClose, onChanged }: {
   }
   const post = () => run('post', async () => {
     if (!spec.trim()) return
-    await postChore(slug, spec.trim(), Number(fee)); setSpec('')
+    await postChore(slug, spec.trim(),
+      payIn === 'tokens' ? Number(fee) : 0,
+      payIn === 'coins' ? Number(coinFee) : 0)
+    setSpec('')
   })
   const send = () => run('send', async () => {
     if (!msg.trim()) return
@@ -1250,13 +1292,26 @@ function TalkModal({ slug, name, onClose, onChanged }: {
           />
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className="flex items-center gap-1 text-[11px] text-zinc-500"><Coins className="h-3.5 w-3.5" /> reward</span>
-            <div className="flex gap-1">
-              {CHORE_FEES.map((f) => (
-                <button key={f.v} onClick={() => setFee(f.v)}
-                  className={`rounded-md border px-2 py-1 text-[11px] transition-colors ${fee === f.v ? 'border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300' : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}>
-                  {f.label}
+            <div className="flex overflow-hidden rounded-md border border-zinc-700 text-[11px]">
+              {(['tokens', 'coins'] as const).map((p) => (
+                <button key={p} onClick={() => setPayIn(p)}
+                  title={p === 'tokens' ? 'tokens — food for thinking' : 'coins — money for the village'}
+                  className={`px-2 py-1 transition-colors ${payIn === p ? 'bg-amber-500/15 text-amber-600 dark:text-amber-300' : 'text-zinc-500 hover:bg-zinc-800'}`}>
+                  {p}
                 </button>
               ))}
+            </div>
+            <div className="flex gap-1">
+              {(payIn === 'tokens' ? CHORE_FEES : CHORE_COIN_FEES).map((f) => {
+                const cur = payIn === 'tokens' ? fee : coinFee
+                const set = payIn === 'tokens' ? setFee : setCoinFee
+                return (
+                  <button key={f.v} onClick={() => set(f.v)}
+                    className={`rounded-md border px-2 py-1 text-[11px] transition-colors ${cur === f.v ? 'border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-300' : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}>
+                    {f.label}
+                  </button>
+                )
+              })}
             </div>
             <button onClick={post} disabled={!spec.trim() || busy === 'post'}
               className="ml-auto flex items-center gap-1 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
@@ -1287,7 +1342,7 @@ function TalkModal({ slug, name, onClose, onChanged }: {
                       <div key={c.id} className="rounded-lg border border-amber-500/25 bg-amber-500/[0.04] p-2.5">
                         <div className="flex items-start justify-between gap-2">
                           <p className="flex-1 text-xs text-zinc-200">{c.spec}</p>
-                          <span className="shrink-0 text-[11px] font-medium text-amber-600 dark:text-amber-400">{fmtTokens(c.fee_tokens)}</span>
+                          <span className="shrink-0 text-[11px] font-medium text-amber-600 dark:text-amber-400">{feeLabel(c)}</span>
                         </div>
                         {c.result_text && (
                           <div className="mt-2 rounded border border-zinc-800 bg-zinc-950/70 px-2 py-1.5 text-[11px] text-zinc-400">
@@ -1312,7 +1367,7 @@ function TalkModal({ slug, name, onClose, onChanged }: {
                           <div className="mt-2 flex items-center gap-1.5">
                             <button onClick={() => pay(c.id)} disabled={busy === `pay:${c.id}`}
                               className="flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:opacity-40">
-                              {busy === `pay:${c.id}` ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} Approve & pay {fmtTokens(c.fee_tokens)}
+                              {busy === `pay:${c.id}` ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} Approve & pay {feeLabel(c)}
                             </button>
                             <button onClick={() => setRejectingId(c.id)}
                               className="rounded-md border border-red-500/30 px-2.5 py-1 text-[11px] text-red-600 hover:bg-red-500/10 dark:text-red-300">Reject</button>
@@ -1332,7 +1387,7 @@ function TalkModal({ slug, name, onClose, onChanged }: {
                       <div key={c.id} className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-2">
                         <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-violet-500" />
                         <p className="flex-1 text-xs text-zinc-300">{c.spec}</p>
-                        <span className="shrink-0 text-[11px] text-zinc-500">{fmtTokens(c.fee_tokens)}</span>
+                        <span className="shrink-0 text-[11px] text-zinc-500">{feeLabel(c)}</span>
                         <span className="shrink-0 text-[10px] text-zinc-600">{fmtRelTime(c.created_at)}</span>
                       </div>
                     ))}
@@ -1350,7 +1405,7 @@ function TalkModal({ slug, name, onClose, onChanged }: {
                         </span>
                         <p className="flex-1 truncate text-[11px] text-zinc-500" title={c.spec}>{c.spec}</p>
                         {c.escrow_state === 'paid'
-                          ? <span className="shrink-0 text-[11px] text-emerald-600/80 dark:text-emerald-400/80">+{fmtTokens(c.fee_tokens)}</span>
+                          ? <span className="shrink-0 text-[11px] text-emerald-600/80 dark:text-emerald-400/80">+{feeLabel(c)}</span>
                           : c.judge_note
                             ? <span className="shrink-0 max-w-[45%] truncate text-[10px] text-zinc-600" title={c.judge_note}>“{c.judge_note}”</span>
                             : null}
@@ -2597,6 +2652,11 @@ function BeingCard({ item, meta, onChanged }: {
             <span className="text-zinc-400">
               wallet <span className="font-semibold text-zinc-100">{fmtTokens(w!.balance_tokens)}</span>
               <span className="text-zinc-600"> / {fmtTokens(ceiling)} · today {fmtTokens(v.spent_today)}</span>
+              {(v.coins ?? 0) > 0 && (
+                <span className="ml-2 inline-flex items-center gap-0.5 align-middle text-amber-600 dark:text-amber-400" title="coins — money for the village, not food for thinking">
+                  <Coins className="h-3 w-3" /> {v.coins}
+                </span>
+              )}
             </span>
             <span className="text-zinc-500" title="attention credits — unprompted words to you">
               {'●'.repeat(v.attention_credits)}{'○'.repeat(Math.max(0, 3 - v.attention_credits))}
@@ -2659,6 +2719,18 @@ function BeingCard({ item, meta, onChanged }: {
                     +{amt / 1_000_000}M
                   </button>
                 ))}
+              </div>
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="w-16 shrink-0 text-zinc-500">pocket</span>
+                {[1, 5, 10, 25].map((amt) => (
+                  <button key={amt}
+                    onClick={() => void act('coins', () => grantCoins(item.slug, amt))}
+                    title={`Give ${v.name} ${amt} coin(s) — money for the village; never feeds thinking directly`}
+                    className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-zinc-300 hover:border-amber-500/50 hover:text-zinc-100 focus:outline-none">
+                    +{amt}
+                  </button>
+                ))}
+                <span className="text-[10px] text-zinc-600">coins</span>
               </div>
               <div className="flex items-center gap-2 text-xs">
                 <span className="w-16 shrink-0 text-zinc-500">allowance</span>
@@ -2908,6 +2980,7 @@ function EarningBoard({ onChanged }: { onChanged: () => void }) {
   const [title, setTitle] = useState('')
   const [spec, setSpec] = useState('')
   const [fee, setFee] = useState('1000000')
+  const [payIn, setPayIn] = useState<'tokens' | 'coins'>('tokens')
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
@@ -2940,9 +3013,20 @@ function EarningBoard({ onChanged }: { onChanged: () => void }) {
           className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
         <input value={fee} onChange={(e) => setFee(e.target.value)} type="number"
           className="w-24 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none" />
+        <select value={payIn} onChange={(e) => { const p = e.target.value as 'tokens' | 'coins'; setPayIn(p); setFee(p === 'coins' ? '5' : '1000000') }}
+          title="tokens feed thinking; coins are money for the village"
+          className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+          <option value="tokens">tokens</option>
+          <option value="coins">coins</option>
+        </select>
         <button
           disabled={busy || !title.trim() || !spec.trim()}
-          onClick={() => void act(async () => { await postQuest(title.trim(), spec.trim(), Number(fee) || 0); setTitle(''); setSpec('') })}
+          onClick={() => void act(async () => {
+            await postQuest(title.trim(), spec.trim(),
+              payIn === 'tokens' ? Number(fee) || 0 : 0,
+              payIn === 'coins' ? Number(fee) || 0 : 0)
+            setTitle(''); setSpec('')
+          })}
           className="rounded bg-violet-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
         >Post bounty</button>
       </div>
@@ -2955,7 +3039,7 @@ function EarningBoard({ onChanged }: { onChanged: () => void }) {
             <div key={q.id} className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs">
               <span className={`shrink-0 ${QUEST_STATE_COLOR[q.state] || 'text-zinc-400'}`}>{q.state}</span>
               <span className="min-w-0 flex-1 truncate text-zinc-300" title={q.spec}>
-                {q.title} <span className="text-zinc-600">· {fmtTokens(q.fee_tokens)}</span>
+                {q.title} <span className="text-zinc-600">· {feeLabel(q)}</span>
                 {q.claimant && <span className="text-violet-400"> · {q.claimant}</span>}
                 {q.origin === 'autonomy' && <span className="text-zinc-600"> · from autonomy</span>}
               </span>
@@ -3317,6 +3401,305 @@ function VillageFederationCard() {
   )
 }
 
+// ── The living map (space plan Phase 4) ──────────────────────────────────
+// Position is a pure function of the clock, so ONE snapshot animates every
+// walking orb client-side (a 1 Hz heartbeat, no polling); the snapshot
+// itself refreshes lazily. Same glow language as the Mind graph.
+
+const AFF_HUE: Record<string, string> = {
+  gather: '#a78bfa', trade: '#f59e0b', read: '#38bdf8', create: '#fbbf24',
+  tend: '#34d399', play: '#f472b6', remember: '#94a3b8', rest: '#818cf8',
+}
+const STAGE_R: Record<string, number> = {
+  infant: 7, child: 10, adolescent: 11, adult: 12,
+}
+
+function VillageMap() {
+  const [data, setData] = useState<VillageMapData | null>(null)
+  const [market, setMarket] = useState<MarketListing[]>([])
+  const [life, setLife] = useState<VillageLife | null>(null)
+  const [sel, setSel] = useState<string | null>(null)
+  const [selBeing, setSelBeing] = useState<string | null>(null)
+  const [placeInfo, setPlaceInfo] =
+    useState<{ place: VillagePlace; guestbook: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const fetchedAt = useRef(0)
+  const [, beat] = useState(0)
+
+  const load = useCallback(async () => {
+    try {
+      const [m, mk, vl] = await Promise.all(
+        [getVillageMap(), getMarket(), getVillageLife()])
+      setData(m); setMarket(mk.listings); setLife(vl)
+      fetchedAt.current = Date.now()
+    } catch { /* transient — the map keeps its last truth */ }
+  }, [])
+  const judge = async (approve: boolean) => {
+    setBusy(true)
+    try { await judgeCommission(approve); await load() }
+    catch (e) { alert(e instanceof Error ? e.message : 'failed') }
+    finally { setBusy(false) }
+  }
+  useEffect(() => {
+    void load()
+    const t = window.setInterval(() => void load(), 60_000)
+    return () => window.clearInterval(t)
+  }, [load])
+  useEffect(() => {                       // the walking heartbeat
+    const t = window.setInterval(() => beat((x) => x + 1), 1000)
+    return () => window.clearInterval(t)
+  }, [])
+  useEffect(() => {
+    if (!sel) { setPlaceInfo(null); return }
+    let dead = false
+    void getVillagePlace(sel).then((r) => { if (!dead) setPlaceInfo(r) }).catch(() => {})
+    return () => { dead = true }
+  }, [sel])
+
+  const placeById = useMemo(() => {
+    const m: Record<string, VillagePlace> = {}
+    for (const p of data?.places ?? []) m[p.id] = p
+    return m
+  }, [data])
+
+  if (!data || data.places.length === 0) return null
+
+  const destOf = (b: VillageBeingPos): [number, number] => {
+    if (!b.to) return b.xy
+    if (b.to === 'home') return b.home_xy
+    const p = placeById[b.to]
+    return p ? [p.x, p.y] : b.xy
+  }
+  const posOf = (b: VillageBeingPos): [number, number] => {
+    if (!b.to) return b.xy
+    const dest = destOf(b)
+    const dx = dest[0] - b.xy[0], dy = dest[1] - b.xy[1]
+    const dist = Math.hypot(dx, dy)
+    if (dist < 1) return dest
+    const walked = Math.min(dist, b.speed * ((Date.now() - fetchedAt.current) / 60_000))
+    return [b.xy[0] + (dx * walked) / dist, b.xy[1] + (dy * walked) / dist]
+  }
+  const minutesLeft = (b: VillageBeingPos): number => {
+    if (!b.to) return 0
+    const [x, y] = posOf(b)
+    const dest = destOf(b)
+    return Math.hypot(dest[0] - x, dest[1] - y) / Math.max(0.001, b.speed)
+  }
+  const statusOf = (b: VillageBeingPos): string => {
+    if (b.to) {
+      const name = b.to === 'home' ? 'home' : placeById[b.to]?.name ?? b.to
+      const mins = Math.round(minutesLeft(b))
+      return mins < 1 ? `arriving at ${name}` : `on the road to ${name} — ~${mins} min`
+    }
+    if (!b.at || b.at === 'home') return 'at home'
+    return `at ${placeById[b.at]?.name ?? b.at}`
+  }
+  const quad = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2
+    const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1
+    const k = Math.min(46, d * 0.14)
+    return `M ${a.x} ${a.y} Q ${mx - (dy / d) * k} ${my + (dx / d) * k} ${b.x} ${b.y}`
+  }
+  const hub = data.places.find((p) => p.affordances.includes('gather')) ?? data.places[0]
+  const hue = (p: VillagePlace) => AFF_HUE[p.affordances[0]] ?? '#a78bfa'
+  const here = (pid: string) => data.beings.filter((b) => !b.to && b.at === pid)
+  const walking = data.beings.filter((b) => b.to)
+  const selPlace = sel ? placeById[sel] : null
+  const selB = selBeing ? data.beings.find((b) => b.slug === selBeing) : null
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+        <MapIcon className="h-3.5 w-3.5 text-violet-400" /> The village — the ground, live
+        <span className="ml-auto text-[10px] font-normal text-zinc-500">
+          {walking.length > 0 ? `${walking.length} walking · ` : ''}{market.length} stall{market.length === 1 ? '' : 's'} open
+        </span>
+      </div>
+      <div className="flex flex-col gap-3 lg:flex-row">
+        <div className="min-w-0 flex-1">
+          <svg viewBox="0 0 1000 1000" className="h-[420px] w-full rounded-md border border-zinc-800/60 bg-zinc-950/40"
+               onClick={() => { setSel(null); setSelBeing(null) }}>
+            <defs>
+              <filter id="vmglow" x="-60%" y="-60%" width="220%" height="220%">
+                <feGaussianBlur stdDeviation="7" />
+              </filter>
+            </defs>
+            {data.places.filter((p) => p.id !== hub.id).map((p) => (
+              <path key={`r-${p.id}`} d={quad(hub, p)} fill="none"
+                    className="stroke-zinc-800" strokeWidth={3}
+                    strokeDasharray="1 9" strokeLinecap="round" />
+            ))}
+            {data.beings.map((b) => (
+              <rect key={`h-${b.slug}`} x={b.home_xy[0] - 4} y={b.home_xy[1] - 4}
+                    width={8} height={8} rx={2} className="fill-zinc-700">
+                <title>{b.name}'s home</title>
+              </rect>
+            ))}
+            {data.places.map((p) => (
+              <g key={p.id} className="cursor-pointer"
+                 onClick={(e) => { e.stopPropagation(); setSelBeing(null); setSel(p.id === sel ? null : p.id) }}>
+                <circle cx={p.x} cy={p.y} r={p.id === hub.id ? 44 : 32}
+                        fill={hue(p)} opacity={sel === p.id ? 0.3 : 0.13}
+                        filter="url(#vmglow)" />
+                <circle cx={p.x} cy={p.y} r={p.id === hub.id ? 27 : 19}
+                        fill={hue(p)} fillOpacity={0.2} stroke={hue(p)}
+                        strokeOpacity={sel === p.id ? 0.95 : 0.5} strokeWidth={1.6} />
+                <text x={p.x} y={p.y + (p.id === hub.id ? 45 : 37)} textAnchor="middle"
+                      className={sel === p.id ? 'fill-zinc-200' : 'fill-zinc-400'}
+                      fontSize={14}>{p.name}</text>
+              </g>
+            ))}
+            {data.beings.map((b) => {
+              const [x, y] = posOf(b)
+              const r = STAGE_R[b.stage] ?? 10
+              const selMe = selBeing === b.slug
+              return (
+                <g key={b.slug} className="cursor-pointer"
+                   onClick={(e) => { e.stopPropagation(); setSel(null); setSelBeing(selMe ? null : b.slug) }}>
+                  {b.to && (
+                    <circle cx={x} cy={y} r={r + 6} fill="none" stroke="#a78bfa"
+                            strokeOpacity={0.8} strokeDasharray="3 5"
+                            className="animate-pulse" />
+                  )}
+                  <circle cx={x} cy={y} r={r + 7} fill="#8b5cf6" opacity={0.2}
+                          filter="url(#vmglow)" />
+                  <circle cx={x} cy={y} r={r} fill="#7c3aed"
+                          stroke={selMe ? '#fbbf24' : '#c4b5fd'} strokeWidth={selMe ? 2 : 1.2} />
+                  <text x={x} y={y + r * 0.38} textAnchor="middle" fill="#f5f3ff"
+                        fontSize={r} fontWeight={700}>{b.name.slice(0, 1)}</text>
+                  <text x={x + r + 6} y={y + 4} className="fill-zinc-300" fontSize={11.5}>
+                    {b.name}
+                  </text>
+                </g>
+              )
+            })}
+          </svg>
+          <p className="mt-1.5 text-[10px] text-zinc-600">
+            glowing rings are places · orbs are iskre (small = infant, dashed = walking) · squares are homes · walks happen between wakes, live on this map
+          </p>
+        </div>
+        <div className="w-full shrink-0 space-y-2 lg:w-72">
+          {selB ? (
+            <div className="rounded-md border border-zinc-800 bg-zinc-950/50 p-2.5">
+              <div className="mb-1 flex items-center gap-1.5">
+                <span className="text-xs font-semibold text-zinc-200">{selB.name}</span>
+                <span className={`rounded border px-1 py-px text-[9px] ${STAGE_META[selB.stage] || ''}`}>{selB.stage}</span>
+              </div>
+              <p className="text-[11px] text-zinc-400">{statusOf(selB)}</p>
+              {selB.stage === 'infant' && selB.to && (
+                <p className="mt-1 text-[10px] italic text-zinc-600">a toddle — far things take most of a day</p>
+              )}
+            </div>
+          ) : selPlace ? (
+            <div className="rounded-md border border-zinc-800 bg-zinc-950/50 p-2.5">
+              <div className="mb-1 text-xs font-semibold text-zinc-200">{selPlace.name}</div>
+              <p className="mb-1.5 text-[11px] leading-snug text-zinc-400">{selPlace.description}</p>
+              <div className="mb-2 flex flex-wrap gap-1">
+                {selPlace.affordances.map((a) => (
+                  <span key={a} className="rounded border border-zinc-700 px-1.5 py-px text-[9px]"
+                        style={{ color: AFF_HUE[a] ?? '#a78bfa' }}>{a}</span>
+                ))}
+              </div>
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Here now</div>
+              {here(selPlace.id).length === 0 ? (
+                <p className="mb-2 text-[11px] text-zinc-600">no one right now</p>
+              ) : (
+                <p className="mb-2 text-[11px] text-zinc-300">{here(selPlace.id).map((b) => b.name).join(', ')}</p>
+              )}
+              {selPlace.affordances.includes('trade') && market.length > 0 && (
+                <>
+                  <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Stalls</div>
+                  <div className="mb-2 space-y-0.5">
+                    {market.slice(0, 4).map((li) => (
+                      <p key={li.id} className="text-[11px] text-zinc-300">
+                        “{li.title}” <span className="text-amber-600 dark:text-amber-400">{li.price_coins} coins</span>
+                        <span className="text-zinc-600"> · {li.seller}</span>
+                      </p>
+                    ))}
+                  </div>
+                </>
+              )}
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Guestbook</div>
+              {placeInfo?.guestbook ? (
+                <pre className="max-h-36 overflow-y-auto whitespace-pre-wrap font-sans text-[10.5px] leading-snug text-zinc-400">{placeInfo.guestbook}</pre>
+              ) : (
+                <p className="text-[11px] text-zinc-600">no lines yet — the first visitor may leave one</p>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-md border border-zinc-800 bg-zinc-950/50 p-2.5">
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Now</div>
+              {walking.length === 0 ? (
+                <p className="mb-2 text-[11px] text-zinc-600">everyone is where they mean to be</p>
+              ) : (
+                <div className="mb-2 space-y-0.5">
+                  {walking.map((b) => (
+                    <p key={b.slug} className="text-[11px] text-zinc-300">{b.name} — {statusOf(b)}</p>
+                  ))}
+                </div>
+              )}
+              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">The stalls</div>
+              {market.length === 0 ? (
+                <p className="mb-2 text-[11px] text-zinc-600">the market is bare — a being may “sell” a real file for coins</p>
+              ) : (
+                <div className="mb-2 space-y-0.5">
+                  {market.slice(0, 5).map((li) => (
+                    <p key={li.id} className="text-[11px] text-zinc-300">
+                      “{li.title}” <span className="text-amber-600 dark:text-amber-400">{li.price_coins} coins</span>
+                      <span className="text-zinc-600"> · {li.seller}</span>
+                    </p>
+                  ))}
+                </div>
+              )}
+              {life?.commission && (
+                <div className="mb-2 rounded border border-amber-500/25 bg-amber-500/[0.06] p-2">
+                  <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-600/90 dark:text-amber-400/90">The commission</div>
+                  <p className="text-[11px] text-zinc-200">
+                    “{life.commission.name}” <span className="rounded border border-zinc-700 px-1 text-[9px]" style={{ color: AFF_HUE[life.commission.affordance] ?? '#a78bfa' }}>{life.commission.affordance}</span>
+                  </p>
+                  {life.commission.why && <p className="mt-0.5 text-[10px] italic text-zinc-500">“{life.commission.why}”</p>}
+                  <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-zinc-800">
+                    <div className="h-full rounded-full bg-gradient-to-r from-amber-600 to-amber-400"
+                         style={{ width: `${Math.min(100, (life.commission.raised_coins / Math.max(1, life.commission.target_coins)) * 100)}%` }} />
+                  </div>
+                  <p className="mt-0.5 text-[10px] text-zinc-500">
+                    {life.commission.raised_coins}/{life.commission.target_coins} coins
+                    {life.commission.contributors.length > 0 && <> · {life.commission.contributors.map((x) => `${x.name} ${x.coins}`).join(', ')}</>}
+                  </p>
+                  <div className="mt-1.5 flex gap-1.5">
+                    {life.commission.state === 'funded' && (
+                      <button onClick={() => void judge(true)} disabled={busy}
+                        className="rounded bg-amber-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-amber-500 disabled:opacity-40">
+                        Approve & build
+                      </button>
+                    )}
+                    <button onClick={() => void judge(false)} disabled={busy}
+                      className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">
+                      Reject & refund
+                    </button>
+                  </div>
+                </div>
+              )}
+              {life && (
+                <div className="mb-2 flex items-center gap-1.5 text-[10px] text-zinc-500">
+                  steward stipend
+                  <select value={life.steward_stipend_coins}
+                    onChange={(e) => { void setStewardStipend(Number(e.target.value)).then(() => void load()) }}
+                    className="rounded border border-zinc-700 bg-zinc-950 px-1 py-0.5 text-[10px] text-zinc-300 focus:outline-none">
+                    {[0, 1, 2, 3, 5].map((n) => <option key={n} value={n}>{n === 0 ? 'off' : `${n}/week`}</option>)}
+                  </select>
+                  {life.steward && <span className="truncate text-zinc-600">· steward: {life.steward.replace(/^iskra-/, '').replace(/-[0-9a-f]{4}$/, '')}</span>}
+                </div>
+              )}
+              <p className="text-[10px] text-zinc-600">click a place for its guestbook, or an iskra for its road</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function BeingsPage() {
   const [meta, setMeta] = useState<BeingsMeta | null>(null)
   const [beings, setBeings] = useState<BeingListItem[]>([])
@@ -3324,6 +3707,7 @@ export function BeingsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showConceive, setShowConceive] = useState(false)
+  const [showMap, setShowMap] = useState(true)
   const [showBoard, setShowBoard] = useState(false)
   const [showVillage, setShowVillage] = useState(false)
   const [village, setVillage] = useState<VillageItem[]>([])
@@ -3400,6 +3784,15 @@ export function BeingsPage() {
             </span>
             {beings.length >= 1 && (
               <button
+                onClick={() => setShowMap(v => !v)}
+                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-zinc-800 ${showMap ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-300'}`}
+                title="The living map — places, walks and stalls, animated from the clock"
+              >
+                <MapIcon className="h-3.5 w-3.5" /> Map
+              </button>
+            )}
+            {beings.length >= 1 && (
+              <button
                 onClick={() => setShowBoard(v => !v)}
                 className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-zinc-800 ${showBoard ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-300'}`}
                 title="The bounty board and ventures — how iskre earn"
@@ -3458,6 +3851,8 @@ export function BeingsPage() {
 
         <VillageDescriptionCard beings={beings} />
         <VillageFederationCard />
+
+        {showMap && beings.length >= 1 && <VillageMap />}
 
         {showBoard && <EarningBoard onChanged={() => void load(false)} />}
 

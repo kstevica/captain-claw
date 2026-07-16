@@ -63,6 +63,29 @@ VENTURE_MAX_PRICE_TOKENS = 5_000_000
 VENTURE_MIN_CADENCE_DAYS = 1
 VENTURE_MAX_CADENCE_DAYS = 30
 
+# The second currency (space plan Phase 2): coins are MONEY, tokens are
+# METABOLISM. Exchange is ONE-WAY (coins → tokens) — thinking never buys
+# coins, or wealth could be printed from the allowance. Conversion opens
+# in adolescence (the 'convert' capability); even an infant may RECEIVE
+# pocket money (a gift is not a trade). Coins are integers and scarce on
+# purpose — a poem at the market should cost 3, not 300000.
+COIN_TOKEN_RATE = 100_000        # tokens minted per coin converted
+COIN_GRANT_MAX = 1_000           # pocket money per parent grant
+WORK_MAX_FEE_COINS = 500         # chore/quest coin denomination cap
+
+# The market (space plan Phase 3): beings trade REAL files for coins.
+# Trades/day grow with the stage (market Saturday adds 2 on top, via
+# being_world.trades_cap — one source, like letters). Prices stay small
+# on purpose: a poem should cost 3 coins, not 300.
+MARKET_MAX_PRICE_COINS = 100
+_TRADES_PER_DAY = {"egg": 0, "infant": 0, "child": 3,
+                   "adolescent": 5, "adult": 8}
+# Commissioned buildings (space plan Phase 5): the village pools coins to
+# raise a NEW place — the long-arc savings goal that makes wealth mean
+# something. The cost is deliberately weeks of pocket money; the coins
+# burn on approval (the economy's one true sink besides conversion).
+COMMISSION_COST_COINS = 50
+
 # Procreation physics (plan §8): the dowry moves from the parents' savings
 # to the child (reason='procreation') — earned wealth, never conjured; a
 # couple splits it. Consent is the human parent's authenticated approval.
@@ -79,7 +102,7 @@ _STAGE_GRANTS: dict[str, frozenset[str]] = {
                         "letters", "self_mod"}),
     "adolescent": frozenset({
         "commons_write", "spawn_agents", "agent_messaging",
-        "organ_runs", "trade", "jobs", "ventures",
+        "organ_runs", "trade", "jobs", "ventures", "convert",
     }),
     "adult": frozenset({"self_mod_auto", "procreate", "negotiate"}),
 }
@@ -113,6 +136,11 @@ def letters_per_day(stage: str) -> int:
     if st is None or "letters_per_day" not in st:
         return LETTERS_PER_DAY
     return int(st["letters_per_day"])
+
+
+def trades_per_day(stage: str) -> int:
+    """Daily market-trade quota (sells posted + buys made count alike)."""
+    return _TRADES_PER_DAY.get(stage, 0)
 
 
 def capabilities(stage: str) -> frozenset[str]:

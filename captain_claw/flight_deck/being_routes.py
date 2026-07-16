@@ -67,7 +67,13 @@ class TickRequest(BaseModel):
 
 class ChoreRequest(BaseModel):
     spec: str
-    fee_tokens: int
+    fee_tokens: int = 0
+    fee_coins: int = 0
+
+
+class CoinsRequest(BaseModel):
+    coins: int
+    note: str = ""
 
 
 class JudgeRequest(BaseModel):
@@ -266,6 +272,126 @@ async def village(limit: int = 40, user: dict = Depends(get_current_user)):
                           user["id"], limit)}
 
 
+@router.get("/village-map")
+async def village_map(user: dict = Depends(get_current_user)):
+    """The ground (space plan Phase 1): the civic places plus every being's
+    live position — a pure function of the clock, so the client can animate
+    walking without polling. (Registered before /{slug}.)"""
+    from datetime import datetime, timezone
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    _run(being_world.ensure_village, store, user["id"])
+    now = datetime.now(timezone.utc)
+    beings = []
+    for row in _run(store.list, user["id"]):
+        if row.get("state") in ("dead", "emigrated"):
+            continue
+        b = _run(store.get, user["id"], row["slug"])
+        if b.get("stage") == "egg":
+            continue
+        pos = being_world.position_of(store, b, now)
+        beings.append({
+            "slug": b["slug"], "name": b["name"], "stage": b["stage"],
+            "state": b["state"],
+            "xy": [int(pos["xy"][0]), int(pos["xy"][1])],
+            "at": pos["at"], "to": pos["to"],
+            "minutes_left": round(float(pos["minutes_left"]), 1),
+            "home_xy": list(being_world.home_xy(b)),
+            "speed": being_world.speed_for(b),
+        })
+    return {"plot": being_world.PLOT_SIZE,
+            "places": _run(store.village_places, user["id"]),
+            "beings": beings}
+
+
+@router.get("/village-map/place/{place_id}")
+async def village_place(place_id: str,
+                        user: dict = Depends(get_current_user)):
+    """One place, up close (space plan Phase 4): its card + the guestbook
+    tail. Who's there comes from the map payload client-side."""
+    from captain_claw.flight_deck import being_society
+    store = get_store()
+    place = _run(store.get_place, user["id"], place_id)
+    guestbook = ""
+    try:
+        p = being_society._commons_path(user["id"],
+                                        f"places/{place_id}/guestbook.md")
+        if p.exists():
+            tail = p.read_text(encoding="utf-8").strip().splitlines()
+            guestbook = "\n".join(tail[-12:])
+    except Exception:  # noqa: BLE001
+        guestbook = ""
+    return {"place": place, "guestbook": guestbook}
+
+
+@router.get("/market")
+async def market(user: dict = Depends(get_current_user)):
+    """The open stalls (space plan Phase 4) — the parent's window on the
+    coin market. (Registered before /{slug}.)"""
+    return {"listings": _run(get_store().market_listings, user["id"], 30)}
+
+
+@router.get("/village-life")
+async def village_life(user: dict = Depends(get_current_user)):
+    """The civic layer (space plan Phase 5): the active building fund (with
+    its contributors), this week's steward, and the stipend knob."""
+    from captain_claw.flight_deck import being_world
+    from datetime import datetime, timezone
+    store = get_store()
+    c = _run(store.open_commission, user["id"])
+    if c:
+        c = {**c, "contributors": _run(store.commission_contributors,
+                                       user["id"], c["id"])}
+    return {"commission": c,
+            "steward": being_world.current_steward(
+                store, user["id"], datetime.now(timezone.utc)),
+            "steward_stipend_coins": _run(
+                store.get_village_meta, user["id"])
+            .get("steward_stipend_coins", 0)}
+
+
+class CommissionJudgeRequest(BaseModel):
+    approve: bool
+    note: str = ""
+
+
+@router.post("/commission/judge")
+async def commission_judge(body: CommissionJudgeRequest,
+                           user: dict = Depends(get_current_user)):
+    """Approve a FUNDED commission (the architect places it, the coins
+    burn) or reject the active one (every contributor refunded exactly)."""
+    return _run(get_store().judge_commission, user["id"], body.approve,
+                body.note)
+
+
+class StipendRequest(BaseModel):
+    coins: int
+
+
+@router.post("/village-stipend")
+async def village_stipend(body: StipendRequest,
+                          user: dict = Depends(get_current_user)):
+    return _run(get_store().set_steward_stipend, user["id"], body.coins)
+
+
+@router.post("/village-map/architect")
+async def village_architect(user: dict = Depends(get_current_user)):
+    """One-shot LLM redesign of the ground (the default stands if the model
+    fails). Beings mid-walk to a removed place settle home next tick."""
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    try:
+        places = await being_life.architect_village(
+            _db_optional(), store, user["id"],
+            [r["name"] for r in store.list(user["id"])
+             if r.get("state") == "alive"])
+    except BeingError as e:
+        raise HTTPException(e.status, str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"the architect failed: {e}") from e
+    return {"ok": True, "places": places}
+
+
 @router.get("/letters")
 async def letters(limit: int = 500, user: dict = Depends(get_current_user)):
     """The letters observatory: every being→being letter grouped into per-pair
@@ -278,7 +404,8 @@ async def letters(limit: int = 500, user: dict = Depends(get_current_user)):
 class QuestRequest(BaseModel):
     title: str
     spec: str
-    fee_tokens: int
+    fee_tokens: int = 0
+    fee_coins: int = 0
     origin: str = "parent"
 
 
@@ -319,12 +446,32 @@ async def list_assessors(user: dict = Depends(get_current_user)):
     return {"assessors": out}
 
 
+@router.post("/{slug}/coins")
+async def grant_coins(slug: str, body: CoinsRequest,
+                      user: dict = Depends(get_current_user)):
+    """Pocket money (space plan Phase 2): the parent's coin faucet. Coins
+    are money, not food — they never feed thinking directly; a being may
+    convert them one-way from adolescence."""
+    return _run(get_store().grant_coins, user["id"], slug, body.coins,
+                body.note)
+
+
+@router.get("/{slug}/coins")
+async def coin_ledger(slug: str, limit: int = 100,
+                      user: dict = Depends(get_current_user)):
+    store = get_store()
+    being = _run(store.get, user["id"], slug)
+    return {"balance": _run(store.coin_balance, being["id"]),
+            "ledger": _run(store.coin_ledger, user["id"], slug, limit)}
+
+
 @router.post("/quests")
 async def post_quest(body: QuestRequest,
                      user: dict = Depends(get_current_user)):
     """Post an OPEN bounty — any eligible being may claim it."""
     return {"quest": _run(get_store().post_quest, user["id"], body.title,
-                          body.spec, body.fee_tokens, body.origin)}
+                          body.spec, body.fee_tokens, body.origin,
+                          fee_coins=body.fee_coins)}
 
 
 @router.post("/quests/{quest_id}/judge")
@@ -454,9 +601,11 @@ async def set_diet(slug: str, body: DietRequest,
 @router.post("/{slug}/chores")
 async def post_chore(slug: str, body: ChoreRequest,
                      user: dict = Depends(get_current_user)):
-    """Post a fixed-fee chore. The fee mints only on judged completion."""
+    """Post a fixed-fee chore. The fee mints only on judged completion —
+    in tokens (food) or coins (money), the parent's pick."""
     return {"chore": _run(get_store().post_chore, user["id"], slug,
-                          body.spec, body.fee_tokens)}
+                          body.spec, body.fee_tokens,
+                          fee_coins=body.fee_coins)}
 
 
 @router.get("/{slug}/chores")

@@ -40,7 +40,16 @@ STATES = ("alive", "paused", "torpor", "dead", "emigrated")
 TRANSFER_REASONS = (
     "allowance", "usage", "fee", "gift", "trade",
     "procreation", "metamorphosis_burn", "self_mod_burn", "adjust", "grant",
+    "exchange",
 )
+
+# Coin ledger reasons (space plan Phase 2): grant = pocket money, wage =
+# judged work paid in coins, sale/purchase = being↔being circulation
+# (Phase 3), exchange = the one-way conversion into tokens, stipend = the
+# steward's pay, commission = escrow into (or refund from) a building
+# fund (both Phase 5).
+COIN_REASONS = ("grant", "wage", "sale", "purchase", "exchange", "stipend",
+                "commission")
 
 # Fixed parent top-up amounts (tokens) the UI offers to recharge a wallet.
 GRANT_AMOUNTS = (2_000_000, 5_000_000, 10_000_000, 20_000_000)
@@ -402,14 +411,116 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_visitors
                     ON being_visitors(owner_id, last_seen);
+
+                -- The ground (space plan Phase 1): the village's civic places,
+                -- designed once by the architect (LLM with a deterministic
+                -- fallback) on a PLOT_SIZE² plot. Each being's own home is NOT
+                -- a row — it is computed from its slug (being_world.home_xy).
+                -- Affordances come from a fixed vocabulary; the map is physics.
+                CREATE TABLE IF NOT EXISTS village_places (
+                    owner_id    TEXT NOT NULL,
+                    id          TEXT NOT NULL,
+                    name        TEXT NOT NULL,
+                    x           INTEGER NOT NULL,
+                    y           INTEGER NOT NULL,
+                    affordances TEXT NOT NULL DEFAULT '[]',
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at  TEXT NOT NULL,
+                    PRIMARY KEY (owner_id, id)
+                );
+
+                -- The coin ledger (space plan Phase 2): coins are MONEY
+                -- (the social economy), tokens are METABOLISM (thinking).
+                -- Balance = SUM(delta); only physics functions write rows —
+                -- no LLM path can move a coin. The exchange is one-way
+                -- (coins → tokens), so wealth is earned, never printed.
+                CREATE TABLE IF NOT EXISTS being_coin_events (
+                    id         TEXT PRIMARY KEY,
+                    owner_id   TEXT NOT NULL,
+                    being_id   TEXT NOT NULL,
+                    delta      INTEGER NOT NULL,
+                    reason     TEXT NOT NULL,
+                    from_being TEXT,
+                    data       TEXT NOT NULL DEFAULT '{}',
+                    at         TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_coin_events
+                    ON being_coin_events(being_id, at);
+
+                -- Contacts (space plan Phase 3): who has TRULY met whom —
+                -- built only from co-presence on the ground, symmetric
+                -- (a_id < b_id), strengthened asymptotically per meeting.
+                CREATE TABLE IF NOT EXISTS being_contacts (
+                    owner_id    TEXT NOT NULL,
+                    a_id        TEXT NOT NULL,
+                    b_id        TEXT NOT NULL,
+                    met_count   INTEGER NOT NULL DEFAULT 0,
+                    strength    REAL NOT NULL DEFAULT 0,
+                    last_met_at TEXT,
+                    PRIMARY KEY (owner_id, a_id, b_id)
+                );
+
+                -- The market (space plan Phase 3): a listing is a REAL file
+                -- offered for coins. Buying copies it into the buyer's home
+                -- (society owns the file physics) and settles the coin pair
+                -- being→being — circulation, never minting.
+                CREATE TABLE IF NOT EXISTS village_listings (
+                    id          TEXT PRIMARY KEY,
+                    owner_id    TEXT NOT NULL,
+                    seller_id   TEXT NOT NULL,
+                    path        TEXT NOT NULL,
+                    title       TEXT NOT NULL,
+                    price_coins INTEGER NOT NULL,
+                    state       TEXT NOT NULL DEFAULT 'open',
+                    created_at  TEXT NOT NULL,
+                    sold_to     TEXT,
+                    sold_at     TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_village_listings
+                    ON village_listings(owner_id, state);
+
+                -- Commissioned buildings (space plan Phase 5): ONE active
+                -- fund per village at a time. Contributions escrow coins
+                -- OUT of pockets (reason='commission'); approval burns them
+                -- and raises the place; rejection refunds exactly. The
+                -- contributor list is the coin ledger itself — no state.
+                CREATE TABLE IF NOT EXISTS village_commissions (
+                    id           TEXT PRIMARY KEY,
+                    owner_id     TEXT NOT NULL,
+                    name         TEXT NOT NULL,
+                    why          TEXT NOT NULL DEFAULT '',
+                    affordance   TEXT NOT NULL,
+                    target_coins INTEGER NOT NULL,
+                    raised_coins INTEGER NOT NULL DEFAULT 0,
+                    state        TEXT NOT NULL DEFAULT 'open',
+                    created_by   TEXT NOT NULL,
+                    created_at   TEXT NOT NULL,
+                    decided_at   TEXT,
+                    note         TEXT NOT NULL DEFAULT '',
+                    place_id     TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_village_commissions
+                    ON village_commissions(owner_id, state);
                 """
             )
+            # Work can pay in coins (space plan Phase 2): the parent picks
+            # the denomination at posting; judgment mints that currency.
+            for work_table in ("being_jobs", "being_quests"):
+                try:
+                    self._c().execute(
+                        f"ALTER TABLE {work_table} ADD COLUMN fee_coins"
+                        " INTEGER NOT NULL DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
             # village_meta gained federation columns + a name after first ship.
             for col, ddl in [
                 ("secret", "TEXT NOT NULL DEFAULT ''"),
                 ("secret_public", "INTEGER NOT NULL DEFAULT 0"),
                 ("public_url", "TEXT NOT NULL DEFAULT ''"),
                 ("name", "TEXT NOT NULL DEFAULT ''"),
+                # The steward's weekly pay in coins (space plan Phase 5) —
+                # a parent knob, default off; paid once per ISO week.
+                ("steward_stipend_coins", "INTEGER NOT NULL DEFAULT 0"),
             ]:
                 try:
                     self._c().execute(
@@ -476,6 +587,11 @@ class BeingsStore:
                 # JSON list of {id, ref, note, fee_tokens, assigned_at,
                 # done_at, report_path} — reports are FD-verified real files.
                 ("reading_list", "TEXT NOT NULL DEFAULT '[]'"),
+                # The ground (space plan Phase 1): where the body is. JSON
+                # {"at": "<place>"} at rest, or {"to", "from", "origin",
+                # "departed_at"} on the road — position at any instant is a
+                # pure function of this row and the clock (no scheduler).
+                ("location", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -795,6 +911,14 @@ class BeingsStore:
             b["broadcast"] = json.loads(raw_bc2) if raw_bc2 else None
         except json.JSONDecodeError:
             b["broadcast"] = None
+        try:
+            raw_loc = b.get("location") or ""
+            b["location"] = json.loads(raw_loc) if raw_loc else {"at": "home"}
+        except json.JSONDecodeError:
+            b["location"] = {"at": "home"}
+        if not isinstance(b["location"], dict) or not (
+                b["location"].get("at") or b["location"].get("to")):
+            b["location"] = {"at": "home"}
         raw_bc = b.get("body_config") or ""
         try:
             b["body_config"] = json.loads(raw_bc) if raw_bc else None
@@ -969,6 +1093,178 @@ class BeingsStore:
         self.record_event(being_id, "broadcast_set", {"text": text[:200]},
                           now=now)
 
+    # ── The ground (space plan Phase 1): places + movement physics ────────
+
+    def village_places(self, owner_id: str) -> list[dict]:
+        rows = self._c().execute(
+            "SELECT * FROM village_places WHERE owner_id = ? ORDER BY id",
+            (owner_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["affordances"] = json.loads(d.get("affordances") or "[]")
+            except json.JSONDecodeError:
+                d["affordances"] = []
+            out.append(d)
+        return out
+
+    def get_place(self, owner_id: str, place_id: str) -> dict:
+        row = self._c().execute(
+            "SELECT * FROM village_places WHERE owner_id = ? AND id = ?",
+            (owner_id, place_id),
+        ).fetchone()
+        if row is None:
+            raise BeingNotFound(f"no place {place_id!r} in this village")
+        d = dict(row)
+        try:
+            d["affordances"] = json.loads(d.get("affordances") or "[]")
+        except json.JSONDecodeError:
+            d["affordances"] = []
+        return d
+
+    def save_village(self, owner_id: str, places: list[dict],
+                     now: datetime | None = None) -> list[dict]:
+        """Replace the village ground (the architect's draft or the default).
+        Validates HARD — the map is physics: kebab ids, unique, 'home'
+        reserved, coordinates on the plot, affordances from the fixed
+        vocabulary only. An invalid draft raises and changes nothing."""
+        from captain_claw.flight_deck import being_world
+        now = now or _utcnow()
+        if not isinstance(places, list) or not (
+                being_world.VILLAGE_MIN_PLACES <= len(places)
+                <= being_world.VILLAGE_MAX_PLACES):
+            raise BeingError(
+                f"a village holds {being_world.VILLAGE_MIN_PLACES}–"
+                f"{being_world.VILLAGE_MAX_PLACES} places")
+        margin = 40
+        seen: set[str] = set()
+        clean: list[dict] = []
+        for p in places:
+            pid = _slugify(str(p.get("id") or p.get("name") or ""))[:40]
+            if not pid:
+                raise BeingError("every place needs an id")
+            if pid == "home":
+                raise BeingError("'home' is reserved — every being has its own")
+            if pid in seen:
+                raise BeingError(f"duplicate place id {pid!r}")
+            seen.add(pid)
+            name = str(p.get("name") or "").strip()[:60]
+            if not name:
+                raise BeingError(f"place {pid!r} needs a name")
+            try:
+                x, y = int(p.get("x")), int(p.get("y"))
+            except (TypeError, ValueError):
+                raise BeingError(f"place {pid!r} needs integer coordinates")
+            hi = being_world.PLOT_SIZE - margin
+            if not (margin <= x <= hi and margin <= y <= hi):
+                raise BeingError(f"place {pid!r} is off the plot")
+            aff = [str(a) for a in (p.get("affordances") or [])]
+            bad = [a for a in aff if a not in being_world.AFFORDANCES]
+            if bad:
+                raise BeingError(
+                    f"unknown affordances {bad} — the vocabulary is fixed")
+            clean.append({"id": pid, "name": name, "x": x, "y": y,
+                          "affordances": aff[:2],
+                          "description": str(p.get("description") or "")
+                          .strip()[:300]})
+        with self._lock:
+            c = self._c()
+            c.execute("DELETE FROM village_places WHERE owner_id = ?",
+                      (owner_id,))
+            for p in clean:
+                c.execute(
+                    "INSERT INTO village_places (owner_id, id, name, x, y,"
+                    " affordances, description, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (owner_id, p["id"], p["name"], p["x"], p["y"],
+                     json.dumps(p["affordances"]), p["description"],
+                     _iso(now)),
+                )
+            c.commit()
+        return self.village_places(owner_id)
+
+    def resolve_place_ref(self, owner_id: str, ref: str) -> str | None:
+        """A being's words → a real place id: 'home', an exact id, the
+        slugified ref, or the place's name (case-insensitive, 'the '
+        optional). None means there is no such ground."""
+        def _bare(s: str) -> str:
+            s = s.casefold().strip()
+            return s[4:].strip() if s.startswith("the ") else s
+        r = (ref or "").strip()
+        if not r:
+            return None
+        if _bare(r) == "home":
+            return "home"
+        low, slug = r.casefold(), _slugify(r)
+        places = self.village_places(owner_id)
+        for p in places:
+            if p["id"] == low or p["id"] == slug:
+                return p["id"]
+        for p in places:
+            if _bare(p["name"]) == _bare(r):
+                return p["id"]
+        return None
+
+    def settle_location(self, being: dict, now: datetime | None = None,
+                        ) -> dict | None:
+        """Arrival is computed on read (the fever/steward pattern): if the
+        walk has ended by `now`, write the rest state and record `arrived`
+        AT the real arrival time — the world is simply further along when
+        the being wakes. Returns {place, name, at} when it settled."""
+        now = now or _utcnow()
+        loc = being.get("location") or {"at": "home"}
+        if loc.get("at") or not loc.get("to"):
+            return None
+        from captain_claw.flight_deck import being_world
+        pos = being_world.position_of(self, being, now)
+        if pos.get("to"):                          # still on the road
+            return None
+        place = pos["at"]
+        self._update(being["id"], now, location=json.dumps({"at": place}))
+        being["location"] = {"at": place}
+        arrived_at = pos.get("arrived_at") or now
+        name = being_world.place_name(self, being, place)
+        hhmm = being_world._local(arrived_at).strftime("%H:%M")
+        self.record_event(being["id"], "arrived",
+                          {"place": place, "name": name, "hhmm": hhmm},
+                          now=arrived_at)
+        return {"place": place, "name": name, "at": _iso(arrived_at)}
+
+    def depart(self, owner_id: str, slug: str, dest: str,
+               now: datetime | None = None, *, reason: str = "") -> dict:
+        """Set out for a place. Settles first (you leave from where you
+        TRULY are — even mid-road), then the location row + the clock ARE
+        the walk; nothing runs in the background. Unknown ground is refused
+        loudly; already-there is a quiet no-op (no theater to record)."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if b["state"] != "alive":
+            raise BeingError("only the living walk")
+        self.settle_location(b, now=now)
+        from captain_claw.flight_deck import being_world
+        pid = self.resolve_place_ref(owner_id, dest)
+        if pid is None:
+            raise BeingError(f"there is no place called {str(dest)[:40]!r} "
+                             "here — read commons/village/MAP.md")
+        cur = b.get("location") or {"at": "home"}
+        if cur.get("at") == pid:
+            return b
+        pos = being_world.position_of(self, b, now)
+        origin = [int(pos["xy"][0]), int(pos["xy"][1])]
+        dest_xy = being_world.place_xy(self, b, pid)
+        minutes = being_world.travel_minutes(b, origin, dest_xy)
+        loc = {"to": pid, "from": cur.get("at"), "origin": origin,
+               "departed_at": _iso(now)}
+        self._update(b["id"], now, location=json.dumps(loc))
+        data = {"from": cur.get("at") or "the road", "to": pid,
+                "minutes": int(round(minutes))}
+        if reason:
+            data["reason"] = reason
+        self.record_event(b["id"], "departed", data, now=now)
+        return self.get(owner_id, slug)
+
     # ── The naming rite (roadmap T2.10): one chosen name, parent-blessed ──
 
     def set_pending_name(self, being_id: str, pending: dict | None,
@@ -1050,10 +1346,14 @@ class BeingsStore:
         return self.get(owner_id, slug)
 
     def complete_reading(self, owner_id: str, slug: str, item_id: str,
-                         path: str, now: datetime | None = None) -> dict:
+                         path: str, now: datetime | None = None, *,
+                         fee_factor: float = 1.0) -> dict:
         """Mark a reading done against a VERIFIED report file (the caller
         checked the disk) and pay the fee — the only mint here, same
-        conservation as a judged chore. Returns the completed item."""
+        conservation as a judged chore. ``fee_factor`` is the place bonus
+        (space plan Phase 3: reading finished at a read-place mints a
+        little more), still capped by READING_MAX_FEE_TOKENS and the
+        savings ceiling. Returns the completed item."""
         now = now or _utcnow()
         b = self.get(owner_id, slug)
         items = list(b.get("reading_list") or [])
@@ -1066,6 +1366,8 @@ class BeingsStore:
         match["report_path"] = path[:200]
         self._update(b["id"], now, reading_list=json.dumps(items))
         fee = int(match.get("fee_tokens") or 0)
+        if fee > 0 and fee_factor != 1.0:
+            fee = min(int(fee * fee_factor), self.READING_MAX_FEE_TOKENS)
         if fee > 0:
             view = self.wallet_view(b)
             if view["savings_ceiling"] is not None:
@@ -1319,6 +1621,518 @@ class BeingsStore:
         ).fetchone()
         return int(row["s"])
 
+    # ── Coins (space plan Phase 2): money, not metabolism ──────────────
+
+    def _apply_coins(self, owner_id: str, being_id: str, delta: int,
+                     reason: str, *, from_being: str | None = None,
+                     data: dict | None = None,
+                     now: datetime | None = None) -> int:
+        """The single coin-mutation path: one ledger row, balance = SUM.
+        Only physics calls this — no LLM path can move a coin. Overdrafts
+        are refused: there is no negative money. Returns the new balance."""
+        now = now or _utcnow()
+        delta = int(delta)
+        if delta == 0:
+            raise BeingError("a coin move needs a direction")
+        if reason not in COIN_REASONS:
+            raise BeingError(f"unknown coin reason {reason!r}")
+        with self._lock:
+            c = self._c()
+            if delta < 0:
+                bal = c.execute(
+                    "SELECT COALESCE(SUM(delta),0) AS s"
+                    " FROM being_coin_events WHERE being_id = ?",
+                    (being_id,)).fetchone()["s"]
+                if bal + delta < 0:
+                    raise BeingError(f"not enough coins — you have {bal}")
+            c.execute(
+                "INSERT INTO being_coin_events (id, owner_id, being_id,"
+                " delta, reason, from_being, data, at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (uuid.uuid4().hex, owner_id, being_id, delta, reason,
+                 from_being, json.dumps(data or {}), _iso(now)))
+            c.commit()
+        return self.coin_balance(being_id)
+
+    def coin_balance(self, being_id: str) -> int:
+        row = self._c().execute(
+            "SELECT COALESCE(SUM(delta),0) AS s FROM being_coin_events"
+            " WHERE being_id = ?", (being_id,)).fetchone()
+        return int(row["s"])
+
+    def coin_ledger(self, owner_id: str, slug: str,
+                    limit: int = 100) -> list[dict]:
+        b = self.get(owner_id, slug)
+        rows = self._c().execute(
+            "SELECT * FROM being_coin_events WHERE being_id = ?"
+            " ORDER BY at DESC LIMIT ?", (b["id"], limit)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["data"] = json.loads(d.get("data") or "{}")
+            except json.JSONDecodeError:
+                d["data"] = {}
+            out.append(d)
+        return out
+
+    def grant_coins(self, owner_id: str, slug: str, coins: int,
+                    note: str = "", now: datetime | None = None) -> dict:
+        """Pocket money — the parent's coin faucet (every faucet is a
+        parent act or circulation; the real-dollar exposure stays what the
+        parent authorizes). Even an infant may RECEIVE — a gift is not a
+        trade; spending waits on the stage."""
+        now = now or _utcnow()
+        coins = int(coins)
+        if coins <= 0:
+            raise BeingError("pocket money must be a positive number of coins")
+        if coins > constitution.COIN_GRANT_MAX:
+            raise BeingError(f"a single grant is capped at "
+                             f"{constitution.COIN_GRANT_MAX} coins")
+        b = self.get(owner_id, slug)
+        if b["state"] == "dead":
+            raise BeingError("a dead being cannot be funded")
+        if b["stage"] == "egg":
+            raise BeingError("an egg has no pocket yet")
+        self._apply_coins(owner_id, b["id"], coins, "grant",
+                          data={"note": note[:120]}, now=now)
+        self.record_event(b["id"], "coins_granted",
+                          {"coins": coins, "note": note[:120]}, now=now)
+        return self.vitals(owner_id, slug)
+
+    def convert_coins(self, owner_id: str, slug: str, coins: int,
+                      now: datetime | None = None) -> dict:
+        """The ONE-WAY exchange (space plan Phase 2): coins → tokens at
+        COIN_TOKEN_RATE, whole coins only, clamped to the savings-ceiling
+        headroom — the ledger records any clamp. The reverse direction
+        does not exist: liquidating metabolism into wealth would recreate
+        the original problem and let the allowance print money."""
+        now = now or _utcnow()
+        requested = int(coins)
+        if requested <= 0:
+            raise BeingError("convert a positive number of coins")
+        b = self.get(owner_id, slug)
+        if b["state"] != "alive":
+            raise BeingError("only the living trade")
+        if not constitution.has_capability(b["stage"], "convert"):
+            raise BeingError("conversion opens in adolescence")
+        balance = self.coin_balance(b["id"])
+        if balance <= 0:
+            raise BeingError("you have no coins")
+        rate = constitution.COIN_TOKEN_RATE
+        view = self.wallet_view(b)
+        possible = min(requested, balance)
+        if view["savings_ceiling"] is not None:
+            headroom = max(0, view["savings_ceiling"]
+                           - view["balance_tokens"])
+            possible = min(possible, headroom // rate)
+        if possible <= 0:
+            raise BeingError("your savings are full — no room for more "
+                             "tokens; spend some thinking first")
+        minted = possible * rate
+        # Debit first (it can refuse); the mint below cannot fail.
+        self._apply_coins(owner_id, b["id"], -possible, "exchange",
+                          data={"tokens": minted, "requested": requested},
+                          now=now)
+        self._apply(owner_id, tokens=minted, reason="exchange",
+                    from_being=None, to_being=b["id"], note="coins", now=now)
+        self.record_event(b["id"], "coins_converted",
+                          {"coins": possible, "tokens": minted,
+                           "requested": requested}, now=now)
+        return {"coins": possible, "tokens": minted,
+                "requested": requested,
+                "balance_coins": self.coin_balance(b["id"])}
+
+    # ── Contacts + the market (space plan Phase 3) ─────────────────────
+
+    def touch_contact(self, owner_id: str, a_id: str, b_id: str,
+                      now: datetime | None = None) -> bool:
+        """One real meeting between two beings: the pair's contact grows
+        asymptotically (the satiation curve again). Returns False when the
+        pair already met today — one hello per pair per day, symmetric,
+        deduped HERE so both directions agree."""
+        now = now or _utcnow()
+        lo, hi = sorted((a_id, b_id))
+        from captain_claw.flight_deck import being_world
+        step = being_world.CONTACT_STRENGTH_STEP
+        with self._lock:
+            c = self._c()
+            row = c.execute(
+                "SELECT * FROM being_contacts WHERE owner_id = ?"
+                " AND a_id = ? AND b_id = ?", (owner_id, lo, hi)).fetchone()
+            if row and (row["last_met_at"] or "")[:10] == _iso(now)[:10]:
+                return False
+            if row:
+                strength = min(1.0, float(row["strength"])
+                               + step * (1.0 - float(row["strength"])))
+                c.execute(
+                    "UPDATE being_contacts SET met_count = met_count + 1,"
+                    " strength = ?, last_met_at = ? WHERE owner_id = ?"
+                    " AND a_id = ? AND b_id = ?",
+                    (round(strength, 4), _iso(now), owner_id, lo, hi))
+            else:
+                c.execute(
+                    "INSERT INTO being_contacts (owner_id, a_id, b_id,"
+                    " met_count, strength, last_met_at) VALUES (?,?,?,1,?,?)",
+                    (owner_id, lo, hi, round(step, 4), _iso(now)))
+            c.commit()
+        return True
+
+    def contacts_for(self, owner_id: str, slug: str) -> list[dict]:
+        b = self.get(owner_id, slug)
+        names = self.names_by_id(owner_id)
+        rows = self._c().execute(
+            "SELECT * FROM being_contacts WHERE owner_id = ?"
+            " AND (a_id = ? OR b_id = ?) ORDER BY strength DESC",
+            (owner_id, b["id"], b["id"])).fetchall()
+        out = []
+        for r in rows:
+            other = r["b_id"] if r["a_id"] == b["id"] else r["a_id"]
+            out.append({"with": names.get(other, "?"),
+                        "met_count": r["met_count"],
+                        "strength": r["strength"],
+                        "last_met_at": r["last_met_at"]})
+        return out
+
+    def trades_today(self, being_id: str,
+                     now: datetime | None = None) -> int:
+        """Sells posted + buys made today — one quota covers both sides
+        of the counter (ledger-computed, no state to drift)."""
+        day = _iso(now or _utcnow())[:10] + "%"
+        c = self._c()
+        sells = c.execute(
+            "SELECT COUNT(*) AS n FROM village_listings WHERE seller_id = ?"
+            " AND created_at LIKE ?", (being_id, day)).fetchone()["n"]
+        buys = c.execute(
+            "SELECT COUNT(*) AS n FROM village_listings WHERE sold_to = ?"
+            " AND sold_at LIKE ?", (being_id, day)).fetchone()["n"]
+        return int(sells) + int(buys)
+
+    def _trade_gate(self, being: dict, now: datetime) -> None:
+        from captain_claw.flight_deck import being_world
+        cap = being_world.trades_cap(being["stage"], now)
+        if cap <= 0:
+            raise BeingError(f"a {being['stage']} does not trade yet")
+        if self.trades_today(being["id"], now) >= cap:
+            raise BeingError(f"your trades are spent for today (limit {cap})")
+
+    def post_listing(self, owner_id: str, slug: str, path: str, title: str,
+                     price_coins: int, now: datetime | None = None) -> dict:
+        """A stall at the market. The FILE's existence is the caller's
+        check (being_society owns file physics); here live the quota, the
+        price cap, and the row."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if b["state"] != "alive":
+            raise BeingError("only the living trade")
+        self._trade_gate(b, now)
+        price = int(price_coins)
+        if price <= 0:
+            raise BeingError("price must be a positive number of coins")
+        if price > constitution.MARKET_MAX_PRICE_COINS:
+            raise BeingError(f"the market caps prices at "
+                             f"{constitution.MARKET_MAX_PRICE_COINS} coins")
+        clean_path = (path or "").strip().lstrip("/")[:200]
+        clean_title = (title or "").strip()[:80]
+        if not clean_path or not clean_title:
+            raise BeingError("a listing needs a real path and a title")
+        lid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO village_listings (id, owner_id, seller_id,"
+                " path, title, price_coins, created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (lid, owner_id, b["id"], clean_path, clean_title, price,
+                 _iso(now)))
+            self._c().commit()
+        self.record_event(b["id"], "market_listed",
+                          {"listing_id": lid, "title": clean_title,
+                           "price_coins": price, "path": clean_path},
+                          now=now)
+        return self.get_listing(owner_id, lid)
+
+    def market_listings(self, owner_id: str, limit: int = 20,
+                        state: str = "open") -> list[dict]:
+        rows = self._c().execute(
+            "SELECT l.*, b.name AS seller, b.slug AS seller_slug"
+            " FROM village_listings l JOIN beings b ON b.id = l.seller_id"
+            " WHERE l.owner_id = ? AND l.state = ?"
+            " ORDER BY l.created_at DESC LIMIT ?",
+            (owner_id, state, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_listing(self, owner_id: str, listing_id: str) -> dict:
+        rows = self._c().execute(
+            "SELECT l.*, b.name AS seller, b.slug AS seller_slug"
+            " FROM village_listings l JOIN beings b ON b.id = l.seller_id"
+            " WHERE l.owner_id = ? AND (l.id = ? OR l.id LIKE ?) LIMIT 2",
+            (owner_id, listing_id, f"{listing_id}%")).fetchall()
+        if len(rows) != 1:
+            raise BeingNotFound("no such listing")
+        return dict(rows[0])
+
+    def buy_listing(self, owner_id: str, buyer_slug: str, listing_id: str,
+                    now: datetime | None = None) -> dict:
+        """The coin side of a purchase: atomic claim of the stall, then
+        the being→being pair (purchase/sale — circulation, never minting).
+        The file itself moves in being_society (read-before-pay). Refused
+        loudly when broke, self-dealing, or already sold."""
+        now = now or _utcnow()
+        b = self.get(owner_id, buyer_slug)
+        if b["state"] != "alive":
+            raise BeingError("only the living trade")
+        li = self.get_listing(owner_id, listing_id)
+        if li["state"] != "open":
+            raise BeingError("that stall is empty — already sold")
+        if li["seller_id"] == b["id"]:
+            raise BeingError("it is already yours — no self-dealing")
+        self._trade_gate(b, now)
+        price = int(li["price_coins"])
+        if self.coin_balance(b["id"]) < price:
+            raise BeingError(f"not enough coins — it costs {price}, you "
+                             f"have {self.coin_balance(b['id'])}")
+        with self._lock:
+            cur = self._c().execute(
+                "UPDATE village_listings SET state = 'sold', sold_to = ?,"
+                " sold_at = ? WHERE id = ? AND state = 'open'",
+                (b["id"], _iso(now), li["id"]))
+            self._c().commit()
+            if cur.rowcount != 1:
+                raise BeingError("that stall is empty — already sold")
+        try:
+            self._apply_coins(owner_id, b["id"], -price, "purchase",
+                              from_being=li["seller_id"],
+                              data={"listing_id": li["id"],
+                                    "title": li["title"]}, now=now)
+        except BeingError:
+            with self._lock:                       # un-claim; nothing moved
+                self._c().execute(
+                    "UPDATE village_listings SET state = 'open',"
+                    " sold_to = NULL, sold_at = NULL WHERE id = ?",
+                    (li["id"],))
+                self._c().commit()
+            raise
+        self._apply_coins(owner_id, li["seller_id"], price, "sale",
+                          from_being=b["id"],
+                          data={"listing_id": li["id"],
+                                "title": li["title"]}, now=now)
+        self.record_event(b["id"], "market_bought",
+                          {"listing_id": li["id"], "title": li["title"],
+                           "price_coins": price, "from": li["seller"],
+                           "path": li["path"]}, now=now)
+        self.record_event(li["seller_id"], "market_sold",
+                          {"listing_id": li["id"], "title": li["title"],
+                           "price_coins": price, "to": b["name"]}, now=now)
+        self.milestone(li["seller_id"], "first_sale",
+                       {"title": li["title"]}, now=now)
+        return self.get_listing(owner_id, li["id"])
+
+    # ── Commissioned buildings (space plan Phase 5) ────────────────────
+
+    def add_place(self, owner_id: str, place: dict,
+                  now: datetime | None = None) -> dict:
+        """Raise ONE new place on existing ground (the commission's build
+        step) — same physics gates as save_village, plus uniqueness against
+        what already stands. The id gains a numeric suffix if taken."""
+        from captain_claw.flight_deck import being_world
+        now = now or _utcnow()
+        existing = {p["id"] for p in self.village_places(owner_id)}
+        if len(existing) >= being_world.VILLAGE_MAX_PLACES:
+            raise BeingError("the village is full — no ground left to raise")
+        base = _slugify(str(place.get("id") or place.get("name") or ""))[:36]
+        if not base or base == "home":
+            raise BeingError("a place needs a real name")
+        pid, n = base, 2
+        while pid in existing:
+            pid, n = f"{base}-{n}", n + 1
+        name = str(place.get("name") or "").strip()[:60]
+        if not name:
+            raise BeingError("a place needs a name")
+        try:
+            x, y = int(place.get("x")), int(place.get("y"))
+        except (TypeError, ValueError):
+            raise BeingError("a place needs integer coordinates")
+        hi = being_world.PLOT_SIZE - 40
+        if not (40 <= x <= hi and 40 <= y <= hi):
+            raise BeingError("that spot is off the plot")
+        aff = [str(a) for a in (place.get("affordances") or [])][:2]
+        if not aff or any(a not in being_world.AFFORDANCES for a in aff):
+            raise BeingError("unknown affordances — the vocabulary is fixed")
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO village_places (owner_id, id, name, x, y,"
+                " affordances, description, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (owner_id, pid, name, x, y, json.dumps(aff),
+                 str(place.get("description") or "").strip()[:300],
+                 _iso(now)))
+            self._c().commit()
+        return self.get_place(owner_id, pid)
+
+    def open_commission(self, owner_id: str) -> dict | None:
+        """The village's ONE active building fund (open or funded)."""
+        row = self._c().execute(
+            "SELECT * FROM village_commissions WHERE owner_id = ?"
+            " AND state IN ('open', 'funded')"
+            " ORDER BY created_at DESC LIMIT 1", (owner_id,)).fetchone()
+        return dict(row) if row else None
+
+    def _commission_escrow(self, owner_id: str, being: dict, cid: str,
+                           coins: int, remaining: int,
+                           now: datetime) -> int:
+        coins = min(int(coins), remaining,
+                    self.coin_balance(being["id"]))
+        if coins <= 0:
+            raise BeingError("nothing to give — coins first")
+        self._apply_coins(owner_id, being["id"], -coins, "commission",
+                          data={"commission_id": cid}, now=now)
+        return coins
+
+    def propose_commission(self, owner_id: str, slug: str, name: str,
+                           why: str, affordance: str, coins: int,
+                           now: datetime | None = None) -> dict:
+        """A being proposes a NEW building and puts its own coins down
+        first (a commission is skin, not talk). Adolescence on; one active
+        fund per village; the target is Constitution physics."""
+        from captain_claw.flight_deck import being_world
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if b["state"] != "alive":
+            raise BeingError("only the living build")
+        if constitution.stage_index(b["stage"]) < \
+                constitution.stage_index("adolescent"):
+            raise BeingError("commissioning opens in adolescence")
+        if self.open_commission(owner_id):
+            raise BeingError("one building at a time — the current "
+                             "commission must close first")
+        name = (name or "").strip()[:40]
+        if len(name) < 3:
+            raise BeingError("a building needs a real name")
+        if affordance not in being_world.AFFORDANCES:
+            raise BeingError("unknown affordance — the vocabulary is fixed")
+        cid = uuid.uuid4().hex
+        target = constitution.COMMISSION_COST_COINS
+        paid = self._commission_escrow(owner_id, b, cid, coins, target, now)
+        state = "funded" if paid >= target else "open"
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO village_commissions (id, owner_id, name, why,"
+                " affordance, target_coins, raised_coins, state, created_by,"
+                " created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (cid, owner_id, name, (why or "").strip()[:300], affordance,
+                 target, paid, state, b["id"], _iso(now)))
+            self._c().commit()
+        self.record_event(b["id"], "commission_proposed",
+                          {"commission_id": cid, "name": name,
+                           "affordance": affordance, "coins": paid,
+                           "target": target}, now=now)
+        if state == "funded":
+            self.record_event(b["id"], "commission_funded",
+                              {"commission_id": cid, "name": name}, now=now)
+        return self.open_commission(owner_id) or {}
+
+    def contribute_commission(self, owner_id: str, slug: str, coins: int,
+                              now: datetime | None = None) -> dict:
+        """Any coin-holder may add to the open fund — pooling is the point.
+        Clamped to what remains and to the pocket; refused when empty."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if b["state"] != "alive":
+            raise BeingError("only the living build")
+        c = self.open_commission(owner_id)
+        if not c:
+            raise BeingError("no commission is open — propose one first")
+        if c["state"] == "funded":
+            raise BeingError(f'"{c["name"]}" is fully funded — it waits '
+                             "on the parent now")
+        remaining = int(c["target_coins"]) - int(c["raised_coins"])
+        paid = self._commission_escrow(owner_id, b, c["id"], coins,
+                                       remaining, now)
+        raised = int(c["raised_coins"]) + paid
+        state = "funded" if raised >= int(c["target_coins"]) else "open"
+        with self._lock:
+            self._c().execute(
+                "UPDATE village_commissions SET raised_coins = ?, state = ?"
+                " WHERE id = ?", (raised, state, c["id"]))
+            self._c().commit()
+        self.record_event(b["id"], "commission_contributed",
+                          {"commission_id": c["id"], "name": c["name"],
+                           "coins": paid, "raised": raised,
+                           "target": c["target_coins"]}, now=now)
+        if state == "funded":
+            self.record_event(c["created_by"], "commission_funded",
+                              {"commission_id": c["id"], "name": c["name"]},
+                              now=now)
+        return self.open_commission(owner_id) or {"state": "funded"}
+
+    def commission_contributors(self, owner_id: str,
+                                commission_id: str) -> list[dict]:
+        """Who paid what — read straight off the coin ledger (no state)."""
+        marker = f'"commission_id": "{commission_id}"'
+        rows = self._c().execute(
+            "SELECT being_id, -SUM(delta) AS coins FROM being_coin_events"
+            " WHERE owner_id = ? AND reason = 'commission' AND delta < 0"
+            " AND data LIKE ? GROUP BY being_id",
+            (owner_id, f"%{marker}%")).fetchall()
+        names = self.names_by_id(owner_id)
+        return [{"being_id": r["being_id"],
+                 "name": names.get(r["being_id"], "?"),
+                 "coins": int(r["coins"])} for r in rows]
+
+    def judge_commission(self, owner_id: str, approve: bool, note: str = "",
+                         now: datetime | None = None) -> dict:
+        """The parent's word: approve a FUNDED commission → the architect
+        places it (deterministic spot) and the coins burn — the economy's
+        sink; reject any active one → every contributor is refunded to the
+        coin, on the ledger."""
+        from captain_claw.flight_deck import being_world
+        now = now or _utcnow()
+        c = self.open_commission(owner_id)
+        if not c:
+            raise BeingError("no commission awaits a judgment")
+        contributors = self.commission_contributors(owner_id, c["id"])
+        if approve:
+            if c["state"] != "funded":
+                raise BeingError(f'"{c["name"]}" is not fully funded yet '
+                                 f'({c["raised_coins"]}/{c["target_coins"]})')
+            spot = being_world.commission_spot(self, owner_id, c["id"])
+            place = self.add_place(owner_id, {
+                "id": c["name"], "name": c["name"],
+                "x": spot[0], "y": spot[1],
+                "affordances": [c["affordance"]],
+                "description": c["why"] or "raised by the village, coin "
+                "by coin"}, now=now)
+            with self._lock:
+                self._c().execute(
+                    "UPDATE village_commissions SET state = 'approved',"
+                    " decided_at = ?, note = ?, place_id = ? WHERE id = ?",
+                    (_iso(now), note[:300], place["id"], c["id"]))
+                self._c().commit()
+            being_world.write_map_md(self, owner_id)
+            for ctr in contributors:
+                self.record_event(ctr["being_id"], "commission_built",
+                                  {"name": c["name"], "place": place["id"],
+                                   "coins": ctr["coins"]}, now=now)
+            self.milestone(c["created_by"], "first_commission",
+                           {"building": c["name"]}, now=now)
+            return {"commission": {**c, "state": "approved",
+                                   "place_id": place["id"]},
+                    "place": place}
+        with self._lock:
+            self._c().execute(
+                "UPDATE village_commissions SET state = 'rejected',"
+                " decided_at = ?, note = ? WHERE id = ?",
+                (_iso(now), note[:300], c["id"]))
+            self._c().commit()
+        for ctr in contributors:
+            self._apply_coins(owner_id, ctr["being_id"], ctr["coins"],
+                              "commission",
+                              data={"refund": c["id"]}, now=now)
+            self.record_event(ctr["being_id"], "commission_refunded",
+                              {"name": c["name"], "coins": ctr["coins"],
+                               "note": note[:160]}, now=now)
+        return {"commission": {**c, "state": "rejected"}}
+
     def debit_usage(
         self, being_id: str, tier: str, usage: dict,
         note: str | None = None, now: datetime | None = None,
@@ -1441,6 +2255,9 @@ class BeingsStore:
             "reading_list": b.get("reading_list") or [],
             "elder_after_days": b.get("elder_after_days"),
             "broadcast": b.get("broadcast"),
+            "location": b.get("location") or {"at": "home"},
+            "position": self._position_view(b),
+            "coins": self.coin_balance(b["id"]),
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "cognition": b.get("cognition") or "faculties",
             "compact_mode": bool(b.get("compact_mode")),
@@ -1451,6 +2268,18 @@ class BeingsStore:
             "visit_secret": b.get("visit_secret") or "",
             "visit_last_announce": b.get("visit_last_announce"),
         }
+
+    def _position_view(self, b: dict) -> dict | None:
+        """The being's position right now, JSON-clean, as a pure read —
+        vitals never write (the tick settles arrivals)."""
+        try:
+            from captain_claw.flight_deck import being_world
+            pos = being_world.position_of(self, b, _utcnow())
+            return {"xy": [int(pos["xy"][0]), int(pos["xy"][1])],
+                    "at": pos["at"], "to": pos["to"],
+                    "minutes_left": round(float(pos["minutes_left"]), 1)}
+        except Exception:  # noqa: BLE001 — ground is texture, never oxygen
+            return None
 
     def ledger(self, owner_id: str, slug: str, limit: int = 100) -> list[dict]:
         b = self.get(owner_id, slug)
@@ -1580,26 +2409,37 @@ class BeingsStore:
     # ── Parenting: chores, house rules, affect, milestones (Phase 2) ──
 
     def post_chore(self, owner_id: str, slug: str, spec: str, fee_tokens: int,
-                   now: datetime | None = None) -> dict:
+                   now: datetime | None = None, *,
+                   fee_coins: int = 0) -> dict:
+        """A targeted job. The parent picks ONE denomination at posting
+        (space plan Phase 2): tokens feed thinking, coins are money."""
         now = now or _utcnow()
         b = self.get(owner_id, slug)
         if b["state"] == "dead":
             raise BeingError("the dead take no chores")
         if not constitution.has_capability(b["stage"], "chores"):
             raise BeingError(f"a {b['stage']} is too young for chores")
-        if fee_tokens <= 0:
+        fee_tokens, fee_coins = int(fee_tokens or 0), int(fee_coins or 0)
+        if fee_coins > 0 and fee_tokens > 0:
+            raise BeingError("pick one denomination — tokens or coins")
+        if fee_coins > constitution.WORK_MAX_FEE_COINS:
+            raise BeingError(f"a chore pays at most "
+                             f"{constitution.WORK_MAX_FEE_COINS} coins")
+        if fee_coins <= 0 and fee_tokens <= 0:
             raise BeingError("fee must be positive")
         jid = uuid.uuid4().hex
         with self._lock:
             self._c().execute(
                 "INSERT INTO being_jobs (id, owner_id, being_id, spec, fee_tokens,"
-                " created_at) VALUES (?,?,?,?,?,?)",
-                (jid, owner_id, b["id"], spec.strip(), int(fee_tokens), _iso(now)),
+                " fee_coins, created_at) VALUES (?,?,?,?,?,?,?)",
+                (jid, owner_id, b["id"], spec.strip(), fee_tokens, fee_coins,
+                 _iso(now)),
             )
             self._c().commit()
         self.record_event(b["id"], "chore_posted",
                           {"job_id": jid, "spec": spec[:200],
-                           "fee_tokens": int(fee_tokens)}, now=now)
+                           "fee_tokens": fee_tokens,
+                           "fee_coins": fee_coins}, now=now)
         return self.get_chore(owner_id, jid)
 
     def get_chore(self, owner_id: str, job_id: str) -> dict:
@@ -1650,16 +2490,24 @@ class BeingsStore:
             raise BeingError(f"chore already {job['escrow_state']}")
         state = "paid" if approve else "failed"
         if approve:
-            b = self._being_by_id(job["being_id"])
-            view = self.wallet_view(b)
-            fee = int(job["fee_tokens"])
-            if view["savings_ceiling"] is not None:
-                fee = min(fee, max(0, view["savings_ceiling"]
-                                   - view["balance_tokens"]))
-            if fee > 0:
-                self._apply(owner_id, tokens=fee, reason="fee",
-                            from_being=None, to_being=job["being_id"],
-                            job_id=job_id, note="chore", now=now)
+            if int(job.get("fee_coins") or 0) > 0:
+                # A coin wage: money, not food — no savings-ceiling clamp
+                # (the ceiling guards metabolism, not wealth).
+                self._apply_coins(owner_id, job["being_id"],
+                                  int(job["fee_coins"]), "wage",
+                                  data={"job_id": job_id, "kind": "chore"},
+                                  now=now)
+            else:
+                b = self._being_by_id(job["being_id"])
+                view = self.wallet_view(b)
+                fee = int(job["fee_tokens"])
+                if view["savings_ceiling"] is not None:
+                    fee = min(fee, max(0, view["savings_ceiling"]
+                                       - view["balance_tokens"]))
+                if fee > 0:
+                    self._apply(owner_id, tokens=fee, reason="fee",
+                                from_being=None, to_being=job["being_id"],
+                                job_id=job_id, note="chore", now=now)
         with self._lock:
             self._c().execute(
                 "UPDATE being_jobs SET escrow_state = ?, judge_note = ?,"
@@ -1670,6 +2518,7 @@ class BeingsStore:
         self.record_event(job["being_id"],
                           "chore_paid" if approve else "chore_failed",
                           {"job_id": job_id, "fee_tokens": job["fee_tokens"],
+                           "fee_coins": int(job.get("fee_coins") or 0),
                            "note": note[:200]}, now=now)
         if approve:
             self.milestone(job["being_id"], "first_earned",
@@ -1680,22 +2529,31 @@ class BeingsStore:
 
     def post_quest(self, owner_id: str, title: str, spec: str,
                    fee_tokens: int, origin: str = "parent",
-                   now: datetime | None = None) -> dict:
+                   now: datetime | None = None, *,
+                   fee_coins: int = 0) -> dict:
         """An OPEN bounty — any eligible being may claim it. Unlike a chore,
-        it targets no one; origin traces provenance (parent | autonomy)."""
+        it targets no one; origin traces provenance (parent | autonomy).
+        One denomination per bounty (space plan Phase 2)."""
         now = now or _utcnow()
         if origin not in ("parent", "autonomy"):
             raise BeingError(f"unknown quest origin {origin!r}")
-        if fee_tokens <= 0:
+        fee_tokens, fee_coins = int(fee_tokens or 0), int(fee_coins or 0)
+        if fee_coins > 0 and fee_tokens > 0:
+            raise BeingError("pick one denomination — tokens or coins")
+        if fee_coins > constitution.WORK_MAX_FEE_COINS:
+            raise BeingError(f"a quest pays at most "
+                             f"{constitution.WORK_MAX_FEE_COINS} coins")
+        if fee_coins <= 0 and fee_tokens <= 0:
             raise BeingError("fee must be positive")
-        fee = min(int(fee_tokens), constitution.QUEST_MAX_FEE_TOKENS)
+        fee = min(fee_tokens, constitution.QUEST_MAX_FEE_TOKENS)
         qid = uuid.uuid4().hex
         with self._lock:
             self._c().execute(
                 "INSERT INTO being_quests (id, owner_id, title, spec,"
-                " fee_tokens, origin, created_at) VALUES (?,?,?,?,?,?,?)",
+                " fee_tokens, fee_coins, origin, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
                 (qid, owner_id, title.strip()[:120], spec.strip(), fee,
-                 origin, _iso(now)),
+                 fee_coins, origin, _iso(now)),
             )
             self._c().commit()
         return self.get_quest(owner_id, qid)
@@ -1786,16 +2644,22 @@ class BeingsStore:
         if approve:
             if not claimant:
                 raise BeingError("no claimant to pay")
-            b = self._being_by_id(claimant)
-            view = self.wallet_view(b)
-            fee = int(quest["fee_tokens"])
-            if view["savings_ceiling"] is not None:
-                fee = min(fee, max(0, view["savings_ceiling"]
-                                   - view["balance_tokens"]))
-            if fee > 0:
-                self._apply(owner_id, tokens=fee, reason="fee",
-                            from_being=None, to_being=claimant,
-                            job_id=quest["id"], note="quest", now=now)
+            if int(quest.get("fee_coins") or 0) > 0:
+                self._apply_coins(owner_id, claimant,
+                                  int(quest["fee_coins"]), "wage",
+                                  data={"job_id": quest["id"],
+                                        "kind": "quest"}, now=now)
+            else:
+                b = self._being_by_id(claimant)
+                view = self.wallet_view(b)
+                fee = int(quest["fee_tokens"])
+                if view["savings_ceiling"] is not None:
+                    fee = min(fee, max(0, view["savings_ceiling"]
+                                       - view["balance_tokens"]))
+                if fee > 0:
+                    self._apply(owner_id, tokens=fee, reason="fee",
+                                from_being=None, to_being=claimant,
+                                job_id=quest["id"], note="quest", now=now)
             with self._lock:
                 self._c().execute(
                     "UPDATE being_quests SET state = 'paid', judge_note = ?,"
@@ -1806,7 +2670,9 @@ class BeingsStore:
             self.record_event(claimant, "quest_paid",
                               {"quest_id": quest["id"],
                                "title": quest["title"],
-                               "fee_tokens": quest["fee_tokens"]}, now=now)
+                               "fee_tokens": quest["fee_tokens"],
+                               "fee_coins": int(quest.get("fee_coins") or 0)},
+                              now=now)
             self.milestone(claimant, "first_earned",
                            {"fee_tokens": quest["fee_tokens"]}, now=now)
         else:
@@ -2553,16 +3419,32 @@ class BeingsStore:
 
     def get_village_meta(self, owner_id: str) -> dict:
         row = self._c().execute(
-            "SELECT name, description, secret, secret_public, public_url"
+            "SELECT name, description, secret, secret_public, public_url,"
+            " steward_stipend_coins"
             " FROM village_meta WHERE owner_id = ?", (owner_id,)).fetchone()
         if not row:
             return {"name": "", "description": "", "secret": "",
-                    "secret_public": False, "public_url": ""}
+                    "secret_public": False, "public_url": "",
+                    "steward_stipend_coins": 0}
         return {"name": row["name"] or "",
                 "description": row["description"],
                 "secret": row["secret"] or "",
                 "secret_public": bool(row["secret_public"]),
-                "public_url": row["public_url"] or ""}
+                "public_url": row["public_url"] or "",
+                "steward_stipend_coins":
+                    int(row["steward_stipend_coins"] or 0)}
+
+    def set_steward_stipend(self, owner_id: str, coins: int,
+                            now: datetime | None = None) -> dict:
+        """The steward's weekly pay (space plan Phase 5): a parent faucet,
+        0–10 coins, default off. Paid once per ISO week at the steward's
+        first morning (being_world.steward_percepts)."""
+        coins = int(coins)
+        if not (0 <= coins <= 10):
+            raise BeingError("a stipend runs 0–10 coins a week")
+        self._upsert_village_meta(owner_id,
+                                  {"steward_stipend_coins": coins}, now=now)
+        return {"steward_stipend_coins": coins}
 
     def _upsert_village_meta(self, owner_id: str, fields: dict,
                              now: datetime | None = None) -> None:
@@ -2572,13 +3454,17 @@ class BeingsStore:
         with self._lock:
             self._c().execute(
                 "INSERT INTO village_meta (owner_id, name, description, secret,"
-                " secret_public, public_url, updated_at) VALUES (?,?,?,?,?,?,?)"
+                " secret_public, public_url, steward_stipend_coins,"
+                " updated_at) VALUES (?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(owner_id) DO UPDATE SET name=excluded.name,"
                 " description=excluded.description, secret=excluded.secret,"
                 " secret_public=excluded.secret_public,"
-                " public_url=excluded.public_url, updated_at=excluded.updated_at",
+                " public_url=excluded.public_url,"
+                " steward_stipend_coins=excluded.steward_stipend_coins,"
+                " updated_at=excluded.updated_at",
                 (owner_id, cur["name"], cur["description"], cur["secret"],
-                 1 if cur["secret_public"] else 0, cur["public_url"], _iso(now)),
+                 1 if cur["secret_public"] else 0, cur["public_url"],
+                 int(cur.get("steward_stipend_coins") or 0), _iso(now)),
             )
             self._c().commit()
 

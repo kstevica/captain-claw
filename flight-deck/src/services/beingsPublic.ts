@@ -47,6 +47,7 @@ export interface PublicProfile {
   stats: PublicStats
   latest_thought: { text: string; at: string; act: string } | null
   broadcast: { text: string; at: string } | null
+  place?: { kind: 'at' | 'road' | 'home'; name: string; minutes_left?: number } | null
 }
 
 export interface PublicFile {

@@ -264,6 +264,146 @@ def gift_tokens(store: BeingsStore, being: dict, to_ref: str, tokens: int,
     return {"to": sib["slug"], "tokens": tokens}
 
 
+# ── The coin market + guestbooks (space plan Phase 3) ────────────────────
+
+def market_sell(store: BeingsStore, being: dict, rel_path: str, title: str,
+                price_coins: int, now: datetime | None = None) -> dict:
+    """A stall at the market: offer one of your OWN real files for coins.
+    Reading the file IS the existence proof (sandboxed, .md only); the
+    store gates the quota and the price cap."""
+    from captain_claw.flight_deck import being_life
+    now = now or _utcnow()
+    being_life.read_self_file(being, rel_path)       # raises if not real
+    title = (title or "").strip() or rel_path.rsplit("/", 1)[-1][:-3]
+    li = store.post_listing(being["owner_id"], being["slug"], rel_path,
+                            title, price_coins, now=now)
+    write_market_md(store, being["owner_id"])
+    return li
+
+
+def market_buy(store: BeingsStore, being: dict, listing_ref: str,
+               now: datetime | None = None) -> dict:
+    """Buy a stall's file with coins — read-before-pay: the seller's file
+    is read FIRST (a vanished file refuses before any coin moves), then
+    the store settles the atomic claim + the being→being coin pair, then
+    the copy lands in shelf/ under a provenance header."""
+    from captain_claw.flight_deck import being_life
+    now = now or _utcnow()
+    li = store.get_listing(being["owner_id"], listing_ref)
+    if li["state"] != "open":
+        raise BeingError("that stall is empty — already sold")
+    seller = store._being_by_id(li["seller_id"])
+    body = being_life.read_self_file(seller, li["path"])
+    li = store.buy_listing(being["owner_id"], being["slug"], li["id"],
+                           now=now)
+    base = li["path"].rsplit("/", 1)[-1]
+    provenance = (
+        f"<!-- bought at the market from {seller['name']} "
+        f"({seller['slug']}) on {now.date().isoformat()}; "
+        f"{li['price_coins']} coins -->\n\n"
+    )
+    dest = being_life._home_path(being,
+                                 f"shelf/{seller['slug']}--{base}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(provenance + body, encoding="utf-8")
+    write_market_md(store, being["owner_id"])
+    return {"listing": li, "path": f"shelf/{seller['slug']}--{base}"}
+
+
+def write_market_md(store: BeingsStore, owner_id: str) -> None:
+    """commons/village/MARKET.md — the open stalls, browsable any day
+    (market Saturday only makes the square CRY them; it never gates)."""
+    try:
+        lis = store.market_listings(owner_id, limit=30)
+        lines = [
+            "# The Market", "",
+            "Open stalls — real files for coins. Buy with "
+            '"buy": {"listing_id": "<id>"} in your digest; sell one of '
+            'your own files with "sell": {"path": "garden/x.md", '
+            '"title": "...", "price_coins": 3}.', "",
+        ]
+        if lis:
+            for li in lis:
+                lines.append(
+                    f'- [{li["id"][:8]}] "{li["title"]}" — '
+                    f'{li["price_coins"]} coins (by {li["seller"]}, '
+                    f'{li["path"]})')
+        else:
+            lines.append("(no stalls today — be the first)")
+        p = _commons_path(owner_id, "village/MARKET.md",
+                          create_parents=True)
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception as e:  # noqa: BLE001 — the board is amenity
+        log.warning("MARKET.md write failed", owner=owner_id, error=str(e))
+
+
+def guestbook_sign(store: BeingsStore, being: dict, line: str,
+                   now: datetime | None = None) -> dict:
+    """One line in the CURRENT place's guestbook (1/day/place) — a real,
+    diffable trace of a life lived in places. Home is private and the
+    road has no book."""
+    from captain_claw.flight_deck import being_world
+    now = now or _utcnow()
+    pid = being_world.place_of(store, being, now)
+    if not pid or pid == "home":
+        raise BeingError("no guestbook here — arrive somewhere first")
+    place = store.get_place(being["owner_id"], pid)
+    today = now.isoformat()[:10]
+    for e in store.events(being["owner_id"], being["slug"], limit=60):
+        if e["at"][:10] < today:
+            break
+        if e["kind"] == "guestbook_signed" \
+                and e["data"].get("place") == pid:
+            raise BeingError(f"you signed {place['name']}'s guestbook "
+                             "today already — once a day")
+    text = (line or "").strip()[:200]
+    if not text:
+        raise BeingError("a guestbook line needs words")
+    p = _commons_path(being["owner_id"], f"places/{pid}/guestbook.md",
+                      create_parents=True)
+    if not p.exists():
+        p.write_text(f"# Guestbook — {place['name']}\n\n", encoding="utf-8")
+    with p.open("a", encoding="utf-8") as f:
+        f.write(f"- {now.date().isoformat()} — {being['name']}: {text}\n")
+    store.record_event(being["id"], "guestbook_signed",
+                       {"place": pid, "place_name": place["name"],
+                        "line": text}, now=now)
+    store.milestone(being["id"], "first_guestbook", {"place": pid}, now=now)
+    return {"place": pid}
+
+
+def handle_market_digest(store: BeingsStore, being: dict, digest: dict,
+                         now: datetime | None = None) -> None:
+    """Route sell / buy / guestbook. Never raises — a refused act becomes
+    a ``society_refused`` event (physics denying, not crashing)."""
+    now = now or _utcnow()
+
+    def _refuse(what: str, err: Exception) -> None:
+        store.record_event(being["id"], "society_refused",
+                           {"what": what, "reason": str(err)}, now=now)
+
+    sell = digest.get("sell")
+    if isinstance(sell, dict) and sell.get("path"):
+        try:
+            market_sell(store, being, str(sell["path"]),
+                        str(sell.get("title") or ""),
+                        int(sell.get("price_coins") or 0), now=now)
+        except (BeingError, BeingNotFound, ValueError, TypeError) as e:
+            _refuse("sell", e)
+    buy = digest.get("buy")
+    if isinstance(buy, dict) and buy.get("listing_id"):
+        try:
+            market_buy(store, being, str(buy["listing_id"]), now=now)
+        except (BeingError, BeingNotFound) as e:
+            _refuse("buy", e)
+    gb = digest.get("guestbook")
+    if isinstance(gb, str) and gb.strip():
+        try:
+            guestbook_sign(store, being, gb, now=now)
+        except (BeingError, BeingNotFound) as e:
+            _refuse("guestbook", e)
+
+
 # ── Percepts & digest handling (wired into the tick) ────────────────────
 
 def society_percepts(store: BeingsStore, being: dict) -> list[str]:

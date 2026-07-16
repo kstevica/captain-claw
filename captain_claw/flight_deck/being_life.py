@@ -473,6 +473,21 @@ async def birth(db, store: BeingsStore, owner_id: str, slug: str) -> dict:
         result["warnings"].append(f"home scaffold failed: {e}")
         log.warning("being home scaffold failed", slug=slug, error=str(e))
     being_society.ensure_commons(owner_id)
+    # The ground (space plan Phase 1): the first birth founds the village —
+    # one architect call when a model is reachable, the deterministic
+    # default otherwise. Physics never waits on a model.
+    try:
+        if not store.village_places(owner_id):
+            if db is not None:
+                try:
+                    await architect_village(db, store, owner_id,
+                                            [being["name"]])
+                except Exception as e:  # noqa: BLE001
+                    log.warning("architect failed; the default village "
+                                "stands", owner=owner_id, error=str(e))
+            being_world.ensure_village(store, owner_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("village founding failed", owner=owner_id, error=str(e))
     try:
         _endow_offspring(store, being)
     except Exception as e:  # noqa: BLE001 — endowment is a gift, not oxygen
@@ -484,6 +499,39 @@ async def birth(db, store: BeingsStore, owner_id: str, slug: str) -> dict:
         store.record_event(being["id"], "spawn_failed", {"error": str(e)})
         log.warning("being body spawn failed", slug=slug, error=str(e))
     return result
+
+
+async def architect_village(db, store: BeingsStore, owner_id: str,
+                            names: list[str]) -> list[dict]:
+    """The one-shot architect (space plan Phase 1): one LLM call names and
+    places the ground; save_village validates HARD (BeingError on any
+    invalid draft, nothing changes) and MAP.md is rewritten on success.
+    Beings mid-walk to a removed place settle home on their next tick."""
+    if db is None:
+        raise BeingError("no FD database — the default village stands")
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    tiers, _env = await _load_owner_tiers(db, owner_id)
+    cfg = (tiers or {}).get("balanced") \
+        or next(iter((tiers or {}).values()), None)
+    if not cfg:
+        raise BeingError("no LLM tier configured — the default village stands")
+    from captain_claw.llm import Message, create_provider
+    system, user = being_world.architect_prompt(owner_id, names)
+    provider = create_provider(
+        provider=cfg.get("provider", "anthropic"), model=cfg.get("model", ""),
+        base_url=cfg.get("base_url") or None,
+        api_key=cfg.get("api_key") or None,
+        temperature=0.9, max_tokens=4000)
+    resp = await provider.complete(
+        messages=[Message(role="system", content=system),
+                  Message(role="user", content=user)],
+        temperature=0.9, max_tokens=4000)
+    places = being_world.parse_architect_places(resp.content)
+    saved = store.save_village(owner_id, places)
+    being_world.write_map_md(store, owner_id)
+    log.info("the architect drew the village", owner=owner_id,
+             places=len(saved))
+    return saved
 
 
 # ── Export / import: move a being between machines (body excluded) ───────
@@ -684,7 +732,25 @@ def public_profile(store: BeingsStore, being: dict) -> dict:
         "latest_thought": latest_thought(store, being),
         # The village radio (T3.16): an adult's one daily public line.
         "broadcast": being.get("broadcast"),
+        # The ground (space plan Phase 4): where the body is, publicly —
+        # a place name or the road, never coordinates of a private home.
+        "place": _public_place(store, being),
     }
+
+
+def _public_place(store: BeingsStore, being: dict) -> dict | None:
+    try:
+        pos = being_world.position_of(store, being, _utcnow())
+        if pos.get("to"):
+            return {"kind": "road",
+                    "name": being_world.place_name(store, being, pos["to"]),
+                    "minutes_left": int(round(pos["minutes_left"]))}
+        if pos.get("at") and pos["at"] != "home":
+            return {"kind": "at",
+                    "name": being_world.place_name(store, being, pos["at"])}
+        return {"kind": "home", "name": "home"}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def village_recommend_prompt(store: BeingsStore, owner: str,
@@ -905,8 +971,19 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
         elif k == "rules_updated":
             lines.append("Your parent updated the house rules.")
         elif k == "chore_paid":
-            lines.append(f"You were PAID {d.get('fee_tokens')} tokens for a "
-                         f"chore. It landed in your savings.")
+            if d.get("fee_coins"):
+                lines.append(f"You were PAID {d.get('fee_coins')} coin(s) "
+                             "for a chore — money in your pocket, not food.")
+            else:
+                lines.append(f"You were PAID {d.get('fee_tokens')} tokens "
+                             "for a chore. It landed in your savings.")
+        elif k == "coins_granted":
+            note = f' — "{d.get("note")}"' if d.get("note") else ""
+            lines.append(
+                f"POCKET MONEY: your parent gave you {d.get('coins')} "
+                f"coin(s){note}. Coins are money, not food — they buy "
+                "nothing by sitting; from adolescence you may convert them "
+                "into thinking.")
         elif k == "chore_failed":
             lines.append(f"A chore was judged not done: {d.get('note') or ''}")
         elif k == "woke_from_torpor":
@@ -927,10 +1004,48 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
             note = f' — "{d.get("note")}"' if d.get("note") else ""
             lines.append("Your parent said not yet to your chosen name"
                          f"{note}. The name you carry remains.")
+        elif k == "arrived":
+            where = d.get("name") or d.get("place") or "somewhere"
+            when = f" at {d['hhmm']}" if d.get("hhmm") else ""
+            book = ("" if (d.get("place") or "home") == "home"
+                    else ' The guestbook lies open — add "guestbook": '
+                         '"one line" to your digest to leave a trace.')
+            lines.append(f"You reached {where}{when} — the walk is done; "
+                         f"you are here now.{book}")
+        elif k == "crossed_paths":
+            lines.append(
+                f"You crossed paths with {d.get('name')} at "
+                f"{d.get('place_name') or d.get('place')} — small company, "
+                "real. A letter would land warmer today.")
+        elif k == "market_sold":
+            lines.append(f'MARKET: your "{d.get("title")}" sold to '
+                         f'{d.get("to")} for {d.get("price_coins")} coins.')
+        elif k == "market_bought":
+            lines.append(f'MARKET: you bought "{d.get("title")}" from '
+                         f'{d.get("from")} — it lies in your shelf/.')
+        elif k == "made_introduction":
+            lines.append(f"You introduced {d.get('for')} to {d.get('to')} — "
+                         "your circles touched; that is what knowing "
+                         "people is for.")
+        elif k == "commission_funded":
+            lines.append(f'"{d.get("name")}" is FULLY FUNDED — the village '
+                         "found the coins; it waits on your parent now.")
+        elif k == "commission_built":
+            lines.append(f'THE VILLAGE GREW: "{d.get("name")}" now stands — '
+                         f"you helped raise it ({d.get('coins')} coin(s) of "
+                         "yours are in its walls). Walk over and see it.")
+        elif k == "commission_refunded":
+            note = f' — "{d.get("note")}"' if d.get("note") else ""
+            lines.append(f'Your parent said not yet to "{d.get("name")}"'
+                         f"{note}. Your {d.get('coins')} coin(s) came back "
+                         "to your pocket.")
     for job in store.chores_for(being["owner_id"], being["slug"],
                                 states=("open",)):
+        fee_txt = (f"{job['fee_coins']} coins"
+                   if int(job.get("fee_coins") or 0) > 0
+                   else f"{job['fee_tokens']} tokens")
         lines.append(f"CHORE from your parent [{job['id'][:8]}]: "
-                     f"{job['spec']}  (fee {job['fee_tokens']} tokens)")
+                     f"{job['spec']}  (fee {fee_txt})")
     # Education (roadmap T2.12): the open curriculum, listed like chores.
     # The report is a REAL file, verified against this tick's diff.
     for item in (being.get("reading_list") or []):
@@ -1075,7 +1190,9 @@ def home_manifest(being: dict) -> dict[str, list[str]]:
 def society_prompt_fields(being: dict, siblings: list[dict] | None,
                           letters_left: int | None,
                           penpal_reach: list[str] | None = None,
-                          now: datetime | None = None) -> list[str]:
+                          now: datetime | None = None,
+                          coins: int = 0,
+                          trades_left: int = 0) -> list[str]:
     """Digest fields this stage can actually DELIVER — shared by the monolith
     prompt and the faculties orient step, so the two cognitions offer the same
     society. Never offers what physics would refuse (letters below child,
@@ -1118,6 +1235,25 @@ def society_prompt_fields(being: dict, siblings: list[dict] | None,
             fields.append(
                 '"broadcast": "ONE short line for your public page — '
                 "today's voice on the village radio (once a day)\"")
+    # The one-way exchange (space plan Phase 2): offered only when the
+    # being HOLDS coins and the stage allows — never a dangled refusal.
+    if coins > 0 and constitution.has_capability(being["stage"], "convert"):
+        fields.append(
+            f'"convert_coins": <up to {coins}>  — turn coins into thinking '
+            f'(1 coin = {constitution.COIN_TOKEN_RATE} tokens; one-way, '
+            'clamped by your savings ceiling)')
+    # The coin market (Phase 3): real files for coins, quota-gated —
+    # never offered to a stage that cannot trade or a spent day.
+    if trades_left > 0:
+        fields.append(
+            '"sell": {"path": "garden/<file>.md", "title": "...", '
+            f'"price_coins": 3}}  — a stall at the market ({trades_left} '
+            'trade(s) left today; commons/village/MARKET.md lists all)')
+        if coins > 0:
+            fields.append(
+                '"buy": {"listing_id": "<id from MARKET.md or a stall '
+                'percept>"}  — coins to the seller, the file into your '
+                'shelf/')
     return fields
 
 
@@ -1196,7 +1332,8 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                         last_mismatch: bool = False,
                         visitors: list[dict] | None = None,
                         mind_lines: list[str] | None = None,
-                        penpal_reach: list[str] | None = None) -> str:
+                        penpal_reach: list[str] | None = None,
+                        coins: int = 0, trades_left: int = 0) -> str:
     now = now or _utcnow()
     g = being["genome"]
     attrs = genome_mod.effective_attributes(g)
@@ -1233,7 +1370,9 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         f"VITALS — wallet {w.get('balance_tokens', '?')} tokens "
         f"(allowance {w.get('effective_preset', '?')}/day, spent today "
         f"{spent_today}); attention credits {being.get('attention_credits', 0)} "
-        f"(each unprompted message to your parent costs one).",
+        f"(each unprompted message to your parent costs one)"
+        + (f"; {coins} coin(s) in your pocket (money, not food)" if coins
+           else "") + ".",
         drives_line,
         "",
         f"YOUR HOME is vfs:{proj}/ — self/, journal/, garden/, skills/. "
@@ -1283,7 +1422,8 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                 "comes in childhood. For now your words go to your parent or "
                 "your journal; never claim to have talked to a sibling.")
     society_fields = society_prompt_fields(being, siblings, letters_left,
-                                           penpal_reach, now=now)
+                                           penpal_reach, now=now, coins=coins,
+                                           trades_left=trades_left)
     if society_fields:
         lines += ["OPTIONAL SOCIETY FIELDS for your digest — use only "
                   "when genuine, never to perform:",
@@ -1595,6 +1735,26 @@ def _normalize_digest(raw: dict) -> dict:
                   "body": str(penpal.get("body") or "")[:2000]}
     else:
         penpal = None
+    introduce = raw.get("introduce")
+    if isinstance(introduce, dict) and introduce.get("to") \
+            and introduce.get("body"):
+        introduce = {"to": str(introduce["to"])[:80],
+                     "body": str(introduce.get("body") or "")[:2000]}
+    else:
+        introduce = None
+    commission = raw.get("commission")
+    if isinstance(commission, dict) and commission.get("coins"):
+        try:
+            c_coins = max(0, int(commission.get("coins") or 0))
+        except (TypeError, ValueError):
+            c_coins = 0
+        commission = {"name": str(commission.get("name") or "")[:40],
+                      "why": str(commission.get("why") or "")[:300],
+                      "affordance": str(commission.get("affordance")
+                                        or "")[:20],
+                      "coins": c_coins} if c_coins else None
+    else:
+        commission = None
     chosen_name = raw.get("chosen_name")
     if isinstance(chosen_name, dict) and chosen_name.get("name"):
         chosen_name = {"name": str(chosen_name["name"]).strip()[:60],
@@ -1606,6 +1766,42 @@ def _normalize_digest(raw: dict) -> dict:
         broadcast = broadcast.strip()[:200]
     else:
         broadcast = None
+    go_to = raw.get("go_to")
+    if isinstance(go_to, str) and go_to.strip():
+        go_to = go_to.strip()[:60]
+    else:
+        go_to = None
+    convert_coins = raw.get("convert_coins")
+    try:
+        convert_coins = int(convert_coins) if convert_coins is not None \
+            else None
+    except (TypeError, ValueError):
+        convert_coins = None
+    if convert_coins is not None and convert_coins <= 0:
+        convert_coins = None
+    if convert_coins is not None:
+        convert_coins = min(convert_coins, 1_000_000)
+    sell = raw.get("sell")
+    if isinstance(sell, dict) and sell.get("path"):
+        try:
+            s_price = max(0, int(sell.get("price_coins") or 0))
+        except (TypeError, ValueError):
+            s_price = 0
+        sell = {"path": str(sell["path"])[:200],
+                "title": str(sell.get("title") or "")[:80],
+                "price_coins": s_price}
+    else:
+        sell = None
+    buy = raw.get("buy")
+    if isinstance(buy, dict) and buy.get("listing_id"):
+        buy = {"listing_id": str(buy["listing_id"])[:64]}
+    else:
+        buy = None
+    guestbook = raw.get("guestbook")
+    if isinstance(guestbook, str) and guestbook.strip():
+        guestbook = guestbook.strip()[:200]
+    else:
+        guestbook = None
     reading_report = raw.get("reading_report")
     if isinstance(reading_report, dict) and reading_report.get("item_id") \
             and reading_report.get("path"):
@@ -1639,6 +1835,13 @@ def _normalize_digest(raw: dict) -> dict:
         "chosen_name": chosen_name,
         "reading_report": reading_report,
         "broadcast": broadcast,
+        "go_to": go_to,
+        "convert_coins": convert_coins,
+        "sell": sell,
+        "buy": buy,
+        "guestbook": guestbook,
+        "introduce": introduce,
+        "commission": commission,
     }
 
 
@@ -1698,7 +1901,8 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
                           percepts: list[str] | None, first_of_day: bool,
                           siblings: list[dict] | None, letters_left: int | None,
                           visitors: list[dict] | None,
-                          penpal_reach: list[str] | None = None) -> str:
+                          penpal_reach: list[str] | None = None,
+                          coins: int = 0, trades_left: int = 0) -> str:
     g = being["genome"]
     can_connect = connect_outlets(being, siblings, letters_left, percepts)
     pressures = drive_pressures(being.get("drives") or {}, now=now,
@@ -1719,7 +1923,9 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
         f"Voice: {g.get('voice_seed') or 'your own, still forming'}.",
         f"VITALS — wallet {w.get('balance_tokens', '?')} tokens (allowance "
         f"{w.get('effective_preset', '?')}/day, spent today {spent_today}); "
-        f"attention credits {being.get('attention_credits', 0)}.",
+        f"attention credits {being.get('attention_credits', 0)}"
+        + (f"; {coins} coin(s) in your pocket (money, not food)" if coins
+           else "") + ".",
         drives_line,
     ]
     _att = attention_note(being, w)
@@ -1747,7 +1953,7 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
                 "You cannot send letters to siblings yet — that ability "
                 "comes in childhood. Never claim to have talked to one.")
     sf = society_prompt_fields(being, siblings, letters_left, penpal_reach,
-                               now=now)
+                               now=now, coins=coins, trades_left=trades_left)
     if sf:
         lines += ["OPTIONAL SOCIETY FIELDS for your decision json — only "
                   "when genuine, never to perform:", *("  " + f for f in sf)]
@@ -1889,7 +2095,8 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
                          senses, view, spent_today, first_of_day, siblings,
                          letters_left, visitors, last_refusals, drives,
                          resolve_port: bool = False,
-                         penpal_reach: list[str] | None = None
+                         penpal_reach: list[str] | None = None,
+                         coins: int = 0, trades_left: int = 0
                          ) -> tuple[str | None, dict, list | None]:
     """The decomposed tick. Returns the SAME ``(reply, digest, changed)`` triple
     the monolithic path yields, so every downstream router is unchanged.
@@ -1920,7 +2127,8 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
         being, kind=kind, now=now, spent_today=spent_today, wallet=view,
         percepts=senses, first_of_day=first_of_day, siblings=siblings,
         letters_left=letters_left, visitors=visitors,
-        penpal_reach=penpal_reach), "orient")
+        penpal_reach=penpal_reach, coins=coins,
+        trades_left=trades_left), "orient")
     raw = _extract_raw(reply, require_act=True)
     if raw is None and reply is not None and kind != "dream":
         store.record_event(bid, "digest_repair_retry", {"faculty": "orient"},
@@ -2277,6 +2485,85 @@ async def _write_journal(being: dict, digest: dict, kind: str,
                     error=str(e))
 
 
+def introduction_reach(store: BeingsStore, being: dict) -> list[dict]:
+    """Who a CONTACT could introduce this being to (space plan Phase 5):
+    linked visitors reachable by a public, letter-capable sibling this
+    being has TRULY met on the ground. One hop, honestly earned — the
+    consent is the via's open door plus the real meeting."""
+    from captain_claw.flight_deck import being_federation
+    out: list[dict] = []
+    try:
+        contact_names = {c["with"] for c in store.contacts_for(
+            being["owner_id"], being["slug"])}
+        if not contact_names:
+            return []
+        visitors = [v for v in store.visitors_for(being["owner_id"])
+                    if being_federation.is_linked(v["id"])]
+        if not visitors:
+            return []
+        for sib in store.siblings(being["owner_id"], being["slug"]):
+            if sib["name"] not in contact_names:
+                continue
+            full = store.get(being["owner_id"], sib["slug"])
+            if not full.get("public") or not constitution.has_capability(
+                    full["stage"], "letters"):
+                continue
+            for v in visitors:
+                out.append({"to": v.get("name") or v.get("slug") or "?",
+                            "via": full, "visitor": v})
+            break                       # one open door is reach enough
+    except Exception:  # noqa: BLE001 — reach is an offer, never oxygen
+        return []
+    return out[:4]
+
+
+async def _deliver_introduction(store: BeingsStore, being: dict, intro: dict,
+                                now: datetime) -> None:
+    """An introduction (space plan Phase 5): a contact with real pen-pal
+    reach lends it — one hop, one letter, YOUR quota. The via is named in
+    the letter itself; both sides carry the event. Refused loudly when no
+    one this being truly knows can reach the name."""
+    from captain_claw.flight_deck import being_federation
+    stage = being["stage"]
+    if not constitution.has_capability(stage, "letters"):
+        raise BeingError(f"a {stage} cannot send letters yet")
+    to = (intro.get("to") or "").strip()
+    body = (intro.get("body") or "").strip()
+    if not to or not body:
+        raise BeingError("an empty letter says nothing")
+    sent = (store.letters_sent_today(being["id"], now)
+            + store.penpals_sent_today(being["id"], now))
+    if sent >= being_world.letters_cap(stage, now):
+        raise BeingError("letter limit reached for today")
+    match = next((r for r in introduction_reach(store, being)
+                  if r["to"].lower() == to.lower()
+                  or str(r["visitor"].get("slug") or "").lower()
+                  == to.lower()), None)
+    if match is None:
+        raise BeingError(f"no one you truly know can introduce you to "
+                         f"{to[:40]!r}")
+    via, visitor = match["via"], match["visitor"]
+    village = ""
+    try:
+        village = store.get_village_meta(being["owner_id"]).get("name") or ""
+    except Exception:  # noqa: BLE001
+        pass
+    signed = (body + f"\n\n(— {via['name']}, whom we both know, made this "
+              "introduction)")
+    await being_federation.send_letter_to_visitor(
+        store, visitor["id"], frm=being["name"], village=village,
+        body=signed)
+    store.record_event(being["id"], "penpal_sent",
+                       {"to": match["to"], "via": f"introduction:{via['name']}",
+                        "preview": body[:120]}, now=now)
+    store.record_event(being["id"], "introduced",
+                       {"to": match["to"], "via": via["name"]}, now=now)
+    store.record_event(via["id"], "made_introduction",
+                       {"for": being["name"], "to": match["to"]}, now=now)
+    store.milestone(being["id"], "first_introduction",
+                    {"to": match["to"]}, now=now)
+
+
 async def _deliver_penpal(store: BeingsStore, being: dict, pp: dict,
                           now: datetime) -> None:
     """Pen-pals (roadmap T2.8): a letter across villages, riding the live
@@ -2477,6 +2764,17 @@ async def _tick_locked(
     if credited:
         store.reset_attention(bid, DAILY_ATTENTION_CREDITS, now=now)
     being = store.get(owner, being["slug"])
+    # The ground (space plan Phase 1): the village exists, and any walk that
+    # ended while the being slept settles BEFORE it senses the world — the
+    # arrival event lands at the REAL arrival time and surfaces this tick.
+    arrived_info: dict | None = None
+    try:
+        being_world.ensure_village(store, owner, now=now)
+        arrived_info = store.settle_location(being, now=now)
+        if arrived_info:
+            being = store.get(owner, being["slug"])
+    except Exception as e:  # noqa: BLE001 — ground never sinks a tick
+        log.warning("village settle failed", slug=being["slug"], error=str(e))
     view = store.wallet_view(being)
     reserve = view["reserve_tokens"]
     if view["enforced"] and view["balance_tokens"] <= reserve:
@@ -2598,6 +2896,13 @@ async def _tick_locked(
         senses = percepts_since(store, being)
     except Exception:  # noqa: BLE001
         senses = []
+    # Co-presence (space plan Phase 3): whoever is settled at the same
+    # civic place right now — one hello per pair per day, a contact that
+    # grows, and honest gossip pulled from their own ledger.
+    try:
+        senses += being_world.encounters(store, being, now, kind)
+    except Exception as e:  # noqa: BLE001 — company is texture
+        log.warning("encounters failed", slug=being["slug"], error=str(e))
     try:
         sibs = store.siblings(owner, being["slug"])
         letters_before = store.letters_sent_today(bid, now)
@@ -2605,6 +2910,23 @@ async def _tick_locked(
             0, being_world.letters_cap(being["stage"], now) - letters_before)
     except Exception:  # noqa: BLE001
         sibs, letters_left, letters_before = [], None, None
+    try:
+        coins_balance = store.coin_balance(bid)
+    except Exception:  # noqa: BLE001 — money is texture, never oxygen
+        coins_balance = 0
+    try:
+        trades_left = max(0, being_world.trades_cap(being["stage"], now)
+                          - store.trades_today(bid, now))
+    except Exception:  # noqa: BLE001
+        trades_left = 0
+    # Strong bonuses, never gates (space plan Phase 3): the drives this
+    # ground favors land ×PLACE_BOOST through the _serve closure below.
+    boosted: frozenset[str] = frozenset()
+    if kind != "dream":
+        try:
+            boosted = being_world.place_drive_boosts(store, being, now)
+        except Exception:  # noqa: BLE001
+            boosted = frozenset()
     # Visitor notes (plan §9): only a public being hears the square, and only
     # a few unseen notes per tick. Marked read only after the being actually
     # THOUGHT this tick (a timed-out tick re-surfaces them) — replying stays
@@ -2636,7 +2958,19 @@ async def _tick_locked(
         nonlocal drives, starved_relief
         if _is_starved(name):
             starved_relief = True
+        if name in boosted:                # the ground favors this (Phase 3)
+            damp *= being_world.PLACE_BOOST
         drives = serve_drive(drives, name, now=now, damp=damp)
+
+    # A first visit anywhere serves explore outright (Phase 3) — the
+    # milestone gate makes it once per place per life.
+    if arrived_info and arrived_info.get("place") not in (None, "home"):
+        try:
+            if store.milestone(bid, f"first_visit_{arrived_info['place']}",
+                               {"place": arrived_info["place"]}, now=now):
+                _serve("explore")
+        except Exception:  # noqa: BLE001
+            pass
 
     # Mentoring feeds the legacy drive (plan §8): news of your children is
     # its own nourishment.
@@ -2644,6 +2978,12 @@ async def _tick_locked(
         _serve("legacy")
     # The parent reaching out is connection — it feeds the connect drive.
     if any(p.startswith("YOUR PARENT WROTE") for p in senses):
+        _serve("connect")
+    # Presence feeds it too (Phase 3): a genuine encounter — live at this
+    # tick, or heard on waking — is connection the being EARNED by being
+    # somewhere. An empty square truly differs from a full one now.
+    if any(p.startswith("CROSSED PATHS") or p.startswith("You crossed paths")
+           for p in senses):
         _serve("connect")
     # A stranger's note is contact too — the square feeds connection (but not
     # as strongly as the parent; it never counts as being parented).
@@ -2712,6 +3052,23 @@ async def _tick_locked(
                                     "visiting (address it by name)")
     except Exception:  # noqa: BLE001 — reach is an offer, never oxygen
         penpal_reach = []
+    # Introductions (space plan Phase 5): when the being has no reach of
+    # its OWN, a contact's open door may lend one hop — offered as a sense.
+    if not penpal_reach and kind != "dream" \
+            and constitution.has_capability(being["stage"], "letters") \
+            and (letters_left is None or letters_left > 0):
+        try:
+            intro = introduction_reach(store, being)
+            if intro:
+                names = ", ".join(sorted({r["to"] for r in intro})[:3])
+                senses.append(
+                    f"AN OPEN DOOR: {intro[0]['via']['name']}, whom you "
+                    f"truly know, could introduce you to {names} of another "
+                    'village. Add "introduce": {"to": "<name>", "body": '
+                    '"short and true"} — it spends a letter, like any '
+                    "other.")
+        except Exception:  # noqa: BLE001
+            pass
     # Is there any channel connection could flow through this tick? Feeds the
     # pressure damp in the prompts and keeps 'lonely' honest (loops plan F9).
     can_connect = connect_outlets(being, sibs, letters_left, senses)
@@ -2737,6 +3094,21 @@ async def _tick_locked(
     except Exception as e:  # noqa: BLE001
         log.warning("illness percepts failed", slug=being["slug"],
                     error=str(e))
+    # A fevered body walks itself home and stays (space plan Phase 1) —
+    # physics, not choice: the turn-for-home is a real departure on the
+    # ledger, and any go_to elsewhere is refused below.
+    if fever_cause:
+        try:
+            loc = being.get("location") or {"at": "home"}
+            if loc.get("at") != "home" and loc.get("to") != "home":
+                store.depart(owner, being["slug"], "home", now=now,
+                             reason="fever")
+                being = store.get(owner, being["slug"])
+                senses.append("Your fevered body turned for home on its own "
+                              "— rest is the only road today.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("fever homing failed", slug=being["slug"],
+                        error=str(e))
     t0 = now
     send = send_fn or _send_via_channel
     if (being.get("cognition") or "faculties") == "faculties":
@@ -2749,7 +3121,8 @@ async def _tick_locked(
             view=view, spent_today=store.spent_today(bid, now=now),
             first_of_day=first_of_day, siblings=sibs, letters_left=letters_left,
             visitors=visitors, last_refusals=last_refusals, drives=drives,
-            resolve_port=(send_fn is None), penpal_reach=penpal_reach or None)
+            resolve_port=(send_fn is None), penpal_reach=penpal_reach or None,
+            coins=coins_balance, trades_left=trades_left)
     else:
         try:
             mind_lines = being_mind.mind_prompt_lines(
@@ -2764,7 +3137,8 @@ async def _tick_locked(
             last_changed=last_changed, last_mismatch=last_mismatch,
             visitors=visitors or None,
             mind_lines=mind_lines or None,
-            penpal_reach=penpal_reach or None)
+            penpal_reach=penpal_reach or None,
+            coins=coins_balance, trades_left=trades_left)
         # 3b. Think — with COMPLETION GATES, each firing at most once THIS tick
         # so theater is caught in-turn instead of waiting a whole heartbeat:
         #   • repair — a reply came back with no parseable digest (weak-model
@@ -2924,8 +3298,18 @@ async def _tick_locked(
                 except Exception:  # noqa: BLE001
                     verified = False
             if verified:
+                # Reading finished at a read-place mints a little more
+                # (Phase 3) — a bonus, never a gate.
+                factor = 1.0
+                try:
+                    pid = being_world.place_of(store, being, now)
+                    if pid and pid != "home" and "read" in store.get_place(
+                            owner, pid)["affordances"]:
+                        factor = being_world.READING_PLACE_FACTOR
+                except Exception:  # noqa: BLE001
+                    factor = 1.0
                 store.complete_reading(owner, being["slug"], rr["item_id"],
-                                       rpath, now=now)
+                                       rpath, now=now, fee_factor=factor)
                 _serve("grow")
             else:
                 store.record_event(
@@ -2945,6 +3329,15 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("being society handling failed", slug=being["slug"],
                         error=str(e))
+    # The coin market + guestbooks (space plan Phase 3): real files for
+    # coins, one line per place per day — refused loudly when not.
+    if any(digest.get(k) for k in ("sell", "buy", "guestbook")):
+        try:
+            being_society.handle_market_digest(
+                store, store.get(owner, being["slug"]), digest, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("market handling failed", slug=being["slug"],
+                        error=str(e))
     # Pen-pals (T2.8) — async delivery over the federation link; real or
     # refused loudly (the refusal echoes into the next tick's senses).
     penpal_delivered = False
@@ -2960,6 +3353,41 @@ async def _tick_locked(
                                 "reason": str(e)}, now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("penpal delivery failed", slug=being["slug"],
+                        error=str(e))
+    # Introductions (space plan Phase 5): a contact's reach, lent one hop.
+    if digest.get("introduce"):
+        intro = digest["introduce"]
+        try:
+            await _deliver_introduction(
+                store, store.get(owner, being["slug"]), intro, now=now)
+            penpal_delivered = True
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "introduce", "to": intro.get("to"),
+                                "reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("introduction delivery failed", slug=being["slug"],
+                        error=str(e))
+    # Commissioned buildings (space plan Phase 5): skin first, then talk —
+    # propose when no fund is open, contribute while one is.
+    if digest.get("commission"):
+        cm = digest["commission"]
+        try:
+            if store.open_commission(owner):
+                store.contribute_commission(owner, being["slug"],
+                                            cm["coins"], now=now)
+            else:
+                store.propose_commission(owner, being["slug"],
+                                         cm.get("name") or "",
+                                         cm.get("why") or "",
+                                         cm.get("affordance") or "",
+                                         cm["coins"], now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "commission", "reason": str(e)},
+                               now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("commission handling failed", slug=being["slug"],
                         error=str(e))
     # The village radio (T3.16): an adult public being's one daily line.
     if digest.get("broadcast"):
@@ -2988,6 +3416,47 @@ async def _tick_locked(
                 store.milestone(bid, "first_broadcast", {}, now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("broadcast handling failed", slug=being["slug"],
+                        error=str(e))
+    # Walking (space plan Phase 1): the one field that moves a body. Real
+    # or refused loudly — geography first, then the fever gate.
+    if digest.get("go_to"):
+        dest = digest["go_to"]
+        try:
+            pid = store.resolve_place_ref(owner, dest)
+            if pid is None:
+                store.record_event(
+                    bid, "society_refused",
+                    {"what": "go_to", "to": dest,
+                     "reason": f"there is no place called {dest[:40]!r} here "
+                     "— read commons/village/MAP.md"}, now=now)
+            elif fever_cause and pid != "home":
+                store.record_event(
+                    bid, "society_refused",
+                    {"what": "go_to", "to": dest,
+                     "reason": "you are fevered; home is the only road"},
+                    now=now)
+            else:
+                store.depart(owner, being["slug"], pid, now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "go_to", "to": dest,
+                                "reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("go_to handling failed", slug=being["slug"],
+                        error=str(e))
+    # The one-way exchange (space plan Phase 2): coins → thinking. Real or
+    # refused loudly; any savings-ceiling clamp lands on the ledger.
+    if digest.get("convert_coins"):
+        try:
+            store.convert_coins(owner, being["slug"],
+                                digest["convert_coins"], now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "convert_coins",
+                                "coins": digest["convert_coins"],
+                                "reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("convert handling failed", slug=being["slug"],
                         error=str(e))
     # The naming rite (T2.10) — proposal only; the parent decides.
     if digest.get("chosen_name"):
