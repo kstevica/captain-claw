@@ -118,6 +118,11 @@ class CompactRequest(BaseModel):
     on: bool
 
 
+class InstinctsRequest(BaseModel):
+    # True → the reflex pass keeps this body live between mind ticks
+    on: bool
+
+
 class RechargeRequest(BaseModel):
     tokens: int
 
@@ -1036,6 +1041,18 @@ async def set_compact(slug: str, body: CompactRequest,
             await being_life.spawn_body(get_db(), store, being)
         except Exception as e:  # noqa: BLE001 — heals on next tick
             store.record_event(being["id"], "spawn_failed", {"error": str(e)})
+    return _run(store.vitals, user["id"], slug)
+
+
+@router.post("/{slug}/instincts")
+async def set_instincts(slug: str, body: InstinctsRequest,
+                        user: dict = Depends(get_current_user)):
+    """The body brain (docs/being-body-brain-plan.md): flip the reflex
+    layer for this being — between mind ticks its walks settle within a
+    minute, encounters are felt on the ground, and plan steps fulfill.
+    Pure Python, $0; Phase 2 adds the tiny capped-context decision brain."""
+    store = get_store()
+    _run(store.set_instincts, user["id"], slug, body.on)
     return _run(store.vitals, user["id"], slug)
 
 

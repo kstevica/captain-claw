@@ -501,6 +501,23 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_village_commissions
                     ON village_commissions(owner_id, state);
+
+                -- The mind's standing intentions for its feet (body-brain
+                -- plan Phase 1): small steps the reflex pass fulfills
+                -- between ticks. kind: go|meet; state: open|done|lapsed.
+                -- A fulfilled 'go' also makes the arrival milestone-
+                -- eligible — planned first visits mint, wandering never.
+                CREATE TABLE IF NOT EXISTS being_plans (
+                    id         TEXT PRIMARY KEY,
+                    being_id   TEXT NOT NULL,
+                    kind       TEXT NOT NULL,
+                    target     TEXT NOT NULL,
+                    state      TEXT NOT NULL DEFAULT 'open',
+                    created_at TEXT NOT NULL,
+                    done_at    TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_plans
+                    ON being_plans(being_id, state);
                 """
             )
             # Work can pay in coins (space plan Phase 2): the parent picks
@@ -592,6 +609,17 @@ class BeingsStore:
                 # "departed_at"} on the road — position at any instant is a
                 # pure function of this row and the clock (no scheduler).
                 ("location", "TEXT NOT NULL DEFAULT ''"),
+                # The body brain (docs/being-body-brain-plan.md): when on,
+                # the loop's reflex pass keeps this body live between mind
+                # ticks — arrivals settle within a minute, co-presence is
+                # felt on the ground, plan steps fulfill on arrival. Pure
+                # Python, $0. Default off: deploying changes nothing until
+                # the parent flips a being on.
+                ("instincts", "INTEGER NOT NULL DEFAULT 0"),
+                # Standing pins from the mind to its feet (body-brain plan):
+                # JSON {"stay": bool, "avoid": [places]} — Phase 2's tiny
+                # decision brain honors these; the reflex pass stores them.
+                ("intent", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -919,6 +947,13 @@ class BeingsStore:
         if not isinstance(b["location"], dict) or not (
                 b["location"].get("at") or b["location"].get("to")):
             b["location"] = {"at": "home"}
+        try:
+            raw_int = b.get("intent") or ""
+            b["intent"] = json.loads(raw_int) if raw_int else {}
+        except json.JSONDecodeError:
+            b["intent"] = {}
+        if not isinstance(b["intent"], dict):
+            b["intent"] = {}
         raw_bc = b.get("body_config") or ""
         try:
             b["body_config"] = json.loads(raw_bc) if raw_bc else None
@@ -1066,6 +1101,111 @@ class BeingsStore:
         self.record_event(b["id"], "compact_set", {"on": bool(on)}, now=now)
         return self.get(owner_id, slug)
 
+    def set_instincts(self, owner_id: str, slug: str, on: bool,
+                      now: datetime | None = None) -> dict:
+        """The body brain toggle (docs/being-body-brain-plan.md): when on,
+        the loop's reflex pass keeps this being's body live between mind
+        ticks — walks settle within a minute of the real ETA, encounters
+        are felt on the ground, plan steps fulfill on arrival."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now, instincts=1 if on else 0)
+        self.record_event(b["id"], "instincts_set", {"on": bool(on)}, now=now)
+        return self.get(owner_id, slug)
+
+    def set_intent(self, being_id: str, intent: dict | None,
+                   now: datetime | None = None) -> None:
+        """Standing pins from the mind to its feet: {"stay": bool,
+        "avoid": [places]}. Overwritten whole each time the mind speaks —
+        the newest word is the word."""
+        self._update(being_id, now or _utcnow(),
+                     intent=json.dumps(intent) if intent else "")
+
+    def instinct_beings(self) -> list[dict]:
+        """Every being the reflex pass covers: alive, instincts on."""
+        rows = self._c().execute(
+            "SELECT owner_id, slug FROM beings"
+            " WHERE state = 'alive' AND instincts = 1").fetchall()
+        return [self.get(r["owner_id"], r["slug"]) for r in rows]
+
+    # ── Plans: the mind's standing intentions for its feet ────────────────
+
+    def add_plan_steps(self, being_id: str, steps: list[dict],
+                       now: datetime | None = None) -> list[dict]:
+        """The mind writes intentions its feet can carry: [{kind, target}]
+        with kind go|meet. Open steps are capped (plans, not a queue) and
+        an identical open step is never doubled. Returns what landed."""
+        now = now or _utcnow()
+        added: list[dict] = []
+        with self._lock:
+            c = self._c()
+            open_rows = c.execute(
+                "SELECT kind, target FROM being_plans WHERE being_id = ?"
+                " AND state = 'open'", (being_id,)).fetchall()
+            have = {(r["kind"], r["target"]) for r in open_rows}
+            room = max(0, constitution.PLAN_STEPS_MAX - len(have))
+            for s in steps:
+                if room <= 0:
+                    break
+                kind = str(s.get("kind") or "")
+                target = str(s.get("target") or "").strip()
+                if kind not in ("go", "meet") or not target \
+                        or (kind, target) in have:
+                    continue
+                pid = uuid.uuid4().hex[:12]
+                c.execute(
+                    "INSERT INTO being_plans (id, being_id, kind, target,"
+                    " state, created_at) VALUES (?,?,?,?,'open',?)",
+                    (pid, being_id, kind, target, _iso(now)))
+                have.add((kind, target))
+                room -= 1
+                added.append({"id": pid, "kind": kind, "target": target})
+            c.commit()
+        return added
+
+    def open_plan_steps(self, being_id: str,
+                        now: datetime | None = None) -> list[dict]:
+        """Open steps, oldest first. Steps the world outran lapse quietly
+        on read (the ledger-computed pattern) — a stale plan is not a debt."""
+        now = now or _utcnow()
+        cutoff = _iso(now - timedelta(days=constitution.PLAN_LAPSE_DAYS))
+        with self._lock:
+            c = self._c()
+            c.execute(
+                "UPDATE being_plans SET state = 'lapsed', done_at = ?"
+                " WHERE being_id = ? AND state = 'open' AND created_at < ?",
+                (_iso(now), being_id, cutoff))
+            c.commit()
+        rows = self._c().execute(
+            "SELECT * FROM being_plans WHERE being_id = ? AND state = 'open'"
+            " ORDER BY created_at", (being_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def fulfill_plan_step(self, being_id: str, step_id: str,
+                          now: datetime | None = None) -> None:
+        with self._lock:
+            self._c().execute(
+                "UPDATE being_plans SET state = 'done', done_at = ?"
+                " WHERE id = ? AND being_id = ? AND state = 'open'",
+                (_iso(now or _utcnow()), step_id, being_id))
+            self._c().commit()
+
+    def fulfill_meet_plans(self, being_id: str, other_slug: str,
+                           other_name: str,
+                           now: datetime | None = None) -> bool:
+        """Co-presence fulfills any open 'meet' step for that being —
+        the world did what the mind asked; the mind hears it next tick."""
+        now = now or _utcnow()
+        done = False
+        for s in self.open_plan_steps(being_id, now=now):
+            if s["kind"] == "meet" and s["target"] == other_slug:
+                self.fulfill_plan_step(being_id, s["id"], now=now)
+                self.record_event(being_id, "plan_fulfilled",
+                                  {"kind": "meet", "target": other_slug,
+                                   "name": other_name}, now=now)
+                done = True
+        return done
+
     # ── Elderhood + the village radio (roadmap T3.14 / T3.16) ─────────
 
     def set_elder_after(self, owner_id: str, slug: str, days: int | None,
@@ -1212,7 +1352,11 @@ class BeingsStore:
         """Arrival is computed on read (the fever/steward pattern): if the
         walk has ended by `now`, write the rest state and record `arrived`
         AT the real arrival time — the world is simply further along when
-        the being wakes. Returns {place, name, at} when it settled."""
+        the being wakes. Returns {place, name, at} when it settled.
+
+        Body-brain plan: the arrival carries who walked (`by`: mind|feet),
+        and fulfills any open 'go' plan step for this place — a planned
+        arrival stays milestone-eligible even when the feet carried it."""
         now = now or _utcnow()
         loc = being.get("location") or {"at": "home"}
         if loc.get("at") or not loc.get("to"):
@@ -1227,17 +1371,34 @@ class BeingsStore:
         arrived_at = pos.get("arrived_at") or now
         name = being_world.place_name(self, being, place)
         hhmm = being_world._local(arrived_at).strftime("%H:%M")
-        self.record_event(being["id"], "arrived",
-                          {"place": place, "name": name, "hhmm": hhmm},
-                          now=arrived_at)
+        planned = False
+        try:
+            for s in self.open_plan_steps(being["id"], now=arrived_at):
+                if s["kind"] == "go" and s["target"] == place:
+                    self.fulfill_plan_step(being["id"], s["id"],
+                                           now=arrived_at)
+                    self.record_event(being["id"], "plan_fulfilled",
+                                      {"kind": "go", "target": place,
+                                       "name": name}, now=arrived_at)
+                    planned = True
+        except Exception:  # noqa: BLE001 — plans are texture, never oxygen
+            pass
+        data = {"place": place, "name": name, "hhmm": hhmm,
+                "by": loc.get("by") or "mind"}
+        if planned:
+            data["planned"] = True
+        self.record_event(being["id"], "arrived", data, now=arrived_at)
         return {"place": place, "name": name, "at": _iso(arrived_at)}
 
     def depart(self, owner_id: str, slug: str, dest: str,
-               now: datetime | None = None, *, reason: str = "") -> dict:
+               now: datetime | None = None, *, reason: str = "",
+               by: str = "mind") -> dict:
         """Set out for a place. Settles first (you leave from where you
         TRULY are — even mid-road), then the location row + the clock ARE
         the walk; nothing runs in the background. Unknown ground is refused
-        loudly; already-there is a quiet no-op (no theater to record)."""
+        loudly; already-there is a quiet no-op (no theater to record).
+        `by` records who walked — the mind (go_to, rites) or the feet
+        (body-brain reflexes) — and rides into the arrival event."""
         now = now or _utcnow()
         b = self.get(owner_id, slug)
         if b["state"] != "alive":
@@ -1256,10 +1417,10 @@ class BeingsStore:
         dest_xy = being_world.place_xy(self, b, pid)
         minutes = being_world.travel_minutes(b, origin, dest_xy)
         loc = {"to": pid, "from": cur.get("at"), "origin": origin,
-               "departed_at": _iso(now)}
+               "departed_at": _iso(now), "by": by}
         self._update(b["id"], now, location=json.dumps(loc))
         data = {"from": cur.get("at") or "the road", "to": pid,
-                "minutes": int(round(minutes))}
+                "minutes": int(round(minutes)), "by": by}
         if reason:
             data["reason"] = reason
         self.record_event(b["id"], "departed", data, now=now)
@@ -2258,6 +2419,9 @@ class BeingsStore:
             "location": b.get("location") or {"at": "home"},
             "position": self._position_view(b),
             "coins": self.coin_balance(b["id"]),
+            "instincts": bool(b.get("instincts")),
+            "intent": b.get("intent") or {},
+            "plan": self.open_plan_steps(b["id"]),
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "cognition": b.get("cognition") or "faculties",
             "compact_mode": bool(b.get("compact_mode")),

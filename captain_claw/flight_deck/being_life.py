@@ -1010,13 +1010,29 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
             book = ("" if (d.get("place") or "home") == "home"
                     else ' The guestbook lies open — add "guestbook": '
                          '"one line" to your digest to leave a trace.')
-            lines.append(f"You reached {where}{when} — the walk is done; "
+            walker = ("Your feet carried you to" if d.get("by") == "feet"
+                      else "You reached")
+            lines.append(f"{walker} {where}{when} — the walk is done; "
                          f"you are here now.{book}")
         elif k == "crossed_paths":
             lines.append(
                 f"You crossed paths with {d.get('name')} at "
                 f"{d.get('place_name') or d.get('place')} — small company, "
                 "real. A letter would land warmer today.")
+        elif k == "plan_fulfilled":
+            if d.get("kind") == "meet":
+                lines.append(f"AS YOU PLANNED: you found {d.get('name')} — "
+                             "the meeting you meant to have, had.")
+            else:
+                lines.append(f"AS YOU PLANNED: you reached "
+                             f"{d.get('name') or d.get('target')} — "
+                             "that step is done.")
+        elif k == "browsed":
+            if d.get("titles"):
+                lines.append(
+                    "Your feet idled past the stalls: "
+                    + ", ".join(f'"{t}"' for t in d["titles"][:3])
+                    + " — buying is the mind's business, if it cares.")
         elif k == "market_sold":
             lines.append(f'MARKET: your "{d.get("title")}" sold to '
                          f'{d.get("to")} for {d.get("price_coins")} coins.')
@@ -1809,6 +1825,37 @@ def _normalize_digest(raw: dict) -> dict:
                           "path": str(reading_report["path"]).strip()[:200]}
     else:
         reading_report = None
+    # The body brain (docs/being-body-brain-plan.md): plan steps for the
+    # feet ([{go|meet|attend: target}] — attend is a kind of going) and
+    # standing pins ({"stay": bool, "avoid": [places]}).
+    plan = raw.get("plan")
+    if isinstance(plan, list):
+        steps = []
+        for s in plan[:6]:
+            if not isinstance(s, dict):
+                continue
+            for key, kind in (("go", "go"), ("attend", "go"),
+                              ("meet", "meet")):
+                if s.get(key) and str(s[key]).strip():
+                    steps.append({"kind": kind,
+                                  "target": str(s[key]).strip()[:60]})
+                    break
+        plan = steps or None
+    else:
+        plan = None
+    intend = raw.get("intend")
+    if isinstance(intend, dict):
+        clean: dict = {}
+        if isinstance(intend.get("stay"), bool):
+            clean["stay"] = intend["stay"]
+        if isinstance(intend.get("avoid"), list):
+            avoid = [str(a).strip()[:60] for a in intend["avoid"][:6]
+                     if str(a or "").strip()]
+            if avoid:
+                clean["avoid"] = avoid
+        intend = clean if clean else None
+    else:
+        intend = None
     return {
         "act_kind": act,
         "summary": str(raw.get("summary") or "")[:300],
@@ -1842,6 +1889,8 @@ def _normalize_digest(raw: dict) -> dict:
         "guestbook": guestbook,
         "introduce": introduce,
         "commission": commission,
+        "plan": plan,
+        "intend": intend,
     }
 
 
@@ -2962,15 +3011,27 @@ async def _tick_locked(
             damp *= being_world.PLACE_BOOST
         drives = serve_drive(drives, name, now=now, damp=damp)
 
-    # A first visit anywhere serves explore outright (Phase 3) — the
-    # milestone gate makes it once per place per life.
-    if arrived_info and arrived_info.get("place") not in (None, "home"):
-        try:
-            if store.milestone(bid, f"first_visit_{arrived_info['place']}",
-                               {"place": arrived_info["place"]}, now=now):
+    # First visits serve explore (Phase 3), by choice or by plan (body-
+    # brain plan): every arrival since the last tick counts — the reflex
+    # pass may have settled it long before this wake — but only a MIND-
+    # walked or PLANNED one is milestone-eligible; feet wandering on
+    # their own (Phase 2) never burns the once-per-life bonus.
+    try:
+        last_at = being.get("last_tick_at") or ""
+        for e in reversed(store.events(owner, being["slug"], limit=30)):
+            if (last_at and e["at"] <= last_at) or e["kind"] != "arrived":
+                continue
+            d = e["data"]
+            place = d.get("place")
+            if place in (None, "home"):
+                continue
+            if d.get("by") == "feet" and not d.get("planned"):
+                continue
+            if store.milestone(bid, f"first_visit_{place}",
+                               {"place": place}, now=now):
                 _serve("explore")
-        except Exception:  # noqa: BLE001
-            pass
+    except Exception:  # noqa: BLE001
+        pass
 
     # Mentoring feeds the legacy drive (plan §8): news of your children is
     # its own nourishment.
@@ -3083,6 +3144,15 @@ async def _tick_locked(
             store, being, now=now, kind=kind, first_of_day=first_of_day)
     except Exception as e:  # noqa: BLE001 — texture never sinks a tick
         log.warning("umwelt percepts failed", slug=being["slug"], error=str(e))
+    # The feet take instruction (body-brain plan Phase 1): taught each
+    # morning while instincts are on — plans are fulfilled between thinks.
+    if kind == "wake" and first_of_day and being.get("instincts"):
+        senses.append(
+            'YOUR FEET CARRY PLANS: add "plan": [{"go": "library"}, '
+            '{"meet": "ada"}] to your digest and your body fulfills the '
+            'steps between thinks — a planned first visit still counts as '
+            'discovery. "intend": {"stay": true} keeps you home; '
+            '{"avoid": ["market"]} steers clear. Small steps, truly walked.')
     # Illness as consequence (roadmap T2.13): fever and confusion computed
     # from the last day of the REAL ledger — never dice. Fever also floors
     # the cadence below (the body spaces itself out) and colors affect.
@@ -3443,6 +3513,62 @@ async def _tick_locked(
                                 "reason": str(e)}, now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("go_to handling failed", slug=being["slug"],
+                        error=str(e))
+    # The mind writes intentions for its feet (body-brain plan Phase 1):
+    # plan steps the reflexes fulfill between ticks — places must be real
+    # ground, meetings must name a real neighbor; junk is refused loudly.
+    if digest.get("plan"):
+        try:
+            steps: list[dict] = []
+            listed: list[dict] | None = None
+            for s in digest["plan"]:
+                t = s["target"]
+                if s["kind"] == "go":
+                    place_id = store.resolve_place_ref(owner, t)
+                    if place_id is None:
+                        store.record_event(
+                            bid, "society_refused",
+                            {"what": "plan", "to": t,
+                             "reason": f"there is no place called {t[:40]!r} "
+                             "here — read commons/village/MAP.md"}, now=now)
+                        continue
+                    steps.append({"kind": "go", "target": place_id})
+                else:                                    # meet
+                    if listed is None:
+                        listed = store.list(owner)
+                    tl = t.casefold()
+                    other = next(
+                        (r for r in listed if r["slug"] != being["slug"]
+                         and (r["slug"] == tl
+                              or (r.get("name") or "").casefold() == tl)),
+                        None)
+                    if other is None:
+                        store.record_event(
+                            bid, "society_refused",
+                            {"what": "plan", "to": t,
+                             "reason": f"no one here goes by {t[:40]!r}"},
+                            now=now)
+                        continue
+                    steps.append({"kind": "meet", "target": other["slug"]})
+            if steps:
+                added = store.add_plan_steps(bid, steps, now=now)
+                if added:
+                    store.record_event(
+                        bid, "plan_set",
+                        {"steps": [f'{s["kind"]}:{s["target"]}'
+                                   for s in added]}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("plan handling failed", slug=being["slug"],
+                        error=str(e))
+    # Standing pins for the feet: stay home / avoid places. Overwritten
+    # whole each time the mind speaks — the newest word is the word.
+    if digest.get("intend"):
+        try:
+            store.set_intent(bid, digest["intend"], now=now)
+            store.record_event(bid, "intent_set", dict(digest["intend"]),
+                               now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("intend handling failed", slug=being["slug"],
                         error=str(e))
     # The one-way exchange (space plan Phase 2): coins → thinking. Real or
     # refused loudly; any savings-ceiling clamp lands on the ledger.

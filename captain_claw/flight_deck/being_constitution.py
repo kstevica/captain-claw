@@ -86,6 +86,13 @@ _TRADES_PER_DAY = {"egg": 0, "infant": 0, "child": 3,
 # burn on approval (the economy's one true sink besides conversion).
 COMMISSION_COST_COINS = 50
 
+# The body brain (docs/being-body-brain-plan.md): the mind may keep a few
+# standing intentions for its feet — small steps the reflex pass fulfills
+# between ticks. Bounded so plans stay plans, not a queue; stale steps
+# lapse quietly (a plan the world outran is not a debt).
+PLAN_STEPS_MAX = 5
+PLAN_LAPSE_DAYS = 7
+
 # Procreation physics (plan §8): the dowry moves from the parents' savings
 # to the child (reason='procreation') — earned wealth, never conjured; a
 # couple splits it. Consent is the human parent's authenticated approval.

@@ -827,53 +827,117 @@ def trades_cap(stage: str, now: datetime) -> int:
     return cap
 
 
-def encounters(store: BeingsStore, being: dict, now: datetime,
-               kind: str) -> list[str]:
-    """Co-presence, felt (space plan Phase 3): another being settled at
-    the same CIVIC place right now → one crossed_paths event to each per
-    pair per day, a contact that grows, and a gossip line — what they've
-    truly been up to, pulled from their own ledger. Homes are private:
-    two beings 'at home' are at DIFFERENT homes."""
-    if kind != "wake":
-        return []
+def _co_present(store: BeingsStore, being: dict, now: datetime,
+                ) -> tuple[str | None, str, list[dict]]:
+    """Where this being stands and who else stands there — civic ground
+    only (homes are private: two beings 'at home' are at DIFFERENT homes)."""
     pid = place_of(store, being, now)
     if not pid or pid == "home":
-        return []
-    lines: list[str] = []
+        return None, "", []
     try:
         others = [store.get(being["owner_id"], r["slug"])
                   for r in store.list(being["owner_id"])
                   if r.get("state") == "alive" and r["slug"] != being["slug"]]
     except Exception:  # noqa: BLE001
-        return []
+        return None, "", []
     here = place_name(store, being, pid)
-    for other in others:
-        if other.get("stage") == "egg" or place_of(store, other, now) != pid:
-            continue
-        try:
-            fresh = store.touch_contact(being["owner_id"], being["id"],
-                                        other["id"], now=now)
-        except Exception:  # noqa: BLE001
-            continue
-        if not fresh:
-            continue                      # already crossed today — one hello
-        gossip = ""
-        try:
-            for e in store.events(being["owner_id"], other["slug"], limit=10):
-                if e["kind"] == "tick" and e["data"].get("summary"):
-                    gossip = f' — lately: "{e["data"]["summary"][:120]}"'
-                    break
-        except Exception:  # noqa: BLE001
-            pass
-        store.record_event(being["id"], "crossed_paths",
-                           {"with": other["slug"], "name": other["name"],
-                            "place": pid, "place_name": here}, now=now)
-        store.record_event(other["id"], "crossed_paths",
-                           {"with": being["slug"], "name": being["name"],
-                            "place": pid, "place_name": here}, now=now)
-        lines.append(f"CROSSED PATHS: {other['name']} is here at {here}"
-                     f"{gossip}")
+    present = [o for o in others if o.get("stage") != "egg"
+               and place_of(store, o, now) == pid]
+    return pid, here, present
+
+
+def _meet(store: BeingsStore, being: dict, other: dict, pid: str,
+          here: str, now: datetime) -> tuple[bool, str]:
+    """One real co-presence moment: the contact grows (once per pair per
+    day, deduped in the store), planned meetings fulfill for BOTH sides
+    (co-presence is real, fresh or not), and a fresh meeting lands
+    crossed_paths on each ledger. Returns (fresh, gossip)."""
+    try:
+        fresh = store.touch_contact(being["owner_id"], being["id"],
+                                    other["id"], now=now)
+    except Exception:  # noqa: BLE001
+        return False, ""
+    try:
+        store.fulfill_meet_plans(being["id"], other["slug"], other["name"],
+                                 now=now)
+        store.fulfill_meet_plans(other["id"], being["slug"], being["name"],
+                                 now=now)
+    except Exception:  # noqa: BLE001 — plans are texture
+        pass
+    if not fresh:
+        return False, ""                  # already crossed today — one hello
+    gossip = ""
+    try:
+        for e in store.events(being["owner_id"], other["slug"], limit=10):
+            if e["kind"] == "tick" and e["data"].get("summary"):
+                gossip = f' — lately: "{e["data"]["summary"][:120]}"'
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    store.record_event(being["id"], "crossed_paths",
+                       {"with": other["slug"], "name": other["name"],
+                        "place": pid, "place_name": here}, now=now)
+    store.record_event(other["id"], "crossed_paths",
+                       {"with": being["slug"], "name": being["name"],
+                        "place": pid, "place_name": here}, now=now)
+    return True, gossip
+
+
+def encounters(store: BeingsStore, being: dict, now: datetime,
+               kind: str) -> list[str]:
+    """Co-presence, felt (space plan Phase 3): another being settled at
+    the same CIVIC place right now → one crossed_paths event to each per
+    pair per day, a contact that grows, and a gossip line — what they've
+    truly been up to, pulled from their own ledger."""
+    if kind != "wake":
+        return []
+    pid, here, present = _co_present(store, being, now)
+    if not pid:
+        return []
+    lines: list[str] = []
+    for other in present:
+        fresh, gossip = _meet(store, being, other, pid, here, now)
+        if fresh:
+            lines.append(f"CROSSED PATHS: {other['name']} is here at {here}"
+                         f"{gossip}")
     return lines
+
+
+def reflex_encounters(store: BeingsStore, being: dict,
+                      now: datetime) -> int:
+    """Between-tick co-presence (body-brain plan Phase 1): the same
+    meeting physics the tick runs, minus the live percept line — events
+    land the minute they happen; the mind hears them at its next tick.
+    Returns how many fresh meetings landed."""
+    pid, here, present = _co_present(store, being, now)
+    if not pid:
+        return 0
+    return sum(1 for other in present
+               if _meet(store, being, other, pid, here, now)[0])
+
+
+def reflex_pass(store: BeingsStore, being: dict, now: datetime) -> int:
+    """One being's between-tick reflexes (body-brain plan Phase 1): pure
+    Python, $0, position-only — the pass creates FACTS (settled arrivals,
+    felt encounters, fulfilled plans, a fevered turn for home); every
+    feeling those facts earn lands at the next mind tick, where the
+    percepts surface and PLACE_BOOST rewards good positioning. Returns
+    how many facts it created."""
+    acted = 0
+    if store.settle_location(being, now=now):
+        acted += 1
+        being = store.get(being["owner_id"], being["slug"])
+    try:
+        if fever_state(store, being, now):
+            loc = being.get("location") or {"at": "home"}
+            if loc.get("at") != "home" and loc.get("to") != "home":
+                store.depart(being["owner_id"], being["slug"], "home",
+                             now=now, reason="fever", by="feet")
+                return acted + 1
+            return acted              # fevered: resting, not mingling
+    except Exception:  # noqa: BLE001 — the illness check is texture here
+        pass
+    return acted + reflex_encounters(store, being, now)
 
 
 def commission_spot(store: BeingsStore, owner_id: str,

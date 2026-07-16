@@ -128,6 +128,9 @@ export interface BeingVitals {
   tick_interval_minutes: number | null
   cognition: 'monolith' | 'faculties'
   compact_mode: boolean
+  instincts: boolean
+  intent: { stay?: boolean; avoid?: string[] }
+  plan: { id: string; kind: string; target: string }[]
   body_archetype: string
   unread_from_being: number
   public: boolean
@@ -465,6 +468,13 @@ export const setCognition = (slug: string, mode: Cognition) =>
 // system prompt, capped context). Same narrative, fewer tokens per heartbeat.
 export const setCompactMode = (slug: string, on: boolean) =>
   fdFetch<BeingVitals>(`/beings/${slug}/compact`, {
+    method: 'POST', body: JSON.stringify({ on }),
+  })
+
+// The body brain (instincts): between mind ticks the feet settle walks,
+// feel encounters, fulfill plans, and make tiny capped decisions.
+export const setInstincts = (slug: string, on: boolean) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/instincts`, {
     method: 'POST', body: JSON.stringify({ on }),
   })
 

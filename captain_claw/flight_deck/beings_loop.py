@@ -17,7 +17,9 @@ import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 
+from captain_claw.flight_deck import being_instinct
 from captain_claw.flight_deck import being_life
+from captain_claw.flight_deck import being_world
 from captain_claw.flight_deck.beings import get_store
 from captain_claw.logging import get_logger
 
@@ -95,6 +97,37 @@ async def _pass(db, now: datetime | None = None) -> int:
     return ticked
 
 
+async def _instinct_pass(db, now: datetime | None = None) -> int:
+    """The body brain's pass (docs/being-body-brain-plan.md): for every
+    alive being with instincts on — first the reflexes (settle finished
+    walks, feel co-presence, turn a fevered body home, fulfill plan
+    steps: pure Python, $0), then at most ONE tiny decision call if a
+    trigger says the ground moved (being_instinct.decide — hard-capped
+    context, metered to the allowance). Quiet hours mean the feet sleep
+    too; one being's failure never touches another's."""
+    store = get_store()
+    now = now or _utcnow()
+    acted = 0
+    try:
+        beings = store.instinct_beings()
+    except Exception as e:  # noqa: BLE001
+        log.warning("instinct pass listing failed", error=str(e))
+        return 0
+    for being in beings:
+        try:
+            quiet, _ = _in_quiet(being["owner_id"], now)
+            if quiet:
+                continue
+            acted += being_world.reflex_pass(store, being, now)
+            fresh = store.get(being["owner_id"], being["slug"])
+            if await being_instinct.decide(db, store, fresh, now=now):
+                acted += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("instinct pass failed", slug=being.get("slug"),
+                        error=str(e))
+    return acted
+
+
 async def beings_loop(db, stop_event: asyncio.Event) -> None:
     log.info("beings loop started", poll_seconds=POLL_SECONDS)
     while not stop_event.is_set():
@@ -104,6 +137,15 @@ async def beings_loop(db, stop_event: asyncio.Event) -> None:
                 log.info("beings loop pass", ticked=n)
         except Exception as e:  # noqa: BLE001
             log.warning("beings loop pass error", error=str(e))
+        # The body brain rides the same poll (body-brain plan): reflexes
+        # are milliseconds of Python; a decision call fires only when a
+        # trigger says the ground moved, hard-capped and metered.
+        try:
+            a = await _instinct_pass(db)
+            if a:
+                log.info("instinct pass", acted=a)
+        except Exception as e:  # noqa: BLE001
+            log.warning("instinct pass error", error=str(e))
         # Federation (§9.1): keep an outbound WS link alive for each visiting
         # being (NAT-friendly), and drop visitors of ours that stopped checking
         # in. reconcile() only starts/stops maintainers — the links themselves

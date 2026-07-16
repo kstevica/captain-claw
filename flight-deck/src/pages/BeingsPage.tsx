@@ -36,7 +36,7 @@ import {
   getVillageLife, judgeCommission, setStewardStipend, type VillageLife,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
-  setCadence, setCognition, setCompactMode, setHouseRules, setMediaDiet,
+  setCadence, setCognition, setCompactMode, setHouseRules, setInstincts, setMediaDiet,
   setStage, setVentureState,
   tickBeing, wakeBeing, GRANT_AMOUNTS, TICK_INTERVAL_CHOICES,
 } from '../services/beings'
@@ -93,6 +93,9 @@ const EVENT_DOT: Record<string, string> = {
   made_introduction: 'bg-fuchsia-400', commission_proposed: 'bg-amber-400',
   commission_contributed: 'bg-amber-400', commission_funded: 'bg-amber-300',
   commission_built: 'bg-emerald-400', commission_refunded: 'bg-zinc-500',
+  instinct: 'bg-teal-300', browsed: 'bg-amber-300',
+  plan_set: 'bg-sky-300', plan_fulfilled: 'bg-emerald-400',
+  intent_set: 'bg-sky-300', instincts_set: 'bg-zinc-500',
 }
 
 // Coins are money, not food (space plan Phase 2) — say which one is on the
@@ -205,6 +208,31 @@ function summarizeEventData(e: BeingEvent): string {
     case 'departed': return `set out for ${d.to} — ~${d.minutes} min walk${d.reason ? ` (${d.reason})` : ''}`
     case 'arrived': return `arrived at ${d.name || d.place}${d.hhmm ? ` at ${d.hhmm}` : ''}`
     case 'crossed_paths': return `crossed paths with ${d.name} at ${d.place_name || d.place}`
+    case 'instinct': {
+      const trig = d.trigger ? ` (${d.trigger})` : ''
+      switch (d.act) {
+        case 'go': return `feet set out for ${d.to}${trig}`
+        case 'hello': return `feet greeted ${(d.with as string[] | undefined)?.join(', ') || 'the company'}${trig}`
+        case 'browse': return `feet browsed the stalls${trig}`
+        case 'linger': return `feet lingered${d.note ? ` — ${d.note}` : ''}${trig}`
+        default: return `feet stood still${d.note ? ` — ${d.note}` : ''}${trig}`
+      }
+    }
+    case 'browsed': return (d.titles as string[] | undefined)?.length
+      ? `browsed the stalls: ${(d.titles as string[]).slice(0, 3).map(t => `'${t}'`).join(', ')}`
+      : 'browsed the stalls — nothing on offer'
+    case 'plan_set': return `planned: ${(d.steps as string[] | undefined)?.join(' · ') || ''}`
+    case 'plan_fulfilled': return d.kind === 'meet'
+      ? `did as planned — found ${d.name || d.target}`
+      : `did as planned — reached ${d.name || d.target}`
+    case 'intent_set': {
+      const pins = [
+        d.stay === true ? 'stay home' : d.stay === false ? 'roam freely' : '',
+        (d.avoid as string[] | undefined)?.length ? `avoid ${(d.avoid as string[]).join(', ')}` : '',
+      ].filter(Boolean).join(' · ')
+      return pins ? `pinned its feet: ${pins}` : 'cleared its feet pins'
+    }
+    case 'instincts_set': return `instincts ${d.on ? 'on — the body lives between thinks' : 'off'}`
     case 'introduced': return `was introduced to ${d.to} (via ${d.via})`
     case 'made_introduction': return `introduced ${d.for} to ${d.to}`
     case 'commission_proposed': return `proposed '${d.name}' — ${d.coins}/${d.target} coins down`
@@ -2689,7 +2717,7 @@ function BeingCard({ item, meta, onChanged }: {
             <span className="font-medium">Care</span>
             {!careOpen && (
               <span className="truncate text-zinc-600">
-                {w!.allowance_preset}/day · {v.tick_interval_minutes ? `every ${v.tick_interval_minutes}m` : 'own pace'} · {v.compact_mode ? 'compact' : 'full'}{v.body_archetype ? ' · custom body' : ''}
+                {w!.allowance_preset}/day · {v.tick_interval_minutes ? `every ${v.tick_interval_minutes}m` : 'own pace'} · {v.compact_mode ? 'compact' : 'full'}{v.instincts ? ' · instincts' : ''}{v.body_archetype ? ' · custom body' : ''}
               </span>
             )}
             <ChevronDown className={`ml-auto h-3 w-3 shrink-0 transition-transform ${careOpen ? 'rotate-180' : ''}`} />
@@ -2778,6 +2806,26 @@ function BeingCard({ item, meta, onChanged }: {
                   <span className="text-[10px] text-zinc-500">lean instructions + lean body · respawns</span>
                 )}
               </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="w-16 shrink-0 text-zinc-500">feet</span>
+                <select value={v.instincts ? 'on' : 'off'}
+                  onChange={(e) => void act('instincts', () => setInstincts(item.slug, e.target.value === 'on'))}
+                  className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+                  <option value="off">Still (default)</option>
+                  <option value="on">Instincts</option>
+                </select>
+                {v.instincts && (
+                  <span className="text-[10px] text-zinc-500">walks, greets, browses between thinks</span>
+                )}
+              </div>
+              {(v.plan?.length ?? 0) > 0 && (
+                <div className="flex items-start gap-2 text-xs">
+                  <span className="w-16 shrink-0 text-zinc-500">plan</span>
+                  <span className="text-[10px] text-zinc-400">
+                    {v.plan.map((s) => `${s.kind} ${s.target}`).join(' · ')}
+                  </span>
+                </div>
+              )}
               <div className="flex items-center gap-2 text-xs">
                 <span className="w-16 shrink-0 text-zinc-500">body</span>
                 <select value={v.body_archetype ?? ''}
