@@ -6,10 +6,11 @@
 // /b/<slug>, so a logged-out stranger reaches it with no account.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ArrowDownUp, ArrowLeft, ArrowUpRight, BookOpen, CalendarDays, ChevronDown,
   ChevronLeft, ChevronRight, Clock, Files, Fingerprint, GitFork, Globe, Loader2,
-  Map as MapIcon, MessageCircle, Moon, Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun,
+  Map as MapIcon, Maximize2, MessageCircle, Minimize2, Moon, Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun,
   Terminal, Users, Wrench, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
@@ -17,14 +18,15 @@ import remarkGfm from 'remark-gfm'
 import {
   type PublicApi, type PublicFile, type PublicGraph, type PublicProfile,
   type PublicThread, type PublicVisitorCard, type PublicVisitorProfile,
-  PUBLIC_MSG_MAX, cadenceLabel, clearThreadId, getPublicBeing,
-  getPublicVillageMap, getVisitorProfile, listPublicBeings, makeBeingApi,
-  makeVisitorApi, savedName, savedThreadId, saveName, saveThreadId,
+  PUBLIC_MSG_MAX, cadenceLabel, clearThreadId, getPublicBeing, getPublicFile,
+  getPublicFiles, getPublicVillageMap, getVisitorProfile, listPublicBeings,
+  makeBeingApi, makeVisitorApi, savedName, savedThreadId, saveName, saveThreadId,
 } from '../services/beingsPublic'
 import type { VillageBeingPos, VillageMapData, VillagePlace } from '../services/beings'
 import { IskraAvatar } from '../components/village/avatars'
 import { IsoScene } from '../components/village/IsoScene'
 import { posOf as walkPosOf, statusOf as walkStatusOf } from '../components/village/walk'
+import { folderFor, shortName, isBoilerplate } from '../components/village/places'
 
 // ── Theme (standalone): default dark, respect a returning FD user's choice ──
 
@@ -514,15 +516,163 @@ function RosterCard({ p, href, visitor, host, linked }: {
 
 const hostOf = (origin: string) => { try { return new URL(origin).host } catch { return origin } }
 
+const AFF_HUE: Record<string, string> = {
+  gather: '#a78bfa', trade: '#f59e0b', read: '#38bdf8', create: '#fbbf24',
+  tend: '#34d399', play: '#f472b6', remember: '#94a3b8', rest: '#818cf8',
+}
+
+// An observer's look at a public iskra — its curated public face (avatar,
+// mood, interests, and with room its latest thought and radio line) and a
+// door to its full page. No coins, no private vitals, no nudge.
+function PubBeingCard({ b, statusOf, full }: {
+  b: VillageBeingPos; statusOf: (b: VillageBeingPos) => string; full: boolean
+}) {
+  const [prof, setProf] = useState<PublicProfile | null>(null)
+  useEffect(() => {
+    let dead = false; setProf(null)
+    void getPublicBeing(b.slug).then((p) => { if (!dead) setProf(p) }).catch(() => {})
+    return () => { dead = true }
+  }, [b.slug])
+  const st = stageOf(b.stage)
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+      <a href={`/b/${b.slug}`} className="flex items-center gap-2.5 hover:opacity-90">
+        {b.avatar && <IskraAvatar c={b.avatar.c} p={b.avatar.p} size={full ? 46 : 26} />}
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-sm font-semibold text-zinc-100">{b.name}</span>
+            <span className={`text-[10px] ${st.tint}`}>{st.emoji} {st.label}</span>
+            {prof?.mood && <span className="rounded bg-zinc-800 px-1.5 py-px text-[9px] text-zinc-300">{prof.mood}</span>}
+            <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500" />
+          </div>
+          <p className="text-[11px] text-zinc-400">{statusOf(b)}</p>
+        </div>
+      </a>
+      {(prof?.interests?.length ?? 0) > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {prof!.interests.slice(0, full ? 8 : 4).map((it) => (
+            <span key={it} className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">{it}</span>
+          ))}
+        </div>
+      )}
+      {full && prof?.broadcast?.text && (
+        <div className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/[0.06] px-2.5 py-1.5">
+          <p className="text-[9px] font-semibold uppercase tracking-wider text-amber-600/80 dark:text-amber-400/80">on the village radio</p>
+          <p className="text-[11px] italic leading-snug text-zinc-200">“{prof.broadcast.text}”</p>
+        </div>
+      )}
+      {full && prof?.latest_thought && (
+        <div className="mt-3 border-l-2 border-violet-500/40 pl-2.5">
+          <p className="text-[11px] italic leading-snug text-zinc-300">“{prof.latest_thought.text}”</p>
+          {prof.latest_thought.at && <p className="mt-0.5 text-[10px] text-zinc-500">{relTime(prof.latest_thought.at)}</p>}
+        </div>
+      )}
+      <a href={`/b/${b.slug}`} className="mt-3 inline-flex items-center gap-1 text-[10px] text-violet-500 hover:text-violet-400 dark:text-violet-400">
+        read {b.name}'s page <ArrowUpRight className="h-3 w-3" />
+      </a>
+    </div>
+  )
+}
+
+// An observer's look at a building — what it is, who's there, and a browser
+// of every PUBLIC iskra's work held there (public files only).
+function PubPlaceCard({ place, beings, hereNames, full }: {
+  place: VillagePlace; beings: VillageBeingPos[]; hereNames: string[]; full: boolean
+}) {
+  const fmap = folderFor(place)
+  const [files, setFiles] = useState<Record<string, PublicFile[]>>({})
+  const [open, setOpen] = useState<{ slug: string; name: string; path: string } | null>(null)
+  const [text, setText] = useState('')
+  useEffect(() => {
+    setFiles({}); setOpen(null)
+    if (!fmap) return
+    let dead = false
+    void Promise.all(beings.map(async (b) => {
+      try {
+        const r = await getPublicFiles(b.slug)
+        const fs = r.files.filter((f) => f.path.startsWith(fmap.folder)
+          && !isBoilerplate(f.path)
+          && (!fmap.excl || !f.path.startsWith(fmap.excl)))
+        return [b.slug, fs] as const
+      } catch { return [b.slug, [] as PublicFile[]] as const }
+    })).then((pairs) => { if (!dead) setFiles(Object.fromEntries(pairs)) })
+    return () => { dead = true }
+  }, [place.id, fmap?.folder, beings.map((b) => b.slug).join(',')])
+  useEffect(() => {
+    if (!open) { setText(''); return }
+    let dead = false
+    void getPublicFile(open.slug, open.path).then((r) => { if (!dead) setText(r.text) })
+      .catch(() => { if (!dead) setText('(could not read this one)') })
+    return () => { dead = true }
+  }, [open?.slug, open?.path])
+  const anyFiles = Object.values(files).some((fs) => fs.length > 0)
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+      <div className="mb-1 flex items-center gap-1.5">
+        <span className="h-2.5 w-2.5 rounded-sm" style={{ background: AFF_HUE[place.affordances[0]] ?? '#a78bfa' }} />
+        <span className="text-sm font-semibold text-zinc-100">{place.name}</span>
+      </div>
+      <p className="mb-2 text-[11px] leading-snug text-zinc-400">{place.description}</p>
+      <div className="mb-2 flex flex-wrap gap-1">
+        {place.affordances.map((a) => (
+          <span key={a} className="rounded border border-zinc-700 px-1.5 py-px text-[9px]" style={{ color: AFF_HUE[a] ?? '#a78bfa' }}>{a}</span>
+        ))}
+      </div>
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Here now</div>
+      <p className="mb-2 text-[11px] text-zinc-300">{hereNames.length ? hereNames.join(', ') : <span className="text-zinc-600">no one right now</span>}</p>
+      {fmap && (
+        open ? (
+          <div>
+            <button onClick={() => setOpen(null)} className="mb-1 flex items-center gap-1 text-[10px] text-violet-500 hover:text-violet-400 dark:text-violet-400">
+              <ChevronLeft className="h-3 w-3" /> {fmap.label}
+            </button>
+            <div className="mb-1 text-[11px] font-medium text-zinc-200">{open.name} · <span className="text-zinc-500">{shortName(open.path)}</span></div>
+            <div className={`overflow-auto rounded border border-zinc-800 bg-zinc-950 p-2.5 ${full ? 'max-h-[46vh]' : 'max-h-52'}`}>
+              <div className="fd-file-markdown text-[12px]"><Markdown remarkPlugins={[remarkGfm]}>{text || '…'}</Markdown></div>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{fmap.label}</div>
+            {!anyFiles ? (
+              <p className="text-[11px] text-zinc-600">nothing here yet</p>
+            ) : (
+              <div className={`space-y-1.5 overflow-y-auto ${full ? 'max-h-[56vh]' : 'max-h-56'}`}>
+                {beings.filter((b) => (files[b.slug] || []).length > 0).map((b) => (
+                  <div key={b.slug}>
+                    <div className="mb-0.5 flex items-center gap-1 text-[10px] text-zinc-400">
+                      {b.avatar && <IskraAvatar c={b.avatar.c} p={b.avatar.p} size={13} />}{b.name}
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {(files[b.slug] || []).map((f) => (
+                        <button key={f.path} onClick={() => setOpen({ slug: b.slug, name: b.name, path: f.path })}
+                          className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:border-violet-500/50 hover:text-zinc-100">
+                          {shortName(f.path)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      )}
+    </div>
+  )
+}
+
 // The observer map (village-world plan): the fronting village rendered
 // isometrically for anyone, read-only — no nudge, no mutation. Reuses the
 // exact IsoScene + walk math the parent map uses; `theme` forces a re-render
-// so the evening lights follow the toggle.
+// so the evening lights follow the toggle. Fullscreen + rich panels mirror
+// the parent map, sourced entirely from the un-gated public endpoints.
 function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
   void theme
   const [data, setData] = useState<VillageMapData | null>(null)
   const [selBeing, setSelBeing] = useState<string | null>(null)
   const [sel, setSel] = useState<string | null>(null)
+  const [full, setFull] = useState(false)
   const fetchedAt = useRef(0)
   const [, beat] = useState(0)
   useEffect(() => {
@@ -537,6 +687,12 @@ function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
     const t = window.setInterval(() => beat((x) => x + 1), 1000)
     return () => window.clearInterval(t)
   }, [])
+  useEffect(() => {
+    if (!full) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFull(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [full])
   const placeById = useMemo(() => {
     const m: Record<string, VillagePlace> = {}
     for (const p of data?.places ?? []) m[p.id] = p
@@ -549,55 +705,60 @@ function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
   const here = (pid: string) => data.beings.filter((b) => !b.to && b.at === pid)
   const selPlace = sel ? placeById[sel] : null
   const selB = selBeing ? data.beings.find((b) => b.slug === selBeing) : null
+
+  const panel = (isFull: boolean) =>
+    selB ? <PubBeingCard b={selB} statusOf={statusOf} full={isFull} />
+      : selPlace ? <PubPlaceCard place={selPlace} beings={data.beings} hereNames={here(selPlace.id).map((b) => b.name)} full={isFull} />
+        : (
+          <div className="rounded-xl border border-dashed border-zinc-800 p-3 text-xs text-zinc-500">
+            A living village. Click a building to browse everyone's work there, or an iskra to follow its road.
+          </div>
+        )
+  const hint = 'public iskre walk the streets on their own heartbeat · click a building or an iskra · scroll to zoom, drag to pan · dark is evening'
+  const header = (
+    <div className="mb-2 flex items-center gap-1.5 text-sm font-medium text-zinc-300">
+      <MapIcon className="h-4 w-4 text-violet-500 dark:text-violet-400" /> The village, live
+      <span className="ml-auto text-[11px] font-normal text-zinc-500">{data.beings.filter((b) => b.to).length} walking</span>
+      <button onClick={() => setFull((f) => !f)} title={full ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
+        className="ml-1 rounded border border-zinc-700 p-1 text-zinc-400 transition-colors hover:border-violet-500/50 hover:text-zinc-200">
+        {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+      </button>
+    </div>
+  )
+
+  if (full) {
+    // Portal to <body>: the public Shell/Gallery nest this inside stacking
+    // contexts that would otherwise paint the page's cards over the overlay.
+    return createPortal(
+      <div className="fixed inset-0 z-[100] flex flex-col bg-gradient-to-b from-zinc-950 to-zinc-900 p-4">
+        {header}
+        <div className="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1">
+              <IsoScene data={data} sel={sel} selBeing={selBeing}
+                onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} fill />
+            </div>
+            <p className="mt-1.5 shrink-0 text-[11px] text-zinc-500">{hint}</p>
+          </div>
+          <div className="w-full shrink-0 overflow-y-auto lg:w-96">{panel(true)}</div>
+        </div>
+      </div>,
+      document.body)
+  }
+
   return (
     <div className="mb-8 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-3">
-      <div className="mb-2 flex items-center gap-1.5 text-sm font-medium text-zinc-300">
-        <MapIcon className="h-4 w-4 text-violet-500 dark:text-violet-400" /> The village, live
-        <span className="ml-auto text-[11px] font-normal text-zinc-500">
-          {data.beings.filter((b) => b.to).length} walking
-        </span>
-      </div>
+      {header}
       <div className="flex flex-col gap-3 lg:flex-row">
         <div className="min-w-0 flex-1">
           <IsoScene data={data} sel={sel} selBeing={selBeing}
             onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} />
-          <p className="mt-1.5 text-[11px] text-zinc-500">
-            public iskre walk the streets on their own heartbeat · click a building or an iskra · scroll to zoom, drag to pan · dark is evening
-          </p>
+          <p className="mt-1.5 text-[11px] text-zinc-500">{hint}</p>
         </div>
-        <div className="w-full shrink-0 space-y-2 lg:w-64">
-          {selB ? (
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
-              <a href={`/b/${selB.slug}`} className="mb-1 flex items-center gap-1.5 hover:underline">
-                {selB.avatar && <IskraAvatar c={selB.avatar.c} p={selB.avatar.p} size={18} />}
-                <span className="text-sm font-semibold text-zinc-100">{selB.name}</span>
-                <ArrowUpRight className="h-3.5 w-3.5 text-zinc-500" />
-              </a>
-              <p className="text-xs text-zinc-400">{statusOf(selB)}</p>
-            </div>
-          ) : selPlace ? (
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
-              <div className="mb-1 text-sm font-semibold text-zinc-100">{selPlace.name}</div>
-              <p className="mb-2 text-xs leading-snug text-zinc-400">{selPlace.description}</p>
-              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Here now</div>
-              <p className="text-xs text-zinc-300">
-                {here(selPlace.id).length === 0 ? 'no one right now' : here(selPlace.id).map((b) => b.name).join(', ')}
-              </p>
-            </div>
-          ) : (
-            <div className="rounded-xl border border-dashed border-zinc-800 p-3 text-xs text-zinc-500">
-              A living village. Click a building for who's there, or an iskra to follow its road.
-            </div>
-          )}
-        </div>
+        <div className="w-full shrink-0 lg:w-64">{panel(false)}</div>
       </div>
     </div>
   )
-}
-
-const AFF_HUE: Record<string, string> = {
-  gather: '#a78bfa', trade: '#f59e0b', read: '#38bdf8', create: '#fbbf24',
-  tend: '#34d399', play: '#f472b6', remember: '#94a3b8', rest: '#818cf8',
 }
 
 function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTheme: () => void }) {

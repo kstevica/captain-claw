@@ -43,6 +43,7 @@ import {
 import { CHARACTER_NAMES, IskraAvatar, PALETTES, PALETTE_NAMES } from '../components/village/avatars'
 import { IsoScene } from '../components/village/IsoScene'
 import { posOf as walkPosOf, statusOf as walkStatusOf } from '../components/village/walk'
+import { folderFor, shortName, isBoilerplate } from '../components/village/places'
 
 const REFRESH_MS = 6000
 const ATTRS = ['CUR', 'PER', 'CAU', 'SOC', 'CRE', 'ORD', 'PLA'] as const
@@ -208,6 +209,7 @@ function summarizeEventData(e: BeingEvent): string {
     case 'quest_failed': return `quest '${d.title}' rejected${d.note ? ` — ${d.note}` : ''}`
     case 'coins_granted': return `pocket money: +${d.coins} coin(s)${d.note ? ` — ${d.note}` : ''}`
     case 'coins_converted': return `converted ${d.coins} coin(s) → ${fmtTokens(Number(d.tokens) || 0)} tokens`
+    case 'avatar_set': return 'chose a new look'
     case 'departed': return `set out for ${d.to} — ~${d.minutes} min walk${d.reason ? ` (${d.reason})` : ''}`
     case 'arrived': return `arrived at ${d.name || d.place}${d.hhmm ? ` at ${d.hhmm}` : ''}`
     case 'crossed_paths': return `crossed paths with ${d.name} at ${d.place_name || d.place}`
@@ -3513,6 +3515,218 @@ const AFF_HUE: Record<string, string> = {
   tend: '#34d399', play: '#f472b6', remember: '#94a3b8', rest: '#818cf8',
 }
 
+// The being panel: a little character sheet — avatar, mood, coins, and (with
+// room, in fullscreen) drives, latest thought, recent life, plus the nudge.
+function MapBeingCard({ b, statusOf, places, nudge, nudging, full }: {
+  b: VillageBeingPos
+  statusOf: (b: VillageBeingPos) => string
+  places: VillagePlace[]
+  nudge: (slug: string, dest: string) => void
+  nudging: boolean
+  full: boolean
+}) {
+  const [vitals, setVitals] = useState<BeingVitals | null>(null)
+  const [events, setEvents] = useState<BeingEvent[]>([])
+  useEffect(() => {
+    let dead = false
+    setVitals(null); setEvents([])
+    void getBeingVitals(b.slug).then((v) => { if (!dead) setVitals(v) }).catch(() => {})
+    void getBeingEvents(b.slug, 30).then((r) => { if (!dead) setEvents(r.events) }).catch(() => {})
+    return () => { dead = true }
+  }, [b.slug])
+  const lastTick = events.find((e) => e.kind === 'tick')
+  const drives = (lastTick?.data?.drives ?? null) as Record<string, number> | null
+  const thought = (lastTick?.data?.summary as string | undefined) || undefined
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+      <div className="flex items-center gap-2.5">
+        {b.avatar && <IskraAvatar c={b.avatar.c} p={b.avatar.p} size={full ? 46 : 26} />}
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-sm font-semibold text-zinc-100">{b.name}</span>
+            <span className={`rounded border px-1 py-px text-[9px] ${STAGE_META[b.stage] || ''}`}>{b.stage}</span>
+            {vitals?.affect?.mood && <span className="rounded bg-zinc-800 px-1.5 py-px text-[9px] text-zinc-300">{vitals.affect.mood}</span>}
+          </div>
+          <p className="text-[11px] text-zinc-400">{statusOf(b)}</p>
+        </div>
+      </div>
+      {b.stage === 'infant' && b.to && <p className="mt-1 text-[10px] italic text-zinc-600">a toddle — far things take most of a day</p>}
+      <div className="mt-2 flex flex-wrap gap-1.5 text-[10px]">
+        <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-600 dark:text-amber-300">{vitals?.coins ?? 0} coins</span>
+        {vitals?.wallet && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">{fmtTokens(vitals.wallet.balance_tokens)} tokens</span>}
+        <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">gen {vitals?.generation ?? '—'}</span>
+      </div>
+      {full && drives && (
+        <div className="mt-3">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">drives</div>
+          <div className="flex items-end gap-2">
+            {DRIVE_ORDER.filter((d) => d in drives).map((d) => {
+              const sat = Math.max(0, Math.min(1, drives[d]))
+              return (
+                <div key={d} className="flex flex-col items-center gap-1" title={`${d} — ${Math.round(sat * 100)}%`}>
+                  <div className="flex h-14 w-2.5 items-end overflow-hidden rounded-full bg-zinc-800">
+                    <div className="w-full rounded-full" style={{ height: `${Math.max(6, sat * 100)}%`, background: DRIVE_COLORS[d] ?? '#71717a' }} />
+                  </div>
+                  <span className="text-[8px] uppercase text-zinc-600">{d.slice(0, 3)}</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+      {full && thought && (
+        <div className="mt-3 border-l-2 border-violet-500/40 pl-2.5">
+          <p className="text-[11px] italic leading-snug text-zinc-300">“{thought}”</p>
+        </div>
+      )}
+      {full && events.length > 0 && (
+        <div className="mt-3">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">lately</div>
+          <div className="space-y-1">
+            {events.filter((e) => e.kind !== 'tick' && !summarizeEventData(e).startsWith('{')).slice(0, 8).map((e, i) => (
+              <div key={i} className="flex items-baseline gap-1.5 text-[10.5px] text-zinc-500">
+                <span className={`inline-block h-1.5 w-1.5 shrink-0 translate-y-[-1px] rounded-full ${EVENT_DOT[e.kind] || 'bg-zinc-700'}`} />
+                <span className="shrink-0 tabular-nums text-zinc-600">{e.at.slice(11, 16)}</span>
+                <span className="truncate">{summarizeEventData(e)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="mt-3 border-t border-zinc-800 pt-2">
+        <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+          <Footprints className="h-3 w-3" /> nudge
+        </div>
+        {b.state !== 'alive' ? (
+          <p className="text-[10px] italic text-zinc-600">only the living walk — wake {b.name} to send it anywhere</p>
+        ) : (
+          <>
+            <select value="" disabled={nudging}
+              onChange={(e) => { if (e.target.value) void nudge(b.slug, e.target.value) }}
+              className="w-full rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[11px] text-zinc-300 focus:border-violet-500/50 focus:outline-none disabled:opacity-50">
+              <option value="">send {b.name} to…</option>
+              {places.filter((p) => p.id !== b.at).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              {(b.at || b.to) && <option value="home">home</option>}
+            </select>
+            <p className="mt-1 text-[10px] text-zinc-600">plots the real streets · {b.name} feels it next tick</p>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// The place panel: what a building is, who's there, its stalls & guestbook,
+// and — the heart of it — a browser of every iskra's work held here (the
+// Garden their gardens, the Library their reading, …). Click a file to read.
+function MapPlaceCard({ place, beings, hereNames, market, guestbook, full }: {
+  place: VillagePlace
+  beings: VillageBeingPos[]
+  hereNames: string[]
+  market: MarketListing[]
+  guestbook: string
+  full: boolean
+}) {
+  const fmap = folderFor(place)
+  const [files, setFiles] = useState<Record<string, SelfFile[]>>({})
+  const [open, setOpen] = useState<{ slug: string; name: string; path: string } | null>(null)
+  const [text, setText] = useState<string>('')
+  useEffect(() => {
+    setFiles({}); setOpen(null)
+    if (!fmap) return
+    let dead = false
+    void Promise.all(beings.map(async (b) => {
+      try {
+        const r = await getSelfFiles(b.slug)
+        const fs = r.files.filter((f) => f.path.startsWith(fmap.folder)
+          && !isBoilerplate(f.path)
+          && (!fmap.excl || !f.path.startsWith(fmap.excl)))
+        return [b.slug, fs] as const
+      } catch { return [b.slug, [] as SelfFile[]] as const }
+    })).then((pairs) => { if (!dead) setFiles(Object.fromEntries(pairs)) })
+    return () => { dead = true }
+  }, [place.id, fmap?.folder, beings.map((b) => b.slug).join(',')])
+  useEffect(() => {
+    if (!open) { setText(''); return }
+    let dead = false
+    void getSelfFile(open.slug, open.path).then((r) => { if (!dead) setText(r.text) })
+      .catch(() => { if (!dead) setText('(could not read this one)') })
+    return () => { dead = true }
+  }, [open?.slug, open?.path])
+  const short = shortName
+  const anyFiles = Object.values(files).some((fs) => fs.length > 0)
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+      <div className="mb-1 flex items-center gap-1.5">
+        <span className="h-2.5 w-2.5 rounded-sm" style={{ background: AFF_HUE[place.affordances[0]] ?? '#a78bfa' }} />
+        <span className="text-sm font-semibold text-zinc-100">{place.name}</span>
+      </div>
+      <p className="mb-1.5 text-[11px] leading-snug text-zinc-400">{place.description}</p>
+      <div className="mb-2 flex flex-wrap gap-1">
+        {place.affordances.map((a) => (
+          <span key={a} className="rounded border border-zinc-700 px-1.5 py-px text-[9px]" style={{ color: AFF_HUE[a] ?? '#a78bfa' }}>{a}</span>
+        ))}
+      </div>
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Here now</div>
+      <p className="mb-2 text-[11px] text-zinc-300">{hereNames.length ? hereNames.join(', ') : <span className="text-zinc-600">no one right now</span>}</p>
+      {place.affordances.includes('trade') && market.length > 0 && (
+        <>
+          <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Stalls</div>
+          <div className="mb-2 space-y-0.5">
+            {market.slice(0, full ? 8 : 4).map((li) => (
+              <p key={li.id} className="text-[11px] text-zinc-300">“{li.title}” <span className="text-amber-600 dark:text-amber-400">{li.price_coins} coins</span><span className="text-zinc-600"> · {li.seller}</span></p>
+            ))}
+          </div>
+        </>
+      )}
+      {fmap && (
+        open ? (
+          <div className="mb-2">
+            <button onClick={() => setOpen(null)} className="mb-1 flex items-center gap-1 text-[10px] text-violet-500 hover:text-violet-400 dark:text-violet-400">
+              <ChevronLeft className="h-3 w-3" /> {fmap.label}
+            </button>
+            <div className="mb-1 text-[11px] font-medium text-zinc-200">{open.name} · <span className="text-zinc-500">{short(open.path)}</span></div>
+            <div className={`overflow-auto rounded border border-zinc-800 bg-zinc-950 p-2.5 ${full ? 'max-h-[46vh]' : 'max-h-52'}`}>
+              <div className="fd-file-markdown text-[12px]"><Markdown remarkPlugins={[remarkGfm]}>{text || '…'}</Markdown></div>
+            </div>
+          </div>
+        ) : (
+          <div className="mb-2">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{fmap.label}</div>
+            {!anyFiles ? (
+              <p className="text-[11px] text-zinc-600">nothing here yet — the iskre haven't left work in {fmap.label}</p>
+            ) : (
+              <div className={`space-y-1.5 overflow-y-auto ${full ? 'max-h-[52vh]' : 'max-h-56'}`}>
+                {beings.filter((b) => (files[b.slug] || []).length > 0).map((b) => (
+                  <div key={b.slug}>
+                    <div className="mb-0.5 flex items-center gap-1 text-[10px] text-zinc-400">
+                      {b.avatar && <IskraAvatar c={b.avatar.c} p={b.avatar.p} size={13} />}{b.name}
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {(files[b.slug] || []).map((f) => (
+                        <button key={f.path} onClick={() => setOpen({ slug: b.slug, name: b.name, path: f.path })}
+                          className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:border-violet-500/50 hover:text-zinc-100">
+                          {short(f.path)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      )}
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Guestbook</div>
+      {guestbook ? (
+        <pre className={`overflow-y-auto whitespace-pre-wrap font-sans text-[10.5px] leading-snug text-zinc-400 ${full ? 'max-h-40' : 'max-h-36'}`}>{guestbook}</pre>
+      ) : (
+        <p className="text-[11px] text-zinc-600">no lines yet — the first visitor may leave one</p>
+      )}
+    </div>
+  )
+}
+
 function VillageMap() {
   const [data, setData] = useState<VillageMapData | null>(null)
   const [market, setMarket] = useState<MarketListing[]>([])
@@ -3523,6 +3737,7 @@ function VillageMap() {
     useState<{ place: VillagePlace; guestbook: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [nudging, setNudging] = useState(false)
+  const [full, setFull] = useState(false)
   const fetchedAt = useRef(0)
   const [, beat] = useState(0)
 
@@ -3555,6 +3770,12 @@ function VillageMap() {
     const t = window.setInterval(() => beat((x) => x + 1), 1000)
     return () => window.clearInterval(t)
   }, [])
+  useEffect(() => {                       // Esc leaves fullscreen
+    if (!full) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFull(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [full])
   useEffect(() => {
     if (!sel) { setPlaceInfo(null); return }
     let dead = false
@@ -3580,161 +3801,120 @@ function VillageMap() {
   const selPlace = sel ? placeById[sel] : null
   const selB = selBeing ? data.beings.find((b) => b.slug === selBeing) : null
 
+  const defaultPanel = () => (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Now</div>
+      {walking.length === 0 ? (
+        <p className="mb-2 text-[11px] text-zinc-600">everyone is where they mean to be</p>
+      ) : (
+        <div className="mb-2 space-y-0.5">
+          {walking.map((b) => (
+            <p key={b.slug} className="text-[11px] text-zinc-300">{b.name} — {statusOf(b)}</p>
+          ))}
+        </div>
+      )}
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">The stalls</div>
+      {market.length === 0 ? (
+        <p className="mb-2 text-[11px] text-zinc-600">the market is bare — a being may “sell” a real file for coins</p>
+      ) : (
+        <div className="mb-2 space-y-0.5">
+          {market.slice(0, full ? 8 : 5).map((li) => (
+            <p key={li.id} className="text-[11px] text-zinc-300">
+              “{li.title}” <span className="text-amber-600 dark:text-amber-400">{li.price_coins} coins</span>
+              <span className="text-zinc-600"> · {li.seller}</span>
+            </p>
+          ))}
+        </div>
+      )}
+      {life?.commission && (
+        <div className="mb-2 rounded border border-amber-500/25 bg-amber-500/[0.06] p-2">
+          <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-600/90 dark:text-amber-400/90">The commission</div>
+          <p className="text-[11px] text-zinc-200">
+            “{life.commission.name}” <span className="rounded border border-zinc-700 px-1 text-[9px]" style={{ color: AFF_HUE[life.commission.affordance] ?? '#a78bfa' }}>{life.commission.affordance}</span>
+          </p>
+          {life.commission.why && <p className="mt-0.5 text-[10px] italic text-zinc-500">“{life.commission.why}”</p>}
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-zinc-800">
+            <div className="h-full rounded-full bg-gradient-to-r from-amber-600 to-amber-400"
+                 style={{ width: `${Math.min(100, (life.commission.raised_coins / Math.max(1, life.commission.target_coins)) * 100)}%` }} />
+          </div>
+          <p className="mt-0.5 text-[10px] text-zinc-500">
+            {life.commission.raised_coins}/{life.commission.target_coins} coins
+            {life.commission.contributors.length > 0 && <> · {life.commission.contributors.map((x) => `${x.name} ${x.coins}`).join(', ')}</>}
+          </p>
+          <div className="mt-1.5 flex gap-1.5">
+            {life.commission.state === 'funded' && (
+              <button onClick={() => void judge(true)} disabled={busy}
+                className="rounded bg-amber-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-amber-500 disabled:opacity-40">
+                Approve & build
+              </button>
+            )}
+            <button onClick={() => void judge(false)} disabled={busy}
+              className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">
+              Reject & refund
+            </button>
+          </div>
+        </div>
+      )}
+      {life && (
+        <div className="mb-2 flex items-center gap-1.5 text-[10px] text-zinc-500">
+          steward stipend
+          <select value={life.steward_stipend_coins}
+            onChange={(e) => { void setStewardStipend(Number(e.target.value)).then(() => void load()) }}
+            className="rounded border border-zinc-700 bg-zinc-950 px-1 py-0.5 text-[10px] text-zinc-300 focus:outline-none">
+            {[0, 1, 2, 3, 5].map((n) => <option key={n} value={n}>{n === 0 ? 'off' : `${n}/week`}</option>)}
+          </select>
+          {life.steward && <span className="truncate text-zinc-600">· steward: {life.steward.replace(/^iskra-/, '').replace(/-[0-9a-f]{4}$/, '')}</span>}
+        </div>
+      )}
+      <p className="text-[10px] text-zinc-600">click a building to browse everyone's work there, or an iskra for its road</p>
+    </div>
+  )
+  const panel = (isFull: boolean) =>
+    selB ? <MapBeingCard b={selB} statusOf={statusOf} places={data.places} nudge={nudge} nudging={nudging} full={isFull} />
+      : selPlace ? <MapPlaceCard place={selPlace} beings={data.beings} hereNames={here(selPlace.id).map((b) => b.name)} market={market} guestbook={placeInfo?.guestbook || ''} full={isFull} />
+        : defaultPanel()
+  const hint = 'iskre walk the streets between wakes · click a building or an iskra · scroll to zoom, drag to pan, double-click to reset · dark is evening'
+  const header = (
+    <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+      <MapIcon className="h-3.5 w-3.5 text-violet-400" /> The village — the ground, live
+      <span className="ml-auto text-[10px] font-normal text-zinc-500">
+        {walking.length > 0 ? `${walking.length} walking · ` : ''}{market.length} stall{market.length === 1 ? '' : 's'} open
+      </span>
+      <button onClick={() => setFull((f) => !f)} title={full ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
+        className="ml-1 rounded border border-zinc-700 p-1 text-zinc-400 transition-colors hover:border-violet-500/50 hover:text-zinc-200">
+        {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+      </button>
+    </div>
+  )
+
+  if (full) {
+    return (
+      <div className="fixed inset-0 z-[70] flex flex-col bg-gradient-to-b from-zinc-950 to-zinc-900 p-4">
+        {header}
+        <div className="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1">
+              <IsoScene data={data} sel={sel} selBeing={selBeing}
+                onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} fill />
+            </div>
+            <p className="mt-1.5 shrink-0 text-[10px] text-zinc-600">{hint}</p>
+          </div>
+          <div className="w-full shrink-0 overflow-y-auto lg:w-96">{panel(true)}</div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
-      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
-        <MapIcon className="h-3.5 w-3.5 text-violet-400" /> The village — the ground, live
-        <span className="ml-auto text-[10px] font-normal text-zinc-500">
-          {walking.length > 0 ? `${walking.length} walking · ` : ''}{market.length} stall{market.length === 1 ? '' : 's'} open
-        </span>
-      </div>
+      {header}
       <div className="flex flex-col gap-3 lg:flex-row">
         <div className="min-w-0 flex-1">
           <IsoScene data={data} sel={sel} selBeing={selBeing}
             onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} />
-          <p className="mt-1.5 text-[10px] text-zinc-600">
-            the village, live — iskre walk the streets between wakes · click a building or an iskra · scroll to zoom, drag to pan, double-click to reset · dark theme is evening
-          </p>
+          <p className="mt-1.5 text-[10px] text-zinc-600">{hint}</p>
         </div>
-        <div className="w-full shrink-0 space-y-2 lg:w-72">
-          {selB ? (
-            <div className="rounded-md border border-zinc-800 bg-zinc-950/50 p-2.5">
-              <div className="mb-1 flex items-center gap-1.5">
-                {selB.avatar && <IskraAvatar c={selB.avatar.c} p={selB.avatar.p} size={18} />}
-                <span className="text-xs font-semibold text-zinc-200">{selB.name}</span>
-                <span className={`rounded border px-1 py-px text-[9px] ${STAGE_META[selB.stage] || ''}`}>{selB.stage}</span>
-              </div>
-              <p className="text-[11px] text-zinc-400">{statusOf(selB)}</p>
-              {selB.stage === 'infant' && selB.to && (
-                <p className="mt-1 text-[10px] italic text-zinc-600">a toddle — far things take most of a day</p>
-              )}
-              <div className="mt-2 border-t border-zinc-800 pt-2">
-                <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                  <Footprints className="h-3 w-3" /> nudge
-                </div>
-                {selB.state !== 'alive' ? (
-                  <p className="text-[10px] italic text-zinc-600">only the living walk — wake {selB.name} to send it anywhere</p>
-                ) : (
-                  <>
-                    <select value="" disabled={nudging}
-                      onChange={(e) => { if (e.target.value) void nudge(selB.slug, e.target.value) }}
-                      className="w-full rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[11px] text-zinc-300 focus:border-violet-500/50 focus:outline-none disabled:opacity-50">
-                      <option value="">send {selB.name} to…</option>
-                      {data.places.filter((p) => p.id !== selB.at).map((p) => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                      {(selB.at || selB.to) && <option value="home">home</option>}
-                    </select>
-                    <p className="mt-1 text-[10px] text-zinc-600">plots the real streets · {selB.name} feels it next tick</p>
-                  </>
-                )}
-              </div>
-            </div>
-          ) : selPlace ? (
-            <div className="rounded-md border border-zinc-800 bg-zinc-950/50 p-2.5">
-              <div className="mb-1 text-xs font-semibold text-zinc-200">{selPlace.name}</div>
-              <p className="mb-1.5 text-[11px] leading-snug text-zinc-400">{selPlace.description}</p>
-              <div className="mb-2 flex flex-wrap gap-1">
-                {selPlace.affordances.map((a) => (
-                  <span key={a} className="rounded border border-zinc-700 px-1.5 py-px text-[9px]"
-                        style={{ color: AFF_HUE[a] ?? '#a78bfa' }}>{a}</span>
-                ))}
-              </div>
-              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Here now</div>
-              {here(selPlace.id).length === 0 ? (
-                <p className="mb-2 text-[11px] text-zinc-600">no one right now</p>
-              ) : (
-                <p className="mb-2 text-[11px] text-zinc-300">{here(selPlace.id).map((b) => b.name).join(', ')}</p>
-              )}
-              {selPlace.affordances.includes('trade') && market.length > 0 && (
-                <>
-                  <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Stalls</div>
-                  <div className="mb-2 space-y-0.5">
-                    {market.slice(0, 4).map((li) => (
-                      <p key={li.id} className="text-[11px] text-zinc-300">
-                        “{li.title}” <span className="text-amber-600 dark:text-amber-400">{li.price_coins} coins</span>
-                        <span className="text-zinc-600"> · {li.seller}</span>
-                      </p>
-                    ))}
-                  </div>
-                </>
-              )}
-              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Guestbook</div>
-              {placeInfo?.guestbook ? (
-                <pre className="max-h-36 overflow-y-auto whitespace-pre-wrap font-sans text-[10.5px] leading-snug text-zinc-400">{placeInfo.guestbook}</pre>
-              ) : (
-                <p className="text-[11px] text-zinc-600">no lines yet — the first visitor may leave one</p>
-              )}
-            </div>
-          ) : (
-            <div className="rounded-md border border-zinc-800 bg-zinc-950/50 p-2.5">
-              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Now</div>
-              {walking.length === 0 ? (
-                <p className="mb-2 text-[11px] text-zinc-600">everyone is where they mean to be</p>
-              ) : (
-                <div className="mb-2 space-y-0.5">
-                  {walking.map((b) => (
-                    <p key={b.slug} className="text-[11px] text-zinc-300">{b.name} — {statusOf(b)}</p>
-                  ))}
-                </div>
-              )}
-              <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">The stalls</div>
-              {market.length === 0 ? (
-                <p className="mb-2 text-[11px] text-zinc-600">the market is bare — a being may “sell” a real file for coins</p>
-              ) : (
-                <div className="mb-2 space-y-0.5">
-                  {market.slice(0, 5).map((li) => (
-                    <p key={li.id} className="text-[11px] text-zinc-300">
-                      “{li.title}” <span className="text-amber-600 dark:text-amber-400">{li.price_coins} coins</span>
-                      <span className="text-zinc-600"> · {li.seller}</span>
-                    </p>
-                  ))}
-                </div>
-              )}
-              {life?.commission && (
-                <div className="mb-2 rounded border border-amber-500/25 bg-amber-500/[0.06] p-2">
-                  <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-600/90 dark:text-amber-400/90">The commission</div>
-                  <p className="text-[11px] text-zinc-200">
-                    “{life.commission.name}” <span className="rounded border border-zinc-700 px-1 text-[9px]" style={{ color: AFF_HUE[life.commission.affordance] ?? '#a78bfa' }}>{life.commission.affordance}</span>
-                  </p>
-                  {life.commission.why && <p className="mt-0.5 text-[10px] italic text-zinc-500">“{life.commission.why}”</p>}
-                  <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-zinc-800">
-                    <div className="h-full rounded-full bg-gradient-to-r from-amber-600 to-amber-400"
-                         style={{ width: `${Math.min(100, (life.commission.raised_coins / Math.max(1, life.commission.target_coins)) * 100)}%` }} />
-                  </div>
-                  <p className="mt-0.5 text-[10px] text-zinc-500">
-                    {life.commission.raised_coins}/{life.commission.target_coins} coins
-                    {life.commission.contributors.length > 0 && <> · {life.commission.contributors.map((x) => `${x.name} ${x.coins}`).join(', ')}</>}
-                  </p>
-                  <div className="mt-1.5 flex gap-1.5">
-                    {life.commission.state === 'funded' && (
-                      <button onClick={() => void judge(true)} disabled={busy}
-                        className="rounded bg-amber-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-amber-500 disabled:opacity-40">
-                        Approve & build
-                      </button>
-                    )}
-                    <button onClick={() => void judge(false)} disabled={busy}
-                      className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">
-                      Reject & refund
-                    </button>
-                  </div>
-                </div>
-              )}
-              {life && (
-                <div className="mb-2 flex items-center gap-1.5 text-[10px] text-zinc-500">
-                  steward stipend
-                  <select value={life.steward_stipend_coins}
-                    onChange={(e) => { void setStewardStipend(Number(e.target.value)).then(() => void load()) }}
-                    className="rounded border border-zinc-700 bg-zinc-950 px-1 py-0.5 text-[10px] text-zinc-300 focus:outline-none">
-                    {[0, 1, 2, 3, 5].map((n) => <option key={n} value={n}>{n === 0 ? 'off' : `${n}/week`}</option>)}
-                  </select>
-                  {life.steward && <span className="truncate text-zinc-600">· steward: {life.steward.replace(/^iskra-/, '').replace(/-[0-9a-f]{4}$/, '')}</span>}
-                </div>
-              )}
-              <p className="text-[10px] text-zinc-600">click a place for its guestbook, or an iskra for its road</p>
-            </div>
-          )}
-        </div>
+        <div className="w-full shrink-0 lg:w-72">{panel(false)}</div>
       </div>
     </div>
   )

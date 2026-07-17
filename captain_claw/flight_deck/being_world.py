@@ -598,7 +598,9 @@ def market_percepts(store: BeingsStore, being: dict, now: datetime,
 # everything here computes.
 
 PLOT_SIZE = 1000
-WALK_SPEED = 10.0             # units per minute — everyone walks the same…
+WALK_SPEED = 30.0             # units per minute — everyone walks the same…
+                              # (3× the original 10 — livelier map, same tick
+                              # cadence; ETAs and the animation follow it)
 INFANT_SPEED_FACTOR = 0.35    # …except infants, who toddle (user-locked)
 VILLAGE_MIN_PLACES = 4
 VILLAGE_MAX_PLACES = 12

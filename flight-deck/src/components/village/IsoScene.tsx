@@ -56,9 +56,11 @@ interface SceneProps {
   onBeing: (slug: string | null) => void
   posOf: (b: VillageBeingPos) => [number, number]
   hue: (p: VillagePlace) => string
+  // fill the parent's height (fullscreen) instead of the fixed 460px card height
+  fill?: boolean
 }
 
-export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue }: SceneProps) {
+export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fill }: SceneProps) {
   const dark = typeof document !== 'undefined'
     && document.documentElement.classList.contains('dark')
   const C = dark ? NIGHT : DAY
@@ -216,7 +218,7 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue }: 
 
   return (
     <svg ref={svgRef} viewBox={vb.join(' ')}
-      className={`h-[460px] w-full touch-none rounded-md border border-zinc-800/60 ${dark ? 'bg-[#20281e]' : 'bg-[#eae4cf]'}`}
+      className={`w-full touch-none rounded-md border border-zinc-800/60 ${fill ? 'h-full min-h-[460px]' : 'h-[460px]'} ${dark ? 'bg-[#20281e]' : 'bg-[#eae4cf]'}`}
       onClick={() => { onPlace(null); onBeing(null) }}
       onWheel={onWheel} onPointerDown={onDown} onPointerMove={onMove}
       onPointerUp={onUp} onPointerLeave={() => { drag.current = null }}
