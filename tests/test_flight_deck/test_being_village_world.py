@@ -286,6 +286,35 @@ def test_the_dead_and_paused_refuse_the_nudge(store):
         store.depart(OWNER, a["slug"], "library", now=NOW, by="nudge")
 
 
+def test_a_fevered_being_is_only_nudged_home(store):
+    """The route gate (mirrors the being's own go_to refusal): while
+    fevered, a nudge anywhere but home is refused — the body would only
+    turn back. Home is always allowed. Tests the exact decision the route
+    makes (resolve + fever_state)."""
+    a = _being(store, "Grozna", stage="adult")
+    world.ensure_village(store, OWNER, now=NOW)
+    # a real breakdown in the last day → fever holds (not dice)
+    store.record_event(a["id"], "collapsed_exhausted", {"weighted": 9},
+                       now=NOW - timedelta(hours=2))
+    being = store.get(OWNER, a["slug"])
+    assert world.fever_state(store, being, NOW)          # she is fevered
+
+    def gate(dest: str) -> bool:                          # the route's rule
+        pid = store.resolve_place_ref(OWNER, dest)
+        return bool(pid and pid != "home"
+                    and world.fever_state(store, being, NOW))
+
+    assert gate("library") is True                       # refused elsewhere
+    assert gate("the Meadow") is True
+    assert gate("home") is False                          # home always ok
+    # and once it passes, every road opens again
+    store.record_event(a["id"], "collapsed_exhausted", {"weighted": 9},
+                       now=NOW - timedelta(days=3))       # aged out
+    well = store.get(OWNER, a["slug"])
+    assert world.fever_state(store, well,
+                             NOW + timedelta(days=2)) is None
+
+
 def test_public_owner_and_map_show_only_public_beings(store):
     pub = _being(store, "Javna", stage="adult")
     _being(store, "Tajna", stage="adult")           # stays private

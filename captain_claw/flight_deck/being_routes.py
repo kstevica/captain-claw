@@ -1065,10 +1065,23 @@ async def nudge_being(slug: str, body: GoRequest,
     """The parent's nudge: send an ALIVE being onto the road to a place
     (or 'home'). It plots the same A* course a mind- or feet-walk uses,
     and the being feels it honestly next tick. Only the living walk —
-    a paused/torpid being refuses loudly. (Registered before /{slug}.)"""
+    a paused/torpid being refuses loudly; a FEVERED one refuses a walk
+    anywhere but home (its body would only turn back), mirroring the
+    being's own go_to gate. (Registered before /{slug}.)"""
+    from datetime import datetime, timezone
     from captain_claw.flight_deck import being_world
     store = get_store()
     _run(being_world.ensure_village, store, user["id"])
+    being = _run(store.get, user["id"], slug)
+    pid = _run(store.resolve_place_ref, user["id"], body.dest)
+    if pid and pid != "home":
+        cause = being_world.fever_state(store, being,
+                                        datetime.now(timezone.utc))
+        if cause:
+            raise HTTPException(
+                409, f"{being['name']} is fevered ({cause}) — home is the "
+                "only road today. The fever passes on its own once its body "
+                "recovers.")
     _run(store.depart, user["id"], slug, body.dest, by="nudge")
     return _run(store.vitals, user["id"], slug)
 

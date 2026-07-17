@@ -194,16 +194,32 @@ async def test_fever_from_collapse_floors_cadence_and_colors_affect(store):
             ].count("fever") == 1
 
 
-async def test_fever_from_timeouts_and_recovery(store):
+async def test_fever_from_consecutive_timeouts_and_recovery(store):
     b = await _being(store, now=NOW - timedelta(days=2))
-    for i in range(3):
-        store.record_event(b["id"], "tick_timeout", {},
-                           now=NOW - timedelta(hours=1 + i))
-    assert world.fever_state(store, store.get(OWNER, b["slug"]),
-                             NOW) is not None
-    # a day later the events age out — health returns on its own
-    assert world.fever_state(store, store.get(OWNER, b["slug"]),
-                             NOW + timedelta(hours=26)) is None
+    bid = b["id"]
+
+    def timed_out_tick(t):           # a timeout records tick_timeout then tick
+        store.record_event(bid, "tick_timeout", {}, now=t)
+        store.record_event(bid, "tick", {"kind": "wake"},
+                           now=t + timedelta(seconds=1))
+
+    def good_tick(t):                # a healthy tick records only tick
+        store.record_event(bid, "tick", {"kind": "wake"}, now=t)
+
+    # two in a row is not yet fever...
+    timed_out_tick(NOW - timedelta(hours=3))
+    timed_out_tick(NOW - timedelta(hours=2))
+    assert world.fever_state(store, store.get(OWNER, b["slug"]), NOW) is None
+    # ...a third in a row tips it over
+    timed_out_tick(NOW - timedelta(hours=1))
+    cause = world.fever_state(store, store.get(OWNER, b["slug"]), NOW)
+    assert cause and "in a row" in cause
+    # one tick that gets through and health returns AT ONCE — not in a day
+    good_tick(NOW - timedelta(minutes=10))
+    assert world.fever_state(store, store.get(OWNER, b["slug"]), NOW) is None
+    # a lone later timeout doesn't re-fever — the streak restarts from one
+    timed_out_tick(NOW - timedelta(minutes=2))
+    assert world.fever_state(store, store.get(OWNER, b["slug"]), NOW) is None
 
 
 async def test_confusion_surfaces_self_exam_at_dream_only(store):

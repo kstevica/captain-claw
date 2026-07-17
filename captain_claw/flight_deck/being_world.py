@@ -58,11 +58,14 @@ PROJECT_CHECKIN_DAYS = 7
 _EXCHANGE_KINDS = ("letter_sent", "letter_received", "gift_sent",
                    "gift_received", "skill_adopted", "skill_spread")
 
-# Illness as consequence, never RNG (roadmap T2.13). Both ailments are
-# computed from the last 24h of the REAL ledger at tick time — no new state,
-# nothing to cure but the underlying events aging out.
-ILLNESS_WINDOW_HOURS = 24.0
-FEVER_TIMEOUTS = 3               # this many timed-out ticks in a day = fever
+# Illness as consequence, never RNG (roadmap T2.13). Computed from the REAL
+# ledger at tick time — no new state, nothing to cure but the events passing.
+ILLNESS_WINDOW_HOURS = 24.0      # collapse + confusion: caught within a day
+# Fever is CONSECUTIVE timeouts, not a daily count (fixed 2026-07-17): a body
+# that answers even one tick is well again. A rolling daily count trapped a
+# flaky-but-working body (e.g. a staging box that restarts) in permanent
+# fever — the streak clears the moment a tick gets through.
+FEVER_CONSEC_TIMEOUTS = 3        # this many timed-out ticks IN A ROW = fever
 FEVER_MIN_WAKE_MINUTES = 120     # a fevered body spaces its ticks out
 CONFUSION_MISMATCHES = 3         # caught pretences in a day = self-exam dream
 
@@ -341,18 +344,53 @@ def _recent_kind_count(store: BeingsStore, being: dict, now: datetime,
     return n
 
 
+def _consecutive_tick_timeouts(store: BeingsStore, being: dict) -> int:
+    """How many of the being's most recent ticks IN A ROW timed out. A
+    timed-out tick records `tick_timeout` (mid-tick) then `tick` (its
+    fallback, at the end); a healthy tick records only `tick`. So each
+    `tick` closes an attempt, marked failed if a `tick_timeout` fell since
+    the previous one; a `tick_timeout` with no closing `tick` (a tick that
+    never got that far) counts as its own failed attempt. Return the length
+    of the trailing run of failures — one tick that gets through resets it,
+    so a body that recovers gets well (unlike the old rolling daily count
+    that a flaky-but-working body could never escape)."""
+    try:
+        recent = store.events(being["owner_id"], being["slug"], limit=80)
+    except Exception:  # noqa: BLE001
+        return 0
+    outcomes: list[bool] = []          # chronological; True = the tick failed
+    pending = False                    # a timeout awaiting its closing tick
+    for e in reversed(recent):         # oldest → newest
+        if e["kind"] == "tick_timeout":
+            if pending:                # two timeouts, no tick between → one
+                outcomes.append(True)  # attempt already failed; close it
+            pending = True
+        elif e["kind"] == "tick":
+            outcomes.append(pending)
+            pending = False
+    if pending:                        # a trailing timeout not yet closed
+        outcomes.append(True)
+    streak = 0
+    for failed in reversed(outcomes):  # newest attempt backward
+        if not failed:
+            break
+        streak += 1
+    return streak
+
+
 def fever_state(store: BeingsStore, being: dict,
                 now: datetime) -> str | None:
-    """FEVER (T2.13): a real breakdown in the last day — a burn-cap collapse
-    or repeated timed-out ticks. Returns the honest cause, or None. While it
-    holds, the tick cadence is floored (the body spaces itself out) and the
-    being is told to rest. It passes when the events age out — nothing to
-    roll, nothing to bless away."""
+    """FEVER (T2.13): a real breakdown — a burn-cap collapse in the last day,
+    or the body timing out several ticks IN A ROW. Returns the honest cause,
+    or None. While it holds, the tick cadence is floored (the body spaces
+    itself out) and the being is told to rest. It passes on its own: a
+    collapse ages out of the day; a timeout streak clears the instant one
+    tick gets through — nothing to roll, nothing to bless away."""
     if _recent_kind_count(store, being, now, ("collapsed_exhausted",)):
         return "your wallet collapsed from overspending"
-    timeouts = _recent_kind_count(store, being, now, ("tick_timeout",))
-    if timeouts >= FEVER_TIMEOUTS:
-        return f"your body timed out {timeouts} times today"
+    streak = _consecutive_tick_timeouts(store, being)
+    if streak >= FEVER_CONSEC_TIMEOUTS:
+        return f"your body timed out {streak} ticks in a row"
     return None
 
 
