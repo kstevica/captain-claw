@@ -542,15 +542,49 @@ export interface VillageBeingPos {
   path?: [number, number][]; departed_at?: string; total_minutes?: number
 }
 export interface VillageProp { tile: [number, number]; kind: string }
+// A sign in the grass (FPV plan Phase 3): planted by the parent or a
+// public visitor; each being finds each sign once. `found` counts finders;
+// `read_by` carries slugs only on the parent's own map.
+export interface VillageNote {
+  id: string; x: number; y: number; text: string
+  author: string; author_kind: 'parent' | 'visitor'
+  created_at: string; found: number; read_by?: string[]
+}
 export interface VillageMapData {
   plot: number; places: VillagePlace[]; beings: VillageBeingPos[]
   grid?: { plot_w: number; plot_h: number; tile_size: number }
   terrain?: { default_elevation: number }
   roads?: [number, number][]
   props?: VillageProp[]
+  notes?: VillageNote[]
 }
 export const getVillageMap = () =>
   fdFetch<VillageMapData>('/beings/village-map')
+export const plantVillageNote = (x: number, y: number, text: string) =>
+  fdFetch<{ note: VillageNote }>('/beings/village-map/notes', {
+    method: 'POST', body: JSON.stringify({ x, y, text }),
+  })
+export const pullVillageNote = (id: string) =>
+  fdFetch<{ ok: boolean }>(`/beings/village-map/notes/${id}`, {
+    method: 'DELETE',
+  })
+export const postVillagePresence = (x: number, y: number) =>
+  fdFetch<{ felt: string[] }>('/beings/village-map/presence', {
+    method: 'POST', body: JSON.stringify({ x, y }),
+  })
+// The living ghost roster (FPV plan Phase 5): other ghosts roaming the
+// village right now — the parent and public visitors see each other.
+export interface GhostPresence {
+  id: string; kind: 'parent' | 'visitor'; name: string; xy: [number, number]
+}
+export const postGhostBeat = (id: string, x: number, y: number) =>
+  fdFetch<{ ghosts: GhostPresence[] }>('/beings/village-map/ghost', {
+    method: 'POST', body: JSON.stringify({ id, x, y }),
+  })
+export const postGhostLeave = (id: string) =>
+  fdFetch<{ ok: boolean }>('/beings/village-map/ghost/leave', {
+    method: 'POST', body: JSON.stringify({ id, x: 0, y: 0 }),
+  })
 export const getVillagePlace = (placeId: string) =>
   fdFetch<{ place: VillagePlace; guestbook: string }>(
     `/beings/village-map/place/${placeId}`)

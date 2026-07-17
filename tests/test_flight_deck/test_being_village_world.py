@@ -460,3 +460,178 @@ def test_a_commissioned_building_is_walkable(store):
     arr = store.settle_location(store.get(OWNER, b["slug"]),
                                 now=NOW + timedelta(hours=8))
     assert arr and arr["place"] == place["id"]
+
+
+# ═══ Signs & the felt ghost (FPV plan Phase 3) ═════════════════════════════
+
+def test_a_sign_is_planted_bounded_and_pulled(store):
+    world.ensure_village(store, OWNER, now=NOW)
+    n = store.add_village_note(OWNER, 500, 500, "  be kind today  ",
+                               author="parent", author_kind="parent",
+                               now=NOW)
+    assert n["text"] == "be kind today"
+    assert store.village_notes(OWNER)[0]["id"] == n["id"]
+    with pytest.raises(BeingError):        # words required
+        store.add_village_note(OWNER, 500, 500, "   ")
+    with pytest.raises(BeingError):        # bounded text
+        store.add_village_note(OWNER, 500, 500, "x" * 281)
+    with pytest.raises(BeingError):        # on the plot
+        store.add_village_note(OWNER, 1200, 500, "off the map")
+    with pytest.raises(BeingError):        # a visitor signs with a name
+        store.add_village_note(OWNER, 1, 1, "hi",
+                               author="x" * 25, author_kind="visitor")
+    assert store.remove_village_note(OWNER, n["id"])
+    assert not store.remove_village_note(OWNER, n["id"])
+    assert store.village_notes(OWNER) == []
+
+
+def test_the_grass_holds_only_so_many_signs(store):
+    world.ensure_village(store, OWNER, now=NOW)
+    for i in range(store.MAX_VILLAGE_NOTES):
+        store.add_village_note(OWNER, 10 + i, 10, f"sign {i}", now=NOW)
+    with pytest.raises(BeingError):
+        store.add_village_note(OWNER, 900, 900, "one too many", now=NOW)
+
+
+def test_a_being_finds_a_near_sign_once(store):
+    b = _being(store, "Nalaznik")
+    world.ensure_village(store, OWNER, now=NOW)
+    home = world.home_xy(b)
+    near = store.add_village_note(OWNER, home[0] + 10, home[1], "hello you",
+                                  author="parent", author_kind="parent",
+                                  now=NOW)
+    store.add_village_note(OWNER, (home[0] + 500) % 1000, home[1],
+                           "far away", now=NOW)
+    assert world.discover_notes(store, b, NOW) == 1
+    ev = _events(store, b["slug"], "note_found")
+    assert len(ev) == 1 and ev[0]["data"]["text"] == "hello you"
+    assert b["slug"] in store.village_notes(OWNER)[0]["read_by"]
+    # once means once — a second pass finds nothing new
+    assert world.discover_notes(store, b, NOW + timedelta(minutes=5)) == 0
+    # the reflex pass carries discovery too (no double-count after read)
+    assert near["id"]  # (sanity: the near sign existed)
+
+
+def test_a_visitor_sign_reads_signed(store):
+    b = _being(store, "Citac")
+    world.ensure_village(store, OWNER, now=NOW)
+    home = world.home_xy(b)
+    store.add_village_note(OWNER, home[0], home[1] + 8, "lijep pozdrav",
+                           author="Mira", author_kind="visitor", now=NOW)
+    world.discover_notes(store, b, NOW)
+    senses = life.percepts_since(store, b)
+    line = next(s for s in senses if "sign planted in the grass" in s)
+    assert "a visitor, Mira" in line and "lijep pozdrav" in line
+
+
+def test_presence_is_felt_near_once_per_cooldown(store):
+    b = _being(store, "Osjetljiva")
+    world.ensure_village(store, OWNER, now=NOW)
+    home = world.home_xy(b)
+    felt = world.presence_felt(store, OWNER, home[0] + 20, home[1],
+                               author="parent", author_kind="parent",
+                               now=NOW)
+    assert felt == [b["name"]]
+    # cooldown: passing again within the hour is weather, not an alarm
+    felt2 = world.presence_felt(store, OWNER, home[0], home[1],
+                                author="parent", author_kind="parent",
+                                now=NOW + timedelta(minutes=10))
+    assert felt2 == []
+    # …and past the cooldown it lands again
+    felt3 = world.presence_felt(store, OWNER, home[0], home[1],
+                                author="parent", author_kind="parent",
+                                now=NOW + timedelta(hours=2))
+    assert felt3 == [b["name"]]
+    # far away is nothing at all
+    felt4 = world.presence_felt(store, OWNER, (home[0] + 500) % 1000,
+                                home[1], author="parent",
+                                author_kind="parent",
+                                now=NOW + timedelta(hours=5))
+    assert felt4 == []
+
+
+def test_a_visitor_wake_only_touches_public_beings(store):
+    pub = _being(store, "Javna")
+    priv = _being(store, "Skrita")
+    world.ensure_village(store, OWNER, now=NOW)
+    hp, hv = world.home_xy(pub), world.home_xy(priv)
+    # both are close enough — but the visitor's wake is scoped
+    felt = world.presence_felt(store, OWNER, hp[0], hp[1],
+                               author="Mira", author_kind="visitor",
+                               now=NOW, only_slugs={pub["slug"]})
+    assert felt == [pub["name"]]
+    assert _events(store, priv["slug"], "presence") == []
+    line = next(s for s in life.percepts_since(store, pub)
+                if "visitor" in s and "Mira" in s)
+    assert "roamed the village" in line
+    assert hv  # (sanity)
+
+
+def test_the_map_payload_carries_signs_and_redacts_readers(store):
+    b = _being(store, "Znak")
+    world.ensure_village(store, OWNER, now=NOW)
+    n = store.add_village_note(OWNER, 500, 500, "vidimo se", now=NOW)
+    store.mark_note_read(OWNER, n["id"], b["slug"])
+    full = world.village_map_payload(store, OWNER, now=NOW)
+    assert full["notes"][0]["found"] == 1
+    assert full["notes"][0]["read_by"] == [b["slug"]]
+    pub = world.village_map_payload(store, OWNER, now=NOW,
+                                    only_slugs=set())
+    assert pub["notes"][0]["found"] == 1
+    assert pub["notes"][0]["read_by"] == []
+
+
+# ═══ The living ghost roster (FPV plan Phase 5) ════════════════════════════
+
+def test_ghosts_in_one_village_see_each_other(store):
+    world._ghost_roster.clear()
+    # the parent heartbeats first — alone, sees no one
+    assert world.ghost_heartbeat(OWNER, "p1", kind="parent", name="parent",
+                                 x=100, y=100) == []
+    # a visitor arrives — sees the parent
+    seen = world.ghost_heartbeat(OWNER, "v1", kind="visitor", name="Mira",
+                                 x=200, y=200)
+    assert len(seen) == 1
+    assert seen[0]["kind"] == "parent" and seen[0]["xy"] == [100, 100]
+    # the parent's next beat now sees the visitor, by name
+    seen2 = world.ghost_heartbeat(OWNER, "p1", kind="parent", name="parent",
+                                  x=100, y=100)
+    assert [g["name"] for g in seen2] == ["Mira"]
+    # a second visitor sees BOTH the parent and the first visitor
+    seen3 = world.ghost_heartbeat(OWNER, "v2", kind="visitor", name="Vjetar",
+                                  x=300, y=300)
+    assert {g["name"] for g in seen3} == {"parent", "Mira"}
+
+
+def test_a_ghost_fades_on_silence(store, monkeypatch):
+    world._ghost_roster.clear()
+    t = {"now": 1000.0}
+    monkeypatch.setattr(world.time, "monotonic", lambda: t["now"])
+    world.ghost_heartbeat(OWNER, "p1", kind="parent", name="parent",
+                          x=10, y=10)
+    # a visitor beats, sees the parent
+    assert len(world.ghost_heartbeat(OWNER, "v1", kind="visitor",
+                                     name="Mira", x=20, y=20)) == 1
+    # time passes beyond the TTL; the parent went silent
+    t["now"] += world.GHOST_TTL_S + 1
+    # the visitor's next beat prunes the stale parent — no one else here
+    assert world.ghost_heartbeat(OWNER, "v1", kind="visitor", name="Mira",
+                                 x=25, y=20) == []
+
+
+def test_ghosts_never_cross_villages(store):
+    world._ghost_roster.clear()
+    world.ghost_heartbeat("village-a", "p1", kind="parent", name="parent",
+                          x=1, y=1)
+    seen = world.ghost_heartbeat("village-b", "v1", kind="visitor",
+                                 name="Mira", x=2, y=2)
+    assert seen == []           # a different village is a different room
+
+
+def test_a_ghost_can_depart_before_the_ttl(store):
+    world._ghost_roster.clear()
+    world.ghost_heartbeat(OWNER, "p1", kind="parent", name="parent",
+                          x=5, y=5)
+    world.ghost_depart(OWNER, "p1")
+    assert world.ghost_heartbeat(OWNER, "v1", kind="visitor", name="Mira",
+                                 x=6, y=6) == []

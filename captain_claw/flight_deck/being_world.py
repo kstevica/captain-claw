@@ -25,6 +25,8 @@ from __future__ import annotations
 import math
 import os
 import random
+import threading
+import time
 import zlib
 from datetime import datetime, timedelta
 
@@ -997,6 +999,15 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
             entry["total_minutes"] = loc.get("minutes")
         beings.append(entry)
     meta = store.get_village_meta(owner_id)
+    # signs in the grass (FPV plan Phase 3): the public map never leaks
+    # which (possibly private) beings found a sign — only how many did
+    notes = []
+    for n in store.village_notes(owner_id):
+        found = len(n.get("read_by") or [])
+        if only_slugs is not None:
+            notes.append({**n, "read_by": [], "found": found})
+        else:
+            notes.append({**n, "found": found})
     return {"plot": PLOT_SIZE,
             "grid": {"plot_w": meta["plot_w"], "plot_h": meta["plot_h"],
                      "tile_size": meta["tile_size"]},
@@ -1004,6 +1015,7 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
             "roads": meta["roads"],
             "props": village_props(store, owner_id),
             "places": store.village_places(owner_id),
+            "notes": notes,
             "beings": beings}
 
 
@@ -1409,6 +1421,134 @@ def reflex_encounters(store: BeingsStore, being: dict,
                if _meet(store, being, other, pid, here, now)[0])
 
 
+# ── Signs & the felt ghost (FPV plan Phase 3) ────────────────────────────
+# The parent (and public visitors) roam the village in first person. They
+# leave two kinds of trace, both positional, both discovered — never pushed:
+# a planted sign a being finds when its own feet carry it near, and a felt
+# presence when the ghost passes close. Both are event rows ($0); every
+# feeling they earn lands at the next mind tick, like all body facts.
+
+NOTE_RADIUS = 40.0          # units (2 tiles): close enough to spot a sign
+PRESENCE_RADIUS = 60.0      # units (3 tiles): close enough to feel
+PRESENCE_COOLDOWN_H = 1.0   # a ghost is weather, not an alarm
+
+
+def discover_notes(store: BeingsStore, being: dict,
+                   now: datetime) -> int:
+    """A being's eyes on the ground: every unread sign within NOTE_RADIUS
+    of where it stands RIGHT NOW is found — marked read for this being and
+    recorded as a note_found fact. Each being finds each sign once."""
+    if being.get("state") in ("dead", "emigrated") \
+            or being.get("stage") == "egg":
+        return 0
+    notes = store.village_notes(being["owner_id"])
+    if not notes:
+        return 0
+    pos = position_of(store, being, now)["xy"]
+    found = 0
+    for n in notes:
+        if being["slug"] in (n.get("read_by") or []):
+            continue
+        if math.dist(pos, (n["x"], n["y"])) > NOTE_RADIUS:
+            continue
+        store.mark_note_read(being["owner_id"], n["id"], being["slug"])
+        store.record_event(being["id"], "note_found", {
+            "note_id": n["id"], "text": (n["text"] or "")[:300],
+            "author": n["author"], "author_kind": n["author_kind"],
+        }, now=now)
+        found += 1
+    return found
+
+
+# ── The living ghost roster (FPV plan Phase 5) ───────────────────────────
+# Ghosts (the parent + public visitors) roam one village together and see
+# each other. A pure in-memory, process-local roster keyed by village
+# owner: each roaming client heartbeats its spot every couple of seconds
+# and gets back the OTHER ghosts here right now. No DB, no percepts — this
+# is the render layer of company, cheap enough to poll fast. Entries expire
+# on silence (a paused or departed ghost fades from the others within the
+# TTL). One shared roster per owner means the parent and the visitors to
+# THAT village are in the same room; other villages never bleed in.
+
+_ghost_roster: dict[str, dict[str, dict]] = {}
+_ghost_lock = threading.Lock()
+GHOST_TTL_S = 8.0             # a ghost gone quiet this long fades for others
+GHOST_MAX_PER_VILLAGE = 40    # a crowd cap so a busy square can't run away
+
+
+def ghost_heartbeat(owner_id: str, ghost_id: str, *, kind: str, name: str,
+                    x: float, y: float) -> list[dict]:
+    """One ghost says 'I'm here'; we answer with everyone else who is. Pure
+    in-memory: upsert this ghost, prune the silent, return the rest."""
+    if not owner_id or not ghost_id:
+        return []
+    nowm = time.monotonic()
+    name = (name or "").strip()[:24] or ("parent" if kind == "parent"
+                                         else "visitor")
+    with _ghost_lock:
+        village = _ghost_roster.setdefault(owner_id, {})
+        if ghost_id not in village and len(village) >= GHOST_MAX_PER_VILLAGE:
+            # roster full: still let this ghost SEE, just don't add it
+            pass
+        else:
+            village[ghost_id] = {"kind": kind, "name": name,
+                                 "x": int(x), "y": int(y), "ts": nowm}
+        others = []
+        for gid, g in list(village.items()):
+            if nowm - g["ts"] > GHOST_TTL_S:
+                del village[gid]
+                continue
+            if gid == ghost_id:
+                continue
+            others.append({"id": gid, "kind": g["kind"], "name": g["name"],
+                           "xy": [g["x"], g["y"]]})
+        if not village:
+            _ghost_roster.pop(owner_id, None)
+        return others
+
+
+def ghost_depart(owner_id: str, ghost_id: str) -> None:
+    """A ghost that leaves the village need not wait for the TTL."""
+    with _ghost_lock:
+        village = _ghost_roster.get(owner_id)
+        if village and ghost_id in village:
+            del village[ghost_id]
+            if not village:
+                _ghost_roster.pop(owner_id, None)
+
+
+def presence_felt(store: BeingsStore, owner_id: str, x: float, y: float, *,
+                  author: str, author_kind: str, now: datetime,
+                  only_slugs: set | None = None) -> list[str]:
+    """The ghost passes close: every living, hatched being within
+    PRESENCE_RADIUS of (x, y) — and past its own cooldown — records one
+    presence fact. `only_slugs` scopes a PUBLIC visitor's wake to public
+    beings; the parent's presence touches the whole family. Returns the
+    names of those who felt it."""
+    felt: list[str] = []
+    cutoff = (now - timedelta(hours=PRESENCE_COOLDOWN_H)).isoformat()
+    for row in store.list(owner_id):
+        if row.get("state") in ("dead", "emigrated"):
+            continue
+        if only_slugs is not None and row["slug"] not in only_slugs:
+            continue
+        being = store.get(owner_id, row["slug"])
+        if being.get("stage") == "egg":
+            continue
+        pos = position_of(store, being, now)["xy"]
+        if math.dist(pos, (x, y)) > PRESENCE_RADIUS:
+            continue
+        recent = any(
+            e["kind"] == "presence" and e["at"] > cutoff
+            for e in store.events(owner_id, being["slug"], limit=40))
+        if recent:
+            continue
+        store.record_event(being["id"], "presence", {
+            "author": author, "author_kind": author_kind}, now=now)
+        felt.append(being["name"])
+    return felt
+
+
 def reflex_pass(store: BeingsStore, being: dict, now: datetime) -> int:
     """One being's between-tick reflexes (body-brain plan Phase 1): pure
     Python, $0, position-only — the pass creates FACTS (settled arrivals,
@@ -1420,6 +1560,10 @@ def reflex_pass(store: BeingsStore, being: dict, now: datetime) -> int:
     if store.settle_location(being, now=now):
         acted += 1
         being = store.get(being["owner_id"], being["slug"])
+    try:  # a sign spotted on the way is a fact too (FPV plan Phase 3)
+        acted += discover_notes(store, being, now)
+    except Exception:  # noqa: BLE001 — signs are texture, never a crash
+        pass
     try:
         if fever_state(store, being, now):
             loc = being.get("location") or {"at": "home"}

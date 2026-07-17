@@ -321,6 +321,78 @@ async def village_place(place_id: str,
     return {"place": place, "guestbook": guestbook}
 
 
+class NoteRequest(BaseModel):
+    x: int
+    y: int
+    text: str
+
+
+class PresenceRequest(BaseModel):
+    x: int
+    y: int
+
+
+@router.post("/village-map/notes")
+async def plant_note(body: NoteRequest,
+                     user: dict = Depends(get_current_user)):
+    """The parent plants a sign in the grass (FPV plan Phase 3). Each
+    being finds it once, when its own feet carry it near."""
+    note = _run(get_store().add_village_note, user["id"], body.x, body.y,
+                body.text, author="parent", author_kind="parent")
+    return {"note": note}
+
+
+@router.delete("/village-map/notes/{note_id}")
+async def pull_note(note_id: str,
+                    user: dict = Depends(get_current_user)):
+    """The parent pulls a sign out — theirs or a visitor's; it is their
+    village's grass."""
+    if not _run(get_store().remove_village_note, user["id"], note_id):
+        raise HTTPException(404, "no such sign")
+    return {"ok": True}
+
+
+@router.post("/village-map/presence")
+async def felt_presence(body: PresenceRequest,
+                        user: dict = Depends(get_current_user)):
+    """The roaming parent-ghost passes close (FPV plan Phase 3): every
+    living being within reach — and past its own cooldown — records one
+    presence fact that colors its next mind tick. $0: an event row."""
+    from datetime import datetime, timezone
+    from captain_claw.flight_deck import being_world
+    felt = _run(being_world.presence_felt, get_store(), user["id"],
+                body.x, body.y, author="parent", author_kind="parent",
+                now=datetime.now(timezone.utc))
+    return {"felt": felt}
+
+
+class GhostRequest(BaseModel):
+    id: str
+    x: int
+    y: int
+
+
+@router.post("/village-map/ghost")
+async def parent_ghost(body: GhostRequest,
+                       user: dict = Depends(get_current_user)):
+    """The parent-ghost's heartbeat (FPV plan Phase 5): report where I am,
+    receive the other ghosts roaming my village right now — the visitors I
+    can see, and any other window I have open. In-memory, $0."""
+    from captain_claw.flight_deck import being_world
+    others = being_world.ghost_heartbeat(
+        user["id"], body.id, kind="parent", name="parent",
+        x=body.x, y=body.y)
+    return {"ghosts": others}
+
+
+@router.post("/village-map/ghost/leave")
+async def parent_ghost_leave(body: GhostRequest,
+                             user: dict = Depends(get_current_user)):
+    from captain_claw.flight_deck import being_world
+    being_world.ghost_depart(user["id"], body.id)
+    return {"ok": True}
+
+
 @router.get("/market")
 async def market(user: dict = Depends(get_current_user)):
     """The open stalls (space plan Phase 4) — the parent's window on the

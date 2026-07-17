@@ -1020,6 +1020,23 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
                 f"You crossed paths with {d.get('name')} at "
                 f"{d.get('place_name') or d.get('place')} — small company, "
                 "real. A letter would land warmer today.")
+        elif k == "note_found":
+            who = ("your parent's handwriting"
+                   if d.get("author_kind") == "parent"
+                   else f"signed by a visitor, {d.get('author') or 'unnamed'}")
+            lines.append(
+                f'You found a small sign planted in the grass — {who}: '
+                f'"{d.get("text")}"')
+        elif k == "presence":
+            if d.get("author_kind") == "parent":
+                lines.append(
+                    "The air went still around you for a moment — something "
+                    "kind passed close by. It felt like family.")
+            else:
+                lines.append(
+                    "The air stirred, as if someone friendly walked past — "
+                    f"a visitor, {d.get('author') or 'unnamed'}, roamed the "
+                    "village today.")
         elif k == "plan_fulfilled":
             if d.get("kind") == "meet":
                 lines.append(f"AS YOU PLANNED: you found {d.get('name')} — "
@@ -2942,6 +2959,13 @@ async def _tick_locked(
     first_of_day = True
     if being.get("last_tick_at"):
         first_of_day = str(being["last_tick_at"])[:10] != now.isoformat()[:10]
+    # A sign underfoot is found at wake too (FPV plan Phase 3) — beings
+    # whose instincts are off still notice where they stand.
+    try:
+        being_world.discover_notes(store, being, now)
+    except Exception as e:  # noqa: BLE001 — signs are texture
+        log.warning("note discovery failed", slug=being["slug"],
+                    error=str(e))
     try:
         senses = percepts_since(store, being)
     except Exception:  # noqa: BLE001

@@ -1,10 +1,10 @@
 // Iskra — living beings: conception (point-buy), vitals, wallet, journal.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, Check, ChevronDown,
   ChevronLeft, ChevronRight, ClipboardList, Coins, Download, Egg, ExternalLink,
-  Files, Fingerprint, Footprints, Gift, Globe, GraduationCap, History, Loader2, Mail,
+  DoorOpen, Files, Fingerprint, Footprints, Gift, Globe, GraduationCap, History, Loader2, Mail,
   Map as MapIcon, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus,
   RefreshCw, Search, ScrollText, Skull, SlidersHorizontal, Sparkles, Sprout,
   Trash2, Upload, Users, Wrench, X, Zap, ZoomIn, ZoomOut,
@@ -44,6 +44,10 @@ import { CHARACTER_NAMES, IskraAvatar, PALETTES, PALETTE_NAMES } from '../compon
 import { IsoScene } from '../components/village/IsoScene'
 import { posOf as walkPosOf, statusOf as walkStatusOf } from '../components/village/walk'
 import { folderFor, shortName, isBoilerplate } from '../components/village/places'
+
+// The first-person village (FPV plan Phase 1) — lazy, so three.js only
+// loads when the parent actually steps in.
+const VillageFPV = lazy(() => import('../components/village/fpv/VillageFPV'))
 
 const REFRESH_MS = 6000
 const ATTRS = ['CUR', 'PER', 'CAU', 'SOC', 'CRE', 'ORD', 'PLA'] as const
@@ -3738,6 +3742,9 @@ function VillageMap() {
   const [busy, setBusy] = useState(false)
   const [nudging, setNudging] = useState(false)
   const [full, setFull] = useState(false)
+  // the FPV gets a SNAPSHOT of the map, not the live 60s-refreshed object —
+  // otherwise every refresh would rebuild the world under the ghost's feet
+  const [fpv, setFpv] = useState<VillageMapData | null>(null)
   const fetchedAt = useRef(0)
   const [, beat] = useState(0)
 
@@ -3771,11 +3778,11 @@ function VillageMap() {
     return () => window.clearInterval(t)
   }, [])
   useEffect(() => {                       // Esc leaves fullscreen
-    if (!full) return
+    if (!full || fpv) return              // (inside the FPV, Esc means pause)
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFull(false) }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [full])
+  }, [full, fpv])
   useEffect(() => {
     if (!sel) { setPlaceInfo(null); return }
     let dead = false
@@ -3880,12 +3887,25 @@ function VillageMap() {
       <span className="ml-auto text-[10px] font-normal text-zinc-500">
         {walking.length > 0 ? `${walking.length} walking · ` : ''}{market.length} stall{market.length === 1 ? '' : 's'} open
       </span>
+      <button onClick={() => setFpv(data)} title="Enter the village — walk it in first person"
+        className="ml-1 flex items-center gap-1 rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-1 text-[10px] font-medium text-violet-600 transition-colors hover:bg-violet-500/20 dark:text-violet-300">
+        <DoorOpen className="h-3.5 w-3.5" /> Enter
+      </button>
       <button onClick={() => setFull((f) => !f)} title={full ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
         className="ml-1 rounded border border-zinc-700 p-1 text-zinc-400 transition-colors hover:border-violet-500/50 hover:text-zinc-200">
         {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
       </button>
     </div>
   )
+  const fpvOverlay = fpv ? (
+    <Suspense fallback={
+      <div className="fixed inset-0 z-[90] grid place-items-center bg-[#0c0f0a] text-[12px] text-[#b9b19a]">
+        raising the village…
+      </div>
+    }>
+      <VillageFPV data={fpv} onClose={() => setFpv(null)} />
+    </Suspense>
+  ) : null
 
   if (full) {
     return (
@@ -3901,6 +3921,7 @@ function VillageMap() {
           </div>
           <div className="w-full shrink-0 overflow-y-auto lg:w-96">{panel(true)}</div>
         </div>
+        {fpvOverlay}
       </div>
     )
   }
@@ -3916,6 +3937,7 @@ function VillageMap() {
         </div>
         <div className="w-full shrink-0 lg:w-72">{panel(false)}</div>
       </div>
+      {fpvOverlay}
     </div>
   )
 }

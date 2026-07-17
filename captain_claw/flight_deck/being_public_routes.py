@@ -165,6 +165,106 @@ async def public_village_map():
                                            only_slugs=slugs)
 
 
+# ── The visiting ghost (FPV plan Phase 3) ─────────────────────────────────
+# Public visitors roam the village in first person and leave signed notes.
+# Both writes are bounded hard: the village-wide sign cap, text/name length
+# limits in the store, a per-village minimum interval here, and the presence
+# cooldown per being. A visitor's wake only ever touches PUBLIC beings.
+
+_last_public_note_at: dict[str, float] = {}
+PUBLIC_NOTE_MIN_INTERVAL_S = 15.0
+
+
+class PublicNoteRequest(BaseModel):
+    x: int
+    y: int
+    text: str
+    name: str
+
+
+class PublicPresenceRequest(BaseModel):
+    x: int
+    y: int
+    name: str = ""
+
+
+@village_router.post("/notes")
+async def public_plant_note(body: PublicNoteRequest):
+    """A visitor plants a signed note in the grass. The Iskre find it as
+    their feet carry them near — signed with the visitor's name."""
+    import time
+    store = get_store()
+    owner = store.public_village_owner()
+    if not owner:
+        raise HTTPException(404, "no public village fronts this machine")
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "a visitor's sign needs a name")
+    last = _last_public_note_at.get(owner, 0.0)
+    if time.monotonic() - last < PUBLIC_NOTE_MIN_INTERVAL_S:
+        raise HTTPException(429, "the grass needs a breath between signs")
+    note = _run(store.add_village_note, owner, body.x, body.y, body.text,
+                author=name, author_kind="visitor")
+    _last_public_note_at[owner] = time.monotonic()
+    # what a visitor learns back is only the sign itself
+    return {"note": {k: note[k] for k in
+                     ("id", "x", "y", "text", "author", "author_kind",
+                      "created_at")}}
+
+
+@village_router.post("/presence")
+async def public_presence(body: PublicPresenceRequest):
+    """A visiting ghost passes close to a PUBLIC being — one presence fact,
+    per being, per cooldown. Private beings never feel a stranger."""
+    from datetime import datetime, timezone
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    owner = store.public_village_owner()
+    if not owner:
+        raise HTTPException(404, "no public village fronts this machine")
+    slugs = {b["slug"] for b in store.public_beings()
+             if b.get("owner_id") == owner}
+    name = (body.name or "").strip()[:24] or "unnamed"
+    felt = _run(being_world.presence_felt, store, owner, body.x, body.y,
+                author=name, author_kind="visitor",
+                now=datetime.now(timezone.utc), only_slugs=slugs)
+    return {"felt": len(felt)}
+
+
+class PublicGhostRequest(BaseModel):
+    id: str
+    x: int
+    y: int
+    name: str = ""
+
+
+@village_router.post("/ghost")
+async def public_ghost(body: PublicGhostRequest):
+    """A visiting ghost's heartbeat (FPV plan Phase 5): report my spot,
+    receive the other ghosts roaming this village — the parent and my
+    fellow visitors. Shares ONE roster per village with the parent, so we
+    all see each other. In-memory, $0, un-gated."""
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    owner = store.public_village_owner()
+    if not owner:
+        raise HTTPException(404, "no public village fronts this machine")
+    others = being_world.ghost_heartbeat(
+        owner, body.id, kind="visitor", name=body.name,
+        x=body.x, y=body.y)
+    return {"ghosts": others}
+
+
+@village_router.post("/ghost/leave")
+async def public_ghost_leave(body: PublicGhostRequest):
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    owner = store.public_village_owner()
+    if owner:
+        being_world.ghost_depart(owner, body.id)
+    return {"ok": True}
+
+
 @village_router.websocket("/link")
 async def village_link(ws: WebSocket):
     """A sending village dials in, presents the secret, and stays connected so

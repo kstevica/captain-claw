@@ -104,6 +104,38 @@ html.light .fd-file-markdown td { border-bottom-color: #e4e4e7; }
 html.light .fd-file-markdown tbody tr:nth-child(even) { background: rgba(244,244,245,0.5); }
 html.light .fd-file-markdown tbody tr:hover { background: rgba(228,228,231,0.4); }
 
+/* ── FPV reading room markdown: always the game's warm night ──
+   The first-person reader panel is dark whatever the app theme is, so it
+   gets its own palette (cream on warm dark) with NO html.light override —
+   otherwise light theme paints near-black text onto a near-black panel. */
+.fd-fpv-markdown { color: #cfc7b0; line-height: 1.7; font-size: 0.9rem; }
+.fd-fpv-markdown > :first-child { margin-top: 0; }
+.fd-fpv-markdown h1 { font-size: 1.55em; font-weight: 700; color: #f4ecd6; margin: 1.2em 0 0.5em; padding-bottom: 0.3em; border-bottom: 2px solid #4a4436; }
+.fd-fpv-markdown h2 { font-size: 1.28em; font-weight: 700; color: #f4ecd6; margin: 1.3em 0 0.45em; padding-bottom: 0.25em; border-bottom: 1px solid #3a352a; }
+.fd-fpv-markdown h3 { font-size: 1.12em; font-weight: 600; color: #e8e2cf; margin: 1.1em 0 0.35em; }
+.fd-fpv-markdown h4 { font-size: 1.04em; font-weight: 600; color: #e8e2cf; margin: 0.9em 0 0.3em; }
+.fd-fpv-markdown h5, .fd-fpv-markdown h6 { font-size: 0.95em; font-weight: 600; color: #a89f88; margin: 0.8em 0 0.3em; text-transform: uppercase; letter-spacing: 0.03em; }
+.fd-fpv-markdown p { margin: 0.55em 0; }
+.fd-fpv-markdown strong { color: #f4ecd6; font-weight: 600; }
+.fd-fpv-markdown em { color: #c9c0a8; }
+.fd-fpv-markdown a { color: #c4b5fd; text-decoration: underline; text-underline-offset: 2px; }
+.fd-fpv-markdown a:hover { color: #ddd0ff; }
+.fd-fpv-markdown ul, .fd-fpv-markdown ol { margin: 0.5em 0; padding-left: 1.4em; }
+.fd-fpv-markdown li { margin-bottom: 0.28em; }
+.fd-fpv-markdown li > ul, .fd-fpv-markdown li > ol { margin: 0.2em 0; }
+.fd-fpv-markdown code { background: rgba(74,68,54,0.55); padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.88em; color: #f0c98a; }
+.fd-fpv-markdown pre { background: #12100b; border: 1px solid #3a352a; border-radius: 8px; padding: 0.9em 1.1em; margin: 0.7em 0; overflow-x: auto; }
+.fd-fpv-markdown pre code { background: none; padding: 0; color: #cfc7b0; font-size: 0.85em; }
+.fd-fpv-markdown blockquote { border-left: 3px solid #8b7bc4; padding: 0.4em 1em; margin: 0.7em 0; background: rgba(139,123,196,0.08); color: #c9c0a8; border-radius: 0 6px 6px 0; }
+.fd-fpv-markdown hr { border: none; border-top: 1px solid #4a4436; margin: 1.3em 0; }
+.fd-fpv-markdown table { width: 100%; border-collapse: collapse; margin: 0.9em 0; font-size: 0.88em; border: 1px solid #4a4436; border-radius: 8px; overflow: hidden; }
+.fd-fpv-markdown thead { background: #241f16; }
+.fd-fpv-markdown th { text-align: left; font-weight: 700; color: #f4ecd6; padding: 0.55em 0.8em; border-bottom: 2px solid #5a5240; }
+.fd-fpv-markdown td { padding: 0.5em 0.8em; border-bottom: 1px solid #3a352a; }
+.fd-fpv-markdown tr:last-child td { border-bottom: none; }
+.fd-fpv-markdown tbody tr:nth-child(even) { background: rgba(74,68,54,0.22); }
+.fd-fpv-markdown img { max-width: 100%; border-radius: 8px; margin: 0.7em 0; }
+
 /* ── Light theme overrides ── */
 html.light {
   color-scheme: light;

@@ -518,6 +518,25 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_plans
                     ON being_plans(being_id, state);
+
+                -- Signs in the grass (FPV plan Phase 3): a note the parent
+                -- (author_kind 'parent') or a public visitor ('visitor')
+                -- plants at a spot in the village. Physical, positional:
+                -- each being finds each sign ONCE (read_by), when its own
+                -- feet carry it near — never pushed, always discovered.
+                CREATE TABLE IF NOT EXISTS village_notes (
+                    id          TEXT PRIMARY KEY,
+                    owner_id    TEXT NOT NULL,
+                    x           INTEGER NOT NULL,
+                    y           INTEGER NOT NULL,
+                    text        TEXT NOT NULL,
+                    author      TEXT NOT NULL DEFAULT 'parent',
+                    author_kind TEXT NOT NULL DEFAULT 'parent',
+                    created_at  TEXT NOT NULL,
+                    read_by     TEXT NOT NULL DEFAULT '[]'
+                );
+                CREATE INDEX IF NOT EXISTS idx_village_notes
+                    ON village_notes(owner_id, created_at);
                 """
             )
             # Work can pay in coins (space plan Phase 2): the parent picks
@@ -1316,6 +1335,101 @@ class BeingsStore:
         except json.JSONDecodeError:
             d["affordances"] = []
         return d
+
+    # ── Signs in the grass (FPV plan Phase 3) ────────────────────────────
+
+    MAX_VILLAGE_NOTES = 24        # the grass can only hold so many signs
+    NOTE_TEXT_MAX = 280
+    NOTE_AUTHOR_MAX = 24
+
+    def village_notes(self, owner_id: str) -> list[dict]:
+        rows = self._c().execute(
+            "SELECT * FROM village_notes WHERE owner_id = ? "
+            "ORDER BY created_at", (owner_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["read_by"] = json.loads(d.get("read_by") or "[]")
+            except json.JSONDecodeError:
+                d["read_by"] = []
+            out.append(d)
+        return out
+
+    def add_village_note(self, owner_id: str, x: int, y: int, text: str, *,
+                         author: str = "parent",
+                         author_kind: str = "parent",
+                         now: datetime | None = None) -> dict:
+        """Plant a sign. Validates HARD (the sign is physics too): text and
+        author trimmed and bounded, the spot on the plot, and a village-wide
+        cap so the grass never drowns in signs."""
+        now = now or _utcnow()
+        text = (text or "").strip()
+        author = (author or "").strip() or "parent"
+        if not text:
+            raise BeingError("a sign needs words")
+        if len(text) > self.NOTE_TEXT_MAX:
+            raise BeingError(
+                f"a sign holds at most {self.NOTE_TEXT_MAX} characters")
+        if len(author) > self.NOTE_AUTHOR_MAX:
+            raise BeingError("that name is too long for a sign")
+        if author_kind not in ("parent", "visitor"):
+            raise BeingError("unknown sign author kind")
+        try:
+            x, y = int(x), int(y)
+        except (TypeError, ValueError):
+            raise BeingError("a sign needs a spot") from None
+        if not (0 <= x <= 1000 and 0 <= y <= 1000):
+            raise BeingError("that spot is beyond the village")
+        n = self._c().execute(
+            "SELECT COUNT(*) FROM village_notes WHERE owner_id = ?",
+            (owner_id,)).fetchone()[0]
+        if int(n) >= self.MAX_VILLAGE_NOTES:
+            raise BeingError(
+                "the grass is full of signs — pull one out first")
+        note = {
+            "id": uuid.uuid4().hex[:12], "owner_id": owner_id,
+            "x": x, "y": y, "text": text, "author": author,
+            "author_kind": author_kind, "created_at": now.isoformat(),
+            "read_by": [],
+        }
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO village_notes (id, owner_id, x, y, text, "
+                "author, author_kind, created_at, read_by) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]')",
+                (note["id"], owner_id, x, y, text, author, author_kind,
+                 note["created_at"]))
+            self._c().commit()
+        return note
+
+    def remove_village_note(self, owner_id: str, note_id: str) -> bool:
+        with self._lock:
+            cur = self._c().execute(
+                "DELETE FROM village_notes WHERE owner_id = ? AND id = ?",
+                (owner_id, note_id))
+            self._c().commit()
+        return cur.rowcount > 0
+
+    def mark_note_read(self, owner_id: str, note_id: str, slug: str) -> None:
+        row = self._c().execute(
+            "SELECT read_by FROM village_notes WHERE owner_id = ? AND id = ?",
+            (owner_id, note_id)).fetchone()
+        if row is None:
+            return
+        try:
+            read_by = json.loads(row["read_by"] or "[]")
+        except json.JSONDecodeError:
+            read_by = []
+        if slug in read_by:
+            return
+        read_by.append(slug)
+        with self._lock:
+            self._c().execute(
+                "UPDATE village_notes SET read_by = ? "
+                "WHERE owner_id = ? AND id = ?",
+                (json.dumps(read_by), owner_id, note_id))
+            self._c().commit()
 
     def save_village(self, owner_id: str, places: list[dict],
                      now: datetime | None = None) -> list[dict]:

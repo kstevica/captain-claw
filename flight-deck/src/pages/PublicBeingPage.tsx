@@ -5,11 +5,11 @@
 // Rendered by App.tsx BEFORE the login gate whenever the path is /village or
 // /b/<slug>, so a logged-out stranger reaches it with no account.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ArrowDownUp, ArrowLeft, ArrowUpRight, BookOpen, CalendarDays, ChevronDown,
-  ChevronLeft, ChevronRight, Clock, Files, Fingerprint, GitFork, Globe, Loader2,
+  ChevronLeft, ChevronRight, Clock, DoorOpen, Files, Fingerprint, GitFork, Globe, Loader2,
   Map as MapIcon, Maximize2, MessageCircle, Minimize2, Moon, Network, RefreshCw, Search, Send, Sparkles, Sprout, Sun,
   Terminal, Users, Wrench, X, ZoomIn, ZoomOut,
 } from 'lucide-react'
@@ -27,6 +27,10 @@ import { IskraAvatar } from '../components/village/avatars'
 import { IsoScene } from '../components/village/IsoScene'
 import { posOf as walkPosOf, statusOf as walkStatusOf } from '../components/village/walk'
 import { folderFor, shortName, isBoilerplate } from '../components/village/places'
+
+// The first-person village (FPV plan Phase 3) — lazy, so three.js only
+// loads when a visitor actually steps in.
+const VillageFPV = lazy(() => import('../components/village/fpv/VillageFPV'))
 
 // ── Theme (standalone): default dark, respect a returning FD user's choice ──
 
@@ -673,6 +677,12 @@ function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
   const [selBeing, setSelBeing] = useState<string | null>(null)
   const [sel, setSel] = useState<string | null>(null)
   const [full, setFull] = useState(false)
+  // the visiting ghost (FPV plan Phase 3): a SNAPSHOT of the map, never
+  // the live 60s-refreshed object — the world must not rebuild mid-walk.
+  // `naming` gates entry until the visitor has a name for their pill.
+  const [fpv, setFpv] = useState<VillageMapData | null>(null)
+  const [naming, setNaming] = useState(false)
+  const [ghostName, setGhostName] = useState(savedName())
   const fetchedAt = useRef(0)
   const [, beat] = useState(0)
   useEffect(() => {
@@ -688,11 +698,16 @@ function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
     return () => window.clearInterval(t)
   }, [])
   useEffect(() => {
-    if (!full) return
+    if (!full || fpv || naming) return    // (inside the FPV, Esc means pause)
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFull(false) }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [full])
+  }, [full, fpv, naming])
+  const enterVillage = () => {
+    if (!data) return
+    if (ghostName.trim()) setFpv(data)
+    else setNaming(true)
+  }
   const placeById = useMemo(() => {
     const m: Record<string, VillagePlace> = {}
     for (const p of data?.places ?? []) m[p.id] = p
@@ -719,11 +734,63 @@ function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
     <div className="mb-2 flex items-center gap-1.5 text-sm font-medium text-zinc-300">
       <MapIcon className="h-4 w-4 text-violet-500 dark:text-violet-400" /> The village, live
       <span className="ml-auto text-[11px] font-normal text-zinc-500">{data.beings.filter((b) => b.to).length} walking</span>
+      <button onClick={enterVillage} title="Enter the village — walk it in first person, leave a note"
+        className="ml-1 flex items-center gap-1 rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-1 text-[10px] font-medium text-violet-600 transition-colors hover:bg-violet-500/20 dark:text-violet-300">
+        <DoorOpen className="h-3.5 w-3.5" /> Enter
+      </button>
       <button onClick={() => setFull((f) => !f)} title={full ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
         className="ml-1 rounded border border-zinc-700 p-1 text-zinc-400 transition-colors hover:border-violet-500/50 hover:text-zinc-200">
         {full ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
       </button>
     </div>
+  )
+  // a visitor needs a name before stepping in — it becomes their pill,
+  // and it signs every note they plant
+  const overlays = (
+    <>
+      {naming && createPortal(
+        <div className="fixed inset-0 z-[110] grid place-items-center bg-[#0c0f0a]/70 backdrop-blur-[2px]">
+          <div className="w-[min(92vw,340px)] rounded-xl border border-[#4a4436] bg-[#171410]/95 p-5 text-[#e8e2cf]">
+            <div className="text-[14px] font-semibold">What shall the village call you?</div>
+            <p className="mt-1 text-[11px] leading-relaxed text-[#b9b19a]">
+              You'll walk it as a quiet ghost. The name goes on your pill —
+              and signs any note you leave in the grass.
+            </p>
+            <input autoFocus value={ghostName} maxLength={24}
+              onChange={(e) => setGhostName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && ghostName.trim()) {
+                  saveName(ghostName.trim()); setNaming(false); setFpv(data)
+                }
+                if (e.key === 'Escape') setNaming(false)
+              }}
+              placeholder="your name"
+              className="mt-3 w-full rounded-lg border border-[#4a4436] bg-[#0c0f0a]/70 px-3 py-2 text-[13px] text-[#e8e2cf] placeholder-[#8d8571] focus:border-amber-400/50 focus:outline-none" />
+            <div className="mt-3 flex gap-2">
+              <button disabled={!ghostName.trim()}
+                onClick={() => { saveName(ghostName.trim()); setNaming(false); setFpv(data) }}
+                className="flex-1 rounded-lg border border-amber-400/40 bg-amber-500/20 px-4 py-1.5 text-[12px] font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40">
+                Step in
+              </button>
+              <button onClick={() => setNaming(false)}
+                className="rounded-lg border border-[#4a4436] px-4 py-1.5 text-[12px] text-[#b9b19a] transition-colors hover:bg-[#2a251d]">
+                Not now
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body)}
+      {fpv && (
+        <Suspense fallback={
+          <div className="fixed inset-0 z-[110] grid place-items-center bg-[#0c0f0a] text-[12px] text-[#b9b19a]">
+            raising the village…
+          </div>
+        }>
+          <VillageFPV data={fpv} mode="visitor" visitorName={ghostName.trim()}
+            onClose={() => setFpv(null)} />
+        </Suspense>
+      )}
+    </>
   )
 
   if (full) {
@@ -742,6 +809,7 @@ function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
           </div>
           <div className="w-full shrink-0 overflow-y-auto lg:w-96">{panel(true)}</div>
         </div>
+        {overlays}
       </div>,
       document.body)
   }
@@ -757,6 +825,7 @@ function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
         </div>
         <div className="w-full shrink-0 lg:w-64">{panel(false)}</div>
       </div>
+      {overlays}
     </div>
   )
 }

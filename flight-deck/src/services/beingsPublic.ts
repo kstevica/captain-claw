@@ -102,6 +102,28 @@ export const listPublicBeings = () =>
 export const getPublicVillageMap = () =>
   villageFetch<import('./beings').VillageMapData>('/map')
 
+// The visiting ghost (FPV plan Phase 3): a public visitor roams the
+// village in first person, leaves signed notes the Iskre later find, and
+// its passing is felt (public beings only, cooldown-bounded, $0).
+export const plantPublicNote = (x: number, y: number, text: string, name: string) =>
+  villageFetch<{ note: import('./beings').VillageNote }>('/notes', {
+    method: 'POST', body: JSON.stringify({ x, y, text, name }),
+  })
+export const postPublicPresence = (x: number, y: number, name: string) =>
+  villageFetch<{ felt: number }>('/presence', {
+    method: 'POST', body: JSON.stringify({ x, y, name }),
+  })
+// The living ghost roster (FPV plan Phase 5): a visitor sees the parent and
+// its fellow visitors — one shared roster per village.
+export const postPublicGhostBeat = (id: string, x: number, y: number, name: string) =>
+  villageFetch<{ ghosts: import('./beings').GhostPresence[] }>('/ghost', {
+    method: 'POST', body: JSON.stringify({ id, x, y, name }),
+  })
+export const postPublicGhostLeave = (id: string, name: string) =>
+  villageFetch<{ ok: boolean }>('/ghost/leave', {
+    method: 'POST', body: JSON.stringify({ id, x: 0, y: 0, name }),
+  })
+
 export const getPublicBeing = (slug: string) =>
   pubFetch<PublicProfile>(`/${slug}`)
 
