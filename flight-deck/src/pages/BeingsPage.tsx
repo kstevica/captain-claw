@@ -3258,35 +3258,85 @@ function LetterBubble({ m, alignLeft }: { m: LetterMessage; alignLeft: boolean }
   )
 }
 
-function LetterThreadCard({ t }: { t: LetterThread }) {
+// One conversation, one line: who talks to whom, how thick the correspondence
+// is, and the last thing said. The letters themselves live in the modal — an
+// inbox reads at a glance; a wall of bubbles does not.
+function LetterThreadRow({ t, onOpen }: { t: LetterThread; onOpen: () => void }) {
   const [a, b] = t.participants
-  const leftSlug = a?.slug
   const delivered = t.messages.filter((m) => m.kind === 'letter').length
   const unread = t.messages.filter((m) => m.kind === 'letter' && !m.read).length
+  const last = t.messages[t.messages.length - 1]
+  const preview = !last ? ''
+    : last.kind === 'refused' ? `nothing landed — ${last.reason}` : (last.body || '')
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40">
-      <div className="flex items-center gap-2 border-b border-zinc-800/70 px-3 py-2">
+    <button onClick={onOpen}
+      className="w-full rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-left transition-colors hover:border-violet-500/40 hover:bg-zinc-900/70">
+      <div className="flex items-center gap-2">
         <Mail className="h-3.5 w-3.5 shrink-0 text-violet-400" />
-        <span className="text-xs font-medium text-zinc-200">{a?.name}</span>
+        <span className="truncate text-xs font-medium text-zinc-200">{a?.name}</span>
         {a && <StageDot p={a} />}
         <span className="text-zinc-600">⇄</span>
-        <span className="text-xs font-medium text-zinc-200">{b?.name}</span>
+        <span className="truncate text-xs font-medium text-zinc-200">{b?.name}</span>
         {b && <StageDot p={b} />}
-        <span className="ml-auto text-[10px] text-zinc-500">
+        <span className="ml-auto shrink-0 text-[10px] text-zinc-500">
           {delivered} letter{delivered === 1 ? '' : 's'}
           {unread > 0 && <span className="ml-1 text-amber-400">· {unread} unread</span>}
         </span>
       </div>
-      <div className="max-h-72 space-y-2.5 overflow-y-auto p-3">
-        {t.messages.map((m, i) => (
-          <LetterBubble key={i} m={m} alignLeft={m.from_slug === leftSlug} />
-        ))}
+      <div className="mt-1 flex items-baseline gap-2">
+        <p className={`min-w-0 truncate text-[11px] ${last?.kind === 'refused' ? 'text-amber-400/80' : 'text-zinc-500'}`}>
+          {last && last.kind === 'letter' && <span className="text-zinc-600">{last.from_name}: </span>}
+          {preview}
+        </p>
+        <span className="ml-auto shrink-0 text-[9px] text-zinc-600">{fmtAt(t.last_at)}</span>
+      </div>
+    </button>
+  )
+}
+
+// The conversation, in full — opened on demand, scrolled inside its own box.
+function LetterThreadModal({ t, onClose }: { t: LetterThread; onClose: () => void }) {
+  const [a, b] = t.participants
+  const leftSlug = a?.slug
+  const delivered = t.messages.filter((m) => m.kind === 'letter').length
+  const refused = t.messages.filter((m) => m.kind === 'refused').length
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-4 py-2.5">
+          <Mail className="h-4 w-4 shrink-0 text-violet-500 dark:text-violet-400" />
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+            {a?.name} {a && <StageDot p={a} />}
+            <span className="font-normal text-zinc-600">⇄</span>
+            {b?.name} {b && <StageDot p={b} />}
+          </h3>
+          <span className="ml-2 text-[11px] text-zinc-500">
+            {delivered} letter{delivered === 1 ? '' : 's'}
+            {refused > 0 && ` · ${refused} bounced`}
+          </span>
+          <button onClick={onClose}
+            className="ml-auto rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-4">
+          {t.messages.map((m, i) => (
+            <LetterBubble key={i} m={m} alignLeft={m.from_slug === leftSlug} />
+          ))}
+        </div>
       </div>
     </div>
   )
 }
 
 function LettersObservatory({ data }: { data: LettersOverview | null }) {
+  const [open, setOpen] = useState<string | null>(null)
   if (!data) {
     return (
       <div className="flex justify-center rounded-lg border border-zinc-800 bg-zinc-900/40 py-8">
@@ -3295,6 +3345,8 @@ function LettersObservatory({ data }: { data: LettersOverview | null }) {
     )
   }
   const { threads, stats } = data
+  // keep the open thread live as letters arrive (the overview re-polls)
+  const openThread = open ? threads.find((t) => t.key === open) : null
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
       <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
@@ -3310,10 +3362,13 @@ function LettersObservatory({ data }: { data: LettersOverview | null }) {
           letter that couldn't be delivered shows why.
         </p>
       ) : (
-        <div className="space-y-2.5">
-          {threads.map((t) => <LetterThreadCard key={t.key} t={t} />)}
+        <div className="space-y-1.5">
+          {threads.map((t) => (
+            <LetterThreadRow key={t.key} t={t} onOpen={() => setOpen(t.key)} />
+          ))}
         </div>
       )}
+      {openThread && <LetterThreadModal t={openThread} onClose={() => setOpen(null)} />}
     </div>
   )
 }
