@@ -99,6 +99,19 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
     return () => mq.removeEventListener('change', sync)
   }, [])
 
+  // hold the viewport at 1.0 while inside — otherwise iOS zooms when a
+  // note/name field takes focus (and never quite zooms back), and a stray
+  // pinch during play would knock the world askew. Restored on the way out.
+  useEffect(() => {
+    if (!IS_TOUCH) return
+    const meta = document.querySelector('meta[name=viewport]')
+    if (!meta) return
+    const prev = meta.getAttribute('content')
+    meta.setAttribute('content',
+      'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no')
+    return () => { if (prev != null) meta.setAttribute('content', prev) }
+  }, [])
+
   // the two ghosts' wires — same shape, different doors
   const api = useMemo(() => (mode === 'parent' ? {
     refetch: getVillageMap,
@@ -317,7 +330,7 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
               onChange={(e) => setNoteText(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Escape') cancelPlant() }}
               rows={3} placeholder="a few words, left in the grass…"
-              className="w-full resize-none rounded-lg border border-[#4a4436] bg-[#0c0f0a]/70 p-2 text-[13px] text-[#e8e2cf] placeholder-[#8d8571] focus:border-violet-400/50 focus:outline-none" />
+              className="w-full resize-none rounded-lg border border-[#4a4436] bg-[#0c0f0a]/70 p-2 text-[16px] text-[#e8e2cf] placeholder-[#8d8571] focus:border-violet-400/50 focus:outline-none" />
             <div className="mt-0.5 text-right text-[10px] text-[#8d8571]">{noteText.length}/{NOTE_MAX}</div>
             {plantErr && <p className="mb-1 text-[11px] text-red-400">{plantErr}</p>}
             <div className="flex gap-2">

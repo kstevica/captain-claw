@@ -765,7 +765,7 @@ function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
                 if (e.key === 'Escape') setNaming(false)
               }}
               placeholder="your name"
-              className="mt-3 w-full rounded-lg border border-[#4a4436] bg-[#0c0f0a]/70 px-3 py-2 text-[13px] text-[#e8e2cf] placeholder-[#8d8571] focus:border-amber-400/50 focus:outline-none" />
+              className="mt-3 w-full rounded-lg border border-[#4a4436] bg-[#0c0f0a]/70 px-3 py-2 text-[16px] text-[#e8e2cf] placeholder-[#8d8571] focus:border-amber-400/50 focus:outline-none" />
             <div className="mt-3 flex gap-2">
               <button disabled={!ghostName.trim()}
                 onClick={() => { saveName(ghostName.trim()); setNaming(false); setFpv(data) }}
