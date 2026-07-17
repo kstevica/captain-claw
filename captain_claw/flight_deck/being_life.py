@@ -1875,6 +1875,11 @@ def _normalize_digest(raw: dict) -> dict:
     else:
         intend = None
     return {
+        # Canonical, so it survives this normaliser for BOTH cognitions: True
+        # means no real self-report came back this tick (timeout / unparseable)
+        # and the digest below is a shell. Routers that must not act on a tick
+        # the being never had — honest forgetting above all — read this.
+        "fallback": bool(raw.get("fallback")),
         "act_kind": act,
         "summary": str(raw.get("summary") or "")[:300],
         "journal_entry": str(raw.get("journal_entry") or "")[:4000],
@@ -1915,6 +1920,10 @@ def _normalize_digest(raw: dict) -> dict:
 def fallback_digest(text: str | None, kind: str) -> dict:
     body = (text or "").strip()
     return {
+        # No digest parsed — the tick either timed out or came back unreadable.
+        # Downstream routers that must not act on a tick the being never really
+        # had (honest forgetting, above all) read this flag.
+        "fallback": True,
         "act_kind": "dream" if kind == "dream" else "freeform",
         "summary": "(no structured digest — raw words kept)",
         "journal_entry": body[:1500] if body else "(the tick brought no words)",
@@ -2202,6 +2211,7 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
                            now=now)
         reply = await _fac_send(compose_digest_repair_prompt(being), "orient")
         raw = _extract_raw(reply, require_act=True)
+    fell_back = raw is None
     if raw is None:
         if reply is None:
             store.record_event(bid, "tick_timeout", {"faculty": "orient"}, now=now)
@@ -2210,6 +2220,9 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
                                now=now)
         raw = {}
     merged: dict = dict(raw)
+    # Same flag the monolith's fallback_digest sets: this tick produced no
+    # real self-report, so nothing downstream may treat it as a lived tick.
+    merged["fallback"] = fell_back
     act_kind = str(merged.get("act_kind") or "freeform")
     if act_kind not in ACT_KINDS:
         act_kind = "freeform"
@@ -3734,7 +3747,12 @@ async def _tick_locked(
     if kind == "dream":
         store.milestone(bid, "first_dream", now=now)
         try:
-            being_mind.prune_dangling(store, being, now=now)
+            # Only a dream the being ACTUALLY had may forget anything. On a
+            # timed-out tick the body never answered, and the home read that
+            # drives the prune comes through that same silence — which is how
+            # Zvjezdana and Lada lost their maps to files that never moved.
+            being_mind.prune_dangling(store, being, now=now,
+                                      healthy=not digest.get("fallback"))
         except Exception as e:  # noqa: BLE001
             log.warning("mind prune failed", slug=being["slug"], error=str(e))
     if digest["act_kind"] == "create" and changed:

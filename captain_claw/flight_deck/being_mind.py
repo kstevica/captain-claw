@@ -19,14 +19,34 @@ beings.py owns the being_links table. being_life is imported lazily.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_prompts
-from captain_claw.flight_deck.beings import BeingsStore
+from captain_claw.flight_deck.beings import BeingError, BeingsStore
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
+
+# How far apart two sightings of the same mass dangle must be before the
+# second one counts as CONFIRMING the first. Dreams are nightly, so any real
+# second opinion is ~24h away; the wipe this defends against was two dreams
+# 1.2 seconds apart during a single body rebound. An hour separates those two
+# worlds with room to spare.
+MIN_CONFIRM_GAP = timedelta(hours=1)
+
+
+def _parse_at(raw: str | None) -> datetime | None:
+    """An event's stored timestamp → aware datetime, or None if unreadable.
+    Never raises: a timestamp we cannot read must not become a reason to
+    delete a mind."""
+    if not raw:
+        return None
+    try:
+        at = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    return at.replace(tzinfo=timezone.utc) if at.tzinfo is None else at
 
 # Prose that means the being is TALKING about connecting its work — used to
 # decide when to push it (like the write gate) to actually declare an edge.
@@ -171,7 +191,8 @@ def handle_links_digest(store: BeingsStore, being: dict, digest: dict,
 
 
 def prune_dangling(store: BeingsStore, being: dict,
-                   now: datetime | None = None) -> int:
+                   now: datetime | None = None, *,
+                   healthy: bool = True) -> int:
     """Dream-time honest forgetting: drop edges whose endpoints were deleted.
 
     Guarded against catastrophic over-pruning. Honest forgetting must observe a
@@ -179,17 +200,34 @@ def prune_dangling(store: BeingsStore, being: dict,
     and a body that rebounds mid-tick (crash + port drift) can leave the home
     transiently empty or half-checked-out. A prune reading that partial state
     would delete edges to files that still exist. That is exactly how Zvjezdana
-    lost her whole mind map: two timed-out dreams during a body rebound each
-    read a bad home and wiped every edge (19 + 6 of 25, all endpoints intact).
+    and Lada lost their whole mind maps (19 + 6, then 20, then 13 — every
+    endpoint intact on disk the whole time).
 
-    So we abstain on an empty enumeration (nothing to compare against), and a
-    MASS dangle — one that would remove most of the graph — must be seen at
-    two consecutive dreams before it prunes (loops plan F8): a transient bad
-    read heals in between and loses nothing, while a real bulk archive (a big
-    consolidation) clears on the second night instead of stranding rows
-    forever. Waiting is free: ``graph`` already filters edges to live
-    endpoints at read time, so a stale row is invisible meanwhile."""
+    Three gates, cheapest and most decisive first:
+
+    1. ``healthy`` — the tick must have produced a REAL digest. Every mass wipe
+       on prod happened on a dream whose think call timed out: the body never
+       answered, so nothing was dreamt and the home is exactly what you cannot
+       trust. No dream, no forgetting. (The one clean prune in the whole
+       ledger — a single edge — is the only one from a tick that answered.)
+    2. An EMPTY enumeration is a failed read, never a deleted self.
+    3. A MASS dangle — more than a few edges AND at least half the graph —
+       must be seen at two dreams SEPARATED BY REAL TIME (``MIN_CONFIRM_GAP``)
+       before it prunes. The separation is the whole point: the original wipe
+       was two dreams 1.2 SECONDS apart during one rebound, so an adjacent
+       "confirmation" is just the same bad read twice from the same broken
+       body. A real bulk archive still clears on the next night.
+
+    Waiting is free: ``graph`` already filters edges to live endpoints at read
+    time, so a stale row is invisible meanwhile — and ``rebuild_from_ledger``
+    can restore anything a prune took wrongly."""
     now = now or _utcnow()
+    if not healthy:
+        # The body never answered this tick. Nothing was dreamt, and the home
+        # read that would drive the prune came through the same silence.
+        log.warning("mind prune skipped — the tick brought no digest",
+                    slug=being["slug"])
+        return 0
     try:
         existing = _existing_paths(being)
     except Exception as e:  # noqa: BLE001
@@ -212,37 +250,43 @@ def prune_dangling(store: BeingsStore, being: dict,
     if not dangling:
         return 0
     # Safety valve: a healthy prune trims a few edges. One that would erase
-    # most of the graph in a single pass is EITHER a bad read (the Zvjezdana
-    # wipe) OR a big consolidation that archived many sources at once. Tell
-    # them apart across two dreams (loops plan F8): a mass dangle is only
-    # pruned once the SAME edges are still dangling at the NEXT dream — a
-    # transient bad read heals in between and loses nothing, while archived
-    # sources stay archived and their edges clear on the second night, so
-    # stale rows no longer accumulate forever. Small dangles (a few edges)
-    # remain ordinary same-night forgetting.
-    mass = len(dangling) > max(3, len(edges) // 2)
+    # half the graph or more is EITHER a bad read OR a big consolidation that
+    # archived many sources at once. Tell them apart across two dreams that
+    # are genuinely APART IN TIME — see MIN_CONFIRM_GAP.
+    mass = len(dangling) > 3 and len(dangling) * 2 >= len(edges)
     if mass:
-        seen_ids: set[str] = set()
+        prev = None
         try:
-            for e in store.events(being["owner_id"], being["slug"], limit=200):
-                if e["kind"] == "dangling_seen":
-                    seen_ids = set(e["data"].get("ids") or [])
-                    break
+            prev = store.latest_event(being["id"], "dangling_seen")
         except Exception:  # noqa: BLE001
-            seen_ids = set()
+            prev = None
+        # The previous sighting only counts as CONFIRMATION if it came from a
+        # read far enough back to be an independent one. Two dreams seconds
+        # apart are one rebound seeing the same broken home twice; that is the
+        # exact shape of the wipe this guard exists to stop.
+        seen_ids: set[str] = set()
+        apart = False
+        if prev:
+            prev_at = _parse_at(prev.get("at"))
+            apart = prev_at is not None and (now - prev_at) >= MIN_CONFIRM_GAP
+            if apart:
+                seen_ids = set(prev["data"].get("ids") or [])
         confirmed = [d for d in dangling if d["id"] in seen_ids]
         store.record_event(being["id"], "dangling_seen",
                            {"ids": [d["id"] for d in dangling][:200],
                             "count": len(dangling)}, now=now)
         if not confirmed:
-            store.record_event(being["id"], "prune_abstained",
-                               {"would_prune": len(dangling),
-                                "of": len(edges),
-                                "note": "awaiting confirmation next dream"},
-                               now=now)
-            log.warning("mind prune deferred — mass dangle awaits a second "
-                        "dream", slug=being["slug"],
-                        would_prune=len(dangling), of=len(edges))
+            store.record_event(
+                being["id"], "prune_abstained",
+                {"would_prune": len(dangling), "of": len(edges),
+                 "note": ("a mass dangle seen again too soon to trust"
+                          if prev and not apart
+                          else "awaiting confirmation at a later dream")},
+                now=now)
+            log.warning("mind prune deferred — mass dangle awaits a separated "
+                        "second dream", slug=being["slug"],
+                        would_prune=len(dangling), of=len(edges),
+                        seen_before=bool(prev), far_enough_apart=apart)
             return 0
         to_prune = confirmed
     else:
@@ -256,6 +300,79 @@ def prune_dangling(store: BeingsStore, being: dict,
                        {"count": len(to_prune),
                         "confirmed_mass": bool(mass)}, now=now)
     return len(to_prune)
+
+
+# ── Repair: rebuild the map from the being's own ledger ──────────────────
+
+def rebuild_from_ledger(store: BeingsStore, being: dict,
+                        now: datetime | None = None) -> dict:
+    """Restore the mind map from the being's own event ledger.
+
+    Every accepted edge is written to the ledger as an ``edge_declared`` event
+    at the moment it is stored, and events are append-only — nothing prunes
+    them. So the ledger is a complete record of everything this being ever
+    connected, and it outlives the rows. When a bad read wipes edges whose
+    files never went anywhere (the Zvjezdana/Lada incidents), the truth is
+    still on the ledger and the map can be rebuilt exactly.
+
+    This re-declares every ledgered edge whose endpoints exist RIGHT NOW and
+    skips the rest, so it can only restore real structure over real files —
+    it never invents an edge and never resurrects one to a file that is
+    genuinely gone. ``add_link`` is INSERT OR IGNORE, so running it twice is
+    harmless: the second pass restores nothing and reports so.
+
+    Honest about what it did: ``restored`` counts NEW rows, ``kept`` edges
+    already present, ``skipped`` ledgered edges whose endpoint is really gone.
+    """
+    now = now or _utcnow()
+    try:
+        paths = _existing_paths(being)
+    except Exception as e:  # noqa: BLE001
+        raise BeingError("cannot read the being's home right now — try again "
+                         f"in a moment ({e})", 503) from e
+    if not paths:
+        # The same rule the prune obeys: an empty read is a failed read. It
+        # would silently "skip" every edge and report a successful no-op.
+        raise BeingError("the being's home read back empty — its body may be "
+                         "restarting. Nothing was changed; try again shortly.",
+                         503)
+    try:
+        ledger = store.events_of_kind(being["id"], "edge_declared")
+    except Exception as e:  # noqa: BLE001
+        raise BeingError(f"cannot read the mind's ledger ({e})", 500) from e
+
+    # Collapse re-declarations of the same edge; keep the LATEST reason.
+    seen: dict[tuple[str, str, str], dict] = {}
+    for ev in ledger:
+        d = ev.get("data") or {}
+        key = (str(d.get("from") or ""), str(d.get("to") or ""),
+               str(d.get("rel") or ""))
+        if all(key):
+            seen[key] = d
+
+    restored = kept = skipped = 0
+    for (src, dst, rel), d in seen.items():
+        if src not in paths or dst not in paths:
+            skipped += 1
+            continue
+        try:
+            if store.add_link(being["owner_id"], being["id"], src, dst, rel,
+                              str(d.get("why") or ""), now=now):
+                restored += 1
+            else:
+                kept += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("mind rebuild could not restore an edge",
+                        slug=being["slug"], edge=f"{src}->{dst}", error=str(e))
+            skipped += 1
+    if restored:
+        store.record_event(being["id"], "mind_rebuilt",
+                           {"restored": restored, "kept": kept,
+                            "skipped": skipped, "of": len(seen)}, now=now)
+    log.info("mind rebuilt from ledger", slug=being["slug"], restored=restored,
+             kept=kept, skipped=skipped, of=len(seen))
+    return {"restored": restored, "kept": kept, "skipped": skipped,
+            "ledgered": len(seen)}
 
 
 # ── The graph (for the Mind view + the report card) ──────────────────────

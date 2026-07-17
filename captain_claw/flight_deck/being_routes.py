@@ -757,6 +757,22 @@ async def being_graph(slug: str, user: dict = Depends(get_current_user)):
     return being_mind.graph(get_store(), being)
 
 
+@router.post("/{slug}/graph/rebuild")
+async def being_graph_rebuild(slug: str,
+                              user: dict = Depends(get_current_user)):
+    """Repair the Mind from the being's own append-only ledger.
+
+    Every edge it ever declared is on the ledger, so a map that a bad read
+    wiped can be restored exactly — only for edges whose files still exist.
+    Idempotent and additive: it never invents an edge, never deletes one, and
+    a second click restores nothing. Returns the repair counts + the fresh
+    graph so the view can redraw without a second round-trip."""
+    store = get_store()
+    being = _run(store.get, user["id"], slug)
+    result = _run(being_mind.rebuild_from_ledger, store, being)
+    return {**result, "graph": being_mind.graph(store, being)}
+
+
 class SelfModRejectRequest(BaseModel):
     note: str = ""
 

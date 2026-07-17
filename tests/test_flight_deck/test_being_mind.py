@@ -210,6 +210,145 @@ async def test_prune_abstains_on_a_mass_prune_but_trims_a_few(store, monkeypatch
     assert len(store.links_for(OWNER, b["slug"])) == 5
 
 
+async def _chain(store, b, n=7):
+    """n files joined by n-1 edges — a small mind to try to destroy."""
+    files = [f"garden/n{i}.md" for i in range(n)]
+    for f in files:
+        _mk(b, f)
+    b = store.get(OWNER, b["slug"])
+    mind.handle_links_digest(store, b, {"links": [
+        {"from": files[i], "to": files[i + 1], "rel": "elaborates"}
+        for i in range(min(n - 1, 6))]}, now=NOW)
+    return b, files
+
+
+async def test_a_timed_out_dream_never_prunes(store, monkeypatch):
+    """The prod wipes: every mass loss came from a dream whose think call timed
+    out. The body never answered, so the home read that drives the prune came
+    through the same silence. No dream, no forgetting."""
+    b = await _being(store)
+    b, files = await _chain(store, b)
+    before = len(store.links_for(OWNER, b["slug"]))
+    # A partial read that would look like near-total deletion.
+    monkeypatch.setattr(mind, "_existing_paths", lambda being: {files[0]})
+    assert mind.prune_dangling(store, b, now=NOW, healthy=False) == 0
+    assert len(store.links_for(OWNER, b["slug"])) == before   # mind intact
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "edges_pruned" not in kinds
+    # It abstained BEFORE reading anything — not even a sighting was recorded.
+    assert "dangling_seen" not in kinds
+
+
+async def test_a_timed_out_dream_tick_leaves_the_mind_alone(store, monkeypatch):
+    """End to end through the real tick: the send times out (no reply at all),
+    so the dream falls back to a shell digest — and honest forgetting must sit
+    that tick out even though a bad read says everything dangles."""
+    db = FakeDB()
+    b = await _being(store)
+    b, files = await _chain(store, b)
+    before = len(store.links_for(OWNER, b["slug"]))
+    assert before >= 5
+    monkeypatch.setattr(mind, "_existing_paths", lambda being: {files[0]})
+
+    async def send(being, prompt):
+        return None                       # the body never answered
+
+    await life.tick(db, store, store.get(OWNER, b["slug"]), kind="dream",
+                    now=NOW, send_fn=send, usage_fn=_usage)
+    assert len(store.links_for(OWNER, b["slug"])) == before
+    assert "edges_pruned" not in [e["kind"]
+                                  for e in store.events(OWNER, b["slug"])]
+
+
+async def test_two_dreams_seconds_apart_cannot_confirm_each_other(
+        store, monkeypatch):
+    """Zvjezdana's real wipe was two dreams 1.2 SECONDS apart during a single
+    body rebound. A second sighting that close is the same broken body reading
+    the same broken home twice — it must not count as confirmation."""
+    b = await _being(store)
+    b, files = await _chain(store, b)
+    before = len(store.links_for(OWNER, b["slug"]))
+    monkeypatch.setattr(mind, "_existing_paths", lambda being: {files[0]})
+
+    assert mind.prune_dangling(store, b, now=NOW) == 0            # abstains
+    later = NOW + timedelta(milliseconds=1200)                    # the rebound
+    assert mind.prune_dangling(store, b, now=later) == 0          # STILL abstains
+    assert len(store.links_for(OWNER, b["slug"])) == before       # mind intact
+    notes = [e["data"].get("note") for e in store.events(OWNER, b["slug"])
+             if e["kind"] == "prune_abstained"]
+    assert any("too soon" in (n or "") for n in notes)
+
+
+async def test_a_separated_second_dream_confirms_a_real_archive(
+        store, monkeypatch):
+    """The other half of the bargain: a genuine bulk archive must still clear.
+    Seen again a night later — a real, independent read — it prunes."""
+    b = await _being(store)
+    b, files = await _chain(store, b)
+    monkeypatch.setattr(mind, "_existing_paths", lambda being: {files[0]})
+
+    assert mind.prune_dangling(store, b, now=NOW) == 0             # night one
+    tomorrow = NOW + timedelta(hours=24)
+    pruned = mind.prune_dangling(store, b, now=tomorrow)           # night two
+    assert pruned > 0
+    assert store.links_for(OWNER, b["slug"]) == []
+    assert any(e["kind"] == "edges_pruned" and e["data"].get("confirmed_mass")
+               for e in store.events(OWNER, b["slug"]))
+
+
+# ── Repair: rebuild from the ledger ──────────────────────────────────────
+
+async def test_rebuild_restores_a_wiped_mind_from_the_ledger(store):
+    """The repair the parent can press: every edge was ledgered as it was
+    declared, so a map wiped by a bad read comes back whole."""
+    b = await _being(store)
+    b, files = await _chain(store, b)
+    declared = len(store.links_for(OWNER, b["slug"]))
+    assert declared >= 5
+    # The wipe: rows gone, every file still on disk (the prod incident).
+    store.remove_links(b["id"], [e["id"] for e in
+                                 store.dangling_links(b["id"], set())])
+    assert store.links_for(OWNER, b["slug"]) == []
+
+    r = mind.rebuild_from_ledger(store, b, now=NOW)
+    assert r["restored"] == declared
+    assert r["skipped"] == 0
+    assert len(store.links_for(OWNER, b["slug"])) == declared
+    assert "mind_rebuilt" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+
+
+async def test_rebuild_is_idempotent_and_never_resurrects_dead_edges(store):
+    """Twice is harmless (nothing doubles), and an edge whose file is really
+    gone stays gone — repair restores structure, it does not invent it."""
+    b = await _being(store)
+    b, files = await _chain(store, b)
+    declared = len(store.links_for(OWNER, b["slug"]))
+    store.remove_links(b["id"], [e["id"] for e in
+                                 store.dangling_links(b["id"], set())])
+    life._home_path(b, files[6]).unlink()      # one file genuinely deleted
+
+    first = mind.rebuild_from_ledger(store, b, now=NOW)
+    assert first["skipped"] == 1               # the n5→n6 edge is really dead
+    assert first["restored"] == declared - 1
+    n = len(store.links_for(OWNER, b["slug"]))
+
+    second = mind.rebuild_from_ledger(store, b, now=NOW)
+    assert second["restored"] == 0             # nothing new
+    assert second["kept"] == declared - 1      # honest about what was there
+    assert len(store.links_for(OWNER, b["slug"])) == n   # no doubles
+
+
+async def test_rebuild_refuses_an_empty_home_read(store, monkeypatch):
+    """The same rule the prune obeys: an empty read is a FAILED read. Repairing
+    against it would 'skip' every edge and report a cheerful no-op."""
+    from captain_claw.flight_deck.beings import BeingError
+    b = await _being(store)
+    b, _files = await _chain(store, b)
+    monkeypatch.setattr(mind, "_existing_paths", lambda being: set())
+    with pytest.raises(BeingError):
+        mind.rebuild_from_ledger(store, b, now=NOW)
+
+
 # ── Tick integration + prompt ────────────────────────────────────────────
 
 async def test_tick_offers_field_shows_shape_and_routes_declaration(store):

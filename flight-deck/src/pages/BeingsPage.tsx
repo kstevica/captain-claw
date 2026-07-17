@@ -29,7 +29,7 @@ import {
   euthanizeBeing, setElderhood,
   getBeingEvents, getBeingJournal, getBeingsMeta, getBeingVitals, getBoard,
   getLiabilities, getReportCard, getSelfFile, getSelfFiles, getVillage,
-  getBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
+  getBeingGraph, rebuildBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
   grantCoins, listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
   getVillageMap, getVillagePlace, getMarket, type VillageMapData,
   type VillagePlace, type VillageBeingPos, type MarketListing,
@@ -377,10 +377,13 @@ const REL_HUE: Record<string, string> = {
   learned_from: '#2dd4bf',
 }
 
-function MindGraph({ graph, loadFile }: {
+function MindGraph({ graph, loadFile, onRebuild }: {
   graph: BeingGraph
   loadFile?: (path: string) => Promise<{ path: string; text: string }>
+  onRebuild?: () => Promise<string>
 }) {
+  const [repairing, setRepairing] = useState(false)
+  const [repairNote, setRepairNote] = useState('')
   const [sel, setSel] = useState<string | null>(null)
   const [hover, setHover] = useState<string | null>(null)
   const [fileView, setFileView] = useState<{ path: string; text: string } | null>(null)
@@ -583,7 +586,24 @@ function MindGraph({ graph, loadFile }: {
           <span className="flex items-center gap-1"><span className="inline-block h-2 w-2 rounded-full" style={{ background: GROUP_HUE.skills, boxShadow: `0 0 6px ${GROUP_HUE.skills}` }} /> skills</span>
           <span className="text-zinc-600">· drag to pan · wheel to zoom · drag a node to move it</span>
           <span className="ml-auto tabular-nums">{graph.nodes.length} artifacts · {graph.edges.length} links · {Math.round(graph.connected_fraction * 100)}% connected</span>
+          {onRebuild && (
+            <button
+              onClick={async () => {
+                setRepairing(true)
+                setRepairNote('')
+                try { setRepairNote(await onRebuild()) } finally { setRepairing(false) }
+              }}
+              disabled={repairing}
+              title="Restore links from this being's own ledger. Every edge it ever declared was recorded there, so links a bad read wiped come back — only for files that still exist. Nothing is invented and nothing is deleted."
+              className="flex items-center gap-1 rounded-md border border-zinc-700/70 bg-zinc-900/80 px-2 py-1 text-[10px] font-semibold text-zinc-400 hover:text-zinc-100 disabled:opacity-50"
+            >
+              {repairing
+                ? <><Loader2 className="h-3 w-3 animate-spin" /> repairing…</>
+                : <><Wrench className="h-3 w-3" /> Repair links</>}
+            </button>
+          )}
         </div>
+        {repairNote && <div className="text-[11px] text-violet-300">{repairNote}</div>}
         {sel && (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-zinc-400">
             <span className="font-medium text-zinc-200">{stemOf(sel)}</span>
@@ -940,7 +960,27 @@ function BeingLogModal({ slug, name, mode, onClose }: {
             ) : error ? (
               <div className="px-6 py-8 text-sm text-red-600 dark:text-red-400">{error}</div>
             ) : mode === 'mind' ? (
-              graph ? <MindGraph graph={graph} loadFile={(p2) => getSelfFile(slug, p2)} /> : null
+              graph ? (
+                <MindGraph
+                  graph={graph}
+                  loadFile={(p2) => getSelfFile(slug, p2)}
+                  onRebuild={async () => {
+                    try {
+                      const r = await rebuildBeingGraph(slug)
+                      setGraph(r.graph)
+                      if (r.restored) {
+                        return `restored ${r.restored} link${r.restored === 1 ? '' : 's'} from the ledger`
+                          + (r.skipped ? ` · ${r.skipped} left out (their files are gone)` : '')
+                      }
+                      return r.kept
+                        ? `nothing to repair — all ${r.kept} ledgered links are already here`
+                        : 'nothing to repair — this being has never declared a link'
+                    } catch (e) {
+                      return e instanceof Error ? e.message : 'repair failed'
+                    }
+                  }}
+                />
+              ) : null
             ) : (
               <div className="fd-file-markdown p-6"><Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown></div>
             )}

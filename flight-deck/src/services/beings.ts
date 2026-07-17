@@ -195,6 +195,17 @@ export interface BeingGraph {
 }
 export const getBeingGraph = (slug: string) =>
   fdFetch<BeingGraph>(`/beings/${slug}/graph`)
+export interface MindRebuild {
+  restored: number
+  kept: number
+  skipped: number
+  ledgered: number
+  graph: BeingGraph
+}
+/** Repair the Mind from the being's own ledger — additive and idempotent:
+ *  it restores edges a bad read wiped, and never invents or deletes one. */
+export const rebuildBeingGraph = (slug: string) =>
+  fdFetch<MindRebuild>(`/beings/${slug}/graph/rebuild`, { method: 'POST' })
 export const getSelfFile = (slug: string, path: string) =>
   fdFetch<{ path: string; text: string }>(`/beings/${slug}/self/file?path=${encodeURIComponent(path)}`)
 export const getLiabilities = () =>

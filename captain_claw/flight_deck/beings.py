@@ -2699,6 +2699,28 @@ class BeingsStore:
         return [{"kind": r["kind"], "data": json.loads(r["data"]), "at": r["at"]}
                 for r in rows]
 
+    def events_of_kind(self, being_id: str, kind: str) -> list[dict]:
+        """Every event of ONE kind, oldest first — unbounded by the recent-
+        events window. The mind's repair reads the whole ``edge_declared``
+        ledger, which can sit thousands of ticks back."""
+        rows = self._c().execute(
+            "SELECT kind, data, at FROM being_events WHERE being_id = ?"
+            " AND kind = ? ORDER BY at", (being_id, kind),
+        ).fetchall()
+        return [{"kind": r["kind"], "data": json.loads(r["data"]), "at": r["at"]}
+                for r in rows]
+
+    def latest_event(self, being_id: str, kind: str) -> dict | None:
+        """The most recent event of one kind, or None — a direct lookup, so a
+        caller never has to page back through the general event window and
+        silently miss what it was looking for."""
+        r = self._c().execute(
+            "SELECT kind, data, at FROM being_events WHERE being_id = ?"
+            " AND kind = ? ORDER BY at DESC LIMIT 1", (being_id, kind),
+        ).fetchone()
+        return ({"kind": r["kind"], "data": json.loads(r["data"]), "at": r["at"]}
+                if r else None)
+
     # ── Life support (Phase 1: beings loop bookkeeping) ──────────────
 
     def set_agent(self, being_id: str, agent_slug: str, port: int, token: str,
