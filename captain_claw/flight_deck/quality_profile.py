@@ -110,6 +110,8 @@ class QualityProfile:
     delta_rounds: bool = False     # R4: continuation rounds inline less prior text (search instead)
     critic_triage: bool = False    # R3: closer distils critic findings into an ordered checklist
     worker_escalate: bool = False  # R5: worker can flag ESCALATE → higher-tier re-dispatch
+    micro_workers: bool = False    # S3 (mrav P4): extract/digest/format-shaped subtasks
+                                   # spawn on the mrav micro runtime (micro tier)
     git_snapshots: bool = False    # R6: git init the research folder + commit each round
     judgment_ledger: bool = False  # R11: force explicit enumeration+resolution of the hard calls
     source_corpus: bool = False    # R10: web_fetch saves full page text to the VFS, returns head+ptr
@@ -170,7 +172,7 @@ class QualityProfile:
             "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
             "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
             "constraints_contract", "block_on_critical", "parallel_build",
-            "interface_consistency",
+            "interface_consistency", "micro_workers",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
