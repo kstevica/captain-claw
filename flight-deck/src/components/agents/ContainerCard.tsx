@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift, Bug } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -101,7 +101,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   onDragStart?: (e: React.PointerEvent) => void
   isDragging?: boolean
 }) {
-  const { stopContainer, startContainer, restartContainer, removeContainer, rebuildContainer, cloneContainer, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode, setEcoMode: storeEcoMode, getEcoMode, setNanoMode: storeNanoMode, getNanoMode } = useContainerStore()
+  const { stopContainer, startContainer, restartContainer, removeContainer, rebuildContainer, cloneContainer, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode, setEcoMode: storeEcoMode, getEcoMode, setNanoMode: storeNanoMode, getNanoMode, setMravMode: storeMravMode, getMravMode } = useContainerStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(container.id))
   const busy = session?.busy ?? false
@@ -139,6 +139,29 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const [ecoSaved, setEcoSaved] = useState(false)
   const nanoMode = getNanoMode(container.id)
   const [nanoSaved, setNanoSaved] = useState(false)
+  const mravModeStored = getMravMode(container.id)
+  const mravMode = mravModeStored ?? false
+  const [mravSaved, setMravSaved] = useState(false)
+
+  // Hydrate Mrav state from the backend once per card (a mrav-spawned
+  // agent must show its badge without ever having been toggled here).
+  useEffect(() => {
+    if (mravModeStored !== undefined) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { token, authEnabled } = useAuthStore.getState()
+        const headers: Record<string, string> = {}
+        if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+        const res = await fetch(`/fd/agent-mrav-mode/docker/${container.id}`, { headers, credentials: 'include' })
+        if (res.ok) {
+          const data = await res.json()
+          if (!cancelled) storeMravMode(container.id, !!data.enabled)
+        }
+      } catch { /* stays unknown; badge simply hidden */ }
+    })()
+    return () => { cancelled = true }
+  }, [container.id, mravModeStored])
 
   const isRunning = container.status === 'running'
   const agentName = container.agent_name || container.name
@@ -593,6 +616,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
                 <Gift className="h-3 w-3" /> Freebie
               </span>
             )}
+            {mravMode && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-400" title="Mrav micro runtime — hard 8k-token input cap per LLM call">
+                <Bug className="h-3 w-3" /> Mrav
+              </span>
+            )}
             <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${badgeCls}`}>
               {isRunning && (
                 <span className="relative flex h-1.5 w-1.5">
@@ -724,6 +752,32 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
             <span>Nano Mode</span>
           </button>
           {nanoSaved && <span className="text-[10px] text-amber-500">saved</span>}
+          <button
+            onClick={async () => {
+              const next = !mravMode
+              storeMravMode(container.id, next)
+              try {
+                const { token, authEnabled } = useAuthStore.getState()
+                const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+                if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+                const res = await fetch(`/fd/agent-mrav-mode/docker/${container.id}`, {
+                  method: 'PUT', headers, credentials: 'include',
+                  body: JSON.stringify({ enabled: next }),
+                })
+                if (res.ok) { setMravSaved(true); setTimeout(() => setMravSaved(false), 2000) }
+              } catch (err) { console.error('Failed to update mrav mode:', err) }
+            }}
+            className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              mravMode
+                ? 'border-violet-500/40 bg-violet-500/15 text-violet-400 hover:bg-violet-500/25'
+                : 'border-zinc-700 bg-zinc-800/50 text-zinc-500 hover:bg-zinc-700/50 hover:text-zinc-400'
+            }`}
+            title="Mrav — micro agentic runtime: the whole loop runs under a hard 8k-token input cap. Built for small local models (Gemma 4 E2B/E4B, Qwen3.5-4B class). Takes effect on the next message."
+          >
+            <Bug className="h-3 w-3" />
+            <span>Mrav</span>
+          </button>
+          {mravSaved && <span className="text-[10px] text-violet-400">saved</span>}
         </div>
 
         {/* Forwarding Task (editable) */}

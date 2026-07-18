@@ -2450,6 +2450,75 @@ async def get_agent_nano_mode(
     return {"enabled": False}
 
 
+class AgentMravModeUpdate(BaseModel):
+    enabled: bool = False
+
+
+@app.put("/fd/agent-mrav-mode/{kind}/{identifier}")
+async def update_agent_mrav_mode(
+    kind: str, identifier: str, body: AgentMravModeUpdate, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Toggle the Mrav micro runtime (8k-capped loop) at runtime.
+
+    Writes ``mrav_mode.txt`` with an explicit "on"/"off" — unlike eco/nano
+    (present=on), because a mrav-spawned agent has ``mrav.enabled: true`` in
+    its config.yaml and "off" must be able to override it. The agent checks
+    the flag on every message, so no restart is needed.
+    """
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    for subdir in ("home-config", "home-config-parent"):
+        cc_dir = agent_dir / "data" / subdir / ".captain-claw"
+        if cc_dir.is_dir():
+            (cc_dir / "mrav_mode.txt").write_text(
+                "on" if body.enabled else "off", encoding="utf-8"
+            )
+
+    return {"ok": True, "enabled": body.enabled,
+            "message": "Mrav runtime updated. Takes effect on the agent's next message."}
+
+
+@app.get("/fd/agent-mrav-mode/{kind}/{identifier}")
+async def get_agent_mrav_mode(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Effective Mrav state: the runtime flag if set, else the spawn config."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    for subdir in ("home-config", "home-config-parent"):
+        flag = agent_dir / "data" / subdir / ".captain-claw" / "mrav_mode.txt"
+        if flag.is_file():
+            try:
+                text = flag.read_text(encoding="utf-8").strip().lower()
+            except Exception:
+                continue
+            if text in ("on", "true", "1", "yes"):
+                return {"enabled": True, "source": "flag"}
+            if text in ("off", "false", "0", "no"):
+                return {"enabled": False, "source": "flag"}
+
+    # No flag → the spawn-time config decides (runtime: "mrav" wrote this).
+    try:
+        cfg_file = agent_dir / "config.yaml"
+        if cfg_file.is_file():
+            data = yaml.safe_load(cfg_file.read_text(encoding="utf-8")) or {}
+            enabled = bool(((data.get("mrav") or {}).get("enabled")) is True)
+            return {"enabled": enabled, "source": "config"}
+    except Exception:
+        pass
+    return {"enabled": False, "source": "config"}
+
+
 @app.get("/fd/cognitive-modes")
 async def list_cognitive_modes():
     """Return all available cognitive modes for UI dropdowns."""
