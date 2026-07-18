@@ -10,6 +10,7 @@
 // the Local inference panel (System page).
 import {
   CreateWebWorkerMLCEngine,
+  prebuiltAppConfig,
   type MLCEngineInterface,
 } from '@mlc-ai/web-llm'
 import { useAuthStore } from '../stores/authStore'
@@ -19,25 +20,59 @@ import { useInferenceStore } from '../stores/inferenceStore'
 // and BrowserProvider sizing.
 const CONTEXT_WINDOW = 9216
 
-// Qwen3.5 is the live-eval champion family (5/6 on the mrav eval at 4B);
-// all three sizes ship in WebLLM 0.2.84's prebuilt catalog.
-export const MODEL_LADDER: { id: string; label: string; minMemGB: number }[] = [
-  { id: 'Qwen3.5-4B-q4f16_1-MLC', label: 'Qwen3.5 4B — best quality (~4.2 GB GPU)', minMemGB: 16 },
-  { id: 'Qwen3.5-2B-q4f16_1-MLC', label: 'Qwen3.5 2B — balanced (~2.3 GB GPU)', minMemGB: 8 },
-  { id: 'Qwen3.5-0.8B-q4f16_1-MLC', label: 'Qwen3.5 0.8B — smallest (~1.1 GB GPU)', minMemGB: 4 },
+// Curated picks (q4f16, VRAM at the catalog's 4k reference — our 9216-token
+// engine window adds KV on top). Qwen3.5 is the live-eval champion family;
+// 9B is the largest Qwen3.5 that WebLLM ships (Qwen3.6 exists only as
+// 27B/35B — not convertible to a browser tab).
+export interface BrowserModel {
+  id: string
+  label: string
+  vramGB: number
+  note: string
+  recommended?: boolean
+}
+
+export const MODEL_CATALOG: BrowserModel[] = [
+  { id: 'Qwen3.5-4B-q4f16_1-MLC', label: 'Qwen3.5 4B', vramGB: 3.8, note: 'recommended — mrav live-eval champion', recommended: true },
+  { id: 'Qwen3.5-9B-q4f16_1-MLC', label: 'Qwen3.5 9B', vramGB: 6.3, note: 'best quality in a tab — 16 GB+ machines', recommended: true },
+  { id: 'Qwen3.5-2B-q4f16_1-MLC', label: 'Qwen3.5 2B', vramGB: 2.2, note: 'balanced small', recommended: true },
+  { id: 'Qwen3.5-0.8B-q4f16_1-MLC', label: 'Qwen3.5 0.8B', vramGB: 1.6, note: 'smallest useful', recommended: true },
+  { id: 'Qwen3-8B-q4f16_1-MLC', label: 'Qwen3 8B', vramGB: 5.6, note: 'previous-gen large' },
+  { id: 'Hermes-3-Llama-3.1-8B-q4f16_1-MLC', label: 'Hermes 3 · Llama 3.1 8B', vramGB: 4.8, note: 'function-calling tuned' },
+  { id: 'Phi-4-mini-instruct-q4f16_1-MLC', label: 'Phi-4 mini (3.8B)', vramGB: 3.4, note: 'Microsoft, MIT license' },
+  { id: 'Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC', label: 'Ministral 3 3B', vramGB: 2.8, note: 'Mistral small, tool-use' },
+  { id: 'gemma3-1b-it-q4f16_1-MLC', label: 'Gemma 3 1B', vramGB: 0.7, note: 'floor — weakest, fastest' },
 ]
+
+// Everything else the pinned WebLLM build can run: q4f16 chat models under
+// ~8.5 GB that are not already curated (no embeddings, no crippled -1k ctx
+// variants). Future package bumps surface here automatically.
+export function extraCatalogModels(): BrowserModel[] {
+  const curated = new Set(MODEL_CATALOG.map((m) => m.id))
+  const out: BrowserModel[] = []
+  for (const m of prebuiltAppConfig.model_list) {
+    const id = m.model_id
+    if (curated.has(id)) continue
+    if (!id.endsWith('q4f16_1-MLC')) continue
+    if (id.startsWith('snowflake')) continue
+    const vram = (m.vram_required_MB || 0) / 1024
+    if (!vram || vram > 8.5) continue
+    out.push({ id, label: id.replace('-q4f16_1-MLC', ''), vramGB: Math.round(vram * 10) / 10, note: '' })
+  }
+  return out.sort((a, b) => a.vramGB - b.vramGB)
+}
 
 export function webgpuAvailable(): boolean {
   return typeof navigator !== 'undefined' && !!(navigator as any).gpu
 }
 
 export function pickDefaultModel(): string {
-  // navigator.deviceMemory is Chromium-only and capped at 8 — treat 8 as
-  // "could be anything ≥8 GB" and let desktop users upgrade manually.
+  // navigator.deviceMemory is Chromium-only and usually capped at 8 — treat
+  // 8 as "could be anything ≥8 GB" and let users pick bigger models by hand.
   const mem = Number((navigator as any).deviceMemory || 8)
-  if (mem >= 16) return MODEL_LADDER[0].id
-  if (mem >= 8) return MODEL_LADDER[1].id
-  return MODEL_LADDER[2].id
+  if (mem >= 16) return 'Qwen3.5-4B-q4f16_1-MLC'
+  if (mem >= 8) return 'Qwen3.5-2B-q4f16_1-MLC'
+  return 'Qwen3.5-0.8B-q4f16_1-MLC'
 }
 
 type Job = {

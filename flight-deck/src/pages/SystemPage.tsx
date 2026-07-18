@@ -17,7 +17,6 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
-import { LocalInferencePanel } from '../components/system/LocalInferencePanel'
 import {
   getSystemProcesses,
   stopSystemProcess,
@@ -313,9 +312,6 @@ export function SystemPage() {
             </button>
           </div>
         </div>
-
-        {/* Browser inference worker (mrav Phase 2) */}
-        <LocalInferencePanel />
 
         {error && (
           <div className="flex items-center gap-2 rounded-md border border-red-900/50 bg-red-950/20 px-4 py-2 text-sm text-red-400">

@@ -3,7 +3,8 @@
 import { useState } from 'react'
 import { Bug, Loader2, Play, Square, Zap } from 'lucide-react'
 import {
-  MODEL_LADDER,
+  MODEL_CATALOG,
+  extraCatalogModels,
   localInference,
   pickDefaultModel,
   webgpuAvailable,
@@ -47,11 +48,20 @@ export function LocalInferencePanel() {
             value={running ? modelId : selectedModel}
             onChange={(e) => setSelectedModel(e.target.value)}
             disabled={running}
-            className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none disabled:opacity-60"
+            className="max-w-[340px] rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none disabled:opacity-60"
           >
-            {MODEL_LADDER.map((m) => (
-              <option key={m.id} value={m.id}>{m.label}</option>
-            ))}
+            <optgroup label="Recommended">
+              {MODEL_CATALOG.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label} — {m.vramGB} GB{m.note ? ` · ${m.note}` : ''}
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="Full catalog (WebLLM 0.2.84)">
+              {extraCatalogModels().map((m) => (
+                <option key={m.id} value={m.id}>{m.label} — {m.vramGB} GB</option>
+              ))}
+            </optgroup>
           </select>
           {running ? (
             <button
