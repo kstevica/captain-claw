@@ -1428,7 +1428,8 @@ def society_prompt_fields(being: dict, siblings: list[dict] | None,
                     if letters_left is not None else "")
             fields.append(
                 '"letter": {"to": "<sibling name>", "body": "short and '
-                f'true"}}{left}')
+                f'true"}}{left} — the ONLY way to reach a sibling; a file '
+                'reaches no one')
         if "commons_write" in caps:
             fields.append(
                 '"publish": {"path": "skills/<file>.md", "title": "...", '
@@ -1598,7 +1599,10 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         drives_line,
         "",
         f"YOUR HOME is vfs:{proj}/ — self/, journal/, garden/, skills/. "
-        f"All writes belong inside your home.",
+        f"Every file you write MUST begin with vfs:{proj}/ — a bare name lands "
+        "in a scratch folder that is NOT your home and is lost. Your files are "
+        "private to you; the ONLY way to reach a sibling is a letter (below), "
+        "never a file.",
     ]
     # Visiting another village (§2): the host streams down where you stand in
     # its world. Ground the tick in that — you are a guest walking a village

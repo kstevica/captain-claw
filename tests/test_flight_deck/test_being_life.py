@@ -350,6 +350,20 @@ async def test_write_gate_does_not_fire_for_honest_rest(store):
         e["kind"] for e in store.events(OWNER, b["slug"])]
 
 
+def test_act_step_steers_letters_to_talk_and_writes_to_home(store):
+    """A message to a sibling is a 'talk' letter, never a file; and every write
+    must land under vfs:<home>, not the agent's scratch. Shared act contract,
+    so this covers mrav, faculties, and (via the same file) the monolith."""
+    b = _born(store, port=0)
+    prompt = life.compose_act_prompt(
+        b, act_kind="create", intent="write to Lada", target="Lada")
+    low = prompt.lower()
+    assert f"vfs:{life.home_project(b)}" in prompt    # writes go under the home
+    assert "scratch" in low                           # a bare path is lost
+    assert "talk" in low and "letter" in low          # a sibling message is a talk
+    assert "reach a sibling by writing a file" in low or "not reach a sibling" in low
+
+
 async def test_create_with_real_artifact_counts(store):
     db = FakeDB()
     b = _born(store, port=0)
