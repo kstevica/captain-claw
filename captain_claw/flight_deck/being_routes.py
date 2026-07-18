@@ -1270,7 +1270,15 @@ async def recharge(slug: str, body: RechargeRequest,
         if not wv["enforced"] or wv["balance_tokens"] > wv["reserve_tokens"]:
             b = _run(store.set_state, user["id"], slug, "alive")
             store.record_event(b["id"], "woke_from_torpor", {"cause": "recharge"})
-            being_life._start_body(b)
+            # Fresh body, not a plain restart — honor any connection/config the
+            # parent changed while it slept (see the wake route).
+            if b.get("agent_slug"):
+                try:
+                    being_life._stop_body(b)
+                    await being_life.spawn_body(get_db(), store, b)
+                except Exception as e:  # noqa: BLE001 — fall back to a restart
+                    store.record_event(b["id"], "spawn_failed", {"error": str(e)})
+                    being_life._start_body(b)
             store.reschedule_wake(user["id"], slug, now)
             v = _run(store.vitals, user["id"], slug)
     elif b["state"] == "alive":
@@ -1299,7 +1307,18 @@ async def wake(slug: str, user: dict = Depends(get_current_user)):
     new_wake = being_life.wake_reschedule(b, datetime.now(timezone.utc))
     if new_wake is not None:
         _run(store.reschedule_wake, user["id"], slug, new_wake)
-    being_life._start_body(b)
+    # Wake on a FRESH body: a plain restart reuses the on-disk config.yaml, so
+    # anything the parent changed while paused — its connection (body_config),
+    # archetype, compact mode — would be silently dropped (a body set to a new
+    # provider/model/ctx while paused would wake on the stale one and fail to
+    # connect). A full respawn regenerates the config from the live record.
+    if b.get("agent_slug"):
+        try:
+            being_life._stop_body(b)
+            await being_life.spawn_body(get_db(), store, b)
+        except Exception as e:  # noqa: BLE001 — fall back to a plain restart
+            store.record_event(b["id"], "spawn_failed", {"error": str(e)})
+            being_life._start_body(b)
     return _run(store.vitals, user["id"], slug)
 
 
