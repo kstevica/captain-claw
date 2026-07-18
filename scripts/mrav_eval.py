@@ -140,7 +140,9 @@ async def run_task(task: Task, args: argparse.Namespace, base_dir: Path) -> dict
 
     runtime = getattr(agent, "_mrav_runtime_cache", None)
     steps = getattr(getattr(runtime, "board", None), "step", 0)
-    usage = dict(getattr(agent, "last_usage", {}) or {})
+    # Prefer the runtime's own counters — they survive a task timeout,
+    # where agent.last_usage was never merged.
+    usage = dict(getattr(runtime, "last_usage", None) or getattr(agent, "last_usage", {}) or {})
     return {
         "task": task.id,
         "outcome": outcome,
@@ -198,4 +200,9 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    code = asyncio.run(main())
+    # Agent init spawns a non-daemon thread that blocks interpreter
+    # shutdown (pre-existing; full pytest runs of tests/test_agent hit the
+    # same wait). The report is printed — leave without joining it.
+    sys.stdout.flush()
+    os._exit(code)

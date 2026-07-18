@@ -17,14 +17,15 @@ Reply with EXACTLY ONE JSON object — no prose, no markdown, no code fences. Ch
 {"action":"tool","tool":"<name>","args":{...}}  run one tool from TOOLS
 {"action":"open_tool","name":"<name>"}  load the schema of a tool listed in INDEX
 {"action":"final","text":"<answer>"}  finish with the complete answer for the user
-{"action":"give_up","reason":"<why>"}  only if the task is truly impossible
+{"action":"give_up","reason":"<why>"}  only if the task is truly impossible. One failed attempt is NOT impossible — try another tool or approach first
 
 Rules:
 - ONE action per reply. Never more than one tool call.
-- "tool" must be an exact name from TOOLS. Tools in INDEX need open_tool first.
+- Tools in TOOLS are ready — call them directly, never open_tool them.
+- open_tool is ONLY for tools listed in INDEX.
 - Give every required arg (marked *). Use exact arg names.
 - Ground statements in OBSERVATIONS. They may be truncated — re-check when unsure.
-- If ERROR is shown, fix the cause; do not repeat the same call unchanged.
+- If ERROR is shown, fix the cause; never send the same reply again.
 - Use "final" as soon as the TASK is done. Answer factually and completely."""
 
 PLAN_CONTRACT = """You are Mrav's planner. Reply with EXACTLY ONE JSON object, no prose:

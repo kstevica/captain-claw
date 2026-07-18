@@ -150,8 +150,9 @@ def test_validate_action_paths():
     action, err = validate_action({"action": "open_tool", "name": "browser"}, visible, all_tools)
     assert action and action.kind == "open_tool" and action.name == "browser"
 
+    # opening an already-visible tool is a tolerated no-op (2B models do this)
     action, err = validate_action({"action": "open_tool", "name": "read"}, visible, all_tools)
-    assert action is None and "already" in err
+    assert action and action.kind == "open_tool" and not err
 
     action, err = validate_action({"action": "final", "text": "answer"}, visible, all_tools)
     assert action and action.kind == "final"
@@ -521,6 +522,27 @@ async def test_runtime_loop_guard_blocks_identical_calls(tmp_path: Path):
     assert reply == "ok stopping"
     assert len(tools.executed) == 1  # second identical call never executed
     assert any(o.label == "loop_guard" for o in runtime.board.observations)
+
+
+@pytest.mark.asyncio
+async def test_runtime_open_tool_on_visible_tool_is_forgiving_noop(tmp_path: Path):
+    provider = FakeProvider(
+        [
+            '{"plan":["write the file"]}',
+            '{"action":"open_tool","name":"read"}',  # read is already core-visible
+            '{"action":"open_tool","name":"read"}',  # identical repeat → loop guard
+            '{"action":"tool","tool":"read","args":{"path":"x"}}',
+            '{"action":"final","text":"done"}',
+        ]
+    )
+    tools = FakeTools()
+    runtime = _runtime(provider, tools, tmp_path)
+    reply = await runtime.run("read x")
+    assert reply == "done"
+    notes = [o for o in runtime.board.observations if o.label == "open_tool"]
+    assert notes and "already in TOOLS" in notes[0].text
+    assert any(o.label == "loop_guard" for o in runtime.board.observations)
+    assert tools.executed == [("read", {"path": "x"})]
 
 
 @pytest.mark.asyncio
