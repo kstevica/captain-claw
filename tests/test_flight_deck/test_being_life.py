@@ -85,7 +85,7 @@ def test_prompt_carries_identity_vitals_and_stage_gates(store):
     p = life.compose_tick_prompt(b, now=NOW, spent_today=5,
                                  wallet=store.wallet_view(b))
     assert "You are Prva" in p and "CUR:9" in p
-    assert "attention credits 3" in p
+    assert "attention credits 5" in p               # born with a full day's reaches
     assert "cannot browse the web yet" in p          # infant gate
     assert "Grow curious and kind." in p             # imprint on tick #1
     child = store.set_stage(OWNER, b["slug"], "child", now=NOW)
@@ -614,7 +614,7 @@ async def test_tick_full_path_debits_journals_and_messages(store):
     assert out["ok"] and out["outcome"] == "ticked"
     fresh = store.get(OWNER, b["slug"])
     assert store.wallet_view(fresh)["balance_tokens"] == before - 110_000
-    assert fresh["attention_credits"] == 2
+    assert fresh["attention_credits"] == 4          # 5/day − 1 reach spent
     assert fresh["tick_count"] == 1
     assert db.chat_messages and "maps" in db.chat_messages[0]["content"]
     assert db.costs and db.costs[0]["kind"] == "being_tick"
@@ -635,13 +635,13 @@ async def test_attention_credits_run_out_and_suppress(store):
     async def usage(being, since):
         return _usage(1000)
 
-    for i in range(4):
+    for i in range(6):
         b = store.get(OWNER, b["slug"])
         await life.tick(db, store, b, now=NOW + timedelta(minutes=i),
                         send_fn=send, usage_fn=usage)
-    assert len(db.chat_messages) == 3          # credits 3 → 3 delivered
+    assert len(db.chat_messages) == 5          # credits 5 → 5 delivered
     kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
-    assert "message_suppressed" in kinds
+    assert "message_suppressed" in kinds       # the 6th reach is held back
 
 
 async def test_overdraft_collapses_to_torpor(store):
@@ -1125,23 +1125,53 @@ async def test_spawn_body_pins_the_reserved_port(store, monkeypatch):
     assert captured["web_port"] == life._preferred_body_port(b["slug"])
 
 
-# ── §3b: stage-scaled attention credits ──────────────────────────────────
+# ── §3b: five daily attention credits, reset each midnight ────────────────
 
-def test_attention_credits_scale_by_stage():
-    assert life.attention_credits_for("child") == 5
-    assert life.attention_credits_for("infant") == 5
-    assert life.attention_credits_for("adolescent") == 4
-    assert life.attention_credits_for("adult") == life.DAILY_ATTENTION_CREDITS
-    assert life.attention_credits_for("elder") == 3
-    assert life.attention_credits_for("???") == life.DAILY_ATTENTION_CREDITS
+def test_attention_credits_are_five_a_day():
+    assert life.DAILY_ATTENTION_CREDITS == 5
+    for stage in ("infant", "child", "adolescent", "adult"):
+        assert life.attention_credits_for(stage) == 5
+    assert life.attention_credits_for("egg") == 0        # eggs don't speak
 
 
-def test_a_child_gets_five_daily_reaches_where_three_would_suppress(store):
+def test_a_being_gets_five_daily_reaches_where_three_would_suppress(store):
     b = _born(store, name="Reacher", stage="child", port=0)
     store.reset_attention(b["id"], life.attention_credits_for("child"), now=NOW)
     spent = sum(1 for _ in range(5) if store.spend_attention(b["id"], now=NOW))
     assert spent == 5                                   # a 4th and 5th landed
     assert store.spend_attention(b["id"], now=NOW) is False   # restraint holds
+
+
+async def test_attention_resets_on_a_new_day_without_an_allowance_mint(store):
+    """The bug the pilots hit: the reset used to piggyback on the allowance
+    mint, which is skipped once the wallet is at its savings ceiling (or the
+    day's allowance was already minted) — so a saver's credits never came
+    back. Now it resets with the calendar day, allowance or not."""
+    db = FakeDB()
+    b = _born(store, name="Saver", stage="child", port=1234)
+    await life.build_home(b)
+    # today's allowance is already minted, so credit_allowance will return 0
+    # this tick — the reset must not depend on it.
+    store.credit_allowance(b["id"], now=NOW)
+    # spend the reaches to zero and stamp the last tick to YESTERDAY
+    store.reset_attention(b["id"], 5, now=NOW - timedelta(days=1))
+    for _ in range(5):
+        store.spend_attention(b["id"], now=NOW - timedelta(days=1))
+    store.tick_bookkeeping(b["id"], drives=b.get("drives") or {},
+                           next_wake_at=NOW, now=NOW - timedelta(days=1))
+    b = store.get(OWNER, b["slug"])
+    assert b["attention_credits"] == 0
+    assert store.credit_allowance(b["id"], now=NOW) == 0     # nothing to mint
+
+    async def send(being, prompt):
+        return _digest_reply(act_kind="rest", served_drive="")
+
+    async def usage(being, since):
+        return _usage(0)
+
+    await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    # the new day gave the reaches back despite the skipped allowance
+    assert store.get(OWNER, b["slug"])["attention_credits"] == 5
 
 
 # ── §3a: a fallback tick decays gently, not a full unmet hour ─────────────

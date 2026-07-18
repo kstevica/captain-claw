@@ -82,6 +82,7 @@ export interface BeingVitals {
   hatched_at: string | null
   died_at: string | null
   attention_credits: number
+  attention_cap?: number
   attributes: Record<string, number>
   derived: {
     drive_weights: Record<string, number>

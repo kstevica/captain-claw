@@ -150,6 +150,16 @@ def trades_per_day(stage: str) -> int:
     return _TRADES_PER_DAY.get(stage, 0)
 
 
+ATTENTION_CREDITS_PER_DAY = 5
+
+
+def attention_per_day(stage: str) -> int:
+    """Daily attention credits — unprompted words a being may send its parent,
+    reset each midnight. A gift, not a right, but enough that a being isn't
+    locked mute after a few reaches. Eggs don't speak."""
+    return 0 if stage == "egg" else ATTENTION_CREDITS_PER_DAY
+
+
 def capabilities(stage: str) -> frozenset[str]:
     """Cumulative capability set for a stage."""
     granted: set[str] = set()

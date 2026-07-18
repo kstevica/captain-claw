@@ -138,7 +138,7 @@ class BeingsStore:
                     state             TEXT NOT NULL DEFAULT 'alive',
                     genome            TEXT NOT NULL,
                     drives            TEXT NOT NULL DEFAULT '{}',
-                    attention_credits INTEGER NOT NULL DEFAULT 3,
+                    attention_credits INTEGER NOT NULL DEFAULT 5,
                     next_wake_at      TEXT,
                     born_at           TEXT NOT NULL,
                     hatched_at        TEXT,
@@ -887,7 +887,8 @@ class BeingsStore:
                 (bid, owner_id, slug, name, stage, state,
                  json.dumps(genome),
                  json.dumps(manifest.get("drives") or {}),
-                 int(manifest.get("attention_credits") or 3),
+                 int(manifest.get("attention_credits")
+                     or constitution.ATTENTION_CREDITS_PER_DAY),
                  manifest.get("born_at") or _iso(now),
                  manifest.get("hatched_at") or _iso(now),
                  json.dumps(lineage), _iso(now), _iso(now),
@@ -2580,6 +2581,7 @@ class BeingsStore:
             "state": b["state"], "born_at": b["born_at"],
             "hatched_at": b["hatched_at"], "died_at": b["died_at"],
             "attention_credits": b["attention_credits"],
+            "attention_cap": constitution.attention_per_day(b["stage"]),
             "attributes": attrs,
             "derived": genome_mod.derive(attrs),
             "generation": b["genome"].get("generation", 1),
@@ -2747,7 +2749,8 @@ class BeingsStore:
             self._c().commit()
             return (cur.rowcount or 0) > 0
 
-    def reset_attention(self, being_id: str, credits: int = 3,
+    def reset_attention(self, being_id: str,
+                        credits: int = constitution.ATTENTION_CREDITS_PER_DAY,
                         now: datetime | None = None) -> None:
         self._update(being_id, now or _utcnow(), attention_credits=credits)
 

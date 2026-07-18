@@ -47,19 +47,15 @@ from captain_claw.logging import get_logger
 log = get_logger(__name__)
 
 TICK_TIMEOUT_SECONDS = 300.0
-DAILY_ATTENTION_CREDITS = 3
-
-# Attention the parent grants a being per day, by stage (§3b). The young lean
-# on the parent; adults are more self-sufficient. Baseline stays 3 (adult).
-_ATTENTION_BY_STAGE = {"infant": 5, "child": 5, "adolescent": 4,
-                       "adult": 3, "elder": 3}
+DAILY_ATTENTION_CREDITS = constitution.ATTENTION_CREDITS_PER_DAY
 
 
 def attention_credits_for(stage: str) -> int:
-    """Daily parent-bound-message credits for a stage — the young get a little
-    more room to reach, so a child isn't locked mute after three (Zvjezdana
-    hit the wall 18× in a day). Restraint remains; the floor just loosens."""
-    return _ATTENTION_BY_STAGE.get(stage, DAILY_ATTENTION_CREDITS)
+    """Daily parent-bound-message credits (§3b) — 5 a day, reset each midnight,
+    so a being isn't locked mute after a few (Zvjezdana hit the wall 18× in a
+    day on the old cap of 3). Restraint remains; the floor just loosens. The
+    stage rule lives in the Constitution."""
+    return constitution.attention_per_day(stage)
 
 
 # A being's body binds a STABLE port derived from its slug, in a band ABOVE
@@ -2890,7 +2886,11 @@ async def _tick_locked(
     #    line: below reserve the being sleeps until fed, and its body (the
     #    agent process) is stopped to cost nothing.
     credited = store.credit_allowance(bid, now=now)
-    if credited:
+    # Attention resets with the CALENDAR DAY, not with the allowance mint — a
+    # being at its savings ceiling (allowance skipped) still gets its reaches
+    # back each midnight. Idempotent per day: last_tick_at is the previous
+    # tick, so the first tick past midnight resets once and no later tick does.
+    if str(being.get("last_tick_at") or "")[:10] != now.isoformat()[:10]:
         store.reset_attention(bid, attention_credits_for(being["stage"]),
                               now=now)
     being = store.get(owner, being["slug"])

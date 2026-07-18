@@ -2740,8 +2740,9 @@ function BeingCard({ item, meta, onChanged }: {
                 </span>
               )}
             </span>
-            <span className="text-zinc-500" title="attention credits — unprompted words to you">
-              {'●'.repeat(v.attention_credits)}{'○'.repeat(Math.max(0, 3 - v.attention_credits))}
+            <span className="text-zinc-500" title="attention credits — unprompted words to you, reset each midnight">
+              {'●'.repeat(v.attention_credits)}
+              {'○'.repeat(Math.max(0, (v.attention_cap ?? 5) - v.attention_credits))}
             </span>
           </div>
           <div className="mb-2 h-1.5 overflow-hidden rounded-full bg-zinc-800">
