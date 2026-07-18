@@ -568,6 +568,7 @@ class Agent(
             status_callback=self.status_callback,
             tool_output_callback=self.tool_output_callback,
             llm_observer=self._mrav_llm_observer,
+            file_registry_provider=lambda: getattr(self, "_file_registry", None),
         )
         self._mrav_runtime_cache = runtime
         return runtime

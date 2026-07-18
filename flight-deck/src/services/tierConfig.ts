@@ -101,7 +101,7 @@ interface SetsBlob { sets: TierSet[]; activeSetId: string }
 
 export const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter', 'litert']
 
-export const TIER_ORDER = ['reason', 'balanced', 'fast', 'longctx', 'coding', 'vision']
+export const TIER_ORDER = ['reason', 'balanced', 'fast', 'longctx', 'coding', 'vision', 'micro']
 
 export const DEFAULT_TOOLS = [
   'shell', 'read', 'write', 'glob', 'edit', 'web_fetch', 'web_search',

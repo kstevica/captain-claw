@@ -373,6 +373,7 @@ class FakeTools:
     def __init__(self, results: dict[str, object] | None = None):
         self.results = results or {}
         self.executed: list[tuple[str, dict]] = []
+        self.executed_kwargs: list[dict] = []
 
     def get_definitions(self, session_id=None, **_):
         return [
@@ -381,8 +382,9 @@ class FakeTools:
             _defn("fancy_tool", desc="Rare specialist tool", props={"level": {"type": "integer"}}, required=["level"]),
         ]
 
-    async def execute(self, name, arguments, session_id=None, **_):
+    async def execute(self, name, arguments, session_id=None, **kwargs):
         self.executed.append((name, dict(arguments)))
+        self.executed_kwargs.append({"session_id": session_id, **kwargs})
         result = self.results.get(name)
         if isinstance(result, Exception):
             raise result
@@ -585,6 +587,36 @@ async def test_runtime_honest_when_steps_exhausted(tmp_path: Path):
     runtime = _runtime(provider, FakeTools(), tmp_path, config=_config(max_steps=3))
     reply = await runtime.run("never finish")
     assert "ran out of steps" in reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_runtime_forwards_file_registry_and_abort_event(tmp_path: Path):
+    """write's saved/tmp redirect is only findable by later reads when the
+    file registry rides along — the exact live failure seen with E4B."""
+    import asyncio
+
+    provider = FakeProvider(
+        [
+            '{"plan":["read"]}',
+            '{"action":"tool","tool":"read","args":{"path":"x"}}',
+            '{"action":"final","text":"ok"}',
+        ]
+    )
+    tools = FakeTools()
+    sentinel = object()
+    cancel = asyncio.Event()
+    runtime = MravRuntime(
+        provider=provider,
+        tools=tools,
+        config=_config(),
+        session_key="filereg",
+        state_dir=tmp_path,
+        file_registry_provider=lambda: sentinel,
+    )
+    assert await runtime.run("go", cancel_event=cancel) == "ok"
+    kw = tools.executed_kwargs[0]
+    assert kw["file_registry"] is sentinel
+    assert kw["abort_event"] is cancel
 
 
 @pytest.mark.asyncio

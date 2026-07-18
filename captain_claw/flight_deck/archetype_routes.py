@@ -26,7 +26,7 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/fd/archetypes", tags=["archetypes"])
 
 _INSTRUCTIONS_DIR = Path(__file__).parent.parent / "instructions"
-_VALID_TIERS = {"reason", "balanced", "fast", "longctx"}
+_VALID_TIERS = {"reason", "balanced", "fast", "longctx", "micro"}
 _VALID_MODES = {"ionian", "dorian", "phrygian", "lydian", "mixolydian",
                 "aeolian", "locrian", "neutra"}
 

@@ -55,6 +55,15 @@
       "base_url": "",
       "input_ctx": 200000,
       "output_ctx": 32768
+    },
+    "micro": {
+      "label": "Micro (mrav)",
+      "use": "mrav micro runtime — small local models under the hard 8k input cap",
+      "provider": "ollama",
+      "model": "qwen3.5:4b",
+      "base_url": "",
+      "input_ctx": 8192,
+      "output_ctx": 1024
     }
   },
   "base_tools": ["shell", "read", "write", "glob", "edit", "web_fetch", "web_search", "personality", "playbooks", "scripts"],
