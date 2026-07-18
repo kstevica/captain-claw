@@ -3822,8 +3822,14 @@ class BrowserProvider(LLMProvider):
                 status_code=503,
             )
         if not response.is_success:
+            # Name the host we actually called — the classic footgun is a
+            # stale tier Base URL (e.g. a leftover cloud-API endpoint), and
+            # a foreign 401/404 is unreadable without it.
             raise LLMAPIError(
-                f"Browser inference error {response.status_code}: {response.text[:300]}",
+                f"Browser inference error {response.status_code} from "
+                f"{self.base_url}: {response.text[:300]} — the broker URL "
+                "must be the agent's Flight Deck (leave the tier's Base URL "
+                "empty unless FD runs elsewhere)",
                 status_code=response.status_code,
             )
         data = response.json()
