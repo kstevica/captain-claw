@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { SlidersHorizontal } from 'lucide-react'
 import type { RoutePlan, RouteSelected } from '../../stores/basnaStore'
 import type { TierMap, ArchetypeRegistry } from '../../services/tierConfig'
-import { TIER_ORDER, PROVIDERS } from '../../services/tierConfig'
+import { TIER_ORDER, PROVIDERS, INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS } from '../../services/tierConfig'
+import { CtxSelect } from '../common/CtxSelect'
 import { Badge, DIFFICULTY_COLOR, WeightBar } from './shared'
 
 const COGNITIVE_MODES = ['neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian']
@@ -116,13 +117,15 @@ export function RoutePlanEditor({ routePlan, tiers, registry, onUpdateSelected }
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className={lbl}>Input ctx</label>
-                    <input className={fld} type="number" value={sel.max_context ?? tc?.input_ctx ?? 0}
-                      onChange={(e) => onUpdateSelected(idx, { max_context: Number(e.target.value) || 0 })} />
+                    <CtxSelect className={fld} options={INPUT_CTX_OPTIONS}
+                      value={sel.max_context ?? tc?.input_ctx ?? 0} zeroLabel="tier default"
+                      onChange={(n) => onUpdateSelected(idx, { max_context: n })} />
                   </div>
                   <div>
                     <label className={lbl}>Output ctx</label>
-                    <input className={fld} type="number" value={sel.max_tokens ?? tc?.output_ctx ?? 0}
-                      onChange={(e) => onUpdateSelected(idx, { max_tokens: Number(e.target.value) || 0 })} />
+                    <CtxSelect className={fld} options={OUTPUT_CTX_OPTIONS}
+                      value={sel.max_tokens ?? tc?.output_ctx ?? 0} zeroLabel="tier default"
+                      onChange={(n) => onUpdateSelected(idx, { max_tokens: n })} />
                   </div>
                 </div>
                 <div>

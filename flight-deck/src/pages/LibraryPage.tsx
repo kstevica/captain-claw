@@ -8,8 +8,10 @@ import { useProcessStore } from '../stores/processStore'
 import { useUIStore } from '../stores/uiStore'
 import { spawnProcess, type SpawnConfig } from '../services/docker'
 import {
-  useTierConfig, PROVIDERS, TIER_ORDER, isSetUnconfigured, type Archetype,
+  useTierConfig, PROVIDERS, TIER_ORDER, isSetUnconfigured,
+  INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS, fmtCtxTokens, type Archetype,
 } from '../services/tierConfig'
+import { CtxSelect } from '../components/common/CtxSelect'
 import {
   createArchetype, updateArchetype, deleteArchetype, generateArchetype,
   type ArchetypeInput,
@@ -25,14 +27,10 @@ const COGNITIVE_MODES = [
 // Auto-open the setup wizard once per browser/user until they complete or dismiss it.
 const WIZARD_SEEN_KEY = 'fd:tier-wizard-seen'
 
-// Context-window presets offered by the wizard (tokens, power-of-2 based —
-// k = 1024, M = 1024²). Defaults: 256k in, 32k out.
-const INPUT_CTX_OPTS = [128, 160, 256, 400, 512, 1024].map((k) => k * 1024)
-const OUTPUT_CTX_OPTS = [16, 32, 64, 128, 256].map((k) => k * 1024)
-
-function fmtCtx(n: number): string {
-  return n >= 1024 * 1024 ? `${Math.round(n / (1024 * 1024))}M` : `${Math.round(n / 1024)}k`
-}
+// Context-window presets — shared with every ctx dropdown (tierConfig).
+const INPUT_CTX_OPTS = INPUT_CTX_OPTIONS
+const OUTPUT_CTX_OPTS = OUTPUT_CTX_OPTIONS
+const fmtCtx = fmtCtxTokens
 
 interface WizardValues {
   name: string
@@ -428,24 +426,20 @@ export function LibraryPage() {
                         <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">
                           Input context <span className="font-normal normal-case text-zinc-600">tokens</span>
                         </label>
-                        <input
-                          type="number"
+                        <CtxSelect
+                          options={INPUT_CTX_OPTIONS}
                           value={tc.input_ctx}
-                          onChange={(e) => updateTier(t, { input_ctx: Number(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm tabular-nums text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-                          placeholder="0"
+                          onChange={(n) => updateTier(t, { input_ctx: n })}
                         />
                       </div>
                       <div>
                         <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">
                           Output context <span className="font-normal normal-case text-zinc-600">tokens</span>
                         </label>
-                        <input
-                          type="number"
+                        <CtxSelect
+                          options={OUTPUT_CTX_OPTIONS}
                           value={tc.output_ctx}
-                          onChange={(e) => updateTier(t, { output_ctx: Number(e.target.value) || 0 })}
-                          className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm tabular-nums text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-                          placeholder="0"
+                          onChange={(n) => updateTier(t, { output_ctx: n })}
                         />
                       </div>
                     </div>
