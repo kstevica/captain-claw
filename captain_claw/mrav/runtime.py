@@ -43,6 +43,7 @@ log = get_logger(__name__)
 # full index ~860 tok — index needs 0.12 so no tool silently falls off it.
 _BUDGET_FRACTIONS: dict[str, float] = {
     "contract": 0.08,
+    "persona": 0.02,
     "tools": 0.22,
     "index": 0.12,
     "task": 0.05,
@@ -90,6 +91,7 @@ class MravRuntime:
         self.replan_every = int(getattr(config, "replan_every", 6))
         self.max_pinned = int(getattr(config, "max_pinned_tools", 3))
         self.temperature = float(getattr(config, "temperature", 0.2))
+        self.persona = str(getattr(config, "persona", "") or "").strip()
         self.escalate_enabled = bool(getattr(config, "escalate", False)) and escalate_provider is not None
 
         self.ledger = PromptLedger(self.input_cap, reserve=512)
@@ -189,6 +191,7 @@ class MravRuntime:
         now_block = error_block + f"{prompts.H_NOW}\n{prompts.ACT_NOW}"
         return [
             Section("contract", prompts.ACT_CONTRACT, self.budgets["contract"], keep="head"),
+            Section("persona", f"Your role: {self.persona}" if self.persona else "", self.budgets["persona"], keep="head"),
             Section("tools", f"{prompts.H_TOOLS}\n{pack.defs_text}", self.budgets["tools"], keep="head"),
             Section("index", f"{prompts.H_INDEX}\n{pack.index_text}", self.budgets["index"], keep="head"),
             Section("task", f"{prompts.H_TASK}\n{board.task}", self.budgets["task"], keep="head"),

@@ -62,6 +62,8 @@ export interface Archetype {
   tools: string[]
   description: string
   fleet_instructions: string
+  // '' | 'classic' = full agent loop; 'mrav' = micro small-model runtime (8k cap)
+  runtime?: string
   keywords?: string[]
   reliability_seed?: number
   // 'user' archetypes are editable/deletable; 'base' come from the JSON file;

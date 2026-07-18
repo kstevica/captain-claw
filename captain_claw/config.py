@@ -1227,6 +1227,9 @@ class MravConfig(BaseModel):
     """
 
     enabled: bool = False
+    # One-line role identity rendered into the micro contract (frozen prefix).
+    # An archetype's full SOP can't fit an 8k loop — this is the distilled form.
+    persona: str = ""
     input_cap: int = 8192  # hard input tokens per LLM call, everything included
     output_cap: int = 1024
     observation_cap: int = 2500  # tool output bigger than this gets digested

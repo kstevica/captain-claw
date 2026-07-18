@@ -15,6 +15,8 @@ export interface ArchetypeInput {
   keywords: string[]
   lead: boolean
   reliability_seed: number
+  // '' | 'classic' | 'mrav' — spawns from this archetype adopt it
+  runtime?: string
 }
 
 function authHeaders(): Record<string, string> {
@@ -113,6 +115,7 @@ export async function forgeArchetypes(opts: {
     keywords: d.keywords || [],
     lead: !!d.lead,
     reliability_seed: typeof d.reliability_seed === 'number' ? d.reliability_seed : 0.7,
+    runtime: d.runtime || '',
   }))
 }
 
