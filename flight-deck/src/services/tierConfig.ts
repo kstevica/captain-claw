@@ -101,6 +101,24 @@ interface SetsBlob { sets: TierSet[]; activeSetId: string }
 
 export const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter', 'litert', 'browser']
 
+// Fixed context-size menus — every panel that edits input/output context
+// uses these (no freeform token counts). Powers of two where natural,
+// decimal for the model-family sizes (100k, 160k).
+export const INPUT_CTX_OPTIONS = [
+  4096, 8192, 16384, 32768, 65536, 100000, 131072, 160000,
+  262144, 524288, 786432, 1048576,
+]
+export const OUTPUT_CTX_OPTIONS = [
+  1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536, 131072, 262144,
+]
+
+export function fmtCtxTokens(n: number): string {
+  if (n >= 1024 * 1024 && n % (1024 * 1024) === 0) return `${n / (1024 * 1024)}M`
+  if (n % 1024 === 0) return `${n / 1024}k`
+  if (n % 1000 === 0) return `${n / 1000}k`
+  return String(n)
+}
+
 export const TIER_ORDER = ['reason', 'balanced', 'fast', 'longctx', 'coding', 'vision', 'micro']
 
 export const DEFAULT_TOOLS = [

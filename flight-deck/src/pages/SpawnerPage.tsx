@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Server, Plus, Trash2, Save, FolderOpen, Copy, X, FileDown, ClipboardCopy, ChevronDown, ChevronRight, Rocket, Cpu, Menu, Key, Check, Gift, Loader2, ExternalLink } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
+import { OUTPUT_CTX_OPTIONS } from '../services/tierConfig'
+import { CtxSelect } from '../components/common/CtxSelect'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { useConnectionStore } from '../stores/connectionStore'
 import { useContainerStore } from '../stores/containerStore'
@@ -681,7 +683,12 @@ export function SpawnerPage() {
                   <input type="number" step="0.1" min="0" max="2" value={config.temperature} onChange={(e) => update('temperature', parseFloat(e.target.value) || 0)} className="input" />
                 </Field>
                 <Field label="Max Tokens">
-                  <input type="number" value={config.maxTokens} onChange={(e) => update('maxTokens', parseInt(e.target.value) || 0)} className="input" />
+                  <CtxSelect
+                    options={OUTPUT_CTX_OPTIONS}
+                    value={config.maxTokens}
+                    onChange={(n) => update('maxTokens', n)}
+                    className="input"
+                  />
                 </Field>
               </div>
               <Field label="API Key" hint={providerKeys[config.provider] ? `Auto-filled from your saved ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key` : systemKeys[config.provider] ? `Auto-filled from system ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key (set by admin)` : 'Save keys in Provider API Keys section below, or ask admin to set system-wide keys.'}>
