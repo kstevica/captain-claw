@@ -342,3 +342,19 @@ def test_the_guest_feels_the_meeting_too(store):
                        now=NOW)
     lines = life.percepts_since(store, store.get("sender", g["slug"]))
     assert any("crossed paths with Ada" in ln for ln in lines)
+
+
+def test_go_ack_merges_the_walk_without_duplicating_ok(store):
+    """Regression: the host's `go` handler did `ack.update(ok=True, **res)`
+    while nudge_visitor already returns `ok`, raising 'multiple values for ok'
+    AFTER the guest had moved — the parent saw a 500 while she walked."""
+    from captain_claw.flight_deck import being_federation as fed
+    _host_village(store)
+    v = store.upsert_visitor("host", "http://guest/v", "iskra-kesh-1", "Kesh",
+                             {"stage": "child"}, now=NOW)
+    ack = fed._go_ack(store, "host", v["id"], "library", "rid-1")
+    assert ack["ok"] is True and ack["to"] == "library" and ack["id"] == "rid-1"
+    assert "error" not in ack
+    # a bad place is a clean, loud refusal — not a crash
+    bad = fed._go_ack(store, "host", v["id"], "no-such", "rid-2")
+    assert bad["ok"] is False and bad["error"]

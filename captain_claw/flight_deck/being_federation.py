@@ -162,15 +162,8 @@ async def village_link_ws(ws: WebSocket) -> None:
             elif t == "go":
                 # The guest's PARENT walks it to a place of THIS village (§2,
                 # host-authoritative). We plot the course on our own grid.
-                ack = {"t": "ack", "id": msg.get("id"), "ok": False}
-                try:
-                    res = being_world.nudge_visitor(
-                        store, owner, vid, str(msg.get("place") or ""))
-                    ack.update(ok=True, **res)
-                except BeingError as e:
-                    ack["error"] = str(e)
-                except Exception as e:  # noqa: BLE001
-                    ack["error"] = str(e)
+                ack = _go_ack(store, owner, vid, str(msg.get("place") or ""),
+                              msg.get("id"))
                 try:
                     async with conn.send_lock:
                         await ws.send_json(ack)
@@ -237,6 +230,21 @@ async def village_link_ws(ws: WebSocket) -> None:
             if not fut.done():
                 fut.set_exception(RuntimeError("the visitor disconnected"))
         log.info("village visitor unlinked", slug=slug)
+
+
+def _go_ack(store: BeingsStore, owner: str, vid: str, place: str,
+            rid) -> dict:
+    """Build the ack for a guest's parent `go` nudge (§2). ``nudge_visitor``
+    already returns a dict carrying ``ok`` + the walk — merge it whole (never
+    pass ``ok`` twice), and turn a refusal into a clean, loud error."""
+    ack = {"t": "ack", "id": rid, "ok": False}
+    try:
+        ack.update(being_world.nudge_visitor(store, owner, vid, place))
+    except BeingError as e:
+        ack["error"] = str(e)
+    except Exception as e:  # noqa: BLE001
+        ack["error"] = str(e)
+    return ack
 
 
 async def _push_here(store: BeingsStore, owner: str, vid: str,
