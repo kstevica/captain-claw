@@ -588,6 +588,25 @@ async def test_runtime_honest_when_steps_exhausted(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_runtime_persona_rendered_in_act_prompt(tmp_path: Path):
+    provider = FakeProvider(
+        [
+            '{"plan":["answer"]}',
+            '{"action":"final","text":"done"}',
+        ]
+    )
+    config = _config()
+    config.persona = "Concise file clerk"
+    runtime = _runtime(provider, FakeTools(), tmp_path, config=config)
+    reply = await runtime.run("hello")
+    assert reply == "done"
+    act_user = provider.calls[1]["user"]
+    assert "Your role: Concise file clerk" in act_user
+    # persona sits in the frozen prefix — before the toolpack
+    assert act_user.index("Your role:") < act_user.index("## TOOLS")
+
+
+@pytest.mark.asyncio
 async def test_runtime_small_cap_still_fits(tmp_path: Path):
     """Everything must still assemble under a much tighter cap (4k)."""
     provider = FakeProvider(

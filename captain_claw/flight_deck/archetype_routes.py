@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck import auth as _auth
@@ -57,6 +57,9 @@ class ArchetypeBody(BaseModel):
     keywords: list[str] = []
     lead: bool = False
     reliability_seed: float = 0.7
+    # "" | "classic" = full agent loop; "mrav" = micro small-model runtime.
+    # Spawns from this archetype adopt it unless the caller overrides.
+    runtime: str = ""
 
 
 class GenerateRequest(BaseModel):
@@ -99,6 +102,7 @@ def _validate(body: ArchetypeBody) -> dict:
         "keywords": [k.strip() for k in body.keywords if k.strip()],
         "lead": bool(body.lead),
         "reliability_seed": float(body.reliability_seed),
+        "runtime": body.runtime if body.runtime in ("", "classic", "mrav") else "",
     }
 
 
@@ -190,7 +194,7 @@ async def generate_archetype(body: GenerateRequest, user: dict = Depends(get_cur
     system_prompt = system_prompt_file.read_text()
 
     try:
-        from captain_claw.llm import create_provider, Message
+        from captain_claw.llm import Message, create_provider
         max_tokens = body.max_tokens if body.max_tokens > 0 else 16384
         provider = create_provider(
             provider=body.provider,
@@ -273,6 +277,7 @@ async def forge_archetypes(
     if files:
         import os
         import tempfile
+
         from captain_claw.tools.summarize_files import SummarizeFilesTool
         for uf in files:
             if not uf or not uf.filename:

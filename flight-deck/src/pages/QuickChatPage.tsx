@@ -28,6 +28,8 @@ export function QuickChatPage() {
   const [search, setSearch] = useState('')
   const [spawningId, setSpawningId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  // Spawn the next quick chat on the Mrav micro runtime (8k cap, small models).
+  const [microRuntime, setMicroRuntime] = useState(false)
 
   // Keep the process list fresh on entry.
   useEffect(() => { fetchProcesses() }, [fetchProcesses])
@@ -110,6 +112,7 @@ export function QuickChatPage() {
       botport_max_concurrent: 5,
       tools: a.tools,
       cognitive_mode: a.cognitive_mode || 'neutra',
+      runtime: microRuntime ? 'mrav' : (a.runtime || ''),
       web_enabled: true,
       web_port: 0,
       web_auth_token: '',
@@ -199,6 +202,20 @@ export function QuickChatPage() {
           <p className="text-xs text-zinc-500 sm:text-sm">
             Pick an archetype, chat with it instantly. It stays off the Agent Desktop until you promote it.
           </p>
+          <label
+            className="mt-2 inline-flex cursor-pointer items-center gap-2 text-xs text-zinc-400"
+            title="Runs the whole agent loop under a hard 8k-token input cap — built for small local models (Gemma 4 E2B/E4B, Qwen3.5-4B class). Make sure the archetype's tier points at a small model."
+          >
+            <input
+              type="checkbox"
+              checked={microRuntime}
+              onChange={(e) => setMicroRuntime(e.target.checked)}
+              className="h-3.5 w-3.5 accent-emerald-500"
+            />
+            <span>
+              Mrav micro runtime <span className="text-zinc-600">— 8k cap, small models</span>
+            </span>
+          </label>
         </div>
         {quickSessions.length > 0 && (
           <button
@@ -270,6 +287,9 @@ export function QuickChatPage() {
                                 <Gauge className="h-2.5 w-2.5" />{a.tier}
                               </span>
                               <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{a.cognitive_mode}</span>
+                              {(microRuntime || a.runtime === 'mrav') && (
+                                <span className="rounded border border-emerald-500/25 bg-emerald-600/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">mrav</span>
+                              )}
                               {!configured && <span className="text-[10px] text-amber-500/80">tier unset</span>}
                             </div>
                           </button>

@@ -1196,6 +1196,8 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
         config.tools = list(arch["tools"])
     if not config.description:
         config.description = str(arch.get("role") or arch.get("description") or f"archetype:{aid}")
+    if not config.runtime and arch.get("runtime") in ("classic", "mrav"):
+        config.runtime = str(arch["runtime"])
 
     # Model: the requested tier (`@tier` wins, else the archetype's own default
     # tier) resolved against the OWNER's Library tier config — the same source
@@ -1342,7 +1344,7 @@ def _build_config_yaml(c: AgentConfig) -> str:
         },
     }
     if (c.runtime or "").strip().lower() == "mrav":
-        cfg["mrav"] = {"enabled": True}
+        cfg["mrav"] = {"enabled": True, "persona": (c.description or c.name or "")[:200]}
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
@@ -1449,7 +1451,7 @@ def _build_process_config_yaml(c: AgentConfig, agent_dir: Path) -> str:
         "logging": {"level": "INFO", "format": "console"},
     }
     if (c.runtime or "").strip().lower() == "mrav":
-        cfg["mrav"] = {"enabled": True}
+        cfg["mrav"] = {"enabled": True, "persona": (c.description or c.name or "")[:200]}
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 

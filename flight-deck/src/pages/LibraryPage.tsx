@@ -98,7 +98,7 @@ export function LibraryPage() {
 
   const blankDraft = (): ArchetypeInput => ({
     archetype_id: '', role: '', family: 'Custom', description: '',
-    cognitive_mode: 'neutra', tier: 'balanced',
+    cognitive_mode: 'neutra', tier: 'balanced', runtime: '',
     tools: registry?.base_tools ? [...registry.base_tools] : [],
     fleet_instructions: '', keywords: [], lead: false, reliability_seed: 0.7,
   })
@@ -112,6 +112,7 @@ export function LibraryPage() {
       tier: a.tier || 'balanced', tools: a.tools || [],
       fleet_instructions: a.fleet_instructions || '', keywords: a.keywords || [],
       lead: !!a.lead, reliability_seed: a.reliability_seed ?? 0.7,
+      runtime: a.runtime || '',
     })
   }
   const closeEditor = () => { setEditor(null); setEditingId(null) }
@@ -223,6 +224,7 @@ export function LibraryPage() {
       botport_max_concurrent: 5,
       tools: a.tools,
       cognitive_mode: a.cognitive_mode || 'neutra',
+      runtime: a.runtime || '',
       web_enabled: true,
       web_port: 0,
       web_auth_token: '',
@@ -763,6 +765,17 @@ export function LibraryPage() {
                     className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
                   >
                     {COGNITIVE_MODES.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1" title="Mrav runs the whole loop under a hard 8k-token input cap — for small local models. The archetype's role becomes a one-line persona.">Runtime</label>
+                  <select
+                    value={editor.runtime || ''}
+                    onChange={(e) => setEditor({ ...editor, runtime: e.target.value })}
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                  >
+                    <option value="">Classic (default)</option>
+                    <option value="mrav">Mrav — micro, 8k cap</option>
                   </select>
                 </div>
               </div>
