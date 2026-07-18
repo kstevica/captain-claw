@@ -83,10 +83,17 @@ export function QuickChatPage() {
     return () => { cancelled = true }
   }, [quickSessions, processes, readySlugs, autoOpenSlug, openChat])
 
+  // With the mrav toggle on, models resolve from the `micro` tier when it
+  // is configured (that's what the tier exists for); otherwise fall back
+  // to the archetype's own tier so the toggle alone never blocks a spawn.
+  const effectiveTierId = (a: Archetype): string =>
+    microRuntime && tiers['micro']?.model?.trim() ? 'micro' : a.tier
+
   const spawn = async (a: Archetype) => {
-    const tc = tiers[a.tier]
+    const tierId = effectiveTierId(a)
+    const tc = tiers[tierId]
     if (!tc || !tc.model.trim()) {
-      setError(`The "${a.tier}" tier has no model — set it under Library → Model Tiers first.`)
+      setError(`The "${tierId}" tier has no model — set it under Library → Model Tiers first.`)
       return
     }
     setError(''); setSpawningId(a.id)
@@ -137,7 +144,7 @@ export function QuickChatPage() {
       setNameOverride(slug, a.lead ? `${a.role} [Lead]` : a.role)
       // Spawn hidden — the agent lives on the desktop but off-canvas until promoted.
       setAgentHidden(`proc-${slug}`, true)
-      quickAdd({ slug, role: a.role, name: a.role, tier: a.tier, promoted: false, createdAt: Date.now() })
+      quickAdd({ slug, role: a.role, name: a.role, tier: tierId, promoted: false, createdAt: Date.now() })
       setPicking(false)
       // Don't open the chat yet — wait for the readiness probe to auto-open it.
       setAutoOpenSlug(slug)
@@ -263,7 +270,7 @@ export function QuickChatPage() {
                     <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{family}</p>
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                       {items.map((a) => {
-                        const configured = !!tiers[a.tier]?.model?.trim()
+                        const configured = !!tiers[effectiveTierId(a)]?.model?.trim()
                         const busy = spawningId === a.id
                         return (
                           <button
@@ -284,7 +291,7 @@ export function QuickChatPage() {
                             <p className="mb-2 text-[11px] leading-snug text-zinc-500 line-clamp-2">{a.description}</p>
                             <div className="flex flex-wrap items-center gap-1.5">
                               <span className="inline-flex items-center gap-1 rounded border border-cyan-500/25 bg-cyan-600/15 px-1.5 py-0.5 text-[10px] font-medium text-cyan-400">
-                                <Gauge className="h-2.5 w-2.5" />{a.tier}
+                                <Gauge className="h-2.5 w-2.5" />{effectiveTierId(a)}
                               </span>
                               <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{a.cognitive_mode}</span>
                               {(microRuntime || a.runtime === 'mrav') && (
