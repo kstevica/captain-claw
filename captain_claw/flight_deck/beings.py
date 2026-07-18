@@ -407,6 +407,13 @@ class BeingsStore:
                     profile    TEXT NOT NULL DEFAULT '{}',
                     first_seen TEXT NOT NULL,
                     last_seen  TEXT NOT NULL,
+                    -- Visiting beings (visiting-beings plan §1): a guest has a
+                    -- BODY in this host village. `location` mirrors a resident's
+                    -- location JSON ({"at": place} at rest, or a walk with
+                    -- origin/departed_at/path/minutes), so being_world.position_of
+                    -- extrapolates it identically. `moved_at` paces the wander.
+                    location   TEXT NOT NULL DEFAULT '',
+                    moved_at   TEXT NOT NULL DEFAULT '',
                     UNIQUE(owner_id, origin, slug)
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_visitors
@@ -588,6 +595,17 @@ class BeingsStore:
                         f"ALTER TABLE village_places ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError:
                     pass
+            # Visiting beings get a body in the host village (§1): position
+            # columns on being_visitors, mirroring a resident's walk state.
+            for col, ddl in [
+                ("location", "TEXT NOT NULL DEFAULT ''"),
+                ("moved_at", "TEXT NOT NULL DEFAULT ''"),
+            ]:
+                try:
+                    self._c().execute(
+                        f"ALTER TABLE being_visitors ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass
             # Lightweight migrations (columns added after first ship).
             for col, ddl in [
                 ("birth_letter", "TEXT NOT NULL DEFAULT ''"),
@@ -668,6 +686,10 @@ class BeingsStore:
                 # {"c": 1–10, "p": palette}. Empty → a stable default from
                 # the slug hash (being_world.default_avatar).
                 ("avatar", "TEXT NOT NULL DEFAULT ''"),
+                # Where a VISITING being stands in the host village (§2): JSON
+                # {village, at, near[], others[]} streamed down the host link.
+                # Empty when not visiting; grounds the tick prompt.
+                ("visit_context", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -1008,6 +1030,11 @@ class BeingsStore:
             b["avatar"] = json.loads(raw_av) if raw_av else None
         except json.JSONDecodeError:
             b["avatar"] = None
+        try:
+            raw_vc = b.get("visit_context") or ""
+            b["visit_context"] = json.loads(raw_vc) if raw_vc else None
+        except json.JSONDecodeError:
+            b["visit_context"] = None
         raw_bc = b.get("body_config") or ""
         try:
             b["body_config"] = json.loads(raw_bc) if raw_bc else None
@@ -3984,7 +4011,9 @@ class BeingsStore:
                        name: str, profile: dict,
                        now: datetime | None = None) -> dict:
         """Register or refresh a visiting being under the HOST owner. Dedup by
-        (owner, origin, slug); last_seen drives heartbeat expiry."""
+        (owner, origin, slug); last_seen drives heartbeat expiry. A NEW guest
+        is seated at the village square (§1) — its body enters there; a refresh
+        never disturbs where it has since walked."""
         now = now or _utcnow()
         origin = (origin or "").strip().rstrip("/")
         existing = self._c().execute(
@@ -3992,18 +4021,76 @@ class BeingsStore:
             " AND origin = ? AND slug = ?", (owner_id, origin, slug)).fetchone()
         vid = existing["id"] if existing else uuid.uuid4().hex
         first_seen = existing["first_seen"] if existing else _iso(now)
+        # First arrival: enter at the square (the civic gate). On refresh we
+        # leave location/moved_at untouched — excluded.* only for name/profile.
+        seat = "" if existing else json.dumps({"at": "square"})
+        moved = "" if existing else _iso(now)
         with self._lock:
             self._c().execute(
                 "INSERT INTO being_visitors (id, owner_id, origin, slug, name,"
-                " profile, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?)"
+                " profile, first_seen, last_seen, location, moved_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(owner_id, origin, slug) DO UPDATE SET"
                 " name=excluded.name, profile=excluded.profile,"
                 " last_seen=excluded.last_seen",
                 (vid, owner_id, origin, slug, name[:80], json.dumps(profile),
-                 first_seen, _iso(now)),
+                 first_seen, _iso(now), seat, moved),
             )
             self._c().commit()
         return self.get_visitor(vid)
+
+    def live_visitors(self, owner_id: str, ttl_minutes: float = 1.0,
+                      now: datetime | None = None) -> list[dict]:
+        """A host owner's ACTIVE visitors — seen within a tight TTL, so a guest
+        whose home-machine link dropped fades from the village promptly. Each
+        carries its parsed profile + location for positioning (§1)."""
+        now = now or _utcnow()
+        cutoff = _iso(now - timedelta(minutes=ttl_minutes))
+        rows = self._c().execute(
+            "SELECT * FROM being_visitors WHERE owner_id = ? AND last_seen >= ?"
+            " ORDER BY first_seen", (owner_id, cutoff)).fetchall()
+        out = []
+        for r in rows:
+            v = dict(r)
+            try:
+                v["profile"] = json.loads(v["profile"] or "{}")
+            except json.JSONDecodeError:
+                v["profile"] = {}
+            try:
+                v["location"] = json.loads(v["location"] or "") or {"at": "square"}
+            except (json.JSONDecodeError, TypeError):
+                v["location"] = {"at": "square"}
+            out.append(v)
+        return out
+
+    def owners_with_live_visitors(self, ttl_minutes: float = 1.0,
+                                  now: datetime | None = None) -> list[str]:
+        """Host owners with a guest seen within the TTL — the wander/settle
+        pass iterates these (§1)."""
+        now = now or _utcnow()
+        cutoff = _iso(now - timedelta(minutes=ttl_minutes))
+        rows = self._c().execute(
+            "SELECT DISTINCT owner_id FROM being_visitors WHERE last_seen >= ?",
+            (cutoff,)).fetchall()
+        return [r["owner_id"] for r in rows]
+
+    def set_visitor_location(self, visitor_id: str, location: dict, *,
+                             mark_moved: bool = False,
+                             now: datetime | None = None) -> None:
+        """Persist a guest's walk state (§1/§2). ``mark_moved`` stamps the
+        wander clock so an idle guest paces its own strolls."""
+        now = now or _utcnow()
+        with self._lock:
+            if mark_moved:
+                self._c().execute(
+                    "UPDATE being_visitors SET location = ?, moved_at = ?"
+                    " WHERE id = ?", (json.dumps(location), _iso(now),
+                                      visitor_id))
+            else:
+                self._c().execute(
+                    "UPDATE being_visitors SET location = ? WHERE id = ?",
+                    (json.dumps(location), visitor_id))
+            self._c().commit()
 
     def get_visitor(self, visitor_id: str) -> dict:
         row = self._c().execute(
@@ -4015,6 +4102,10 @@ class BeingsStore:
             v["profile"] = json.loads(v["profile"] or "{}")
         except json.JSONDecodeError:
             v["profile"] = {}
+        try:
+            v["location"] = json.loads(v.get("location") or "") or {"at": "square"}
+        except (json.JSONDecodeError, TypeError):
+            v["location"] = {"at": "square"}
         return v
 
     def public_visitors(self, ttl_minutes: int = 30,
@@ -4071,6 +4162,13 @@ class BeingsStore:
                      visit_url=(url or "").strip().rstrip("/")[:400],
                      visit_secret=(secret or "").strip()[:200])
         return self.get(owner_id, slug)
+
+    def set_visit_context(self, being_id: str, ctx: dict | None,
+                          now: datetime | None = None) -> None:
+        """Store (or clear) where a visiting being stands in the host village —
+        streamed down the link, read by the tick prompt (§2)."""
+        self._update(being_id, now or _utcnow(),
+                     visit_context=json.dumps(ctx) if ctx else "")
 
     def beings_visiting(self) -> list[dict]:
         """Every being configured to visit somewhere — the announce loop's list."""

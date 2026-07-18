@@ -144,6 +144,7 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
 
   const Cottage = BUILDING_SPRITES.cottage
   for (const b of data.beings) {
+    if (b.kind === 'visitor' || !b.home_xy) continue   // guests keep no cottage
     const [htx, hty] = homeNW(b.home_xy)
     const [nx, ny] = iso(htx * TILE, hty * TILE)
     pieces.push({
@@ -182,7 +183,9 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
     const [wx, wy] = posOf(b)
     const [sx, sy] = iso(wx, wy)
     const selMe = selBeing === b.slug
+    const guest = b.kind === 'visitor'
     const size = b.stage === 'infant' ? 40 : 54
+    const aura = guest ? '#38bdf8' : '#8b5cf6'      // guests glow sky-blue
     pieces.push({
       depth: sy + 0.5,       // a hair in front of anything sharing the tile
       el: (
@@ -194,15 +197,28 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
               strokeDasharray="8 10" strokeLinecap="round" />
           )}
           <ellipse cx={sx} cy={sy} rx={selMe ? 22 : 16} ry={selMe ? 11 : 8}
-            fill={selMe ? '#fbbf24' : '#8b5cf6'} opacity={selMe ? 0.4 : 0.18} />
+            fill={selMe ? '#fbbf24' : aura} opacity={selMe ? 0.4 : guest ? 0.28 : 0.18} />
+          {guest && (
+            <ellipse cx={sx} cy={sy} rx={20} ry={10} fill="none" stroke={aura}
+              strokeOpacity={0.8} strokeDasharray="3 5" />
+          )}
           {b.to && (
             <ellipse cx={sx} cy={sy} rx={24} ry={12} fill="none" stroke="#a78bfa"
               strokeOpacity={0.7} strokeDasharray="4 6" className="animate-pulse" />
           )}
-          <g transform={`translate(${sx - size / 2} ${sy - (size * 64) / 48 + 4})`}>
+          <g transform={`translate(${sx - size / 2} ${sy - (size * 64) / 48 + 4})`}
+            opacity={guest ? 0.94 : 1}>
             <IskraAvatar c={b.avatar?.c ?? 1} p={b.avatar?.p ?? 'ember'}
-              size={size} title={b.name} />
+              size={size} title={guest ? `${b.name} — visiting from ${b.from}` : b.name} />
           </g>
+          {guest && (
+            <text x={sx} y={sy - (size * 64) / 48 - 6} textAnchor="middle" fontSize={17}
+              pointerEvents="none" fill="#7dd3fc"
+              style={{ paintOrder: 'stroke', stroke: dark ? '#0d1b2a' : '#e8f4fb',
+                       strokeWidth: 4, strokeLinejoin: 'round', fontWeight: 600 }}>
+              ✦ visiting
+            </text>
+          )}
           <text x={sx} y={sy + 24} textAnchor="middle" fontSize={24}
             pointerEvents="none" className="fill-zinc-200"
             style={{ paintOrder: 'stroke', stroke: dark ? '#1b2118' : '#f4efdf',

@@ -548,10 +548,13 @@ export interface VillagePlace {
 export interface VillageBeingPos {
   slug: string; name: string; stage: string; state: string
   xy: [number, number]; at: string | null; to: string | null
-  minutes_left: number; home_xy: [number, number]; speed: number
+  minutes_left: number; home_xy?: [number, number]; speed: number
   avatar?: { c: number; p: string }
   // the plotted course (village-world plan Phase 2): walk it client-side
   path?: [number, number][]; departed_at?: string; total_minutes?: number
+  // a visiting being from another village (visiting-beings plan §1):
+  // rendered distinctly, wearing a "visiting from <origin>" label.
+  kind?: 'resident' | 'visitor'; from?: string; mood?: string
 }
 export interface VillageProp { tile: [number, number]; kind: string }
 // A sign in the grass (FPV plan Phase 3): planted by the parent or a
@@ -717,3 +720,11 @@ export const setBeingVisit = (slug: string, url: string, secret: string) =>
     `/beings/${slug}/visit`, {
       method: 'POST', body: JSON.stringify({ url, secret }),
     })
+// The map of the village this being is visiting, proxied down its link with
+// the guest positioned in it (visiting-beings plan §2).
+export const getVisitedMap = (slug: string) =>
+  fdFetch<VillageMapData>(`/beings/${slug}/visit/map`)
+// Walk the visiting being to a place of the village it visits (§2).
+export const nudgeVisit = (slug: string, place: string) =>
+  fdFetch<{ ok: boolean; to?: string; at?: string; walking?: boolean; minutes?: number }>(
+    `/beings/${slug}/visit/nudge`, { method: 'POST', body: JSON.stringify({ place }) })

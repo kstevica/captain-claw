@@ -28,11 +28,11 @@ import random
 import threading
 import time
 import zlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_prompts
-from captain_claw.flight_deck.beings import BeingsStore
+from captain_claw.flight_deck.beings import BeingError, BeingsStore
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -97,6 +97,10 @@ def _tz_name() -> str:
         return (get_config().context.timezone or "").strip()
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _local(now: datetime) -> datetime:
@@ -1050,32 +1054,8 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
             entry["departed_at"] = loc.get("departed_at")
             entry["total_minutes"] = loc.get("minutes")
         beings.append(entry)
-    # Standing spots: seat the PARKED beings so two at one place never share a
-    # point. Walkers (entry["to"] set) animate along their own paths and are
-    # left alone. Homes hold a single occupant, so seating there is a no-op.
-    places_by_id = {p["id"]: p for p in store.village_places(owner_id)}
-    parked: dict[str, list[dict]] = {}
-    for e in beings:
-        if e["at"] and not e["to"]:
-            parked.setdefault(e["at"], []).append(e)
-    for pid, here in parked.items():
-        if len(here) < 2:
-            continue                        # a lone occupant keeps the anchor
-        p = places_by_id.get(pid)
-        if p is not None:
-            anchor = (int(p["x"]), int(p["y"]))
-            w = int(p.get("w") or 0) or footprint_for(p)[0]
-            h = int(p.get("h") or 0) or footprint_for(p)[1]
-            fp = (w, h, p.get("kind") or "building")
-        elif pid == "home":
-            continue                        # unique per being — never collides
-        else:
-            continue                        # unknown place — leave as anchor
-        seats = standing_spots(anchor, fp, [e["slug"] for e in here])
-        for e in here:
-            xy = seats.get(e["slug"])
-            if xy:
-                e["xy"] = [xy[0], xy[1]]
+    # Standing spots (seating residents + any guests together) run once below
+    # via _seat_parked, AFTER the visiting beings are appended.
     meta = store.get_village_meta(owner_id)
     # signs in the grass (FPV plan Phase 3): the public map never leaks
     # which (possibly private) beings found a sign — only how many did
@@ -1086,6 +1066,14 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
             notes.append({**n, "read_by": [], "found": found})
         else:
             notes.append({**n, "found": found})
+    # Visiting beings (§1): guests from other villages, positioned in THIS
+    # village and rendered beside residents. They fade the moment their home
+    # link goes quiet (tight TTL in live_visitors).
+    for e in visitors_on_map(store, owner_id, now):
+        beings.append(e)
+    # Re-seat parked co-location across residents AND guests together, so a
+    # guest never lands on a resident's exact pixel.
+    _seat_parked(store, owner_id, beings)
     return {"plot": PLOT_SIZE,
             "grid": {"plot_w": meta["plot_w"], "plot_h": meta["plot_h"],
                      "tile_size": meta["tile_size"]},
@@ -1095,6 +1083,252 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
             "places": store.village_places(owner_id),
             "notes": notes,
             "beings": beings}
+
+
+# ── Visiting beings: a guest with a body in this village (§1) ─────────────
+
+VISITOR_WANDER_MIN_MINUTES = 12.0   # an idle guest strolls at most this often
+_VISITOR_STAGES = ("infant", "child", "adolescent", "adult")
+
+
+def visitor_being(v: dict) -> dict:
+    """A resident-shaped view of a visitor row, so position_of / plot_course /
+    speed_for treat a guest exactly like a local walker. owner_id is the HOST's
+    (its places resolve here); slug stays the guest's for stable seating."""
+    prof = v.get("profile") or {}
+    stage = prof.get("stage") if prof.get("stage") in _VISITOR_STAGES else "adult"
+    loc = v.get("location")
+    if not isinstance(loc, dict) or not loc:
+        loc = {"at": "square"}
+    return {"id": v["id"], "owner_id": v["owner_id"], "slug": v["slug"],
+            "name": v.get("name") or v["slug"], "stage": stage,
+            "state": "alive", "location": loc}
+
+
+def visitor_position(store: BeingsStore, v: dict, now: datetime) -> dict:
+    """Where a guest stands right now — same pure extrapolation as a resident."""
+    return position_of(store, visitor_being(v), now)
+
+
+def visitors_on_map(store: BeingsStore, owner_id: str,
+                    now: datetime) -> list[dict]:
+    """Render entries for every LIVE guest in this village — the same shape as
+    a resident entry, tagged ``kind:"visitor"`` with a ``from`` origin label."""
+    out: list[dict] = []
+    try:
+        guests = store.live_visitors(owner_id, now=now)
+    except Exception:  # noqa: BLE001 — a guest list hiccup never breaks the map
+        return out
+    for v in guests:
+        vb = visitor_being(v)
+        try:
+            pos = visitor_position(store, v, now)
+        except Exception:  # noqa: BLE001
+            continue
+        prof = v.get("profile") or {}
+        entry = {
+            "slug": v["slug"], "name": vb["name"], "stage": vb["stage"],
+            "state": "alive", "kind": "visitor",
+            "from": _origin_label(v),
+            "xy": [int(pos["xy"][0]), int(pos["xy"][1])],
+            "at": pos["at"], "to": pos["to"],
+            "minutes_left": round(float(pos["minutes_left"]), 1),
+            "speed": speed_for(vb),
+            "avatar": prof.get("avatar") or default_avatar(vb),
+            "mood": prof.get("mood") or "",
+        }
+        loc = v.get("location") or {}
+        if pos.get("to") and isinstance(loc.get("path"), list):
+            entry["path"] = loc["path"]
+            entry["departed_at"] = loc.get("departed_at")
+            entry["total_minutes"] = loc.get("minutes")
+        out.append(entry)
+    return out
+
+
+def visitor_here(store: BeingsStore, owner_id: str, v: dict,
+                 now: datetime) -> dict:
+    """The awareness a host streams to a guest (§2): the village it walks, the
+    place it stands at, what's nearby, and which residents are right beside it.
+    Pure read; the guest's own tick turns this into felt context."""
+    try:
+        village = (store.get_village_meta(owner_id).get("name") or "").strip()
+    except Exception:  # noqa: BLE001
+        village = ""
+    village = village or "this village"
+    pos = visitor_position(store, v, now)
+    places = store.village_places(owner_id)
+    by_id = {p["id"]: p for p in places}
+    at_id = pos.get("at")
+    at_name = (by_id.get(at_id, {}).get("name") if at_id and at_id != "home"
+               else None) or ("the road" if pos.get("to") else "the square")
+    xy = pos["xy"]
+    near = [p["name"] for p in
+            sorted(places, key=lambda p: math.dist(xy, (p["x"], p["y"])))[:3]]
+    others: list[str] = []
+    if at_id and at_id not in ("home", None) and not pos.get("to"):
+        try:
+            for r in store.list(owner_id):
+                if r.get("state") != "alive":
+                    continue
+                o = store.get(owner_id, r["slug"])
+                if o.get("stage") == "egg":
+                    continue
+                if place_of(store, o, now) == at_id:
+                    others.append(o["name"])
+        except Exception:  # noqa: BLE001
+            others = []
+    return {"village": village, "at": at_name, "near": near,
+            "others": others[:6]}
+
+
+def _origin_label(v: dict) -> str:
+    """A short 'visiting from …' label — the guest's public village URL host,
+    else a generic 'another village'."""
+    origin = (v.get("origin") or "").strip()
+    if not origin:
+        return "another village"
+    lbl = origin.split("//", 1)[-1].split("/", 1)[0]
+    return lbl or "another village"
+
+
+def _seat_parked(store: BeingsStore, owner_id: str, beings: list[dict]) -> None:
+    """Fan out every PARKED entry (resident or guest) at a shared place onto
+    distinct standing spots — the same seating the payload already did for
+    residents, re-run so guests join the same rings."""
+    places_by_id = {p["id"]: p for p in store.village_places(owner_id)}
+    parked: dict[str, list[dict]] = {}
+    for e in beings:
+        if e.get("at") and not e.get("to"):
+            parked.setdefault(e["at"], []).append(e)
+    for pid, here in parked.items():
+        if len(here) < 2:
+            continue
+        p = places_by_id.get(pid)
+        if p is None:
+            continue
+        anchor = (int(p["x"]), int(p["y"]))
+        w = int(p.get("w") or 0) or footprint_for(p)[0]
+        h = int(p.get("h") or 0) or footprint_for(p)[1]
+        seats = standing_spots(anchor, (w, h, p.get("kind") or "building"),
+                               [e["slug"] for e in here])
+        for e in here:
+            xy = seats.get(e["slug"])
+            if xy:
+                e["xy"] = [xy[0], xy[1]]
+
+
+def wander_visitors(store: BeingsStore, owner_id: str,
+                    now: datetime | None = None) -> int:
+    """Host-side $0 stroll: an idle guest drifts between civic places so it
+    feels alive between its parent's nudges. Only PARKED guests past the
+    wander interval move; grounds (square/garden/meadow) are the destinations
+    — a guest never barges into a resident's home. Returns how many set out."""
+    now = now or _utcnow()
+    try:
+        guests = store.live_visitors(owner_id, now=now)
+        places = store.village_places(owner_id)
+    except Exception:  # noqa: BLE001
+        return 0
+    civic = [p for p in places
+             if (p.get("kind") or footprint_for(p)[2]) == "grounds"]
+    if not civic:
+        civic = places
+    moved = 0
+    for v in guests:
+        loc = v.get("location") or {}
+        if loc.get("to"):
+            continue                        # already on the road
+        moved_at = _parse_dt(v.get("moved_at"))
+        if moved_at is not None and (now - moved_at).total_seconds() < \
+                VISITOR_WANDER_MIN_MINUTES * 60.0:
+            continue                        # strolled recently — let it rest
+        here = loc.get("at") or "square"
+        # a deterministic-but-varying next place from the guest + the hour,
+        # never where it already stands
+        options = [p for p in civic if p["id"] != here]
+        if not options:
+            continue
+        idx = zlib.crc32(
+            f"{v['id']}:{now.strftime('%Y%m%d%H')}".encode()) % len(options)
+        pick = options[idx]
+        vb = visitor_being(v)
+        try:
+            origin = list(visitor_position(store, v, now)["xy"])
+            path, minutes = plot_course(store, vb, origin, pick["id"])
+        except Exception:  # noqa: BLE001
+            continue
+        new_loc = {"to": pick["id"], "from": here, "origin": origin,
+                   "departed_at": now.isoformat(), "path": path,
+                   "minutes": round(float(minutes), 2)}
+        try:
+            store.set_visitor_location(v["id"], new_loc, mark_moved=True,
+                                       now=now)
+            moved += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return moved
+
+
+def nudge_visitor(store: BeingsStore, owner_id: str, visitor_id: str,
+                  place_id: str, now: datetime | None = None) -> dict:
+    """A guest's parent walks it to a host place (§2, host-authoritative). The
+    host plots the course over its OWN grid and stores the walk; the guest's
+    position streams back down. Refuses an unknown place loudly."""
+    now = now or _utcnow()
+    v = store.get_visitor(visitor_id)
+    if v.get("owner_id") != owner_id:
+        raise BeingError("that guest is not in this village", 404)
+    places = {p["id"]: p for p in store.village_places(owner_id)}
+    if place_id not in places:
+        raise BeingError(f"there is no place called {place_id!r} here", 400)
+    vb = visitor_being(v)
+    origin = list(visitor_position(store, v, now)["xy"])
+    here = (v.get("location") or {}).get("at")
+    if here == place_id:
+        return {"ok": True, "at": place_id, "walking": False}
+    path, minutes = plot_course(store, vb, origin, place_id)
+    loc = {"to": place_id, "from": here, "origin": origin,
+           "departed_at": now.isoformat(), "path": path,
+           "minutes": round(float(minutes), 2)}
+    store.set_visitor_location(visitor_id, loc, mark_moved=True, now=now)
+    return {"ok": True, "to": place_id, "walking": True,
+            "minutes": round(float(minutes), 1)}
+
+
+def settle_visitors(store: BeingsStore, owner_id: str,
+                    now: datetime | None = None) -> int:
+    """A guest whose walk has ended settles to rest at its destination — the
+    same read-time arrival a resident gets. Returns how many just arrived."""
+    now = now or _utcnow()
+    try:
+        guests = store.live_visitors(owner_id, now=now)
+    except Exception:  # noqa: BLE001
+        return 0
+    settled = 0
+    for v in guests:
+        loc = v.get("location") or {}
+        if not loc.get("to"):
+            continue
+        pos = visitor_position(store, v, now)
+        if pos.get("to"):
+            continue                        # still walking
+        try:
+            store.set_visitor_location(v["id"], {"at": pos["at"]}, now=now)
+            settled += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return settled
+
+
+def _parse_dt(raw) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
 # ── Plotted courses (village-world plan Phase 2) ─────────────────────────
@@ -1466,12 +1700,59 @@ def _meet(store: BeingsStore, being: dict, other: dict, pid: str,
     return True, gossip
 
 
+def _visitors_present(store: BeingsStore, being: dict, pid: str,
+                      now: datetime) -> list[dict]:
+    """Live guests settled at the same civic place as this resident (§3)."""
+    try:
+        guests = store.live_visitors(being["owner_id"], now=now)
+    except Exception:  # noqa: BLE001
+        return []
+    here = []
+    for v in guests:
+        prof = v.get("profile") or {}
+        if prof.get("state") not in (None, "", "alive"):
+            continue                        # a paused/dead guest doesn't meet
+        if prof.get("stage") == "egg":
+            continue
+        try:
+            if visitor_position(store, v, now).get("at") == pid:
+                here.append(v)
+        except Exception:  # noqa: BLE001
+            continue
+    return here
+
+
+def _meet_visitor(store: BeingsStore, being: dict, v: dict, pid: str,
+                  here: str, now: datetime) -> tuple[bool, str]:
+    """A resident crosses paths with a GUEST (§3). One-sided on the ledger —
+    the guest's own record lives on its home machine — but deduped once per
+    pair per day via the shared contact row, and coloured by a gossip line
+    from what the guest last thought (its streamed profile)."""
+    try:
+        fresh = store.touch_contact(being["owner_id"], being["id"], v["id"],
+                                    now=now)
+    except Exception:  # noqa: BLE001
+        return False, ""
+    if not fresh:
+        return False, ""
+    prof = v.get("profile") or {}
+    thought = (prof.get("latest_thought") or "").strip()
+    gossip = f' — lately: "{thought[:120]}"' if thought else ""
+    frm = _origin_label(v)
+    store.record_event(being["id"], "crossed_paths",
+                       {"with": v["slug"], "name": v.get("name") or v["slug"],
+                        "place": pid, "place_name": here, "visitor": True,
+                        "from": frm}, now=now)
+    return True, gossip
+
+
 def encounters(store: BeingsStore, being: dict, now: datetime,
                kind: str) -> list[str]:
     """Co-presence, felt (space plan Phase 3): another being settled at
     the same CIVIC place right now → one crossed_paths event to each per
     pair per day, a contact that grows, and a gossip line — what they've
-    truly been up to, pulled from their own ledger."""
+    truly been up to, pulled from their own ledger. Guests of the village
+    count too (§3)."""
     if kind != "wake":
         return []
     pid, here, present = _co_present(store, being, now)
@@ -1483,6 +1764,12 @@ def encounters(store: BeingsStore, being: dict, now: datetime,
         if fresh:
             lines.append(f"CROSSED PATHS: {other['name']} is here at {here}"
                          f"{gossip}")
+    for v in _visitors_present(store, being, pid, now):
+        fresh, gossip = _meet_visitor(store, being, v, pid, here, now)
+        if fresh:
+            lines.append(f"CROSSED PATHS: {v.get('name') or v['slug']}, "
+                         f"visiting from {_origin_label(v)}, is here at "
+                         f"{here}{gossip}")
     return lines
 
 
@@ -1491,12 +1778,15 @@ def reflex_encounters(store: BeingsStore, being: dict,
     """Between-tick co-presence (body-brain plan Phase 1): the same
     meeting physics the tick runs, minus the live percept line — events
     land the minute they happen; the mind hears them at its next tick.
-    Returns how many fresh meetings landed."""
+    Guests count too (§3). Returns how many fresh meetings landed."""
     pid, here, present = _co_present(store, being, now)
     if not pid:
         return 0
-    return sum(1 for other in present
-               if _meet(store, being, other, pid, here, now)[0])
+    n = sum(1 for other in present
+            if _meet(store, being, other, pid, here, now)[0])
+    n += sum(1 for v in _visitors_present(store, being, pid, now)
+             if _meet_visitor(store, being, v, pid, here, now)[0])
+    return n
 
 
 # ── Signs & the felt ghost (FPV plan Phase 3) ────────────────────────────

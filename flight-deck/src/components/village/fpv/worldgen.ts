@@ -211,6 +211,7 @@ export function buildWorld(data: VillageMapData): BuiltWorld {
 
   // ── every being's home: a small plastered cottage, door to the lane ────
   for (const b of data.beings) {
+    if (b.kind === 'visitor' || !b.home_xy) continue   // guests keep no cottage
     const [htx, hty] = homeNW(b.home_xy)
     const bx0 = htx * TPB + MARGIN, bz0 = hty * TPB + MARGIN
     const bx1 = bx0 + 2 * TPB - 1, bz1 = bz0 + 2 * TPB - 1

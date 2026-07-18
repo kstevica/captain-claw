@@ -157,6 +157,16 @@ async def beings_loop(db, stop_event: asyncio.Event) -> None:
                 ttl_minutes=being_life.VISITOR_TTL_MINUTES)
         except Exception as e:  # noqa: BLE001
             log.warning("federation reconcile error", error=str(e))
+        # Visiting beings walk this village (§1): settle arrivals, then let an
+        # idle guest stroll between civic places — host-side, $0, no LLM.
+        try:
+            st = get_store()
+            now2 = _utcnow()
+            for oid in st.owners_with_live_visitors(now=now2):
+                being_world.settle_visitors(st, oid, now=now2)
+                being_world.wander_visitors(st, oid, now=now2)
+        except Exception as e:  # noqa: BLE001
+            log.warning("visitor wander error", error=str(e))
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=POLL_SECONDS)
         except asyncio.TimeoutError:

@@ -5,7 +5,7 @@ import {
   ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, Check, ChevronDown,
   ChevronLeft, ChevronRight, ClipboardList, Coins, Download, Egg, ExternalLink,
   DoorOpen, Files, Fingerprint, Footprints, Gift, Globe, GraduationCap, History, Loader2, Mail,
-  Map as MapIcon, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus,
+  Map as MapIcon, MapPin, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus,
   RefreshCw, Search, ScrollText, Skull, SlidersHorizontal, Sparkles, Sprout,
   Trash2, Upload, Users, Wrench, X, Zap, ZoomIn, ZoomOut,
 } from 'lucide-react'
@@ -23,6 +23,7 @@ import {
   exportBeing, importBeing, purgeBeing, getVillageMeta, setVillageMeta,
   recommendVillageMeta, type VillageMeta, type Visitor,
   setVillageFederation, getVisitors, removeVisitor, setBeingVisit,
+  getVisitedMap, nudgeVisit,
   acceptVenture, addReading, approveChosenName, approveProcreation,
   approveSelfMod, approveVenture, rejectChosenName, removeReading,
   arrangeOffspring, cancelQuest, conceiveBeing, emigrateBeing,
@@ -375,6 +376,75 @@ const REL_HUE: Record<string, string> = {
   grew_from: '#a78bfa', responds_to: '#38bdf8', elaborates: '#34d399',
   contradicts: '#fb7185', abandons: '#71717a', uses_skill: '#fbbf24',
   learned_from: '#2dd4bf',
+}
+
+// The village a being is VISITING (visiting-beings plan §2): the host's map,
+// proxied down the link with the guest positioned in it. The parent sees that
+// village and nudges their guest to walk its buildings.
+function VisitedVillage({ slug, name }: { slug: string; name: string }) {
+  const [map, setMap] = useState<VillageMapData | null>(null)
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState('')
+  const [sel, setSel] = useState<string | null>(null)
+  const [selBeing, setSelBeing] = useState<string | null>(null)
+  const fetchedAt = useRef(0)
+
+  const load = useCallback(async () => {
+    try { const m = await getVisitedMap(slug); fetchedAt.current = Date.now(); setMap(m); setErr('') }
+    catch (e) { setErr(e instanceof Error ? e.message : 'the link is down') }
+  }, [slug])
+
+  useEffect(() => { void load(); const t = window.setInterval(load, 5_000); return () => window.clearInterval(t) }, [load])
+
+  const placeById = useMemo(() => {
+    const o: Record<string, VillagePlace> = {}
+    for (const p of map?.places ?? []) o[p.id] = p
+    return o
+  }, [map])
+  const posOf = (b: VillageBeingPos) => walkPosOf(b, placeById, fetchedAt.current)
+  const guest = map?.beings.find((b) => b.kind === 'visitor' && b.slug === slug)
+
+  const nudge = async (place: string) => {
+    setBusy(place)
+    try { await nudgeVisit(slug, place); await load() }
+    catch (e) { alert(e instanceof Error ? e.message : 'the nudge did not arrive') }
+    finally { setBusy('') }
+  }
+
+  if (err) return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3 text-[11px] text-amber-500">
+      Can't see that village right now — {err}. It reappears when the link is back.
+    </div>
+  )
+  if (!map) return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 text-[11px] text-zinc-500">Loading the village {name} is visiting…</div>
+  )
+  const here = guest?.at ? (placeById[guest.at]?.name || guest.at) : guest?.to ? 'on the road' : 'the square'
+  return (
+    <div className="rounded-xl border border-sky-900/40 bg-sky-950/20 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[11px] text-zinc-300">
+          <MapPin className="h-3.5 w-3.5 text-sky-400" />
+          <span className="font-medium text-sky-300">{name}</span> is at <span className="font-medium text-zinc-200">{here}</span> in the village it visits
+        </div>
+        {guest?.to && <span className="text-[10px] text-sky-400/80">walking…</span>}
+      </div>
+      <div className="overflow-hidden rounded-md">
+        <IsoScene data={map} sel={sel} selBeing={selBeing ?? slug}
+          onPlace={setSel} onBeing={setSelBeing} posOf={posOf}
+          hue={(p) => AFF_HUE[p.affordances[0]] ?? '#a78bfa'} />
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <span className="w-full text-[10px] uppercase tracking-wide text-zinc-500">Walk {name} to a building</span>
+        {map.places.map((p) => (
+          <button key={p.id} onClick={() => nudge(p.id)} disabled={!!busy || guest?.at === p.id}
+            className="rounded-full border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 hover:border-sky-500/60 hover:text-sky-300 disabled:opacity-40">
+            {busy === p.id ? '…' : guest?.at === p.id ? `● ${p.name}` : p.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function MindGraph({ graph, loadFile, onRebuild }: {
@@ -2539,6 +2609,7 @@ function ParentingModal({ slug, name, onClose, onChanged }: {
                   <div className="mt-1 text-zinc-600">{v.visit_last_announce ? `link last active ${fmtRelTime(v.visit_last_announce)}` : 'link starting…'}</div>
                 </div>
               )}
+              {v.visit_url && <VisitedVillage slug={slug} name={name} />}
             </div>
             )}
 

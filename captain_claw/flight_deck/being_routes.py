@@ -742,6 +742,34 @@ async def set_being_visit(slug: str, body: VisitRequest,
             "announced": announced}
 
 
+@router.get("/{slug}/visit/map")
+async def visited_village_map(slug: str,
+                              user: dict = Depends(get_current_user)):
+    """The map of the village THIS being is visiting — proxied down its link,
+    with the guest positioned in it, so the parent can see and walk it (§2)."""
+    from captain_claw.flight_deck import being_federation
+    being = _run(get_store().get, user["id"], slug)
+    if not being.get("visit_url"):
+        raise HTTPException(400, "this being is not visiting anywhere")
+    return await being_federation.village_client.pull_map(slug)
+
+
+class VisitNudgeRequest(BaseModel):
+    place: str
+
+
+@router.post("/{slug}/visit/nudge")
+async def nudge_visiting_being(slug: str, body: VisitNudgeRequest,
+                               user: dict = Depends(get_current_user)):
+    """Walk this visiting being to a place of the village it visits (§2). The
+    nudge travels up its link; the host walks it and streams the move back."""
+    from captain_claw.flight_deck import being_federation
+    being = _run(get_store().get, user["id"], slug)
+    if not being.get("visit_url"):
+        raise HTTPException(400, "this being is not visiting anywhere")
+    return await being_federation.village_client.nudge(slug, body.place)
+
+
 @router.get("/{slug}/public-threads")
 async def public_threads(slug: str, user: dict = Depends(get_current_user)):
     """The parent's overview of every visitor thread on the public page —

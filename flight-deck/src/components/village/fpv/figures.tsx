@@ -71,24 +71,35 @@ function rasterize(c: number, p: string): Promise<THREE.CanvasTexture> {
   return made
 }
 
-function nameTag(text: string): THREE.Sprite {
+function nameTag(text: string, guestFrom?: string): THREE.Sprite {
   const cv = document.createElement('canvas')
-  cv.width = 256; cv.height = 64
+  cv.width = 256; cv.height = guestFrom ? 96 : 64
   const ctx = cv.getContext('2d')!
   ctx.font = '600 26px -apple-system, system-ui, sans-serif'
   const w = Math.min(236, ctx.measureText(text).width + 28)
   const x0 = (256 - w) / 2
-  ctx.fillStyle = 'rgba(23,20,16,0.82)'
+  ctx.fillStyle = guestFrom ? 'rgba(12,30,45,0.85)' : 'rgba(23,20,16,0.82)'
   ctx.beginPath()
   ctx.roundRect(x0, 12, w, 40, 20)
   ctx.fill()
-  ctx.fillStyle = '#e8e2cf'
+  ctx.fillStyle = guestFrom ? '#bae6fd' : '#e8e2cf'
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
   ctx.fillText(text, 128, 33)
+  if (guestFrom) {
+    ctx.font = '600 18px -apple-system, system-ui, sans-serif'
+    const sub = `✦ visiting from ${guestFrom}`
+    const sw = Math.min(244, ctx.measureText(sub).width + 24)
+    ctx.fillStyle = 'rgba(12,30,45,0.85)'
+    ctx.beginPath()
+    ctx.roundRect((256 - sw) / 2, 58, sw, 30, 15)
+    ctx.fill()
+    ctx.fillStyle = '#7dd3fc'
+    ctx.fillText(sub, 128, 74)
+  }
   const tex = new THREE.CanvasTexture(cv)
   tex.colorSpace = THREE.SRGBColorSpace
   const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }))
-  sp.scale.set(1.7, 0.42, 1)
+  sp.scale.set(1.7, guestFrom ? 0.63 : 0.42, 1)
   return sp
 }
 
@@ -174,7 +185,7 @@ export class Figures {
     const paper = new THREE.Mesh(new THREE.PlaneGeometry(h * (168 / 224), h), mat)
     paper.position.y = h / 2
     group.add(paper)
-    const tag = nameTag(b.name)
+    const tag = nameTag(b.name, b.kind === 'visitor' ? (b.from || 'another village') : undefined)
     tag.position.y = h + 0.34
     group.add(tag)
     const mark = spark()

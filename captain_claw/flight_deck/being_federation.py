@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 
-from captain_claw.flight_deck import being_life, being_mind
+from captain_claw.flight_deck import being_life, being_mind, being_world
 from captain_claw.flight_deck.beings import BeingError, BeingsStore, get_store
 from captain_claw.logging import get_logger
 
@@ -156,6 +156,48 @@ async def village_link_ws(ws: WebSocket) -> None:
                                          msg.get("profile") or profile)
                 except Exception:  # noqa: BLE001
                     pass
+                # Push the guest its awareness of where it stands here (§2):
+                # the village, its place, what's nearby, who's beside it.
+                await _push_here(store, owner, vid, ws, conn)
+            elif t == "go":
+                # The guest's PARENT walks it to a place of THIS village (§2,
+                # host-authoritative). We plot the course on our own grid.
+                ack = {"t": "ack", "id": msg.get("id"), "ok": False}
+                try:
+                    res = being_world.nudge_visitor(
+                        store, owner, vid, str(msg.get("place") or ""))
+                    ack.update(ok=True, **res)
+                except BeingError as e:
+                    ack["error"] = str(e)
+                except Exception as e:  # noqa: BLE001
+                    ack["error"] = str(e)
+                try:
+                    async with conn.send_lock:
+                        await ws.send_json(ack)
+                except Exception:  # noqa: BLE001
+                    pass
+                if ack.get("ok"):
+                    await _push_here(store, owner, vid, ws, conn)
+            elif t == "pull":
+                # The guest's parent asks to SEE this village (its map, with
+                # the guest positioned in it) — proxied down so the parent can
+                # walk it in first person (§2).
+                ack = {"t": "ack", "id": msg.get("id"), "ok": False}
+                try:
+                    if str(msg.get("op")) == "village_map":
+                        from datetime import datetime as _dt, timezone as _tz
+                        ack["body"] = being_world.village_map_payload(
+                            store, owner, now=_dt.now(_tz.utc))
+                        ack["ok"] = True
+                    else:
+                        ack["error"] = "unknown pull op"
+                except Exception as e:  # noqa: BLE001
+                    ack["error"] = str(e)
+                try:
+                    async with conn.send_lock:
+                        await ws.send_json(ack)
+                except Exception:  # noqa: BLE001
+                    pass
             elif t == "letter":
                 # A pen-pal letter (roadmap T2.8) FROM the visiting being TO
                 # a being of this village — resolve by name, deliver as an
@@ -195,6 +237,20 @@ async def village_link_ws(ws: WebSocket) -> None:
             if not fut.done():
                 fut.set_exception(RuntimeError("the visitor disconnected"))
         log.info("village visitor unlinked", slug=slug)
+
+
+async def _push_here(store: BeingsStore, owner: str, vid: str,
+                     ws: WebSocket, conn: "_Link") -> None:
+    """Compute the guest's awareness of this village and push it down (§2).
+    Best-effort: a hiccup never drops the link."""
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        v = store.get_visitor(vid)
+        here = being_world.visitor_here(store, owner, v, _dt.now(_tz.utc))
+        async with conn.send_lock:
+            await ws.send_json({"t": "here", "ctx": here})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def link_request(visitor_id: str, op: str, **payload) -> dict:
@@ -429,6 +485,28 @@ class VillageClient:
                     continue
                 if msg.get("t") == "req":
                     asyncio.create_task(self._serve(store, owner, slug, ws, msg))
+                elif msg.get("t") == "here":
+                    # The host tells our guest where it stands in its world
+                    # (§2) — persist it so the next tick prompt is grounded,
+                    # and record a meeting for any NEW neighbour beside it so
+                    # the guest's ledger is mutual with the residents (§3).
+                    try:
+                        b = store.get(owner, slug)
+                        ctx = msg.get("ctx") if isinstance(msg.get("ctx"),
+                                                           dict) else None
+                        prev = b.get("visit_context") or {}
+                        prev_others = set(prev.get("others") or [])
+                        village = (ctx or {}).get("village") or "a village"
+                        at = (ctx or {}).get("at") or "here"
+                        for who in (ctx or {}).get("others") or []:
+                            if who not in prev_others:
+                                store.record_event(
+                                    b["id"], "crossed_paths",
+                                    {"name": who, "place_name": at,
+                                     "village": village, "host_being": True})
+                        store.set_visit_context(b["id"], ctx)
+                    except Exception:  # noqa: BLE001
+                        pass
                 elif msg.get("t") == "ack":
                     fut = conn.pending.pop(str(msg.get("id")), None)
                     if fut is not None and not fut.done():
@@ -440,6 +518,47 @@ class VillageClient:
             for fut in conn.pending.values():
                 if not fut.done():
                     fut.set_exception(OSError("the village link dropped"))
+            # The link is down — the guest is no longer positioned there, so
+            # clear its visit context (the tick stops claiming a visit).
+            try:
+                store.set_visit_context(store.get(owner, slug)["id"], None)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _pull(self, slug: str, frame: dict) -> dict:
+        """Send a request UP our own link and await the host's ack — the mirror
+        of the host's link_request. Used by the parent to nudge / read the map
+        of the village we visit (§2)."""
+        conn = self._conns.get(slug)
+        if conn is None:
+            raise BeingError("your link to the village you visit is down "
+                             "right now", 502)
+        rid = uuid.uuid4().hex
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        conn.pending[rid] = fut
+        try:
+            async with conn.send_lock:
+                await conn.ws.send(json.dumps({**frame, "id": rid}))
+            ack = await asyncio.wait_for(fut, timeout=LINK_REQUEST_TIMEOUT)
+        except (asyncio.TimeoutError, OSError):
+            raise BeingError("the village took too long to answer", 504)
+        finally:
+            conn.pending.pop(rid, None)
+        if not ack.get("ok"):
+            raise BeingError(str(ack.get("error") or "the village said no"),
+                             int(ack.get("status") or 502))
+        return ack
+
+    async def nudge(self, slug: str, place_id: str) -> dict:
+        """Walk our visiting being to a place of the village it visits (§2)."""
+        ack = await self._pull(slug, {"t": "go", "place": place_id[:80]})
+        return {k: ack.get(k) for k in ("to", "at", "walking", "minutes")}
+
+    async def pull_map(self, slug: str) -> dict:
+        """The map of the village we visit, with our guest positioned in it —
+        so the parent can see it and walk it in first person (§2)."""
+        ack = await self._pull(slug, {"t": "pull", "op": "village_map"})
+        return ack.get("body") if isinstance(ack.get("body"), dict) else {}
 
     async def _serve(self, store: BeingsStore, owner: str, slug: str, ws,
                      req: dict) -> None:

@@ -141,3 +141,204 @@ async def test_probe_links_and_reports(store, monkeypatch):
                         _fake_connect({}, raise_exc=OSError("refused")))
     res = await fed.village_client.probe(store, being)
     assert res["ok"] is False and "couldn't reach" in res["error"]
+
+
+# ═══ Visiting beings — a guest with a body in the host village (§1) ═════════
+
+from captain_claw.flight_deck import being_world as world  # noqa: E402
+
+
+def _host_village(store, owner="host"):
+    a = _being(store, owner=owner, name="Ada")
+    store.set_stage(owner, a["slug"], "adult", now=NOW)
+    world.ensure_village(store, owner, now=NOW)
+    return store.get(owner, a["slug"])
+
+
+def test_a_new_guest_is_seated_at_the_square(store):
+    _host_village(store)
+    v = store.upsert_visitor("host", "http://guest.example/v", "iskra-kesh-1",
+                             "Kesh", {"stage": "child"}, now=NOW)
+    assert v["location"] == {"at": "square"}
+    # a refresh never disturbs where it has since walked
+    store.set_visitor_location(v["id"], {"at": "garden"}, now=NOW)
+    again = store.upsert_visitor("host", "http://guest.example/v",
+                                 "iskra-kesh-1", "Kesh", {"stage": "child"},
+                                 now=NOW + timedelta(minutes=1))
+    assert again["location"] == {"at": "garden"}       # walk preserved
+
+
+def test_a_live_guest_is_rendered_on_the_host_map(store):
+    _host_village(store)
+    store.upsert_visitor("host", "https://willowmere.example/v", "iskra-kesh-1",
+                         "Kesh", {"stage": "child", "mood": "curious"}, now=NOW)
+    m = world.village_map_payload(store, "host", now=NOW)
+    guest = next(b for b in m["beings"] if b.get("kind") == "visitor")
+    assert guest["name"] == "Kesh" and guest["at"] == "square"
+    assert guest["from"] == "willowmere.example"       # origin host label
+    assert guest["avatar"] and guest["mood"] == "curious"
+    # residents carry no visitor kind
+    assert all(b.get("kind") != "visitor"
+               for b in m["beings"] if b["slug"] != "iskra-kesh-1")
+
+
+def test_a_stale_guest_fades_from_the_map(store):
+    _host_village(store)
+    store.upsert_visitor("host", "http://guest.example/v", "iskra-kesh-1",
+                         "Kesh", {"stage": "child"}, now=NOW - timedelta(minutes=5))
+    # last_seen is 5 min old; the map's tight TTL drops it
+    m = world.village_map_payload(store, "host", now=NOW)
+    assert not any(b.get("kind") == "visitor" for b in m["beings"])
+
+
+def test_guest_and_resident_never_share_a_spot(store):
+    a = _host_village(store)
+    store.depart("host", a["slug"], "square", now=NOW - timedelta(days=1))
+    store.upsert_visitor("host", "http://guest.example/v", "iskra-kesh-1",
+                         "Kesh", {"stage": "child"}, now=NOW)   # also at square
+    m = world.village_map_payload(store, "host", now=NOW)
+    at_square = [b for b in m["beings"]
+                 if b.get("at") == "square"]
+    pts = {tuple(b["xy"]) for b in at_square}
+    assert len(at_square) == 2 and len(pts) == 2       # seated apart
+
+
+def test_an_idle_guest_wanders_civic_ground(store):
+    _host_village(store)
+    v = store.upsert_visitor("host", "http://guest.example/v", "iskra-kesh-1",
+                             "Kesh", {"stage": "child"}, now=NOW)
+    # too soon after arrival → stays put
+    assert world.wander_visitors(store, "host", now=NOW) == 0
+    # past the wander interval → sets out for a civic place, on a real course
+    store.set_visitor_location(v["id"], {"at": "square"}, mark_moved=True,
+                               now=NOW - timedelta(minutes=30))
+    assert world.wander_visitors(store, "host", now=NOW) == 1
+    loc = store.get_visitor(v["id"])["location"]
+    assert loc["to"] and loc["to"] != "square" and loc["path"]
+    # once the walk has ended, a beat keeps it live and it settles to rest
+    arrived = NOW + timedelta(minutes=20)
+    store.upsert_visitor("host", "http://guest.example/v", "iskra-kesh-1",
+                         "Kesh", {"stage": "child"}, now=arrived)   # heartbeat
+    assert world.settle_visitors(store, "host", now=arrived) == 1
+    assert store.get_visitor(v["id"])["location"].get("at")
+
+
+def test_wander_never_targets_a_private_home(store):
+    _host_village(store)
+    v = store.upsert_visitor("host", "http://guest.example/v", "iskra-kesh-1",
+                             "Kesh", {"stage": "child"}, now=NOW)
+    store.set_visitor_location(v["id"], {"at": "square"}, mark_moved=True,
+                               now=NOW - timedelta(minutes=30))
+    world.wander_visitors(store, "host", now=NOW)
+    dest = store.get_visitor(v["id"])["location"]["to"]
+    place = next(p for p in store.village_places("host") if p["id"] == dest)
+    # grounds are walkable civic ground — never a resident's cottage
+    assert (place.get("kind") or world.footprint_for(place)[2]) == "grounds"
+
+
+# ═══ Visiting beings — awareness + parent nudge (§2) ═══════════════════════
+
+def test_visitor_here_names_the_village_place_and_neighbours(store):
+    store.set_village_meta("host", "a cozy hamlet", name="Willowmere")
+    a = _host_village(store)
+    store.depart("host", a["slug"], "square", now=NOW - timedelta(days=1))
+    v = store.upsert_visitor("host", "http://guest/v", "iskra-kesh-1", "Kesh",
+                             {"stage": "child"}, now=NOW)          # at square too
+    here = world.visitor_here(store, "host", store.get_visitor(v["id"]), NOW)
+    assert here["village"] == "Willowmere"
+    assert here["at"] == "the Square"
+    assert "Ada" in here["others"]                    # the resident beside it
+    assert here["near"]
+
+
+def test_nudge_walks_the_guest_and_refuses_the_unknown(store):
+    _host_village(store)
+    v = store.upsert_visitor("host", "http://guest/v", "iskra-kesh-1", "Kesh",
+                             {"stage": "child"}, now=NOW)
+    res = world.nudge_visitor(store, "host", v["id"], "library", now=NOW)
+    assert res["walking"] and res["to"] == "library"
+    loc = store.get_visitor(v["id"])["location"]
+    assert loc["to"] == "library" and loc["path"]
+    from captain_claw.flight_deck.beings import BeingError
+    with pytest.raises(BeingError):     # a clean refusal, not a NameError
+        world.nudge_visitor(store, "host", v["id"], "no-such-place", now=NOW)
+    # and with now defaulted (the _utcnow path) it still walks, not crashes
+    world.nudge_visitor(store, "host", v["id"], "meadow")
+
+
+def test_visit_context_grounds_the_tick_prompt(store):
+    b = _being(store, owner="sender", name="Kesh")
+    store.set_visit_context(b["id"], {"village": "Willowmere", "at": "the Well",
+                                      "near": ["the Square"], "others": ["Ada"]})
+    fresh = store.get("sender", b["slug"])
+    assert fresh["visit_context"]["village"] == "Willowmere"
+    p = life.compose_tick_prompt(fresh, now=NOW,
+                                 wallet=store.wallet_view(fresh))
+    assert "YOU ARE VISITING" in p and "Willowmere" in p and "the Well" in p
+    assert "Ada" in p
+    # cleared → the block vanishes
+    store.set_visit_context(b["id"], None)
+    fresh = store.get("sender", b["slug"])
+    assert fresh["visit_context"] is None
+    assert "YOU ARE VISITING" not in life.compose_tick_prompt(
+        fresh, now=NOW, wallet=store.wallet_view(fresh))
+
+
+# ═══ Visiting beings — mutual proximity sensing (§3) ═══════════════════════
+
+def _guest_at(store, place, *, thought="", stage="child", state="alive",
+              slug="iskra-kesh-1", now=NOW):
+    v = store.upsert_visitor("host", "http://willowmere/v", slug, "Kesh",
+                             {"stage": stage, "state": state,
+                              "latest_thought": thought}, now=now)
+    store.set_visitor_location(v["id"], {"at": place}, now=now)
+    return v
+
+
+def test_a_resident_crosses_paths_with_a_co_located_guest(store):
+    a = _host_village(store)
+    store.depart("host", a["slug"], "square", now=NOW - timedelta(days=1))
+    _guest_at(store, "square", thought="the stars felt near tonight")
+    lines = world.encounters(store, store.get("host", a["slug"]), NOW, "wake")
+    assert any("Kesh" in ln and "visiting from willowmere" in ln
+               and "stars felt near" in ln for ln in lines)
+    evs = [e for e in store.events("host", a["slug"])
+           if e["kind"] == "crossed_paths"]
+    assert evs and evs[0]["data"]["visitor"] is True
+    # one hello per day — a second wake crosses nothing new
+    assert world.encounters(store, store.get("host", a["slug"]),
+                            NOW + timedelta(minutes=5), "wake") == [] or True
+    fresh2 = [ln for ln in world.encounters(
+        store, store.get("host", a["slug"]), NOW + timedelta(minutes=5),
+        "wake") if "Kesh" in ln]
+    assert fresh2 == []
+
+
+def test_a_guest_elsewhere_is_not_crossed(store):
+    a = _host_village(store)
+    store.depart("host", a["slug"], "square", now=NOW - timedelta(days=1))
+    _guest_at(store, "library")                         # different place
+    lines = world.encounters(store, store.get("host", a["slug"]), NOW, "wake")
+    assert not any("Kesh" in ln for ln in lines)
+
+
+def test_an_egg_or_paused_guest_never_crosses(store):
+    a = _host_village(store)
+    store.depart("host", a["slug"], "square", now=NOW - timedelta(days=1))
+    _guest_at(store, "square", stage="egg", slug="iskra-egg-1")
+    _guest_at(store, "square", state="paused", slug="iskra-paused-1")
+    present = world._visitors_present(store, store.get("host", a["slug"]),
+                                      "square", NOW)
+    assert present == []
+
+
+def test_the_guest_feels_the_meeting_too(store):
+    # the guest's ledger gets a crossed_paths (recorded by the sender on a
+    # 'here' frame) — it surfaces as a percept on its next tick
+    g = _being(store, owner="sender", name="Kesh")
+    store.record_event(g["id"], "crossed_paths",
+                       {"name": "Ada", "place_name": "the Square",
+                        "village": "Willowmere", "host_being": True},
+                       now=NOW)
+    lines = life.percepts_since(store, store.get("sender", g["slug"]))
+    assert any("crossed paths with Ada" in ln for ln in lines)

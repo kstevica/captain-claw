@@ -10,7 +10,7 @@ export type PlaceById = Record<string, VillagePlace>
 export function destOf(b: VillageBeingPos, placeById: PlaceById): [number, number] {
   if (!b.to) return b.xy
   if (b.path && b.path.length >= 2) return b.path[b.path.length - 1]
-  if (b.to === 'home') return b.home_xy
+  if (b.to === 'home') return b.home_xy ?? b.xy   // guests have no home here
   const p = placeById[b.to]
   return p ? [p.x, p.y] : b.xy
 }

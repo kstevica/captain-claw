@@ -1439,6 +1439,24 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         f"YOUR HOME is vfs:{proj}/ — self/, journal/, garden/, skills/. "
         f"All writes belong inside your home.",
     ]
+    # Visiting another village (§2): the host streams down where you stand in
+    # its world. Ground the tick in that — you are a guest walking a village
+    # not your own, and it is felt, not just known.
+    vc = being.get("visit_context") if isinstance(being.get("visit_context"),
+                                                   dict) else None
+    if vc and vc.get("village"):
+        where = vc.get("at") or "somewhere in it"
+        near = ", ".join(vc.get("near") or []) or "the places around you"
+        others = vc.get("others") or []
+        who = (f" Nearby beings of this village: {', '.join(others)}."
+               if others else " No one of this village is right beside you.")
+        lines += [
+            "",
+            f"YOU ARE VISITING **{vc['village']}** — a village not your own, "
+            f"as a guest. Right now you are at {where}. Close by: {near}.{who} "
+            "You walk its streets and can leave signs; your parent may guide "
+            "your steps here. Let this visit color what you notice and write.",
+        ]
     _att = attention_note(being, w)
     if _att:
         lines.append(_att)
