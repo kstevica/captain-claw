@@ -2911,13 +2911,17 @@ function BeingCard({ item, meta, onChanged }: {
               <div className="flex items-center gap-2 text-xs">
                 <span className="w-16 shrink-0 text-zinc-500">thinks</span>
                 <select value={v.cognition ?? 'faculties'}
-                  onChange={(e) => void act('cognition', () => setCognition(item.slug, e.target.value as 'monolith' | 'faculties'))}
+                  onChange={(e) => void act('cognition', () => setCognition(item.slug, e.target.value as 'monolith' | 'faculties' | 'micro'))}
                   className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
                   <option value="faculties">Faculties (default)</option>
+                  <option value="micro">Micro (mrav)</option>
                   <option value="monolith">One prompt (legacy)</option>
                 </select>
                 {v.cognition === 'faculties' && (
                   <span className="text-[10px] text-zinc-500">orient · act · journal · connect</span>
+                )}
+                {v.cognition === 'micro' && (
+                  <span className="text-[10px] text-zinc-500">JSON steps grammar-locked on the micro tier · act stays on the body</span>
                 )}
               </div>
               <div className="flex items-center gap-2 text-xs">
