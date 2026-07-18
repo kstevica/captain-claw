@@ -2354,11 +2354,25 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
             changed = None
 
     # 3) JOURNAL — grounded self-report (prose + a tiny json).
-    jreply = await _fac_send(compose_journal_prompt(
+    jprompt = compose_journal_prompt(
         being, intent=intent, act_kind=act_kind, changed=changed,
         visitors=visitors, refused=refused_talk,
         letter=merged.get("letter") if isinstance(merged.get("letter"), dict)
-        else None), "journal")
+        else None)
+    if micro_mind:
+        # Micro calls are stateless — the body path saw its previous words
+        # via replayed session history, but a direct micro call sees only
+        # this prompt. Without the tail, identical quiet ticks produce
+        # byte-identical prompts and ANY model (4B or 9B, seen live)
+        # repeats itself verbatim. Micro-only: faculties stays byte-same.
+        tail_label, tail = journal_tail_for_tick(being, now, kind=kind)
+        if tail and tail.strip():
+            jprompt += (
+                f"\n\n{tail_label}\n{tail.strip()}\n"
+                "Do NOT repeat or paraphrase those words — write only what is "
+                "NEW or different about this moment. If truly nothing changed, "
+                "say so in one fresh short sentence.")
+    jreply = await _fac_send(jprompt, "journal")
     jraw = _extract_raw(jreply) or {}
     if jraw.get("journal_entry"):
         merged["journal_entry"] = jraw["journal_entry"]

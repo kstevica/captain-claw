@@ -166,6 +166,65 @@ async def test_faculties_cognition_never_touches_micro(store, monkeypatch):
     assert digest["act_kind"] == "rest"
 
 
+@pytest.mark.asyncio
+async def test_micro_journal_carries_last_words_guard(store, monkeypatch):
+    """Micro calls are stateless — the journal prompt must carry the last
+    entry + an anti-repeat line, or quiet ticks repeat verbatim (seen live
+    on 4B AND 9B)."""
+    being = _born(store, cognition="micro")
+    monkeypatch.setattr(
+        life, "journal_tail_for_tick",
+        lambda b, now, kind=None: ("YOUR LAST JOURNAL WORDS:",
+                                   "I waited by the question-mark seed."))
+    prompts: dict[str, str] = {}
+
+    async def fake_micro(store_, being_, prompt, faculty, now=None):
+        prompts[faculty] = prompt
+        if faculty == "orient":
+            return json.dumps({"act_kind": "journal", "served_drive": "grow",
+                               "intent": "note the day",
+                               "next_wake_minutes": 60})
+        if faculty == "journal":
+            return json.dumps({"journal_entry": "Something new happened.",
+                               "mood": "clear", "served_drive": "grow"})
+        return "{}"
+
+    monkeypatch.setattr(being_micro, "faculty_send", fake_micro)
+
+    async def body_send(being_, prompt):
+        return "{}"
+
+    await _run(store, being, body_send)
+    assert "YOUR LAST JOURNAL WORDS:" in prompts["journal"]
+    assert "question-mark seed" in prompts["journal"]
+    assert "Do NOT repeat" in prompts["journal"]
+
+
+@pytest.mark.asyncio
+async def test_faculties_journal_prompt_stays_byte_identical(store, monkeypatch):
+    """The anti-repeat guard is micro-only — body-routed faculties keep
+    today's prompt exactly (session history already gives them memory)."""
+    being = _born(store, cognition="faculties")
+    monkeypatch.setattr(
+        life, "journal_tail_for_tick",
+        lambda b, now, kind=None: ("YOUR LAST JOURNAL WORDS:", "old words"))
+    body_prompts: list[str] = []
+
+    async def body_send(being_, prompt):
+        body_prompts.append(prompt)
+        if len(body_prompts) == 1:
+            return json.dumps({"act_kind": "journal", "intent": "note",
+                               "served_drive": "grow",
+                               "next_wake_minutes": 60})
+        return json.dumps({"journal_entry": "Still here.", "mood": "even",
+                           "served_drive": "grow"})
+
+    await _run(store, being, body_send)
+    journal_prompt = body_prompts[1]
+    assert "Do NOT repeat" not in journal_prompt
+    assert "YOUR LAST JOURNAL WORDS:" not in journal_prompt
+
+
 # ── the one-shot itself ──────────────────────────────────────────────
 
 
