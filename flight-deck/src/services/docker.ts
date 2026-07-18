@@ -121,6 +121,9 @@ export interface SpawnConfig {
   slack_enabled: boolean
   slack_bot_token: string
   cognitive_mode: string
+  // Runtime: "" | "classic" = full agent loop; "mrav" = micro small-model
+  // runtime (hard 8k input cap per LLM call, docs/mrav-micro-agent-plan.md).
+  runtime?: string
   network_mode: string
   restart_policy: string
   extra_volumes: { host: string; container: string }[]
