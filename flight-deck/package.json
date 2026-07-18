@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mlc-ai/web-llm": "0.2.84",
     "@tailwindcss/vite": "^4.2.2",
     "@types/prismjs": "^1.26.6",
     "@xyflow/react": "^12.10.1",
