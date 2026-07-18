@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
@@ -3743,6 +3744,124 @@ class LiteRTProvider(LLMProvider):
         return
 
 
+class BrowserProvider(LLMProvider):
+    """Completions served by a browser tab registered as an inference worker.
+
+    The loop (and every tool) runs server-side; the tab only turns
+    (messages, schema) into tokens via WebLLM/WebGPU, brokered by Flight
+    Deck's ``/fd/infer/complete`` (see flight_deck/infer_broker.py). The
+    prod host needs no GPU — whoever has the Flight Deck tab open with
+    Local inference enabled donates the compute.
+
+    ``tools`` are ignored by design: the only current caller is the Mrav
+    micro runtime, which speaks a text protocol with grammar-constrained
+    JSON (``response_schema`` → xgrammar in the tab). A stable per-instance
+    ``session_key`` keeps one agent pinned to one tab so WebLLM's KV
+    delta-prefill turns 10-40s cold prefills into ~1-3s steps.
+    """
+
+    def __init__(
+        self,
+        model: str = "browser-auto",
+        base_url: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+        tokens_per_minute: int = 0,
+    ):
+        from captain_claw.fd_client import flight_deck_base
+
+        self.provider = "browser"
+        self.model = model
+        self.base_url = (base_url or flight_deck_base() or "http://127.0.0.1:25080").rstrip("/")
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.session_key = uuid.uuid4().hex[:16]
+        # Read timeout must survive a cold in-tab prefill (10-40s on good
+        # GPUs, worse on iGPUs) plus generation; the broker's own job
+        # timeout (240s) is the real ceiling.
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=330.0, write=30.0, pool=30.0),
+            follow_redirects=True,
+        )
+        self.rate_limiter = TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        response_schema: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        from captain_claw.fd_client import flight_deck_headers
+
+        body: dict[str, Any] = {
+            "messages": [
+                {"role": m.role, "content": m.content or ""} for m in messages
+            ],
+            "max_tokens": max_tokens or self.max_tokens,
+            "temperature": self.temperature if temperature is None else temperature,
+            "session_key": self.session_key,
+        }
+        if response_schema:
+            body["response_schema"] = response_schema
+
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/fd/infer/complete",
+                json=body,
+                headers=flight_deck_headers(),
+            )
+        except httpx.HTTPError as exc:
+            raise LLMAPIError(f"Browser inference broker unreachable: {exc}")
+        if response.status_code == 503:
+            raise LLMAPIError(
+                "No browser inference worker online — open Flight Deck and "
+                "enable Local inference in a tab, or switch this agent's "
+                "provider to ollama.",
+                status_code=503,
+            )
+        if not response.is_success:
+            raise LLMAPIError(
+                f"Browser inference error {response.status_code}: {response.text[:300]}",
+                status_code=response.status_code,
+            )
+        data = response.json()
+        return LLMResponse(
+            content=str(data.get("content") or ""),
+            model=str(data.get("model") or self.model),
+            usage=data.get("usage") or {},
+            finish_reason=str(data.get("finish_reason") or ""),
+        )
+
+    async def complete_structured(
+        self,
+        messages: list[Message],
+        response_schema: dict[str, Any],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Grammar-enforced JSON via xgrammar inside the tab's WebLLM engine."""
+        return await self.complete(
+            messages, None, temperature, max_tokens, response_schema=response_schema
+        )
+
+    async def complete_streaming(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        # v1 brokers whole completions; callers chunk for display themselves.
+        response = await self.complete(messages, tools, temperature, max_tokens)
+        if response.content:
+            yield response.content
+
+    def count_tokens(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+
 def create_provider(
     provider: str = "ollama",
     model: str = "llama3.2",
@@ -3772,6 +3891,17 @@ def create_provider(
       ``LITERT_BACKEND=cpu`` env var to force CPU; defaults to GPU.
     """
     normalized = _normalize_provider_name(provider)
+
+    if normalized == "browser":
+        # Browser-tab inference worker via the Flight Deck broker; base_url
+        # defaults to FD_URL (agents spawned by FD have it injected).
+        return BrowserProvider(
+            model=model,
+            base_url=base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tokens_per_minute=tokens_per_minute,
+        )
 
     if normalized == "ollama":
         return OllamaProvider(
