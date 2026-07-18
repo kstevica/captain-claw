@@ -10,6 +10,8 @@
 // the Local inference panel (System page).
 import {
   CreateWebWorkerMLCEngine,
+  deleteModelAllInfoInCache,
+  hasModelInCache,
   prebuiltAppConfig,
   type MLCEngineInterface,
 } from '@mlc-ai/web-llm'
@@ -76,6 +78,65 @@ export function webgpuAvailable(): boolean {
   return typeof navigator !== 'undefined' && !!(navigator as any).gpu
 }
 
+// ── Downloaded-weights management ──
+// WebLLM caches weights in the browser (Cache API), keyed by model id.
+// These helpers let the panel show what's on disk and free it.
+
+export interface DownloadedModel {
+  id: string
+  label: string
+  sizeGB: number // approx (catalog VRAM reference — download is a bit less)
+}
+
+function labelFor(id: string): string {
+  const curated = MODEL_CATALOG.find((m) => m.id === id)
+  return curated ? curated.label : id.replace('-q4f16_1-MLC', '').replace('-q4f32_1-MLC', '')
+}
+
+// Scan the whole prebuilt catalog for cached models — so a weight downloaded
+// under an old build (or outside the current dropdown filter) is still
+// listed and removable.
+export async function listDownloadedModels(): Promise<DownloadedModel[]> {
+  const checks = await Promise.all(
+    prebuiltAppConfig.model_list.map(async (m) => {
+      try {
+        const cached = await hasModelInCache(m.model_id)
+        return cached ? { id: m.model_id, vram: (m.vram_required_MB || 0) / 1024 } : null
+      } catch {
+        return null
+      }
+    }),
+  )
+  return checks
+    .filter((x): x is { id: string; vram: number } => x !== null)
+    .map((x) => ({ id: x.id, label: labelFor(x.id), sizeGB: Math.round(x.vram * 10) / 10 }))
+    .sort((a, b) => b.sizeGB - a.sizeGB)
+}
+
+export async function removeDownloadedModel(id: string): Promise<void> {
+  // Never delete weights out from under the running engine — stop first.
+  if (localInference.isServing(id)) localInference.stop()
+  await deleteModelAllInfoInCache(id)
+}
+
+export interface StorageEstimate {
+  usageGB: number
+  quotaGB: number
+}
+
+export async function storageEstimate(): Promise<StorageEstimate | null> {
+  if (!navigator.storage?.estimate) return null
+  try {
+    const { usage, quota } = await navigator.storage.estimate()
+    return {
+      usageGB: Math.round(((usage || 0) / 1024 ** 3) * 10) / 10,
+      quotaGB: Math.round(((quota || 0) / 1024 ** 3) * 10) / 10,
+    }
+  } catch {
+    return null
+  }
+}
+
 export function pickDefaultModel(): string {
   // navigator.deviceMemory is Chromium-only and usually capped at 8 — treat
   // 8 as "could be anything ≥8 GB" and let users pick bigger models by hand.
@@ -105,6 +166,13 @@ class LocalInferenceManager {
 
   private patch(partial: Parameters<ReturnType<typeof useInferenceStore.getState>['patch']>[0]) {
     useInferenceStore.getState().patch(partial)
+  }
+
+  // True when the engine currently holds this model (so cache-delete can
+  // stop it first rather than yanking weights mid-serve).
+  isServing(modelId?: string): boolean {
+    if (!this.desired) return false
+    return modelId ? this.modelId === modelId : true
   }
 
   async start(modelId?: string, ctxWindow?: number): Promise<void> {

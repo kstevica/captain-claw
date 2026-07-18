@@ -1,9 +1,19 @@
 // Browser LLM — this tab as an inference worker for your Mrav agents.
 // The panel logic lives in components/system/LocalInferencePanel; this page
 // adds the model catalog and the how-it-works context.
-import { Bug, Cpu, Globe, ScrollText, Zap } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { Bug, Cpu, Globe, HardDrive, Loader2, RefreshCw, ScrollText, Trash2, Zap } from 'lucide-react'
 import { LocalInferencePanel } from '../components/system/LocalInferencePanel'
-import { MODEL_CATALOG, extraCatalogModels, webgpuAvailable } from '../inference/localInference'
+import {
+  MODEL_CATALOG,
+  extraCatalogModels,
+  listDownloadedModels,
+  removeDownloadedModel,
+  storageEstimate,
+  webgpuAvailable,
+  type DownloadedModel,
+  type StorageEstimate,
+} from '../inference/localInference'
 import { useInferenceStore } from '../stores/inferenceStore'
 
 function fmtClock(ts: number): string {
@@ -14,6 +24,99 @@ function fmtClock(ts: number): string {
 
 function shortModel(id: string): string {
   return id.replace(/-q4f(16|32)_1-MLC$/, '').replace(/-Instruct.*$/, '')
+}
+
+function DownloadedModels() {
+  const status = useInferenceStore((s) => s.status)
+  const [models, setModels] = useState<DownloadedModel[] | null>(null)
+  const [storage, setStorage] = useState<StorageEstimate | null>(null)
+  const [removing, setRemoving] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    const [list, est] = await Promise.all([listDownloadedModels(), storageEstimate()])
+    setModels(list)
+    setStorage(est)
+  }, [])
+
+  // Rescan on mount and whenever a model finishes loading (status → ready),
+  // since a fresh download just landed in the cache.
+  useEffect(() => { void refresh() }, [refresh, status])
+
+  const remove = async (id: string, label: string) => {
+    if (!window.confirm(`Delete downloaded weights for ${label}? It will re-download next time you start it.`)) return
+    setRemoving(id)
+    try {
+      await removeDownloadedModel(id)
+      await refresh()
+    } finally {
+      setRemoving(null)
+    }
+  }
+
+  const totalGB = models ? Math.round(models.reduce((s, m) => s + m.sizeGB, 0) * 10) / 10 : 0
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950/50 p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <HardDrive className="h-4 w-4 text-violet-400" />
+          <h2 className="text-sm font-medium text-zinc-200">Downloaded models</h2>
+          <span className="text-xs text-zinc-500">
+            {models === null
+              ? 'scanning…'
+              : `${models.length} cached${models.length ? ` · ~${totalGB} GB` : ''}${storage ? ` · ${storage.usageGB} GB used of ${storage.quotaGB} GB` : ''}`}
+          </span>
+        </div>
+        <button
+          onClick={() => void refresh()}
+          className="flex items-center gap-1.5 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+        >
+          <RefreshCw className="h-3 w-3" /> Rescan
+        </button>
+      </div>
+
+      {models !== null && models.length === 0 ? (
+        <p className="text-xs text-zinc-600">
+          No weights cached yet. Starting a model above downloads it once; it stays cached here until you remove it.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead>
+              <tr className="border-b border-zinc-800 text-[10px] uppercase tracking-wide text-zinc-500">
+                <th className="py-1.5 pr-4 font-medium">Model</th>
+                <th className="py-1.5 pr-4 text-right font-medium">≈ size</th>
+                <th className="py-1.5 text-right font-medium">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(models ?? []).map((m) => (
+                <tr key={m.id} className="border-b border-zinc-900">
+                  <td className="py-1.5 pr-4 font-medium text-zinc-300">{m.label}</td>
+                  <td className="py-1.5 pr-4 text-right tabular-nums text-zinc-400">{m.sizeGB} GB</td>
+                  <td className="py-1.5 text-right">
+                    <button
+                      onClick={() => void remove(m.id, m.label)}
+                      disabled={removing === m.id}
+                      className="ml-auto inline-flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-0.5 text-[11px] text-zinc-400 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-50"
+                    >
+                      {removing === m.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {models !== null && (
+            <p className="mt-3 text-[11px] text-zinc-600">
+              Sizes are approximate (catalog reference). “Used” is total browser storage for this origin — mostly weights.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function UsageLog() {
@@ -172,6 +275,8 @@ export function BrowserLLMPage() {
             Qwen3.6 ships only as 27B/35B — beyond what a browser tab can hold.
           </p>
         </div>
+
+        <DownloadedModels />
 
         <UsageLog />
 
