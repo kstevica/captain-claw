@@ -2519,6 +2519,143 @@ async def get_agent_mrav_mode(
     return {"enabled": False, "source": "config"}
 
 
+# ── Browser inference workers (mrav Phase 2) ─────────────────────────
+# A browser tab registers over /fd/infer-ws (WebLLM in a WebWorker) and
+# serves completion jobs; agents call POST /fd/infer/complete through
+# BrowserProvider. The tab never executes tools — it only turns
+# (messages, schema) into tokens. docs/mrav-micro-agent-plan.md.
+
+
+def _authorize_infer_call(request: Request) -> None:
+    """Gate the broker for captain-claw agents: loopback OR X-Agent-Secret.
+
+    Same model as /fd/codex/access_token — agents hold FD_AGENT_SHARED_SECRET
+    from their spawn env; local processes come in over loopback anyway.
+    """
+    secret = os.environ.get("FD_AGENT_SHARED_SECRET", "").strip()
+    if secret:
+        provided = request.headers.get("X-Agent-Secret", "")
+        if provided and secrets.compare_digest(provided, secret):
+            return
+    client_host = request.client.host if request.client else ""
+    if client_host in ("127.0.0.1", "::1", "localhost"):
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized agent call")
+
+
+@app.websocket("/fd/infer-ws")
+async def infer_worker_ws(ws: WebSocket, token: str = ""):
+    """A browser tab registers as an inference worker for its signed-in user."""
+    from captain_claw.flight_deck import auth as _auth_mod
+    from captain_claw.flight_deck.infer_broker import get_infer_broker
+
+    owner_id = ""
+    if AUTH_ENABLED:
+        try:
+            from captain_claw.flight_deck.auth import decode_access_token
+            owner_id = str(decode_access_token(token).get("sub") or "")
+        except Exception:
+            owner_id = ""
+        if not owner_id:
+            await ws.close(code=4401)
+            return
+    else:
+        owner_id = str(_auth_mod._LOCAL_USER["id"])
+
+    await ws.accept()
+    broker = get_infer_broker()
+    worker_id = ""
+    try:
+        registration = await ws.receive_json()
+        if str(registration.get("type") or "") != "register":
+            await ws.close(code=4400)
+            return
+        worker_id = broker.register(owner_id, registration, ws.send_json)
+        await ws.send_json({"type": "registered", "worker_id": worker_id})
+        while True:
+            message = await ws.receive_json()
+            broker.handle_message(worker_id, message)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        print(f"infer-ws error: {exc}")
+    finally:
+        if worker_id:
+            broker.unregister(worker_id)
+
+
+class InferCompleteBody(BaseModel):
+    messages: list[dict] = Field(default_factory=list)
+    response_schema: dict | None = None
+    max_tokens: int = 1024
+    temperature: float = 0.2
+    session_key: str = ""
+    owner_id: str = ""  # optional explicit owner (in-process callers)
+
+
+@app.post("/fd/infer/complete")
+async def infer_complete(body: InferCompleteBody, request: Request):
+    """Run one completion on the calling owner's browser inference worker."""
+    from captain_claw.flight_deck.infer_broker import (
+        InferJobError, NoWorkerError, get_infer_broker,
+    )
+
+    _authorize_infer_call(request)
+    broker = get_infer_broker()
+
+    # Owner resolution: explicit body → agent slug → the only owner with
+    # workers → the synthetic local user (auth-disabled desktop).
+    owner = (body.owner_id or "").strip()
+    if not owner:
+        slug = request.headers.get("X-Agent-Slug", "").strip()
+        if slug:
+            entry = _load_process_registry().get(slug) or {}
+            owner = str(entry.get("owner") or "")
+    if not owner:
+        owners = broker.owner_ids()
+        if len(owners) == 1:
+            owner = owners[0]
+    if not owner and not AUTH_ENABLED:
+        from captain_claw.flight_deck import auth as _auth_mod
+        owner = str(_auth_mod._LOCAL_USER["id"])
+    if not owner:
+        raise HTTPException(503, "no inference worker online (owner could not be resolved)")
+
+    if not body.messages:
+        raise HTTPException(400, "messages required")
+    try:
+        return await broker.submit(
+            owner,
+            body.messages,
+            response_schema=body.response_schema,
+            max_tokens=body.max_tokens,
+            temperature=body.temperature,
+            session_key=body.session_key,
+        )
+    except NoWorkerError:
+        raise HTTPException(
+            503,
+            "no browser inference worker online for this owner — open Flight "
+            "Deck and enable Local inference, or switch the agent to ollama",
+        )
+    except InferJobError as exc:
+        raise HTTPException(502, f"inference worker failed: {exc}")
+    except TimeoutError:
+        raise HTTPException(504, "inference worker timed out")
+
+
+@app.get("/fd/infer/status")
+async def infer_status(request: Request, user: dict | None = _required_user_dep):
+    """The signed-in user's live inference workers (Local inference panel)."""
+    from captain_claw.flight_deck import auth as _auth_mod
+    from captain_claw.flight_deck.infer_broker import get_infer_broker
+
+    owner = str(getattr(request.state, "user_id", "") or "")
+    if not owner and not AUTH_ENABLED:
+        owner = str(_auth_mod._LOCAL_USER["id"])
+    return {"workers": get_infer_broker().status(owner)}
+
+
 @app.get("/fd/cognitive-modes")
 async def list_cognitive_modes():
     """Return all available cognitive modes for UI dropdowns."""
