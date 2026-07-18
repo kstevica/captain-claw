@@ -243,6 +243,57 @@ def list_self_files(being: dict) -> list[dict]:
     return out
 
 
+def normalize_home_extensions(being: dict) -> list[tuple[str, str]]:
+    """Give a suffix-less home file a ``.md`` extension so it becomes real.
+
+    Small models routinely write ``mrav`` / ``saved`` instead of ``mrav.md``
+    — and every downstream system (the file browser, remote-village sync,
+    the mind graph, the market) keys on ``.md``, so an extensionless file is
+    invisible: it exists on disk and in git, but the being can't see it
+    listed, no one else can read it, and it never joins the link graph.
+    Renaming it to ``<name>.md`` folds it straight into all of that with no
+    change to any of those systems.
+
+    Conservative: only bare files with NO extension at all are touched.
+    Dotfiles (``.keep``, ``.gitignore``, ``.vfs-meta.jsonl``), ``.git/``,
+    and the journal/ and archive/ trees (which own their own naming) are
+    left exactly as they are, and an existing ``<name>.md`` is never
+    clobbered. Best effort — never raises. Returns the (old, new) rel pairs.
+    """
+    try:
+        root = home_root(being)
+    except Exception:  # noqa: BLE001
+        return []
+    if not root.exists():
+        return []
+    renamed: list[tuple[str, str]] = []
+    for p in sorted(root.rglob("*")):
+        try:
+            if not p.is_file():
+                continue
+            parts = p.relative_to(root).parts
+        except OSError:
+            continue
+        if any(seg.startswith(".") for seg in parts):
+            continue                        # dotfiles / dotdirs (incl. .git)
+        if parts[0] in ("journal", "archive"):
+            continue                        # own their dated / consolidated names
+        if p.suffix:
+            continue                        # already carries an extension
+        target = p.with_name(p.name + ".md")
+        if target.exists():
+            continue                        # don't overwrite a real .md
+        try:
+            p.rename(target)
+        except OSError as e:
+            log.warning("home extension normalize failed", slug=being.get("slug"),
+                        file=p.name, error=str(e))
+            continue
+        renamed.append((p.relative_to(root).as_posix(),
+                        target.relative_to(root).as_posix()))
+    return renamed
+
+
 def remove_home(being: dict) -> bool:
     """Delete the being's VFS home directory outright (used by purge). Best
     effort, sandboxed to the resolved home root — returns True if it's gone."""
@@ -1229,6 +1280,25 @@ def journal_tail_for_tick(being: dict, now: datetime,
         if page:
             return page
     return ("YOUR LAST JOURNAL WORDS:", _read_journal_tail(being, now))
+
+
+def _too_similar(new_entry: str, tail: str, threshold: float = 0.92) -> bool:
+    """Is this journal entry a verbatim (or near-verbatim) echo of the last?
+
+    ``tail`` is the recent journal text, which already contains the previous
+    entry, so an exact repeat shows up as a substring; a near-repeat is
+    caught by comparing against the tail's trailing window of the same
+    length. Short scraps (< 20 chars) are ignored — "still here." is allowed
+    to recur."""
+    n = " ".join((new_entry or "").split()).lower()
+    t = " ".join((tail or "").split()).lower()
+    if not n or not t or len(n) < 20:
+        return False
+    if n in t:
+        return True
+    import difflib
+    window = t[-(len(n) + 40):]
+    return difflib.SequenceMatcher(None, n, window).ratio() >= threshold
 
 
 def home_manifest(being: dict) -> dict[str, list[str]]:
@@ -2359,21 +2429,42 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
         visitors=visitors, refused=refused_talk,
         letter=merged.get("letter") if isinstance(merged.get("letter"), dict)
         else None)
+    journal_tail = ""
     if micro_mind:
         # Micro calls are stateless — the body path saw its previous words
         # via replayed session history, but a direct micro call sees only
         # this prompt. Without the tail, identical quiet ticks produce
         # byte-identical prompts and ANY model (4B or 9B, seen live)
         # repeats itself verbatim. Micro-only: faculties stays byte-same.
-        tail_label, tail = journal_tail_for_tick(being, now, kind=kind)
-        if tail and tail.strip():
+        tail_label, journal_tail = journal_tail_for_tick(being, now, kind=kind)
+        if journal_tail and journal_tail.strip():
             jprompt += (
-                f"\n\n{tail_label}\n{tail.strip()}\n"
+                f"\n\n{tail_label}\n{journal_tail.strip()}\n"
                 "Do NOT repeat or paraphrase those words — write only what is "
                 "NEW or different about this moment. If truly nothing changed, "
                 "say so in one fresh short sentence.")
     jreply = await _fac_send(jprompt, "journal")
     jraw = _extract_raw(jreply) or {}
+    # The hot journal temperature usually diverges on its own, but on a
+    # dead-quiet tick a small model can still echo its last entry word for
+    # word under the grammar. Catch the exact echo and re-roll ONCE with a
+    # blunt nudge — a second sample at temp 0.9 almost always lands new.
+    if (micro_mind and journal_tail
+            and _too_similar(str(jraw.get("journal_entry") or ""), journal_tail)):
+        store.record_event(bid, "micro_journal_repeat_retry",
+                           {"preview": str(jraw.get("journal_entry") or "")[:80]},
+                           now=now)
+        jreply2 = await _fac_send(
+            jprompt + ("\n\nSTOP — the entry you just formed repeats your last "
+                       "words almost exactly. That is a rut. Say something "
+                       "genuinely different: a new detail you notice, a shift "
+                       "in mood, or one plain new sentence admitting nothing "
+                       "has changed."),
+            "journal")
+        jraw2 = _extract_raw(jreply2) or {}
+        if (jraw2.get("journal_entry") and not _too_similar(
+                str(jraw2["journal_entry"]), journal_tail)):
+            jreply, jraw = jreply2, jraw2
     if jraw.get("journal_entry"):
         merged["journal_entry"] = jraw["journal_entry"]
     elif jreply and not merged.get("journal_entry"):
@@ -3872,6 +3963,19 @@ async def _tick_locked(
             log.warning("mind prune failed", slug=being["slug"], error=str(e))
     if digest["act_kind"] == "create" and changed:
         store.milestone(bid, "first_artifact", now=now)
+    # Rescue any suffix-less file the ACT just left (mrav/saved → mrav.md):
+    # give it a .md so it's visible, syncable, and graph-linkable. The rename
+    # rides into this tick's journal commit (git add -A). Runs for every
+    # cognition — it's a naming rescue, not a mrav-only concern.
+    try:
+        renamed = normalize_home_extensions(being)
+        if renamed:
+            store.record_event(bid, "home_files_normalized",
+                               {"renamed": [f"{o}→{n}" for o, n in renamed][:8]},
+                               now=now)
+    except Exception as e:  # noqa: BLE001 — naming is cosmetic, never fatal
+        log.warning("home extension normalize failed", slug=being["slug"],
+                    error=str(e))
     try:
         await _write_journal(being, digest, kind, now,
                              changed=changed, mismatch=mismatch)

@@ -44,6 +44,16 @@ MICRO_MAX_TOKENS = 1024     # faculty replies are tiny JSON; this is generous
 # body's tools and the git-diff write gate.
 MICRO_FACULTIES = ("orient", "talk", "journal", "connect")
 
+# Per-faculty sampling temperature. orient/talk/connect are near-decisions —
+# keep them tight and reproducible. journal is free prose, and on a quiet
+# tick (nothing changed, near-identical prompt) a low temperature makes a
+# small model emit the SAME sentence verbatim, ledger row after ledger row
+# (seen live on 4B AND 9B). A hot journal is the real cure; the prompt's
+# "don't repeat" nudge only helps a model that's already willing to diverge.
+_FACULTY_TEMPERATURE = {"orient": 0.4, "talk": 0.5, "journal": 0.9,
+                        "connect": 0.4}
+_DEFAULT_TEMPERATURE = 0.4
+
 _DRIVES = ("survive", "grow", "explore", "connect", "create")
 _LINK_RELS = ("grew_from", "responds_to", "elaborates", "contradicts",
               "uses_skill", "learned_from")
@@ -150,15 +160,20 @@ def faculty_schema(faculty: str) -> dict[str, Any] | None:
 
 
 async def faculty_send(store, being: dict, prompt: str, faculty: str,
-                       now: datetime | None = None) -> str | None:
+                       now: datetime | None = None,
+                       temperature: float | None = None) -> str | None:
     """One grammar-locked faculty call on the owner's micro tier.
 
     Returns the reply text, or ``None`` for "use the body instead" — the
-    caller records the fallback event. Never raises.
+    caller records the fallback event. Never raises. ``temperature`` defaults
+    to the per-faculty setting (hot for journal, tight for decisions); the
+    caller can override it (e.g. an anti-repeat retry turns it up further).
     """
     schema = faculty_schema(faculty)
     if schema is None:
         return None
+    if temperature is None:
+        temperature = _FACULTY_TEMPERATURE.get(faculty, _DEFAULT_TEMPERATURE)
     try:
         from captain_claw.flight_deck.auth import get_db
         db = get_db()
@@ -177,7 +192,7 @@ async def faculty_send(store, being: dict, prompt: str, faculty: str,
             model=cfg.get("model", ""),
             base_url=cfg.get("base_url") or None,
             api_key=cfg.get("api_key") or None,
-            temperature=0.4,
+            temperature=temperature,
             max_tokens=MICRO_MAX_TOKENS,
             num_ctx=MICRO_INPUT_CAP + MICRO_MAX_TOKENS,
             think=False,
@@ -195,6 +210,7 @@ async def faculty_send(store, being: dict, prompt: str, faculty: str,
             [Message(role="system", content=system),
              Message(role="user", content=user)],
             schema,
+            temperature=temperature,
             max_tokens=MICRO_MAX_TOKENS,
         )
         text = (getattr(resp, "content", "") or "").strip()

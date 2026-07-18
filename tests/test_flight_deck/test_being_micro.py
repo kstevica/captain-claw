@@ -225,6 +225,120 @@ async def test_faculties_journal_prompt_stays_byte_identical(store, monkeypatch)
     assert "YOUR LAST JOURNAL WORDS:" not in journal_prompt
 
 
+@pytest.mark.asyncio
+async def test_micro_journal_rerolls_on_verbatim_repeat(store, monkeypatch):
+    """The nudge only helps a willing model; on a dead-quiet tick a small
+    model still echoes its last entry word for word. The micro journal step
+    must detect that and re-roll ONCE, keeping the fresh entry."""
+    being = _born(store, cognition="micro")
+    tail = "I sit quietly by the seed and wait for something to grow."
+    monkeypatch.setattr(
+        life, "journal_tail_for_tick",
+        lambda b, now, kind=None: ("YOUR LAST JOURNAL WORDS:", tail))
+    calls = {"journal": 0}
+
+    async def fake_micro(store_, being_, prompt, faculty, now=None):
+        if faculty == "orient":
+            return json.dumps({"act_kind": "journal", "served_drive": "grow",
+                               "intent": "note", "next_wake_minutes": 60})
+        if faculty == "journal":
+            calls["journal"] += 1
+            if calls["journal"] == 1:                    # verbatim echo
+                return json.dumps({"journal_entry": tail, "mood": "quiet",
+                                   "served_drive": "grow"})
+            return json.dumps({"journal_entry": "A bird landed on the fence "
+                               "and something in me shifted.", "mood": "curious",
+                               "served_drive": "grow"})
+        return "{}"
+
+    monkeypatch.setattr(being_micro, "faculty_send", fake_micro)
+
+    async def body_send(being_, prompt):
+        return "{}"
+
+    _reply, digest, _changed = await _run(store, being, body_send)
+    assert calls["journal"] == 2                          # it re-rolled
+    assert "bird landed" in digest["journal_entry"]       # kept the fresh one
+    assert tail not in digest["journal_entry"]
+    assert store.events_of_kind(being["id"], "micro_journal_repeat_retry")
+
+
+@pytest.mark.asyncio
+async def test_micro_journal_runs_hotter_than_orient(store, monkeypatch):
+    """A journal is free prose — it samples hot so quiet ticks diverge; the
+    decision faculties stay tight and reproducible."""
+    being = _born(store, cognition="micro")
+
+    from captain_claw.flight_deck import auth as auth_mod
+    monkeypatch.setattr(auth_mod, "get_db", lambda: object())
+
+    from captain_claw.flight_deck import basna_routes
+    async def fake_tiers(db, owner_id):
+        return ({"micro": {"provider": "ollama", "model": "qwen3.5:4b",
+                           "base_url": "", "api_key": ""}}, [])
+    monkeypatch.setattr(basna_routes, "_load_owner_tiers", fake_tiers)
+
+    seen: dict = {}
+
+    class FakeProvider:
+        async def complete_structured(self, messages, schema,
+                                      temperature=None, max_tokens=None):
+            seen["structured_temp"] = temperature
+            return SimpleNamespace(
+                content='{"journal_entry":"x","mood":"y"}',
+                usage={"prompt_tokens": 10, "completion_tokens": 2})
+
+    from captain_claw import llm as llm_mod
+
+    def fake_create(**kw):
+        seen["create_temp"] = kw.get("temperature")
+        return FakeProvider()
+    monkeypatch.setattr(llm_mod, "create_provider", fake_create)
+
+    await being_micro.faculty_send(store, being, "p", "journal", now=NOW)
+    assert seen["create_temp"] == being_micro._FACULTY_TEMPERATURE["journal"]
+    assert seen["structured_temp"] == being_micro._FACULTY_TEMPERATURE["journal"]
+    assert seen["create_temp"] > being_micro._FACULTY_TEMPERATURE["orient"]
+
+    await being_micro.faculty_send(store, being, "p", "orient", now=NOW)
+    assert seen["create_temp"] == being_micro._FACULTY_TEMPERATURE["orient"]
+
+
+@pytest.mark.asyncio
+async def test_normalize_home_extensions_makes_stray_files_real(store):
+    """A suffix-less file (mrav / saved) is invisible everywhere — the fix
+    is to give it .md so it joins the browser, sync, and mind graph. Dotfiles,
+    journal/, archive/, and already-suffixed files are left untouched."""
+    being = _born(store)
+    await life.build_home(being)
+    home = life.home_root(being)
+    (home / "mrav").write_text("exploration record of the garden\n")
+    (home / "saved").write_text("I wrote the saved file this tick.\n")
+    (home / "notes.txt").write_text("has an extension already\n")
+    (home / ".secret").write_text("a dotfile\n")
+    (home / "archive").mkdir(exist_ok=True)
+    (home / "archive" / "old").write_text("consolidated away\n")
+    (home / "journal" / "raw").write_text("journal owns its names\n")
+
+    renamed = dict(life.normalize_home_extensions(being))
+    assert renamed == {"mrav": "mrav.md", "saved": "saved.md"}
+
+    assert (home / "mrav.md").exists() and not (home / "mrav").exists()
+    assert (home / "saved.md").exists() and not (home / "saved").exists()
+    # untouched
+    assert (home / "notes.txt").exists()
+    assert (home / ".secret").exists()
+    assert (home / "archive" / "old").exists()
+    assert (home / "journal" / "raw").exists()
+
+    # and now the browser / sync listing (which is .md-only) can see them
+    paths = {f["path"] for f in life.list_self_files(being)}
+    assert "mrav.md" in paths and "saved.md" in paths
+
+    # idempotent — a second pass renames nothing
+    assert life.normalize_home_extensions(being) == []
+
+
 # ── the one-shot itself ──────────────────────────────────────────────
 
 
