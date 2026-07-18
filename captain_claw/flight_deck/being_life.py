@@ -34,6 +34,7 @@ from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_genome as genome_mod
 from captain_claw.flight_deck import (
     being_earning,
+    being_micro,
     being_mind,
     being_prompts,
     being_selfmod,
@@ -2227,8 +2228,22 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
     re-pins the fleet registry). So each faculty call re-resolves the LIVE port
     first and NEVER overlaps another — one LLM request in flight at a time."""
     bid = being["id"]
+    micro_mind = (being.get("cognition") or "") == "micro"
 
     async def _fac_send(prompt: str, faculty: str) -> str | None:
+        # Micro cognition (mrav Phase 3): the pure-JSON faculties go straight
+        # to the owner's `micro` tier with a grammar-locked schema — no body
+        # round-trip, no 30k system-prompt tax, guaranteed-parseable reply.
+        # ACT and the write gate are never routed here: they need the body's
+        # real tools and the git-diff verification. Any miss falls back to
+        # the body for THIS call, loudly.
+        if micro_mind and faculty in being_micro.MICRO_FACULTIES:
+            text = await being_micro.faculty_send(
+                store, being, prompt, faculty, now=now)
+            if text is not None:
+                return text
+            store.record_event(bid, "micro_fallback_body",
+                               {"faculty": faculty}, now=now)
         # Follow the body: re-resolve its port right before every call so a
         # mid-tick drift is tracked, not fatal (the stale-port "connection
         # refused" that made replies never come back). Only for the real
@@ -3288,7 +3303,7 @@ async def _tick_locked(
                         error=str(e))
     t0 = now
     send = send_fn or _send_via_channel
-    if (being.get("cognition") or "faculties") == "faculties":
+    if (being.get("cognition") or "faculties") in ("faculties", "micro"):
         # 3b-alt. The DECOMPOSED tick (docs/being-faculties-plan.md): one being,
         # a short pipeline of small focused calls (orient → act → journal →
         # connect), composed into the same digest so everything below is

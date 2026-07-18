@@ -127,7 +127,7 @@ export interface BeingVitals {
   position?: { xy: [number, number]; at: string | null; to: string | null; minutes_left: number } | null
   coins?: number
   tick_interval_minutes: number | null
-  cognition: 'monolith' | 'faculties'
+  cognition: 'monolith' | 'faculties' | 'micro'
   compact_mode: boolean
   instincts: boolean
   intent: { stay?: boolean; avoid?: string[] }
@@ -471,7 +471,8 @@ export const setCadence = (slug: string, minutes: number | null) =>
     method: 'POST', body: JSON.stringify({ minutes }),
   })
 
-export type Cognition = 'monolith' | 'faculties'
+// 'micro' = faculties whose JSON steps run grammar-locked on the micro tier
+export type Cognition = 'monolith' | 'faculties' | 'micro'
 export const setCognition = (slug: string, mode: Cognition) =>
   fdFetch<BeingVitals>(`/beings/${slug}/cognition`, {
     method: 'POST', body: JSON.stringify({ mode }),

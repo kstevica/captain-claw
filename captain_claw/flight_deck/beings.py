@@ -1160,11 +1160,14 @@ class BeingsStore:
     def set_cognition(self, owner_id: str, slug: str, mode: str,
                       now: datetime | None = None) -> dict:
         """Choose how the being THINKS a tick: 'monolith' (one prompt → one
-        digest) or 'faculties' (decomposed pipeline — better for weak-context
-        models). See docs/being-faculties-plan.md."""
+        digest), 'faculties' (decomposed pipeline — better for weak-context
+        models), or 'micro' (faculties whose JSON steps run grammar-locked on
+        the owner's `micro` tier; ACT stays on the body). See
+        docs/being-faculties-plan.md and docs/mrav-micro-agent-plan.md."""
         now = now or _utcnow()
-        if mode not in ("monolith", "faculties"):
-            raise BeingError("cognition must be 'monolith' or 'faculties'")
+        if mode not in ("monolith", "faculties", "micro"):
+            raise BeingError(
+                "cognition must be 'monolith', 'faculties' or 'micro'")
         b = self.get(owner_id, slug)
         self._update(b["id"], now, cognition=mode)
         self.record_event(b["id"], "cognition_set", {"mode": mode}, now=now)
