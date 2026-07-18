@@ -73,6 +73,7 @@ class MravRuntime:
         status_callback: Callable[[str], None] | None = None,
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
         llm_observer: Callable[[str, Any, list[Any], int, int], None] | None = None,
+        file_registry_provider: Callable[[], Any] | None = None,
     ):
         self.provider = provider
         self.tools = tools
@@ -86,6 +87,12 @@ class MravRuntime:
         # shell points this at _emit_llm_trace + _record_usage_to_db so a
         # mrav call is as visible as a classic one.
         self.llm_observer = llm_observer
+        # Callable returning the CURRENT FileRegistry (it is created during
+        # agent initialize and can be swapped per session). Without it,
+        # write's saved/tmp/<session>/ redirect is unfindable by later
+        # reads — the exact failure seen live with Gemma 4 E4B.
+        self.file_registry_provider = file_registry_provider
+        self._cancel_event: asyncio.Event | None = None
 
         self.input_cap = int(getattr(config, "input_cap", 8192))
         self.output_cap = int(getattr(config, "output_cap", 1024))
@@ -283,11 +290,19 @@ class MravRuntime:
 
     async def _run_tool(self, action: StepAction) -> tuple[bool, str]:
         """Execute one tool; returns (success, observation_text)."""
+        file_registry = None
+        if self.file_registry_provider is not None:
+            try:
+                file_registry = self.file_registry_provider()
+            except Exception:
+                file_registry = None
         try:
             result = await self.tools.execute(
                 action.tool,
                 action.args,
                 session_id=self.session_id,
+                abort_event=self._cancel_event,
+                file_registry=file_registry,
             )
         except Exception as exc:
             return False, f"TOOL FAILED: {type(exc).__name__}: {exc}"
@@ -361,6 +376,7 @@ class MravRuntime:
 
     async def run(self, user_input: str, *, cancel_event: asyncio.Event | None = None) -> str:
         board = self.board
+        self._cancel_event = cancel_event
         board.new_task(user_input.strip())
         self.last_usage = {}
         self.trace.write("task_start", task=board.task, model=getattr(self.provider, "model", "?"))
