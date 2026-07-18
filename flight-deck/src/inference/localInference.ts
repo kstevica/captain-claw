@@ -227,13 +227,25 @@ class LocalInferenceManager {
           total_tokens: usage?.total_tokens ?? 0,
         },
       }))
-      const seconds = ((performance.now() - started) / 1000).toFixed(1)
+      const elapsed = (performance.now() - started) / 1000
+      const prompt = usage?.prompt_tokens ?? 0
+      const completion = usage?.completion_tokens ?? 0
       const state = useInferenceStore.getState()
       this.patch({
         jobsDone: state.jobsDone + 1,
-        lastCall: `${usage?.prompt_tokens ?? '?'}→${usage?.completion_tokens ?? '?'} tok · ${seconds}s`,
+        lastCall: `${prompt || '?'}→${completion || '?'} tok · ${elapsed.toFixed(1)}s`,
+      })
+      state.logJob({
+        ts: Date.now(),
+        model: this.modelId,
+        promptTokens: prompt,
+        completionTokens: completion,
+        seconds: elapsed,
+        tps: elapsed > 0 ? completion / elapsed : 0,
+        ok: true,
       })
     } catch (err) {
+      const elapsed = (performance.now() - started) / 1000
       try {
         this.ws?.send(JSON.stringify({
           type: 'error',
@@ -241,6 +253,16 @@ class LocalInferenceManager {
           message: err instanceof Error ? err.message : String(err),
         }))
       } catch { /* socket already gone; broker fails the job on disconnect */ }
+      useInferenceStore.getState().logJob({
+        ts: Date.now(),
+        model: this.modelId,
+        promptTokens: 0,
+        completionTokens: 0,
+        seconds: elapsed,
+        tps: 0,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 }
