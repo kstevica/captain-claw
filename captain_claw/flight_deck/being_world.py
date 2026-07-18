@@ -688,6 +688,58 @@ def place_xy(store: BeingsStore, being: dict, place_id: str,
     return (int(p["x"]), int(p["y"]))
 
 
+# ── Standing spots: two Iskre never occupy one point ─────────────────────
+# A place is an AREA, not a point. `place_xy` returns its single anchor, so
+# every being parked there would render on the exact same pixel (Zvjezdana +
+# Lada both at (714, 382) on staging). We seat each parked being at its own
+# spot fanned around the anchor, sized to the footprint so they stand ON the
+# place — pure geometry, no store, shared by the 2D map and the FPV because
+# both read the seated `xy` straight from the map payload.
+
+SPOT_INNER_RING = 6                # slots in the first ring (index 1..6)
+SPOT_TOTAL = 13                    # anchor + inner ring + outer ring
+
+
+def _spot_offsets(w: int, h: int) -> list[tuple[float, float]]:
+    """Deterministic (dx, dy) unit offsets for a w×h-tile footprint. Index 0
+    is the anchor itself; then a 6-slot inner ring and an outer ring, radius
+    scaled to the place so occupants stand on/around it, never off it."""
+    base = max(TILE * 0.6, min(w, h) * TILE * 0.32)
+    offs: list[tuple[float, float]] = [(0.0, 0.0)]
+    for i in range(SPOT_INNER_RING):
+        a = 2.0 * math.pi * i / SPOT_INNER_RING
+        offs.append((base * math.cos(a), base * math.sin(a)))
+    outer = SPOT_TOTAL - 1 - SPOT_INNER_RING
+    for i in range(outer):
+        a = 2.0 * math.pi * i / outer + math.pi / 6.0
+        offs.append((base * 1.9 * math.cos(a), base * 1.9 * math.sin(a)))
+    return offs
+
+
+def standing_spots(anchor: tuple[int, int], footprint: tuple[int, int, str],
+                   slugs) -> dict[str, tuple[int, int]]:
+    """Seat every being parked at one place at a distinct point around the
+    anchor. Each slug has a STABLE preferred spot from its hash; collisions
+    resolve by a linear probe in sorted-slug order, so a being keeps its spot
+    while the room's occupants are unchanged and only shifts when someone
+    arrives or leaves. Clamped one tile inside the plot."""
+    offs = _spot_offsets(footprint[0], footprint[1])
+    n = len(offs)
+    taken: dict[int, str] = {}
+    seats: dict[str, tuple[int, int]] = {}
+    lo, hi = TILE, PLOT_SIZE - TILE
+    for slug in sorted(slugs):
+        pref = zlib.crc32(str(slug).encode("utf-8")) % n
+        idx = next((( pref + k) % n for k in range(n)
+                    if (pref + k) % n not in taken), pref)
+        taken[idx] = slug
+        dx, dy = offs[idx]
+        x = min(hi, max(lo, int(round(anchor[0] + dx))))
+        y = min(hi, max(lo, int(round(anchor[1] + dy))))
+        seats[slug] = (x, y)
+    return seats
+
+
 def place_name(store: BeingsStore, being: dict, place_id: str) -> str:
     if place_id == "home":
         return "home"
@@ -998,6 +1050,32 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
             entry["departed_at"] = loc.get("departed_at")
             entry["total_minutes"] = loc.get("minutes")
         beings.append(entry)
+    # Standing spots: seat the PARKED beings so two at one place never share a
+    # point. Walkers (entry["to"] set) animate along their own paths and are
+    # left alone. Homes hold a single occupant, so seating there is a no-op.
+    places_by_id = {p["id"]: p for p in store.village_places(owner_id)}
+    parked: dict[str, list[dict]] = {}
+    for e in beings:
+        if e["at"] and not e["to"]:
+            parked.setdefault(e["at"], []).append(e)
+    for pid, here in parked.items():
+        if len(here) < 2:
+            continue                        # a lone occupant keeps the anchor
+        p = places_by_id.get(pid)
+        if p is not None:
+            anchor = (int(p["x"]), int(p["y"]))
+            w = int(p.get("w") or 0) or footprint_for(p)[0]
+            h = int(p.get("h") or 0) or footprint_for(p)[1]
+            fp = (w, h, p.get("kind") or "building")
+        elif pid == "home":
+            continue                        # unique per being — never collides
+        else:
+            continue                        # unknown place — leave as anchor
+        seats = standing_spots(anchor, fp, [e["slug"] for e in here])
+        for e in here:
+            xy = seats.get(e["slug"])
+            if xy:
+                e["xy"] = [xy[0], xy[1]]
     meta = store.get_village_meta(owner_id)
     # signs in the grass (FPV plan Phase 3): the public map never leaks
     # which (possibly private) beings found a sign — only how many did

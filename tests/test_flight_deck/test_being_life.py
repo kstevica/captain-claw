@@ -483,6 +483,85 @@ async def test_non_create_drive_still_credited_without_a_file(store):
             > tick_ev["data"]["drives"]["grow"])
 
 
+async def test_body_faltered_since_reads_the_window(store):
+    """The signal 2b hangs on: a rebound/unreachable AT or after the tick's
+    start counts; the same event before it does not."""
+    b = _born(store, port=0)
+    b = store.get(OWNER, b["slug"])
+    assert life._body_faltered_since(store, b, NOW) is False
+    store.record_event(b["id"], "body_rebound", {"port": 1},
+                       now=NOW - timedelta(minutes=5))       # before the tick
+    assert life._body_faltered_since(store, b, NOW) is False
+    store.record_event(b["id"], "body_rebound", {"port": 2}, now=NOW)  # during
+    assert life._body_faltered_since(store, b, NOW) is True
+
+
+async def test_a_faltered_body_is_not_punished_for_an_empty_tree(store):
+    """2b: a create claim with no file, but the body rebounded DURING the tick.
+    A clean tree we cannot trust must abstain — no drive_unearned, no
+    act_unverified — and record act_unverifiable instead. Contrast with
+    test_create_drive_is_not_satisfied_by_narration, where a HEALTHY empty
+    tree still earns the unearned/downgrade."""
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        # the body drifts to a new port mid-tick — the write may be lost to it
+        store.record_event(being["id"], "body_rebound",
+                           {"port": 999, "was": 0}, now=NOW)
+        return _digest_reply(act_kind="create", served_drive="create",
+                             summary="made a thing",
+                             journal_entry="I wrote garden/attempt.md.")
+
+    async def usage(being, since):
+        return _usage(30_000)
+
+    await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "drive_unearned" not in kinds            # not starved
+    assert "act_unverified" not in kinds            # not downgraded as fiction
+    assert "narration_mismatch" not in kinds        # no false accusation
+    assert "act_unverifiable" in kinds              # abstained, on the record
+    # and the create drive was neither punished nor falsely credited: it only
+    # decays like any unserved drive this tick (no artifact seen).
+    tick_ev = next(e for e in store.events(OWNER, b["slug"])
+                   if e["kind"] == "tick")
+    assert tick_ev["data"]["drives"]["create"] < 0.75
+
+
+async def test_a_faltered_body_still_credits_a_write_it_can_see(store):
+    """2b abstention is only about the EMPTY tree. If the file really landed,
+    a rebound doesn't erase the credit — a write we can see is real."""
+    db = FakeDB()
+    b = _born(store, port=0)
+    await life.build_home(b)
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        p = life._home_path(being, "garden/landed.md")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("# Landed\n", encoding="utf-8")
+        store.record_event(being["id"], "body_rebound",
+                           {"port": 999, "was": 0}, now=NOW)
+        return _digest_reply(act_kind="create", served_drive="create",
+                             summary="made a thing",
+                             journal_entry="I wrote garden/landed.md for real.")
+
+    async def usage(being, since):
+        return _usage(30_000)
+
+    out = await life.tick(db, store, b, now=NOW, send_fn=send, usage_fn=usage)
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert out["act"] == "create"                   # a seen write counts
+    assert "act_unverifiable" not in kinds
+    assert "drive_unearned" not in kinds
+    tick_ev = next(e for e in store.events(OWNER, b["slug"])
+                   if e["kind"] == "tick")
+    assert tick_ev["data"]["drives"]["create"] > 0.74
+
+
 async def test_mismatch_under_journal_act_is_flagged_and_fed_back(store):
     """The exact pilot pattern: act_kind='journal' while the prose claims a
     file write. The narrow create/tend check misses it; the mismatch check
@@ -1013,6 +1092,99 @@ async def test_spawn_body_runs_on_archetype_tier_tools_mode(store, monkeypatch):
     assert cfg.cognitive_mode == "lydia"
     assert "web_search" in cfg.tools                     # archetype tool applied
     assert all(t in cfg.tools for t in ("read", "write", "edit", "glob"))
+
+
+# ── §2a: the body binds a stable, reserved port ──────────────────────────
+
+def test_preferred_body_port_is_stable_in_band_and_varies():
+    lo, hi = life.BEING_PORT_BASE, life.BEING_PORT_BASE + life.BEING_PORT_SPAN
+    a = life._preferred_body_port("iskra-lada-6d37")
+    assert a == life._preferred_body_port("iskra-lada-6d37")   # stable
+    assert lo <= a < hi                                        # in the band
+    ports = {life._preferred_body_port(f"iskra-x-{i:04x}") for i in range(40)}
+    assert len(ports) > 20                                     # spreads out
+    for p in ports:
+        assert lo <= p < hi
+
+
+async def test_spawn_body_pins_the_reserved_port(store, monkeypatch):
+    """The body is spawned on its deterministic band port, not port 0 — so it
+    stops drifting through the shared pool on every restart (§2a)."""
+    b = _born(store, port=0)
+    captured = {}
+
+    async def fake_spawn(cfg, request, user):
+        captured["web_port"] = cfg.web_port
+        return None
+
+    monkeypatch.setattr("captain_claw.flight_deck.server.spawn_process", fake_spawn)
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (captured["web_port"], "tok"))
+    await life.spawn_body(None, store, b)
+    assert captured["web_port"] == life._preferred_body_port(b["slug"])
+
+
+# ── §3b: stage-scaled attention credits ──────────────────────────────────
+
+def test_attention_credits_scale_by_stage():
+    assert life.attention_credits_for("child") == 5
+    assert life.attention_credits_for("infant") == 5
+    assert life.attention_credits_for("adolescent") == 4
+    assert life.attention_credits_for("adult") == life.DAILY_ATTENTION_CREDITS
+    assert life.attention_credits_for("elder") == 3
+    assert life.attention_credits_for("???") == life.DAILY_ATTENTION_CREDITS
+
+
+def test_a_child_gets_five_daily_reaches_where_three_would_suppress(store):
+    b = _born(store, name="Reacher", stage="child", port=0)
+    store.reset_attention(b["id"], life.attention_credits_for("child"), now=NOW)
+    spent = sum(1 for _ in range(5) if store.spend_attention(b["id"], now=NOW))
+    assert spent == 5                                   # a 4th and 5th landed
+    assert store.spend_attention(b["id"], now=NOW) is False   # restraint holds
+
+
+# ── §3a: a fallback tick decays gently, not a full unmet hour ─────────────
+
+def test_decay_drives_zero_hours_is_the_minimum_quantum():
+    d = {"survive": {"weight": 1.0, "satisfaction": 0.5}}
+    soft = life.decay_drives(d, 0.0)["survive"]["satisfaction"]
+    hard = life.decay_drives(d, 1.0)["survive"]["satisfaction"]
+    assert 0.5 - soft == pytest.approx(life.DRIVE_MIN_DECAY_PER_TICK)
+    assert (0.5 - hard) > (0.5 - soft)                  # a full hour bites more
+
+
+async def test_a_timed_out_tick_barely_decays_the_drives(store):
+    """§3a: a tick whose body never answered shouldn't dock a full hour of
+    unmet drive — the being didn't choose the stillness. Contrast a normal
+    tick, which decays the full amount."""
+    db = FakeDB()
+    b = _born(store, name="Silent", port=1234)
+    await life.build_home(b)
+    # seed a known drive state an hour before the tick
+    start = {n: {"weight": 1.0, "satisfaction": 0.6}
+             for n in ("survive", "grow", "explore", "connect", "create")}
+    store.tick_bookkeeping(b["id"], drives=start,
+                           next_wake_at=NOW, now=NOW - timedelta(hours=1))
+    b = store.get(OWNER, b["slug"])
+
+    async def timeout_send(being, prompt):
+        return None                                    # the body never answers
+
+    async def usage(being, since):
+        return _usage(0)
+
+    out = await life.tick(db, store, b, now=NOW,
+                          send_fn=timeout_send, usage_fn=usage)
+    assert out["outcome"] == "ticked"
+    tick_ev = next(e for e in store.events(OWNER, b["slug"])
+                   if e["kind"] == "tick")
+    # gentle: each drive fell by only the minimum quantum from 0.6, nowhere
+    # near the full hourly 0.02 bite.
+    for n in ("survive", "grow", "explore"):
+        drop = 0.6 - tick_ev["data"]["drives"][n]
+        assert drop == pytest.approx(life.DRIVE_MIN_DECAY_PER_TICK, abs=1e-6)
+    assert "tick_timeout" in [e["kind"] for e in store.events(OWNER, b["slug"])]
 
 
 # ── #2: per-being tick cadence the parent pins ───────────────────────────

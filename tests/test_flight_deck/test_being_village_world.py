@@ -328,6 +328,94 @@ def test_public_owner_and_map_show_only_public_beings(store):
     assert m["places"]                               # the ground still shows
 
 
+# ═══ Standing spots — two Iskre never occupy one point ════════════════════
+
+def _park(store, slug, place):
+    """Send a being to a place a day ago so, read now, its walk has ended and
+    it reports PARKED at that place (position_of settles on read)."""
+    store.depart(OWNER, slug, place, now=NOW - timedelta(days=1))
+
+
+def test_two_beings_at_one_place_get_distinct_spots(store):
+    a = _being(store, "Ada", stage="adult")
+    b = _being(store, "Bela", stage="adult")
+    world.ensure_village(store, OWNER, now=NOW)
+    _park(store, a["slug"], "square")
+    _park(store, b["slug"], "square")
+    m = world.village_map_payload(store, OWNER, now=NOW)
+    ea = next(x for x in m["beings"] if x["slug"] == a["slug"])
+    eb = next(x for x in m["beings"] if x["slug"] == b["slug"])
+    assert ea["at"] == "square" and eb["at"] == "square" and not ea["to"]
+    assert tuple(ea["xy"]) != tuple(eb["xy"])          # never the same pixel
+    # and both stand near the place, not flung across the plot
+    sq = next(p for p in m["places"] if p["id"] == "square")
+    for e in (ea, eb):
+        assert abs(e["xy"][0] - sq["x"]) <= 3 * world.TILE
+        assert abs(e["xy"][1] - sq["y"]) <= 3 * world.TILE
+
+
+def test_many_beings_at_one_place_all_distinct(store):
+    slugs = []
+    for nm in ("Ana", "Bura", "Cvita", "Dora", "Eva"):
+        slugs.append(_being(store, nm, stage="adult")["slug"])
+    world.ensure_village(store, OWNER, now=NOW)
+    for s in slugs:
+        _park(store, s, "meadow")
+    m = world.village_map_payload(store, OWNER, now=NOW)
+    pts = [tuple(e["xy"]) for e in m["beings"] if e["at"] == "meadow"]
+    assert len(pts) == len(slugs) == len(set(pts))     # all seated apart
+
+
+def test_a_spot_is_stable_while_the_room_is_unchanged(store):
+    a = _being(store, "Ada", stage="adult")
+    b = _being(store, "Bela", stage="adult")
+    world.ensure_village(store, OWNER, now=NOW)
+    _park(store, a["slug"], "library")
+    _park(store, b["slug"], "library")
+    m1 = world.village_map_payload(store, OWNER, now=NOW)
+    m2 = world.village_map_payload(store, OWNER, now=NOW + timedelta(minutes=5))
+    for slug in (a["slug"], b["slug"]):
+        p1 = next(e["xy"] for e in m1["beings"] if e["slug"] == slug)
+        p2 = next(e["xy"] for e in m2["beings"] if e["slug"] == slug)
+        assert p1 == p2                                # seat doesn't wander
+
+
+def test_a_lone_occupant_keeps_the_anchor(store):
+    a = _being(store, "Sama", stage="adult")
+    world.ensure_village(store, OWNER, now=NOW)
+    _park(store, a["slug"], "square")
+    m = world.village_map_payload(store, OWNER, now=NOW)
+    e = next(x for x in m["beings"] if x["slug"] == a["slug"])
+    sq = next(p for p in m["places"] if p["id"] == "square")
+    assert tuple(e["xy"]) == (sq["x"], sq["y"])        # no needless offset
+
+
+def test_walking_beings_are_never_seated(store):
+    a = _being(store, "Ada", stage="adult")
+    b = _being(store, "Bela", stage="adult")
+    world.ensure_village(store, OWNER, now=NOW)
+    # both still ON THE ROAD to the same place — seats must not touch them
+    store.depart(OWNER, a["slug"], "library", now=NOW)
+    store.depart(OWNER, b["slug"], "library", now=NOW)
+    m = world.village_map_payload(store, OWNER, now=NOW)
+    for slug in (a["slug"], b["slug"]):
+        e = next(x for x in m["beings"] if x["slug"] == slug)
+        assert e["to"] == "library"                    # walking, not parked
+        # xy is the live path position, i.e. the walker's origin at t0
+        assert e.get("path")
+
+
+def test_spots_stay_inside_the_plot(store):
+    offs = world._spot_offsets(4, 4)
+    seats = world.standing_spots((world.PLOT_SIZE - 5, world.PLOT_SIZE - 5),
+                                 (4, 4, "grounds"),
+                                 [f"iskra-edge-{i}" for i in range(8)])
+    assert len(offs) == world.SPOT_TOTAL
+    for (x, y) in seats.values():
+        assert world.TILE <= x <= world.PLOT_SIZE - world.TILE
+        assert world.TILE <= y <= world.PLOT_SIZE - world.TILE
+
+
 # ═══ Phase 2 — plotted courses ═════════════════════════════════════════════
 
 def test_astar_routes_around_walls_and_prefers_streets():

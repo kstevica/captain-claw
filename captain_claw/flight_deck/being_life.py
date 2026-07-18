@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import types
+import zlib
 from datetime import datetime, timedelta, timezone
 
 from captain_claw import vfs
@@ -46,6 +48,31 @@ log = get_logger(__name__)
 
 TICK_TIMEOUT_SECONDS = 300.0
 DAILY_ATTENTION_CREDITS = 3
+
+# Attention the parent grants a being per day, by stage (§3b). The young lean
+# on the parent; adults are more self-sufficient. Baseline stays 3 (adult).
+_ATTENTION_BY_STAGE = {"infant": 5, "child": 5, "adolescent": 4,
+                       "adult": 3, "elder": 3}
+
+
+def attention_credits_for(stage: str) -> int:
+    """Daily parent-bound-message credits for a stage — the young get a little
+    more room to reach, so a child isn't locked mute after three (Zvjezdana
+    hit the wall 18× in a day). Restraint remains; the floor just loosens."""
+    return _ATTENTION_BY_STAGE.get(stage, DAILY_ATTENTION_CREDITS)
+
+
+# A being's body binds a STABLE port derived from its slug, in a band ABOVE
+# the shared 24080 worker pool (which 5+ deployments on one box all scan from,
+# so a body drifted to a new port on every restart → ~90 rebounds each, and
+# stale-port ticks timed out). Same slug → same port at birth and every
+# respawn, so the row and the registry agree and the per-tick re-pin stops.
+BEING_PORT_BASE = int(os.environ.get("FD_BEING_PORT_BASE", "24800") or 24800)
+BEING_PORT_SPAN = int(os.environ.get("FD_BEING_PORT_SPAN", "180") or 180)
+
+
+def _preferred_body_port(slug: str) -> int:
+    return BEING_PORT_BASE + zlib.crc32(str(slug).encode("utf-8")) % BEING_PORT_SPAN
 # Compact mode (per-being, panel toggle): the body's context window is capped
 # so tick history stays lean — the being's continuity lives in its home files
 # (journal tail + manifest are re-injected fresh every tick), so a long chat
@@ -430,7 +457,11 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
         provider_api_key=tcfg.get("api_key", "") or "",
         tier="" if tcfg else tier,
         web_enabled=True,
-        web_port=0,
+        # A STABLE port from the slug in the reserved being band (§2a): the
+        # body lands here at birth and every respawn instead of scanning the
+        # crowded shared pool, so it stops drifting. spawn_process falls back
+        # to the next free port from here only if this one is genuinely taken.
+        web_port=_preferred_body_port(being["slug"]),
         env_vars=env_vars,
         owner_hint=owner,
     )
@@ -2491,6 +2522,24 @@ async def deliver_parent_message(db, being: dict, message: str) -> bool:
 _IGNORED_CHANGES = {".vfs-meta.jsonl", ".gitignore"}
 
 
+def _body_faltered_since(store, being: dict, t0: datetime) -> bool:
+    """Did the body drift or go dark DURING this tick? A `body_rebound` or
+    `body_unreachable` at/after the tick's start means the git tree we read
+    can be stale or half-written — so a clean diff is not trustworthy
+    evidence the being made nothing (the Lada lesson: a flaky body must not
+    be judged as if it chose to sit idle)."""
+    cutoff = t0.isoformat()
+    try:
+        for e in store.events(being["owner_id"], being["slug"], limit=40):
+            if e["at"] < cutoff:
+                break                       # events are newest-first
+            if e["kind"] in ("body_rebound", "body_unreachable"):
+                return True
+    except Exception:  # noqa: BLE001 — never let bookkeeping punish a being
+        return False
+    return False
+
+
 async def _tick_changed_files(being: dict) -> list[str] | None:
     """The files the agent ACTUALLY wrote this turn — ground truth. Called
     after the agent turn but before the journal write dirties the tree, so
@@ -2842,7 +2891,8 @@ async def _tick_locked(
     #    agent process) is stopped to cost nothing.
     credited = store.credit_allowance(bid, now=now)
     if credited:
-        store.reset_attention(bid, DAILY_ATTENTION_CREDITS, now=now)
+        store.reset_attention(bid, attention_credits_for(being["stage"]),
+                              now=now)
     being = store.get(owner, being["slug"])
     # The ground (space plan Phase 1): the village exists, and any walk that
     # ended while the being slept settles BEFORE it senses the world — the
@@ -2968,7 +3018,8 @@ async def _tick_locked(
                 being["last_tick_at"])).total_seconds() / 3600.0)
         except ValueError:
             pass
-    drives = decay_drives(being.get("drives") or {}, hours)
+    drives_before = dict(being.get("drives") or {})
+    drives = decay_drives(drives_before, hours)
     first_of_day = True
     if being.get("last_tick_at"):
         first_of_day = str(being["last_tick_at"])[:10] != now.isoformat()[:10]
@@ -3352,7 +3403,16 @@ async def _tick_locked(
     # 5. The self-report is digested; the arithmetic of feeling stays FD-side.
     claims_write = _claims_file_write(
         f"{digest['journal_entry']} {digest['summary']}")
-    made_nothing = changed is not None and not changed
+    # A read you cannot trust is not evidence (the mind-map + Lada lesson): if
+    # the tick fell back OR the body drifted/went dark during it, a clean diff
+    # does NOT prove the being made nothing. So an empty tree only counts
+    # against it when the tick was verifiable — otherwise we ABSTAIN (neither
+    # punish the act nor credit an unseen write). A write we CAN see is real
+    # regardless, so `made_something` needs no such guard.
+    verifiable = (not digest.get("fallback")
+                  and not _body_faltered_since(store, being, t0))
+    made_something = bool(changed)
+    made_nothing = (changed is not None) and (not changed) and verifiable
     mismatch = made_nothing and claims_write
 
     # Satisfaction is EARNED, not narrated. The create drive rises only when a
@@ -3360,10 +3420,18 @@ async def _tick_locked(
     # disk is unchanged no longer feels as good as doing it (the whole point).
     # Under variety pressure, feeding the rut's own drive pays half (F6).
     if digest["served_drive"]:
-        if digest["served_drive"] == "create" and made_nothing:
-            store.record_event(bid, "drive_unearned",
-                               {"drive": "create",
-                                "summary": digest["summary"][:160]}, now=now)
+        if digest["served_drive"] == "create" and not made_something:
+            if made_nothing:
+                store.record_event(bid, "drive_unearned",
+                                   {"drive": "create",
+                                    "summary": digest["summary"][:160]}, now=now)
+            else:                       # unverifiable — abstain, don't starve
+                store.record_event(bid, "act_unverifiable",
+                                   {"drive": "create",
+                                    "reason": ("fallback tick"
+                                               if digest.get("fallback")
+                                               else "body faltered mid-tick"),
+                                    "summary": digest["summary"][:160]}, now=now)
         elif (digest["served_drive"] == "connect"
               and digest["act_kind"] == "talk"):
             pass  # earned only if something truly left the being — settled
@@ -3785,6 +3853,14 @@ async def _tick_locked(
     # pretences sting, a milestone is pride, a starved drive finally served
     # is relief; hunger, honest loneliness and the satisfaction delta carry
     # the rest (loops plan Increment 1 — the flatline fix).
+    # §3a: a tick the body couldn't honor (timed out / no digest) already
+    # docked every drive a full hour at the top of the tick and served
+    # nothing — pure loss for a stillness the being never chose (the Lada
+    # floor). Time did pass, so decay the minimum quantum only, from the
+    # pre-tick snapshot. A fallback tick serves nothing, so no earned bump is
+    # thrown away; honest ticks are untouched.
+    if digest.get("fallback"):
+        drives = decay_drives(drives_before, 0.0)
     tick_events: list[str] = []
     try:
         now_iso = now.isoformat()
