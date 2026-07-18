@@ -31,6 +31,7 @@ import {
   Code2,
   Globe,
   Activity,
+  Bug,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -103,6 +104,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
     items: [
       { id: 'today', icon: CalendarDays, label: 'Today' },
       { id: 'system', icon: Activity, label: 'Processes' },
+      { id: 'browser-llm', icon: Bug, label: 'Browser LLM' },
       { id: 'agent-folders', icon: HardDrive, label: 'Agent Folders', adminOnly: true },
       { id: 'connections', icon: Plug, label: 'Connections' },
       { id: 'gpu-cloud', icon: Cloud, label: 'GPU Cloud' },
