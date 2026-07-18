@@ -1345,6 +1345,13 @@ def _build_config_yaml(c: AgentConfig) -> str:
     }
     if (c.runtime or "").strip().lower() == "mrav":
         cfg["mrav"] = {"enabled": True, "persona": (c.description or c.name or "")[:200]}
+        # The tier's context sizes ARE the mrav caps: input_ctx → input_cap
+        # (hard per-call prompt budget), output_ctx → output_cap. Unset (0)
+        # keeps the runtime defaults (8192 / 1024).
+        if c.max_context > 0:
+            cfg["mrav"]["input_cap"] = c.max_context
+        if c.max_tokens > 0:
+            cfg["mrav"]["output_cap"] = c.max_tokens
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
@@ -1452,6 +1459,13 @@ def _build_process_config_yaml(c: AgentConfig, agent_dir: Path) -> str:
     }
     if (c.runtime or "").strip().lower() == "mrav":
         cfg["mrav"] = {"enabled": True, "persona": (c.description or c.name or "")[:200]}
+        # The tier's context sizes ARE the mrav caps: input_ctx → input_cap
+        # (hard per-call prompt budget), output_ctx → output_cap. Unset (0)
+        # keeps the runtime defaults (8192 / 1024).
+        if c.max_context > 0:
+            cfg["mrav"]["input_cap"] = c.max_context
+        if c.max_tokens > 0:
+            cfg["mrav"]["output_cap"] = c.max_tokens
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 

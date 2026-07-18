@@ -659,6 +659,45 @@ async def test_runtime_llm_observer_and_token_ticker(tmp_path: Path):
     assert await runtime2.run("hi") == "ok"
 
 
+@pytest.mark.asyncio
+async def test_runtime_honors_raised_caps(tmp_path: Path):
+    """A 32k/8k tier must scale the ledger and budgets, not fight them."""
+    provider = FakeProvider(
+        [
+            '{"plan":["answer"]}',
+            '{"action":"final","text":"roomy"}',
+        ]
+    )
+    runtime = _runtime(
+        provider, FakeTools(), tmp_path,
+        config=_config(input_cap=32768, output_cap=8192),
+    )
+    assert await runtime.run("q " * 5000) == "roomy"
+    assert runtime.ledger.input_cap == 32768
+    assert all(c["tokens"] <= 32768 for c in provider.calls)
+    # section budgets scale with the cap: observations alone now exceed
+    # the entire old 8k budget
+    assert runtime.budgets["observations"] > 8192
+    assert provider.calls[-1]["max_tokens"] == 8192
+
+
+def test_spawn_yaml_carries_tier_ctx_into_mrav_caps(tmp_path: Path):
+    import yaml as _yaml
+
+    from captain_claw.flight_deck.server import AgentConfig, _build_process_config_yaml
+
+    config = AgentConfig(name="t", runtime="mrav", max_context=32768, max_tokens=8192)
+    data = _yaml.safe_load(_build_process_config_yaml(config, tmp_path))
+    assert data["mrav"]["enabled"] is True
+    assert data["mrav"]["input_cap"] == 32768
+    assert data["mrav"]["output_cap"] == 8192
+
+    # unset input ctx (0) keeps the runtime's 8k default (key absent)
+    config2 = AgentConfig(name="t2", runtime="mrav", max_context=0)
+    data2 = _yaml.safe_load(_build_process_config_yaml(config2, tmp_path))
+    assert "input_cap" not in data2["mrav"]
+
+
 def test_mrav_flag_state_tristate_and_mtime_cache(tmp_path: Path):
     """The FD card toggle writes mrav_mode.txt; the agent reads it tri-state."""
     import os
