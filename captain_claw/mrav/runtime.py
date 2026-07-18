@@ -72,6 +72,7 @@ class MravRuntime:
         escalate_provider: Any | None = None,
         status_callback: Callable[[str], None] | None = None,
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
+        llm_observer: Callable[[str, Any, list[Any], int, int], None] | None = None,
     ):
         self.provider = provider
         self.tools = tools
@@ -81,6 +82,10 @@ class MravRuntime:
         self.escalate_provider = escalate_provider
         self.status_callback = status_callback
         self.tool_output_callback = tool_output_callback
+        # (label, response, messages, max_tokens, latency_ms) — the Agent
+        # shell points this at _emit_llm_trace + _record_usage_to_db so a
+        # mrav call is as visible as a classic one.
+        self.llm_observer = llm_observer
 
         self.input_cap = int(getattr(config, "input_cap", 8192))
         self.output_cap = int(getattr(config, "output_cap", 1024))
@@ -133,6 +138,8 @@ class MravRuntime:
         step_kind: str = "act",
     ) -> str:
         """One capped LLM call: final fit gate, structured when schema given."""
+        import time
+
         from captain_claw.llm import Message
 
         fits, total = self.ledger.check_messages([system, user])
@@ -142,6 +149,7 @@ class MravRuntime:
         prov = provider or self.provider
         messages = [Message(role="system", content=system), Message(role="user", content=user)]
         out_tokens = max_tokens or self.output_cap
+        started = time.monotonic()
         if schema is not None:
             response = await prov.complete_structured(
                 messages, schema, temperature=self.temperature, max_tokens=out_tokens
@@ -150,16 +158,31 @@ class MravRuntime:
             response = await prov.complete(
                 messages, None, temperature=self.temperature, max_tokens=out_tokens
             )
-        self._add_usage(getattr(response, "usage", None))
+        latency_ms = int((time.monotonic() - started) * 1000)
+        usage = getattr(response, "usage", None) or {}
+        self._add_usage(usage)
         content = strip_thinking(getattr(response, "content", "") or "")
+        in_tok = int(usage.get("prompt_tokens") or 0) or total
+        out_tok = int(usage.get("completion_tokens") or 0) or estimate_tokens(content)
         self.trace.write(
             "llm",
             kind=step_kind,
             model=getattr(prov, "model", "?"),
-            in_tokens=total,
-            out_chars=len(content),
+            in_tokens=in_tok,
+            out_tokens=out_tok,
+            latency_ms=latency_ms,
             escalated=prov is not self.provider,
         )
+        # Live token ticker — always on, like the classic status line.
+        self._status(f"mrav: {step_kind} · {in_tok}→{out_tok} tok · {latency_ms/1000:.1f}s")
+        # Same visibility as the classic loop: llm_trace card + usage-to-DB,
+        # both handled by the observer the Agent shell wires in (it applies
+        # the same ui.monitor_trace_llm gating as normal mode).
+        if self.llm_observer is not None:
+            try:
+                self.llm_observer(f"mrav:{step_kind}", response, messages, out_tokens, latency_ms)
+            except Exception as exc:
+                log.debug("mrav llm observer failed", error=str(exc))
         return content
 
     async def _digest_call(self, system: str, user: str, max_tokens: int) -> str:

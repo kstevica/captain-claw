@@ -567,9 +567,47 @@ class Agent(
             escalate_provider=escalate_provider,
             status_callback=self.status_callback,
             tool_output_callback=self.tool_output_callback,
+            llm_observer=self._mrav_llm_observer,
         )
         self._mrav_runtime_cache = runtime
         return runtime
+
+    def _mrav_llm_observer(
+        self,
+        label: str,
+        response: Any,
+        messages: list[Message],
+        max_tokens: int,
+        latency_ms: int,
+    ) -> None:
+        """Give every mrav LLM call the same visibility as a classic one.
+
+        Same channels, same gating: an ``llm_trace`` monitor card + session
+        entry (only when ``ui.monitor_trace_llm`` is on, exactly like the
+        classic loop) and the fire-and-forget per-call usage DB record.
+        """
+        try:
+            self._emit_llm_trace(
+                interaction_label=label,
+                response=response,
+                messages=messages,
+                tools=None,
+                max_tokens=max_tokens,
+            )
+        except Exception:
+            pass
+        try:
+            self._record_usage_to_db(
+                interaction_label=label,
+                messages=messages,
+                response=response,
+                tools_enabled=False,
+                max_tokens=max_tokens,
+                latency_ms=latency_ms,
+                error=False,
+            )
+        except Exception:
+            pass
 
     async def _mrav_complete(self, user_input: str) -> str:
         if not self._initialized:
