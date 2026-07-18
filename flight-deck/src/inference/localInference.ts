@@ -16,9 +16,19 @@ import {
 import { useAuthStore } from '../stores/authStore'
 import { useInferenceStore } from '../stores/inferenceStore'
 
-// Total engine context: 8k input cap + 1k output, matching the broker
-// and BrowserProvider sizing.
-const CONTEXT_WINDOW = 9216
+// Engine context window (total: input + output). 9216 matches mrav's
+// default caps (8k in + 1k out); 40960 matches a raised 32k/8k tier.
+// Bigger windows cost GPU memory (KV grows linearly with the window).
+export const DEFAULT_ENGINE_WINDOW = 9216
+export const ENGINE_WINDOW_OPTIONS: { value: number; label: string }[] = [
+  { value: 4096, label: '4k' },
+  { value: 8192, label: '8k' },
+  { value: 9216, label: '9k — mrav default (8k in + 1k out)' },
+  { value: 16384, label: '16k' },
+  { value: 32768, label: '32k' },
+  { value: 40960, label: '40k — raised mrav tier (32k in + 8k out)' },
+  { value: 65536, label: '64k' },
+]
 
 // Curated picks (q4f16, VRAM at the catalog's 4k reference — our 9216-token
 // engine window adds KV on top). Qwen3.5 is the live-eval champion family;
@@ -90,13 +100,14 @@ class LocalInferenceManager {
   private ws: WebSocket | null = null
   private desired = false
   private modelId = ''
+  private ctxWindow = DEFAULT_ENGINE_WINDOW
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   private patch(partial: Parameters<ReturnType<typeof useInferenceStore.getState>['patch']>[0]) {
     useInferenceStore.getState().patch(partial)
   }
 
-  async start(modelId?: string): Promise<void> {
+  async start(modelId?: string, ctxWindow?: number): Promise<void> {
     if (this.desired) return
     if (!webgpuAvailable()) {
       this.patch({ status: 'error', error: 'WebGPU is not available in this browser.' })
@@ -104,7 +115,11 @@ class LocalInferenceManager {
     }
     this.desired = true
     this.modelId = modelId || pickDefaultModel()
-    this.patch({ status: 'starting', modelId: this.modelId, error: '', progress: 'Loading model…' })
+    this.ctxWindow = ctxWindow || DEFAULT_ENGINE_WINDOW
+    this.patch({
+      status: 'starting', modelId: this.modelId, ctxWindow: this.ctxWindow,
+      error: '', progress: 'Loading model…',
+    })
 
     try {
       this.worker = new Worker(new URL('./webllmWorker.ts', import.meta.url), { type: 'module' })
@@ -116,7 +131,7 @@ class LocalInferenceManager {
             this.patch({ progress: report.text || `${Math.round((report.progress || 0) * 100)}%` })
           },
         },
-        { context_window_size: CONTEXT_WINDOW },
+        { context_window_size: this.ctxWindow },
       )
     } catch (err) {
       this.patch({
@@ -158,7 +173,7 @@ class LocalInferenceManager {
         type: 'register',
         engine: 'webllm',
         model: this.modelId,
-        ctx_max: CONTEXT_WINDOW,
+        ctx_max: this.ctxWindow,
         schema: true,
       }))
     }
