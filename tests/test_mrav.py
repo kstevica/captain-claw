@@ -587,6 +587,46 @@ async def test_runtime_honest_when_steps_exhausted(tmp_path: Path):
     assert "ran out of steps" in reply.lower()
 
 
+@pytest.mark.asyncio
+async def test_runtime_llm_observer_and_token_ticker(tmp_path: Path):
+    """Every mrav LLM call surfaces like a classic one: observer + token status."""
+    provider = FakeProvider(
+        [
+            '{"plan":["answer"]}',
+            '{"action":"final","text":"done"}',
+        ]
+    )
+    observed: list[tuple] = []
+    statuses: list[str] = []
+    runtime = MravRuntime(
+        provider=provider,
+        tools=FakeTools(),
+        config=_config(),
+        session_key="observer",
+        state_dir=tmp_path,
+        status_callback=statuses.append,
+        llm_observer=lambda label, resp, msgs, max_tokens, latency_ms: observed.append(
+            (label, dict(resp.usage), len(msgs), max_tokens, latency_ms)
+        ),
+    )
+    reply = await runtime.run("hi")
+    assert reply == "done"
+    assert [o[0] for o in observed] == ["mrav:plan", "mrav:act"]
+    for _label, usage, message_count, max_tokens, latency_ms in observed:
+        assert usage["prompt_tokens"] == 10 and usage["completion_tokens"] == 5
+        assert message_count == 2 and max_tokens > 0 and latency_ms >= 0
+    # the always-on ticker shows sent→received tokens
+    assert any("10→5 tok" in s for s in statuses)
+    # an observer crash must never break the loop
+    provider2 = FakeProvider(['{"plan":["a"]}', '{"action":"final","text":"ok"}'])
+    runtime2 = MravRuntime(
+        provider=provider2, tools=FakeTools(), config=_config(),
+        session_key="observer2", state_dir=tmp_path,
+        llm_observer=lambda *a: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert await runtime2.run("hi") == "ok"
+
+
 def test_mrav_flag_state_tristate_and_mtime_cache(tmp_path: Path):
     """The FD card toggle writes mrav_mode.txt; the agent reads it tri-state."""
     import os
