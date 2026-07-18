@@ -1217,6 +1217,32 @@ class ProviderKeysConfig(BaseModel):
         return result
 
 
+class MravConfig(BaseModel):
+    """Mrav — micro agentic runtime for small models (docs/mrav-micro-agent-plan.md).
+
+    When enabled, the agent's chat loop is served by MravRuntime (hard
+    ``input_cap`` tokens per LLM call) instead of the classic 16-mixin loop.
+    Escalation is opt-in and explicit: a failing step may retry once on the
+    configured bigger model, never silently.
+    """
+
+    enabled: bool = False
+    input_cap: int = 8192  # hard input tokens per LLM call, everything included
+    output_cap: int = 1024
+    observation_cap: int = 2500  # tool output bigger than this gets digested
+    digest_target: int = 400
+    max_steps: int = 24
+    act_retries: int = 2
+    replan_every: int = 6
+    max_pinned_tools: int = 3
+    temperature: float = 0.2
+    escalate: bool = False
+    escalate_provider: str = ""
+    escalate_model: str = ""
+    escalate_api_key: str = ""
+    escalate_base_url: str = ""
+
+
 class Config(BaseSettings):
     """Main configuration for Captain Claw."""
 
@@ -1259,6 +1285,7 @@ class Config(BaseSettings):
     cognitive_tempo: CognitiveTempoConfig = Field(default_factory=CognitiveTempoConfig)
     cognitive_mode: CognitiveModeConfig = Field(default_factory=CognitiveModeConfig)
     mcp_serve: MCPServeConfig = Field(default_factory=MCPServeConfig)
+    mrav: MravConfig = Field(default_factory=MravConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",
