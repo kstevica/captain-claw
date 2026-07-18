@@ -180,7 +180,13 @@ class MravRuntime:
         plan_text = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(board.plan))
         facts_text = "\n".join(f"- {f}" for f in board.facts)
         plan_block = "\n".join(x for x in (plan_text, facts_text and prompts.H_FACTS, facts_text) if x)
-        now_block = (f"{prompts.H_ERROR}\n{error}\n\n" if error else "") + f"{prompts.H_NOW}\n{prompts.ACT_NOW}"
+        error_block = (
+            f"{prompts.H_ERROR}\nYour previous reply was rejected: {error}\n"
+            "Do not repeat it — choose a different action.\n\n"
+            if error
+            else ""
+        )
+        now_block = error_block + f"{prompts.H_NOW}\n{prompts.ACT_NOW}"
         return [
             Section("contract", prompts.ACT_CONTRACT, self.budgets["contract"], keep="head"),
             Section("tools", f"{prompts.H_TOOLS}\n{pack.defs_text}", self.budgets["tools"], keep="head"),
@@ -390,6 +396,35 @@ class MravRuntime:
                 return self._finish(f"I could not complete this: {action.reason}", "give_up")
 
             if action.kind == "open_tool":
+                sig = f"open_tool:{action.name}"
+                if sig == last_call_sig:
+                    board.consecutive_failures += 1
+                    board.add_observation(
+                        "error",
+                        "loop_guard",
+                        f"You already did open_tool on '{action.name}'. It is in TOOLS — "
+                        "call it now with its args, or pick another action.",
+                    )
+                    self.trace.write("repeat_call", step=board.step, tool=sig)
+                    continue
+                last_call_sig = sig
+                if action.name in pack.visible_names:
+                    # Forgiving no-op: 2B-class models "open" core tools out
+                    # of habit; a rejection here loops them (seen live, E2B).
+                    # Bait the correct next reply with a concrete template —
+                    # small models follow examples far better than prose.
+                    compact = pack.visible.get(action.name)
+                    args_hint = ", ".join(
+                        f'"{p}":...' for p in (compact.param_names[:3] if compact else [])
+                    )
+                    board.add_observation(
+                        "note",
+                        "open_tool",
+                        f"Tool '{action.name}' is already in TOOLS. Call it now, like: "
+                        f'{{"action":"tool","tool":"{action.name}","args":{{{args_hint}}}}}',
+                    )
+                    self.trace.write("open_tool_noop", step=board.step, name=action.name)
+                    continue
                 board.pin_tool(action.name, self.max_pinned)
                 board.add_observation("note", "open_tool", f"Loaded schema for tool '{action.name}'; it is now in TOOLS.")
                 board.consecutive_failures = 0

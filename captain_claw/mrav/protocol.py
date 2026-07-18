@@ -162,10 +162,12 @@ def validate_action(
         name = str(obj.get("name", "") or obj.get("tool", "")).strip()
         if not name:
             return None, 'action "open_tool" needs a "name" from INDEX.'
-        if name in visible_tools:
-            return None, f'Tool "{name}" is already in TOOLS — call it directly.'
         if name not in all_tools:
             return None, f'Unknown tool "{name}". Use an exact name from INDEX.'
+        # Opening an already-visible tool is accepted as a no-op: small
+        # models routinely "open" a core tool before calling it, and
+        # rejecting that traps them in a repeat loop (seen live with
+        # Gemma 4 E2B). The runtime answers with a nudge observation.
         return StepAction(kind="open_tool", name=name), ""
 
     if kind == "final":
