@@ -3,6 +3,8 @@
 import { useState } from 'react'
 import { Bug, Loader2, Play, Square, Zap } from 'lucide-react'
 import {
+  DEFAULT_ENGINE_WINDOW,
+  ENGINE_WINDOW_OPTIONS,
   MODEL_CATALOG,
   extraCatalogModels,
   localInference,
@@ -19,8 +21,9 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
 }
 
 export function LocalInferencePanel() {
-  const { status, modelId, progress, error, wsConnected, jobsDone, lastCall } = useInferenceStore()
+  const { status, modelId, ctxWindow, progress, error, wsConnected, jobsDone, lastCall } = useInferenceStore()
   const [selectedModel, setSelectedModel] = useState(pickDefaultModel())
+  const [selectedWindow, setSelectedWindow] = useState(DEFAULT_ENGINE_WINDOW)
   const gpu = webgpuAvailable()
   const running = status === 'starting' || status === 'ready'
   const meta = STATUS_META[status] ?? STATUS_META.off
@@ -63,6 +66,17 @@ export function LocalInferencePanel() {
               ))}
             </optgroup>
           </select>
+          <select
+            value={running ? (ctxWindow || selectedWindow) : selectedWindow}
+            onChange={(e) => setSelectedWindow(Number(e.target.value))}
+            disabled={running}
+            title="Engine context window (input + output). Must cover the mrav tier's input_cap + output_cap; bigger windows cost GPU memory."
+            className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none disabled:opacity-60"
+          >
+            {ENGINE_WINDOW_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>ctx {o.label}</option>
+            ))}
+          </select>
           {running ? (
             <button
               onClick={() => localInference.stop()}
@@ -72,7 +86,7 @@ export function LocalInferencePanel() {
             </button>
           ) : (
             <button
-              onClick={() => void localInference.start(selectedModel)}
+              onClick={() => void localInference.start(selectedModel, selectedWindow)}
               disabled={!gpu}
               title={gpu ? 'Download the model (cached after the first time) and start serving' : 'WebGPU is not available in this browser'}
               className="flex items-center gap-1.5 rounded-md border border-violet-500/40 bg-violet-500/15 px-3 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-500/25 disabled:cursor-not-allowed disabled:opacity-50"
@@ -94,6 +108,7 @@ export function LocalInferencePanel() {
               <span className={wsConnected ? 'text-emerald-500' : 'text-amber-500'}>
                 {wsConnected ? 'connected' : 'reconnecting…'}
               </span>
+              {ctxWindow > 0 && <span className="text-zinc-500">ctx {Math.round(ctxWindow / 1024)}k</span>}
               <span className="text-zinc-500">jobs: {jobsDone}</span>
               {lastCall && (
                 <span className="flex items-center gap-1 text-zinc-500">

@@ -8,6 +8,7 @@ export type InferenceStatus = 'off' | 'starting' | 'ready' | 'error'
 interface InferenceState {
   status: InferenceStatus
   modelId: string
+  ctxWindow: number // engine window (input + output tokens)
   progress: string
   error: string
   wsConnected: boolean
@@ -19,6 +20,7 @@ interface InferenceState {
 export const useInferenceStore = create<InferenceState>((set) => ({
   status: 'off',
   modelId: '',
+  ctxWindow: 0,
   progress: '',
   error: '',
   wsConnected: false,

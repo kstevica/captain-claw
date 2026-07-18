@@ -20,7 +20,7 @@ const STEPS = [
   {
     Icon: Zap,
     title: 'Built for Mrav',
-    text: 'The engine runs a 9216-token window (8k input + 1k output), matching the micro runtime’s cap. JSON is grammar-enforced in the tab, so even small models keep the step protocol.',
+    text: 'The engine window is yours to pick — 9k matches the default mrav caps (8k in + 1k out), 40k matches a raised 32k/8k tier. JSON is grammar-enforced in the tab, so even small models keep the step protocol.',
   },
 ]
 
