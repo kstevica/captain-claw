@@ -186,6 +186,13 @@ async def faculty_send(store, being: dict, prompt: str, faculty: str,
         if not str(cfg.get("model") or "").strip():
             return None
 
+        # The micro tier's configured context sizes ARE the caps for this call
+        # — set the tier to 40k/8k and the faculty gets 40k/8k, exactly like a
+        # mrav agent or a Vatra micro worker. Unset (0) keeps the small-model
+        # defaults (8192 / 1024). The 8k default is a floor, never a ceiling.
+        input_cap = int(cfg.get("input_ctx") or 0) or MICRO_INPUT_CAP
+        output_cap = int(cfg.get("output_ctx") or 0) or MICRO_MAX_TOKENS
+
         from captain_claw.llm import Message, create_provider
         provider = create_provider(
             provider=cfg.get("provider", "ollama"),
@@ -193,15 +200,15 @@ async def faculty_send(store, being: dict, prompt: str, faculty: str,
             base_url=cfg.get("base_url") or None,
             api_key=cfg.get("api_key") or None,
             temperature=temperature,
-            max_tokens=MICRO_MAX_TOKENS,
-            num_ctx=MICRO_INPUT_CAP + MICRO_MAX_TOKENS,
+            max_tokens=output_cap,
+            num_ctx=input_cap + output_cap,
             think=False,
         )
 
         from captain_claw.mrav.ledger import estimate_tokens, truncate_tokens
         system = SYSTEM.format(
             name=being.get("name") or being.get("slug") or "an iskra")
-        budget = MICRO_INPUT_CAP - estimate_tokens(system) - 256
+        budget = input_cap - estimate_tokens(system) - 256
         # Identity/vitals live at the head, the task contract at the tail —
         # when a mature prompt must shrink, keep both ends.
         user = truncate_tokens(prompt or "", budget, keep="split")
@@ -211,7 +218,7 @@ async def faculty_send(store, being: dict, prompt: str, faculty: str,
              Message(role="user", content=user)],
             schema,
             temperature=temperature,
-            max_tokens=MICRO_MAX_TOKENS,
+            max_tokens=output_cap,
         )
         text = (getattr(resp, "content", "") or "").strip()
 

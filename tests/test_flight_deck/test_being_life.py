@@ -1094,6 +1094,98 @@ async def test_spawn_body_runs_on_archetype_tier_tools_mode(store, monkeypatch):
     assert all(t in cfg.tools for t in ("read", "write", "edit", "glob"))
 
 
+# ── per-being body config override ───────────────────────────────────────
+
+def test_set_body_config_stores_sanitized_and_clears(store):
+    b = _born(store, port=0)
+    assert store.vitals(OWNER, b["slug"])["body_config"] == {}        # default: none
+    store.set_body_config(OWNER, b["slug"], {
+        "provider": "ollama", "model": "qwen3.5:4b",
+        "base_url": "http://localhost:11434", "api_key": "secret-key",
+        "input_ctx": 40000, "output_ctx": 8000})
+    raw = store.get(OWNER, b["slug"])["body_config"]
+    assert raw["provider"] == "ollama" and raw["model"] == "qwen3.5:4b"
+    assert raw["input_ctx"] == 40000 and raw["output_ctx"] == 8000
+    assert raw["api_key"] == "secret-key"                            # kept for spawn
+    # vitals never leaks the key — only whether one is set
+    v = store.vitals(OWNER, b["slug"])["body_config"]
+    assert "api_key" not in v and v["has_key"] is True
+    assert v["provider"] == "ollama" and v["input_ctx"] == 40000
+    assert "body_config_set" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+    # clearing → back to the tier, vitals empty again
+    store.set_body_config(OWNER, b["slug"], {})
+    assert store.get(OWNER, b["slug"])["body_config"] is None
+    assert store.vitals(OWNER, b["slug"])["body_config"] == {}
+
+
+async def test_spawn_body_body_config_is_authoritative(store, monkeypatch):
+    """A set body_config wins over the stage tier entirely — the body never
+    resurrects on the hatch-time connection ('don't resurrect with hatching
+    details')."""
+    b = _born(store, port=0)
+    store.set_body_config(OWNER, b["slug"], {
+        "provider": "ollama", "model": "qwen3.5:4b", "base_url": "",
+        "api_key": "", "input_ctx": 40000, "output_ctx": 8000})
+    b = store.get(OWNER, b["slug"])
+    tier = life._stage_tier(b["stage"])
+    captured = {}
+
+    async def fake_spawn(cfg, request, user):
+        captured["cfg"] = cfg
+        return None
+
+    async def fake_tiers(db, owner):
+        # the stage tier points at a DIFFERENT (stale) connection
+        return ({tier: {"provider": "openai", "model": "deepseek-v4-flash",
+                        "base_url": "https://api.deepseek.com",
+                        "api_key": "stale"}}, [])
+
+    monkeypatch.setattr("captain_claw.flight_deck.server.spawn_process", fake_spawn)
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (24096, "tok"))
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.basna_routes._load_owner_tiers", fake_tiers)
+    monkeypatch.setattr(life, "_body_mrav_flag_on", lambda being: False)
+    await life.spawn_body(FakeDB(), store, b)
+    cfg = captured["cfg"]
+    assert cfg.provider == "ollama" and cfg.model == "qwen3.5:4b"
+    assert cfg.base_url == "" and cfg.provider_api_key == ""         # stale key gone
+    assert cfg.max_context == 40000 and cfg.max_tokens == 8000
+
+
+async def test_spawn_body_mrav_flag_plus_ctx_becomes_mrav_body(store, monkeypatch):
+    """A flag-enabled mrav body with an explicit input_ctx spawns as a mrav
+    body so its caps are that ctx, not the runtime's 8192/1024 default. With no
+    input_ctx it stays flag-only (runtime unset)."""
+    b = _born(store, port=0)
+    store.set_body_config(OWNER, b["slug"], {
+        "provider": "ollama", "model": "qwen3.5:4b", "input_ctx": 40000})
+    b = store.get(OWNER, b["slug"])
+    captured = {}
+
+    async def fake_spawn(cfg, request, user):
+        captured["cfg"] = cfg
+        return None
+
+    monkeypatch.setattr("captain_claw.flight_deck.server.spawn_process", fake_spawn)
+    monkeypatch.setattr(
+        "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
+        lambda slug: (24096, "tok"))
+    monkeypatch.setattr(life, "_body_mrav_flag_on", lambda being: True)
+    await life.spawn_body(None, store, b)               # db=None → tier skipped, bc used
+    assert captured["cfg"].runtime == "mrav"
+    assert captured["cfg"].max_context == 40000
+    assert captured["cfg"].max_tokens == 1024           # mrav default, not 32768
+
+    # flag on but NO input_ctx → stays flag-only (runtime unset, 8k default)
+    store.set_body_config(OWNER, b["slug"], {
+        "provider": "ollama", "model": "qwen3.5:4b"})
+    b2 = store.get(OWNER, b["slug"])
+    await life.spawn_body(None, store, b2)
+    assert captured["cfg"].runtime == ""
+
+
 # ── §2a: the body binds a stable, reserved port ──────────────────────────
 
 def test_preferred_body_port_is_stable_in_band_and_varies():

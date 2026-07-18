@@ -1157,6 +1157,49 @@ class BeingsStore:
                           {"archetype": (archetype_id or "").strip()}, now=now)
         return self.get(owner_id, slug)
 
+    def set_body_config(self, owner_id: str, slug: str,
+                        config: dict | None,
+                        now: datetime | None = None) -> dict:
+        """Pin the being's BODY to an explicit LLM connection — provider,
+        model, base_url, api_key, and context sizes (input_ctx / output_ctx) —
+        instead of the stage tier it was born with. Once set it is
+        AUTHORITATIVE: every respawn uses exactly this, never the hatch-time
+        details. Pass None/{} to clear it and fall back to the stage tier. The
+        caller respawns the body so the change takes effect now."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        clean: dict = {}
+        for k in ("provider", "model", "base_url", "api_key"):
+            v = (config or {}).get(k)
+            if v not in (None, ""):
+                clean[k] = str(v).strip()
+        for k in ("input_ctx", "output_ctx"):
+            try:
+                iv = int((config or {}).get(k) or 0)
+            except (TypeError, ValueError):
+                iv = 0
+            if iv > 0:
+                clean[k] = iv
+        # The UI never sees the stored key (sanitized), so a save that leaves
+        # it blank means "keep the current one" — carry it forward. A full
+        # clear (empty config → clean == {}) still wipes it, key and all.
+        if clean and not clean.get("api_key"):
+            prev = b.get("body_config")
+            if isinstance(prev, dict) and prev.get("api_key"):
+                clean["api_key"] = prev["api_key"]
+        raw = json.dumps(clean) if clean else ""
+        self._update(b["id"], now, body_config=raw)
+        # Never log the key itself — just whether one is set.
+        self.record_event(b["id"], "body_config_set",
+                          {"provider": clean.get("provider"),
+                           "model": clean.get("model"),
+                           "base_url": clean.get("base_url"),
+                           "input_ctx": clean.get("input_ctx"),
+                           "output_ctx": clean.get("output_ctx"),
+                           "has_key": bool(clean.get("api_key")),
+                           "cleared": not clean}, now=now)
+        return self.get(owner_id, slug)
+
     def set_cognition(self, owner_id: str, slug: str, mode: str,
                       now: datetime | None = None) -> dict:
         """Choose how the being THINKS a tick: 'monolith' (one prompt → one
@@ -2643,11 +2686,28 @@ class BeingsStore:
             "cognition": b.get("cognition") or "faculties",
             "compact_mode": bool(b.get("compact_mode")),
             "body_archetype": b.get("body_archetype") or "",
+            "body_config": self._body_config_view(b),
             "unread_from_being": self.unread_from_being(b["id"]),
             "public": bool(b.get("public")),
             "visit_url": b.get("visit_url") or "",
             "visit_secret": b.get("visit_secret") or "",
             "visit_last_announce": b.get("visit_last_announce"),
+        }
+
+    def _body_config_view(self, b: dict) -> dict:
+        """The being's explicit body connection for the UI — WITHOUT the key
+        itself (only whether one is set), so the secret never leaves the box.
+        Empty dict means "no override, the body runs on its stage tier"."""
+        bc = b.get("body_config")
+        if not isinstance(bc, dict) or not bc:
+            return {}
+        return {
+            "provider": bc.get("provider") or "",
+            "model": bc.get("model") or "",
+            "base_url": bc.get("base_url") or "",
+            "input_ctx": int(bc.get("input_ctx") or 0),
+            "output_ctx": int(bc.get("output_ctx") or 0),
+            "has_key": bool(bc.get("api_key")),
         }
 
     def _avatar_view(self, b: dict) -> dict:

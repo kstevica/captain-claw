@@ -143,6 +143,16 @@ class BodyArchetypeRequest(BaseModel):
     archetype_id: str = ""
 
 
+class BodyConfigRequest(BaseModel):
+    # An explicit body connection, or all-empty to clear it (back to the tier).
+    provider: str = ""
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    input_ctx: int = 0
+    output_ctx: int = 0
+
+
 class AssessRequest(BaseModel):
     assessor: str   # registry slug of the agent to ask for a second opinion
 
@@ -1217,6 +1227,25 @@ async def set_body_archetype(slug: str, body: BodyArchetypeRequest,
     spawn."""
     store = get_store()
     being = _run(store.set_body_archetype, user["id"], slug, body.archetype_id)
+    if being["state"] == "alive" and being.get("agent_slug"):
+        try:
+            being_life._stop_body(being)
+            await being_life.spawn_body(get_db(), store, being)
+        except Exception as e:  # noqa: BLE001 — heals on next tick
+            store.record_event(being["id"], "spawn_failed", {"error": str(e)})
+    return _run(store.vitals, user["id"], slug)
+
+
+@router.post("/{slug}/body-config")
+async def set_body_config(slug: str, body: BodyConfigRequest,
+                          user: dict = Depends(get_current_user)):
+    """Pin the being's BODY to an explicit LLM connection — provider, model,
+    context sizes, api key, base URL — so it stops being resurrected with the
+    stage-tier details it was hatched on. All-empty clears it (back to the
+    tier). Respawns an alive body so the new connection takes effect at once;
+    otherwise it applies on the next spawn."""
+    store = get_store()
+    being = _run(store.set_body_config, user["id"], slug, body.model_dump())
     if being["state"] == "alive" and being.get("agent_slug"):
         try:
             being_life._stop_body(being)

@@ -339,6 +339,79 @@ async def test_normalize_home_extensions_makes_stray_files_real(store):
     assert life.normalize_home_extensions(being) == []
 
 
+@pytest.mark.asyncio
+async def test_faculty_send_obeys_micro_tier_ctx(store, monkeypatch):
+    """The micro tier's input_ctx/output_ctx ARE the caps — set 40k/8k and the
+    faculty call gets 40k/8k, not the hardcoded 8192/1024."""
+    being = _born(store, cognition="micro")
+
+    from captain_claw.flight_deck import auth as auth_mod
+    monkeypatch.setattr(auth_mod, "get_db", lambda: object())
+
+    from captain_claw.flight_deck import basna_routes
+    async def fake_tiers(db, owner_id):
+        return ({"micro": {"provider": "ollama", "model": "qwen3.5:4b",
+                           "base_url": "", "api_key": "",
+                           "input_ctx": 40000, "output_ctx": 8000}}, [])
+    monkeypatch.setattr(basna_routes, "_load_owner_tiers", fake_tiers)
+
+    seen: dict = {}
+
+    class FakeProvider:
+        async def complete_structured(self, messages, schema,
+                                      temperature=None, max_tokens=None):
+            seen["structured_max"] = max_tokens
+            return SimpleNamespace(content='{"journal_entry":"x","mood":"y"}',
+                                   usage={"prompt_tokens": 5, "completion_tokens": 1})
+
+    from captain_claw import llm as llm_mod
+
+    def fake_create(**kw):
+        seen["num_ctx"] = kw.get("num_ctx")
+        seen["max_tokens"] = kw.get("max_tokens")
+        return FakeProvider()
+    monkeypatch.setattr(llm_mod, "create_provider", fake_create)
+
+    await being_micro.faculty_send(store, being, "p", "journal", now=NOW)
+    assert seen["num_ctx"] == 40000 + 8000
+    assert seen["max_tokens"] == 8000
+    assert seen["structured_max"] == 8000
+
+
+@pytest.mark.asyncio
+async def test_faculty_send_defaults_ctx_when_tier_unset(store, monkeypatch):
+    """No configured ctx → the small-model default 8192/1024 (a floor)."""
+    being = _born(store, cognition="micro")
+
+    from captain_claw.flight_deck import auth as auth_mod
+    monkeypatch.setattr(auth_mod, "get_db", lambda: object())
+
+    from captain_claw.flight_deck import basna_routes
+    async def fake_tiers(db, owner_id):
+        return ({"micro": {"provider": "ollama", "model": "qwen3.5:4b"}}, [])
+    monkeypatch.setattr(basna_routes, "_load_owner_tiers", fake_tiers)
+
+    seen: dict = {}
+
+    class FakeProvider:
+        async def complete_structured(self, messages, schema,
+                                      temperature=None, max_tokens=None):
+            return SimpleNamespace(content='{"journal_entry":"x","mood":"y"}',
+                                   usage={})
+
+    from captain_claw import llm as llm_mod
+
+    def fake_create(**kw):
+        seen["num_ctx"] = kw.get("num_ctx")
+        seen["max_tokens"] = kw.get("max_tokens")
+        return FakeProvider()
+    monkeypatch.setattr(llm_mod, "create_provider", fake_create)
+
+    await being_micro.faculty_send(store, being, "p", "journal", now=NOW)
+    assert seen["num_ctx"] == being_micro.MICRO_INPUT_CAP + being_micro.MICRO_MAX_TOKENS
+    assert seen["max_tokens"] == being_micro.MICRO_MAX_TOKENS
+
+
 # ── the one-shot itself ──────────────────────────────────────────────
 
 

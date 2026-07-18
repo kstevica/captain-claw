@@ -37,10 +37,13 @@ import {
   getVillageLife, judgeCommission, setStewardStipend, type VillageLife, nudgeBeing,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
+  setBodyConfig, type BodyConnectionInput,
   setAvatar, setCadence, setCognition, setCompactMode, setHouseRules, setInstincts, setMediaDiet,
   setStage, setVentureState,
   tickBeing, wakeBeing, GRANT_AMOUNTS, TICK_INTERVAL_CHOICES,
 } from '../services/beings'
+import { PROVIDERS, INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS } from '../services/tierConfig'
+import { CtxSelect } from '../components/common/CtxSelect'
 import { CHARACTER_NAMES, IskraAvatar, PALETTES, PALETTE_NAMES } from '../components/village/avatars'
 import { IsoScene } from '../components/village/IsoScene'
 import { posOf as walkPosOf, statusOf as walkStatusOf } from '../components/village/walk'
@@ -2704,6 +2707,8 @@ function BeingCard({ item, meta, onChanged }: {
   const [parentingOpen, setParentingOpen] = useState(false)
   const [careOpen, setCareOpen] = useState(false)
   const [lookOpen, setLookOpen] = useState(false)
+  const [connOpen, setConnOpen] = useState(false)
+  const [conn, setConn] = useState<BodyConnectionInput>({})
 
   const load = useCallback(async () => {
     try {
@@ -3015,6 +3020,95 @@ function BeingCard({ item, meta, onChanged }: {
                 {v.body_archetype && (
                   <span className="text-[10px] text-zinc-500">archetype model · respawns</span>
                 )}
+              </div>
+              <div className="flex items-start gap-2 text-xs">
+                <span className="w-16 shrink-0 pt-1.5 text-zinc-500">connect</span>
+                <div className="min-w-0 flex-1">
+                  <button
+                    onClick={() => {
+                      if (!connOpen) {
+                        const bc = v.body_config || {}
+                        setConn({
+                          provider: bc.provider || '', model: bc.model || '',
+                          base_url: bc.base_url || '', api_key: '',
+                          input_ctx: bc.input_ctx || 0, output_ctx: bc.output_ctx || 0,
+                        })
+                      }
+                      setConnOpen((o) => !o)
+                    }}
+                    title="Pin this body's provider, model, context, key and base URL — it stops resurrecting on the hatch-time stage tier"
+                    className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-zinc-300 hover:border-violet-500/50 focus:outline-none">
+                    <span className="text-[10px] text-zinc-400">
+                      {v.body_config?.model
+                        ? `${v.body_config.provider || '?'} · ${v.body_config.model}`
+                        : 'Default (stage tier)'}
+                    </span>
+                    <ChevronDown className={`h-3 w-3 text-zinc-600 transition-transform ${connOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {connOpen && (
+                    <div className="mt-1.5 space-y-1.5 rounded-lg border border-zinc-800 bg-zinc-950/70 p-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-16 shrink-0 text-[10px] text-zinc-500">provider</span>
+                        <select value={conn.provider || ''}
+                          onChange={(e) => setConn((c) => ({ ...c, provider: e.target.value }))}
+                          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+                          <option value="">—</option>
+                          {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-16 shrink-0 text-[10px] text-zinc-500">model</span>
+                        <input value={conn.model || ''}
+                          onChange={(e) => setConn((c) => ({ ...c, model: e.target.value }))}
+                          placeholder="qwen3.5:4b"
+                          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none" />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-16 shrink-0 text-[10px] text-zinc-500">input ctx</span>
+                        <CtxSelect options={INPUT_CTX_OPTIONS} value={conn.input_ctx || 0}
+                          zeroLabel="Tier default"
+                          onChange={(n) => setConn((c) => ({ ...c, input_ctx: n }))}
+                          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs tabular-nums text-zinc-300 focus:border-violet-500/50 focus:outline-none" />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-16 shrink-0 text-[10px] text-zinc-500">output ctx</span>
+                        <CtxSelect options={OUTPUT_CTX_OPTIONS} value={conn.output_ctx || 0}
+                          zeroLabel="Tier default"
+                          onChange={(n) => setConn((c) => ({ ...c, output_ctx: n }))}
+                          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs tabular-nums text-zinc-300 focus:border-violet-500/50 focus:outline-none" />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-16 shrink-0 text-[10px] text-zinc-500">base URL</span>
+                        <input value={conn.base_url || ''}
+                          onChange={(e) => setConn((c) => ({ ...c, base_url: e.target.value }))}
+                          placeholder="empty = provider default"
+                          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none" />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-16 shrink-0 text-[10px] text-zinc-500">api key</span>
+                        <input type="password" value={conn.api_key || ''}
+                          onChange={(e) => setConn((c) => ({ ...c, api_key: e.target.value }))}
+                          placeholder={v.body_config?.has_key ? '•••• set — blank keeps it' : 'empty for local'}
+                          className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none" />
+                      </div>
+                      <div className="flex items-center justify-between gap-2 pt-0.5">
+                        <span className="text-[10px] text-zinc-600">authoritative · respawns the body</span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => void act('body', () => setBodyConfig(item.slug, {})).then(() => setConnOpen(false))}
+                            className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 hover:border-zinc-600 hover:text-zinc-200 focus:outline-none">
+                            Clear
+                          </button>
+                          <button
+                            onClick={() => void act('body', () => setBodyConfig(item.slug, conn)).then(() => setConnOpen(false))}
+                            className="rounded border border-violet-500/50 bg-violet-500/10 px-2 py-1 text-[10px] text-violet-200 hover:bg-violet-500/20 focus:outline-none">
+                            Save
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}

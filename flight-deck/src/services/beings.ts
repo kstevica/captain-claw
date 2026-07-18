@@ -134,6 +134,16 @@ export interface BeingVitals {
   plan: { id: string; kind: string; target: string }[]
   avatar: { c: number; p: string }
   body_archetype: string
+  // An explicit body connection, or {} for the stage-tier default. The key
+  // itself never crosses the wire — only whether one is set.
+  body_config: {
+    provider?: string
+    model?: string
+    base_url?: string
+    input_ctx?: number
+    output_ctx?: number
+    has_key?: boolean
+  }
   unread_from_being: number
   public: boolean
   visit_url: string
@@ -516,6 +526,30 @@ export const listBodyArchetypes = () =>
 export const setBodyArchetype = (slug: string, archetypeId: string) =>
   fdFetch<BeingVitals>(`/beings/${slug}/body-archetype`, {
     method: 'POST', body: JSON.stringify({ archetype_id: archetypeId }),
+  })
+
+export interface BodyConnectionInput {
+  provider?: string
+  model?: string
+  base_url?: string
+  api_key?: string
+  input_ctx?: number
+  output_ctx?: number
+}
+
+// Pin the body to an explicit provider/model/ctx/key/base (authoritative — no
+// hatch-tier fallback), or pass {} to clear it back to the stage tier.
+export const setBodyConfig = (slug: string, cfg: BodyConnectionInput) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/body-config`, {
+    method: 'POST',
+    body: JSON.stringify({
+      provider: cfg.provider ?? '',
+      model: cfg.model ?? '',
+      base_url: cfg.base_url ?? '',
+      api_key: cfg.api_key ?? '',
+      input_ctx: cfg.input_ctx ?? 0,
+      output_ctx: cfg.output_ctx ?? 0,
+    }),
   })
 
 // Clear the "unread messages from the being" cue — the parent opened its thread.

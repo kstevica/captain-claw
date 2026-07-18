@@ -437,6 +437,34 @@ def set_body_eco_flag(being: dict, enabled: bool) -> None:
                         path=str(target), error=str(e))
 
 
+def _body_mrav_flag_on(being: dict) -> bool:
+    """Whether the parent flipped this body's Mrav toggle on (mrav_mode.txt).
+
+    The flag alone enables the mrav runtime at spawn, but only the config path
+    writes the tier's context sizes into the mrav caps (input_ctx → input_cap).
+    Reading it here lets a flag-enabled body obey a configured 40k/8k instead
+    of the runtime's 8192/1024 default. Same target files the agent-card toggle
+    writes (server ``/fd/agent-mrav-mode``)."""
+    slug = being.get("agent_slug") or being["slug"]
+    try:
+        from captain_claw.flight_deck.server import DATA_DIR
+    except Exception:  # noqa: BLE001
+        return False
+    agent_dir = DATA_DIR / slug
+    targets = [
+        agent_dir / "data" / "home-config-parent" / ".captain-claw" / "mrav_mode.txt",
+        agent_dir / "data" / "home-config" / ".captain-claw" / "mrav_mode.txt",
+        agent_dir / "data" / "home-config" / "mrav_mode.txt",
+    ]
+    for t in targets:
+        try:
+            if t.exists() and t.read_text(encoding="utf-8").strip().lower() == "on":
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
 async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
     """Spawn the being's persistent agent process, pinned to its VFS home.
 
@@ -469,11 +497,19 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
     if db is not None:
         tiers_map, owner_env = await _load_owner_tiers(db, owner)
     tcfg = (tiers_map or {}).get(tier) or {}
-    # An IMPORTED being carries its own connection (body_config) so it works on
-    # a machine that never configured a matching tier — it wins over the owner's
-    # tier config for every non-empty field.
+    # A being can carry its own connection (body_config): an IMPORTED being to
+    # work on a machine that never configured a matching tier, or a parent who
+    # set the body's provider/model/ctx/key/base by hand.
     bc = being.get("body_config") or {}
-    if bc:
+    if bc.get("provider") or bc.get("model"):
+        # An explicit connection is AUTHORITATIVE — the body uses exactly this
+        # at every respawn, never the hatch-time stage tier again (the "don't
+        # resurrect with hatching details" contract). Empty fields stay empty,
+        # so clearing a stale key is a real edit, not a silent no-op.
+        tcfg = dict(bc)
+    elif bc:
+        # A partial config (e.g. an import that carried only ctx) still layers
+        # over the tier for its non-empty fields.
         tcfg = {**tcfg, **{k: v for k, v in bc.items() if v}}
     env_vars = list(owner_env or []) + [
         {"key": "CLAW_VFS_PROJECT", "value": home_project(being)},
@@ -513,8 +549,26 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
         env_vars=env_vars,
         owner_hint=owner,
     )
-    if tcfg.get("output_ctx"):
-        cfg.max_tokens = int(tcfg["output_ctx"])
+    # Context sizes come from the body's tier (or its explicit body_config):
+    # output_ctx caps generation, input_ctx the window. input_ctx also feeds
+    # the mrav caps below.
+    input_ctx = int(tcfg.get("input_ctx") or 0)
+    output_ctx = int(tcfg.get("output_ctx") or 0)
+    if output_ctx:
+        cfg.max_tokens = output_ctx
+    if input_ctx:
+        cfg.max_context = input_ctx
+    # A body the parent flipped to Mrav is mrav via the flag alone — but the
+    # flag doesn't carry context sizes into the yaml, so it silently runs at
+    # the runtime's 8192/1024. When an explicit input_ctx is set, spawn it as
+    # a mrav body so its caps become that ctx (input_ctx → input_cap); give
+    # output the mrav default (1024), not the classic 32768, when the tier
+    # leaves output_ctx unset. No input_ctx → nothing changes (flag still runs
+    # mrav at the 8k default, exactly as before).
+    if input_ctx and _body_mrav_flag_on(being):
+        cfg.runtime = "mrav"
+        if not output_ctx:
+            cfg.max_tokens = 1024
     # Apply the archetype's cognitive mode + tools, but always keep the file
     # tools a being needs to tend its home, whatever the archetype declares.
     if archetype:
