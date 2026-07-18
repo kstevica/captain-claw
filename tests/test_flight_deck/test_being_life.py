@@ -1198,22 +1198,26 @@ async def test_spawn_body_mrav_is_persistent_and_rewrites_flag(store, monkeypatc
     monkeypatch.setattr(life, "set_body_mrav_flag",
                         lambda being, on: flag_writes.append(on))
 
-    # ON + explicit ctx → mrav body, caps from the tier, output → mrav 1024
+    # ON + explicit output_ctx → mrav body, output_cap = that ctx (honored)
     store.set_body_config(OWNER, b["slug"], {
-        "provider": "ollama", "model": "qwen3.5:4b", "input_ctx": 40000})
+        "provider": "ollama", "model": "qwen3.5:4b",
+        "input_ctx": 40000, "output_ctx": 8000})
     store.set_body_mrav(OWNER, b["slug"], True)
     await life.spawn_body(None, store, store.get(OWNER, b["slug"]))
     assert captured["cfg"].runtime == "mrav"
     assert captured["cfg"].max_context == 40000
-    assert captured["cfg"].max_tokens == 1024
+    assert captured["cfg"].max_tokens == 8000            # output_ctx honored
     assert flag_writes[-1] is True                       # flag rewritten from record
 
-    # ON + NO ctx → STILL mrav (the toggle decides, not ctx), 8k runtime default
+    # ON + NO output_ctx → mrav, but output is NOT clamped to 1024 (a being
+    # writes through ACT; 1k truncates its files) — a generous bounded default.
     store.set_body_config(OWNER, b["slug"], {
-        "provider": "ollama", "model": "qwen3.5:4b"})
+        "provider": "ollama", "model": "qwen3.5:4b", "input_ctx": 40000})
     await life.spawn_body(None, store, store.get(OWNER, b["slug"]))
     assert captured["cfg"].runtime == "mrav"
-    assert captured["cfg"].max_context == 0              # runtime keeps its 8192 default
+    assert captured["cfg"].max_context == 40000
+    assert captured["cfg"].max_tokens == life.MRAV_BODY_OUTPUT_DEFAULT
+    assert captured["cfg"].max_tokens > 1024
 
     # OFF → not a mrav body, flag written off
     store.set_body_mrav(OWNER, b["slug"], False)

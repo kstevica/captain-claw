@@ -78,6 +78,13 @@ def _preferred_body_port(slug: str) -> int:
 # micro system prompt (~2k) + tick prompt (~1-1.5k) + current-turn tool work
 # + ~15k of recent voice. Applied at spawn; a toggle respawns a live body.
 COMPACT_BODY_MAX_CONTEXT = 24_000
+# A mrav body's per-step OUTPUT cap when the tier sets no output_ctx. NOT the
+# runtime's tiny 1024 default: a being writes through ACT (the file content
+# rides inside the tool-call JSON), so a 1k cap truncates journals/artifacts
+# mid-write (seen on prod: Lada). Generous enough for any single write, still
+# bounded so a small local model's num_ctx stays sane. Set output_ctx to
+# override in either direction.
+MRAV_BODY_OUTPUT_DEFAULT = 8192
 # Write completion gate (plan rule #1): if a being CLAIMS/attempts a write but
 # the git diff shows nothing, push it this many extra times IN THE SAME TICK to
 # actually write the file, before accepting the anti-theater downgrade. Bounded
@@ -595,16 +602,17 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
     # Mrav body: the PERSISTENT per-being toggle (body_mrav on the record),
     # falling back to the ephemeral agent-card flag for beings set up before
     # it. Rewrite the flag file from the record on every spawn so a rebuilt
-    # body dir comes back mrav (or not) exactly as the parent chose — this is
-    # the "survives a body destroy" fix. When mrav, carry the tier's ctx into
-    # the caps (input_ctx → input_cap via max_context) and give output the mrav
-    # default (1024), not the classic 32768, when output_ctx is unset.
+    # body dir comes back mrav (or not) exactly as the parent chose — the
+    # "survives a body destroy" fix. The mrav caps then follow the being's
+    # ctx: input_ctx → input_cap (the hard per-call budget), and output_cap =
+    # output_ctx if set, else MRAV_BODY_OUTPUT_DEFAULT — NEVER the runtime's
+    # 1024, which truncates a being's ACT writes mid-file.
     mrav_body = body_mrav_on(being)
     set_body_mrav_flag(being, mrav_body)
     if mrav_body:
         cfg.runtime = "mrav"
         if not output_ctx:
-            cfg.max_tokens = 1024
+            cfg.max_tokens = MRAV_BODY_OUTPUT_DEFAULT
     # Apply the archetype's cognitive mode + tools, but always keep the file
     # tools a being needs to tend its home, whatever the archetype declares.
     if archetype:
