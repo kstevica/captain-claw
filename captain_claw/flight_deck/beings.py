@@ -644,6 +644,11 @@ class BeingsStore:
                 # tools, cognitive_mode). Empty → the stage tier + owner config.
                 # Changing it respawns the body. See being_life.spawn_body.
                 ("body_archetype", "TEXT NOT NULL DEFAULT ''"),
+                # Persistent Mrav toggle for the body: '' (follow the ephemeral
+                # agent-card flag), 'on', or 'off'. spawn_body rewrites the flag
+                # file from this on every spawn, so the choice survives a body
+                # destroy/rebuild. See being_life.body_mrav_on.
+                ("body_mrav", "TEXT NOT NULL DEFAULT ''"),
                 # When the parent last opened this being's thread — messages it
                 # spoke after this are "unread from the being" (a badge cue).
                 ("parent_read_at", "TEXT"),
@@ -1198,6 +1203,19 @@ class BeingsStore:
                            "output_ctx": clean.get("output_ctx"),
                            "has_key": bool(clean.get("api_key")),
                            "cleared": not clean}, now=now)
+        return self.get(owner_id, slug)
+
+    def set_body_mrav(self, owner_id: str, slug: str, on: bool,
+                      now: datetime | None = None) -> dict:
+        """Persist whether the being's BODY runs the Mrav runtime. Unlike the
+        ephemeral agent-card flag (a file in the agent dir), this rides on the
+        being record, so spawn_body re-applies it even after the body dir was
+        destroyed and rebuilt. The caller respawns the body so it takes effect
+        now."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        self._update(b["id"], now, body_mrav=("on" if on else "off"))
+        self.record_event(b["id"], "body_mrav_set", {"on": bool(on)}, now=now)
         return self.get(owner_id, slug)
 
     def set_cognition(self, owner_id: str, slug: str, mode: str,
@@ -2687,6 +2705,7 @@ class BeingsStore:
             "compact_mode": bool(b.get("compact_mode")),
             "body_archetype": b.get("body_archetype") or "",
             "body_config": self._body_config_view(b),
+            "body_mrav": self._body_mrav_view(b),
             "unread_from_being": self.unread_from_being(b["id"]),
             "public": bool(b.get("public")),
             "visit_url": b.get("visit_url") or "",
@@ -2709,6 +2728,19 @@ class BeingsStore:
             "output_ctx": int(bc.get("output_ctx") or 0),
             "has_key": bool(bc.get("api_key")),
         }
+
+    def _body_mrav_view(self, b: dict) -> bool:
+        """The EFFECTIVE Mrav state of the body for the UI toggle: the
+        persistent ``body_mrav`` if set, else the ephemeral agent-card flag
+        (so a being made mrav before this toggle shows as on)."""
+        pref = str(b.get("body_mrav") or "").strip().lower()
+        if pref in ("on", "off"):
+            return pref == "on"
+        try:  # lazy — being_life imports this module
+            from captain_claw.flight_deck import being_life
+            return being_life._read_mrav_flag_file(b)
+        except Exception:  # noqa: BLE001
+            return False
 
     def _avatar_view(self, b: dict) -> dict:
         """The picked look, or the stable slug-hash default — never empty,

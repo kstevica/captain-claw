@@ -37,7 +37,7 @@ import {
   getVillageLife, judgeCommission, setStewardStipend, type VillageLife, nudgeBeing,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
-  setBodyConfig, type BodyConnectionInput,
+  setBodyConfig, setBodyMrav, type BodyConnectionInput,
   setAvatar, setCadence, setCognition, setCompactMode, setHouseRules, setInstincts, setMediaDiet,
   setStage, setVentureState,
   tickBeing, wakeBeing, GRANT_AMOUNTS, TICK_INTERVAL_CHOICES,
@@ -3019,6 +3019,18 @@ function BeingCard({ item, meta, onChanged }: {
                 </select>
                 {v.body_archetype && (
                   <span className="text-[10px] text-zinc-500">archetype model · respawns</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="w-16 shrink-0 text-zinc-500">mrav</span>
+                <select value={v.body_mrav ? 'on' : 'off'}
+                  onChange={(e) => void act('body', () => setBodyMrav(item.slug, e.target.value === 'on'))}
+                  className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none">
+                  <option value="off">Off (default)</option>
+                  <option value="on">On (mrav runtime)</option>
+                </select>
+                {v.body_mrav && (
+                  <span className="text-[10px] text-zinc-500">8k-cap loop · persists across a body rebuild</span>
                 )}
               </div>
               <div className="flex items-start gap-2 text-xs">

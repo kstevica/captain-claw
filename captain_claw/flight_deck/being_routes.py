@@ -153,6 +153,11 @@ class BodyConfigRequest(BaseModel):
     output_ctx: int = 0
 
 
+class BodyMravRequest(BaseModel):
+    # True → the body runs the Mrav runtime; persisted so it survives a rebuild
+    on: bool
+
+
 class AssessRequest(BaseModel):
     assessor: str   # registry slug of the agent to ask for a second opinion
 
@@ -1246,6 +1251,24 @@ async def set_body_config(slug: str, body: BodyConfigRequest,
     otherwise it applies on the next spawn."""
     store = get_store()
     being = _run(store.set_body_config, user["id"], slug, body.model_dump())
+    if being["state"] == "alive" and being.get("agent_slug"):
+        try:
+            being_life._stop_body(being)
+            await being_life.spawn_body(get_db(), store, being)
+        except Exception as e:  # noqa: BLE001 — heals on next tick
+            store.record_event(being["id"], "spawn_failed", {"error": str(e)})
+    return _run(store.vitals, user["id"], slug)
+
+
+@router.post("/{slug}/body-mrav")
+async def set_body_mrav(slug: str, body: BodyMravRequest,
+                        user: dict = Depends(get_current_user)):
+    """Run the being's BODY on the Mrav runtime (or not), persisted on the
+    being record so it survives a body destroy/rebuild — spawn_body rewrites
+    the flag file from it every spawn. Respawns an alive body so it takes
+    effect now; otherwise it applies on the next spawn."""
+    store = get_store()
+    being = _run(store.set_body_mrav, user["id"], slug, body.on)
     if being["state"] == "alive" and being.get("agent_slug"):
         try:
             being_life._stop_body(being)

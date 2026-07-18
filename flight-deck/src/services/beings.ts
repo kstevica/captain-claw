@@ -144,6 +144,8 @@ export interface BeingVitals {
     output_ctx?: number
     has_key?: boolean
   }
+  // Effective Mrav state of the body (persistent toggle, or the agent-card flag).
+  body_mrav: boolean
   unread_from_being: number
   public: boolean
   visit_url: string
@@ -550,6 +552,12 @@ export const setBodyConfig = (slug: string, cfg: BodyConnectionInput) =>
       input_ctx: cfg.input_ctx ?? 0,
       output_ctx: cfg.output_ctx ?? 0,
     }),
+  })
+
+// Persist whether the body runs the Mrav runtime (survives a body rebuild).
+export const setBodyMrav = (slug: string, on: boolean) =>
+  fdFetch<BeingVitals>(`/beings/${slug}/body-mrav`, {
+    method: 'POST', body: JSON.stringify({ on }),
   })
 
 // Clear the "unread messages from the being" cue — the parent opened its thread.

@@ -1146,7 +1146,7 @@ async def test_spawn_body_body_config_is_authoritative(store, monkeypatch):
         lambda slug: (24096, "tok"))
     monkeypatch.setattr(
         "captain_claw.flight_deck.basna_routes._load_owner_tiers", fake_tiers)
-    monkeypatch.setattr(life, "_body_mrav_flag_on", lambda being: False)
+    monkeypatch.setattr(life, "set_body_mrav_flag", lambda being, on: None)
     await life.spawn_body(FakeDB(), store, b)
     cfg = captured["cfg"]
     assert cfg.provider == "ollama" and cfg.model == "qwen3.5:4b"
@@ -1154,15 +1154,24 @@ async def test_spawn_body_body_config_is_authoritative(store, monkeypatch):
     assert cfg.max_context == 40000 and cfg.max_tokens == 8000
 
 
-async def test_spawn_body_mrav_flag_plus_ctx_becomes_mrav_body(store, monkeypatch):
-    """A flag-enabled mrav body with an explicit input_ctx spawns as a mrav
-    body so its caps are that ctx, not the runtime's 8192/1024 default. With no
-    input_ctx it stays flag-only (runtime unset)."""
+def test_set_body_mrav_persists_and_vitals(store):
     b = _born(store, port=0)
-    store.set_body_config(OWNER, b["slug"], {
-        "provider": "ollama", "model": "qwen3.5:4b", "input_ctx": 40000})
-    b = store.get(OWNER, b["slug"])
+    assert store.vitals(OWNER, b["slug"])["body_mrav"] is False       # default off
+    store.set_body_mrav(OWNER, b["slug"], True)
+    assert store.get(OWNER, b["slug"])["body_mrav"] == "on"
+    assert store.vitals(OWNER, b["slug"])["body_mrav"] is True
+    assert "body_mrav_set" in [e["kind"] for e in store.events(OWNER, b["slug"])]
+    store.set_body_mrav(OWNER, b["slug"], False)
+    assert store.vitals(OWNER, b["slug"])["body_mrav"] is False
+
+
+async def test_spawn_body_mrav_is_persistent_and_rewrites_flag(store, monkeypatch):
+    """The persistent body_mrav toggle (not input_ctx) decides a mrav body, and
+    spawn_body rewrites the flag file from the record every spawn so a rebuilt
+    body dir comes back mrav. Off → not a mrav body."""
+    b = _born(store, port=0)
     captured = {}
+    flag_writes: list[bool] = []
 
     async def fake_spawn(cfg, request, user):
         captured["cfg"] = cfg
@@ -1172,18 +1181,31 @@ async def test_spawn_body_mrav_flag_plus_ctx_becomes_mrav_body(store, monkeypatc
     monkeypatch.setattr(
         "captain_claw.flight_deck.dubina_agents.resolve_agent_port_token",
         lambda slug: (24096, "tok"))
-    monkeypatch.setattr(life, "_body_mrav_flag_on", lambda being: True)
-    await life.spawn_body(None, store, b)               # db=None → tier skipped, bc used
+    monkeypatch.setattr(life, "set_body_mrav_flag",
+                        lambda being, on: flag_writes.append(on))
+
+    # ON + explicit ctx → mrav body, caps from the tier, output → mrav 1024
+    store.set_body_config(OWNER, b["slug"], {
+        "provider": "ollama", "model": "qwen3.5:4b", "input_ctx": 40000})
+    store.set_body_mrav(OWNER, b["slug"], True)
+    await life.spawn_body(None, store, store.get(OWNER, b["slug"]))
     assert captured["cfg"].runtime == "mrav"
     assert captured["cfg"].max_context == 40000
-    assert captured["cfg"].max_tokens == 1024           # mrav default, not 32768
+    assert captured["cfg"].max_tokens == 1024
+    assert flag_writes[-1] is True                       # flag rewritten from record
 
-    # flag on but NO input_ctx → stays flag-only (runtime unset, 8k default)
+    # ON + NO ctx → STILL mrav (the toggle decides, not ctx), 8k runtime default
     store.set_body_config(OWNER, b["slug"], {
         "provider": "ollama", "model": "qwen3.5:4b"})
-    b2 = store.get(OWNER, b["slug"])
-    await life.spawn_body(None, store, b2)
+    await life.spawn_body(None, store, store.get(OWNER, b["slug"]))
+    assert captured["cfg"].runtime == "mrav"
+    assert captured["cfg"].max_context == 0              # runtime keeps its 8192 default
+
+    # OFF → not a mrav body, flag written off
+    store.set_body_mrav(OWNER, b["slug"], False)
+    await life.spawn_body(None, store, store.get(OWNER, b["slug"]))
     assert captured["cfg"].runtime == ""
+    assert flag_writes[-1] is False
 
 
 # ── §2a: the body binds a stable, reserved port ──────────────────────────

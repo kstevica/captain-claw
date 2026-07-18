@@ -437,25 +437,27 @@ def set_body_eco_flag(being: dict, enabled: bool) -> None:
                         path=str(target), error=str(e))
 
 
-def _body_mrav_flag_on(being: dict) -> bool:
-    """Whether the parent flipped this body's Mrav toggle on (mrav_mode.txt).
-
-    The flag alone enables the mrav runtime at spawn, but only the config path
-    writes the tier's context sizes into the mrav caps (input_ctx → input_cap).
-    Reading it here lets a flag-enabled body obey a configured 40k/8k instead
-    of the runtime's 8192/1024 default. Same target files the agent-card toggle
-    writes (server ``/fd/agent-mrav-mode``)."""
+def _mrav_flag_targets(being: dict) -> list:
+    """The mrav_mode.txt paths — same files the agent-card toggle writes
+    (server ``/fd/agent-mrav-mode``) and ``set_body_eco_flag`` mirrors."""
     slug = being.get("agent_slug") or being["slug"]
-    try:
-        from captain_claw.flight_deck.server import DATA_DIR
-    except Exception:  # noqa: BLE001
-        return False
+    from captain_claw.flight_deck.server import DATA_DIR
     agent_dir = DATA_DIR / slug
-    targets = [
+    return [
         agent_dir / "data" / "home-config-parent" / ".captain-claw" / "mrav_mode.txt",
         agent_dir / "data" / "home-config" / ".captain-claw" / "mrav_mode.txt",
         agent_dir / "data" / "home-config" / "mrav_mode.txt",
     ]
+
+
+def _read_mrav_flag_file(being: dict) -> bool:
+    """Whether the ephemeral mrav_mode.txt flag (agent-card toggle) says on.
+    Lives in the agent dir, so it does NOT survive a body destroy — that is
+    why ``body_mrav`` on the being record exists."""
+    try:
+        targets = _mrav_flag_targets(being)
+    except Exception:  # noqa: BLE001
+        return False
     for t in targets:
         try:
             if t.exists() and t.read_text(encoding="utf-8").strip().lower() == "on":
@@ -463,6 +465,38 @@ def _body_mrav_flag_on(being: dict) -> bool:
         except Exception:  # noqa: BLE001
             continue
     return False
+
+
+def body_mrav_on(being: dict) -> bool:
+    """Whether this body should run the Mrav runtime — the PERSISTENT toggle.
+
+    ``body_mrav`` on the being record wins (``'on'`` / ``'off'``); it survives a
+    body destroy because ``spawn_body`` rewrites the flag file from it. Unset
+    (``''``) falls back to the ephemeral agent-card flag, so a being made mrav
+    before this toggle existed keeps working until the parent sets it."""
+    pref = str(being.get("body_mrav") or "").strip().lower()
+    if pref == "on":
+        return True
+    if pref == "off":
+        return False
+    return _read_mrav_flag_file(being)
+
+
+def set_body_mrav_flag(being: dict, enabled: bool) -> None:
+    """Write the body's ``mrav_mode.txt`` (``on``/``off``) so the running agent
+    picks up the persistent toggle even after its dir was rebuilt. Best-effort,
+    mirroring ``set_body_eco_flag``; a failed flag never sinks a spawn."""
+    try:
+        targets = _mrav_flag_targets(being)
+    except Exception:  # noqa: BLE001
+        return
+    for target in targets:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("on" if enabled else "off", encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            log.warning("being mrav flag write failed",
+                        slug=being.get("slug"), path=str(target), error=str(e))
 
 
 async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
@@ -558,14 +592,16 @@ async def spawn_body(db, store: BeingsStore, being: dict) -> dict:
         cfg.max_tokens = output_ctx
     if input_ctx:
         cfg.max_context = input_ctx
-    # A body the parent flipped to Mrav is mrav via the flag alone — but the
-    # flag doesn't carry context sizes into the yaml, so it silently runs at
-    # the runtime's 8192/1024. When an explicit input_ctx is set, spawn it as
-    # a mrav body so its caps become that ctx (input_ctx → input_cap); give
-    # output the mrav default (1024), not the classic 32768, when the tier
-    # leaves output_ctx unset. No input_ctx → nothing changes (flag still runs
-    # mrav at the 8k default, exactly as before).
-    if input_ctx and _body_mrav_flag_on(being):
+    # Mrav body: the PERSISTENT per-being toggle (body_mrav on the record),
+    # falling back to the ephemeral agent-card flag for beings set up before
+    # it. Rewrite the flag file from the record on every spawn so a rebuilt
+    # body dir comes back mrav (or not) exactly as the parent chose — this is
+    # the "survives a body destroy" fix. When mrav, carry the tier's ctx into
+    # the caps (input_ctx → input_cap via max_context) and give output the mrav
+    # default (1024), not the classic 32768, when output_ctx is unset.
+    mrav_body = body_mrav_on(being)
+    set_body_mrav_flag(being, mrav_body)
+    if mrav_body:
         cfg.runtime = "mrav"
         if not output_ctx:
             cfg.max_tokens = 1024
