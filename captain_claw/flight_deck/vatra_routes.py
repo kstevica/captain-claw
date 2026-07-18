@@ -1311,7 +1311,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             # run the micro runtime. Wording of the subtask + role decides;
             # everything else keeps its tier untouched.
             micro = bool(getattr(quality, "micro_workers", False)) and _micro_suited(
-                f"{st.get('title', '')} {st.get('desc', '')} {arch.get('role', '')}")
+                f"{st.get('title', '')} {st.get('brief', '')} {arch.get('role', '')}")
             if micro:
                 _progress(sid, "spawn",
                           f"{arch.get('role') or arch['id']}: micro-suited → mrav runtime")
