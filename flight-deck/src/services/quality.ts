@@ -18,6 +18,7 @@ export type QualityProfile = {
   delta_rounds: boolean
   critic_triage: boolean
   worker_escalate: boolean
+  micro_workers: boolean
   git_snapshots: boolean
   judgment_ledger: boolean
   source_corpus: boolean
@@ -42,7 +43,7 @@ export type QualityProfile = {
 
 export const BOOL_FLAGS = [
   'test_gate', 'deep_build', 'coverage_check', 'parallel_build', 'acted_gate', 'research_map',
-  'delta_rounds', 'critic_triage', 'worker_escalate', 'git_snapshots',
+  'delta_rounds', 'critic_triage', 'worker_escalate', 'git_snapshots', 'micro_workers',
   'judgment_ledger', 'source_corpus', 'claim_check', 'rubric_contract', 'intent_brief',
   'consistency_check', 'facts_ledger', 'constraints_contract', 'block_on_critical',
   'interface_consistency',
@@ -55,7 +56,7 @@ export function defaultProfile(): QualityProfile {
     test_gate: false, deep_build: false, coverage_check: false, parallel_build: false,
     deep_build_samples: 2, parallel_build_max_slices: 6,
     acted_gate: false, research_map: false, delta_rounds: false, critic_triage: false,
-    worker_escalate: false, git_snapshots: false,
+    worker_escalate: false, git_snapshots: false, micro_workers: false,
     judgment_ledger: false, source_corpus: false, claim_check: false, rubric_contract: false,
     intent_brief: false,
     consistency_check: false, facts_ledger: false, constraints_contract: false,
@@ -168,6 +169,8 @@ export const LEVERS: Lever[] = [
     blurb: 'Continuation rounds inline only a short preview of the prior result (full text via file + map). Caps chain cost.' },
   { flag: 'worker_escalate', code: 'R5', scope: 'research', cost: 'cheap', label: 'Worker escalate',
     blurb: 'A worker that flags ESCALATE gets one focused retry instead of the merge absorbing a bare flag.' },
+  { flag: 'micro_workers', code: 'S3', scope: 'research', cost: 'saver', label: 'Micro workers (mrav)',
+    blurb: 'Extract/digest/format-shaped subtasks spawn on the mrav micro runtime (micro tier, 8k cap) — near-free mechanical work; reasoning roles keep their tiers.' },
   { flag: 'git_snapshots', code: 'R6', scope: 'research', cost: 'free', label: 'Git snapshots',
     blurb: 'Commit each round’s state of the research folder to git — diffs, rollback, provenance. Zero model tokens.' },
   { flag: 'rubric_contract', code: 'R9', scope: 'research', cost: 'cheap', label: 'Rubric contract',

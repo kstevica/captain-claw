@@ -578,11 +578,25 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
 
 # ── Spawn / teardown (mirrors Basna's; stamped CLAW_VATRA_WORKER) ─────
 
+# Subtasks whose shape suits a 2-4B model under the mrav 8k cap: mechanical
+# extraction / digestion / formatting, not open-ended reasoning. Matched
+# against subtask title+desc+role when the `micro_workers` lever is on.
+_MICRO_SUITED_RE = re.compile(
+    r"\b(extract|digest|summar|format|reformat|convert|collect|compile|"
+    r"catalog|list|tabulat|scan|gather|dedup|normali[sz])", re.IGNORECASE)
+
+
+def _micro_suited(text: str) -> bool:
+    """True when a subtask's wording marks it as micro-runtime material."""
+    return bool(_MICRO_SUITED_RE.search(text or ""))
+
+
 async def _spawn_worker(request: Request, user: dict, *, name: str, description: str,
                         cognitive_mode: str, tools: list[str], tier: str,
                         tiers: dict | None, api_key: str, env_vars: list[dict] | None,
                         extra_env: list[dict] | None = None,
                         corpus: bool = False,
+                        micro: bool = False,
                         ) -> dict:
     """Spawn one ephemeral agent and resolve its web port. Returns
     {ok, slug, port, auth, message}. Strips the run-starting `basna` tool and
@@ -601,10 +615,29 @@ async def _spawn_worker(request: Request, user: dict, *, name: str, description:
     base_url = lt.get("base_url") or ""
     max_tokens = int(lt.get("output_ctx") or 0) or 32768
     max_context = int(lt.get("input_ctx") or 0)
+
+    # S3 (mrav Phase 4): a micro-suited subtask spawns the same worker
+    # process, same transport, but runs the mrav micro loop on the owner's
+    # `micro` tier. An explicit tier "micro" ALWAYS means mrav — a classic
+    # agent on a 2-4B model with the full tool-schema prompt is exactly the
+    # failure mode mrav exists to avoid. Default off → byte-identical.
+    runtime = ""
+    if micro or tier == "micro":
+        runtime = "mrav"
+        mt = (tiers or {}).get("micro") or {}
+        if str(mt.get("model") or "").strip():
+            provider = mt.get("provider") or provider
+            model = mt["model"]
+            key = mt.get("api_key") or key
+            base_url = mt.get("base_url") or ""
+            max_tokens = int(mt.get("output_ctx") or 0) or 1024
+            max_context = int(mt.get("input_ctx") or 0) or 8192
+
     worker_tools = [t for t in (tools or AgentConfig().tools) if t != "basna"]
     base = dict(
         name=name, description=description,
         cognitive_mode=cognitive_mode or "neutra", tools=worker_tools,
+        runtime=runtime,
         env_vars=(env_vars or []) + (extra_env or []) + [{"key": _WORKER_MARKER, "value": "1"}]
         + ([{"key": "CLAW_SOURCE_CORPUS", "value": "1"}] if corpus else []),  # R10
         web_enabled=True, web_port=0,
@@ -1274,6 +1307,14 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         async def _spawn_owner(st: dict) -> dict | None:
             arch = arch_by_id[st["owner_archetype_id"]]
             tier = arch.get("tier", "balanced")
+            # S3 (mrav Phase 4, opt-in): extract/digest/format-shaped subtasks
+            # run the micro runtime. Wording of the subtask + role decides;
+            # everything else keeps its tier untouched.
+            micro = bool(getattr(quality, "micro_workers", False)) and _micro_suited(
+                f"{st.get('title', '')} {st.get('desc', '')} {arch.get('role', '')}")
+            if micro:
+                _progress(sid, "spawn",
+                          f"{arch.get('role') or arch['id']}: micro-suited → mrav runtime")
             # Name by SUBTASK id, not just archetype — two pieces can share an
             # owner archetype (e.g. two researcher slices), and a per-archetype name
             # would collide so only one agent spawns.
@@ -1288,6 +1329,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 api_key=body.api_key, env_vars=body.env_vars,
                 extra_env=_vatra_env(sid, st["id"], arch["id"], 0),
                 corpus=quality.source_corpus,  # R10
+                micro=micro,
             )
             if not sp["ok"]:
                 _progress(sid, "spawn", f"{arch.get('role') or arch['id']}: unusable — {sp['message']}", ok=False)
