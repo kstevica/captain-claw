@@ -54,6 +54,9 @@ interface AgentConfig {
   // Cognitive mode
   cognitiveMode: string
 
+  // Runtime: '' = classic full agent loop; 'mrav' = micro small-model runtime
+  runtime: string
+
   // Docker
   networkMode: string
   restartPolicy: string
@@ -145,6 +148,7 @@ const defaultConfig: AgentConfig = {
   slackEnabled: false,
   slackBotToken: '',
   cognitiveMode: 'neutra',
+  runtime: '',
   networkMode: 'host',
   restartPolicy: 'unless-stopped',
   extraVolumes: [],
@@ -715,6 +719,12 @@ export function SpawnerPage() {
                   <option value="locrian">Locrian — The Deconstructionist (challenges premises)</option>
                 </select>
               </Field>
+              <Field label="Runtime" hint="Mrav runs the whole agent loop under a hard 8k-token input cap — built for small local models (Gemma 4 E2B/E4B, Qwen3.5-4B class)">
+                <select value={config.runtime} onChange={(e) => update('runtime', e.target.value)} className="input">
+                  <option value="">Classic — full agent loop (default)</option>
+                  <option value="mrav">Mrav — micro runtime, 8k cap (small models)</option>
+                </select>
+              </Field>
             </Section>
 
             {/* Provider API Keys */}
@@ -986,6 +996,7 @@ export function SpawnerPage() {
                     slack_enabled: config.slackEnabled,
                     slack_bot_token: config.slackBotToken,
                     cognitive_mode: config.cognitiveMode,
+                    runtime: config.runtime,
                     network_mode: config.networkMode,
                     restart_policy: config.restartPolicy,
                     extra_volumes: config.extraVolumes,
