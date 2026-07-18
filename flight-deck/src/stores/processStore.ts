@@ -12,6 +12,7 @@ const FLEET_INSTRUCTIONS_KEY = 'fd:process-fleet-instructions'
 const COGNITIVE_MODE_KEY = 'fd:process-cognitive-modes'
 const ECO_MODE_KEY = 'fd:process-eco-modes'
 const NANO_MODE_KEY = 'fd:process-nano-modes'
+const MRAV_MODE_KEY = 'fd:process-mrav-modes'
 const MODEL_OVERRIDE_KEY = 'fd:process-model-overrides'
 
 function loadMap(key: string): Record<string, string> {
@@ -37,6 +38,7 @@ interface ProcessStore {
   cognitiveModeOverrides: Record<string, string>
   ecoModeOverrides: Record<string, boolean>
   nanoModeOverrides: Record<string, boolean>
+  mravModeOverrides: Record<string, boolean>
   modelOverrides: Record<string, { provider: string; model: string }>
 
   fetchProcesses: () => Promise<void>
@@ -59,6 +61,9 @@ interface ProcessStore {
   getEcoMode: (slug: string) => boolean
   setNanoMode: (slug: string, enabled: boolean) => void
   getNanoMode: (slug: string) => boolean
+  setMravMode: (slug: string, enabled: boolean) => void
+  // undefined = not yet known — cards hydrate it from GET /fd/agent-mrav-mode
+  getMravMode: (slug: string) => boolean | undefined
   setModelOverride: (slug: string, provider: string, model: string) => void
   getModelOverride: (slug: string) => { provider: string; model: string } | null
 }
@@ -74,6 +79,7 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   cognitiveModeOverrides: loadMap(COGNITIVE_MODE_KEY),
   ecoModeOverrides: loadBoolMap(ECO_MODE_KEY),
   nanoModeOverrides: loadBoolMap(NANO_MODE_KEY),
+  mravModeOverrides: loadBoolMap(MRAV_MODE_KEY),
   modelOverrides: (() => { try { return JSON.parse(localStorage.getItem(MODEL_OVERRIDE_KEY) || '{}') } catch { return {} } })(),
 
   fetchProcesses: async () => {
@@ -181,6 +187,16 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
 
   getNanoMode: (slug) => get().nanoModeOverrides[slug] || false,
 
+  setMravMode: (slug, enabled) => {
+    const overrides = { ...get().mravModeOverrides, [slug]: enabled }
+    persistMap(MRAV_MODE_KEY, overrides)
+    set({ mravModeOverrides: overrides })
+  },
+
+  // No `|| false`: undefined tells the card to hydrate from the backend,
+  // so a mrav-spawned agent shows its badge without ever being toggled.
+  getMravMode: (slug) => get().mravModeOverrides[slug],
+
   setModelOverride: (slug, provider, model) => {
     const overrides = { ...get().modelOverrides, [slug]: { provider, model } }
     const val = JSON.stringify(overrides)
@@ -204,6 +220,7 @@ registerHydrator((settings) => {
     [COGNITIVE_MODE_KEY, 'cognitiveModeOverrides'],
     [ECO_MODE_KEY, 'ecoModeOverrides'],
     [NANO_MODE_KEY, 'nanoModeOverrides'],
+    [MRAV_MODE_KEY, 'mravModeOverrides'],
     [MODEL_OVERRIDE_KEY, 'modelOverrides'],
   ] as const) {
     const raw = settings[key]

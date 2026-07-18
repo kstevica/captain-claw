@@ -14,6 +14,7 @@ const FLEET_INSTRUCTIONS_KEY = 'fd:container-fleet-instructions'
 const COGNITIVE_MODE_KEY = 'fd:container-cognitive-modes'
 const ECO_MODE_KEY = 'fd:container-eco-modes'
 const NANO_MODE_KEY = 'fd:container-nano-modes'
+const MRAV_MODE_KEY = 'fd:container-mrav-modes'
 
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
@@ -39,6 +40,7 @@ interface ContainerStore {
   fleetInstructionsOverrides: Record<string, string>
   cognitiveModeOverrides: Record<string, string>
   ecoModeOverrides: Record<string, boolean>
+  mravModeOverrides: Record<string, boolean>
   nanoModeOverrides: Record<string, boolean>
 
   fetchContainers: () => Promise<void>
@@ -64,6 +66,9 @@ interface ContainerStore {
   getEcoMode: (id: string) => boolean
   setNanoMode: (id: string, enabled: boolean) => void
   getNanoMode: (id: string) => boolean
+  setMravMode: (id: string, enabled: boolean) => void
+  // undefined = not yet known — cards hydrate it from GET /fd/agent-mrav-mode
+  getMravMode: (id: string) => boolean | undefined
 }
 
 export const useContainerStore = create<ContainerStore>((set, get) => ({
@@ -78,6 +83,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
   cognitiveModeOverrides: loadMap(COGNITIVE_MODE_KEY),
   ecoModeOverrides: loadBoolMap(ECO_MODE_KEY),
+  mravModeOverrides: loadBoolMap(MRAV_MODE_KEY),
   nanoModeOverrides: loadBoolMap(NANO_MODE_KEY),
 
   fetchContainers: async () => {
@@ -290,6 +296,15 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   getNanoMode: (id) => {
     return get().nanoModeOverrides[id] || false
   },
+
+  setMravMode: (id, enabled) => {
+    const overrides = { ...get().mravModeOverrides, [id]: enabled }
+    saveMap(MRAV_MODE_KEY, overrides)
+    set({ mravModeOverrides: overrides })
+  },
+
+  // No `|| false`: undefined tells the card to hydrate from the backend.
+  getMravMode: (id) => get().mravModeOverrides[id],
 }))
 
 registerHydrator((settings) => {
@@ -303,6 +318,7 @@ registerHydrator((settings) => {
     [COGNITIVE_MODE_KEY, 'cognitiveModeOverrides'],
     [ECO_MODE_KEY, 'ecoModeOverrides'],
     [NANO_MODE_KEY, 'nanoModeOverrides'],
+    [MRAV_MODE_KEY, 'mravModeOverrides'],
   ] as const) {
     const raw = settings[key]
     if (raw) {

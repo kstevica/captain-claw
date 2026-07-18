@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift } from 'lucide-react'
+import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift, Bug } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -92,7 +92,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   onDragStart?: (e: React.PointerEvent) => void
   isDragging?: boolean
 }) {
-  const { stopProcess, startProcess, restartProcess, removeProcess, cloneProcess, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode, setEcoMode: storeEcoMode, getEcoMode, setNanoMode: storeNanoMode, getNanoMode } = useProcessStore()
+  const { stopProcess, startProcess, restartProcess, removeProcess, cloneProcess, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode, setEcoMode: storeEcoMode, getEcoMode, setNanoMode: storeNanoMode, getNanoMode, setMravMode: storeMravMode, getMravMode } = useProcessStore()
   const openChat = useChatStore((s) => s.openChat)
   const setModel = useChatStore((s) => s.setModel)
   const session = useChatStore((s) => s.sessions.get(`proc-${proc.slug}`))
@@ -129,6 +129,30 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [ecoSaved, setEcoSaved] = useState(false)
   const nanoMode = getNanoMode(proc.slug)
   const [nanoSaved, setNanoSaved] = useState(false)
+  const mravModeStored = getMravMode(proc.slug)
+  const mravMode = mravModeStored ?? false
+  const [mravSaved, setMravSaved] = useState(false)
+
+  // Hydrate the Mrav state from the backend once per card — an agent
+  // spawned with runtime "mrav" must show its badge without ever having
+  // been toggled in this browser.
+  useEffect(() => {
+    if (mravModeStored !== undefined) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { token, authEnabled } = useAuthStore.getState()
+        const headers: Record<string, string> = {}
+        if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+        const res = await fetch(`/fd/agent-mrav-mode/process/${proc.slug}`, { headers, credentials: 'include' })
+        if (res.ok) {
+          const data = await res.json()
+          if (!cancelled) storeMravMode(proc.slug, !!data.enabled)
+        }
+      } catch { /* stays unknown; badge simply hidden */ }
+    })()
+    return () => { cancelled = true }
+  }, [proc.slug, mravModeStored])
   const { setModelOverride } = useProcessStore()
 
   const isRunning = proc.status === 'running'
@@ -362,6 +386,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
               )}
             </div>
             <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs font-mono text-emerald-400/80 shrink-0">:{proc.web_port}</span>
+            {mravMode && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-400 shrink-0" title="Mrav micro runtime — 8k input cap">
+                <Bug className="h-2.5 w-2.5" /> Mrav
+              </span>
+            )}
             <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium shrink-0 ${badgeCls}`}>
               {isRunning && (
                 <span className="relative flex h-1.5 w-1.5">
@@ -532,6 +561,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                     <Gift className="h-3 w-3" /> Freebie
                   </span>
                 )}
+                {mravMode && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-400" title="Mrav micro runtime — hard 8k-token input cap per LLM call">
+                    <Bug className="h-3 w-3" /> Mrav
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -659,6 +693,32 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
             <span>Nano Mode</span>
           </button>
           {nanoSaved && <span className="text-[10px] text-amber-500">saved</span>}
+          <button
+            onClick={async () => {
+              const next = !mravMode
+              storeMravMode(proc.slug, next)
+              try {
+                const { token, authEnabled } = useAuthStore.getState()
+                const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+                if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+                const res = await fetch(`/fd/agent-mrav-mode/process/${proc.slug}`, {
+                  method: 'PUT', headers, credentials: 'include',
+                  body: JSON.stringify({ enabled: next }),
+                })
+                if (res.ok) { setMravSaved(true); setTimeout(() => setMravSaved(false), 2000) }
+              } catch (err) { console.error('Failed to update mrav mode:', err) }
+            }}
+            className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              mravMode
+                ? 'border-violet-500/40 bg-violet-500/15 text-violet-400 hover:bg-violet-500/25'
+                : 'border-zinc-700 bg-zinc-800/50 text-zinc-500 hover:bg-zinc-700/50 hover:text-zinc-400'
+            }`}
+            title="Mrav — micro agentic runtime: the whole loop runs under a hard 8k-token input cap. Built for small local models (Gemma 4 E2B/E4B, Qwen3.5-4B class). Takes effect on the next message."
+          >
+            <Bug className="h-3 w-3" />
+            <span>Mrav</span>
+          </button>
+          {mravSaved && <span className="text-[10px] text-violet-400">saved</span>}
         </div>
 
         {/* Forwarding Task */}

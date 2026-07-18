@@ -31,6 +31,49 @@ from captain_claw.llm_session_logger import get_llm_session_logger
 from captain_claw.session import Session, get_session_manager
 from captain_claw.tools import get_tool_registry
 
+# mrav_mode.txt cache: path → (mtime, tri-state). Mirrors the eco/nano
+# runtime-flag pattern in InstructionLoader (mtime-guarded re-read so the
+# Flight Deck toggle takes effect without a restart).
+_MRAV_FLAG_CACHE: dict[str, tuple[float, bool | None]] = {}
+
+
+def _mrav_flag_state(path: Path | None = None) -> bool | None:
+    """Tri-state Mrav runtime flag: True/False from mrav_mode.txt, None when absent.
+
+    None means "no runtime override" — the caller falls back to config.
+    Unlike eco/nano (present=on), this flag stores an explicit on/off so it
+    can also force-disable an agent whose config.yaml enables mrav.
+    """
+    if path is None:
+        try:
+            path = Path("~/.captain-claw/mrav_mode.txt").expanduser()
+        except Exception:
+            path = Path("/tmp/.captain-claw/mrav_mode.txt")
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except FileNotFoundError:
+        _MRAV_FLAG_CACHE.pop(key, None)
+        return None
+    except Exception:
+        cached = _MRAV_FLAG_CACHE.get(key)
+        return cached[1] if cached else None
+    cached = _MRAV_FLAG_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        text = path.read_text(encoding="utf-8").strip().lower()
+    except Exception:
+        return cached[1] if cached else None
+    if text in ("on", "true", "1", "yes"):
+        state: bool | None = True
+    elif text in ("off", "false", "0", "no"):
+        state = False
+    else:
+        state = None
+    _MRAV_FLAG_CACHE[key] = (mtime, state)
+    return state
+
 
 class Agent(
     AgentOrchestrationMixin,
@@ -443,6 +486,12 @@ class Agent(
     # and with the flag off these overrides are pure pass-throughs.
 
     def _mrav_enabled(self) -> bool:
+        # Runtime flag file (Flight Deck toggle, like eco/nano) overrides
+        # config in BOTH directions: "on" enables a classic-spawned agent,
+        # "off" disables a mrav-spawned one. Absent → config decides.
+        flag = _mrav_flag_state()
+        if flag is not None:
+            return flag
         try:
             cfg = get_config()
             # `is True` on purpose: a mocked/partial config must never route

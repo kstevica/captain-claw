@@ -587,6 +587,32 @@ async def test_runtime_honest_when_steps_exhausted(tmp_path: Path):
     assert "ran out of steps" in reply.lower()
 
 
+def test_mrav_flag_state_tristate_and_mtime_cache(tmp_path: Path):
+    """The FD card toggle writes mrav_mode.txt; the agent reads it tri-state."""
+    import os
+
+    from captain_claw.agent import _mrav_flag_state
+
+    flag = tmp_path / "mrav_mode.txt"
+    assert _mrav_flag_state(flag) is None  # absent → config decides
+
+    base = 1_000_000_000
+    flag.write_text("on")
+    os.utime(flag, (base, base))
+    assert _mrav_flag_state(flag) is True
+
+    flag.write_text("off")
+    os.utime(flag, (base + 10, base + 10))
+    assert _mrav_flag_state(flag) is False  # explicit off overrides config-on
+
+    flag.write_text("gibberish")
+    os.utime(flag, (base + 20, base + 20))
+    assert _mrav_flag_state(flag) is None  # unparseable → no override
+
+    flag.unlink()
+    assert _mrav_flag_state(flag) is None
+
+
 @pytest.mark.asyncio
 async def test_runtime_persona_rendered_in_act_prompt(tmp_path: Path):
     provider = FakeProvider(
