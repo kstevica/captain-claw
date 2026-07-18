@@ -82,6 +82,7 @@ const LLM_PROVIDERS = [
   { value: 'openrouter', label: 'OpenRouter' },
   { value: 'xai', label: 'xAI' },
   { value: 'litert', label: 'LiteRT (local Gemma)' },
+  { value: 'browser', label: 'Browser tab (Local inference)' },
 ] as const
 
 type ProviderKeys = Record<string, string>

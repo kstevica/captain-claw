@@ -99,7 +99,7 @@ interface SetsBlob { sets: TierSet[]; activeSetId: string }
 
 // ── Constants ────────────────────────────────────────────────────────
 
-export const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter', 'litert']
+export const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter', 'litert', 'browser']
 
 export const TIER_ORDER = ['reason', 'balanced', 'fast', 'longctx', 'coding', 'vision', 'micro']
 
