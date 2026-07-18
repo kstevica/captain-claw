@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.6-purple)](release-notes/RELEASE_NOTES_0.7.6.md)
+[![Version](https://img.shields.io/badge/version-0.7.7-purple)](release-notes/RELEASE_NOTES_0.7.7.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](#quick-start)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#multi-model-support)
 
@@ -14,7 +14,7 @@
 
 ![Flight Deck — spawn a team of specialists, monitor them live, and chat with any one from a single dashboard](docs/screenshots/flight-deck.png)
 
-<p align="center"><strong>6 orchestration modes</strong> &nbsp;·&nbsp; <strong>48 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>31 ready-made specialists</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong></p>
+<p align="center"><strong>6 orchestration modes</strong> &nbsp;·&nbsp; <strong>48 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>31 ready-made specialists</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
 
 A **self-hosted framework for orchestrating fleets of specialist AI agents** — from **ensemble reasoning** (six orchestration modes) to a **full agentic coding pipeline** (plan → independent review → ship). Model-agnostic and local-friendly: connect OpenAI, Anthropic, Google Gemini, DeepSeek, Ollama, or OpenRouter (plus "Sign in with ChatGPT" — no API key), or run 100% local with Ollama. Backed by 48 built-in tools per agent, persistent cross-session memory, and autonomous "dream cycle" cognition.
 
@@ -66,6 +66,18 @@ Captain Claw is **MIT licensed and free forever** — your data stays on your ma
 </p>
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
+
+## What's New in 0.7.7
+
+**Mrav — small models do real work · the village in first person.** A parallel micro agentic runtime runs real tool-using loops on 2–4B models (Gemma 4 E2B/E4B, Qwen3.5 4B) under a **hard 8k-token input cap per LLM call** — locally via Ollama or **in your browser tab** via WebGPU. And Iskra's village becomes a place you can **enter in first person**. Everything opt-in; defaults byte-identical.
+
+- **The Mrav runtime** — a hard token ledger, blackboard state outside the model, a step-decomposed loop (plan → act-one-tool → digest → compress), and **grammar-constrained JSON** at every step. Switch any agent to it live (agent-card toggle + violet badge), pick it at spawn, flag it on Quick chat, or mint archetypes that are born micro. Live-evaled: Qwen3.5-4B 5/6 · Gemma 4 E4B 4/6 · E2B 3/6.
+- **Browser LLM** (Sidebar → System) — your tab becomes an inference worker: WebLLM on WebGPU, 61 models (up to **Qwen3.5 9B at 6.3 GB**), an engine-window picker, a downloaded-weights manager, and a usage log. Tools stay on the server; only tokens are made in the tab — prod needs no GPU. 0.35s/step once the KV pin is warm.
+- **Beings think micro** — a third cognition routes the JSON faculties (orient/talk/journal/connect) grammar-locked to the micro tier (~1–2k tokens instead of a 34–36k body turn); ACT and the anti-theater write gate stay on the body. Per-call wallet metering; loud fallback events.
+- **Vatra micro workers** — an opt-in Quality lever spawns extract/digest/format-shaped subtasks on the mrav runtime while reasoning roles keep their tiers; an archetype tier of `micro` always means mrav.
+- **The village in first person** — roam Iskra's village as a quiet ghost: a three.js voxel world on the real village clock, Iskre walking their true routes (they sense you near), signs that land as percepts, reading stands for any building's work, a live ghost roster (parent + public visitors see each other), full mobile controls. Plus: visiting federated beings now have real bodies in the host village, letters read like an inbox, wallet recharge, and a mind graph that can't be wiped by a timed-out dream.
+
+See [RELEASE_NOTES_0.7.7.md](release-notes/RELEASE_NOTES_0.7.7.md).
 
 ## What's New in 0.7.6
 

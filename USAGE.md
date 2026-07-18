@@ -4308,6 +4308,28 @@ Three cross-mode capabilities landed in 0.7.3 for Basna, Vatra, and Code. **All 
 
 **Max parallel agents.** A **Max parallel** input (0 = unlimited) caps how many agent turns run at once — set it low (e.g. 2) for local models so parallel prefills don't exhaust the serving box's memory.
 
+### Mrav — the micro runtime & Browser LLM (NEW in 0.7.7)
+
+**Mrav** is a parallel agentic runtime for small models (Gemma 4 E2B/E4B, Qwen3.5 4B class) with a **hard 8,192-token input cap per LLM call**. The classic agent is untouched — Mrav shares its tools, tiers and chat transport, but replaces prompt assembly entirely: a token ledger enforces the cap, state lives on a blackboard outside the model, and the loop runs in small steps (plan → act-one-tool → digest → compress) with **grammar-constrained JSON** replies (Ollama structured outputs / WebLLM xgrammar). Honest by design: failures surface as errors, never silent upgrades; an optional escalation retry is off by default.
+
+**Setting it up.** Library → Model Tiers → **micro**: point it at a small local model (`ollama` / `qwen3.5:4b` is the live-eval champion) or at provider **`browser`** (model name is advisory; leave Base URL empty). The tier's input/output context sizes become the mrav caps — 8k/1k default, raise to 32k/8k if your model and RAM allow.
+
+**Turning it on.**
+- **Spawner** → Runtime: *Mrav — micro runtime, 8k cap* (next to Cognitive Mode).
+- **Agent card** → the **Mrav** button beside Eco/Nano toggles it live (violet badge appears next to the status pill; takes effect on the next message, no restart). The flag file overrides the spawn config in both directions.
+- **Quick chat** → tick *Mrav micro runtime* and every archetype card resolves through the micro tier (chips flip to `micro` + `mrav`).
+- **Archetypes** → the Library editor has a Runtime field; a `mrav` archetype spawns micro everywhere, with its role injected as a one-line persona (a full SOP can't fit 8k).
+- **Beings** → the card's *thinks* dropdown gains **Micro (mrav)**: the JSON faculties (orient/talk/journal/connect) run grammar-locked on the micro tier while ACT and the write gate stay on the body; each micro thought debits the wallet (`tick-micro:*`), and any miss falls back to the body with a `micro_fallback_body` event.
+- **Vatra** → Quality tab → *Micro workers (mrav)*: extract/digest/format-shaped subtasks spawn on the micro runtime; reasoning roles, the planner, reporter and fact-checker keep their tiers. An archetype tier of `micro` always means mrav, lever or not.
+
+**Browser LLM (Sidebar → System).** Pick a model, press **Start**, and the tab becomes an inference worker for *your* agents: WebLLM on WebGPU, weights cached by the browser after the first download. Agents with provider `browser` route through Flight Deck's broker to the tab — tools and state stay on the server, only tokens are made in the browser, so the server needs no GPU (works against a remote server too; the tab dials out). The page offers 9 curated models (Qwen3.5 4B default up to **Qwen3.5 9B**, ~6.3 GB) plus the full 52-model catalog, an **engine-window picker** (9k matches the default mrav caps; 40k a raised 32k/8k tier), a **Downloaded models** panel (cached weights, real disk usage, one-click remove), and a **Usage log** of every completion served. One tab serves one job at a time — open a second tab (or use Ollama) for parallel micro workers.
+
+**Eval harness.** `python scripts/mrav_eval.py --model qwen3.5:4b` runs 6 offline agentic tasks against any model and prints pass/fail with token counts — the gate for blessing new models. Live roster: Qwen3.5-4B 5/6 · Gemma 4 E4B 4/6 · Gemma 4 E2B 3/6.
+
+### The village in first person (NEW in 0.7.7)
+
+Open the **Village** page and enter the world: a three.js voxel village built from the same map data as the isometric view — buildings, streets, seeded props, real-clock day/night. Walk with collision and jump, or press **F** to phase through walls. The Iskre walk their true routes beside you and react when you come near; plant a **sign** in the grass and it lands as a percept at the being's next mind tick; press **R** at a building's reading stand to browse that iskra's files in place. Ghosts see each other — you'll meet public visitors from the un-gated `/village` page (identity pills: violet parent, amber visitor). Full touch controls on mobile (joystick, jump/fly/note/read, gyro look).
+
 ### Iskra — Living Beings (NEW in 0.7.6)
 
 A **Beings** page (Sidebar → Life) where you conceive and **raise** persistent digital beings. A being is not a chatbot or a scheduled agent — it has a **genome**, a **token wallet**, **drives**, and a **life loop** that ticks on its own heartbeat. It wakes, journals, tends a garden of files, makes and connects things, earns, and grows through developmental **stages you parent it through**. Everything is built on one rule — **anti-theater**: the ground truth for "did she make something" is the **git diff of her home**, never her own narration.
