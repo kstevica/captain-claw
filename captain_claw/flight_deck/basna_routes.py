@@ -74,7 +74,7 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/fd/basna", tags=["basna"])
 
 _INSTRUCTIONS_DIR = Path(__file__).parent.parent / "instructions"
-_VALID_TIERS = {"reason", "balanced", "fast", "longctx", "coding", "vision"}
+_VALID_TIERS = {"reason", "balanced", "fast", "longctx", "coding", "vision", "micro"}
 _VALID_DIFFICULTY = {"trivial", "moderate", "hard"}
 _VALID_MERGE = {"converge", "diverge"}
 

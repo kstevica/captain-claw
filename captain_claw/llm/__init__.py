@@ -204,6 +204,23 @@ class LLMProvider(ABC):
                 pass
         return response
 
+    async def complete_structured(
+        self,
+        messages: list[Message],
+        response_schema: dict[str, Any],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Completion constrained to a JSON schema, where the backend supports it.
+
+        Providers with native constrained decoding (Ollama ``format``,
+        browser xgrammar) override this. The default falls back to a plain
+        completion — safe because callers must describe the expected JSON
+        shape in the prompt anyway (grammar never injects the schema into
+        the prompt), and callers validate + retry regardless.
+        """
+        return await self.complete(messages, None, temperature, max_tokens)
+
     @abstractmethod
     def count_tokens(self, text: str) -> int:
         pass
@@ -1728,6 +1745,7 @@ class OllamaProvider(LLMProvider):
         tools: list[ToolDefinition] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        response_schema: dict[str, Any] | None = None,
     ) -> LLMResponse:
         log.info(
             "OllamaProvider.complete entry",
@@ -1763,6 +1781,10 @@ class OllamaProvider(LLMProvider):
             body["think"] = self.think
         if ollama_tools:
             body["tools"] = ollama_tools
+        if response_schema:
+            # Ollama structured outputs: `format` takes a full JSON schema
+            # and constrains decoding via grammar (GBNF-backed).
+            body["format"] = response_schema
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -1884,6 +1906,22 @@ class OllamaProvider(LLMProvider):
         # Should not reach here, but just in case:
         err_detail = str(last_exc) or type(last_exc).__name__ if last_exc else "unknown"
         raise LLMAPIError(f"Ollama HTTP error after retries: {err_detail}")
+
+    async def complete_structured(
+        self,
+        messages: list[Message],
+        response_schema: dict[str, Any],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        """Native structured outputs via Ollama's grammar-backed `format`."""
+        return await self.complete(
+            messages,
+            None,
+            temperature,
+            max_tokens,
+            response_schema=response_schema,
+        )
 
     async def complete_streaming(
         self,

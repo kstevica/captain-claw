@@ -2,9 +2,10 @@
 
 import asyncio
 import json
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC
 from pathlib import Path
 from typing import Any
-from typing import Callable
 
 from captain_claw.agent_chunked_processing_mixin import AgentChunkedProcessingMixin
 from captain_claw.agent_completion_mixin import AgentCompletionMixin
@@ -13,8 +14,8 @@ from captain_claw.agent_file_ops_mixin import AgentFileOpsMixin
 from captain_claw.agent_guard_mixin import AgentGuardMixin
 from captain_claw.agent_model_mixin import AgentModelMixin
 from captain_claw.agent_orchestration_mixin import AgentOrchestrationMixin
-from captain_claw.agent_playbook_mixin import AgentPlaybookMixin
 from captain_claw.agent_pipeline_mixin import AgentPipelineMixin
+from captain_claw.agent_playbook_mixin import AgentPlaybookMixin
 from captain_claw.agent_reasoning_mixin import AgentReasoningMixin
 from captain_claw.agent_research_mixin import AgentResearchMixin
 from captain_claw.agent_scale_detection_mixin import AgentScaleDetectionMixin
@@ -163,8 +164,8 @@ class Agent(
         if not isinstance(timing, dict):
             timing = {}
             self.session.metadata["timing"] = timing
-        from datetime import datetime, timezone
-        now_iso = datetime.now(timezone.utc).isoformat()
+        from datetime import datetime
+        now_iso = datetime.now(UTC).isoformat()
         timing[kind] = now_iso
         # First activity we ever see for this session doubles as its start.
         timing.setdefault("session_started_at", now_iso)
@@ -222,8 +223,8 @@ class Agent(
         timing = self.session.metadata.get("timing")
         if not isinstance(timing, dict) or not timing:
             return ""
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
+        from datetime import datetime
+        now = datetime.now(UTC)
 
         def _ago(iso: str) -> str | None:
             try:
@@ -231,7 +232,7 @@ class Agent(
             except (ValueError, TypeError):
                 return None
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return self._humanize_age((now - dt).total_seconds())
 
         # Next scheduled/cron run ETA (forward-looking), from the cache the
@@ -242,7 +243,7 @@ class Agent(
             try:
                 dt = datetime.fromisoformat(str(next_cron["eta_iso"]))
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 until = self._humanize_until((dt - now).total_seconds())
                 label = str(next_cron.get("label", "") or "").strip()
                 next_run_str = f"{until} ({label})" if label else until
@@ -434,3 +435,113 @@ class Agent(
             )
         except Exception:
             pass
+
+    # ── Mrav micro runtime (docs/mrav-micro-agent-plan.md) ──────────────
+    # Parallel small-model loop: when `mrav.enabled` is set in config, the
+    # chat surface delegates to MravRuntime. Everything else about this
+    # Agent — session store, callbacks, web/WS wiring — stays identical,
+    # and with the flag off these overrides are pure pass-throughs.
+
+    def _mrav_enabled(self) -> bool:
+        try:
+            cfg = get_config()
+            # `is True` on purpose: a mocked/partial config must never route
+            # chat into the micro runtime by accident (mock attrs are truthy).
+            return getattr(getattr(cfg, "mrav", None), "enabled", False) is True
+        except Exception:
+            return False
+
+    async def complete(self, user_input: str) -> str:
+        if self._mrav_enabled():
+            return await self._mrav_complete(user_input)
+        return await super().complete(user_input)
+
+    async def stream(self, user_input: str) -> AsyncIterator[str]:
+        if not self._mrav_enabled():
+            async for chunk in super().stream(user_input):
+                yield chunk
+            return
+        self._set_runtime_status("thinking")
+        content = await self._mrav_complete(user_input)
+        self._set_runtime_status("streaming")
+        chunk_size = 24
+        for idx in range(0, len(content), chunk_size):
+            yield content[idx : idx + chunk_size]
+        self._set_runtime_status("waiting")
+
+    def _mrav_runtime_instance(self) -> Any:
+        cached = getattr(self, "_mrav_runtime_cache", None)
+        if cached is not None:
+            return cached
+        from captain_claw.llm import create_provider
+        from captain_claw.mrav import MravRuntime
+
+        cfg = get_config()
+        mc = cfg.mrav
+        # Dedicated provider: micro context sizing (for Ollama, num_ctx must
+        # cover input + generation) and thinking off — never the classic
+        # 160k allocation.
+        provider = create_provider(
+            provider=cfg.model.provider,
+            model=cfg.model.model,
+            api_key=(cfg.model.api_key or None),
+            base_url=(cfg.model.base_url or None),
+            temperature=mc.temperature,
+            max_tokens=mc.output_cap,
+            num_ctx=mc.input_cap + mc.output_cap,
+            tokens_per_minute=cfg.model.tokens_per_minute,
+            think=False,
+        )
+        escalate_provider = None
+        if mc.escalate and mc.escalate_model:
+            escalate_provider = create_provider(
+                provider=(mc.escalate_provider or cfg.model.provider),
+                model=mc.escalate_model,
+                api_key=(mc.escalate_api_key or cfg.model.api_key or None),
+                base_url=(mc.escalate_base_url or None),
+                temperature=mc.temperature,
+                max_tokens=mc.output_cap,
+                num_ctx=mc.input_cap + mc.output_cap,
+                think=False,
+            )
+        try:
+            session_key = str(self._current_session_slug() or "default")
+        except Exception:
+            session_key = "default"
+        runtime = MravRuntime(
+            provider=provider,
+            tools=self.tools,
+            config=mc,
+            session_key=session_key,
+            state_dir=self.workspace_base_path / "mrav",
+            session_id=getattr(self.session, "id", None),
+            escalate_provider=escalate_provider,
+            status_callback=self.status_callback,
+            tool_output_callback=self.tool_output_callback,
+        )
+        self._mrav_runtime_cache = runtime
+        return runtime
+
+    async def _mrav_complete(self, user_input: str) -> str:
+        if not self._initialized:
+            await self.initialize()
+        self._add_session_message(role="user", content=user_input)
+        runtime = self._mrav_runtime_instance()
+        try:
+            reply = await runtime.run(user_input, cancel_event=self.cancel_event)
+            self._last_complete_success = True
+        except Exception as exc:
+            # Honest failure — surface it in chat instead of a dead socket;
+            # the step trace next to the blackboard has the details.
+            reply = f"Mrav runtime error: {type(exc).__name__}: {exc}"
+            self._last_complete_success = False
+        self.last_usage = self._empty_usage()
+        for key, value in (runtime.last_usage or {}).items():
+            if key in self.last_usage:
+                try:
+                    self.last_usage[key] = int(value)
+                    self.total_usage[key] = self.total_usage.get(key, 0) + int(value)
+                except (TypeError, ValueError):
+                    continue
+        self._add_session_message(role="assistant", content=reply)
+        return reply

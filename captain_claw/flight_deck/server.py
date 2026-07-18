@@ -1089,6 +1089,13 @@ class AgentConfig(BaseModel):
     # Cognitive mode
     cognitive_mode: str = "neutra"
 
+    # Runtime — "" / "classic" = the full 16-mixin agent loop; "mrav" = the
+    # micro small-model runtime (hard 8k input cap per LLM call, see
+    # docs/mrav-micro-agent-plan.md). Spawn writes `mrav.enabled: true` into
+    # the agent's config.yaml; the agent process swaps loops behind the same
+    # web server and chat WS.
+    runtime: str = ""
+
     # Docker
     network_mode: str = "host"
     restart_policy: str = "unless-stopped"
@@ -1334,6 +1341,8 @@ def _build_config_yaml(c: AgentConfig) -> str:
             "default_mode": c.cognitive_mode,
         },
     }
+    if (c.runtime or "").strip().lower() == "mrav":
+        cfg["mrav"] = {"enabled": True}
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
@@ -1439,6 +1448,8 @@ def _build_process_config_yaml(c: AgentConfig, agent_dir: Path) -> str:
         "slack": {"enabled": c.slack_enabled, "bot_token": c.slack_bot_token},
         "logging": {"level": "INFO", "format": "console"},
     }
+    if (c.runtime or "").strip().lower() == "mrav":
+        cfg["mrav"] = {"enabled": True}
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
