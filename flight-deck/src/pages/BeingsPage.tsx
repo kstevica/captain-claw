@@ -3101,7 +3101,7 @@ function BeingCard({ item, meta, onChanged }: {
                           </button>
                           <button
                             onClick={() => void act('body', () => setBodyConfig(item.slug, conn)).then(() => setConnOpen(false))}
-                            className="rounded border border-violet-500/50 bg-violet-500/10 px-2 py-1 text-[10px] text-violet-200 hover:bg-violet-500/20 focus:outline-none">
+                            className="rounded bg-violet-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-violet-500 focus:outline-none">
                             Save
                           </button>
                         </div>
