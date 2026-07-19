@@ -415,6 +415,26 @@ def test_beings_at_a_building_stand_outside_its_walls(store):
     assert len(lib) == 2 and lib[0] != lib[1]
 
 
+def test_a_crowd_at_a_tiny_building_never_shares_a_pixel(store):
+    """The reported FPV bug: Zvjezda + Lada (+ a guest) all at the 1x1 Well
+    collapsed onto one spot. A crowd at even a tiny building must take
+    DISTINCT walkable apron tiles — a whole tile apart, not tight offsets
+    that round together."""
+    world.ensure_village(store, OWNER, now=NOW)
+    solid = world._building_tiles(store, OWNER)
+    slugs = []
+    for nm in ("Zvjezda", "Lada", "Mira", "Nada"):
+        s = _being(store, nm, stage="adult")["slug"]
+        _park(store, s, "well")                          # all at the 1x1 Well
+        slugs.append(s)
+    m = world.village_map_payload(store, OWNER, now=NOW)
+    at_well = [e for e in m["beings"] if e["at"] == "well"]
+    assert len(at_well) == len(slugs)
+    tiles = [world.tile_of(e["xy"][0], e["xy"][1]) for e in at_well]
+    assert len(set(tiles)) == len(tiles)                 # every one a distinct tile
+    assert all(t not in solid for t in tiles)            # and none in the wall
+
+
 def test_walking_beings_are_never_seated(store):
     a = _being(store, "Ada", stage="adult")
     b = _being(store, "Bela", stage="adult")

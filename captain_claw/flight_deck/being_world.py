@@ -1334,13 +1334,55 @@ def _nudge_off_solid(xy: tuple[int, int], solid: set,
     return (int(xy[0]), int(xy[1]))
 
 
+def _apron_tiles(p: dict, solid: set, plot: int) -> list[tuple[int, int]]:
+    """The walkable tiles hugging a building's outer edge — where a crowd
+    stands, ONE per tile, never on a wall. Door-front first so beings gather
+    at the entrance, then by distance; deterministic tie-break."""
+    fp = set(footprint_tiles(p))
+    edge = int(plot) // TILE - 1
+    apron: set = set()
+    for tx, ty in fp:
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                c = (tx + dx, ty + dy)
+                if c in fp or c in solid:
+                    continue
+                if not (1 <= c[0] < edge and 1 <= c[1] < edge):
+                    continue
+                apron.add(c)
+    fx, fy = tile_of(*_building_front(p))
+    return sorted(apron, key=lambda c: ((c[0] - fx) ** 2 + (c[1] - fy) ** 2, c))
+
+
+def _seat_at_building(p: dict, slugs, solid: set,
+                      plot: int) -> dict[str, tuple[int, int]]:
+    """Seat every being at a building onto a DISTINCT walkable apron tile —
+    stable per-slug (hash + linear probe in sorted-slug order), door-front
+    first. This is why two Iskre never share a pixel at a building: they take
+    different TILES of the ring, a whole tile apart, not tight offsets that
+    round together."""
+    apron = _apron_tiles(p, solid, plot)
+    if not apron:                                    # walled in on all sides
+        f = _nudge_off_solid(_building_front(p), solid, plot)
+        return {s: f for s in slugs}                 # last-resort (degenerate)
+    n = len(apron)
+    taken: dict[int, str] = {}
+    seats: dict[str, tuple[int, int]] = {}
+    for slug in sorted(slugs):
+        pref = zlib.crc32(str(slug).encode("utf-8")) % n
+        idx = next(((pref + k) % n for k in range(n)
+                    if (pref + k) % n not in taken), pref)
+        taken[idx] = slug
+        seats[slug] = tile_center(apron[idx][0], apron[idx][1])
+    return seats
+
+
 def _seat_parked(store: BeingsStore, owner_id: str, beings: list[dict]) -> None:
     """Seat every PARKED entry (resident or guest) on WALKABLE ground at its
-    place: co-occupants fan onto distinct spots, and at a solid BUILDING
-    everyone stands OUT FRONT — never inside the walls (the anchor a
-    building's row carries is its interior heart). Re-run over residents and
-    guests together so a guest joins the same rings and no one shares a
-    pixel."""
+    place: on a GROUND they fan around its heart; at a solid BUILDING they
+    take DISTINCT tiles of its apron — never inside the walls (the anchor a
+    building's row carries is its interior heart), never two on one pixel.
+    Re-run over residents and guests together so a guest joins the same rings."""
     places_by_id = {p["id"]: p for p in store.village_places(owner_id)}
     pw, _ph = plot_dims(store, owner_id)               # real plot (grow map)
     solid = _building_tiles(store, owner_id)           # walls to keep out of
@@ -1358,20 +1400,19 @@ def _seat_parked(store: BeingsStore, owner_id: str, beings: list[dict]) -> None:
         # walkable); a BUILDING always does — its heart is inside the walls.
         if len(here) < 2 and not building:
             continue
-        w = int(p.get("w") or 0) or footprint_for(p)[0]
-        h = int(p.get("h") or 0) or footprint_for(p)[1]
-        anchor = _building_front(p) if building else (int(p["x"]), int(p["y"]))
-        if len(here) == 1:
-            xy = _nudge_off_solid(anchor, solid, pw)
-            here[0]["xy"] = [xy[0], xy[1]]
-            continue
-        seats = standing_spots(anchor, (w, h, kind),
-                               [e["slug"] for e in here], plot=pw)
+        slugs = [e["slug"] for e in here]
+        if building:
+            seats = _seat_at_building(p, slugs, solid, pw)
+        else:
+            w = int(p.get("w") or 0) or footprint_for(p)[0]
+            h = int(p.get("h") or 0) or footprint_for(p)[1]
+            seats = standing_spots((int(p["x"]), int(p["y"])),
+                                   (w, h, kind), slugs, plot=pw)
         for e in here:
             xy = seats.get(e["slug"])
             if xy:
-                xy = _nudge_off_solid(xy, solid, pw)
-                e["xy"] = [xy[0], xy[1]]
+                xy = _nudge_off_solid(xy, solid, pw)   # grounds safety net
+                e["xy"] = [int(xy[0]), int(xy[1])]
 
 
 def wander_visitors(store: BeingsStore, owner_id: str,
