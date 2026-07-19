@@ -411,6 +411,39 @@ async def remove_object(object_id: str,
     return {"ok": True}
 
 
+class RoadRequest(BaseModel):
+    x: int
+    y: int
+
+
+@router.post("/village-map/road")
+async def toggle_road(body: RoadRequest,
+                      user: dict = Depends(get_current_user)):
+    """Road-building: the parent paints (or lifts) a street tile at (x, y).
+    A hand-drawn road renders, speeds walking, and keeps beings from
+    building on it — exactly like a carved one — and survives a redraw."""
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    _run(being_world.ensure_village, store, user["id"])
+    tx, ty = being_world.tile_of(int(body.x), int(body.y))
+    _run(store.toggle_manual_road, user["id"], tx, ty)
+    return {"ok": True}
+
+
+class PlotSizeRequest(BaseModel):
+    size: int
+
+
+@router.post("/village-map/size")
+async def set_plot_size(body: PlotSizeRequest,
+                        user: dict = Depends(get_current_user)):
+    """Grow map: set the (square) plot size — grow-only, clamped and snapped
+    to a whole tile grid. Existing places, homes, objects and roads keep
+    their coordinates; the map just gains open room to build in."""
+    store = get_store()
+    return _run(store.set_plot_size, user["id"], int(body.size))
+
+
 @router.post("/village-map/presence")
 async def felt_presence(body: PresenceRequest,
                         user: dict = Depends(get_current_user)):

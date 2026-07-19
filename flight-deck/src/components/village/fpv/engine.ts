@@ -39,6 +39,8 @@ export interface FPVHandle {
   // a fresh map payload: the world stays, the walkers update (Phase 2)
   setBeings: (beings: VillageBeingPos[], places: VillagePlace[], fetchedAtMs: number) => void
   setNotes: (notes: VillageNote[]) => void
+  // re-mesh the static world in place (a thing built / road painted inside FPV)
+  rebuild: (world: BuiltWorld) => void
   // the other ghosts here right now (Phase 5): parent + visitors
   setGhosts: (ghosts: GhostPresence[]) => void
   // where the ghost stands, in village units (for presence + planting)
@@ -144,8 +146,18 @@ export function createFPV(canvas: HTMLCanvasElement, world: BuiltWorld,
   scene.fog = new THREE.Fog(0x9cc4e8, 60, 220)
 
   const { texture: atlas, uvFor } = buildAtlas()
-  const { solid, glow } = buildMeshes(world, atlas, uvFor)
+  // the static world is re-meshable in place (rebuild) so a thing built or
+  // a road painted from inside the FPV appears without leaving.
+  let { solid, glow } = buildMeshes(world, atlas, uvFor)
   scene.add(solid); scene.add(glow)
+  const rebuild = (next: BuiltWorld) => {
+    world = next
+    scene.remove(solid); solid.geometry.dispose()
+    scene.remove(glow); glow.geometry.dispose()
+    const m = buildMeshes(world, atlas, uvFor)
+    solid = m.solid; glow = m.glow
+    scene.add(solid); scene.add(glow)
+  }
 
   const hemi = new THREE.HemisphereLight(0xdfeaff, 0x9a8f78, 0.9)
   const sun = new THREE.DirectionalLight(0xffffff, 1.5)
@@ -504,6 +516,7 @@ export function createFPV(canvas: HTMLCanvasElement, world: BuiltWorld,
     },
     setBeings: (beings, places, fetchedAtMs) => figures.sync(beings, places, fetchedAtMs),
     setNotes: (notes) => { signs.sync(notes); lastStatus = '' },
+    rebuild: (next: BuiltWorld) => rebuild(next),
     setGhosts: (roster) => ghosts.sync(roster),
     positionUnits: toUnits,
     enterTouch: () => { if (!locked) { soft = true; locked = true; hooks.onLock(true) } },

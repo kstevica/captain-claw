@@ -725,6 +725,18 @@ export const removeVillageObject = (id: string) =>
   fdFetch<{ ok: boolean }>(`/beings/village-map/object/${id}`, {
     method: 'DELETE',
   })
+// Road-building: paint/lift a street tile at a village-unit spot.
+export const toggleVillageRoad = (x: number, y: number) =>
+  fdFetch<{ ok: boolean }>('/beings/village-map/road', {
+    method: 'POST', body: JSON.stringify({ x, y }),
+  })
+// Grow map: set the (square) plot size — grow-only, clamped server-side.
+export const PLOT_SIZES = [1000, 1400, 1800, 2400] as const
+export const setVillagePlotSize = (size: number) =>
+  fdFetch<{ plot_w: number; plot_h: number; tile_size: number }>(
+    '/beings/village-map/size', {
+      method: 'POST', body: JSON.stringify({ size }),
+    })
 
 // ── The public square (parent side) ──
 

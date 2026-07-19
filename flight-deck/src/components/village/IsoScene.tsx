@@ -5,13 +5,14 @@
 // function of the clock, so one snapshot animates without polling).
 // Dark theme is evening: cooler ground, and the lamps come on.
 
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { VillageBeingPos, VillageMapData, VillagePlace } from '../../services/beings'
 import { IskraAvatar } from './avatars'
 import { BUILDING_SPRITES, OBJECT_SPRITES, PROP_SPRITES, Conifer, Cottage as CottageSprite, spriteForPlace } from './buildings'
 
 const TILE = 20
-const GRID = 50
+const GRID = 120     // generous clamp ceiling (matches backend GRID_MAX) —
+                     // real plot size comes from the payload (grow map)
 const ISO_X = 1.6           // per world unit → a 20-unit tile spans 32 px
 const ISO_Y = 0.8           // …and 16 px tall: the classic 2:1 diamond
 
@@ -62,32 +63,42 @@ interface SceneProps {
   // still DRAW the objects — they just aren't selectable there.
   selObject?: string | null
   onObject?: (id: string | null) => void
-  // parent-build: when a kind is armed, a background click reports the
-  // village-unit spot instead of deselecting (the parent's hand on the map).
+  // parent-build: when a kind is armed OR road mode is on, a background
+  // click reports the village-unit spot instead of deselecting.
   buildKind?: string | null
+  roadMode?: boolean
   onGround?: (x: number, y: number) => void
 }
 
 export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fill,
-                           selObject, onObject, buildKind, onGround }: SceneProps) {
+                           selObject, onObject, buildKind, roadMode, onGround }: SceneProps) {
   const dark = typeof document !== 'undefined'
     && document.documentElement.classList.contains('dark')
   const C = dark ? NIGHT : DAY
 
+  // the real plot size (grow map) — the ground diamond and the home view
+  // scale with it; iso() itself is plot-agnostic.
+  const plot = data.grid?.plot_w || 1000
+  const isoW = 1.6 * plot, isoH = 0.8 * plot     // half-width / quarter-height
   // pan + zoom: a viewBox the wheel shrinks and the pointer drags
-  const HOME_VB: [number, number, number, number] = [-1660, -140, 3320, 1900]
+  const HOME_VB = useMemo<[number, number, number, number]>(
+    () => [-isoW - 60, -isoH * 0.175, isoW * 2 + 120, isoH * 2 + 300],
+    [isoW, isoH])
   const [vb, setVb] = useState(HOME_VB)
+  // a resize (new plot) re-frames the whole view
+  useEffect(() => { setVb(HOME_VB) }, [HOME_VB])
   const drag = useRef<{ x: number; y: number; vb: typeof HOME_VB } | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
+  const aspect = HOME_VB[3] / HOME_VB[2]
   const onWheel = useCallback((e: React.WheelEvent) => {
     setVb((v) => {
       const k = e.deltaY > 0 ? 1.12 : 1 / 1.12
-      const w = Math.min(3320, Math.max(500, v[2] * k))
-      const hgt = w * (1900 / 3320)
+      const w = Math.min(HOME_VB[2], Math.max(500, v[2] * k))
+      const hgt = w * aspect
       const cx = v[0] + v[2] / 2, cy = v[1] + v[3] / 2
       return [cx - w / 2, cy - hgt / 2, w, hgt]
     })
-  }, [])
+  }, [HOME_VB, aspect])
   const onDown = useCallback((e: React.PointerEvent) => {
     drag.current = { x: e.clientX, y: e.clientY, vb }
   }, [vb])
@@ -315,9 +326,9 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
   }
   return (
     <svg ref={svgRef} viewBox={vb.join(' ')}
-      className={`w-full touch-none rounded-md border border-zinc-800/60 ${buildKind ? 'cursor-crosshair' : ''} ${fill ? 'h-full min-h-[460px]' : 'h-[460px]'} ${dark ? 'bg-[#20281e]' : 'bg-[#eae4cf]'}`}
+      className={`w-full touch-none rounded-md border border-zinc-800/60 ${buildKind || roadMode ? 'cursor-crosshair' : ''} ${fill ? 'h-full min-h-[460px]' : 'h-[460px]'} ${dark ? 'bg-[#20281e]' : 'bg-[#eae4cf]'}`}
       onClick={(e) => {
-        if (buildKind && onGround) { onGroundClick(e); return }
+        if ((buildKind || roadMode) && onGround) { onGroundClick(e); return }
         onPlace(null); onBeing(null); onObject?.(null)
       }}
       onWheel={onWheel} onPointerDown={onDown} onPointerMove={onMove}
@@ -329,7 +340,7 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
           <polygon points="32,0 64,16 32,32 0,16" fill={C.grass2} />
         </pattern>
       </defs>
-      <polygon points={`0,0 1600,800 0,1600 -1600,800`} fill="url(#isoGrass)" />
+      <polygon points={`0,0 ${isoW},${isoH} 0,${2 * isoH} ${-isoW},${isoH}`} fill="url(#isoGrass)" />
       {roads.map(([tx, ty]) => (
         <polygon key={`rd-${tx}-${ty}`} points={tileDiamond(tx, ty)}
           fill={C.road} stroke={C.roadEdge} strokeWidth={1} />

@@ -597,6 +597,10 @@ class BeingsStore:
                 ("tile_size", "INTEGER NOT NULL DEFAULT 20"),
                 ("terrain", "TEXT NOT NULL DEFAULT ''"),
                 ("roads", "TEXT NOT NULL DEFAULT ''"),
+                # Roads the PARENT painted by hand (road-building): a second
+                # street layer, unioned with the carved `roads` at read time
+                # so it survives every re-carve (a redraw never wipes it).
+                ("roads_manual", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(
@@ -4185,7 +4189,7 @@ class BeingsStore:
         row = self._c().execute(
             "SELECT name, description, secret, secret_public, public_url,"
             " steward_stipend_coins, plot_w, plot_h, tile_size, terrain,"
-            " roads"
+            " roads, roads_manual"
             " FROM village_meta WHERE owner_id = ?", (owner_id,)).fetchone()
         if not row:
             return {"name": "", "description": "", "secret": "",
@@ -4193,7 +4197,7 @@ class BeingsStore:
                     "steward_stipend_coins": 0,
                     "plot_w": 1000, "plot_h": 1000, "tile_size": 20,
                     "terrain": {"default_elevation": 0, "elevation": {}},
-                    "roads": []}
+                    "roads": [], "roads_manual": []}
         try:
             terrain = json.loads(row["terrain"]) if row["terrain"] else None
         except json.JSONDecodeError:
@@ -4202,6 +4206,11 @@ class BeingsStore:
             roads = json.loads(row["roads"]) if row["roads"] else []
         except json.JSONDecodeError:
             roads = []
+        try:
+            roads_manual = (json.loads(row["roads_manual"])
+                            if row["roads_manual"] else [])
+        except (json.JSONDecodeError, IndexError):
+            roads_manual = []
         return {"name": row["name"] or "",
                 "description": row["description"],
                 "secret": row["secret"] or "",
@@ -4214,7 +4223,7 @@ class BeingsStore:
                 "tile_size": int(row["tile_size"] or 20),
                 "terrain": terrain
                 or {"default_elevation": 0, "elevation": {}},
-                "roads": roads}
+                "roads": roads, "roads_manual": roads_manual}
 
     def set_steward_stipend(self, owner_id: str, coins: int,
                             now: datetime | None = None) -> dict:
@@ -4237,8 +4246,8 @@ class BeingsStore:
             self._c().execute(
                 "INSERT INTO village_meta (owner_id, name, description, secret,"
                 " secret_public, public_url, steward_stipend_coins,"
-                " plot_w, plot_h, tile_size, terrain, roads,"
-                " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                " plot_w, plot_h, tile_size, terrain, roads, roads_manual,"
+                " updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(owner_id) DO UPDATE SET name=excluded.name,"
                 " description=excluded.description, secret=excluded.secret,"
                 " secret_public=excluded.secret_public,"
@@ -4246,7 +4255,7 @@ class BeingsStore:
                 " steward_stipend_coins=excluded.steward_stipend_coins,"
                 " plot_w=excluded.plot_w, plot_h=excluded.plot_h,"
                 " tile_size=excluded.tile_size, terrain=excluded.terrain,"
-                " roads=excluded.roads,"
+                " roads=excluded.roads, roads_manual=excluded.roads_manual,"
                 " updated_at=excluded.updated_at",
                 (owner_id, cur["name"], cur["description"], cur["secret"],
                  1 if cur["secret_public"] else 0, cur["public_url"],
@@ -4255,6 +4264,8 @@ class BeingsStore:
                  int(cur.get("tile_size") or 20),
                  json.dumps(cur["terrain"]) if cur.get("terrain") else "",
                  json.dumps(cur["roads"]) if cur.get("roads") else "",
+                 json.dumps(cur["roads_manual"])
+                 if cur.get("roads_manual") else "",
                  _iso(now)),
             )
             self._c().commit()
@@ -4266,6 +4277,48 @@ class BeingsStore:
         self._upsert_village_meta(
             owner_id, {"roads": [[int(t[0]), int(t[1])] for t in tiles]},
             now=now)
+
+    # ── Parent-painted roads + plot size (road-building / grow map) ──────
+
+    def toggle_manual_road(self, owner_id: str, tx: int, ty: int,
+                           now: datetime | None = None) -> dict:
+        """The parent paints (or lifts) a street tile — a separate layer
+        unioned with the carved roads at read time (being_world.
+        effective_roads), so it never fights the auto-carve and survives a
+        redraw. Toggling a tile already painted lifts it."""
+        cur = self.get_village_meta(owner_id)
+        manual = {(int(t[0]), int(t[1]))
+                  for t in (cur.get("roads_manual") or [])}
+        t = (int(tx), int(ty))
+        if t in manual:
+            manual.discard(t)
+        else:
+            manual.add(t)
+        self._upsert_village_meta(
+            owner_id, {"roads_manual": [[a, b] for a, b in sorted(manual)]},
+            now=now)
+        return {"roads_manual": [[a, b] for a, b in sorted(manual)]}
+
+    def set_plot_size(self, owner_id: str, size: int,
+                      now: datetime | None = None) -> dict:
+        """Grow the plot (grow map): a square plot, TILE-multiple, clamped
+        to [PLOT_MIN, PLOT_MAX]. Existing places/homes/objects/roads keep
+        their coordinates — the map just gains open room to build in."""
+        from captain_claw.flight_deck import being_world
+        tile = int(self.get_village_meta(owner_id).get("tile_size") or 20)
+        size = int(size)
+        size = max(being_world.PLOT_MIN,
+                   min(being_world.PLOT_MAX, size))
+        size = (size // tile) * tile               # snap to a whole tile grid
+        self._upsert_village_meta(owner_id,
+                                  {"plot_w": size, "plot_h": size}, now=now)
+        # re-carve streets/props for the new grid (deterministic, in place)
+        try:
+            being_world.refresh_layout(self, owner_id, now=now)
+            being_world.write_map_md(self, owner_id)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"plot_w": size, "plot_h": size, "tile_size": tile}
 
     def set_place_layout(self, owner_id: str, place_id: str, *, w: int,
                          h: int, kind: str,

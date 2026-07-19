@@ -984,6 +984,73 @@ async def test_a_beings_own_work_is_not_the_parents_to_lift(store):
     assert got["being_id"] != "parent"     # the route guards on this being_id
 
 
+# ═══ Road-building (the parent paints streets) ════════════════════════════
+
+async def test_parent_paints_and_lifts_a_road(store):
+    world.ensure_village(store, OWNER, now=NOW)
+    carved = len(store.get_village_meta(OWNER)["roads"])
+    store.toggle_manual_road(OWNER, 30, 10, now=NOW)
+    store.toggle_manual_road(OWNER, 30, 11, now=NOW)
+    meta = store.get_village_meta(OWNER)
+    assert meta["roads_manual"] == [[30, 10], [30, 11]]
+    eff = world.effective_roads(meta)
+    assert (30, 10) in eff and (30, 11) in eff
+    assert len(eff) == carved + 2                      # carved ∪ painted
+    # a painted road is real ground: it feeds the walk grid + build-guard
+    assert (30, 10) in world.construction_taken(store, OWNER)
+    # lifting toggles it off
+    store.toggle_manual_road(OWNER, 30, 10, now=NOW)
+    assert (30, 10) not in world.effective_roads(store.get_village_meta(OWNER))
+
+
+async def test_a_painted_road_survives_a_recarve(store):
+    world.ensure_village(store, OWNER, now=NOW)
+    store.toggle_manual_road(OWNER, 32, 40, now=NOW)
+    world.refresh_layout(store, OWNER, now=NOW)         # the auto-carve reruns
+    assert (32, 40) in world.effective_roads(store.get_village_meta(OWNER))
+    # …and it rides the map payload for the client to draw
+    payload = world.village_map_payload(store, OWNER, now=NOW)
+    assert [32, 40] in payload["roads"]
+
+
+# ═══ Grow map (the parent enlarges the plot) ══════════════════════════════
+
+async def test_grow_the_plot_scales_grid_and_room(store):
+    world.ensure_village(store, OWNER, now=NOW)
+    assert world.grid_dims(store, OWNER) == (50, 50)
+    out = store.set_plot_size(OWNER, 1800, now=NOW)
+    assert out["plot_w"] == 1800
+    assert world.grid_dims(store, OWNER) == (90, 90)
+    assert world.village_map_payload(store, OWNER, now=NOW)["plot"] == 1800
+    # the new room is buildable: the keeper places far out east
+    o = world.place_parent_object(store, OWNER, "bench", "Far Bench",
+                                  "out east", 1600, 1600, now=NOW)
+    assert world.tile_of(o["x"], o["y"])[0] >= 60      # beyond the old grid
+
+
+async def test_grow_is_clamped_snapped_and_grow_only(store):
+    world.ensure_village(store, OWNER, now=NOW)
+    assert store.set_plot_size(OWNER, 99999, now=NOW)["plot_w"] \
+        == world.PLOT_MAX                              # clamped up
+    # grow-only: a smaller ask floors at the standard plot (never shrinks
+    # below), and any size snaps to a whole tile grid
+    assert store.set_plot_size(OWNER, 100, now=NOW)["plot_w"] \
+        == world.PLOT_MIN
+    got = store.set_plot_size(OWNER, 1333, now=NOW)["plot_w"]
+    assert got % world.TILE == 0 and got == 1320
+
+
+async def test_homes_stay_valid_on_a_grown_plot(store):
+    b = await _being(store, name="Ana")
+    world.ensure_village(store, OWNER, now=NOW)
+    store.set_plot_size(OWNER, 2400, now=NOW)
+    hx, hy = world.home_xy(store.get(OWNER, b["slug"]))
+    assert 0 <= hx <= 2400 and 0 <= hy <= 2400         # still on the plot
+    # position resolves cleanly (no crash from the bigger grid)
+    pos = world.position_of(store, store.get(OWNER, b["slug"]), NOW)
+    assert pos["at"] == "home"
+
+
 # ═══ The whitelist, the offers, the map ═══════════════════════════════════
 
 def test_normalize_digest_object_shapes():

@@ -37,7 +37,7 @@ import {
   type MarketListing,
   getVillageLife, judgeCommission, setStewardStipend, type VillageLife, nudgeBeing,
   editVillagePlace, redesignVillage, placeVillageObject, removeVillageObject,
-  OBJECT_KINDS, type ObjectKind,
+  OBJECT_KINDS, type ObjectKind, toggleVillageRoad, setVillagePlotSize, PLOT_SIZES,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
   setBodyConfig, setBodyMrav, type BodyConnectionInput,
@@ -4176,6 +4176,7 @@ function VillageMap() {
   const [buildAt, setBuildAt] = useState<{ x: number; y: number } | null>(null)
   const [buildName, setBuildName] = useState('')
   const [buildWords, setBuildWords] = useState('')
+  const [roadMode, setRoadMode] = useState(false)   // road-building paint mode
   const fetchedAt = useRef(0)
   const [, beat] = useState(0)
 
@@ -4210,11 +4211,23 @@ function VillageMap() {
     catch (e) { alert(e instanceof Error ? e.message : 'the architect failed') }
     finally { setBusy(false) }
   }
-  // parent-build: arm a kind, click the map to stage a spot, name it, place.
+  // parent-build / road-building share the ground click: road mode paints a
+  // street tile at once; an armed kind stages an object dialog.
   const onGround = (x: number, y: number) => {
+    if (roadMode) { void paintRoad(x, y); return }
     if (!buildKind) return
     setBuildAt({ x, y }); setBuildName(''); setBuildWords('')
     setSel(null); setSelBeing(null); setSelObj(null)
+  }
+  const paintRoad = async (x: number, y: number) => {
+    try { await toggleVillageRoad(x, y); await load() }
+    catch (e) { alert(e instanceof Error ? e.message : 'could not lay it') }
+  }
+  const resize = async (size: number) => {
+    setBusy(true)
+    try { await setVillagePlotSize(size); await load() }
+    catch (e) { alert(e instanceof Error ? e.message : 'could not resize') }
+    finally { setBusy(false) }
   }
   const placeObject = async () => {
     if (!buildKind || !buildAt || !buildName.trim()) return
@@ -4353,15 +4366,35 @@ function VillageMap() {
         </div>
         <div className="flex flex-wrap gap-1">
           {OBJECT_KINDS.map((k) => (
-            <button key={k} onClick={() => setBuildKind(buildKind === k ? null : k)}
-              className={`rounded border px-1.5 py-0.5 text-[10px] capitalize transition-colors ${buildKind === k ? 'border-violet-500 bg-violet-500/20 text-violet-200' : 'border-zinc-700 text-zinc-400 hover:border-violet-500/50 hover:text-zinc-200'}`}>
+            <button key={k} onClick={() => { setRoadMode(false); setBuildKind(buildKind === k ? null : k) }}
+              className={`rounded border px-1.5 py-0.5 text-[10px] capitalize transition-colors ${buildKind === k ? 'border-violet-500 bg-violet-500/15 text-violet-700 dark:bg-violet-500/20 dark:text-violet-200' : 'border-zinc-700 text-zinc-400 hover:border-violet-500/50 hover:text-zinc-200'}`}>
               {k}
             </button>
           ))}
+          <button onClick={() => { setBuildKind(null); setRoadMode(!roadMode) }}
+            className={`rounded border px-1.5 py-0.5 text-[10px] transition-colors ${roadMode ? 'border-amber-500 bg-amber-500/15 text-amber-700 dark:bg-amber-500/20 dark:text-amber-200' : 'border-zinc-700 text-zinc-400 hover:border-amber-500/50 hover:text-zinc-200'}`}>
+            roads
+          </button>
         </div>
         <p className="mt-1 text-[10px] text-zinc-600">
-          {buildKind ? <>click anywhere on the map to set down a <span className="text-violet-400">{buildKind}</span> · <button onClick={() => setBuildKind(null)} className="underline hover:text-zinc-300">cancel</button></> : 'pick a thing, then click the ground — you place anywhere, no cost'}
+          {roadMode ? <>click tiles to lay a street · click a road again to lift it · <button onClick={() => setRoadMode(false)} className="underline hover:text-zinc-300">done</button></>
+            : buildKind ? <>click anywhere on the map to set down a <span className="text-violet-400">{buildKind}</span> · <button onClick={() => setBuildKind(null)} className="underline hover:text-zinc-300">cancel</button></>
+            : 'pick a thing or “roads”, then click the ground — you place anywhere, no cost'}
         </p>
+        <div className="mt-2 flex items-center gap-1.5 border-t border-zinc-800 pt-2">
+          <span className="text-[10px] text-zinc-500">Map size</span>
+          {PLOT_SIZES.map((s) => {
+            const cur = (data.grid?.plot_w || 1000) === s
+            const shrink = s < (data.grid?.plot_w || 1000)
+            return (
+              <button key={s} disabled={busy || cur || shrink} title={shrink ? 'grow-only — can’t shrink' : ''}
+                onClick={() => void resize(s)}
+                className={`rounded border px-1.5 py-0.5 text-[10px] transition-colors ${cur ? 'border-violet-500 bg-violet-500/15 text-violet-700 dark:bg-violet-500/20 dark:text-violet-200' : 'border-zinc-700 text-zinc-400 hover:border-violet-500/50 hover:text-zinc-200 disabled:opacity-30'}`}>
+                {s === 1000 ? 'standard' : s === 1400 ? 'large' : s === 1800 ? 'huge' : 'vast'}
+              </button>
+            )
+          })}
+        </div>
       </div>
       <button onClick={() => void redraw()} disabled={busy}
         className="mb-2 flex w-full items-center justify-center gap-1.5 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition-colors hover:border-violet-500/50 hover:text-zinc-200 disabled:opacity-40">
@@ -4438,7 +4471,7 @@ function VillageMap() {
             <div className="min-h-0 flex-1">
               <IsoScene data={data} sel={sel} selBeing={selBeing}
                 selObject={selObj} onObject={setSelObj}
-                buildKind={buildKind} onGround={onGround}
+                buildKind={buildKind} roadMode={roadMode} onGround={onGround}
                 onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} fill />
             </div>
             <p className="mt-1.5 shrink-0 text-[10px] text-zinc-600">{hint}</p>
@@ -4458,7 +4491,7 @@ function VillageMap() {
         <div className="min-w-0 flex-1">
           <IsoScene data={data} sel={sel} selBeing={selBeing}
             selObject={selObj} onObject={setSelObj}
-            buildKind={buildKind} onGround={onGround}
+            buildKind={buildKind} roadMode={roadMode} onGround={onGround}
             onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} />
           <p className="mt-1.5 text-[10px] text-zinc-600">{hint}</p>
         </div>

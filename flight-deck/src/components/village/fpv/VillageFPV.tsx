@@ -266,7 +266,12 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
     try {
       await placeVillageObject({ kind: buildKind, name: buildName.trim(),
         inscription: buildWords.trim(), x: buildAt.x, y: buildAt.y })
-      await refreshNotes()   // pulls a fresh payload → the object appears
+      // a placed thing is STATIC geometry — re-mesh the world in place so it
+      // appears without leaving (setNotes/setBeings alone can't show it).
+      const m = await api.refetch()
+      handleRef.current?.setBeings(m.beings, m.places, Date.now())
+      handleRef.current?.setNotes(m.notes ?? [])
+      handleRef.current?.rebuild(buildWorld(m))
       setBuildAt(null)
       enter()
     } catch (e) {

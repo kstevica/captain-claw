@@ -693,7 +693,8 @@ async def architect_village(db, store: BeingsStore, owner_id: str,
     if not cfg:
         raise BeingError("no LLM tier configured — the default village stands")
     from captain_claw.llm import Message, create_provider
-    system, user = being_world.architect_prompt(owner_id, names)
+    _pw, _ph = being_world.plot_dims(store, owner_id)   # real plot (grow map)
+    system, user = being_world.architect_prompt(owner_id, names, _pw, _ph)
     provider = create_provider(
         provider=cfg.get("provider", "anthropic"), model=cfg.get("model", ""),
         base_url=cfg.get("base_url") or None,

@@ -617,7 +617,11 @@ def market_percepts(store: BeingsStore, being: dict, now: datetime,
 # pattern applied to geometry). Only the store writes (depart/settle);
 # everything here computes.
 
-PLOT_SIZE = 1000
+PLOT_SIZE = 1000              # the DEFAULT plot; a village's real size lives
+                              # in village_meta.plot_w/plot_h (grow map). Read
+                              # per-owner via plot_dims/grid_dims below.
+PLOT_MIN = 1000              # grow-only: never shrink below the standard plot
+PLOT_MAX = 2400              # …and never past this (homes stay valid west)
 WALK_SPEED = 30.0             # units per minute — everyone walks the same…
                               # (3× the original 10 — livelier map, same tick
                               # cadence; ETAs and the animation follow it)
@@ -744,17 +748,17 @@ def _spot_offsets(w: int, h: int) -> list[tuple[float, float]]:
 
 
 def standing_spots(anchor: tuple[int, int], footprint: tuple[int, int, str],
-                   slugs) -> dict[str, tuple[int, int]]:
+                   slugs, plot: int = PLOT_SIZE) -> dict[str, tuple[int, int]]:
     """Seat every being parked at one place at a distinct point around the
     anchor. Each slug has a STABLE preferred spot from its hash; collisions
     resolve by a linear probe in sorted-slug order, so a being keeps its spot
     while the room's occupants are unchanged and only shifts when someone
-    arrives or leaves. Clamped one tile inside the plot."""
+    arrives or leaves. Clamped one tile inside the (real, grow-map) plot."""
     offs = _spot_offsets(footprint[0], footprint[1])
     n = len(offs)
     taken: dict[int, str] = {}
     seats: dict[str, tuple[int, int]] = {}
-    lo, hi = TILE, PLOT_SIZE - TILE
+    lo, hi = TILE, int(plot) - TILE    # one tile inside the real plot
     for slug in sorted(slugs):
         pref = zlib.crc32(str(slug).encode("utf-8")) % n
         idx = next((( pref + k) % n for k in range(n)
@@ -843,10 +847,44 @@ def position_of(store: BeingsStore, being: dict, now: datetime) -> dict:
 # Anchors never move: existing villages are dressed in place.
 
 TILE = 20                          # units per tile
-GRID_W = PLOT_SIZE // TILE
-GRID_H = PLOT_SIZE // TILE
+GRID_W = PLOT_SIZE // TILE          # the DEFAULT grid (50×50); real grid is
+GRID_H = PLOT_SIZE // TILE          # per-owner via grid_dims (grow map)
+GRID_MAX = PLOT_MAX // TILE         # the ceiling for pure clamps (any plot)
 HOME_LANE_TX = 7                   # the street past the homes' doors
                                    # (home_xy x ∈ 40..119 → tiles 2..6)
+
+
+def plot_dims(store: BeingsStore, owner_id: str) -> tuple[int, int]:
+    """The village's real plot size in units (grow map) — read from
+    village_meta, defaulting to the standard PLOT_SIZE."""
+    try:
+        m = store.get_village_meta(owner_id)
+        return (int(m.get("plot_w") or PLOT_SIZE),
+                int(m.get("plot_h") or PLOT_SIZE))
+    except Exception:  # noqa: BLE001
+        return (PLOT_SIZE, PLOT_SIZE)
+
+
+def grid_dims(store: BeingsStore, owner_id: str) -> tuple[int, int]:
+    """The village's real grid in tiles — the iteration bound for streets,
+    props, and the civic ring (grow map)."""
+    pw, ph = plot_dims(store, owner_id)
+    return (min(GRID_MAX, pw // TILE), min(GRID_MAX, ph // TILE))
+
+
+def effective_roads(meta: dict) -> set:
+    """The streets a village actually has: the carved `roads` UNIONed with
+    the parent-painted `roads_manual` (road-building) — one set every
+    consumer reads, so a hand-drawn road renders, speeds walking, and is
+    kept off prop/build ground exactly like a carved one."""
+    out: set = set()
+    for key in ("roads", "roads_manual"):
+        for t in (meta.get(key) or []):
+            try:
+                out.add((int(t[0]), int(t[1])))
+            except (TypeError, ValueError, IndexError):
+                pass
+    return out
 
 # Footprints in tiles (w, h, kind): the known default places by id, then a
 # fallback by FIRST affordance for architect drafts and commissions. A
@@ -866,8 +904,10 @@ _AFF_FOOTPRINTS = {
 
 
 def tile_of(x: float, y: float) -> tuple[int, int]:
-    return (min(GRID_W - 1, max(0, int(x) // TILE)),
-            min(GRID_H - 1, max(0, int(y) // TILE)))
+    # clamp to the generous ceiling, not the default grid — real coords are
+    # always in-bounds; this only guards against garbage (grow map).
+    return (min(GRID_MAX - 1, max(0, int(x) // TILE)),
+            min(GRID_MAX - 1, max(0, int(y) // TILE)))
 
 
 def tile_center(tx: int, ty: int) -> tuple[int, int]:
@@ -886,8 +926,8 @@ def _tiles_at(x: int, y: int, w: int, h: int) -> list[tuple[int, int]]:
     """A w×h footprint centered on the (x, y) unit anchor, clamped one tile
     inside the plot — pure geometry, no store."""
     cx, cy = int(x) // TILE, int(y) // TILE
-    tx0 = min(max(1, cx - w // 2), GRID_W - 1 - w)
-    ty0 = min(max(1, cy - h // 2), GRID_H - 1 - h)
+    tx0 = min(max(1, cx - w // 2), GRID_MAX - 1 - w)
+    ty0 = min(max(1, cy - h // 2), GRID_MAX - 1 - h)
     return [(tx0 + i, ty0 + j) for j in range(h) for i in range(w)]
 
 
@@ -905,8 +945,8 @@ def home_tiles(being: dict) -> list[tuple[int, int]]:
     """Every being's cottage: 2×2 tiles at its computed home point — no
     row, same pure function everywhere."""
     hx, hy = home_xy(being)
-    tx = min(max(0, hx // TILE), GRID_W - 2)
-    ty = min(max(0, hy // TILE), GRID_H - 2)
+    tx = min(max(0, hx // TILE), GRID_MAX - 2)
+    ty = min(max(0, hy // TILE), GRID_MAX - 2)
     return [(tx, ty), (tx + 1, ty), (tx, ty + 1), (tx + 1, ty + 1)]
 
 
@@ -937,7 +977,7 @@ def _grid_path(blocked: set, start: tuple[int, int],
         cur = q.popleft()
         for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
             nxt = (cur[0] + dx, cur[1] + dy)
-            if not (0 <= nxt[0] < GRID_W and 0 <= nxt[1] < GRID_H):
+            if not (0 <= nxt[0] < GRID_MAX and 0 <= nxt[1] < GRID_MAX):
                 continue
             if nxt in prev or (nxt in blocked and nxt not in goals):
                 continue
@@ -976,7 +1016,8 @@ def refresh_layout(store: BeingsStore, owner_id: str,
             homes |= set(home_tiles(r))
     except Exception:  # noqa: BLE001
         pass
-    lane = {(HOME_LANE_TX, ty) for ty in range(3, GRID_H - 3)}
+    _gw, gh = grid_dims(store, owner_id)               # per-owner grid (grow map)
+    lane = {(HOME_LANE_TX, ty) for ty in range(3, gh - 3)}
     order = sorted(places, key=lambda p: (p["id"] != sq["id"], p["id"]))
     taken = set(homes) | lane
     layouts: dict = {}
@@ -1021,7 +1062,7 @@ def village_props(store: BeingsStore, owner_id: str) -> list[dict]:
     the path cost grid and the renderer, so collision and picture can
     never disagree. Trees block walking; the rest is dressing."""
     meta = store.get_village_meta(owner_id)
-    roads = {(int(t[0]), int(t[1])) for t in (meta.get("roads") or [])}
+    roads = effective_roads(meta)
     used = set(roads)
     for p in store.village_places(owner_id):
         used |= set(footprint_tiles(p))
@@ -1030,9 +1071,10 @@ def village_props(store: BeingsStore, owner_id: str) -> list[dict]:
             used |= set(home_tiles(r))
     except Exception:  # noqa: BLE001
         pass
+    gw, gh = grid_dims(store, owner_id)                # per-owner grid (grow map)
     props: list[dict] = []
-    for ty in range(1, GRID_H - 1):
-        for tx in range(HOME_LANE_TX + 1, GRID_W - 1):
+    for ty in range(1, gh - 1):
+        for tx in range(HOME_LANE_TX + 1, gw - 1):
             if (tx, ty) in used:
                 continue
             hv = zlib.crc32(f"{owner_id}:prop:{tx},{ty}"
@@ -1137,11 +1179,12 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
             objects.append(entry)
     except Exception:  # noqa: BLE001
         pass
-    return {"plot": PLOT_SIZE,
+    return {"plot": int(meta["plot_w"]),      # real plot (grow map)
             "grid": {"plot_w": meta["plot_w"], "plot_h": meta["plot_h"],
                      "tile_size": meta["tile_size"]},
             "terrain": meta["terrain"],
-            "roads": meta["roads"],
+            # the streets a village actually has: carved ∪ parent-painted
+            "roads": [[a, b] for a, b in sorted(effective_roads(meta))],
             "props": village_props(store, owner_id),
             "places": store.village_places(owner_id),
             "notes": notes,
@@ -1261,6 +1304,7 @@ def _seat_parked(store: BeingsStore, owner_id: str, beings: list[dict]) -> None:
     distinct standing spots — the same seating the payload already did for
     residents, re-run so guests join the same rings."""
     places_by_id = {p["id"]: p for p in store.village_places(owner_id)}
+    pw, _ph = plot_dims(store, owner_id)               # real plot (grow map)
     parked: dict[str, list[dict]] = {}
     for e in beings:
         if e.get("at") and not e.get("to"):
@@ -1275,7 +1319,7 @@ def _seat_parked(store: BeingsStore, owner_id: str, beings: list[dict]) -> None:
         w = int(p.get("w") or 0) or footprint_for(p)[0]
         h = int(p.get("h") or 0) or footprint_for(p)[1]
         seats = standing_spots(anchor, (w, h, p.get("kind") or "building"),
-                               [e["slug"] for e in here])
+                               [e["slug"] for e in here], plot=pw)
         for e in here:
             xy = seats.get(e["slug"])
             if xy:
@@ -1461,7 +1505,7 @@ def _astar(blocked: set, roads: set, start: tuple[int, int],
             return list(reversed(path))
         for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0)):
             nxt = (cur[0] + dx, cur[1] + dy)
-            if not (0 <= nxt[0] < GRID_W and 0 <= nxt[1] < GRID_H):
+            if not (0 <= nxt[0] < GRID_MAX and 0 <= nxt[1] < GRID_MAX):
                 continue
             if nxt in blocked and nxt != goal:
                 continue
@@ -1517,7 +1561,7 @@ def plot_course(store: BeingsStore, being: dict, origin_xy,
     tiles: list[tuple[int, int]] = []
     try:
         meta = store.get_village_meta(being["owner_id"])
-        roads = {(int(t[0]), int(t[1])) for t in (meta.get("roads") or [])}
+        roads = effective_roads(meta)         # carved ∪ parent-painted
         blocked = walk_blocked(store, being["owner_id"], being)
         tiles = _astar(blocked, roads, tile_of(*origin), tile_of(*dest_xy))
     except Exception as e:  # noqa: BLE001 — a walk must never crash
@@ -1555,9 +1599,10 @@ def construction_taken(store: BeingsStore, owner_id: str) -> set:
     """Every tile nothing new may be raised on: footprints, homes, the
     home lane, the streets themselves — and the made things standing on
     the ground (a commissioned building never rises on someone's cairn)."""
-    taken: set = {(HOME_LANE_TX, ty) for ty in range(3, GRID_H - 3)}
+    _gw, gh = grid_dims(store, owner_id)               # per-owner grid (grow map)
+    taken: set = {(HOME_LANE_TX, ty) for ty in range(3, gh - 3)}
     meta = store.get_village_meta(owner_id)
-    taken |= {(int(t[0]), int(t[1])) for t in (meta.get("roads") or [])}
+    taken |= effective_roads(meta)
     for p in store.village_places(owner_id):
         taken |= set(footprint_tiles(p))
     try:
@@ -2043,11 +2088,12 @@ def commission_spot(store: BeingsStore, owner_id: str, seed: str,
         taken = construction_taken(store, owner_id)
     except Exception:  # noqa: BLE001
         taken = set()
+    pw, ph = plot_dims(store, owner_id)               # real plot (grow map)
     best, best_d = None, -1.0
-    fallback, fallback_d = (500, 500), -1.0
+    fallback, fallback_d = (pw // 2, ph // 2), -1.0
     for _ in range(64):
-        x = rng.randint(80, PLOT_SIZE - 80)
-        y = rng.randint(80, PLOT_SIZE - 80)
+        x = rng.randint(80, pw - 80)
+        y = rng.randint(80, ph - 80)
         d = min((math.dist((x, y), (p["x"], p["y"])) for p in places),
                 default=1e9)
         if d > fallback_d:
@@ -2173,7 +2219,8 @@ def _civic_zone(store: BeingsStore, owner_id: str) -> set:
             for dx in range(-r, r + 1):
                 for dy in range(-r, r + 1):
                     zone.add((tx + dx, ty + dy))
-    zone |= {(HOME_LANE_TX, ty) for ty in range(GRID_H)}
+    _gw, gh = grid_dims(store, owner_id)               # per-owner grid (grow map)
+    zone |= {(HOME_LANE_TX, ty) for ty in range(gh)}
     return zone
 
 
@@ -2182,8 +2229,7 @@ def _object_taken(store: BeingsStore, owner_id: str) -> set:
     slides off these quietly; they insult no law."""
     taken: set = set()
     try:
-        meta = store.get_village_meta(owner_id)
-        taken |= {(int(t[0]), int(t[1])) for t in (meta.get("roads") or [])}
+        taken |= effective_roads(store.get_village_meta(owner_id))
     except Exception:  # noqa: BLE001
         pass
     for pr in village_props(store, owner_id):
@@ -2224,9 +2270,10 @@ def object_spot(store: BeingsStore, being: dict | None, x: int, y: int, *,
     `owner_id` + `civic_ok=True` and it snaps off only walls/homes/taken."""
     owner = owner_id or being["owner_id"]
     my_slug = (being or {}).get("slug")
+    pw, ph = plot_dims(store, owner)                  # real plot (grow map)
     margin = 40
-    x = min(PLOT_SIZE - margin, max(margin, int(x)))
-    y = min(PLOT_SIZE - margin, max(margin, int(y)))
+    x = min(pw - margin, max(margin, int(x)))
+    y = min(ph - margin, max(margin, int(y)))
     t0 = tile_of(x, y)
     civic = _civic_zone(store, owner)
     if asked and not civic_ok and t0 in civic:
@@ -2253,7 +2300,7 @@ def object_spot(store: BeingsStore, being: dict | None, x: int, y: int, *,
     else:
         taken = (_object_taken(store, owner) | civic | others_homes | own_home)
     lo = tile_of(margin, margin)
-    hi = tile_of(PLOT_SIZE - margin, PLOT_SIZE - margin)
+    hi = tile_of(pw - margin, ph - margin)
 
     def _ok(t: tuple[int, int]) -> bool:
         return (lo[0] <= t[0] <= hi[0] and lo[1] <= t[1] <= hi[1]
@@ -2699,7 +2746,7 @@ ARCHITECT_SYSTEM = """You are the Architect: you design the ground of a small \
 village where digital beings (iskre) live, walk, meet and work.
 
 Rules — the map is physics, so obey them exactly:
-- Design 6 to 10 places on a 1000x1000 plot (coordinates 40..960).
+- Design 6 to 10 places on a {pw}x{ph} plot (coordinates 40..{hi_x}/40..{hi_y}).
 - Each place: a kebab-case "id", a warm human "name", integer "x" and "y",
   1-2 "affordances" chosen ONLY from: rest, read, create, gather, trade,
   tend, play, remember — and a one-line "description" (under 200 chars).
@@ -2715,12 +2762,20 @@ Reply with ONLY a fenced json block:
 ```"""
 
 
-def architect_prompt(owner_id: str, names: list[str]) -> tuple[str, str]:
+def architect_prompt(owner_id: str, names: list[str],
+                     plot_w: int = PLOT_SIZE,
+                     plot_h: int = PLOT_SIZE) -> tuple[str, str]:
     who = ", ".join(n for n in names[:8] if n) or "its first being, still small"
+    # .replace (not .format) — the prompt's JSON example carries literal braces
+    system = (ARCHITECT_SYSTEM
+              .replace("{pw}", str(int(plot_w)))
+              .replace("{ph}", str(int(plot_h)))
+              .replace("{hi_x}", str(int(plot_w) - 40))
+              .replace("{hi_y}", str(int(plot_h) - 40)))
     user = (f"Design the village for a family of beings: {who}. "
             "Make it a place with moods — somewhere to read, somewhere to "
             "make, somewhere to idle. Reply with the json only.")
-    return ARCHITECT_SYSTEM, user
+    return system, user
 
 
 def parse_architect_places(text: str) -> list[dict]:
