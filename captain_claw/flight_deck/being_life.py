@@ -2187,6 +2187,21 @@ def _normalize_digest(raw: dict) -> dict:
             "description": str(redescribe_place["description"]).strip()[:300]}
     else:
         redescribe_place = None
+    # Instinct → reason (instinct-build plan): the mind ratifies a beginning
+    # the FEET broke — finish it (name + words + fee) or let it fall.
+    finish = raw.get("finish")
+    if isinstance(finish, dict) and finish.get("object_id") \
+            and finish.get("name"):
+        finish = {"object_id": str(finish["object_id"]).strip()[:64],
+                  "name": str(finish["name"]).strip()[:40],
+                  "inscription": str(finish.get("inscription") or "")[:300]}
+    else:
+        finish = None
+    abandon = raw.get("abandon")
+    if isinstance(abandon, dict) and abandon.get("object_id"):
+        abandon = {"object_id": str(abandon["object_id"]).strip()[:64]}
+    else:
+        abandon = None
     return {
         # Canonical, so it survives this normaliser for BOTH cognitions: True
         # means no real self-report came back this tick (timeout / unparseable)
@@ -2234,6 +2249,8 @@ def _normalize_digest(raw: dict) -> dict:
         "home_look": home_look,
         "rename_place": rename_place,
         "redescribe_place": redescribe_place,
+        "finish": finish,
+        "abandon": abandon,
     }
 
 
@@ -3599,6 +3616,13 @@ async def _tick_locked(
     # The umwelt (roadmap Tier 1 + 2): the calendar each morning, the machine
     # as felt body under strain, and at dreams — month-birthdays, a tangle of
     # two old works, exchanged-with siblings, the life project.
+    # A beginning the mind never finished crumbles (instinct-build plan) —
+    # pruned before the umwelt sweep so a just-fallen stake never prompts
+    # its own confirmation; the maker hears it fell next wake.
+    try:
+        being_world.prune_crumbled_stakes(store, owner, now)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         senses += being_world.umwelt_percepts(
             store, being, now=now, kind=kind, first_of_day=first_of_day)
@@ -4020,6 +4044,37 @@ async def _tick_locked(
                                now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("unplace handling failed", slug=being["slug"],
+                        error=str(e))
+    # Instinct → reason (instinct-build plan): the mind ratifies (or drops)
+    # a beginning the feet broke — finish authors meaning + burns the fee.
+    if digest.get("finish"):
+        fn = digest["finish"]
+        try:
+            being_society.finish_staked_object(
+                store, store.get(owner, being["slug"]), fn["object_id"],
+                fn["name"], fn.get("inscription") or "", now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "finish", "reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("finish handling failed", slug=being["slug"],
+                        error=str(e))
+    if digest.get("abandon"):
+        ab = digest["abandon"]
+        try:
+            fresh = store.get(owner, being["slug"])
+            o = store.get_village_object(owner, ab["object_id"])
+            if o["being_id"] != fresh["id"] or o.get("state") != "staked":
+                raise BeingError("that is not a beginning of yours to abandon")
+            store.delete_village_object(owner, ab["object_id"])
+            store.record_event(bid, "stake_abandoned",
+                               {"id": ab["object_id"], "kind": o["kind"]},
+                               now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "abandon", "reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("abandon handling failed", slug=being["slug"],
                         error=str(e))
     # Home as your canvas (world-shaping plan Phase 4): naming and
     # dressing your own cottage — ungated, refused only by the physics

@@ -208,6 +208,9 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
     const Sprite = OBJECT_SPRITES[o.kind]
     if (!Sprite) continue
     const selMe = selObject === o.id
+    // A beginning (instinct-build plan): the feet broke ground but the mind
+    // hasn't finished it — drawn faint and dashed, "not yet real."
+    const staked = o.staked
     pieces.push({
       depth: by + 0.25,     // a made thing edges in front of a same-tile prop
       el: (
@@ -221,11 +224,21 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
             <ellipse cx="0" cy="4" rx="26" ry="13" fill="#fbbf24"
               opacity="0.32" stroke="#fbbf24" strokeOpacity="0.8" />
           )}
-          <Sprite />
-          {dark && (o.kind === 'lantern' || o.kind === 'shrine') && (
+          {staked && (
+            <ellipse cx="0" cy="4" rx="20" ry="10" fill="none"
+              stroke="#cbb48a" strokeWidth="1.5" strokeDasharray="3 3"
+              opacity="0.75" />
+          )}
+          <g opacity={staked ? 0.4 : 1}
+            style={staked ? { filter: 'grayscale(0.5)' } : undefined}>
+            <Sprite />
+          </g>
+          {dark && !staked && (o.kind === 'lantern' || o.kind === 'shrine') && (
             <circle cx="0" cy="-26" r="40" fill="#ffd98a" opacity="0.14" />
           )}
-          <title>{`${o.name} — a ${o.kind}${o.by_name ? `, ${o.by_name}'s work` : ''}`}</title>
+          <title>{staked
+            ? `a beginning — a ${o.kind} someone started${o.by_name ? ` (${o.by_name})` : ''}, not yet real`
+            : `${o.name} — a ${o.kind}${o.by_name ? `, ${o.by_name}'s work` : ''}`}</title>
         </g>
       ),
     })

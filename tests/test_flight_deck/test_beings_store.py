@@ -48,7 +48,8 @@ def test_conceive_by_preset_and_hatch_credits_first_allowance(store):
 def test_conceive_validates_point_buy(store):
     with pytest.raises(BeingError):
         store.conceive(OWNER, "Kriva", attributes={"CUR": 40}, now=NOW)
-    sheet = {"CUR": 6, "PER": 6, "CAU": 6, "SOC": 6, "CRE": 6, "ORD": 6, "PLA": 4}
+    sheet = {"CUR": 6, "PER": 6, "CAU": 6, "SOC": 6, "CRE": 6, "ORD": 6,
+             "PLA": 4, "IMP": 5}   # sums to POOL (45)
     b = store.conceive(OWNER, "Točna", attributes=sheet, now=NOW)
     assert b["genome"]["attributes"] == sheet
 
@@ -198,7 +199,7 @@ def test_metamorphosis_burns_updates_genome_and_logs(store):
     out = store.metamorphose(OWNER, b["slug"], "ORD", "PLA", "wants joy",
                              now=NOW + timedelta(days=9))
     assert out["genome"]["attributes"]["PLA"] == 3    # scholar PLA 2 → 3
-    assert out["genome"]["attributes"]["ORD"] == 7
+    assert out["genome"]["attributes"]["ORD"] == 8    # scholar ORD 9 → 8
     assert len(out["genome"]["metamorphoses"]) == 1
     after = store.wallet_view(out)["balance_tokens"]
     assert before - after == 9_000_000                 # 3² × 1M, first move

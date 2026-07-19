@@ -267,6 +267,16 @@ export function buildWorld(data: VillageMapData): BuiltWorld {
   for (const o of data.objects ?? []) {
     const bx = o.tile[0] * TPB + MARGIN, bz = o.tile[1] * TPB + MARGIN
     const cx = bx + 1, cz = bz + 1
+    // A beginning (instinct-build plan): the feet broke ground, the mind
+    // hasn't finished it — a walkable work-site of turned soil, never a
+    // solid obstacle (parity with walk_blocked, which excludes stakes).
+    if (o.staked) {
+      set(cx, 2, cz, B.SOIL); set(cx + 1, 2, cz, B.SOIL)
+      set(cx, 2, cz + 1, B.SOIL)
+      labels.push({ x0: bx, z0: bz, x1: bx + TPB - 1, z1: bz + TPB - 1,
+                    name: `a beginning — a ${o.kind}` })
+      continue
+    }
     labels.push({ x0: bx, z0: bz, x1: bx + TPB - 1, z1: bz + TPB - 1,
                   name: `“${o.name}”` })
     switch (o.kind) {

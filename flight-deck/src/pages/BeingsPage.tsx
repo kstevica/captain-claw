@@ -56,7 +56,7 @@ import { folderFor, shortName, isBoilerplate } from '../components/village/place
 const VillageFPV = lazy(() => import('../components/village/fpv/VillageFPV'))
 
 const REFRESH_MS = 6000
-const ATTRS = ['CUR', 'PER', 'CAU', 'SOC', 'CRE', 'ORD', 'PLA'] as const
+const ATTRS = ['CUR', 'PER', 'CAU', 'SOC', 'CRE', 'ORD', 'PLA', 'IMP'] as const
 
 const STAGE_META: Record<string, string> = {
   egg: 'bg-zinc-500/15 text-zinc-300 border-zinc-500/30',
@@ -115,6 +115,8 @@ const EVENT_DOT: Record<string, string> = {
   home_named: 'bg-violet-300', home_styled: 'bg-violet-300',
   civic_placed: 'bg-amber-400', place_renamed: 'bg-amber-400',
   place_redescribed: 'bg-amber-300',
+  broke_ground: 'bg-stone-400', object_finished: 'bg-emerald-400',
+  stake_crumbled: 'bg-zinc-600', stake_abandoned: 'bg-zinc-600',
 }
 
 // Coins are money, not food (space plan Phase 2) — say which one is on the
@@ -261,6 +263,10 @@ function summarizeEventData(e: BeingEvent): string {
       ? `renamed its home “${d.from}” → “${d.name}”`
       : `named its home — “${d.name}”`
     case 'home_styled': return `dressed its home — ${d.roof} roof, ${d.wall} walls`
+    case 'broke_ground': return `broke ground on a ${d.kind} on impulse — its feet, ahead of its mind`
+    case 'object_finished': return `finished what its hands began — “${d.name}”, a ${d.kind}, now real`
+    case 'stake_crumbled': return `a ${d.kind} it began crumbled — never finished in time`
+    case 'stake_abandoned': return `let a ${d.kind} it had begun fall — thought better of it`
     case 'civic_placed': return `as steward, raised a public ${d.kind} on the commons — “${d.name}”`
     case 'place_renamed': return `as steward, renamed a place → “${d.name}”${d.why ? ` — ${d.why}` : ''}`
     case 'place_redescribed': return 'as steward, rewrote a place’s description'
@@ -1096,6 +1102,7 @@ function derivePreview(a: Record<string, number>) {
     risk: ((a.CUR - a.CAU + 10) / 20).toFixed(2),
     thrift: ((a.CAU + a.ORD) / 20).toFixed(2),
     whimsy: (a.PLA / 10).toFixed(2),
+    impulse: ((a.IMP ?? 5) / 10).toFixed(2),
   }
 }
 
@@ -1209,7 +1216,7 @@ function ConceiveModal({ meta, onClose, onDone }: {
             </div>
           ))}
           <div className="pt-1 text-[11px] text-zinc-600">
-            explore {d.explore} · connect {d.connect} · create {d.create} · risk {d.risk} · thrift {d.thrift} · whimsy {d.whimsy}
+            explore {d.explore} · connect {d.connect} · create {d.create} · risk {d.risk} · thrift {d.thrift} · whimsy {d.whimsy} · impulse {d.impulse}
           </div>
         </div>
 
@@ -4094,19 +4101,25 @@ function MapObjectCard({ o, beings, full }: {
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
       <div className="mb-1 flex items-center gap-1.5">
-        <span className="h-2.5 w-2.5 rounded-full" style={{ background: AFF_HUE[o.affordance] ?? '#a78bfa' }} />
-        <span className="text-sm font-semibold text-zinc-100">{o.name}</span>
+        <span className="h-2.5 w-2.5 rounded-full" style={{ background: o.staked ? '#a8a29e' : (AFF_HUE[o.affordance] ?? '#a78bfa') }} />
+        <span className="text-sm font-semibold text-zinc-100">{o.staked ? 'a beginning' : o.name}</span>
       </div>
       <div className="mb-2 flex flex-wrap gap-1">
         <span className="rounded border border-zinc-700 px-1.5 py-px text-[9px] text-zinc-400">{o.kind}</span>
-        <span className="rounded border border-zinc-700 px-1.5 py-px text-[9px]" style={{ color: AFF_HUE[o.affordance] ?? '#a78bfa' }}>{o.affordance}</span>
+        {!o.staked && <span className="rounded border border-zinc-700 px-1.5 py-px text-[9px]" style={{ color: AFF_HUE[o.affordance] ?? '#a78bfa' }}>{o.affordance}</span>}
         {o.civic && <span className="rounded border border-amber-500/40 px-1.5 py-px text-[9px] text-amber-600 dark:text-amber-400">a public work</span>}
+        {o.staked && <span className="rounded border border-stone-500/40 px-1.5 py-px text-[9px] text-stone-500 dark:text-stone-400">unfinished · on impulse</span>}
       </div>
-      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{o.civic ? 'Raised by the steward' : 'Made by'}</div>
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{o.staked ? 'Started by' : (o.civic ? 'Raised by the steward' : 'Made by')}</div>
       <div className="mb-2 flex items-center gap-1 text-[11px] text-zinc-300">
         {maker?.avatar && <IskraAvatar c={maker.avatar.c} p={maker.avatar.p} size={14} />}
         {o.by_name || o.by || <span className="text-zinc-600">someone long gone</span>}
       </div>
+      {o.staked ? (
+        <p className="text-[11px] leading-snug text-zinc-500">
+          the feet broke ground here on impulse — bare and wordless. Its maker’s mind must finish it (a name, an inscription) or it crumbles back to the ground within a day.
+        </p>
+      ) : (<>
       <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Its face reads</div>
       {reading ? (
         <div className={`overflow-auto rounded border border-zinc-800 bg-zinc-950 p-2.5 ${full ? 'max-h-[46vh]' : 'max-h-52'}`}>
@@ -4126,6 +4139,7 @@ function MapObjectCard({ o, beings, full }: {
       <p className="mt-2 text-[10px] text-zinc-600">
         iskre nearby can see and use it — far ones only sense something stands here
       </p>
+      </>)}
     </div>
   )
 }
@@ -4562,7 +4576,7 @@ export function BeingsPage() {
             <Sparkles className="mx-auto mb-2 h-6 w-6 text-zinc-600" />
             <p className="text-sm text-zinc-400">No beings yet.</p>
             <p className="mt-1 text-xs text-zinc-600">
-              Conceive one — allocate its 40 points, write its first words, hatch it, and watch it live.
+              Conceive one — allocate its 45 points, write its first words, hatch it, and watch it live.
             </p>
           </div>
         ) : (

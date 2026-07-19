@@ -1645,12 +1645,14 @@ class BeingsStore:
         return dict(row)
 
     def add_village_object(self, owner_id: str, being_id: str, kind: str,
-                           name: str, affordance: str,
+                           name: str, affordance: str, *,
+                           state: str = "held", x: int = 0, y: int = 0,
                            now: datetime | None = None) -> dict:
-        """Insert a crafted thing 'in hand' (no ground yet). The id derives
-        from the name like a place's (numeric suffix on collision); the
-        proof file's path is fixed HERE so file and row can never disagree.
-        Validation of kind/name/fee lives in being_society.craft_object —
+        """Insert an object row. `held` (crafted, in hand — the mind's path)
+        or `staked` (the feet broke ground — kind + a spot, no file, no fee
+        yet). The id derives from the name like a place's (numeric suffix on
+        collision); the proof file's path is fixed HERE so file and row can
+        never disagree. Validation lives in being_society/being_world —
         this is the SQL, not the law."""
         now = now or _utcnow()
         base = _slugify(name)[:40] or "work"
@@ -1660,20 +1662,36 @@ class BeingsStore:
                 (owner_id, oid)).fetchone():
             oid = f"{base}-{n}"
             n += 1
+        placed = _iso(now) if state == "standing" else None
         row = {"owner_id": owner_id, "id": oid, "being_id": being_id,
                "kind": kind, "name": name, "affordance": affordance,
-               "x": 0, "y": 0, "state": "held",
+               "x": int(x), "y": int(y), "state": state,
                "file_path": f"garden/works/{oid}.md",
-               "created_at": _iso(now), "placed_at": None}
+               "created_at": _iso(now), "placed_at": placed}
         with self._lock:
             self._c().execute(
                 "INSERT INTO village_objects (owner_id, id, being_id, kind,"
-                " name, affordance, x, y, state, file_path, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (owner_id, oid, being_id, kind, name, affordance, 0, 0,
-                 "held", row["file_path"], row["created_at"]))
+                " name, affordance, x, y, state, file_path, created_at,"
+                " placed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (owner_id, oid, being_id, kind, name, affordance,
+                 int(x), int(y), state, row["file_path"], row["created_at"],
+                 placed))
             self._c().commit()
         return row
+
+    def set_object_meaning(self, owner_id: str, object_id: str, *,
+                           name: str, affordance: str,
+                           now: datetime | None = None) -> None:
+        """The mind finishes a staked beginning (instinct-build plan): the
+        name it authors and (should the kind's affordance ever be re-picked)
+        the affordance land on the existing row; state → standing is the
+        caller's next step via set_object_ground."""
+        with self._lock:
+            self._c().execute(
+                "UPDATE village_objects SET name = ?, affordance = ?"
+                " WHERE owner_id = ? AND id = ?",
+                (name, affordance, owner_id, object_id))
+            self._c().commit()
 
     def set_object_ground(self, owner_id: str, object_id: str, *,
                           x: int, y: int, state: str, civic: bool = False,

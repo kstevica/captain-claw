@@ -1112,13 +1112,18 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
     # them; until then the key rides along, additive and cheap.
     objects: list[dict] = []
     try:
-        for o in store.village_objects(owner_id, state="standing"):
-            entry = {"id": o["id"], "kind": o["kind"], "name": o["name"],
-                     "affordance": o["affordance"],
+        standing = store.village_objects(owner_id, state="standing")
+        staked = store.village_objects(owner_id, state="staked")
+        for o in standing + staked:
+            is_stake = o.get("state") == "staked"
+            entry = {"id": o["id"], "kind": o["kind"],
+                     "name": o["name"], "affordance": o["affordance"],
                      "xy": [int(o["x"]), int(o["y"])],
                      "tile": list(tile_of(int(o["x"]), int(o["y"]))),
-                     "face": _object_face(store, o),
-                     "civic": bool(int(o.get("civic") or 0))}
+                     # a beginning has no inscription to read yet
+                     "face": "" if is_stake else _object_face(store, o),
+                     "civic": bool(int(o.get("civic") or 0)),
+                     "staked": is_stake}
             try:
                 by = store._being_by_id(o["being_id"])
                 entry["by"] = by["slug"]
@@ -2348,6 +2353,96 @@ def unplace_object(store: BeingsStore, being: dict, object_ref: str,
     return store.get_village_object(owner, oid)
 
 
+# ── Restless hands: the feet break ground (instinct-build plan) ──────────
+# The impulsive body brain may STAKE an unfinished thing where it stands —
+# wordless, free, reversible. The mind ratifies it (name + inscription +
+# fee) or it crumbles. Breaking ground is a gesture; the inscription is a
+# voice — the body-brain invariant, extended by exactly one gesture.
+
+STAKE_CRUMBLE_HOURS = 24.0     # an unfinished beginning falls after ~a day
+BUILD_IMPULSE_MIN = 0.55       # below this, building stays the mind's to begin
+
+
+def impulsiveness(being: dict) -> float:
+    """The body brain's boldness (0..1), from the IMP attribute. A neutral
+    0.5 when the sheet can't be read — never a crash."""
+    try:
+        from captain_claw.flight_deck import being_genome as genome_mod
+        return float(genome_mod.derive(genome_mod.effective_attributes(
+            being["genome"]))["impulsiveness"])
+    except Exception:  # noqa: BLE001
+        return 0.5
+
+
+def staked_object_of(store: BeingsStore, being: dict) -> dict | None:
+    """This being's one beginning waiting for its mind, or None."""
+    try:
+        for o in store.village_objects(being["owner_id"], state="staked"):
+            if o["being_id"] == being["id"]:
+                return o
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def stake_object(store: BeingsStore, being: dict, kind: str,
+                 now: datetime | None = None) -> dict:
+    """The feet break ground where they stand: a `staked` row (kind + a
+    snapped spot, no file, no fee, no boost). Physics gates the impulse
+    itself (a deliberate being never stakes, even if the model hallucinates
+    the verb), one beginning at a time, civic ground slid out (the feet are
+    not the steward's hand). An unknown kind falls to the simplest primitive
+    so the impulse still lands."""
+    now = now or _utcnow()
+    owner = being["owner_id"]
+    if being.get("state") != "alive":
+        raise BeingError("only the living break ground")
+    if impulsiveness(being) < BUILD_IMPULSE_MIN:
+        raise BeingError("not restless enough — building begins in the mind")
+    kind = (kind or "").strip().lower()
+    if kind not in OBJECT_KINDS:
+        kind = "cairn"
+    if staked_object_of(store, being) is not None:
+        raise BeingError("a beginning already waits for your mind to finish")
+    pos = position_of(store, being, now)
+    sx, sy = object_spot(store, being, int(pos["xy"][0]), int(pos["xy"][1]),
+                         asked=False)
+    affordance = OBJECT_KINDS[kind][0]
+    row = store.add_village_object(owner, being["id"], kind, kind, affordance,
+                                   state="staked", x=sx, y=sy, now=now)
+    store.record_event(being["id"], "broke_ground",
+                       {"id": row["id"], "kind": kind, "x": sx, "y": sy},
+                       now=now)
+    return row
+
+
+def prune_crumbled_stakes(store: BeingsStore, owner_id: str,
+                          now: datetime | None = None) -> int:
+    """A beginning the mind never finished falls back to the ground after
+    STAKE_CRUMBLE_HOURS — a pure function of the clock, recorded so the
+    maker hears it. Idempotent; safe to call every tick and every poll."""
+    now = now or _utcnow()
+    removed = 0
+    try:
+        stakes = store.village_objects(owner_id, state="staked")
+    except Exception:  # noqa: BLE001
+        return 0
+    for o in stakes:
+        try:
+            t = datetime.fromisoformat(str(o["created_at"]))
+        except (TypeError, ValueError):
+            continue
+        if (now - t).total_seconds() >= STAKE_CRUMBLE_HOURS * 3600.0:
+            try:
+                store.delete_village_object(owner_id, o["id"])
+                store.record_event(o["being_id"], "stake_crumbled",
+                                   {"id": o["id"], "kind": o["kind"]}, now=now)
+                removed += 1
+            except Exception:  # noqa: BLE001
+                pass
+    return removed
+
+
 # ── Phase 2: function + discovery ────────────────────────────────────────
 # A made thing DOES something: standing within reach, its affordance pays
 # the same boost a place does — another's at the full PLACE_BOOST, your
@@ -2448,9 +2543,12 @@ def object_percepts(store: BeingsStore, being: dict, now: datetime,
         objs = [o for o in store.village_objects(being["owner_id"],
                                                  state="standing")
                 if o["being_id"] != being["id"]]
+        stakes = [s for s in store.village_objects(being["owner_id"],
+                                                   state="staked")
+                  if s["being_id"] != being["id"]]
     except Exception:  # noqa: BLE001
         return []
-    if not objs:
+    if not objs and not stakes:
         return []
     try:
         pos = position_of(store, being, now)
@@ -2458,6 +2556,17 @@ def object_percepts(store: BeingsStore, being: dict, now: datetime,
         return []
     xy = pos["xy"]
     lines: list[str] = []
+    # A neighbor's BEGINNING close by (instinct-build plan): a wordless
+    # work-in-progress — sensed, never "discovered" (it isn't real yet, so
+    # no milestone, no explore serve). At most one, the nearest.
+    near_stake = sorted(
+        ((math.dist(xy, (int(s["x"]), int(s["y"]))), s) for s in stakes),
+        key=lambda t: t[0])[:1]
+    for d, s in near_stake:
+        if d <= OBJECT_SEE_RADIUS:
+            lines.append(
+                f'A BEGINNING: someone has started raising a {s["kind"]} '
+                "here — bare and unfinished, no words on it yet.")
     far: list[tuple[float, dict]] = []
     for o in objs:
         d = math.dist(xy, (int(o["x"]), int(o["y"])))
@@ -2575,6 +2684,33 @@ def parse_architect_places(text: str) -> list[dict]:
     return [p for p in places if isinstance(p, dict)]
 
 
+def stake_confirm_percept(store: BeingsStore, being: dict, now: datetime,
+                          kind: str, first_of_day: bool) -> list[str]:
+    """Instinct → reason (instinct-build plan): while a beginning the FEET
+    broke waits, the mind meets it every wake — finish it (author the
+    meaning, pay the fee → real) or abandon it, before it crumbles."""
+    if kind != "wake":
+        return []
+    s = staked_object_of(store, being)
+    if not s:
+        return []
+    try:
+        created = datetime.fromisoformat(str(s["created_at"]))
+        left_h = max(0, int(((created + timedelta(hours=STAKE_CRUMBLE_HOURS))
+                             - now).total_seconds() // 3600))
+    except Exception:  # noqa: BLE001
+        left_h = int(STAKE_CRUMBLE_HOURS)
+    fee = constitution.OBJECT_CRAFT_FEE_TOKENS
+    return [
+        f'YOUR HANDS BROKE GROUND: on impulse you began a {s["kind"]} where '
+        "you stood — bare and unfinished, it crumbles in about "
+        f"{left_h}h if you do nothing. FINISH it — a name and a true "
+        f"inscription make it REAL (costs {fee} tokens): "
+        f'"finish": {{"object_id": "{s["id"]}", "name": "...", '
+        '"inscription": "a few true words"}. Or let it fall: '
+        f'"abandon": {{"object_id": "{s["id"]}"}}.']
+
+
 def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,
                     kind: str, first_of_day: bool) -> list[str]:
     """Everything the world says to a being this tick, in one honest sweep.
@@ -2600,7 +2736,7 @@ def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,
     if note:
         lines.append(note)
     for fn in (location_percepts, market_percepts, steward_percepts,
-               commission_percepts, object_percepts):
+               commission_percepts, object_percepts, stake_confirm_percept):
         try:
             lines += fn(store, being, now, kind, first_of_day)
         except Exception:  # noqa: BLE001

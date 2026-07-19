@@ -616,6 +616,8 @@ export interface VillageObject {
   face: string; by: string; by_name: string
   // a public work the steward placed on the commons (Phase 5)
   civic?: boolean
+  // a beginning the feet broke that the mind hasn't finished (instinct-build)
+  staked?: boolean
 }
 // A sign in the grass (FPV plan Phase 3): planted by the parent or a
 // public visitor; each being finds each sign once. `found` counts finders;

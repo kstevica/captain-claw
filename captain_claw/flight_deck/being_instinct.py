@@ -57,11 +57,20 @@ FEET_SYSTEM = (
     "the mind's plan and pins when they exist; otherwise walk toward "
     "ground that serves the pressing drives.")
 
+# When the being is restless-handed enough (impulse ≥ BUILD_IMPULSE_MIN)
+# and stands on open ground, the feet gain ONE more gesture: breaking
+# ground. Wordless and free — the mind gives the beginning its meaning.
+FEET_BUILD_LINE = (
+    '{"act": "build", "kind": "cairn|bench|signpost|planter|sculpture|'
+    'lantern|fountain|shrine"} — break ground on a new thing right HERE, on '
+    "impulse; your mind will name it and make it real later")
+
 _TRIGGER_TEXT = {
     "arrived": "you just arrived here",
     "company": "someone crossed your path",
     "plan": "the mind's plan waits",
     "restless": "quiet minutes piled up — the feet itch",
+    "urge_to_build": "your hands itch to make something, right here",
 }
 
 _JSON_RE = re.compile(r"\{[^{}]*\}")
@@ -115,9 +124,39 @@ def wants_decision(store: BeingsStore, being: dict,
         has_plan = False
     if has_plan and gap_min >= FEET_PLAN_MINUTES:
         return "plan"
-    if gap_min >= FEET_IDLE_MINUTES:
-        return "restless"
-    return None
+    # Impulse tunes the whole small brain (instinct-build plan): a restless
+    # being's feet stir sooner; a deliberate one's wait longer.
+    imp = being_world.impulsiveness(being)
+    idle_floor = FEET_IDLE_MINUTES * (1.5 - imp)   # imp 0.8→~32, 0.2→~58 min
+    if gap_min < idle_floor:
+        return None
+    # The urge to build: restless hands + a pressing make-drive + open
+    # ground underfoot + no beginning already waiting = break ground.
+    if imp >= being_world.BUILD_IMPULSE_MIN and _build_ground_ready(
+            store, being, now):
+        return "urge_to_build"
+    return "restless"
+
+
+def _build_ground_ready(store: BeingsStore, being: dict,
+                        now: datetime) -> bool:
+    """Would breaking ground HERE actually land? Open (non-civic) footing,
+    no beginning of this being's already waiting, and a make-drive
+    (create/explore) actually pressing — else the feet just wander."""
+    try:
+        if being_world.staked_object_of(store, being) is not None:
+            return False
+        from captain_claw.flight_deck import being_life
+        ranked = dict(being_life.drive_pressures(being.get("drives") or {},
+                                                 now))
+        if max(ranked.get("create", 0.0), ranked.get("explore", 0.0)) < 0.35:
+            return False
+        pos = being_world.position_of(store, being, now)
+        being_world.object_spot(store, being, int(pos["xy"][0]),
+                                int(pos["xy"][1]), asked=False)  # raises if none
+        return True
+    except Exception:  # noqa: BLE001 — no ground, no urge
+        return False
 
 
 # ── The micro-prompt (hard-capped) ────────────────────────────────────────
@@ -185,6 +224,13 @@ def feet_prompt(store: BeingsStore, being: dict, now: datetime,
     avoid = (being.get("intent") or {}).get("avoid") or []
     if avoid:
         lines.append("Pins: avoid " + ", ".join(avoid))
+    # The extra gesture, offered only to restless hands on open ground.
+    try:
+        if being_world.impulsiveness(being) >= being_world.BUILD_IMPULSE_MIN \
+                and _build_ground_ready(store, being, now):
+            lines.append("You may also: " + FEET_BUILD_LINE)
+    except Exception:  # noqa: BLE001
+        pass
     lines.append("Why you stir: " + _TRIGGER_TEXT.get(trigger, trigger))
     recent: list[str] = []
     try:
@@ -222,13 +268,17 @@ def parse_feet_act(text: str) -> dict | None:
         act = str(obj["act"]).strip().lower()
         if act in ("attend", "go_to", "walk"):
             act = "go"
-        if act not in ("go", "linger", "hello", "browse", "home"):
+        if act not in ("go", "linger", "hello", "browse", "home", "build"):
             return None
         if act == "go":
             to = str(obj.get("to") or "").strip()
             if not to:
                 return None
             return {"act": "go", "to": to[:60]}
+        if act == "build":
+            # kind is a bodily choice; the physics floor decides if it lands
+            return {"act": "build",
+                    "kind": str(obj.get("kind") or "").strip().lower()[:20]}
         return {"act": act}
     return None
 
@@ -284,6 +334,16 @@ def _apply_act(store: BeingsStore, being: dict, act: dict | None,
             return {"act": "linger", "note": "nobody here"}
         being_world.reflex_encounters(store, being, now)   # idempotent
         return {"act": "hello", "with": [p["name"] for p in present[:3]]}
+    if kind == "build":
+        # Break ground — wordless, free. Physics gates the impulse floor,
+        # one-at-a-time, and civic ground; a refusal stays a quiet note (the
+        # feet never nag the mind). The MIND finishes it into a real thing.
+        try:
+            row = being_world.stake_object(store, being, act.get("kind") or "",
+                                           now=now)
+            return {"act": "build", "kind": row["kind"], "id": row["id"]}
+        except BeingError as e:
+            return {"act": "none", "note": str(e)[:120]}
     return {"act": "linger"}
 
 

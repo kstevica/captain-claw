@@ -434,6 +434,63 @@ def craft_object(store: BeingsStore, being: dict, kind: str, name: str,
     return row
 
 
+def finish_staked_object(store: BeingsStore, being: dict, object_id: str,
+                         name: str, inscription: str,
+                         now: datetime | None = None) -> dict:
+    """The mind ratifies a beginning the FEET broke (instinct-build plan):
+    author the meaning, pay the SAME fee and write the SAME proof file as a
+    deliberate craft — on the row the feet already staked — then stand it
+    up (now it boosts, is discovered, counts against the cap). Order is
+    check → write → burn → stand, so a broke being or a failed write costs
+    nothing. Yours only, and only while it is still a beginning."""
+    from captain_claw.flight_deck import being_life
+    now = now or _utcnow()
+    o = store.get_village_object(being["owner_id"], object_id)   # raises
+    if o["being_id"] != being["id"]:
+        raise BeingError("that beginning is not yours to finish")
+    if o.get("state") != "staked":
+        raise BeingError("that is not a beginning waiting to be finished")
+    name = (name or "").strip()
+    if not (2 <= len(name) <= 40):
+        raise BeingError("a made thing needs a name (2–40 characters)")
+    inscription = (inscription or "").strip()
+    if not inscription:
+        raise BeingError("a made thing carries words — give it an "
+                         "inscription")
+    view = store.wallet_view(being)
+    fee = constitution.OBJECT_CRAFT_FEE_TOKENS
+    if view["enforced"] and view["balance_tokens"] < fee:
+        raise InsufficientTokens("cannot afford the craft fee to finish it")
+    try:
+        p = being_life._home_path(being, o["file_path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            f"# {name}\n\n"
+            f"<!-- a {o['kind']}, made by {being['name']} ({being['slug']}) "
+            f"on {now.date().isoformat()} -->\n\n{inscription}\n",
+            encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        raise BeingError("the making failed — nothing was made") from None
+    if view["enforced"]:
+        store._apply(being["owner_id"], tokens=fee, reason="craft_burn",
+                     from_being=being["id"], to_being=None,
+                     note=name[:80], now=now)
+    store.set_object_meaning(being["owner_id"], object_id, name=name,
+                             affordance=o["affordance"], now=now)
+    store.set_object_ground(being["owner_id"], object_id, x=int(o["x"]),
+                            y=int(o["y"]), state="standing", now=now)
+    # A stake sits where the feet stood; the standing-object cap/civic
+    # guards were never checked. It stands here — the mind chose to finish
+    # what the body began, exactly there.
+    store.record_event(being["id"], "object_finished",
+                       {"id": object_id, "kind": o["kind"], "name": name,
+                        "fee_tokens": fee if view["enforced"] else 0},
+                       now=now)
+    store.milestone(being["id"], "first_finish",
+                    {"kind": o["kind"], "made": name}, now=now)
+    return store.get_village_object(being["owner_id"], object_id)
+
+
 def handle_market_digest(store: BeingsStore, being: dict, digest: dict,
                          now: datetime | None = None) -> None:
     """Route sell / buy / guestbook. Never raises — a refused act becomes

@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 
 SPECIES = "iskra"
 
-ATTRS = ("CUR", "PER", "CAU", "SOC", "CRE", "ORD", "PLA")
+ATTRS = ("CUR", "PER", "CAU", "SOC", "CRE", "ORD", "PLA", "IMP")
 ATTR_NAMES = {
     "CUR": "Curiosity",
     "PER": "Persistence",
@@ -32,22 +32,32 @@ ATTR_NAMES = {
     "CRE": "Creativity",
     "ORD": "Order",
     "PLA": "Playfulness",
+    # The body brain's boldness (docs/being-instinct-build-plan.md): how
+    # readily the feet act on their own — and whether they break ground on
+    # impulse. High IMP = restless, initiating; low = deliberate, leaving
+    # building to the mind's reasoned craft.
+    "IMP": "Impulse",
 }
+# A genome born before IMP existed reads this neutral middle for it — no
+# migration; its total simply becomes ~POOL like everyone else's.
+ATTR_DEFAULTS = {"IMP": 5}
 
-POOL = 40
+POOL = 45
 ATTR_MIN = 1
 ATTR_MAX = 10
 # Lineage total band: offspring totals are clamped here so attribute inflation
-# can't creep in across generations (tradeoffs stay real).
-BAND_MIN = 36
-BAND_MAX = 44
+# can't creep in across generations (tradeoffs stay real). ~±11% of POOL.
+BAND_MIN = 40
+BAND_MAX = 50
 
-# All presets must sum to exactly POOL (enforced by tests).
+# All presets must sum to exactly POOL (enforced by tests). IMP fits the
+# archetype: the explorer and artist act on impulse; the scholar and
+# caretaker deliberate.
 PRESETS: dict[str, dict[str, int]] = {
-    "explorer":  {"CUR": 9, "PER": 6, "CAU": 2, "SOC": 5, "CRE": 7, "ORD": 4, "PLA": 7},
-    "scholar":   {"CUR": 8, "PER": 8, "CAU": 6, "SOC": 3, "CRE": 5, "ORD": 8, "PLA": 2},
-    "artist":    {"CUR": 7, "PER": 5, "CAU": 2, "SOC": 4, "CRE": 9, "ORD": 3, "PLA": 10},
-    "caretaker": {"CUR": 4, "PER": 7, "CAU": 7, "SOC": 9, "CRE": 3, "ORD": 8, "PLA": 2},
+    "explorer":  {"CUR": 9, "PER": 5, "CAU": 2, "SOC": 5, "CRE": 6, "ORD": 4, "PLA": 7, "IMP": 7},
+    "scholar":   {"CUR": 8, "PER": 8, "CAU": 7, "SOC": 3, "CRE": 5, "ORD": 9, "PLA": 2, "IMP": 3},
+    "artist":    {"CUR": 7, "PER": 4, "CAU": 2, "SOC": 4, "CRE": 9, "ORD": 2, "PLA": 9, "IMP": 8},
+    "caretaker": {"CUR": 4, "PER": 7, "CAU": 7, "SOC": 9, "CRE": 3, "ORD": 8, "PLA": 3, "IMP": 4},
 }
 
 METAMORPHOSIS_BASE_TOKENS = 1_000_000
@@ -106,7 +116,11 @@ def effective_attributes(genome: dict) -> dict[str, int]:
     for k, delta in (genome.get("epigenetics") or {}).items():
         if k in attrs:
             attrs[k] = max(ATTR_MIN, min(ATTR_MAX, int(attrs[k]) + int(delta)))
-    return {a: int(attrs.get(a, ATTR_MIN)) for a in ATTRS}
+    # Missing attrs read their default (IMP=5 for pre-IMP genomes, ATTR_MIN
+    # otherwise) — this is the single gateway inheritance flows through, so
+    # an old parent breeds as a neutral-impulse one, no migration needed.
+    return {a: int(attrs.get(a, ATTR_DEFAULTS.get(a, ATTR_MIN)))
+            for a in ATTRS}
 
 
 def derive(attributes: dict[str, int]) -> dict:
@@ -114,6 +128,7 @@ def derive(attributes: dict[str, int]) -> dict:
     cur, per, cau = attributes["CUR"], attributes["PER"], attributes["CAU"]
     soc, cre, ord_, pla = (attributes["SOC"], attributes["CRE"],
                            attributes["ORD"], attributes["PLA"])
+    imp = attributes.get("IMP", ATTR_DEFAULTS["IMP"])
     return {
         "drive_weights": {
             "survive": 1.0,
@@ -126,6 +141,9 @@ def derive(attributes: dict[str, int]) -> dict:
         "goal_hysteresis_ticks": 2 + per,
         "routine_strength": round(ord_ / 10, 2),
         "whimsy": round(pla / 10, 2),
+        # The body brain's boldness (instinct-build plan): drives how
+        # readily the feet act, and gates breaking ground on impulse.
+        "impulsiveness": round(imp / 10, 2),
         "thrift": round((cau + ord_) / 20, 2),
         "industriousness": round((per + cre) / 20, 2),
         "generosity": round((soc + pla) / 20, 2),

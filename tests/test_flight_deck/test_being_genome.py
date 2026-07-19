@@ -11,7 +11,8 @@ NOW = datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
 
 
 def _sheet(**over):
-    base = {"CUR": 6, "PER": 6, "CAU": 6, "SOC": 6, "CRE": 6, "ORD": 6, "PLA": 4}
+    base = {"CUR": 6, "PER": 6, "CAU": 6, "SOC": 6, "CRE": 6, "ORD": 6,
+            "PLA": 4, "IMP": 5}  # sums to POOL (45)
     base.update(over)
     return base
 
@@ -23,8 +24,8 @@ def test_valid_sheet_passes():
 
 
 def test_pool_must_be_exact():
-    errs = g.validate_point_buy(_sheet(PLA=5))  # 41 points
-    assert any("exactly 40" in e for e in errs)
+    errs = g.validate_point_buy(_sheet(PLA=5))  # 46 points
+    assert any("exactly 45" in e for e in errs)
 
 
 def test_range_and_type_enforced():

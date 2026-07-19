@@ -113,11 +113,17 @@ async def _instinct_pass(db, now: datetime | None = None) -> int:
     except Exception as e:  # noqa: BLE001
         log.warning("instinct pass listing failed", error=str(e))
         return 0
+    pruned_owners: set = set()
     for being in beings:
         try:
             quiet, _ = _in_quiet(being["owner_id"], now)
             if quiet:
                 continue
+            # A beginning the mind never finished crumbles (instinct-build
+            # plan) — once per owner per pass, even between mind ticks.
+            if being["owner_id"] not in pruned_owners:
+                pruned_owners.add(being["owner_id"])
+                being_world.prune_crumbled_stakes(store, being["owner_id"], now)
             acted += being_world.reflex_pass(store, being, now)
             fresh = store.get(being["owner_id"], being["slug"])
             if await being_instinct.decide(db, store, fresh, now=now):
