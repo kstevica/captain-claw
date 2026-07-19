@@ -390,6 +390,31 @@ def test_a_lone_occupant_keeps_the_anchor(store):
     assert tuple(e["xy"]) == (sq["x"], sq["y"])        # no needless offset
 
 
+def test_beings_at_a_building_stand_outside_its_walls(store):
+    """A building can't be entered, so a being parked at one is seated on
+    walkable ground OUT FRONT — never rendered inside its footprint (the
+    reported bug: iskre drawn inside the Well pavilion). Holds for a lone
+    occupant and a crowd, on the host village's own map."""
+    world.ensure_village(store, OWNER, now=NOW)
+    solid = world._building_tiles(store, OWNER)
+    assert solid                                        # the village has walls
+    # the Library is a 3x2 building; the Well a 1x1 — both solid
+    lone = _being(store, "Sama", stage="adult")
+    _park(store, lone["slug"], "well")
+    a = _being(store, "Ada", stage="adult")
+    b = _being(store, "Bela", stage="adult")
+    _park(store, a["slug"], "library")
+    _park(store, b["slug"], "library")
+    m = world.village_map_payload(store, OWNER, now=NOW)
+    at_bldg = [e for e in m["beings"] if e["at"] in ("well", "library")]
+    assert len(at_bldg) == 3
+    for e in at_bldg:
+        assert world.tile_of(e["xy"][0], e["xy"][1]) not in solid   # not in a wall
+    # the two co-occupants still get distinct spots
+    lib = [tuple(e["xy"]) for e in at_bldg if e["at"] == "library"]
+    assert len(lib) == 2 and lib[0] != lib[1]
+
+
 def test_walking_beings_are_never_seated(store):
     a = _being(store, "Ada", stage="adult")
     b = _being(store, "Bela", stage="adult")

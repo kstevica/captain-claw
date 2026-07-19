@@ -1299,30 +1299,78 @@ def _origin_label(v: dict) -> str:
     return lbl or "another village"
 
 
+def _building_front(p: dict) -> tuple[int, int]:
+    """Where a visitor STANDS at a building: one tile OUT from its door, away
+    from the interior — on walkable ground, never inside walls it cannot
+    enter. Falls back to the anchor when the door is unknown (the caller
+    snaps that clear of the footprint)."""
+    dx, dy = p.get("door_x"), p.get("door_y")
+    if dx is None or dy is None:
+        return (int(p["x"]), int(p["y"]))
+    cx, cy = tile_of(int(p["x"]), int(p["y"]))
+    sx = 1 if int(dx) > cx else -1 if int(dx) < cx else 0
+    sy = 1 if int(dy) > cy else -1 if int(dy) < cy else 0
+    return tile_center(int(dx) + sx, int(dy) + sy)
+
+
+def _nudge_off_solid(xy: tuple[int, int], solid: set,
+                     plot: int) -> tuple[int, int]:
+    """Push a seat that landed on a building footprint out to the nearest
+    walkable tile (a ring-by-ring search) so a parked being never renders
+    inside a wall. Clamped one tile inside the real (grow-map) plot."""
+    t = tile_of(xy[0], xy[1])
+    if t not in solid:
+        return (int(xy[0]), int(xy[1]))
+    lo, hi = TILE, int(plot) - TILE
+    for r in range(1, 8):
+        for dx in range(-r, r + 1):
+            for dy in range(-r, r + 1):
+                if max(abs(dx), abs(dy)) != r:
+                    continue
+                cand = (t[0] + dx, t[1] + dy)
+                if cand not in solid:
+                    cx, cy = tile_center(cand[0], cand[1])
+                    return (min(hi, max(lo, cx)), min(hi, max(lo, cy)))
+    return (int(xy[0]), int(xy[1]))
+
+
 def _seat_parked(store: BeingsStore, owner_id: str, beings: list[dict]) -> None:
-    """Fan out every PARKED entry (resident or guest) at a shared place onto
-    distinct standing spots — the same seating the payload already did for
-    residents, re-run so guests join the same rings."""
+    """Seat every PARKED entry (resident or guest) on WALKABLE ground at its
+    place: co-occupants fan onto distinct spots, and at a solid BUILDING
+    everyone stands OUT FRONT — never inside the walls (the anchor a
+    building's row carries is its interior heart). Re-run over residents and
+    guests together so a guest joins the same rings and no one shares a
+    pixel."""
     places_by_id = {p["id"]: p for p in store.village_places(owner_id)}
     pw, _ph = plot_dims(store, owner_id)               # real plot (grow map)
+    solid = _building_tiles(store, owner_id)           # walls to keep out of
     parked: dict[str, list[dict]] = {}
     for e in beings:
         if e.get("at") and not e.get("to"):
             parked.setdefault(e["at"], []).append(e)
     for pid, here in parked.items():
-        if len(here) < 2:
-            continue
         p = places_by_id.get(pid)
         if p is None:
             continue
-        anchor = (int(p["x"]), int(p["y"]))
+        kind = p.get("kind") or footprint_for(p)[2]
+        building = kind == "building"
+        # A ground place with a lone occupant needs no reseat (its heart is
+        # walkable); a BUILDING always does — its heart is inside the walls.
+        if len(here) < 2 and not building:
+            continue
         w = int(p.get("w") or 0) or footprint_for(p)[0]
         h = int(p.get("h") or 0) or footprint_for(p)[1]
-        seats = standing_spots(anchor, (w, h, p.get("kind") or "building"),
+        anchor = _building_front(p) if building else (int(p["x"]), int(p["y"]))
+        if len(here) == 1:
+            xy = _nudge_off_solid(anchor, solid, pw)
+            here[0]["xy"] = [xy[0], xy[1]]
+            continue
+        seats = standing_spots(anchor, (w, h, kind),
                                [e["slug"] for e in here], plot=pw)
         for e in here:
             xy = seats.get(e["slug"])
             if xy:
+                xy = _nudge_off_solid(xy, solid, pw)
                 e["xy"] = [xy[0], xy[1]]
 
 
