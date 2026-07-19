@@ -13,6 +13,7 @@ import { createPortal } from 'react-dom'
 import {
   getSelfFile, getSelfFiles, getVillageMap, plantVillageNote,
   postGhostBeat, postGhostLeave, postVillagePresence, pullVillageNote,
+  placeVillageObject, OBJECT_KINDS, type ObjectKind,
   type VillageMapData, type VillageNote, type VillagePlace,
 } from '../../../services/beings'
 import {
@@ -82,6 +83,13 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
   const [noteText, setNoteText] = useState('')
   const [planting, setPlanting] = useState(false)
   const [plantErr, setPlantErr] = useState('')
+  // parent-build: set a made thing down at the ghost's feet
+  const [buildAt, setBuildAt] = useState<{ x: number; y: number } | null>(null)
+  const [buildKind, setBuildKind] = useState<ObjectKind>('bench')
+  const [buildName, setBuildName] = useState('')
+  const [buildWords, setBuildWords] = useState('')
+  const [buildErr, setBuildErr] = useState('')
+  const [building, setBuilding] = useState(false)
   const [portrait, setPortrait] = useState(false)
   const hintTimer = useRef(0)
   const lastPresence = useRef<{ x: number; y: number } | null>(null)
@@ -164,6 +172,9 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
       },
       onStatus: setStatus,
       onPlant: (units) => { setPlantErr(''); setNoteText(''); setPlantAt(units) },
+      onBuild: mode === 'parent'
+        ? (units) => { setBuildErr(''); setBuildName(''); setBuildWords(''); setBuildAt(units) }
+        : undefined,
       onPull: mode === 'parent'
         ? (note) => { void pullVillageNote(note.id).then(refreshNotes).catch(() => {}) }
         : undefined,
@@ -248,6 +259,24 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
   }
   const cancelPlant = () => { setPlantAt(null); setNoteText(''); enter() }
 
+  const build = async () => {
+    if (!buildAt || !buildName.trim()) return
+    setBuilding(true)
+    setBuildErr('')
+    try {
+      await placeVillageObject({ kind: buildKind, name: buildName.trim(),
+        inscription: buildWords.trim(), x: buildAt.x, y: buildAt.y })
+      await refreshNotes()   // pulls a fresh payload → the object appears
+      setBuildAt(null)
+      enter()
+    } catch (e) {
+      setBuildErr(e instanceof Error ? e.message : 'it would not stand')
+    } finally {
+      setBuilding(false)
+    }
+  }
+  const cancelBuild = () => { setBuildAt(null); enter() }
+
   const overlay = (
     <div className="fixed inset-0 z-[90] bg-[#0c0f0a]">
       <canvas ref={canvasRef} className="block h-full w-full cursor-crosshair" onClick={enter} />
@@ -263,7 +292,7 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
       {/* touch controls — a phone roams by thumb-stick + buttons (Phase 6) */}
       {IS_TOUCH && locked && handleRef.current && (
         <Suspense fallback={null}>
-          <MobileControls handle={handleRef.current} status={status} />
+          <MobileControls handle={handleRef.current} status={status} canBuild={mode === 'parent'} />
         </Suspense>
       )}
 
@@ -303,7 +332,7 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
       {/* first-entry controls hint */}
       {locked && hint && !status.note && !status.readable && (
         <div className={`pointer-events-none absolute bottom-6 left-1/2 -translate-x-1/2 px-4 py-2 text-[12px] ${PANEL}`}>
-          WASD walk · Space jump · <b>F</b> phase · <b>E</b> leave a note · <b>R</b> read · Esc pause
+          WASD walk · Space jump · <b>F</b> phase · <b>E</b> note{mode === 'parent' && <> · <b>B</b> build</>} · <b>R</b> read · Esc pause
         </div>
       )}
 
@@ -347,8 +376,48 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
         </div>
       )}
 
+      {/* parent-build: set a made thing down at the ghost's feet */}
+      {buildAt && (
+        <div className="absolute inset-0 grid place-items-center bg-[#0c0f0a]/55 backdrop-blur-[2px]">
+          <div className={`w-[min(92vw,400px)] p-4 ${PANEL}`}>
+            <div className="mb-1 text-[13px] font-semibold">Set a thing down here</div>
+            <p className="mb-2 text-[11px] text-[#b9b19a]">
+              Your own hand on the world — it stands here for the Iskre to find and use.
+            </p>
+            <div className="mb-2 flex flex-wrap gap-1">
+              {OBJECT_KINDS.map((k) => (
+                <button key={k} onClick={() => setBuildKind(k)}
+                  className={`rounded-md border px-2 py-0.5 text-[11px] capitalize transition-colors ${buildKind === k ? 'border-violet-400/60 bg-violet-500/25 text-violet-100' : 'border-[#4a4436] text-[#b9b19a] hover:bg-[#2a251d]'}`}>
+                  {k}
+                </button>
+              ))}
+            </div>
+            <input autoFocus value={buildName} maxLength={40}
+              onChange={(e) => setBuildName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') cancelBuild() }}
+              placeholder="a name for it"
+              className="mb-1.5 w-full rounded-lg border border-[#4a4436] bg-[#0c0f0a]/70 p-2 text-[16px] text-[#e8e2cf] placeholder-[#8d8571] focus:border-violet-400/50 focus:outline-none" />
+            <textarea value={buildWords} maxLength={300} rows={2}
+              onChange={(e) => setBuildWords(e.target.value)}
+              placeholder="an inscription — a few words (optional)"
+              className="w-full resize-none rounded-lg border border-[#4a4436] bg-[#0c0f0a]/70 p-2 text-[15px] text-[#e8e2cf] placeholder-[#8d8571] focus:border-violet-400/50 focus:outline-none" />
+            {buildErr && <p className="mt-1 text-[11px] text-red-400">{buildErr}</p>}
+            <div className="mt-2 flex gap-2">
+              <button onClick={() => void build()} disabled={building || !buildName.trim()}
+                className="flex-1 rounded-lg border border-violet-400/40 bg-violet-500/20 px-4 py-1.5 text-[12px] font-medium text-violet-100 transition-colors hover:bg-violet-500/30 disabled:opacity-40">
+                {building ? 'placing…' : 'Place it'}
+              </button>
+              <button onClick={cancelBuild}
+                className="rounded-lg border border-[#4a4436] px-4 py-1.5 text-[12px] text-[#b9b19a] transition-colors hover:bg-[#2a251d]">
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* the doorstep — before the first step in */}
-      {!locked && !everLocked && !plantAt && !reading && (
+      {!locked && !everLocked && !plantAt && !buildAt && !reading && (
         <div className="absolute inset-0 grid place-items-center bg-[#0c0f0a]/55">
           <div className={`w-[min(92vw,380px)] p-5 text-center ${PANEL}`}>
             <div className="flex items-center justify-center gap-2 text-[15px] font-semibold">
@@ -388,7 +457,7 @@ export default function VillageFPV({ data, onClose, mode = 'parent', visitorName
       )}
 
       {/* paused — Esc released the mouse */}
-      {!locked && everLocked && !plantAt && !reading && (
+      {!locked && everLocked && !plantAt && !buildAt && !reading && (
         <div className="absolute inset-0 grid place-items-center bg-[#0c0f0a]/55 backdrop-blur-[2px]">
           <div className={`w-[min(92vw,320px)] p-5 text-center ${PANEL}`}>
             <div className="text-[14px] font-semibold">The world holds its breath</div>

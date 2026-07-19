@@ -1647,13 +1647,15 @@ class BeingsStore:
     def add_village_object(self, owner_id: str, being_id: str, kind: str,
                            name: str, affordance: str, *,
                            state: str = "held", x: int = 0, y: int = 0,
+                           file_dir: str = "garden/works",
                            now: datetime | None = None) -> dict:
         """Insert an object row. `held` (crafted, in hand — the mind's path)
         or `staked` (the feet broke ground — kind + a spot, no file, no fee
         yet). The id derives from the name like a place's (numeric suffix on
         collision); the proof file's path is fixed HERE so file and row can
-        never disagree. Validation lives in being_society/being_world —
-        this is the SQL, not the law."""
+        never disagree. `file_dir` is the home folder for a being's work
+        (default) or a commons folder for a parent-placed work. Validation
+        lives in being_society/being_world — this is the SQL, not the law."""
         now = now or _utcnow()
         base = _slugify(name)[:40] or "work"
         oid, n = base, 2
@@ -1666,7 +1668,7 @@ class BeingsStore:
         row = {"owner_id": owner_id, "id": oid, "being_id": being_id,
                "kind": kind, "name": name, "affordance": affordance,
                "x": int(x), "y": int(y), "state": state,
-               "file_path": f"garden/works/{oid}.md",
+               "file_path": f"{file_dir}/{oid}.md",
                "created_at": _iso(now), "placed_at": placed}
         with self._lock:
             self._c().execute(

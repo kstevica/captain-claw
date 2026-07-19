@@ -666,3 +666,48 @@ Still open (all noted above): furnishable interiors, object weathering,
 object gifting/selling (unify with the market), richer object function,
 group builds, per-object guestbooks, street naming, steward-proposed
 redesign.
+
+---
+
+## Parent-build (SHIPPED 2026-07-19, live-verified) — the keeper's own hands
+
+The parent gets direct hands on OBJECTS (beyond the Phase 5 civic hand on
+places): place any of the 8 kinds anywhere in the village, from BOTH the
+iso map and the FPV ghost.
+
+- **Backend** (`being_world.place_parent_object` + routes): a standing
+  object attributed to the sentinel maker `PARENT_MAKER = "parent"`. The
+  keeper tends the whole village — it places ANYWHERE (`object_spot` grew a
+  `being=None` + `owner_id` path with `civic_ok=True`, snapping off only
+  walls/homes/occupied), **no fee, no cap**. Its inscription lives in the
+  COMMONS (`commons/village/works/<id>.md`; the parent has no being-home),
+  so `_object_face` branches on the maker to read it, and beings **discover
+  and are boosted by** a parent object like any other (its maker id matches
+  no being). `add_village_object` gained a `file_dir` param (home vs
+  commons). Routes: `POST /village-map/object` {kind, name, inscription,
+  x, y} and `DELETE /village-map/object/{id}` (guarded: only
+  `being_id == "parent"` works are the keeper's to lift — a being's own
+  work stays the being's). Payload objects carry `parent: true` +
+  `by_name: "the village's keeper"`; the discovery percept reads "a gift
+  from the village's keeper".
+- **Iso map**: a "BUILD — YOUR OWN HAND" palette (the 8 kinds) in the map's
+  default panel; arming a kind turns the map into a placement canvas
+  (`IsoScene` gained `buildKind` + `onGround`, unprojecting a background
+  click by inverting the exact `iso()` used to draw — village units, no
+  offset). A ground click stages the spot → a name/inscription dialog →
+  POST → the thing appears. The object panel shows "your hand" + "Placed
+  by / the village's keeper" + a "Lift it back — remove this" button.
+- **FPV** (parent ghost only): a new **B** key (and a mobile Hammer button)
+  breaks out a kind-picker + name/inscription dialog at the ghost's feet,
+  mirroring the note-plant flow (`engine` gained an `onBuild` hook +
+  `doBuild` + `build()`; `VillageFPV` gained the dialog + `placeVillageObject`
+  wiring; the controls hint reads "B build" for the parent).
+- Tests: `test_being_objects.py` +3 (place-anywhere incl. commons + vocab
+  guard; beings discover + are full-boosted by a parent object; a being's
+  own work isn't the parent's to lift). Being suite 42 (objects file);
+  full FD 962 + the same 8 pre-existing; tsc clean; no new lint.
+- **Live-verified** on an isolated FD: the iso palette → armed Fountain →
+  clicked open grass → the "Set down a Fountain" dialog → placed "The
+  Keeper's Fountain"; the panel read fountain · gather · **your hand** /
+  **PLACED BY the village's keeper** / the inscription / **Lift it back**;
+  Remove cleared it. Bundle pair index-CqVk_8Un.js + index-DDkbIN-q.css.

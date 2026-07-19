@@ -618,6 +618,8 @@ export interface VillageObject {
   civic?: boolean
   // a beginning the feet broke that the mind hasn't finished (instinct-build)
   staked?: boolean
+  // placed by the parent's own hand (parent-build)
+  parent?: boolean
 }
 // A sign in the grass (FPV plan Phase 3): planted by the parent or a
 // public visitor; each being finds each sign once. `found` counts finders;
@@ -707,6 +709,22 @@ export const editVillagePlace = (
 export const redesignVillage = () =>
   fdFetch<{ ok: boolean; places: VillagePlace[] }>(
     '/beings/village-map/architect', { method: 'POST' })
+
+// The parent's own hand on the world (parent-build): place / lift a made
+// thing anywhere in the village, from the map or the FPV ghost.
+export const OBJECT_KINDS = [
+  'bench', 'cairn', 'signpost', 'planter', 'sculpture', 'lantern',
+  'fountain', 'shrine'] as const
+export type ObjectKind = typeof OBJECT_KINDS[number]
+export const placeVillageObject = (
+  body: { kind: string; name: string; inscription: string; x: number; y: number }) =>
+  fdFetch<{ ok: boolean; object: VillageObject }>('/beings/village-map/object', {
+    method: 'POST', body: JSON.stringify(body),
+  })
+export const removeVillageObject = (id: string) =>
+  fdFetch<{ ok: boolean }>(`/beings/village-map/object/${id}`, {
+    method: 'DELETE',
+  })
 
 // ── The public square (parent side) ──
 

@@ -62,10 +62,14 @@ interface SceneProps {
   // still DRAW the objects — they just aren't selectable there.
   selObject?: string | null
   onObject?: (id: string | null) => void
+  // parent-build: when a kind is armed, a background click reports the
+  // village-unit spot instead of deselecting (the parent's hand on the map).
+  buildKind?: string | null
+  onGround?: (x: number, y: number) => void
 }
 
 export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fill,
-                           selObject, onObject }: SceneProps) {
+                           selObject, onObject, buildKind, onGround }: SceneProps) {
   const dark = typeof document !== 'undefined'
     && document.documentElement.classList.contains('dark')
   const C = dark ? NIGHT : DAY
@@ -297,10 +301,25 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
 
   pieces.sort((a, z) => a.depth - z.depth)
 
+  // parent-build: unproject a background click (viewBox space → village
+  // units) by inverting the same iso() used to draw, so the thing lands
+  // where the keeper points. iso(x,y) = [(x-y)·ISO_X, (x+y)·ISO_Y].
+  const onGroundClick = (e: React.MouseEvent) => {
+    const svg = svgRef.current
+    if (!svg) return
+    const r = svg.getBoundingClientRect()
+    const vx = vb[0] + ((e.clientX - r.left) / r.width) * vb[2]
+    const vy = vb[1] + ((e.clientY - r.top) / r.height) * vb[3]
+    const a = vx / ISO_X, b = vy / ISO_Y     // a = x−y, b = x+y
+    onGround?.(Math.round((a + b) / 2), Math.round((b - a) / 2))
+  }
   return (
     <svg ref={svgRef} viewBox={vb.join(' ')}
-      className={`w-full touch-none rounded-md border border-zinc-800/60 ${fill ? 'h-full min-h-[460px]' : 'h-[460px]'} ${dark ? 'bg-[#20281e]' : 'bg-[#eae4cf]'}`}
-      onClick={() => { onPlace(null); onBeing(null); onObject?.(null) }}
+      className={`w-full touch-none rounded-md border border-zinc-800/60 ${buildKind ? 'cursor-crosshair' : ''} ${fill ? 'h-full min-h-[460px]' : 'h-[460px]'} ${dark ? 'bg-[#20281e]' : 'bg-[#eae4cf]'}`}
+      onClick={(e) => {
+        if (buildKind && onGround) { onGroundClick(e); return }
+        onPlace(null); onBeing(null); onObject?.(null)
+      }}
       onWheel={onWheel} onPointerDown={onDown} onPointerMove={onMove}
       onPointerUp={onUp} onPointerLeave={() => { drag.current = null }}
       onDoubleClick={() => setVb(HOME_VB)}>

@@ -7,15 +7,16 @@
 // note form or a reading panel opens (those unlock the ghost).
 
 import { useEffect, useRef, useState } from 'react'
-import { BookOpen, ChevronsUp, Compass, Feather, PenLine } from 'lucide-react'
+import { BookOpen, ChevronsUp, Compass, Feather, Hammer, PenLine } from 'lucide-react'
 import type { FPVHandle, FPVStatus } from './engine'
 
 const LOOK_SENS = 0.005
 const STICK_R = 52   // px — joystick travel radius
 
-export default function MobileControls({ handle, status }: {
+export default function MobileControls({ handle, status, canBuild }: {
   handle: FPVHandle
   status: FPVStatus
+  canBuild?: boolean
 }) {
   const [thumb, setThumb] = useState({ x: 0, y: 0 })
   const [gyroOn, setGyroOn] = useState(false)
@@ -132,6 +133,12 @@ export default function MobileControls({ handle, status }: {
             className={`${BTN} ${idle}`} aria-label="leave a note">
             <PenLine className="h-6 w-6" />
           </button>
+          {canBuild && (
+            <button onPointerDown={tap(() => handle.build())}
+              className={`${BTN} ${idle}`} aria-label="build">
+              <Hammer className="h-6 w-6" />
+            </button>
+          )}
           <button onPointerDown={tap(() => handle.read())}
             disabled={!status.readable}
             className={`${BTN} ${status.readable ? on : 'border-[#3a352a] bg-[#171410]/40 text-[#6a6350]'}`}

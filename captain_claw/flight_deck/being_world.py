@@ -1123,13 +1123,17 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
                      # a beginning has no inscription to read yet
                      "face": "" if is_stake else _object_face(store, o),
                      "civic": bool(int(o.get("civic") or 0)),
-                     "staked": is_stake}
-            try:
-                by = store._being_by_id(o["being_id"])
-                entry["by"] = by["slug"]
-                entry["by_name"] = by["name"]
-            except Exception:  # noqa: BLE001
-                entry["by"], entry["by_name"] = "", ""
+                     "staked": is_stake,
+                     "parent": o.get("being_id") == PARENT_MAKER}
+            if o.get("being_id") == PARENT_MAKER:
+                entry["by"], entry["by_name"] = "parent", "the village's keeper"
+            else:
+                try:
+                    by = store._being_by_id(o["being_id"])
+                    entry["by"] = by["slug"]
+                    entry["by_name"] = by["name"]
+                except Exception:  # noqa: BLE001
+                    entry["by"], entry["by_name"] = "", ""
             objects.append(entry)
     except Exception:  # noqa: BLE001
         pass
@@ -2202,7 +2206,8 @@ def _building_tiles(store: BeingsStore, owner_id: str) -> set:
     return walls
 
 
-def object_spot(store: BeingsStore, being: dict, x: int, y: int, *,
+def object_spot(store: BeingsStore, being: dict | None, x: int, y: int, *,
+                owner_id: str | None = None,
                 asked: bool = True, civic_ok: bool = False) -> tuple[int, int]:
     """Where a made thing may stand, from a rough ask. An EXPLICIT ask for
     the commons and its ring, the lane, or another's yard REFUSES (the
@@ -2214,8 +2219,11 @@ def object_spot(store: BeingsStore, being: dict, x: int, y: int, *,
 
     `civic_ok` (the steward's hand, Phase 5): the commons opens — a public
     work may stand on the plaza, by the well, along the ring — and only
-    real obstacles (building walls, homes, occupied tiles) snap it aside."""
-    owner = being["owner_id"]
+    real obstacles (building walls, homes, occupied tiles) snap it aside.
+    `being=None` is the PARENT's hand (they tend the whole village): pass
+    `owner_id` + `civic_ok=True` and it snaps off only walls/homes/taken."""
+    owner = owner_id or being["owner_id"]
+    my_slug = (being or {}).get("slug")
     margin = 40
     x = min(PLOT_SIZE - margin, max(margin, int(x)))
     y = min(PLOT_SIZE - margin, max(margin, int(y)))
@@ -2226,11 +2234,11 @@ def object_spot(store: BeingsStore, being: dict, x: int, y: int, *,
             "the commons isn't yours to build on — the steward and your "
             "parent tend that ground; choose open ground past the civic "
             "ring")
-    own_home: set = set(home_tiles(being))
+    own_home: set = set(home_tiles(being)) if being else set()
     others_homes: set = set()
     try:
         for r in store.list(owner):
-            if r.get("slug") != being.get("slug"):
+            if r.get("slug") != my_slug:
                 others_homes |= set(home_tiles(r))
     except Exception:  # noqa: BLE001
         pass
@@ -2329,6 +2337,51 @@ def place_object(store: BeingsStore, being: dict, object_ref: str,
                        {"id": oid, "kind": o["kind"], "name": o["name"],
                         "x": sx, "y": sy}, now=now)
     return store.get_village_object(owner, oid)
+
+
+# The parent's own hand on the world (parent-build): the parent tends the
+# whole village — it may place a made thing ANYWHERE (walls/homes aside),
+# no fee, no cap. Attributed to a sentinel maker; its inscription lives in
+# the commons (the parent has no being-home), so beings discover and read
+# it like any object.
+PARENT_MAKER = "parent"
+
+
+def place_parent_object(store: BeingsStore, owner_id: str, kind: str,
+                        name: str, inscription: str, x: int, y: int,
+                        now: datetime | None = None) -> dict:
+    """The parent sets a made thing down anywhere in the village — snapping
+    only off walls, homes and occupied tiles. A standing, real thing at
+    once (the parent authors its meaning): it boosts, is discovered, blocks
+    if its kind does. No fee, no cap."""
+    from captain_claw.flight_deck import being_society
+    now = now or _utcnow()
+    kind = (kind or "").strip().lower()
+    if kind not in OBJECT_KINDS:
+        raise BeingError("the craft vocabulary is fixed: "
+                         + ", ".join(sorted(OBJECT_KINDS)))
+    name = (name or "").strip()
+    if not (2 <= len(name) <= 40):
+        raise BeingError("a made thing needs a name (2–40 characters)")
+    inscription = (inscription or "").strip()[:300]
+    sx, sy = object_spot(store, None, int(x), int(y),
+                         owner_id=owner_id, asked=True, civic_ok=True)
+    affordance = OBJECT_KINDS[kind][0]
+    row = store.add_village_object(owner_id, PARENT_MAKER, kind, name,
+                                   affordance, state="standing", x=sx, y=sy,
+                                   file_dir="village/works", now=now)
+    # the inscription lives in the commons (the parent keeps no home)
+    body = inscription or "(placed by the village's keeper — no words on it)"
+    try:
+        p = being_society._commons_path(owner_id, row["file_path"],
+                                        create_parents=True)
+        p.write_text(
+            f"# {name}\n\n"
+            f"<!-- a {kind}, placed by the village's keeper on "
+            f"{now.date().isoformat()} -->\n\n{body}\n", encoding="utf-8")
+    except Exception:  # noqa: BLE001 — the thing still stands
+        pass
+    return store.get_village_object(owner_id, row["id"])
 
 
 def unplace_object(store: BeingsStore, being: dict, object_ref: str,
@@ -2490,6 +2543,8 @@ def drive_boost_factors(store: BeingsStore, being: dict,
 
 
 def _maker_label(store: BeingsStore, o: dict) -> str:
+    if o.get("being_id") == PARENT_MAKER:
+        return " — a gift from the village's keeper"
     try:
         return f", {store._being_by_id(o['being_id'])['name']}'s work"
     except Exception:  # noqa: BLE001
@@ -2498,11 +2553,16 @@ def _maker_label(store: BeingsStore, o: dict) -> str:
 
 def _object_face(store: BeingsStore, o: dict) -> str:
     """The inscription's first true line — read from the maker's REAL
-    proof file (the file IS the content; a vanished file reads blank)."""
+    proof file (the file IS the content; a vanished file reads blank). A
+    parent-placed work keeps its words in the commons, not a being-home."""
     try:
         from captain_claw.flight_deck import being_life
-        maker = store._being_by_id(o["being_id"])
-        p = being_life._home_path(maker, o["file_path"])
+        if o.get("being_id") == PARENT_MAKER:
+            from captain_claw.flight_deck import being_society
+            p = being_society._commons_path(o["owner_id"], o["file_path"])
+        else:
+            maker = store._being_by_id(o["being_id"])
+            p = being_life._home_path(maker, o["file_path"])
         for ln in p.read_text(encoding="utf-8").splitlines():
             s = ln.strip()
             if not s or s.startswith("#") or s.startswith("<!--"):

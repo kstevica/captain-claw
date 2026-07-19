@@ -29,6 +29,8 @@ export interface FPVHooks {
   onPull?: (note: VillageNote) => void
   // Phase 4: R opens the reader for the stand within reach
   onRead?: (lectern: Lectern) => void
+  // parent-build: B sets a made thing down at the ghost's feet (parent only)
+  onBuild?: (units: { x: number; y: number }) => void
 }
 
 export interface FPVHandle {
@@ -48,6 +50,7 @@ export interface FPVHandle {
   jump: () => void
   toggleFly: () => boolean                         // returns the new phase state
   note: () => void
+  build: () => void                                // parent-build: at the feet
   read: () => boolean                              // true if a stand was in reach
   setGyro: (on: boolean) => void                   // steer look by phone tilt
 }
@@ -370,6 +373,7 @@ export function createFPV(canvas: HTMLCanvasElement, world: BuiltWorld,
   }
   const doFly = () => { phase = !phase; player.vel.y = 0; lastStatus = ''; return phase }
   const doNote = () => { if (!hooks.onPlant) return; releasePointer(); hooks.onPlant(toUnits()) }
+  const doBuild = () => { if (!hooks.onBuild) return; releasePointer(); hooks.onBuild(toUnits()) }
   const doRead = () => {
     if (!hooks.onRead) return false
     const stand = lecterns.nearest({ x: player.pos.x, z: player.pos.z })
@@ -391,6 +395,7 @@ export function createFPV(canvas: HTMLCanvasElement, world: BuiltWorld,
     }
     if (e.code === 'KeyF') doFly()
     else if (e.code === 'KeyE') doNote()
+    else if (e.code === 'KeyB') doBuild()
     else if (e.code === 'KeyX') doPull()
     else if (e.code === 'KeyR') doRead()
     else if (e.code === 'Escape' && soft) {
@@ -507,6 +512,7 @@ export function createFPV(canvas: HTMLCanvasElement, world: BuiltWorld,
     jump: () => { jumpQueued = true },
     toggleFly: () => doFly(),
     note: () => doNote(),
+    build: () => doBuild(),
     read: () => doRead(),
     setGyro: (on) => {
       gyro = on

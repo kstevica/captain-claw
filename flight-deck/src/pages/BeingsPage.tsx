@@ -4,7 +4,7 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, Check, ChevronDown,
   ChevronLeft, ChevronRight, ClipboardList, Coins, Download, Egg, ExternalLink,
-  DoorOpen, Files, Fingerprint, Footprints, Gift, Globe, GraduationCap, History, Loader2, Mail,
+  DoorOpen, Files, Fingerprint, Footprints, Gift, Globe, GraduationCap, Hammer, History, Loader2, Mail,
   Map as MapIcon, MapPin, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Pencil, Play, Plus,
   RefreshCw, Search, ScrollText, Skull, SlidersHorizontal, Sparkles, Sprout,
   Trash2, Upload, Users, Wand2, Wrench, X, Zap, ZoomIn, ZoomOut,
@@ -36,7 +36,8 @@ import {
   type VillagePlace, type VillageBeingPos, type VillageObject,
   type MarketListing,
   getVillageLife, judgeCommission, setStewardStipend, type VillageLife, nudgeBeing,
-  editVillagePlace, redesignVillage,
+  editVillagePlace, redesignVillage, placeVillageObject, removeVillageObject,
+  OBJECT_KINDS, type ObjectKind,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
   setBodyConfig, setBodyMrav, type BodyConnectionInput,
@@ -4081,10 +4082,11 @@ function MapPlaceCard({ place, beings, hereNames, market, guestbook, full, onEdi
 // A made thing on the map (world-shaping plan Phase 3): name, kind, the
 // maker, and its face — with the whole inscription readable through the
 // maker's real proof file (garden/works/<id>.md).
-function MapObjectCard({ o, beings, full }: {
+function MapObjectCard({ o, beings, full, onRemove }: {
   o: VillageObject
   beings: VillageBeingPos[]
   full: boolean
+  onRemove?: () => void
 }) {
   const [text, setText] = useState<string>('')
   const [reading, setReading] = useState(false)
@@ -4108,9 +4110,10 @@ function MapObjectCard({ o, beings, full }: {
         <span className="rounded border border-zinc-700 px-1.5 py-px text-[9px] text-zinc-400">{o.kind}</span>
         {!o.staked && <span className="rounded border border-zinc-700 px-1.5 py-px text-[9px]" style={{ color: AFF_HUE[o.affordance] ?? '#a78bfa' }}>{o.affordance}</span>}
         {o.civic && <span className="rounded border border-amber-500/40 px-1.5 py-px text-[9px] text-amber-600 dark:text-amber-400">a public work</span>}
+        {o.parent && <span className="rounded border border-violet-500/40 px-1.5 py-px text-[9px] text-violet-600 dark:text-violet-400">your hand</span>}
         {o.staked && <span className="rounded border border-stone-500/40 px-1.5 py-px text-[9px] text-stone-500 dark:text-stone-400">unfinished · on impulse</span>}
       </div>
-      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{o.staked ? 'Started by' : (o.civic ? 'Raised by the steward' : 'Made by')}</div>
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{o.staked ? 'Started by' : (o.parent ? 'Placed by' : (o.civic ? 'Raised by the steward' : 'Made by'))}</div>
       <div className="mb-2 flex items-center gap-1 text-[11px] text-zinc-300">
         {maker?.avatar && <IskraAvatar c={maker.avatar.c} p={maker.avatar.p} size={14} />}
         {o.by_name || o.by || <span className="text-zinc-600">someone long gone</span>}
@@ -4130,16 +4133,24 @@ function MapObjectCard({ o, beings, full }: {
           {o.face
             ? <p className="mb-1 text-[11px] italic leading-snug text-zinc-300">“{o.face}”</p>
             : <p className="mb-1 text-[11px] text-zinc-600">its face has worn blank</p>}
-          <button onClick={() => setReading(true)}
-            className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:border-violet-500/50 hover:text-zinc-100">
-            read the whole inscription
-          </button>
+          {!o.parent && (
+            <button onClick={() => setReading(true)}
+              className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:border-violet-500/50 hover:text-zinc-100">
+              read the whole inscription
+            </button>
+          )}
         </>
       )}
       <p className="mt-2 text-[10px] text-zinc-600">
         iskre nearby can see and use it — far ones only sense something stands here
       </p>
       </>)}
+      {onRemove && (
+        <button onClick={onRemove}
+          className="mt-2 flex w-full items-center justify-center gap-1.5 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition-colors hover:border-red-500/50 hover:text-red-400">
+          <Trash2 className="h-3 w-3" /> Lift it back — remove this
+        </button>
+      )}
     </div>
   )
 }
@@ -4159,6 +4170,12 @@ function VillageMap() {
   // the FPV gets a SNAPSHOT of the map, not the live 60s-refreshed object —
   // otherwise every refresh would rebuild the world under the ghost's feet
   const [fpv, setFpv] = useState<VillageMapData | null>(null)
+  // parent-build: an armed kind → the map becomes a placement canvas; a
+  // ground click stages {x,y} → a name/inscription dialog → POST.
+  const [buildKind, setBuildKind] = useState<ObjectKind | null>(null)
+  const [buildAt, setBuildAt] = useState<{ x: number; y: number } | null>(null)
+  const [buildName, setBuildName] = useState('')
+  const [buildWords, setBuildWords] = useState('')
   const fetchedAt = useRef(0)
   const [, beat] = useState(0)
 
@@ -4191,6 +4208,28 @@ function VillageMap() {
     setBusy(true)
     try { await redesignVillage(); await load() }
     catch (e) { alert(e instanceof Error ? e.message : 'the architect failed') }
+    finally { setBusy(false) }
+  }
+  // parent-build: arm a kind, click the map to stage a spot, name it, place.
+  const onGround = (x: number, y: number) => {
+    if (!buildKind) return
+    setBuildAt({ x, y }); setBuildName(''); setBuildWords('')
+    setSel(null); setSelBeing(null); setSelObj(null)
+  }
+  const placeObject = async () => {
+    if (!buildKind || !buildAt || !buildName.trim()) return
+    setBusy(true)
+    try {
+      await placeVillageObject({ kind: buildKind, name: buildName.trim(),
+        inscription: buildWords.trim(), x: buildAt.x, y: buildAt.y })
+      setBuildAt(null); setBuildKind(null); await load()
+    } catch (e) { alert(e instanceof Error ? e.message : 'could not place it') }
+    finally { setBusy(false) }
+  }
+  const removeObject = async (id: string) => {
+    setBusy(true)
+    try { await removeVillageObject(id); setSelObj(null); await load() }
+    catch (e) { alert(e instanceof Error ? e.message : 'could not lift it') }
     finally { setBusy(false) }
   }
   useEffect(() => {
@@ -4307,6 +4346,23 @@ function VillageMap() {
           {life.steward && <span className="truncate text-zinc-600">· steward: {life.steward.replace(/^iskra-/, '').replace(/-[0-9a-f]{4}$/, '')}</span>}
         </div>
       )}
+      {/* parent-build: the keeper's own hand — arm a kind, click the map */}
+      <div className="mb-2 rounded border border-zinc-800 bg-zinc-950/40 p-2">
+        <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+          <Hammer className="h-3 w-3" /> Build — your own hand
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {OBJECT_KINDS.map((k) => (
+            <button key={k} onClick={() => setBuildKind(buildKind === k ? null : k)}
+              className={`rounded border px-1.5 py-0.5 text-[10px] capitalize transition-colors ${buildKind === k ? 'border-violet-500 bg-violet-500/20 text-violet-200' : 'border-zinc-700 text-zinc-400 hover:border-violet-500/50 hover:text-zinc-200'}`}>
+              {k}
+            </button>
+          ))}
+        </div>
+        <p className="mt-1 text-[10px] text-zinc-600">
+          {buildKind ? <>click anywhere on the map to set down a <span className="text-violet-400">{buildKind}</span> · <button onClick={() => setBuildKind(null)} className="underline hover:text-zinc-300">cancel</button></> : 'pick a thing, then click the ground — you place anywhere, no cost'}
+        </p>
+      </div>
       <button onClick={() => void redraw()} disabled={busy}
         className="mb-2 flex w-full items-center justify-center gap-1.5 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition-colors hover:border-violet-500/50 hover:text-zinc-200 disabled:opacity-40">
         <Wand2 className="h-3 w-3" /> Redraw the village…
@@ -4316,7 +4372,8 @@ function VillageMap() {
   )
   const panel = (isFull: boolean) =>
     selB ? <MapBeingCard b={selB} statusOf={statusOf} places={data.places} nudge={nudge} nudging={nudging} full={isFull} />
-      : selO ? <MapObjectCard o={selO} beings={data.beings} full={isFull} />
+      : selO ? <MapObjectCard o={selO} beings={data.beings} full={isFull}
+          onRemove={selO.parent ? () => void removeObject(selO.id) : undefined} />
         : selPlace ? <MapPlaceCard place={selPlace} beings={data.beings} hereNames={here(selPlace.id).map((b) => b.name)} market={market} guestbook={placeInfo?.guestbook || ''} full={isFull} onEdit={(body) => editPlace(selPlace.id, body)} />
           : defaultPanel()
   const hint = 'iskre walk the streets between wakes · click a building or an iskra · scroll to zoom, drag to pan, double-click to reset · dark is evening'
@@ -4345,6 +4402,32 @@ function VillageMap() {
       <VillageFPV data={fpv} onClose={() => setFpv(null)} />
     </Suspense>
   ) : null
+  // parent-build: the name/inscription dialog after a ground click
+  const buildDialog = buildAt && buildKind ? (
+    <div className="fixed inset-0 z-[80] grid place-items-center bg-black/50 p-4" onClick={() => setBuildAt(null)}>
+      <div onClick={(e) => e.stopPropagation()} className="w-[min(92vw,360px)] rounded-xl border border-zinc-700 bg-zinc-900 p-4 shadow-xl">
+        <div className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-zinc-100">
+          <Hammer className="h-4 w-4 text-violet-400" /> Set down a <span className="capitalize text-violet-300">{buildKind}</span>
+        </div>
+        <p className="mb-2 text-[11px] text-zinc-500">The Iskre nearby will see it and use it; far ones will sense it and want to come look.</p>
+        <input autoFocus value={buildName} maxLength={40} placeholder="a name for it"
+          onChange={(e) => setBuildName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Escape') setBuildAt(null) }}
+          className="mb-1.5 w-full rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 focus:border-violet-500/50 focus:outline-none" />
+        <textarea value={buildWords} maxLength={300} rows={3} placeholder="an inscription — a few words to carve on it (optional)"
+          onChange={(e) => setBuildWords(e.target.value)}
+          className="mb-2 w-full resize-none rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none" />
+        <div className="flex gap-2">
+          <button disabled={busy || !buildName.trim()} onClick={() => void placeObject()}
+            className="flex-1 rounded bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+            {busy ? 'placing…' : 'Place it'}
+          </button>
+          <button onClick={() => setBuildAt(null)}
+            className="rounded border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800">Cancel</button>
+        </div>
+      </div>
+    </div>
+  ) : null
 
   if (full) {
     return (
@@ -4355,6 +4438,7 @@ function VillageMap() {
             <div className="min-h-0 flex-1">
               <IsoScene data={data} sel={sel} selBeing={selBeing}
                 selObject={selObj} onObject={setSelObj}
+                buildKind={buildKind} onGround={onGround}
                 onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} fill />
             </div>
             <p className="mt-1.5 shrink-0 text-[10px] text-zinc-600">{hint}</p>
@@ -4362,6 +4446,7 @@ function VillageMap() {
           <div className="w-full shrink-0 overflow-y-auto lg:w-96">{panel(true)}</div>
         </div>
         {fpvOverlay}
+        {buildDialog}
       </div>
     )
   }
@@ -4373,12 +4458,14 @@ function VillageMap() {
         <div className="min-w-0 flex-1">
           <IsoScene data={data} sel={sel} selBeing={selBeing}
             selObject={selObj} onObject={setSelObj}
+            buildKind={buildKind} onGround={onGround}
             onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} />
           <p className="mt-1.5 text-[10px] text-zinc-600">{hint}</p>
         </div>
         <div className="w-full shrink-0 lg:w-72">{panel(false)}</div>
       </div>
       {fpvOverlay}
+      {buildDialog}
     </div>
   )
 }

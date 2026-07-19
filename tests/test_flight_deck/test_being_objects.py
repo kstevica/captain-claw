@@ -933,6 +933,57 @@ async def test_update_place_gates_and_leaves_the_ground_alone(store):
         store.update_place(OWNER, "no-such-place", name="Ghost", now=NOW)
 
 
+# ═══ The parent's own hand (parent-build) ═════════════════════════════════
+
+async def test_the_parent_places_a_thing_anywhere(store):
+    await _being(store, name="Ana")
+    world.ensure_village(store, OWNER, now=NOW)
+    sq = next(p for p in store.village_places(OWNER) if p["id"] == "square")
+    # the parent may place ON the commons (the keeper tends everything)
+    o = world.place_parent_object(store, OWNER, "fountain", "Keeper's Spring",
+                                  "drink and rest", sq["x"], sq["y"], now=NOW)
+    assert o["state"] == "standing" and o["being_id"] == "parent"
+    assert world.tile_of(o["x"], o["y"]) in world._civic_zone(store, OWNER)
+    assert world._object_face(store, o) == "drink and rest"   # from commons
+    payload = world.village_map_payload(store, OWNER, now=NOW)
+    e = next(x for x in payload["objects"] if x["id"] == o["id"])
+    assert e["parent"] is True and e["by_name"] == "the village's keeper"
+    with pytest.raises(BeingError, match="vocabulary is fixed"):
+        world.place_parent_object(store, OWNER, "tower", "X", "", 500, 500,
+                                  now=NOW)
+
+
+async def test_beings_discover_and_are_boosted_by_a_parent_object(store):
+    b = await _being(store, name="Cvijeta", now=NOW - timedelta(days=2))
+    world.ensure_village(store, OWNER, now=NOW)
+    ask = _legal_asks(store, b, 1)[0]
+    o = world.place_parent_object(store, OWNER, "bench", "A Quiet Seat",
+                                  "for weary feet", ask[0], ask[1], now=NOW)
+    _settle_at_object(store, b, "A Quiet Seat")
+    # a parent bench (someone else's) grants the FULL boost to a being on it
+    assert world.drive_boost_factors(
+        store, store.get(OWNER, b["slug"]), NOW).get("grow") \
+        == world.PLACE_BOOST
+    # and it is discovered like any standing thing
+    lines = world.object_percepts(store, store.get(OWNER, b["slug"]),
+                                  NOW, "wake", True)
+    assert any("A DISCOVERY" in ln and "A Quiet Seat" in ln
+               and "keeper" in ln for ln in lines)
+    assert o["id"] in [e["data"]["id"] for e in store.events(OWNER, b["slug"])
+                       if e["kind"] == "object_found"]
+
+
+async def test_a_beings_own_work_is_not_the_parents_to_lift(store):
+    b = await _being(store, name="Ana")
+    world.ensure_village(store, OWNER, now=NOW)
+    row = _craft(store, b)
+    ask = _legal_asks(store, b, 1)[0]
+    world.place_object(store, store.get(OWNER, b["slug"]), row["id"],
+                       x=ask[0], y=ask[1], now=NOW)
+    got = store.get_village_object(OWNER, row["id"])
+    assert got["being_id"] != "parent"     # the route guards on this being_id
+
+
 # ═══ The whitelist, the offers, the map ═══════════════════════════════════
 
 def test_normalize_digest_object_shapes():

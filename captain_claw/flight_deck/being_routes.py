@@ -367,6 +367,50 @@ async def pull_note(note_id: str,
     return {"ok": True}
 
 
+class ObjectRequest(BaseModel):
+    kind: str
+    name: str
+    inscription: str = ""
+    x: int
+    y: int
+
+
+@router.post("/village-map/object")
+async def place_object(body: ObjectRequest,
+                       user: dict = Depends(get_current_user)):
+    """The parent's own hand on the world (parent-build): set a made thing
+    down anywhere in the village — from the map or the FPV ghost. Snaps off
+    walls/homes/occupied ground; no fee, no cap. It stands as a real thing
+    the Iskre discover and use."""
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    _run(being_world.ensure_village, store, user["id"])
+    try:
+        obj = _run(being_world.place_parent_object, store, user["id"],
+                   body.kind, body.name, body.inscription, body.x, body.y)
+    except BeingError as e:
+        raise HTTPException(e.status, str(e)) from e
+    return {"ok": True, "object": obj}
+
+
+@router.delete("/village-map/object/{object_id}")
+async def remove_object(object_id: str,
+                        user: dict = Depends(get_current_user)):
+    """The parent removes one of ITS OWN placed works (a being's own work
+    is the being's to keep — only the keeper's gifts are the keeper's to
+    lift)."""
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    try:
+        o = _run(store.get_village_object, user["id"], object_id)
+    except BeingError as e:
+        raise HTTPException(e.status, str(e)) from e
+    if o.get("being_id") != being_world.PARENT_MAKER:
+        raise HTTPException(403, "only the works you placed are yours to lift")
+    _run(store.delete_village_object, user["id"], object_id)
+    return {"ok": True}
+
+
 @router.post("/village-map/presence")
 async def felt_presence(body: PresenceRequest,
                         user: dict = Depends(get_current_user)):
