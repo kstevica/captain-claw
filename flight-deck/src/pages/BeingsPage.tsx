@@ -2878,6 +2878,42 @@ function BeingCard({ item, meta, onChanged }: {
             </div>
           )}
 
+          {/* The work board (work-board plan) — the mind assigns, the feet
+              work; kept in plain view on the card, not behind Care. */}
+          {(() => {
+            const bd = v.board
+            if (!bd || !(bd.open.length || bd.active.length || bd.recent.length)) return null
+            const label = (t: BoardTask) => t.kind === 'build'
+              ? `build ${t.detail || 'a thing'} · ${t.target}`
+              : t.kind === 'meet' ? `meet ${t.target}` : `go · ${t.target}`
+            return (
+              <div className="mb-2.5 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-2">
+                <div className="mb-1 flex items-center gap-1.5 text-[9px] uppercase tracking-wide text-zinc-600">
+                  <ClipboardList className="h-3 w-3" />
+                  <span className="font-medium">Work board</span>
+                  <span className="ml-auto normal-case tracking-normal text-zinc-700">the mind assigns · the feet work</span>
+                </div>
+                <div className="space-y-0.5">
+                  {bd.active.map((t) => (
+                    <div key={t.id} className="text-[11px] text-violet-700 dark:text-violet-300">
+                      ▸ {label(t)} <span className="text-zinc-500">·working</span>
+                    </div>
+                  ))}
+                  {bd.open.map((t) => (
+                    <div key={t.id} className="text-[11px] text-zinc-400">○ {label(t)}</div>
+                  ))}
+                  {bd.recent.map((t) => t.state === 'done' ? (
+                    <div key={t.id} className="text-[11px] text-emerald-700 dark:text-emerald-400">✓ {label(t)}</div>
+                  ) : (
+                    <div key={t.id} className="text-[11px] text-rose-700 dark:text-rose-400">
+                      ✗ {label(t)}{t.note ? ` — ${t.note}` : ''}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
+
           {/* Care — every knob, tucked away until the parent reaches for it */}
           <button onClick={() => setCareOpen((o) => !o)}
             className="mb-2 flex w-full items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-[11px] text-zinc-500 transition-colors hover:border-zinc-700 hover:text-zinc-300">
@@ -2990,37 +3026,6 @@ function BeingCard({ item, meta, onChanged }: {
                   <span className="text-[10px] text-zinc-500">walks, greets, browses between thinks</span>
                 )}
               </div>
-              {(() => {
-                // The work board (work-board plan): the mind assigns tasks,
-                // the feet work them and mark each done / active / refused.
-                const bd = v.board
-                if (!bd || !(bd.open.length || bd.active.length || bd.recent.length)) return null
-                const label = (t: BoardTask) => t.kind === 'build'
-                  ? `build ${t.detail || 'a thing'} · ${t.target}`
-                  : t.kind === 'meet' ? `meet ${t.target}` : `go · ${t.target}`
-                return (
-                  <div className="flex items-start gap-2 text-xs">
-                    <span className="w-16 shrink-0 pt-0.5 text-zinc-500">work</span>
-                    <div className="min-w-0 space-y-0.5">
-                      {bd.active.map((t) => (
-                        <div key={t.id} className="text-[10px] text-violet-700 dark:text-violet-300">
-                          ▸ {label(t)} <span className="text-zinc-500">·working</span>
-                        </div>
-                      ))}
-                      {bd.open.map((t) => (
-                        <div key={t.id} className="text-[10px] text-zinc-400">○ {label(t)}</div>
-                      ))}
-                      {bd.recent.map((t) => t.state === 'done' ? (
-                        <div key={t.id} className="text-[10px] text-emerald-700 dark:text-emerald-400">✓ {label(t)}</div>
-                      ) : (
-                        <div key={t.id} className="text-[10px] text-rose-700 dark:text-rose-400">
-                          ✗ {label(t)}{t.note ? ` — ${t.note}` : ''}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )
-              })()}
               <div className="flex items-start gap-2 text-xs">
                 <span className="w-16 shrink-0 pt-1.5 text-zinc-500">look</span>
                 <div className="min-w-0">
