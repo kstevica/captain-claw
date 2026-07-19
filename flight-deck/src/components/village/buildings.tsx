@@ -27,19 +27,35 @@ const pts = (...p: [number, number][]) => p.map((q) => q.join(',')).join(' ')
 
 // ── homes + buildings ─────────────────────────────────────────────────────
 
-// home cottage, 2×2: N(0,0) E(64,32) S(0,64) W(-64,32), rise 28
-export const Cottage: FC = () => (
-  <g>
-    <polygon points={pts([64, 4], [64, 32], [0, 64], [0, 36])} fill={WALL} />
-    <polygon points={pts([-64, 4], [-64, 32], [0, 64], [0, 36])} fill={WALL_D} />
-    <polygon points={pts([0, -44], [64, 4], [0, 36])} fill={ROOF} />
-    <polygon points={pts([0, -44], [-64, 4], [0, 36])} fill={ROOF_D} />
-    <polygon points={pts([20, 32], [34, 42], [34, 24], [20, 15])} fill={TIMBER_D} />
-    <polygon points={pts([22, 30], [32, 37], [32, 25], [22, 18.5])} fill={TIMBER} />
-    <rect x="-40" y="14" width="12" height="10" rx="2" fill={GLOW} transform="skewY(-26.5)" />
-    <circle cx="0" cy="-44" r="2.4" fill={ROOF_D} />
-  </g>
-)
+// home cottage, 2×2: N(0,0) E(64,32) S(0,64) W(-64,32), rise 28.
+// Home as your canvas (world-shaping plan Phase 4): the cottage may wear
+// a being-chosen dress — roof + wall hue pairs from the fixed vocabulary.
+export const HOME_ROOF_HUES: Record<string, [string, string]> = {
+  ember: [ROOF, ROOF_D], slate: ['#7c93a8', '#5f7488'],
+  moss: ['#7fa05a', '#647f45'], dusk: ['#8b7fa8', '#6d6288'],
+}
+export const HOME_WALL_HUES: Record<string, [string, string]> = {
+  plaster: [WALL, WALL_D], timber: [TIMBER, TIMBER_D],
+  sage: ['#d5dcba', '#bcc59e'],
+}
+
+export const Cottage: FC<{ look?: { roof?: string; wall?: string } | null }> =
+  ({ look }) => {
+    const [rf, rfD] = HOME_ROOF_HUES[look?.roof || ''] ?? HOME_ROOF_HUES.ember
+    const [wl, wlD] = HOME_WALL_HUES[look?.wall || ''] ?? HOME_WALL_HUES.plaster
+    return (
+      <g>
+        <polygon points={pts([64, 4], [64, 32], [0, 64], [0, 36])} fill={wl} />
+        <polygon points={pts([-64, 4], [-64, 32], [0, 64], [0, 36])} fill={wlD} />
+        <polygon points={pts([0, -44], [64, 4], [0, 36])} fill={rf} />
+        <polygon points={pts([0, -44], [-64, 4], [0, 36])} fill={rfD} />
+        <polygon points={pts([20, 32], [34, 42], [34, 24], [20, 15])} fill={TIMBER_D} />
+        <polygon points={pts([22, 30], [32, 37], [32, 25], [22, 18.5])} fill={TIMBER} />
+        <rect x="-40" y="14" width="12" height="10" rx="2" fill={GLOW} transform="skewY(-26.5)" />
+        <circle cx="0" cy="-44" r="2.4" fill={rfD} />
+      </g>
+    )
+  }
 
 // library, 3×2: N(0,0) E(96,48) S(32,80) W(-64,32), rise 34
 export const Library: FC = () => (
@@ -267,6 +283,91 @@ export const Lamp: FC = () => (
     <ellipse cx="0" cy="2" rx="5" ry="2" fill="#000" opacity="0.12" />
   </g>
 )
+
+// ── made things (world-shaping plan Phase 3) ──────────────────────────────
+// Objects a being crafted and placed: small 1-tile fixtures drawn CENTERED
+// on (0,0) like the props (the renderer translates them to the tile
+// center). Bench and Cairn reuse the fixtures above, nudged to center.
+
+export const Signpost: FC = () => (
+  <g>
+    <rect x="-1.6" y="-30" width="3.2" height="32" fill={TIMBER_D} />
+    <g transform="skewY(-26.5)">
+      <rect x="1" y="-24" width="20" height="8" rx="1.5" fill={TIMBER} />
+      <path d="M 21 -24 L 26 -20 L 21 -16 Z" fill={TIMBER} />
+      <line x1="4" y1="-21.5" x2="17" y2="-21.5" stroke={INK} strokeWidth="1.2" opacity="0.6" />
+      <line x1="4" y1="-18.8" x2="14" y2="-18.8" stroke={INK} strokeWidth="1.2" opacity="0.6" />
+    </g>
+    <ellipse cx="0" cy="2" rx="6" ry="2.4" fill="#000" opacity="0.12" />
+  </g>
+)
+
+export const Planter: FC = () => (
+  <g>
+    <polygon points={pts([-13, 0], [0, 6.5], [13, 0], [0, -6.5])} fill={TIMBER} />
+    <polygon points={pts([-13, 0], [0, 6.5], [0, 11], [-13, 4.5])} fill={TIMBER_D} />
+    <polygon points={pts([13, 0], [0, 6.5], [0, 11], [13, 4.5])} fill={TIMBER_D} opacity="0.75" />
+    <polygon points={pts([-9, 0], [0, 4.5], [9, 0], [0, -4.5])} fill={SOIL_D} />
+    <g fill={LEAF}>
+      <circle cx="-4" cy="-6" r="3" /><circle cx="3" cy="-8" r="3.4" />
+      <circle cx="0" cy="-3" r="2.6" />
+    </g>
+    <circle cx="-4.5" cy="-9" r="1.8" fill="#d98a9c" />
+    <circle cx="4" cy="-12" r="1.8" fill="#e9e2b8" />
+  </g>
+)
+
+export const Sculpture: FC = () => (
+  <g>
+    <polygon points={pts([-10, 4], [0, 9], [10, 4], [0, -1])} fill={STONE_D} />
+    <path d="M -3 4 Q -7 -6 -2 -14 Q 4 -20 2 -28 Q 8 -22 6 -12 Q 5 -4 3 4 Z"
+      fill={STONE} />
+    <path d="M -3 4 Q -6 -4 -3 -11 Q -4 -3 -1 4 Z" fill={STONE_D} opacity="0.6" />
+    <circle cx="2.6" cy="-28" r="2.4" fill={STONE} />
+    <ellipse cx="0" cy="6" rx="9" ry="3" fill="#000" opacity="0.1" />
+  </g>
+)
+
+export const Lantern: FC = () => (
+  <g>
+    <rect x="-1.2" y="-24" width="2.4" height="25" fill={TIMBER_D} />
+    <rect x="-4" y="-31" width="8" height="8.4" rx="2" fill={INK} />
+    <rect x="-2.6" y="-29.6" width="5.2" height="5.4" rx="1.2" fill={GLOW} className="village-lamp" />
+    <path d="M -4 -31 L 0 -34 L 4 -31" stroke={INK} strokeWidth="1.6" fill="none" />
+    <ellipse cx="0" cy="2" rx="4.6" ry="1.9" fill="#000" opacity="0.12" />
+  </g>
+)
+
+export const Fountain: FC = () => (
+  <g>
+    <ellipse cx="0" cy="2" rx="14" ry="6.6" fill={STONE} />
+    <ellipse cx="0" cy="1" rx="10.5" ry="4.8" fill={WATER} />
+    <ellipse cx="0" cy="0.6" rx="6.5" ry="3" fill={WATER_D} />
+    <rect x="-1.4" y="-14" width="2.8" height="14" fill={STONE_D} />
+    <ellipse cx="0" cy="-14" rx="4.4" ry="2" fill={WATER} />
+    <path d="M -3.4 -13 q -2.5 5 -4.5 7 M 3.4 -13 q 2.5 5 4.5 7"
+      stroke={WATER} strokeWidth="1.4" fill="none" strokeLinecap="round" />
+  </g>
+)
+
+export const Shrine: FC = () => (
+  <g>
+    <polygon points={pts([-11, 2], [0, 7.5], [11, 2], [0, -3.5])} fill={STONE_D} />
+    <rect x="-8.5" y="-16" width="2.6" height="18" fill={STONE} />
+    <rect x="5.9" y="-16" width="2.6" height="18" fill={STONE} />
+    <polygon points={pts([0, -26], [13, -15], [0, -18.5], [-13, -15])} fill={ROOF} />
+    <polygon points={pts([0, -18.5], [13, -15], [0, -11.5], [-13, -15])} fill={ROOF_D} opacity="0.55" />
+    <rect x="-2.4" y="-9" width="4.8" height="5" rx="1" fill={GLOW} opacity="0.9" className="village-lamp" />
+  </g>
+)
+
+const ObjBench: FC = () => <g transform="translate(0 -12)"><Bench /></g>
+const ObjCairn: FC = () => <g transform="translate(0 -4)"><Cairn /></g>
+
+export const OBJECT_SPRITES: Record<string, FC> = {
+  bench: ObjBench, cairn: ObjCairn, signpost: Signpost, planter: Planter,
+  sculpture: Sculpture, lantern: Lantern, fountain: Fountain, shrine: Shrine,
+}
 
 // ── the registry the renderer draws from ──────────────────────────────────
 

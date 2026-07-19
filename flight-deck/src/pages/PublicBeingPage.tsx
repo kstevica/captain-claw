@@ -711,6 +711,13 @@ function PublicVillageMap({ theme }: { theme: 'dark' | 'light' }) {
   const placeById = useMemo(() => {
     const m: Record<string, VillagePlace> = {}
     for (const p of data?.places ?? []) m[p.id] = p
+    // Made things are ground too (world-shaping plan): resolve
+    // 'object:<id>' walk targets to real names + spots here as well.
+    for (const o of data?.objects ?? []) {
+      m[`object:${o.id}`] = { id: `object:${o.id}`, name: o.name,
+        x: o.xy[0], y: o.xy[1], affordances: [o.affordance],
+        description: o.face }
+    }
     return m
   }, [data])
   if (!data || data.places.length === 0) return null
@@ -1298,6 +1305,12 @@ function BeingDetail({ profile: p, api, banner }: {
                       {p.place.kind === 'road'
                         ? `walking to ${p.place.name}${p.place.minutes_left ? ` — ~${p.place.minutes_left} min` : ''}`
                         : `last seen at ${p.place.name}`}
+                    </span></>
+                  )}
+                  {p.place && p.place.kind === 'home' && p.home_name && (
+                    <><span className="text-zinc-600">·</span>
+                    <span className="text-teal-600 dark:text-teal-400">
+                      at home — “{p.home_name}”
                     </span></>
                   )}
                 </div>

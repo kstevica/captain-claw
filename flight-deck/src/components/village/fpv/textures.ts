@@ -11,6 +11,9 @@ export const B = {
   TIMBER: 7, PLASTER: 8, STONE: 9, ROOF_RED: 10, ROOF_DARK: 11, TRUNK: 12,
   LEAVES: 13, FENCE: 14, MEADOW: 15, FLOWERS: 16, WINDOW: 17, POST: 18,
   LAMP: 19, WATER: 20,
+  // Home as your canvas (world-shaping plan Phase 4): the cottage
+  // dresses a being may choose — two more roofs and a sage wall.
+  ROOF_SLATE: 21, ROOF_MOSS: 22, WALL_SAGE: 23,
 } as const
 
 // tile indices into the atlas
@@ -19,6 +22,7 @@ const T = {
   PLANK: 6, TIMBER: 7, PLASTER: 8, STONE: 9, ROOF_RED: 10, ROOF_DARK: 11,
   TRUNK_SIDE: 12, TRUNK_TOP: 13, LEAVES: 14, FENCE: 15, MEADOW: 16,
   FLOWERS: 17, WINDOW: 18, POST: 19, LAMP: 20, WATER: 21,
+  ROOF_SLATE: 22, ROOF_MOSS: 23, WALL_SAGE: 24,
 }
 
 // id → [top, side, bottom] tiles
@@ -43,6 +47,9 @@ export const BLOCK_TILES: Record<number, [number, number, number]> = {
   [B.POST]: [T.POST, T.POST, T.POST],
   [B.LAMP]: [T.LAMP, T.LAMP, T.LAMP],
   [B.WATER]: [T.WATER, T.WATER, T.WATER],
+  [B.ROOF_SLATE]: [T.ROOF_SLATE, T.ROOF_SLATE, T.ROOF_SLATE],
+  [B.ROOF_MOSS]: [T.ROOF_MOSS, T.ROOF_MOSS, T.ROOF_MOSS],
+  [B.WALL_SAGE]: [T.WALL_SAGE, T.WALL_SAGE, T.WALL_SAGE],
 }
 
 export const isSolid = (id: number) => id !== B.AIR && id !== B.WATER
@@ -173,6 +180,24 @@ export function buildAtlas(): { texture: THREE.CanvasTexture; uvFor: (tile: numb
       c.fillStyle = `rgb(${(118 * m) | 0},${(104 * m) | 0},${(140 * m) | 0})`
       c.fillRect(x, y, 1, 1)
     }
+  })
+  // chosen cottage dresses (world-shaping plan Phase 4): the same
+  // shingle rhythm in a cool slate and a mossy green, and a sage wall
+  const shingles = (base: [number, number, number]) =>
+    (c: Ctx, r: Rng) => {
+      for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+        const row = Math.floor(y / 4)
+        const seam = y % 4 === 3 || (x + (row % 2 === 0 ? 0 : 4)) % 8 === 7
+        const m = (1 + (r() - 0.5) * 0.14) * (seam ? 0.62 : 1)
+        c.fillStyle = `rgb(${(base[0] * m) | 0},${(base[1] * m) | 0},${(base[2] * m) | 0})`
+        c.fillRect(x, y, 1, 1)
+      }
+    }
+  paint(T.ROOF_SLATE, shingles([110, 128, 146]))
+  paint(T.ROOF_MOSS, shingles([106, 136, 84]))
+  paint(T.WALL_SAGE, (c, r) => {
+    speckle(c, r, [205, 214, 178], 0.07)
+    for (let i = 0; i < 5; i++) { c.fillStyle = 'rgba(160,172,138,.5)'; c.fillRect((r() * 16) | 0, (r() * 16) | 0, 1, 1) }
   })
   paint(T.TRUNK_SIDE, (c, r) => {
     for (let x = 0; x < 16; x++) {

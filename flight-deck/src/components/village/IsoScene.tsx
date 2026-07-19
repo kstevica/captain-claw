@@ -8,7 +8,7 @@
 import { useCallback, useRef, useState } from 'react'
 import type { VillageBeingPos, VillageMapData, VillagePlace } from '../../services/beings'
 import { IskraAvatar } from './avatars'
-import { BUILDING_SPRITES, PROP_SPRITES, Conifer, spriteForPlace } from './buildings'
+import { BUILDING_SPRITES, OBJECT_SPRITES, PROP_SPRITES, Conifer, Cottage as CottageSprite, spriteForPlace } from './buildings'
 
 const TILE = 20
 const GRID = 50
@@ -58,9 +58,14 @@ interface SceneProps {
   hue: (p: VillagePlace) => string
   // fill the parent's height (fullscreen) instead of the fixed 460px card height
   fill?: boolean
+  // made things (world-shaping plan Phase 3): optional so read-only maps
+  // still DRAW the objects — they just aren't selectable there.
+  selObject?: string | null
+  onObject?: (id: string | null) => void
 }
 
-export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fill }: SceneProps) {
+export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fill,
+                           selObject, onObject }: SceneProps) {
   const dark = typeof document !== 'undefined'
     && document.documentElement.classList.contains('dark')
   const C = dark ? NIGHT : DAY
@@ -116,7 +121,7 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
       depth,
       el: (
         <g key={`pl-${p.id}`} className="cursor-pointer"
-          onClick={(e) => { e.stopPropagation(); onBeing(null); onPlace(p.id === sel ? null : p.id) }}>
+          onClick={(e) => { e.stopPropagation(); onBeing(null); onObject?.(null); onPlace(p.id === sel ? null : p.id) }}>
           <polygon points={footDiamond(tx0, ty0, w, h)} fill={hue(p)}
             opacity={sel === p.id ? 0.28 : 0} stroke={hue(p)}
             strokeOpacity={sel === p.id ? 0.9 : 0} strokeWidth={3} />
@@ -142,21 +147,37 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
     })
   }
 
-  const Cottage = BUILDING_SPRITES.cottage
   for (const b of data.beings) {
     if (b.kind === 'visitor' || !b.home_xy) continue   // guests keep no cottage
     const [htx, hty] = homeNW(b.home_xy)
     const [nx, ny] = iso(htx * TILE, hty * TILE)
+    // Home as your canvas (world-shaping plan Phase 4): the cottage wears
+    // its being's chosen dress and, when named, its name.
+    const title = b.home_name
+      ? `“${b.home_name}” — ${b.name}'s home` : `${b.name}'s home`
     pieces.push({
       depth: ny + 4 * 16,
       el: (
         <g key={`hm-${b.slug}`} transform={`translate(${nx} ${ny}) scale(0.72)`}
           style={{ transformBox: 'fill-box' }} opacity={0.96}>
-          <Cottage />
-          <title>{`${b.name}'s home`}</title>
+          <CottageSprite look={b.home_look} />
+          <title>{title}</title>
         </g>
       ),
     })
+    if (b.home_name) {
+      pieces.push({
+        depth: 1e6,
+        el: (
+          <text key={`hmlb-${b.slug}`} x={nx} y={ny + 78} textAnchor="middle"
+            fontSize={19} pointerEvents="none" className="fill-zinc-400"
+            style={{ paintOrder: 'stroke', stroke: dark ? '#1b2118' : '#f4efdf',
+                     strokeWidth: 4, strokeLinejoin: 'round', fontStyle: 'italic' }}>
+            “{b.home_name}”
+          </text>
+        ),
+      })
+    }
   }
 
   for (const pr of props) {
@@ -179,6 +200,37 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
     })
   }
 
+  // Made things (world-shaping plan Phase 3): a being's placed works, drawn
+  // beside the props and clickable when the map offers a panel for them.
+  for (const o of data.objects ?? []) {
+    const [tx, ty] = o.tile
+    const [bx, by] = iso((tx + 0.5) * TILE, (ty + 0.5) * TILE)
+    const Sprite = OBJECT_SPRITES[o.kind]
+    if (!Sprite) continue
+    const selMe = selObject === o.id
+    pieces.push({
+      depth: by + 0.25,     // a made thing edges in front of a same-tile prop
+      el: (
+        <g key={`ob-${o.id}`} transform={`translate(${bx} ${by})`}
+          className={onObject ? 'cursor-pointer' : undefined}
+          onClick={onObject ? (e) => {
+            e.stopPropagation(); onPlace(null); onBeing(null)
+            onObject(selMe ? null : o.id)
+          } : undefined}>
+          {selMe && (
+            <ellipse cx="0" cy="4" rx="26" ry="13" fill="#fbbf24"
+              opacity="0.32" stroke="#fbbf24" strokeOpacity="0.8" />
+          )}
+          <Sprite />
+          {dark && (o.kind === 'lantern' || o.kind === 'shrine') && (
+            <circle cx="0" cy="-26" r="40" fill="#ffd98a" opacity="0.14" />
+          )}
+          <title>{`${o.name} — a ${o.kind}${o.by_name ? `, ${o.by_name}'s work` : ''}`}</title>
+        </g>
+      ),
+    })
+  }
+
   for (const b of data.beings) {
     const [wx, wy] = posOf(b)
     const [sx, sy] = iso(wx, wy)
@@ -190,7 +242,7 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
       depth: sy + 0.5,       // a hair in front of anything sharing the tile
       el: (
         <g key={`bg-${b.slug}`} className="cursor-pointer"
-          onClick={(e) => { e.stopPropagation(); onPlace(null); onBeing(selMe ? null : b.slug) }}>
+          onClick={(e) => { e.stopPropagation(); onPlace(null); onObject?.(null); onBeing(selMe ? null : b.slug) }}>
           {selMe && b.to && b.path && b.path.length >= 2 && (
             <polyline points={b.path.map(([px, py]) => iso(px, py).join(',')).join(' ')}
               fill="none" stroke="#a78bfa" strokeWidth={4} strokeOpacity={0.55}
@@ -235,7 +287,7 @@ export function IsoScene({ data, sel, selBeing, onPlace, onBeing, posOf, hue, fi
   return (
     <svg ref={svgRef} viewBox={vb.join(' ')}
       className={`w-full touch-none rounded-md border border-zinc-800/60 ${fill ? 'h-full min-h-[460px]' : 'h-[460px]'} ${dark ? 'bg-[#20281e]' : 'bg-[#eae4cf]'}`}
-      onClick={() => { onPlace(null); onBeing(null) }}
+      onClick={() => { onPlace(null); onBeing(null); onObject?.(null) }}
       onWheel={onWheel} onPointerDown={onDown} onPointerMove={onMove}
       onPointerUp={onUp} onPointerLeave={() => { drag.current = null }}
       onDoubleClick={() => setVb(HOME_VB)}>

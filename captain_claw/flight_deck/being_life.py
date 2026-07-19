@@ -912,6 +912,9 @@ def public_profile(store: BeingsStore, being: dict) -> dict:
         # The ground (space plan Phase 4): where the body is, publicly —
         # a place name or the road, never coordinates of a private home.
         "place": _public_place(store, being),
+        # Home as your canvas (world-shaping plan Phase 4): the cottage's
+        # chosen name — the being's own word for its own ground.
+        "home_name": being.get("home_name") or "",
     }
 
 
@@ -925,7 +928,9 @@ def _public_place(store: BeingsStore, being: dict) -> dict | None:
         if pos.get("at") and pos["at"] != "home":
             return {"kind": "at",
                     "name": being_world.place_name(store, being, pos["at"])}
-        return {"kind": "home", "name": "home"}
+        # a named cottage speaks its own name (world-shaping Phase 4)
+        return {"kind": "home",
+                "name": being.get("home_name") or "home"}
     except Exception:  # noqa: BLE001
         return None
 
@@ -1422,7 +1427,9 @@ def society_prompt_fields(being: dict, siblings: list[dict] | None,
                           penpal_reach: list[str] | None = None,
                           now: datetime | None = None,
                           coins: int = 0,
-                          trades_left: int = 0) -> list[str]:
+                          trades_left: int = 0,
+                          can_craft: bool = False,
+                          held_objects: list[str] | None = None) -> list[str]:
     """Digest fields this stage can actually DELIVER — shared by the monolith
     prompt and the faculties orient step, so the two cognitions offer the same
     society. Never offers what physics would refuse (letters below child,
@@ -1485,6 +1492,31 @@ def society_prompt_fields(being: dict, siblings: list[dict] | None,
                 '"buy": {"listing_id": "<id from MARKET.md or a stall '
                 'percept>"}  — coins to the seller, the file into your '
                 'shelf/')
+    # Made things (world-shaping plan Phase 1): offered only when the stage
+    # and wallet truly allow — and 'place' only for work already in hand.
+    if can_craft:
+        fields.append(
+            '"craft": {"kind": "bench|cairn|signpost|planter|sculpture|'
+            'lantern|fountain|shrine", "name": "...", "inscription": "a few '
+            'true words"}  — make a real thing for the village ground '
+            f'(burns {constitution.OBJECT_CRAFT_FEE_TOKENS} tokens; place '
+            'it after — the commons and its ring are not yours to build on)')
+    if held_objects:
+        fields.append(
+            '"place": {"object_id": "' + held_objects[0] + '"}  — set your '
+            'work down where you stand (or add x, y); in your hands: '
+            + ", ".join(held_objects[:3])
+            + '; your own yard is always yours to build in')
+    # Home as your canvas (Phase 4): offered only while the cottage is
+    # still nameless/undressed — after that the being knows the way.
+    if not being.get("home_name"):
+        fields.append(
+            '"home_name": "..."  — name your own cottage (yours alone, '
+            'no permission needed; it shows on the village map)')
+    if not being.get("home_look"):
+        fields.append(
+            '"home_look": {"roof": "ember|slate|moss|dusk", "wall": '
+            '"plaster|timber|sage"}  — dress your cottage to your taste')
     return fields
 
 
@@ -1564,7 +1596,9 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                         visitors: list[dict] | None = None,
                         mind_lines: list[str] | None = None,
                         penpal_reach: list[str] | None = None,
-                        coins: int = 0, trades_left: int = 0) -> str:
+                        coins: int = 0, trades_left: int = 0,
+                        can_craft: bool = False,
+                        held_objects: list[str] | None = None) -> str:
     now = now or _utcnow()
     g = being["genome"]
     attrs = genome_mod.effective_attributes(g)
@@ -1675,7 +1709,9 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
                 "your journal; never claim to have talked to a sibling.")
     society_fields = society_prompt_fields(being, siblings, letters_left,
                                            penpal_reach, now=now, coins=coins,
-                                           trades_left=trades_left)
+                                           trades_left=trades_left,
+                                           can_craft=can_craft,
+                                           held_objects=held_objects)
     if society_fields:
         lines += ["OPTIONAL SOCIETY FIELDS for your digest — use only "
                   "when genuine, never to perform:",
@@ -2092,6 +2128,65 @@ def _normalize_digest(raw: dict) -> dict:
         intend = clean if clean else None
     else:
         intend = None
+    # Iskre shape their world (world-shaping plan Phase 1): make a real
+    # thing (craft), set it down (place), take it back up (unplace).
+    craft = raw.get("craft")
+    if isinstance(craft, dict) and craft.get("kind") and craft.get("name"):
+        craft = {"kind": str(craft["kind"]).strip().lower()[:20],
+                 "name": str(craft["name"]).strip()[:40],
+                 "inscription": str(craft.get("inscription") or "")[:300]}
+    else:
+        craft = None
+
+    def _coord(v):
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    place = raw.get("place")
+    if isinstance(place, dict) and place.get("object_id"):
+        place = {"object_id": str(place["object_id"]).strip()[:64],
+                 "x": _coord(place.get("x")), "y": _coord(place.get("y"))}
+    else:
+        place = None
+    unplace = raw.get("unplace")
+    if isinstance(unplace, dict) and unplace.get("object_id"):
+        unplace = {"object_id": str(unplace["object_id"]).strip()[:64]}
+    else:
+        unplace = None
+    # Home as your canvas (world-shaping plan Phase 4): name and dress
+    # your own cottage — ungated, personal, never the commons.
+    home_name = raw.get("home_name")
+    if isinstance(home_name, str) and home_name.strip():
+        home_name = home_name.strip()[:40]
+    else:
+        home_name = None
+    home_look = raw.get("home_look")
+    if isinstance(home_look, dict) and (home_look.get("roof")
+                                        or home_look.get("wall")):
+        home_look = {"roof": str(home_look.get("roof") or "").strip()[:20],
+                     "wall": str(home_look.get("wall") or "").strip()[:20]}
+    else:
+        home_look = None
+    # The civic hand (world-shaping plan Phase 5): the steward may rename
+    # or redescribe a place. Whitelisted here; the tick gates on the role.
+    rename_place = raw.get("rename_place")
+    if isinstance(rename_place, dict) and rename_place.get("place") \
+            and rename_place.get("name"):
+        rename_place = {"place": str(rename_place["place"]).strip()[:60],
+                        "name": str(rename_place["name"]).strip()[:60],
+                        "why": str(rename_place.get("why") or "")[:200]}
+    else:
+        rename_place = None
+    redescribe_place = raw.get("redescribe_place")
+    if isinstance(redescribe_place, dict) and redescribe_place.get("place") \
+            and redescribe_place.get("description"):
+        redescribe_place = {
+            "place": str(redescribe_place["place"]).strip()[:60],
+            "description": str(redescribe_place["description"]).strip()[:300]}
+    else:
+        redescribe_place = None
     return {
         # Canonical, so it survives this normaliser for BOTH cognitions: True
         # means no real self-report came back this tick (timeout / unparseable)
@@ -2132,6 +2227,13 @@ def _normalize_digest(raw: dict) -> dict:
         "commission": commission,
         "plan": plan,
         "intend": intend,
+        "craft": craft,
+        "place": place,
+        "unplace": unplace,
+        "home_name": home_name,
+        "home_look": home_look,
+        "rename_place": rename_place,
+        "redescribe_place": redescribe_place,
     }
 
 
@@ -2196,7 +2298,9 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
                           siblings: list[dict] | None, letters_left: int | None,
                           visitors: list[dict] | None,
                           penpal_reach: list[str] | None = None,
-                          coins: int = 0, trades_left: int = 0) -> str:
+                          coins: int = 0, trades_left: int = 0,
+                          can_craft: bool = False,
+                          held_objects: list[str] | None = None) -> str:
     g = being["genome"]
     can_connect = connect_outlets(being, siblings, letters_left, percepts)
     pressures = drive_pressures(being.get("drives") or {}, now=now,
@@ -2247,7 +2351,9 @@ def compose_orient_prompt(being: dict, *, kind: str, now: datetime,
                 "You cannot send letters to siblings yet — that ability "
                 "comes in childhood. Never claim to have talked to one.")
     sf = society_prompt_fields(being, siblings, letters_left, penpal_reach,
-                               now=now, coins=coins, trades_left=trades_left)
+                               now=now, coins=coins, trades_left=trades_left,
+                               can_craft=can_craft,
+                               held_objects=held_objects)
     if sf:
         lines += ["OPTIONAL SOCIETY FIELDS for your decision json — only "
                   "when genuine, never to perform:", *("  " + f for f in sf)]
@@ -2390,7 +2496,9 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
                          letters_left, visitors, last_refusals, drives,
                          resolve_port: bool = False,
                          penpal_reach: list[str] | None = None,
-                         coins: int = 0, trades_left: int = 0
+                         coins: int = 0, trades_left: int = 0,
+                         can_craft: bool = False,
+                         held_objects: list[str] | None = None,
                          ) -> tuple[str | None, dict, list | None]:
     """The decomposed tick. Returns the SAME ``(reply, digest, changed)`` triple
     the monolithic path yields, so every downstream router is unchanged.
@@ -2436,7 +2544,8 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
         percepts=senses, first_of_day=first_of_day, siblings=siblings,
         letters_left=letters_left, visitors=visitors,
         penpal_reach=penpal_reach, coins=coins,
-        trades_left=trades_left), "orient")
+        trades_left=trades_left, can_craft=can_craft,
+        held_objects=held_objects), "orient")
     raw = _extract_raw(reply, require_act=True)
     if raw is None and reply is not None and kind != "dream":
         store.record_event(bid, "digest_repair_retry", {"faculty": "orient"},
@@ -3297,14 +3406,32 @@ async def _tick_locked(
                           - store.trades_today(bid, now))
     except Exception:  # noqa: BLE001
         trades_left = 0
-    # Strong bonuses, never gates (space plan Phase 3): the drives this
-    # ground favors land ×PLACE_BOOST through the _serve closure below.
-    boosted: frozenset[str] = frozenset()
+    # Made things (world-shaping plan Phase 1): offer the craft only when
+    # stage + wallet truly allow, and remind of work still in hand — the
+    # one nudge a crafted-but-never-placed thing gets.
+    can_craft, held_objects = False, []
+    try:
+        can_craft = (
+            constitution.stage_index(being["stage"])
+            >= constitution.stage_index("child")
+            and (not view["enforced"]
+                 or view["balance_tokens"]
+                 >= constitution.OBJECT_CRAFT_FEE_TOKENS))
+        held_objects = [o["id"] for o in
+                        store.village_objects(owner, state="held")
+                        if o["being_id"] == bid]
+    except Exception:  # noqa: BLE001
+        can_craft, held_objects = False, []
+    # Strong bonuses, never gates (space plan Phase 3 + world-shaping
+    # Phase 2): the drives this ground favors — the settled place AND any
+    # made thing within reach (another's full, your own reduced) — land
+    # their factor through the _serve closure below.
+    boosted: dict[str, float] = {}
     if kind != "dream":
         try:
-            boosted = being_world.place_drive_boosts(store, being, now)
+            boosted = being_world.drive_boost_factors(store, being, now)
         except Exception:  # noqa: BLE001
-            boosted = frozenset()
+            boosted = {}
     # Visitor notes (plan §9): only a public being hears the square, and only
     # a few unseen notes per tick. Marked read only after the being actually
     # THOUGHT this tick (a timed-out tick re-surfaces them) — replying stays
@@ -3336,8 +3463,8 @@ async def _tick_locked(
         nonlocal drives, starved_relief
         if _is_starved(name):
             starved_relief = True
-        if name in boosted:                # the ground favors this (Phase 3)
-            damp *= being_world.PLACE_BOOST
+        if name in boosted:                # the ground favors this — place
+            damp *= boosted[name]          # or made thing, factor varies
         drives = serve_drive(drives, name, now=now, damp=damp)
 
     # First visits serve explore (Phase 3), by choice or by plan (body-
@@ -3353,6 +3480,10 @@ async def _tick_locked(
             d = e["data"]
             place = d.get("place")
             if place in (None, "home"):
+                continue
+            # Arrivals at made things don't burn a place milestone — the
+            # landmark payoff is Phase 2's object_found, not first_visit.
+            if str(place).startswith("object:"):
                 continue
             if d.get("by") == "feet" and not d.get("planned"):
                 continue
@@ -3473,6 +3604,13 @@ async def _tick_locked(
             store, being, now=now, kind=kind, first_of_day=first_of_day)
     except Exception as e:  # noqa: BLE001 — texture never sinks a tick
         log.warning("umwelt percepts failed", slug=being["slug"], error=str(e))
+    # A landmark truly reached (world-shaping plan Phase 2): standing
+    # before another's made thing for the first time serves explore — the
+    # urge's payoff, once per thing per life (the milestone inside
+    # object_percepts gates; this only reads the line it just produced,
+    # so it must sit AFTER the umwelt sweep).
+    if any(p.startswith("A DISCOVERY:") for p in senses):
+        _serve("explore")
     # The feet take instruction (body-brain plan Phase 1): taught each
     # morning while instincts are on — plans are fulfilled between thinks.
     if kind == "wake" and first_of_day and being.get("instincts"):
@@ -3521,7 +3659,8 @@ async def _tick_locked(
             first_of_day=first_of_day, siblings=sibs, letters_left=letters_left,
             visitors=visitors, last_refusals=last_refusals, drives=drives,
             resolve_port=(send_fn is None), penpal_reach=penpal_reach or None,
-            coins=coins_balance, trades_left=trades_left)
+            coins=coins_balance, trades_left=trades_left,
+            can_craft=can_craft, held_objects=held_objects or None)
     else:
         try:
             mind_lines = being_mind.mind_prompt_lines(
@@ -3537,7 +3676,8 @@ async def _tick_locked(
             visitors=visitors or None,
             mind_lines=mind_lines or None,
             penpal_reach=penpal_reach or None,
-            coins=coins_balance, trades_left=trades_left)
+            coins=coins_balance, trades_left=trades_left,
+            can_craft=can_craft, held_objects=held_objects or None)
         # 3b. Think — with COMPLETION GATES, each firing at most once THIS tick
         # so theater is caught in-turn instead of waiting a whole heartbeat:
         #   • repair — a reply came back with no parseable digest (weak-model
@@ -3833,6 +3973,122 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("broadcast handling failed", slug=being["slug"],
                         error=str(e))
+    # Iskre shape their world (world-shaping plan Phase 1): a made thing
+    # is a real file + a burned fee; placing is geometry — the commons
+    # refuses, open ground is free. Real or refused loudly.
+    if digest.get("craft"):
+        cr = digest["craft"]
+        try:
+            being_society.craft_object(
+                store, store.get(owner, being["slug"]), cr["kind"],
+                cr["name"], cr.get("inscription") or "", now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "craft", "reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("craft handling failed", slug=being["slug"],
+                        error=str(e))
+    # The steward's hand (world-shaping plan Phase 5): computed once, it
+    # opens the commons for THIS being's place/rename/redescribe this week.
+    is_steward = False
+    try:
+        is_steward = being_world.current_steward(store, owner, now) \
+            == being["slug"]
+    except Exception:  # noqa: BLE001
+        is_steward = False
+    if digest.get("place"):
+        pl = digest["place"]
+        try:
+            being_world.place_object(
+                store, store.get(owner, being["slug"]), pl["object_id"],
+                x=pl.get("x"), y=pl.get("y"), steward=is_steward, now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "place", "reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("place handling failed", slug=being["slug"],
+                        error=str(e))
+    if digest.get("unplace"):
+        up = digest["unplace"]
+        try:
+            being_world.unplace_object(
+                store, store.get(owner, being["slug"]), up["object_id"],
+                now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "unplace", "reason": str(e)},
+                               now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("unplace handling failed", slug=being["slug"],
+                        error=str(e))
+    # Home as your canvas (world-shaping plan Phase 4): naming and
+    # dressing your own cottage — ungated, refused only by the physics
+    # of taste (vocab) and churn (one rename a day).
+    if digest.get("home_name"):
+        try:
+            store.set_home_name(owner, being["slug"], digest["home_name"],
+                                now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "home_name", "reason": str(e)},
+                               now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("home naming failed", slug=being["slug"],
+                        error=str(e))
+    if digest.get("home_look"):
+        hl = digest["home_look"]
+        try:
+            cur = store.get(owner, being["slug"]).get("home_look") or {}
+            store.set_home_look(
+                owner, being["slug"],
+                hl.get("roof") or cur.get("roof") or "ember",
+                hl.get("wall") or cur.get("wall") or "plaster", now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": "home_look", "reason": str(e)},
+                               now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("home styling failed", slug=being["slug"],
+                        error=str(e))
+    # The civic hand (world-shaping plan Phase 5): only the current steward
+    # may reshape a shared place's name or prose — public content, so a
+    # non-steward is refused kindly (ask the steward, or your parent). The
+    # id never changes; MAP.md is rewritten so every being reads the new word.
+    for field, kw in (("rename_place", "name"),
+                      ("redescribe_place", "description")):
+        if not digest.get(field):
+            continue
+        req = digest[field]
+        if not is_steward:
+            store.record_event(bid, "society_refused",
+                               {"what": field, "reason": "only this week's "
+                                "steward may reshape a shared place — ask "
+                                "them, or your parent"}, now=now)
+            continue
+        try:
+            pid = store.resolve_place_ref(owner, req["place"])
+            if pid is None or pid == "home" or pid.startswith("object:"):
+                store.record_event(bid, "society_refused",
+                                   {"what": field, "reason": "there is no "
+                                    f"civic place called {req['place'][:40]!r} "
+                                    "— read commons/village/MAP.md"}, now=now)
+                continue
+            store.update_place(owner, pid, **{kw: req[kw]}, now=now)
+            being_world.write_map_md(store, owner)
+            store.record_event(
+                bid, "place_renamed" if field == "rename_place"
+                else "place_redescribed",
+                {"place": pid, **({"name": req["name"],
+                                   "why": req.get("why") or ""}
+                                  if field == "rename_place"
+                                  else {"description": req["description"]})},
+                now=now)
+        except BeingError as e:
+            store.record_event(bid, "society_refused",
+                               {"what": field, "reason": str(e)}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("civic edit failed", slug=being["slug"],
+                        field=field, error=str(e))
     # Walking (space plan Phase 1): the one field that moves a body. Real
     # or refused loudly — geography first, then the fever gate.
     if digest.get("go_to"):

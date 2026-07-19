@@ -40,7 +40,7 @@ STATES = ("alive", "paused", "torpor", "dead", "emigrated")
 TRANSFER_REASONS = (
     "allowance", "usage", "fee", "gift", "trade",
     "procreation", "metamorphosis_burn", "self_mod_burn", "adjust", "grant",
-    "exchange",
+    "exchange", "craft_burn",
 )
 
 # Coin ledger reasons (space plan Phase 2): grant = pocket money, wage =
@@ -544,6 +544,31 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_village_notes
                     ON village_notes(owner_id, created_at);
+
+                -- Made things (world-shaping plan Phase 1): a thing a being
+                -- crafted with its own hands. The row is the object; the
+                -- proof is a REAL file in the maker's home (file_path).
+                -- state: held (in hand) | standing (on the ground at x,y).
+                -- The store never judges ground — being_world guards the
+                -- commons, snaps to open tiles, and enforces the area cap.
+                CREATE TABLE IF NOT EXISTS village_objects (
+                    owner_id   TEXT NOT NULL,
+                    id         TEXT NOT NULL,
+                    being_id   TEXT NOT NULL,
+                    kind       TEXT NOT NULL,
+                    name       TEXT NOT NULL,
+                    affordance TEXT NOT NULL DEFAULT '',
+                    x          INTEGER NOT NULL DEFAULT 0,
+                    y          INTEGER NOT NULL DEFAULT 0,
+                    state      TEXT NOT NULL DEFAULT 'held',
+                    file_path  TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    placed_at  TEXT,
+                    civic      INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (owner_id, id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_village_objects
+                    ON village_objects(owner_id, state);
                 """
             )
             # Work can pay in coins (space plan Phase 2): the parent picks
@@ -606,6 +631,15 @@ class BeingsStore:
                         f"ALTER TABLE being_visitors ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError:
                     pass
+            # The civic hand (world-shaping plan Phase 5): a made thing the
+            # STEWARD placed on the commons — a public work, attributed to
+            # the role, not counted against a being's own share.
+            try:
+                self._c().execute(
+                    "ALTER TABLE village_objects ADD COLUMN civic"
+                    " INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
             # Lightweight migrations (columns added after first ship).
             for col, ddl in [
                 ("birth_letter", "TEXT NOT NULL DEFAULT ''"),
@@ -695,6 +729,13 @@ class BeingsStore:
                 # {village, at, near[], others[]} streamed down the host link.
                 # Empty when not visiting; grounds the tick prompt.
                 ("visit_context", "TEXT NOT NULL DEFAULT ''"),
+                # Home as your canvas (world-shaping plan Phase 4): the
+                # being names and styles its OWN cottage — ungated, no
+                # parent approval (it's your home, not the commons).
+                # home_look is JSON {"roof": ..., "wall": ...} from the
+                # fixed vocabulary in being_world.
+                ("home_name", "TEXT NOT NULL DEFAULT ''"),
+                ("home_look", "TEXT NOT NULL DEFAULT ''"),
             ]:
                 try:
                     self._c().execute(f"ALTER TABLE beings ADD COLUMN {col} {ddl}")
@@ -1040,6 +1081,11 @@ class BeingsStore:
             b["visit_context"] = json.loads(raw_vc) if raw_vc else None
         except json.JSONDecodeError:
             b["visit_context"] = None
+        try:
+            raw_hl = b.get("home_look") or ""
+            b["home_look"] = json.loads(raw_hl) if raw_hl else None
+        except json.JSONDecodeError:
+            b["home_look"] = None
         raw_bc = b.get("body_config") or ""
         try:
             b["body_config"] = json.loads(raw_bc) if raw_bc else None
@@ -1275,6 +1321,60 @@ class BeingsStore:
         b = self.get(owner_id, slug)
         self._update(b["id"], now, avatar=json.dumps({"c": c, "p": p}))
         self.record_event(b["id"], "avatar_set", {"c": c, "p": p}, now=now)
+        return self.get(owner_id, slug)
+
+    # ── Home as your canvas (world-shaping plan Phase 4) ─────────────────
+
+    def set_home_name(self, owner_id: str, slug: str, name: str,
+                      now: datetime | None = None) -> dict:
+        """A being names its OWN cottage — ungated (any living stage; it's
+        your home, not the commons), renameable once a day so a churning
+        model can't thrash the label."""
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if b["state"] != "alive":
+            raise BeingError("only the living keep house")
+        name = (name or "").strip()
+        if not (2 <= len(name) <= 40):
+            raise BeingError("a home's name runs 2–40 characters")
+        if name == (b.get("home_name") or ""):
+            raise BeingError("your home already bears that name")
+        today = now.isoformat()[:10]
+        if b.get("home_name"):
+            for e in self.events(owner_id, slug, limit=40):
+                if e["at"][:10] < today:
+                    break
+                if e["kind"] == "home_named":
+                    raise BeingError("you named your home today already — "
+                                     "live with it a day")
+        old = b.get("home_name") or ""
+        self._update(b["id"], now, home_name=name)
+        self.record_event(b["id"], "home_named",
+                          {"name": name, "from": old}, now=now)
+        self.milestone(b["id"], "named_home", {"home": name}, now=now)
+        return self.get(owner_id, slug)
+
+    def set_home_look(self, owner_id: str, slug: str, roof: str, wall: str,
+                      now: datetime | None = None) -> dict:
+        """The cottage's dress — roof and wall from the fixed vocabulary
+        (being_world.HOME_ROOFS/HOME_WALLS); the physics of taste."""
+        from captain_claw.flight_deck import being_world
+        now = now or _utcnow()
+        b = self.get(owner_id, slug)
+        if b["state"] != "alive":
+            raise BeingError("only the living keep house")
+        roof = (roof or "").strip().lower()
+        wall = (wall or "").strip().lower()
+        if roof not in being_world.HOME_ROOFS:
+            raise BeingError("roofs come in: "
+                             + ", ".join(being_world.HOME_ROOFS))
+        if wall not in being_world.HOME_WALLS:
+            raise BeingError("walls come in: "
+                             + ", ".join(being_world.HOME_WALLS))
+        self._update(b["id"], now,
+                     home_look=json.dumps({"roof": roof, "wall": wall}))
+        self.record_event(b["id"], "home_styled",
+                          {"roof": roof, "wall": wall}, now=now)
         return self.get(owner_id, slug)
 
     def set_intent(self, being_id: str, intent: dict | None,
@@ -1523,6 +1623,135 @@ class BeingsStore:
                 (json.dumps(read_by), owner_id, note_id))
             self._c().commit()
 
+    # ── Made things (world-shaping plan Phase 1) ─────────────────────────
+
+    def village_objects(self, owner_id: str,
+                        state: str | None = None) -> list[dict]:
+        q = "SELECT * FROM village_objects WHERE owner_id = ?"
+        args: list = [owner_id]
+        if state:
+            q += " AND state = ?"
+            args.append(state)
+        rows = self._c().execute(q + " ORDER BY created_at, id",
+                                 args).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_village_object(self, owner_id: str, object_id: str) -> dict:
+        row = self._c().execute(
+            "SELECT * FROM village_objects WHERE owner_id = ? AND id = ?",
+            (owner_id, object_id)).fetchone()
+        if row is None:
+            raise BeingNotFound(f"no made thing {object_id!r} in this village")
+        return dict(row)
+
+    def add_village_object(self, owner_id: str, being_id: str, kind: str,
+                           name: str, affordance: str,
+                           now: datetime | None = None) -> dict:
+        """Insert a crafted thing 'in hand' (no ground yet). The id derives
+        from the name like a place's (numeric suffix on collision); the
+        proof file's path is fixed HERE so file and row can never disagree.
+        Validation of kind/name/fee lives in being_society.craft_object —
+        this is the SQL, not the law."""
+        now = now or _utcnow()
+        base = _slugify(name)[:40] or "work"
+        oid, n = base, 2
+        while self._c().execute(
+                "SELECT 1 FROM village_objects WHERE owner_id = ? AND id = ?",
+                (owner_id, oid)).fetchone():
+            oid = f"{base}-{n}"
+            n += 1
+        row = {"owner_id": owner_id, "id": oid, "being_id": being_id,
+               "kind": kind, "name": name, "affordance": affordance,
+               "x": 0, "y": 0, "state": "held",
+               "file_path": f"garden/works/{oid}.md",
+               "created_at": _iso(now), "placed_at": None}
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO village_objects (owner_id, id, being_id, kind,"
+                " name, affordance, x, y, state, file_path, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (owner_id, oid, being_id, kind, name, affordance, 0, 0,
+                 "held", row["file_path"], row["created_at"]))
+            self._c().commit()
+        return row
+
+    def set_object_ground(self, owner_id: str, object_id: str, *,
+                          x: int, y: int, state: str, civic: bool = False,
+                          now: datetime | None = None) -> None:
+        now = now or _utcnow()
+        with self._lock:
+            self._c().execute(
+                "UPDATE village_objects SET x = ?, y = ?, state = ?,"
+                " placed_at = ?, civic = ? WHERE owner_id = ? AND id = ?",
+                (int(x), int(y), state,
+                 _iso(now) if state == "standing" else None,
+                 1 if (civic and state == "standing") else 0,
+                 owner_id, object_id))
+            self._c().commit()
+
+    def update_place(self, owner_id: str, place_id: str, *,
+                     name: str | None = None, description: str | None = None,
+                     now: datetime | None = None) -> dict:
+        """The civic hand (world-shaping plan Phase 5): rename or redescribe
+        an EXISTING place. The id never changes (guestbooks, MAP.md, and
+        everything a being remembers stay true) — only the display name and
+        the prose. Same HARD bounds as save_village; coords, affordances,
+        and layout are untouched."""
+        now = now or _utcnow()
+        self.get_place(owner_id, place_id)         # raises BeingNotFound
+        fields: dict = {}
+        if name is not None:
+            name = str(name).strip()[:60]
+            if len(name) < 2:
+                raise BeingError("a place needs a name (2–60 characters)")
+            fields["name"] = name
+        if description is not None:
+            fields["description"] = str(description).strip()[:300]
+        if not fields:
+            raise BeingError("nothing to change")
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        with self._lock:
+            self._c().execute(
+                f"UPDATE village_places SET {cols}"
+                " WHERE owner_id = ? AND id = ?",
+                (*fields.values(), owner_id, place_id))
+            self._c().commit()
+        return self.get_place(owner_id, place_id)
+
+    def delete_village_object(self, owner_id: str, object_id: str) -> None:
+        """Hard removal — only the craft compensator uses this (a row whose
+        proof file failed to write must not exist; no file, no object)."""
+        with self._lock:
+            self._c().execute(
+                "DELETE FROM village_objects WHERE owner_id = ? AND id = ?",
+                (owner_id, object_id))
+            self._c().commit()
+
+    def resolve_object_ref(self, owner_id: str, ref: str, *,
+                           being_id: str | None = None,
+                           standing_only: bool = False) -> str | None:
+        """A being's words → a made thing's id (exact id, slugified, or its
+        name, 'the ' optional) — resolve_place_ref's mirror for the object
+        layer. None means no such thing (or none of YOURS, when filtered)."""
+        def _bare(s: str) -> str:
+            s = s.casefold().strip()
+            return s[4:].strip() if s.startswith("the ") else s
+        r = (ref or "").strip()
+        if not r:
+            return None
+        low, slug = r.casefold(), _slugify(r)
+        objs = self.village_objects(
+            owner_id, state="standing" if standing_only else None)
+        if being_id is not None:
+            objs = [o for o in objs if o["being_id"] == being_id]
+        for o in objs:
+            if o["id"] == low or o["id"] == slug:
+                return o["id"]
+        for o in objs:
+            if _bare(o["name"]) == _bare(r):
+                return o["id"]
+        return None
+
     def save_village(self, owner_id: str, places: list[dict],
                      now: datetime | None = None) -> list[dict]:
         """Replace the village ground (the architect's draft or the default).
@@ -1610,7 +1839,14 @@ class BeingsStore:
         for p in places:
             if _bare(p["name"]) == _bare(r):
                 return p["id"]
-        return None
+        # A standing made thing is real ground too (world-shaping plan
+        # Phase 1): walkable by name, namespaced so every consumer knows
+        # which layer it landed on. Places always win a name collision.
+        try:
+            oid = self.resolve_object_ref(owner_id, r, standing_only=True)
+        except Exception:  # noqa: BLE001
+            oid = None
+        return f"object:{oid}" if oid else None
 
     def settle_location(self, being: dict, now: datetime | None = None,
                         ) -> dict | None:
@@ -1689,6 +1925,7 @@ class BeingsStore:
                "path": path, "minutes": round(float(minutes), 2)}
         self._update(b["id"], now, location=json.dumps(loc))
         data = {"from": cur.get("at") or "the road", "to": pid,
+                "name": being_world.place_name(self, b, pid),
                 "minutes": int(round(minutes)), "by": by}
         if reason:
             data["reason"] = reason
@@ -2711,6 +2948,8 @@ class BeingsStore:
             "visit_url": b.get("visit_url") or "",
             "visit_secret": b.get("visit_secret") or "",
             "visit_last_announce": b.get("visit_last_announce"),
+            "home_name": b.get("home_name") or "",
+            "home_look": b.get("home_look"),
         }
 
     def _body_config_view(self, b: dict) -> dict:

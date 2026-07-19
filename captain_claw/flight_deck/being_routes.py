@@ -476,6 +476,28 @@ async def village_architect(user: dict = Depends(get_current_user)):
     return {"ok": True, "places": places}
 
 
+class PlaceEditRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+@router.post("/village-map/place/{place_id}/edit")
+async def village_place_edit(place_id: str, body: PlaceEditRequest,
+                             user: dict = Depends(get_current_user)):
+    """The parent's civic hand (world-shaping plan Phase 5): rename and/or
+    redescribe a place. The id never changes; MAP.md is rewritten so every
+    being reads the new word next wake."""
+    from captain_claw.flight_deck import being_world
+    store = get_store()
+    try:
+        place = _run(store.update_place, user["id"], place_id,
+                     name=body.name, description=body.description)
+        _run(being_world.write_map_md, store, user["id"])
+    except BeingError as e:
+        raise HTTPException(e.status, str(e)) from e
+    return {"ok": True, "place": place}
+
+
 @router.get("/letters")
 async def letters(limit: int = 500, user: dict = Depends(get_current_user)):
     """The letters observatory: every being→being letter grouped into per-pair

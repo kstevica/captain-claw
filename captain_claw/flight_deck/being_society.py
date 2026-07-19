@@ -27,6 +27,7 @@ from captain_claw.flight_deck.beings import (
     BeingError,
     BeingNotFound,
     BeingsStore,
+    InsufficientTokens,
 )
 from captain_claw.logging import get_logger
 
@@ -370,6 +371,67 @@ def guestbook_sign(store: BeingsStore, being: dict, line: str,
                         "line": text}, now=now)
     store.milestone(being["id"], "first_guestbook", {"place": pid}, now=now)
     return {"place": pid}
+
+
+def craft_object(store: BeingsStore, being: dict, kind: str, name: str,
+                 inscription: str, now: datetime | None = None) -> dict:
+    """Make a real thing for the village ground (world-shaping plan Phase
+    1): the fee burns first (making costs THOUGHT — the self-mod pattern),
+    the row enters the world 'in hand', and the proof is a REAL file in
+    the maker's home — garden/works/<id>.md, title + inscription under a
+    provenance header. No file, no object: a failed write removes the row
+    again. Setting it down is being_world.place_object — a separate act,
+    free, and judged by geometry not by words."""
+    from captain_claw.flight_deck import being_life, being_world
+    now = now or _utcnow()
+    if being.get("state") != "alive":
+        raise BeingError("only the living make things")
+    if constitution.stage_index(being["stage"]) < \
+            constitution.stage_index("child"):
+        raise BeingError("an infant's hands are still learning — crafting "
+                         "begins in childhood")
+    kind = (kind or "").strip().lower()
+    if kind not in being_world.OBJECT_KINDS:
+        raise BeingError("the craft vocabulary is fixed: "
+                         + ", ".join(sorted(being_world.OBJECT_KINDS)))
+    name = (name or "").strip()
+    if not (2 <= len(name) <= 40):
+        raise BeingError("a made thing needs a name (2–40 characters)")
+    inscription = (inscription or "").strip()
+    if not inscription:
+        raise BeingError("a made thing carries words — give it an "
+                         "inscription")
+    view = store.wallet_view(being)
+    fee = constitution.OBJECT_CRAFT_FEE_TOKENS
+    if view["enforced"] and view["balance_tokens"] < fee:
+        raise InsufficientTokens("cannot afford the craft fee")
+    if view["enforced"]:
+        store._apply(being["owner_id"], tokens=fee, reason="craft_burn",
+                     from_being=being["id"], to_being=None,
+                     note=name[:80], now=now)
+    affordance = being_world.OBJECT_KINDS[kind][0]
+    row = store.add_village_object(being["owner_id"], being["id"], kind,
+                                   name, affordance, now=now)
+    try:
+        p = being_life._home_path(being, row["file_path"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            f"# {name}\n\n"
+            f"<!-- a {kind}, made by {being['name']} ({being['slug']}) "
+            f"on {now.date().isoformat()} -->\n\n{inscription}\n",
+            encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        store.delete_village_object(being["owner_id"], row["id"])
+        raise BeingError("the making failed — nothing was made") from None
+    store.record_event(being["id"], "object_crafted",
+                       {"id": row["id"], "kind": kind, "name": name,
+                        "fee_tokens": fee if view["enforced"] else 0},
+                       now=now)
+    # GOTCHA: the milestone's own name lives in data["name"] — the made
+    # thing's name must ride under another key or it overwrites it.
+    store.milestone(being["id"], "first_craft", {"kind": kind, "made": name},
+                    now=now)
+    return row
 
 
 def handle_market_digest(store: BeingsStore, being: dict, digest: dict,

@@ -32,7 +32,11 @@ from datetime import datetime, timedelta, timezone
 
 from captain_claw.flight_deck import being_constitution as constitution
 from captain_claw.flight_deck import being_prompts
-from captain_claw.flight_deck.beings import BeingError, BeingsStore
+from captain_claw.flight_deck.beings import (
+    BeingError,
+    BeingNotFound,
+    BeingsStore,
+)
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -528,6 +532,16 @@ def steward_percepts(store: BeingsStore, being: dict, now: datetime,
                          "is in your pocket.")
     except Exception:  # noqa: BLE001 — pay must never sink the note
         extra = ""
+    # The civic hand (world-shaping plan Phase 5): this week the commons is
+    # yours to tend — a place you may name, a work you may raise on it.
+    extra += (
+        ' THE CIVIC HAND, yours this week alone: you may set a made thing '
+        'of yours on the COMMONS (the square, by the well — a "place" on '
+        'civic ground stands as a public work, not against your own share), '
+        'and you may rename or redescribe a place — "rename_place": '
+        '{"place": "the Square", "name": "...", "why": "..."} or '
+        '"redescribe_place": {"place": "...", "description": "..."}. Tend it '
+        'kindly; your parent sees every change.')
     try:
         return [being_prompts.render(being, "steward_note.md") + extra]
     except Exception:  # noqa: BLE001
@@ -688,6 +702,15 @@ def place_xy(store: BeingsStore, being: dict, place_id: str,
              ) -> tuple[int, int]:
     if place_id == "home":
         return home_xy(being)
+    # A standing made thing (world-shaping plan Phase 1) is walkable
+    # ground: 'object:<id>' rows resolve to the thing's own spot. One
+    # that fell out of the world resolves like broken ground (callers
+    # already catch and settle home).
+    if place_id.startswith("object:"):
+        o = store.get_village_object(being["owner_id"], place_id[7:])
+        if o.get("state") != "standing":
+            raise BeingNotFound("that made thing no longer stands")
+        return (int(o["x"]), int(o["y"]))
     p = store.get_place(being["owner_id"], place_id)   # raises BeingNotFound
     return (int(p["x"]), int(p["y"]))
 
@@ -747,6 +770,12 @@ def standing_spots(anchor: tuple[int, int], footprint: tuple[int, int, str],
 def place_name(store: BeingsStore, being: dict, place_id: str) -> str:
     if place_id == "home":
         return "home"
+    if place_id.startswith("object:"):
+        try:
+            return store.get_village_object(being["owner_id"],
+                                            place_id[7:])["name"]
+        except Exception:  # noqa: BLE001
+            return place_id
     try:
         return store.get_place(being["owner_id"], place_id)["name"]
     except Exception:  # noqa: BLE001
@@ -1047,6 +1076,10 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
             "home_xy": list(home_xy(b)),
             "speed": speed_for(b),
             "avatar": store._avatar_view(b),
+            # Home as your canvas (Phase 4): the cottage's chosen name
+            # and dress ride the payload so both maps + the FPV wear them.
+            "home_name": b.get("home_name") or "",
+            "home_look": b.get("home_look"),
         }
         loc = b.get("location") or {}
         if pos.get("to") and isinstance(loc.get("path"), list):
@@ -1074,6 +1107,27 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
     # Re-seat parked co-location across residents AND guests together, so a
     # guest never lands on a resident's exact pixel.
     _seat_parked(store, owner_id, beings)
+    # Made things (world-shaping plan Phase 1): the standing objects are
+    # their own render layer beside the props — the Phase 3 frontend draws
+    # them; until then the key rides along, additive and cheap.
+    objects: list[dict] = []
+    try:
+        for o in store.village_objects(owner_id, state="standing"):
+            entry = {"id": o["id"], "kind": o["kind"], "name": o["name"],
+                     "affordance": o["affordance"],
+                     "xy": [int(o["x"]), int(o["y"])],
+                     "tile": list(tile_of(int(o["x"]), int(o["y"]))),
+                     "face": _object_face(store, o),
+                     "civic": bool(int(o.get("civic") or 0))}
+            try:
+                by = store._being_by_id(o["being_id"])
+                entry["by"] = by["slug"]
+                entry["by_name"] = by["name"]
+            except Exception:  # noqa: BLE001
+                entry["by"], entry["by_name"] = "", ""
+            objects.append(entry)
+    except Exception:  # noqa: BLE001
+        pass
     return {"plot": PLOT_SIZE,
             "grid": {"plot_w": meta["plot_w"], "plot_h": meta["plot_h"],
                      "tile_size": meta["tile_size"]},
@@ -1082,6 +1136,7 @@ def village_map_payload(store: BeingsStore, owner_id: str, *,
             "props": village_props(store, owner_id),
             "places": store.village_places(owner_id),
             "notes": notes,
+            "objects": objects,
             "beings": beings}
 
 
@@ -1360,6 +1415,15 @@ def walk_blocked(store: BeingsStore, owner_id: str,
     for pr in village_props(store, owner_id):
         if pr["kind"] == "tree":
             blocked.add((pr["tile"][0], pr["tile"][1]))
+    # Made things that block (world-shaping plan Phase 2): stone stands in
+    # the way. The goal tile is always enterable in _astar, so walking TO
+    # a cairn still ends at the cairn.
+    try:
+        for o in store.village_objects(owner_id, state="standing"):
+            if OBJECT_KINDS.get(o.get("kind") or "", ("", False))[1]:
+                blocked.add(tile_of(int(o["x"]), int(o["y"])))
+    except Exception:  # noqa: BLE001
+        pass
     return blocked
 
 
@@ -1422,6 +1486,10 @@ def walk_target_xy(store: BeingsStore, being: dict,
     stepping from the door to the heart of the place is the settle.)"""
     if place_id == "home":
         return home_xy(being)
+    if place_id.startswith("object:"):
+        # A made thing has no door — legs walk straight to it (Phase 1
+        # objects never block; Phase 2 wires blocking kinds into the grid).
+        return place_xy(store, being, place_id)
     p = store.get_place(being["owner_id"], place_id)
     if (p.get("kind") or "") == "building" and p.get("door_x") is not None:
         return tile_center(int(p["door_x"]), int(p["door_y"]))
@@ -1476,7 +1544,8 @@ def _along(pts: list, frac: float) -> tuple[int, int]:
 
 def construction_taken(store: BeingsStore, owner_id: str) -> set:
     """Every tile nothing new may be raised on: footprints, homes, the
-    home lane, and the streets themselves."""
+    home lane, the streets themselves — and the made things standing on
+    the ground (a commissioned building never rises on someone's cairn)."""
     taken: set = {(HOME_LANE_TX, ty) for ty in range(3, GRID_H - 3)}
     meta = store.get_village_meta(owner_id)
     taken |= {(int(t[0]), int(t[1])) for t in (meta.get("roads") or [])}
@@ -1485,6 +1554,11 @@ def construction_taken(store: BeingsStore, owner_id: str) -> set:
     try:
         for r in store.list(owner_id):
             taken |= set(home_tiles(r))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        for o in store.village_objects(owner_id, state="standing"):
+            taken.add(tile_of(int(o["x"]), int(o["y"])))
     except Exception:  # noqa: BLE001
         pass
     return taken
@@ -2013,6 +2087,441 @@ def commission_percepts(store: BeingsStore, being: dict, now: datetime,
     return []
 
 
+# ── Iskre shape their world (docs/being-world-shaping-plan.md Phase 1) ───
+#
+# A being CRAFTS a real thing (a proof file + a burned token fee — that
+# part lives in being_society) and PLACES it on open ground here. Physics
+# decides, the LLM only asks: the commons and a buffer ring around it are
+# refused loudly (only the parent/steward tend the commons — Arc C), the
+# lane and another's yard are refused, anything merely occupied snaps to
+# the nearest open tile, and the world's capacity is a function of its
+# AREA — the cap rises by itself when the village grows. Objects are their
+# own layer: never counted against VILLAGE_MAX_PLACES, never stored as
+# places, walkable as 'object:<id>' ground.
+
+OBJECT_KINDS: dict[str, tuple[str, bool]] = {
+    # kind: (the affordance it will carry, blocks walking) — Phase 2 wires
+    # both into the homeostat and the path grid; Phase 1 records them.
+    "bench": ("remember", False), "cairn": ("remember", True),
+    "signpost": ("read", False), "planter": ("tend", False),
+    "sculpture": ("play", True), "lantern": ("gather", False),
+    "fountain": ("gather", True), "shrine": ("remember", True),
+}
+CIVIC_BUFFER_TILES = 2         # the no-build ring around every civic place
+OBJECT_SNAP_TILES = 8          # how far a rough ask may slide to open ground
+
+# Home as your canvas (Phase 4): the ground around your own cottage is
+# YOURS — always a legal, cap-exempt place to set your works down (the
+# cap guards the commons' openness, not your garden). And the cottage
+# itself takes a name and a dress, chosen by the being, no gate.
+YARD_RADIUS = 2                # tiles beyond the cottage that count as yard
+HOME_ROOFS = ("ember", "slate", "moss", "dusk")
+HOME_WALLS = ("plaster", "timber", "sage")
+
+
+def home_yard_tiles(being: dict) -> set:
+    """The being's own yard: the cottage footprint dilated by YARD_RADIUS.
+    Pure geometry — the civic guard and the snap still apply on top (a
+    yard never overrides the lane or a neighbor's ground)."""
+    out: set = set()
+    for (tx, ty) in home_tiles(being):
+        for dx in range(-YARD_RADIUS, YARD_RADIUS + 1):
+            for dy in range(-YARD_RADIUS, YARD_RADIUS + 1):
+                out.add((tx + dx, ty + dy))
+    return out
+
+
+def object_cap(store: BeingsStore, owner_id: str) -> int:
+    """How many made things the village ground holds — area-scaled, so a
+    grown plot raises the cap without touching a line of code."""
+    try:
+        meta = store.get_village_meta(owner_id)
+        area = (int(meta.get("plot_w") or PLOT_SIZE)
+                * int(meta.get("plot_h") or PLOT_SIZE))
+    except Exception:  # noqa: BLE001
+        area = PLOT_SIZE * PLOT_SIZE
+    return max(1, area // constitution.OBJECT_AREA_PER_SLOT)
+
+
+def object_share(store: BeingsStore, owner_id: str) -> int:
+    """One being's share of the ground — the cap split across the roster,
+    floored so a crowded village never zeroes anyone out of shaping it."""
+    try:
+        roster = max(1, len(store.list(owner_id)))
+    except Exception:  # noqa: BLE001
+        roster = 1
+    return max(constitution.OBJECT_MIN_PER_BEING,
+               object_cap(store, owner_id) // roster)
+
+
+def _civic_zone(store: BeingsStore, owner_id: str) -> set:
+    """Civic footprints dilated by the buffer ring, plus the home lane —
+    the ground a being may NOT build on or near. The law, not clutter."""
+    zone: set = set()
+    r = CIVIC_BUFFER_TILES
+    for p in store.village_places(owner_id):
+        for (tx, ty) in footprint_tiles(p):
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    zone.add((tx + dx, ty + dy))
+    zone |= {(HOME_LANE_TX, ty) for ty in range(GRID_H)}
+    return zone
+
+
+def _object_taken(store: BeingsStore, owner_id: str) -> set:
+    """Tiles merely OCCUPIED (streets, props, standing things) — the snap
+    slides off these quietly; they insult no law."""
+    taken: set = set()
+    try:
+        meta = store.get_village_meta(owner_id)
+        taken |= {(int(t[0]), int(t[1])) for t in (meta.get("roads") or [])}
+    except Exception:  # noqa: BLE001
+        pass
+    for pr in village_props(store, owner_id):
+        taken.add((pr["tile"][0], pr["tile"][1]))
+    try:
+        for o in store.village_objects(owner_id, state="standing"):
+            taken.add(tile_of(int(o["x"]), int(o["y"])))
+    except Exception:  # noqa: BLE001
+        pass
+    return taken
+
+
+def _building_tiles(store: BeingsStore, owner_id: str) -> set:
+    """The walls a made thing must never stand inside — building
+    footprints only (grounds like the plaza and meadow are walkable)."""
+    walls: set = set()
+    for p in store.village_places(owner_id):
+        if (p.get("kind") or footprint_for(p)[2]) == "building":
+            walls |= set(footprint_tiles(p))
+    return walls
+
+
+def object_spot(store: BeingsStore, being: dict, x: int, y: int, *,
+                asked: bool = True, civic_ok: bool = False) -> tuple[int, int]:
+    """Where a made thing may stand, from a rough ask. An EXPLICIT ask for
+    the commons and its ring, the lane, or another's yard REFUSES (the
+    law, said loudly and taught); an at-your-feet placement (asked=False)
+    slides out instead — the being said "set it down", not "build on the
+    commons". Anything merely occupied — a street, a tree, a standing
+    thing, your own cottage walls — always snaps to the nearest open
+    tile. Deterministic: the same ask lands on the same ground.
+
+    `civic_ok` (the steward's hand, Phase 5): the commons opens — a public
+    work may stand on the plaza, by the well, along the ring — and only
+    real obstacles (building walls, homes, occupied tiles) snap it aside."""
+    owner = being["owner_id"]
+    margin = 40
+    x = min(PLOT_SIZE - margin, max(margin, int(x)))
+    y = min(PLOT_SIZE - margin, max(margin, int(y)))
+    t0 = tile_of(x, y)
+    civic = _civic_zone(store, owner)
+    if asked and not civic_ok and t0 in civic:
+        raise BeingError(
+            "the commons isn't yours to build on — the steward and your "
+            "parent tend that ground; choose open ground past the civic "
+            "ring")
+    own_home: set = set(home_tiles(being))
+    others_homes: set = set()
+    try:
+        for r in store.list(owner):
+            if r.get("slug") != being.get("slug"):
+                others_homes |= set(home_tiles(r))
+    except Exception:  # noqa: BLE001
+        pass
+    if asked and not civic_ok and t0 in others_homes:
+        raise BeingError("that ground is another's yard — build on open "
+                         "ground, or your own")
+    if civic_ok:
+        # public works stand on the commons; only walls, homes and
+        # already-taken tiles turn them aside.
+        taken = (_object_taken(store, owner) | _building_tiles(store, owner)
+                 | others_homes | own_home)
+    else:
+        taken = (_object_taken(store, owner) | civic | others_homes | own_home)
+    lo = tile_of(margin, margin)
+    hi = tile_of(PLOT_SIZE - margin, PLOT_SIZE - margin)
+
+    def _ok(t: tuple[int, int]) -> bool:
+        return (lo[0] <= t[0] <= hi[0] and lo[1] <= t[1] <= hi[1]
+                and t not in taken)
+
+    if _ok(t0):
+        return tile_center(*t0)
+    for ring in range(1, OBJECT_SNAP_TILES + 1):
+        for dy in range(-ring, ring + 1):
+            for dx in range(-ring, ring + 1):
+                if max(abs(dx), abs(dy)) != ring:
+                    continue
+                t = (t0[0] + dx, t0[1] + dy)
+                if _ok(t):
+                    return tile_center(*t)
+    raise BeingError("no open ground near there — try elsewhere on the map")
+
+
+def place_object(store: BeingsStore, being: dict, object_ref: str,
+                 x: int | None = None, y: int | None = None,
+                 steward: bool = False,
+                 now: datetime | None = None) -> dict:
+    """Set a crafted thing down — or move one already standing. Yours
+    only; no spot asked means where you stand right now; the civic law is
+    checked on the ASKED ground (a refusal teaches, a snap forgives); the
+    village cap and your share are checked before new ground is taken.
+
+    `steward` (Phase 5): this being is the current steward placing a PUBLIC
+    work — the commons opens (civic_ok), the thing is marked civic, and it
+    stands outside the being-cap (public works are the role's, not the
+    being's share). The caller proves the role; here it is physics."""
+    now = now or _utcnow()
+    owner = being["owner_id"]
+    oid = (store.resolve_object_ref(owner, object_ref,
+                                    being_id=being["id"])
+           or object_ref)
+    o = store.get_village_object(owner, oid)     # raises BeingNotFound
+    if o["being_id"] != being["id"]:
+        raise BeingError(f"“{o['name']}” is not your work to move")
+    asked = x is not None and y is not None
+    if not asked:
+        pos = position_of(store, being, now)
+        x, y = int(pos["xy"][0]), int(pos["xy"][1])
+    # Snap FIRST — where the thing truly lands decides whether the cap
+    # applies at all: your own yard (Phase 4) is cap-exempt ground (the
+    # cap guards the commons' openness, not your garden), and a steward's
+    # public work (Phase 5) stands outside the being-cap entirely.
+    sx, sy = object_spot(store, being, x, y, asked=asked, civic_ok=steward)
+    here = tile_of(sx, sy)
+    in_yard = here in home_yard_tiles(being)
+    # A public work is one that truly STANDS on the commons — a steward
+    # placing in its own yard or the open wilds is just a being with a
+    # made thing (not civic, and the cap applies as usual).
+    is_civic = steward and here in _civic_zone(store, owner)
+    if o["state"] != "standing" and not in_yard and not is_civic:
+        def _in_makers_yard(s: dict) -> bool:
+            try:
+                maker = store._being_by_id(s["being_id"])
+            except Exception:  # noqa: BLE001 — a purged maker keeps no yard
+                return False
+            return tile_of(int(s["x"]), int(s["y"])) \
+                in home_yard_tiles(maker)
+        standing = [s for s in store.village_objects(owner, state="standing")
+                    if not int(s.get("civic") or 0) and not _in_makers_yard(s)]
+        cap = object_cap(store, owner)
+        if len(standing) >= cap:
+            raise BeingError(
+                f"the open ground holds {cap} made things and holds "
+                "them all — unplace an old work of yours to make room "
+                "(your own yard is always yours)")
+        mine = [s for s in standing if s["being_id"] == being["id"]]
+        share = object_share(store, owner)
+        if len(mine) >= share:
+            raise BeingError(
+                f"your hands keep {share} things standing on the open "
+                "ground already — unplace one, or build in your own yard")
+    store.set_object_ground(owner, oid, x=sx, y=sy, state="standing",
+                            civic=is_civic, now=now)
+    store.record_event(being["id"],
+                       "civic_placed" if is_civic else "object_placed",
+                       {"id": oid, "kind": o["kind"], "name": o["name"],
+                        "x": sx, "y": sy}, now=now)
+    return store.get_village_object(owner, oid)
+
+
+def unplace_object(store: BeingsStore, being: dict, object_ref: str,
+                   now: datetime | None = None) -> dict:
+    """Take your own standing thing back into your hands — frees its
+    ground (and a cap slot); the proof file stays yours either way."""
+    now = now or _utcnow()
+    owner = being["owner_id"]
+    oid = (store.resolve_object_ref(owner, object_ref,
+                                    being_id=being["id"])
+           or object_ref)
+    o = store.get_village_object(owner, oid)
+    if o["being_id"] != being["id"]:
+        raise BeingError(f"“{o['name']}” is not yours to take up")
+    if o["state"] != "standing":
+        raise BeingError(f"“{o['name']}” is already in your hands")
+    store.set_object_ground(owner, oid, x=int(o["x"]), y=int(o["y"]),
+                            state="held", now=now)
+    store.record_event(being["id"], "object_removed",
+                       {"id": oid, "kind": o["kind"], "name": o["name"]},
+                       now=now)
+    return store.get_village_object(owner, oid)
+
+
+# ── Phase 2: function + discovery ────────────────────────────────────────
+# A made thing DOES something: standing within reach, its affordance pays
+# the same boost a place does — another's at the full PLACE_BOOST, your
+# OWN at OBJECT_OWN_BOOST (building for the village is the point; farming
+# your own bench pays less). And the world pulls: close by, an unfound
+# thing is a DISCOVERY (once per thing per life, serves explore — the
+# landmark payoff); far off, a morning senses it as a nameless pull; when
+# the explore drive is truly hungry the pull becomes an URGE with a road.
+# Your own works are silent — you know where you left them.
+
+OBJECT_ACCESS_RADIUS = 40.0    # units — within reach: the boost applies
+OBJECT_SEE_RADIUS = 60.0       # units — close enough to see what it is
+OBJECT_SENSE_LINES = 2         # a morning senses at most this many pulls
+OBJECT_OWN_BOOST = 1.25        # your own work pays, but less than another's
+OBJECT_URGE_EXPLORE = 0.25     # explore pressure at/above this feels the urge
+
+
+def drive_boost_factors(store: BeingsStore, being: dict,
+                        now: datetime) -> dict[str, float]:
+    """Every drive this ground favors → its factor. The settled place's
+    affordances pay PLACE_BOOST as before; a standing made thing within
+    OBJECT_ACCESS_RADIUS pays too — the strongest source wins. Empty on
+    the road or off the map; objects only count when settled (reach is a
+    fact of standing somewhere, not of passing by)."""
+    factors: dict[str, float] = {
+        d: PLACE_BOOST for d in place_drive_boosts(store, being, now)}
+    try:
+        pos = position_of(store, being, now)
+        if pos.get("at"):
+            xy = pos["xy"]
+            for o in store.village_objects(being["owner_id"],
+                                           state="standing"):
+                if math.dist(xy, (int(o["x"]), int(o["y"]))) \
+                        > OBJECT_ACCESS_RADIUS:
+                    continue
+                d = AFFORDANCE_DRIVE_BOOSTS.get(o.get("affordance") or "")
+                if not d:
+                    continue
+                f = (OBJECT_OWN_BOOST if o["being_id"] == being["id"]
+                     else PLACE_BOOST)
+                factors[d] = max(factors.get(d, 1.0), f)
+    except Exception:  # noqa: BLE001
+        pass
+    return factors
+
+
+def _maker_label(store: BeingsStore, o: dict) -> str:
+    try:
+        return f", {store._being_by_id(o['being_id'])['name']}'s work"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _object_face(store: BeingsStore, o: dict) -> str:
+    """The inscription's first true line — read from the maker's REAL
+    proof file (the file IS the content; a vanished file reads blank)."""
+    try:
+        from captain_claw.flight_deck import being_life
+        maker = store._being_by_id(o["being_id"])
+        p = being_life._home_path(maker, o["file_path"])
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            s = ln.strip()
+            if not s or s.startswith("#") or s.startswith("<!--"):
+                continue
+            return s[:120]
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _compass(a, b) -> str:
+    """8-way heading from a to b in map space (x east, y south)."""
+    ang = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 360.0
+    dirs = ("east", "south-east", "south", "south-west",
+            "west", "north-west", "north", "north-east")
+    return dirs[int((ang + 22.5) // 45) % 8]
+
+
+def _walk_bucket(being: dict, d: float) -> str:
+    """Distance as this body feels it — an infant's 'far' is honest."""
+    m = d / max(0.001, speed_for(being))
+    if m < 20:
+        return "a short walk"
+    if m < 60:
+        return "a good walk"
+    return "far across the village"
+
+
+def object_percepts(store: BeingsStore, being: dict, now: datetime,
+                    kind: str, first_of_day: bool) -> list[str]:
+    """Made things, felt (world-shaping plan Phase 2): the discovery when
+    close (any wake — even a wake mid-road beside it), the pull and the
+    urge each morning while something unfound stands far off."""
+    if kind != "wake" or being.get("state") in ("dead", "emigrated") \
+            or being.get("stage") == "egg":
+        return []
+    try:
+        objs = [o for o in store.village_objects(being["owner_id"],
+                                                 state="standing")
+                if o["being_id"] != being["id"]]
+    except Exception:  # noqa: BLE001
+        return []
+    if not objs:
+        return []
+    try:
+        pos = position_of(store, being, now)
+    except Exception:  # noqa: BLE001
+        return []
+    xy = pos["xy"]
+    lines: list[str] = []
+    far: list[tuple[float, dict]] = []
+    for o in objs:
+        d = math.dist(xy, (int(o["x"]), int(o["y"])))
+        if d <= OBJECT_SEE_RADIUS:
+            # Once per thing per life — the milestone IS the dedup, and
+            # its data key must not be 'name' (it would overwrite).
+            if store.milestone(being["id"], f"found_object_{o['id']}",
+                               {"object": o["id"], "kind": o["kind"]},
+                               now=now):
+                face = _object_face(store, o)
+                line = (f'A DISCOVERY: a {o["kind"]} stands here — '
+                        f'"{o["name"]}"{_maker_label(store, o)}.')
+                if face:
+                    line += f' Its face reads: "{face}"'
+                store.record_event(being["id"], "object_found",
+                                   {"id": o["id"], "kind": o["kind"],
+                                    "object": o["name"]}, now=now)
+                lines.append(line)
+        else:
+            far.append((d, o))
+    if not (first_of_day and far):
+        return lines
+    # The morning's pulls: nameless texture — unless explore is hungry,
+    # when the nearest unfound thing becomes an urge with a road (the
+    # name arrives as hearsay so "go_to" can walk it; what it IS stays
+    # unknown until the being stands before it).
+    found: set[str] = set()
+    try:
+        for m in store.milestones(being["owner_id"], being["slug"]):
+            n = str(m.get("data", {}).get("name") or "")
+            if n.startswith("found_object_"):
+                found.add(n[len("found_object_"):])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from captain_claw.flight_deck.being_life import drive_pressures
+        explore_p = dict(drive_pressures(
+            being.get("drives") or {}, now=now)).get("explore", 0.0)
+    except Exception:  # noqa: BLE001
+        explore_p = 0.0
+    far.sort(key=lambda t: t[0])
+    urged, pulls = False, 0
+    for d, o in far:
+        if pulls >= OBJECT_SENSE_LINES:
+            break
+        if o["id"] in found:
+            continue
+        pulls += 1
+        head, span = _compass(xy, (int(o["x"]), int(o["y"]))), \
+            _walk_bucket(being, d)
+        if not urged and float(explore_p) >= OBJECT_URGE_EXPLORE:
+            urged = True
+            lines.append(
+                f"AN URGE: something new stands to the {head}, {span} off "
+                "— you can't make out what, and you find you WANT to know. "
+                f'You have heard it called "{o["name"]}". Add "go_to": '
+                f'"{o["name"]}" and see it with your own eyes.')
+        else:
+            lines.append(
+                f"Something stands to the {head}, {span} off — too far to "
+                "make out what.")
+    return lines
+
+
 # The architect (one-shot, never a resident): one LLM call names and places
 # the ground from the fixed vocabulary; save_village validates HARD and the
 # deterministic default stands whenever the draft fails. Prompt + parse are
@@ -2091,7 +2600,7 @@ def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,
     if note:
         lines.append(note)
     for fn in (location_percepts, market_percepts, steward_percepts,
-               commission_percepts):
+               commission_percepts, object_percepts):
         try:
             lines += fn(store, being, now, kind, first_of_day)
         except Exception:  # noqa: BLE001

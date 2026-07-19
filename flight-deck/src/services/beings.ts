@@ -151,6 +151,9 @@ export interface BeingVitals {
   visit_url: string
   visit_secret: string
   visit_last_announce: string | null
+  // home as your canvas (world-shaping plan Phase 4)
+  home_name: string
+  home_look: { roof?: string; wall?: string } | null
 }
 
 export const TICK_INTERVAL_CHOICES = [2, 5, 10, 15, 30, 60] as const
@@ -598,8 +601,22 @@ export interface VillageBeingPos {
   // a visiting being from another village (visiting-beings plan §1):
   // rendered distinctly, wearing a "visiting from <origin>" label.
   kind?: 'resident' | 'visitor'; from?: string; mood?: string
+  // home as your canvas (world-shaping plan Phase 4): the cottage's
+  // being-chosen name and dress.
+  home_name?: string
+  home_look?: { roof?: string; wall?: string } | null
 }
 export interface VillageProp { tile: [number, number]; kind: string }
+// A made thing (world-shaping plan): crafted by a being, standing on open
+// ground. `face` is the inscription's first line, read from the maker's
+// real proof file; `by` is the maker's slug, `by_name` its display name.
+export interface VillageObject {
+  id: string; kind: string; name: string; affordance: string
+  xy: [number, number]; tile: [number, number]
+  face: string; by: string; by_name: string
+  // a public work the steward placed on the commons (Phase 5)
+  civic?: boolean
+}
 // A sign in the grass (FPV plan Phase 3): planted by the parent or a
 // public visitor; each being finds each sign once. `found` counts finders;
 // `read_by` carries slugs only on the parent's own map.
@@ -615,6 +632,7 @@ export interface VillageMapData {
   roads?: [number, number][]
   props?: VillageProp[]
   notes?: VillageNote[]
+  objects?: VillageObject[]
 }
 export const getVillageMap = () =>
   fdFetch<VillageMapData>('/beings/village-map')
@@ -674,6 +692,19 @@ export const setStewardStipend = (coins: number) =>
   fdFetch<{ steward_stipend_coins: number }>('/beings/village-stipend', {
     method: 'POST', body: JSON.stringify({ coins }),
   })
+
+// The civic hand (world-shaping plan Phase 5): the parent may rename or
+// redescribe a place (the id never changes; MAP.md is rewritten), and
+// redraw the whole ground with the one-shot architect.
+export const editVillagePlace = (
+  placeId: string, body: { name?: string; description?: string }) =>
+  fdFetch<{ ok: boolean; place: VillagePlace }>(
+    `/beings/village-map/place/${placeId}/edit`, {
+      method: 'POST', body: JSON.stringify(body),
+    })
+export const redesignVillage = () =>
+  fdFetch<{ ok: boolean; places: VillagePlace[] }>(
+    '/beings/village-map/architect', { method: 'POST' })
 
 // ── The public square (parent side) ──
 

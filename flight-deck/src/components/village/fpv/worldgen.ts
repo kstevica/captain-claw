@@ -78,6 +78,16 @@ const SPRITE_BY_AFFORDANCE: Record<string, string> = {
 const spriteFor = (p: VillagePlace) =>
   SPRITE_BY_ID[p.id] || SPRITE_BY_AFFORDANCE[(p.affordances || [])[0] || ''] || 'cottage'
 
+// Home as your canvas (world-shaping plan Phase 4): the cottage dress
+// vocabulary → blocks. Unknown/unset falls back to the classic cottage.
+const HOME_ROOF_BLOCKS: Record<string, number> = {
+  ember: B.ROOF_RED, slate: B.ROOF_SLATE, moss: B.ROOF_MOSS,
+  dusk: B.ROOF_DARK,
+}
+const HOME_WALL_BLOCKS: Record<string, number> = {
+  plaster: B.PLASTER, timber: B.TIMBER, sage: B.WALL_SAGE,
+}
+
 // deterministic per-position hash for margin trees and meadow flowers
 function hash2(x: number, z: number, s: number): number {
   let h = (x * 374761393 + z * 668265263 + s * 974711) | 0
@@ -215,7 +225,9 @@ export function buildWorld(data: VillageMapData): BuiltWorld {
     const [htx, hty] = homeNW(b.home_xy)
     const bx0 = htx * TPB + MARGIN, bz0 = hty * TPB + MARGIN
     const bx1 = bx0 + 2 * TPB - 1, bz1 = bz0 + 2 * TPB - 1
-    labels.push({ x0: bx0, z0: bz0, x1: bx1, z1: bz1, name: `${b.name}'s home` })
+    labels.push({ x0: bx0, z0: bz0, x1: bx1, z1: bz1,
+                  name: b.home_name ? `“${b.home_name}” — ${b.name}'s home`
+                    : `${b.name}'s home` })
     // the door faces the nearest street (the home lane, in practice)
     let best: [number, number] | null = null, bestD = Infinity
     const hcx = (htx + 1) * TPB, hcz = (hty + 1) * TPB
@@ -227,7 +239,12 @@ export function buildWorld(data: VillageMapData): BuiltWorld {
     const side = !best ? 'e'
       : Math.abs(best[0] - hcx) >= Math.abs(best[1] - hcz)
         ? (best[0] > hcx ? 'e' : 'w') : (best[1] > hcz ? 's' : 'n')
-    cottage(bx0, bz0, bx1, bz1, side, set)
+    // Home as your canvas (world-shaping plan Phase 4): the cottage
+    // wears the being's chosen dress — roof and wall from the vocab.
+    const look = b.home_look || {}
+    const roofBlock = HOME_ROOF_BLOCKS[look.roof || ''] ?? B.ROOF_RED
+    const wallBlock = HOME_WALL_BLOCKS[look.wall || ''] ?? B.PLASTER
+    cottage(bx0, bz0, bx1, bz1, side, set, wallBlock, roofBlock)
   }
 
   // ── props: trees, bushes, flowers, lamps (same seeded payload) ─────────
@@ -240,6 +257,57 @@ export function buildWorld(data: VillageMapData): BuiltWorld {
     else if (pr.kind === 'lamp') {
       // on the tile corner so the street stays walkable
       if (get(bx, 2, bz) !== B.AIR) { set(bx, 3, bz, B.POST); set(bx, 4, bz, B.POST); set(bx, 5, bz, B.LAMP) }
+    }
+  }
+
+  // ── made things (world-shaping plan Phase 3): a being's placed works ───
+  // Small block fixtures on their tile. Blocking kinds (cairn, sculpture,
+  // fountain, shrine) fill enough of the tile to read as an obstacle —
+  // parity with walk_blocked; the rest sit light and walkable-around.
+  for (const o of data.objects ?? []) {
+    const bx = o.tile[0] * TPB + MARGIN, bz = o.tile[1] * TPB + MARGIN
+    const cx = bx + 1, cz = bz + 1
+    labels.push({ x0: bx, z0: bz, x1: bx + TPB - 1, z1: bz + TPB - 1,
+                  name: `“${o.name}”` })
+    switch (o.kind) {
+      case 'bench':
+        set(cx, 3, cz, B.PLANK); set(cx + 1, 3, cz, B.PLANK)
+        break
+      case 'signpost':
+        set(cx, 3, cz, B.POST); set(cx, 4, cz, B.POST)
+        set(cx, 5, cz, B.PLANK)
+        break
+      case 'planter':
+        set(cx, 3, cz, B.PLANK); set(cx + 1, 3, cz, B.PLANK)
+        set(cx, 4, cz, B.LEAVES); set(cx + 1, 4, cz, B.FLOWERS)
+        break
+      case 'lantern':
+        set(cx, 3, cz, B.POST); set(cx, 4, cz, B.POST)
+        set(cx, 5, cz, B.LAMP)
+        break
+      case 'cairn':
+        set(cx, 3, cz, B.STONE); set(cx + 1, 3, cz, B.STONE)
+        set(cx, 3, cz + 1, B.STONE); set(cx, 4, cz, B.STONE)
+        break
+      case 'sculpture':
+        set(cx, 3, cz, B.STONE); set(cx, 4, cz, B.STONE)
+        set(cx, 5, cz, B.STONE); set(cx + 1, 3, cz, B.STONE)
+        break
+      case 'fountain':
+        rect(cx - 1, cz - 1, cx + 2, cz + 2, (x, z) => {
+          const edge = x === cx - 1 || x === cx + 2 || z === cz - 1 || z === cz + 2
+          if (edge) set(x, 3, z, B.STONE)
+          else set(x, 2, z, B.WATER)
+        })
+        break
+      case 'shrine':
+        set(cx, 3, cz, B.STONE); set(cx, 4, cz, B.STONE)
+        set(cx + 1, 3, cz, B.STONE); set(cx + 1, 4, cz, B.STONE)
+        set(cx, 5, cz, B.ROOF_RED); set(cx + 1, 5, cz, B.ROOF_RED)
+        set(cx, 3, cz + 1, B.LAMP)
+        break
+      default:
+        set(cx, 3, cz, B.STONE)
     }
   }
 
@@ -334,14 +402,15 @@ export function buildWorld(data: VillageMapData): BuiltWorld {
     roofOn(x0, z0, x1, z1, 3 + kit.wallH, kit.roof, 4, s)
   }
   function cottage(x0: number, z0: number, x1: number, z1: number,
-                   side: string, s: typeof set) {
+                   side: string, s: typeof set,
+                   wall: number = B.PLASTER, roof: number = B.ROOF_RED) {
     const wallH = 3
     rect(x0, z0, x1, z1, (x, z) => s(x, 2, z, B.PLANK))
     rect(x0, z0, x1, z1, (x, z) => {
       const edge = x === x0 || x === x1 || z === z0 || z === z1
       if (!edge) return
       const corner = (x === x0 || x === x1) && (z === z0 || z === z1)
-      for (let y = 0; y < wallH; y++) s(x, 3 + y, z, corner ? B.TIMBER : B.PLASTER)
+      for (let y = 0; y < wallH; y++) s(x, 3 + y, z, corner ? B.TIMBER : wall)
     })
     const midX = (x0 + x1) >> 1, midZ = (z0 + z1) >> 1
     const carve = (x: number, z: number) => { s(x, 3, z, B.AIR); s(x, 4, z, B.AIR) }
@@ -349,6 +418,6 @@ export function buildWorld(data: VillageMapData): BuiltWorld {
     else if (side === 'w') { carve(x0, midZ); carve(x0, midZ + 1); s(x1, 4, midZ, B.WINDOW) }
     else if (side === 's') { carve(midX, z1); carve(midX + 1, z1); s(midX, 4, z0, B.WINDOW) }
     else { carve(midX, z0); carve(midX + 1, z0); s(midX, 4, z1, B.WINDOW) }
-    roofOn(x0, z0, x1, z1, 3 + wallH, B.ROOF_RED, 4, s)
+    roofOn(x0, z0, x1, z1, 3 + wallH, roof, 4, s)
   }
 }

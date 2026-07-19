@@ -5,9 +5,9 @@ import {
   ArrowDownUp, ArrowRightLeft, BookOpen, CalendarDays, Check, ChevronDown,
   ChevronLeft, ChevronRight, ClipboardList, Coins, Download, Egg, ExternalLink,
   DoorOpen, Files, Fingerprint, Footprints, Gift, Globe, GraduationCap, History, Loader2, Mail,
-  Map as MapIcon, MapPin, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Play, Plus,
+  Map as MapIcon, MapPin, Maximize2, MessageCircle, Minimize2, Moon, Network, Pause, Pencil, Play, Plus,
   RefreshCw, Search, ScrollText, Skull, SlidersHorizontal, Sparkles, Sprout,
-  Trash2, Upload, Users, Wrench, X, Zap, ZoomIn, ZoomOut,
+  Trash2, Upload, Users, Wand2, Wrench, X, Zap, ZoomIn, ZoomOut,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -33,8 +33,10 @@ import {
   getBeingGraph, rebuildBeingGraph, getBeingMessages, hatchBeing, judgeChore, judgeQuest,
   grantCoins, listBeings, listChores, messageBeing, pauseBeing, postChore, postQuest,
   getVillageMap, getVillagePlace, getMarket, type VillageMapData,
-  type VillagePlace, type VillageBeingPos, type MarketListing,
+  type VillagePlace, type VillageBeingPos, type VillageObject,
+  type MarketListing,
   getVillageLife, judgeCommission, setStewardStipend, type VillageLife, nudgeBeing,
+  editVillagePlace, redesignVillage,
   rechargeBeing, rejectProcreation, rejectSelfMod, rollbackPersona, setAllowance,
   setBodyArchetype, listBodyArchetypes, type BodyArchetypeOption, markBeingRead,
   setBodyConfig, setBodyMrav, type BodyConnectionInput,
@@ -108,6 +110,11 @@ const EVENT_DOT: Record<string, string> = {
   instinct: 'bg-teal-300', browsed: 'bg-amber-300',
   plan_set: 'bg-sky-300', plan_fulfilled: 'bg-emerald-400',
   intent_set: 'bg-sky-300', instincts_set: 'bg-zinc-500',
+  object_crafted: 'bg-emerald-400', object_placed: 'bg-teal-400',
+  object_removed: 'bg-zinc-500', object_found: 'bg-amber-300',
+  home_named: 'bg-violet-300', home_styled: 'bg-violet-300',
+  civic_placed: 'bg-amber-400', place_renamed: 'bg-amber-400',
+  place_redescribed: 'bg-amber-300',
 }
 
 // Coins are money, not food (space plan Phase 2) — say which one is on the
@@ -218,7 +225,7 @@ function summarizeEventData(e: BeingEvent): string {
     case 'coins_granted': return `pocket money: +${d.coins} coin(s)${d.note ? ` — ${d.note}` : ''}`
     case 'coins_converted': return `converted ${d.coins} coin(s) → ${fmtTokens(Number(d.tokens) || 0)} tokens`
     case 'avatar_set': return 'chose a new look'
-    case 'departed': return `set out for ${d.to} — ~${d.minutes} min walk${d.reason ? ` (${d.reason})` : ''}`
+    case 'departed': return `set out for ${d.name || String(d.to ?? '').replace(/^object:/, '')} — ~${d.minutes} min walk${d.reason ? ` (${d.reason})` : ''}`
     case 'arrived': return `arrived at ${d.name || d.place}${d.hhmm ? ` at ${d.hhmm}` : ''}`
     case 'crossed_paths': return `crossed paths with ${d.name} at ${d.place_name || d.place}`
     case 'instinct': {
@@ -246,6 +253,17 @@ function summarizeEventData(e: BeingEvent): string {
       return pins ? `pinned its feet: ${pins}` : 'cleared its feet pins'
     }
     case 'instincts_set': return `instincts ${d.on ? 'on — the body lives between thinks' : 'off'}`
+    case 'object_crafted': return `made a ${d.kind} — “${d.name}”${Number(d.fee_tokens) ? ` (${fmtTokens(Number(d.fee_tokens))} burned)` : ''}`
+    case 'object_placed': return `set “${d.name}” down on the open ground`
+    case 'object_removed': return `took “${d.name}” back into its hands`
+    case 'object_found': return `discovered “${d.object || d.id}” — a ${d.kind} someone made`
+    case 'home_named': return d.from
+      ? `renamed its home “${d.from}” → “${d.name}”`
+      : `named its home — “${d.name}”`
+    case 'home_styled': return `dressed its home — ${d.roof} roof, ${d.wall} walls`
+    case 'civic_placed': return `as steward, raised a public ${d.kind} on the commons — “${d.name}”`
+    case 'place_renamed': return `as steward, renamed a place → “${d.name}”${d.why ? ` — ${d.why}` : ''}`
+    case 'place_redescribed': return 'as steward, rewrote a place’s description'
     case 'introduced': return `was introduced to ${d.to} (via ${d.via})`
     case 'made_introduction': return `introduced ${d.for} to ${d.to}`
     case 'commission_proposed': return `proposed '${d.name}' — ${d.coins}/${d.target} coins down`
@@ -402,6 +420,12 @@ function VisitedVillage({ slug, name }: { slug: string; name: string }) {
   const placeById = useMemo(() => {
     const o: Record<string, VillagePlace> = {}
     for (const p of map?.places ?? []) o[p.id] = p
+    // the host village's made things resolve as ground here too
+    for (const ob of map?.objects ?? []) {
+      o[`object:${ob.id}`] = { id: `object:${ob.id}`, name: ob.name,
+        x: ob.xy[0], y: ob.xy[1], affordances: [ob.affordance],
+        description: ob.face }
+    }
     return o
   }, [map])
   const posOf = (b: VillageBeingPos) => walkPosOf(b, placeById, fetchedAt.current)
@@ -3900,18 +3924,24 @@ function MapBeingCard({ b, statusOf, places, nudge, nudging, full }: {
 // The place panel: what a building is, who's there, its stalls & guestbook,
 // and — the heart of it — a browser of every iskra's work held here (the
 // Garden their gardens, the Library their reading, …). Click a file to read.
-function MapPlaceCard({ place, beings, hereNames, market, guestbook, full }: {
+function MapPlaceCard({ place, beings, hereNames, market, guestbook, full, onEdit }: {
   place: VillagePlace
   beings: VillageBeingPos[]
   hereNames: string[]
   market: MarketListing[]
   guestbook: string
   full: boolean
+  onEdit?: (body: { name?: string; description?: string }) => Promise<void>
 }) {
   const fmap = folderFor(place)
   const [files, setFiles] = useState<Record<string, SelfFile[]>>({})
   const [open, setOpen] = useState<{ slug: string; name: string; path: string } | null>(null)
   const [text, setText] = useState<string>('')
+  const [editing, setEditing] = useState(false)
+  const [eName, setEName] = useState(place.name)
+  const [eDesc, setEDesc] = useState(place.description)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { setEditing(false); setEName(place.name); setEDesc(place.description) }, [place.id])
   useEffect(() => {
     setFiles({}); setOpen(null)
     if (!fmap) return
@@ -3941,8 +3971,41 @@ function MapPlaceCard({ place, beings, hereNames, market, guestbook, full }: {
       <div className="mb-1 flex items-center gap-1.5">
         <span className="h-2.5 w-2.5 rounded-sm" style={{ background: AFF_HUE[place.affordances[0]] ?? '#a78bfa' }} />
         <span className="text-sm font-semibold text-zinc-100">{place.name}</span>
+        {onEdit && !editing && (
+          <button onClick={() => setEditing(true)} title="Rename or redescribe this place"
+            className="ml-auto rounded border border-zinc-700 p-0.5 text-zinc-500 hover:border-violet-500/50 hover:text-zinc-200">
+            <Pencil className="h-3 w-3" />
+          </button>
+        )}
       </div>
-      <p className="mb-1.5 text-[11px] leading-snug text-zinc-400">{place.description}</p>
+      {onEdit && editing ? (
+        <div className="mb-2 space-y-1.5 rounded border border-violet-500/25 bg-violet-500/[0.05] p-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-violet-600/90 dark:text-violet-400/90">The civic hand</div>
+          <input value={eName} onChange={(e) => setEName(e.target.value)} maxLength={60}
+            className="w-full rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[11px] text-zinc-100 focus:border-violet-500/50 focus:outline-none" />
+          <textarea value={eDesc} onChange={(e) => setEDesc(e.target.value)} maxLength={300} rows={2}
+            className="w-full resize-none rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1 text-[11px] text-zinc-300 focus:border-violet-500/50 focus:outline-none" />
+          <div className="flex gap-1.5">
+            <button disabled={saving || (!eName.trim())}
+              onClick={async () => {
+                setSaving(true)
+                try {
+                  await onEdit({
+                    ...(eName.trim() && eName !== place.name ? { name: eName.trim() } : {}),
+                    ...(eDesc !== place.description ? { description: eDesc } : {}),
+                  })
+                  setEditing(false)
+                } finally { setSaving(false) }
+              }}
+              className="rounded bg-violet-600 px-2 py-0.5 text-[10px] font-medium text-white hover:bg-violet-500 disabled:opacity-40">Save</button>
+            <button onClick={() => { setEditing(false); setEName(place.name); setEDesc(place.description) }}
+              className="rounded border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800">Cancel</button>
+          </div>
+          <p className="text-[9px] text-zinc-600">the id never changes — guestbooks and everything the iskre remember stay true</p>
+        </div>
+      ) : (
+        <p className="mb-1.5 text-[11px] leading-snug text-zinc-400">{place.description}</p>
+      )}
       <div className="mb-2 flex flex-wrap gap-1">
         {place.affordances.map((a) => (
           <span key={a} className="rounded border border-zinc-700 px-1.5 py-px text-[9px]" style={{ color: AFF_HUE[a] ?? '#a78bfa' }}>{a}</span>
@@ -4008,12 +4071,72 @@ function MapPlaceCard({ place, beings, hereNames, market, guestbook, full }: {
   )
 }
 
+// A made thing on the map (world-shaping plan Phase 3): name, kind, the
+// maker, and its face — with the whole inscription readable through the
+// maker's real proof file (garden/works/<id>.md).
+function MapObjectCard({ o, beings, full }: {
+  o: VillageObject
+  beings: VillageBeingPos[]
+  full: boolean
+}) {
+  const [text, setText] = useState<string>('')
+  const [reading, setReading] = useState(false)
+  const maker = beings.find((b) => b.slug === o.by)
+  useEffect(() => { setText(''); setReading(false) }, [o.id])
+  useEffect(() => {
+    if (!reading || text) return
+    let dead = false
+    void getSelfFile(o.by, `garden/works/${o.id}.md`)
+      .then((r) => { if (!dead) setText(r.text) })
+      .catch(() => { if (!dead) setText('(its face has worn blank)') })
+    return () => { dead = true }
+  }, [reading, o.id])
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+      <div className="mb-1 flex items-center gap-1.5">
+        <span className="h-2.5 w-2.5 rounded-full" style={{ background: AFF_HUE[o.affordance] ?? '#a78bfa' }} />
+        <span className="text-sm font-semibold text-zinc-100">{o.name}</span>
+      </div>
+      <div className="mb-2 flex flex-wrap gap-1">
+        <span className="rounded border border-zinc-700 px-1.5 py-px text-[9px] text-zinc-400">{o.kind}</span>
+        <span className="rounded border border-zinc-700 px-1.5 py-px text-[9px]" style={{ color: AFF_HUE[o.affordance] ?? '#a78bfa' }}>{o.affordance}</span>
+        {o.civic && <span className="rounded border border-amber-500/40 px-1.5 py-px text-[9px] text-amber-600 dark:text-amber-400">a public work</span>}
+      </div>
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{o.civic ? 'Raised by the steward' : 'Made by'}</div>
+      <div className="mb-2 flex items-center gap-1 text-[11px] text-zinc-300">
+        {maker?.avatar && <IskraAvatar c={maker.avatar.c} p={maker.avatar.p} size={14} />}
+        {o.by_name || o.by || <span className="text-zinc-600">someone long gone</span>}
+      </div>
+      <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Its face reads</div>
+      {reading ? (
+        <div className={`overflow-auto rounded border border-zinc-800 bg-zinc-950 p-2.5 ${full ? 'max-h-[46vh]' : 'max-h-52'}`}>
+          <div className="fd-file-markdown text-[12px]"><Markdown remarkPlugins={[remarkGfm]}>{text || '…'}</Markdown></div>
+        </div>
+      ) : (
+        <>
+          {o.face
+            ? <p className="mb-1 text-[11px] italic leading-snug text-zinc-300">“{o.face}”</p>
+            : <p className="mb-1 text-[11px] text-zinc-600">its face has worn blank</p>}
+          <button onClick={() => setReading(true)}
+            className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-300 hover:border-violet-500/50 hover:text-zinc-100">
+            read the whole inscription
+          </button>
+        </>
+      )}
+      <p className="mt-2 text-[10px] text-zinc-600">
+        iskre nearby can see and use it — far ones only sense something stands here
+      </p>
+    </div>
+  )
+}
+
 function VillageMap() {
   const [data, setData] = useState<VillageMapData | null>(null)
   const [market, setMarket] = useState<MarketListing[]>([])
   const [life, setLife] = useState<VillageLife | null>(null)
   const [sel, setSel] = useState<string | null>(null)
   const [selBeing, setSelBeing] = useState<string | null>(null)
+  const [selObj, setSelObj] = useState<string | null>(null)
   const [placeInfo, setPlaceInfo] =
     useState<{ place: VillagePlace; guestbook: string } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -4045,6 +4168,17 @@ function VillageMap() {
     catch (e) { alert(e instanceof Error ? e.message : 'failed') }
     finally { setNudging(false) }
   }
+  const editPlace = async (id: string, body: { name?: string; description?: string }) => {
+    await editVillagePlace(id, body)
+    await load()
+  }
+  const redraw = async () => {
+    if (!confirm('Redraw the whole village with the architect? Places may be renamed, moved, or replaced — guestbooks and homes stay, but the ground is redrawn. Iskre mid-walk settle home next wake.')) return
+    setBusy(true)
+    try { await redesignVillage(); await load() }
+    catch (e) { alert(e instanceof Error ? e.message : 'the architect failed') }
+    finally { setBusy(false) }
+  }
   useEffect(() => {
     void load()
     const t = window.setInterval(() => void load(), 60_000)
@@ -4070,6 +4204,14 @@ function VillageMap() {
   const placeById = useMemo(() => {
     const m: Record<string, VillagePlace> = {}
     for (const p of data?.places ?? []) m[p.id] = p
+    // Made things are ground too (world-shaping plan): a walk may target
+    // 'object:<id>' — hand the walk math + status lines a name and a spot,
+    // so no raw id ever leaks into "on the road to …" / "at …".
+    for (const o of data?.objects ?? []) {
+      m[`object:${o.id}`] = { id: `object:${o.id}`, name: o.name,
+        x: o.xy[0], y: o.xy[1], affordances: [o.affordance],
+        description: o.face }
+    }
     return m
   }, [data])
 
@@ -4084,6 +4226,7 @@ function VillageMap() {
   const walking = data.beings.filter((b) => b.to)
   const selPlace = sel ? placeById[sel] : null
   const selB = selBeing ? data.beings.find((b) => b.slug === selBeing) : null
+  const selO = selObj ? (data.objects ?? []).find((o) => o.id === selObj) : null
 
   const defaultPanel = () => (
     <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
@@ -4150,13 +4293,18 @@ function VillageMap() {
           {life.steward && <span className="truncate text-zinc-600">· steward: {life.steward.replace(/^iskra-/, '').replace(/-[0-9a-f]{4}$/, '')}</span>}
         </div>
       )}
-      <p className="text-[10px] text-zinc-600">click a building to browse everyone's work there, or an iskra for its road</p>
+      <button onClick={() => void redraw()} disabled={busy}
+        className="mb-2 flex w-full items-center justify-center gap-1.5 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition-colors hover:border-violet-500/50 hover:text-zinc-200 disabled:opacity-40">
+        <Wand2 className="h-3 w-3" /> Redraw the village…
+      </button>
+      <p className="text-[10px] text-zinc-600">click a building to rename it or browse its work, or an iskra for its road · this week's steward may raise public works & rename places</p>
     </div>
   )
   const panel = (isFull: boolean) =>
     selB ? <MapBeingCard b={selB} statusOf={statusOf} places={data.places} nudge={nudge} nudging={nudging} full={isFull} />
-      : selPlace ? <MapPlaceCard place={selPlace} beings={data.beings} hereNames={here(selPlace.id).map((b) => b.name)} market={market} guestbook={placeInfo?.guestbook || ''} full={isFull} />
-        : defaultPanel()
+      : selO ? <MapObjectCard o={selO} beings={data.beings} full={isFull} />
+        : selPlace ? <MapPlaceCard place={selPlace} beings={data.beings} hereNames={here(selPlace.id).map((b) => b.name)} market={market} guestbook={placeInfo?.guestbook || ''} full={isFull} onEdit={(body) => editPlace(selPlace.id, body)} />
+          : defaultPanel()
   const hint = 'iskre walk the streets between wakes · click a building or an iskra · scroll to zoom, drag to pan, double-click to reset · dark is evening'
   const header = (
     <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
@@ -4192,6 +4340,7 @@ function VillageMap() {
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="min-h-0 flex-1">
               <IsoScene data={data} sel={sel} selBeing={selBeing}
+                selObject={selObj} onObject={setSelObj}
                 onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} fill />
             </div>
             <p className="mt-1.5 shrink-0 text-[10px] text-zinc-600">{hint}</p>
@@ -4209,6 +4358,7 @@ function VillageMap() {
       <div className="flex flex-col gap-3 lg:flex-row">
         <div className="min-w-0 flex-1">
           <IsoScene data={data} sel={sel} selBeing={selBeing}
+            selObject={selObj} onObject={setSelObj}
             onPlace={setSel} onBeing={setSelBeing} posOf={posOf} hue={hue} />
           <p className="mt-1.5 text-[10px] text-zinc-600">{hint}</p>
         </div>

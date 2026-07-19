@@ -86,6 +86,16 @@ _TRADES_PER_DAY = {"egg": 0, "infant": 0, "child": 3,
 # burn on approval (the economy's one true sink besides conversion).
 COMMISSION_COST_COINS = 50
 
+# Made things (docs/being-world-shaping-plan.md Phase 1): a being crafts a
+# real thing (a proof file + a burned token fee — making costs THOUGHT,
+# never money) and places it on open ground for free. The world's capacity
+# is a function of its ground: the cap is derived from plot area, so it
+# rises by itself when the village grows. The per-being floor keeps a
+# crowded village from zeroing anyone out of shaping their world.
+OBJECT_CRAFT_FEE_TOKENS = 25_000
+OBJECT_AREA_PER_SLOT = 25_000    # plot units² per standing object (40 today)
+OBJECT_MIN_PER_BEING = 3         # every being may always keep a few standing
+
 # The body brain (docs/being-body-brain-plan.md): the mind may keep a few
 # standing intentions for its feet — small steps the reflex pass fulfills
 # between ticks. Bounded so plans stay plans, not a queue; stale steps

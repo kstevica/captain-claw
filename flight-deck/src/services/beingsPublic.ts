@@ -48,6 +48,9 @@ export interface PublicProfile {
   latest_thought: { text: string; at: string; act: string } | null
   broadcast: { text: string; at: string } | null
   place?: { kind: 'at' | 'road' | 'home'; name: string; minutes_left?: number } | null
+  // home as your canvas (world-shaping plan Phase 4): the cottage's
+  // being-chosen name; a named home also speaks through place.name.
+  home_name?: string
 }
 
 export interface PublicFile {
