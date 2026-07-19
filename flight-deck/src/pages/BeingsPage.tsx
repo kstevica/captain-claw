@@ -13,6 +13,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
+  type BoardTask,
   type Assessor, type BeingGraph, type Chore, type Quest, type Readiness,
   type ReportCard, type SavedAssessment, type SelfFile, type ThreadItem,
   type Venture, type VillageItem, type ParentPublicThread,
@@ -110,6 +111,7 @@ const EVENT_DOT: Record<string, string> = {
   commission_built: 'bg-emerald-400', commission_refunded: 'bg-zinc-500',
   instinct: 'bg-teal-300', browsed: 'bg-amber-300',
   plan_set: 'bg-sky-300', plan_fulfilled: 'bg-emerald-400',
+  plan_dropped: 'bg-zinc-500',
   intent_set: 'bg-sky-300', instincts_set: 'bg-zinc-500',
   object_crafted: 'bg-emerald-400', object_placed: 'bg-teal-400',
   object_removed: 'bg-zinc-500', object_found: 'bg-amber-300',
@@ -234,7 +236,9 @@ function summarizeEventData(e: BeingEvent): string {
     case 'instinct': {
       const trig = d.trigger ? ` (${d.trigger})` : ''
       switch (d.act) {
-        case 'go': return `feet set out for ${d.to}${trig}`
+        case 'go': return `feet set out for ${d.to}${d.what ? ` — ${d.what}` : ''}${trig}`
+        case 'build': return `feet broke ground on a ${d.kind}${d.what ? ` — ${d.what}` : ''}${trig}`
+        case 'refuse': return `feet refused ${d.what || d.task}${d.why ? ` — ${d.why}` : ''}${trig}`
         case 'hello': return `feet greeted ${(d.with as string[] | undefined)?.join(', ') || 'the company'}${trig}`
         case 'browse': return `feet browsed the stalls${trig}`
         case 'linger': return `feet lingered${d.note ? ` — ${d.note}` : ''}${trig}`
@@ -244,7 +248,8 @@ function summarizeEventData(e: BeingEvent): string {
     case 'browsed': return (d.titles as string[] | undefined)?.length
       ? `browsed the stalls: ${(d.titles as string[]).slice(0, 3).map(t => `'${t}'`).join(', ')}`
       : 'browsed the stalls — nothing on offer'
-    case 'plan_set': return `planned: ${(d.steps as string[] | undefined)?.join(' · ') || ''}`
+    case 'plan_set': return `assigned to its feet: ${(d.steps as string[] | undefined)?.join(' · ') || ''}`
+    case 'plan_dropped': return `dropped from the board: ${(d.steps as string[] | undefined)?.join(' · ') || ''}`
     case 'plan_fulfilled': return d.kind === 'meet'
       ? `did as planned — found ${d.name || d.target}`
       : `did as planned — reached ${d.name || d.target}`
@@ -2985,14 +2990,37 @@ function BeingCard({ item, meta, onChanged }: {
                   <span className="text-[10px] text-zinc-500">walks, greets, browses between thinks</span>
                 )}
               </div>
-              {(v.plan?.length ?? 0) > 0 && (
-                <div className="flex items-start gap-2 text-xs">
-                  <span className="w-16 shrink-0 text-zinc-500">plan</span>
-                  <span className="text-[10px] text-zinc-400">
-                    {v.plan.map((s) => `${s.kind} ${s.target}`).join(' · ')}
-                  </span>
-                </div>
-              )}
+              {(() => {
+                // The work board (work-board plan): the mind assigns tasks,
+                // the feet work them and mark each done / active / refused.
+                const bd = v.board
+                if (!bd || !(bd.open.length || bd.active.length || bd.recent.length)) return null
+                const label = (t: BoardTask) => t.kind === 'build'
+                  ? `build ${t.detail || 'a thing'} · ${t.target}`
+                  : t.kind === 'meet' ? `meet ${t.target}` : `go · ${t.target}`
+                return (
+                  <div className="flex items-start gap-2 text-xs">
+                    <span className="w-16 shrink-0 pt-0.5 text-zinc-500">work</span>
+                    <div className="min-w-0 space-y-0.5">
+                      {bd.active.map((t) => (
+                        <div key={t.id} className="text-[10px] text-violet-700 dark:text-violet-300">
+                          ▸ {label(t)} <span className="text-zinc-500">·working</span>
+                        </div>
+                      ))}
+                      {bd.open.map((t) => (
+                        <div key={t.id} className="text-[10px] text-zinc-400">○ {label(t)}</div>
+                      ))}
+                      {bd.recent.map((t) => t.state === 'done' ? (
+                        <div key={t.id} className="text-[10px] text-emerald-700 dark:text-emerald-400">✓ {label(t)}</div>
+                      ) : (
+                        <div key={t.id} className="text-[10px] text-rose-700 dark:text-rose-400">
+                          ✗ {label(t)}{t.note ? ` — ${t.note}` : ''}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })()}
               <div className="flex items-start gap-2 text-xs">
                 <span className="w-16 shrink-0 pt-1.5 text-zinc-500">look</span>
                 <div className="min-w-0">

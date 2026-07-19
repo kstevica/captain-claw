@@ -509,9 +509,12 @@ class BeingsStore:
                 CREATE INDEX IF NOT EXISTS idx_village_commissions
                     ON village_commissions(owner_id, state);
 
-                -- The mind's standing intentions for its feet (body-brain
-                -- plan Phase 1): small steps the reflex pass fulfills
-                -- between ticks. kind: go|meet; state: open|done|lapsed.
+                -- The work board (work-board plan; grew from the body-brain
+                -- plan Phase 1 nudge list): tasks the mind assigns and the
+                -- feet actively work. kind: go|meet|build; state: open →
+                -- active → done|refused, plus dropped|lapsed. `detail` is a
+                -- build task's object KIND; `note` a refusal reason; the
+                -- `object_id` links a done build task to the stake it made.
                 -- A fulfilled 'go' also makes the arrival milestone-
                 -- eligible — planned first visits mint, wandering never.
                 CREATE TABLE IF NOT EXISTS being_plans (
@@ -521,7 +524,11 @@ class BeingsStore:
                     target     TEXT NOT NULL,
                     state      TEXT NOT NULL DEFAULT 'open',
                     created_at TEXT NOT NULL,
-                    done_at    TEXT
+                    done_at    TEXT,
+                    detail     TEXT NOT NULL DEFAULT '',
+                    note       TEXT NOT NULL DEFAULT '',
+                    claimed_at TEXT,
+                    object_id  TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_plans
                     ON being_plans(being_id, state);
@@ -644,6 +651,23 @@ class BeingsStore:
                     " INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            # The work board (work-board plan): being_plans grew from a
+            # one-way nudge list into a two-way board. `detail` = the object
+            # KIND of a build task; `note` = the feet's refusal reason;
+            # `claimed_at` = when the feet took a task up; `object_id` = the
+            # stake a completed build task produced. The `state` column now
+            # also carries 'active' | 'refused' | 'dropped'.
+            for col, ddl in [
+                ("detail", "TEXT NOT NULL DEFAULT ''"),
+                ("note", "TEXT NOT NULL DEFAULT ''"),
+                ("claimed_at", "TEXT"),
+                ("object_id", "TEXT NOT NULL DEFAULT ''"),
+            ]:
+                try:
+                    self._c().execute(
+                        f"ALTER TABLE being_plans ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass
             # Lightweight migrations (columns added after first ship).
             for col, ddl in [
                 ("birth_letter", "TEXT NOT NULL DEFAULT ''"),
@@ -1396,72 +1420,165 @@ class BeingsStore:
             " WHERE state = 'alive' AND instincts = 1").fetchall()
         return [self.get(r["owner_id"], r["slug"]) for r in rows]
 
-    # ── Plans: the mind's standing intentions for its feet ────────────────
+    # ── The work board: the mind assigns, the feet work ──────────────────
 
     def add_plan_steps(self, being_id: str, steps: list[dict],
                        now: datetime | None = None) -> list[dict]:
-        """The mind writes intentions its feet can carry: [{kind, target}]
-        with kind go|meet. Open steps are capped (plans, not a queue) and
-        an identical open step is never doubled. Returns what landed."""
+        """The mind writes tasks its feet can work: [{kind, target, detail}]
+        with kind go|meet|build (detail = a build task's object KIND). Open
+        steps are capped (a board, not a queue) and an identical open step
+        is never doubled. Returns what landed."""
         now = now or _utcnow()
         added: list[dict] = []
         with self._lock:
             c = self._c()
             open_rows = c.execute(
-                "SELECT kind, target FROM being_plans WHERE being_id = ?"
-                " AND state = 'open'", (being_id,)).fetchall()
-            have = {(r["kind"], r["target"]) for r in open_rows}
+                "SELECT kind, target, detail FROM being_plans WHERE being_id"
+                " = ? AND state IN ('open','active')", (being_id,)).fetchall()
+            have = {(r["kind"], r["target"], r["detail"]) for r in open_rows}
             room = max(0, constitution.PLAN_STEPS_MAX - len(have))
             for s in steps:
                 if room <= 0:
                     break
                 kind = str(s.get("kind") or "")
                 target = str(s.get("target") or "").strip()
-                if kind not in ("go", "meet") or not target \
-                        or (kind, target) in have:
+                detail = str(s.get("detail") or "").strip()[:20]
+                if kind not in ("go", "meet", "build") or not target \
+                        or (kind, target, detail) in have:
                     continue
                 pid = uuid.uuid4().hex[:12]
                 c.execute(
                     "INSERT INTO being_plans (id, being_id, kind, target,"
-                    " state, created_at) VALUES (?,?,?,?,'open',?)",
-                    (pid, being_id, kind, target, _iso(now)))
-                have.add((kind, target))
+                    " detail, state, created_at) VALUES (?,?,?,?,?,'open',?)",
+                    (pid, being_id, kind, target, detail, _iso(now)))
+                have.add((kind, target, detail))
                 room -= 1
-                added.append({"id": pid, "kind": kind, "target": target})
+                added.append({"id": pid, "kind": kind, "target": target,
+                              "detail": detail})
             c.commit()
         return added
 
     def open_plan_steps(self, being_id: str,
                         now: datetime | None = None) -> list[dict]:
-        """Open steps, oldest first. Steps the world outran lapse quietly
-        on read (the ledger-computed pattern) — a stale plan is not a debt."""
+        """Actionable tasks (open + the feet's claimed 'active'), oldest
+        first. Tasks the world outran lapse quietly on read (the ledger-
+        computed pattern) — a stale task is not a debt. The stable oldest-
+        first order is the feet's handle order (t1, t2, …)."""
         now = now or _utcnow()
         cutoff = _iso(now - timedelta(days=constitution.PLAN_LAPSE_DAYS))
         with self._lock:
             c = self._c()
             c.execute(
                 "UPDATE being_plans SET state = 'lapsed', done_at = ?"
-                " WHERE being_id = ? AND state = 'open' AND created_at < ?",
+                " WHERE being_id = ? AND state IN ('open','active')"
+                " AND created_at < ?",
                 (_iso(now), being_id, cutoff))
             c.commit()
         rows = self._c().execute(
-            "SELECT * FROM being_plans WHERE being_id = ? AND state = 'open'"
-            " ORDER BY created_at", (being_id,)).fetchall()
+            "SELECT * FROM being_plans WHERE being_id = ?"
+            " AND state IN ('open','active') ORDER BY created_at",
+            (being_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    def fulfill_plan_step(self, being_id: str, step_id: str,
-                          now: datetime | None = None) -> None:
+    def claim_plan_step(self, being_id: str, step_id: str,
+                        now: datetime | None = None) -> None:
+        """The feet take a task up: open → active (claimed)."""
         with self._lock:
             self._c().execute(
-                "UPDATE being_plans SET state = 'done', done_at = ?"
-                " WHERE id = ? AND being_id = ? AND state = 'open'",
+                "UPDATE being_plans SET state = 'active', claimed_at = ?"
+                " WHERE id = ? AND being_id = ? AND state IN ('open','active')",
                 (_iso(now or _utcnow()), step_id, being_id))
             self._c().commit()
+
+    def fulfill_plan_step(self, being_id: str, step_id: str,
+                          object_id: str = "",
+                          now: datetime | None = None) -> None:
+        """A task grounded: open/active → done. `object_id` links a build
+        task to the stake the feet made."""
+        with self._lock:
+            self._c().execute(
+                "UPDATE being_plans SET state = 'done', done_at = ?,"
+                " object_id = ? WHERE id = ? AND being_id = ?"
+                " AND state IN ('open','active')",
+                (_iso(now or _utcnow()), object_id, step_id, being_id))
+            self._c().commit()
+
+    def refuse_plan_step(self, being_id: str, step_id: str, why: str,
+                         now: datetime | None = None) -> None:
+        """The feet decline a task: open/active → refused, with a reason
+        the mind reads next wake."""
+        with self._lock:
+            self._c().execute(
+                "UPDATE being_plans SET state = 'refused', done_at = ?,"
+                " note = ? WHERE id = ? AND being_id = ?"
+                " AND state IN ('open','active')",
+                (_iso(now or _utcnow()), (why or "")[:40], step_id, being_id))
+            self._c().commit()
+
+    def drop_plan_steps(self, being_id: str, refs: list[str],
+                        now: datetime | None = None) -> list[dict]:
+        """The mind removes tasks by id or target/detail match — open,
+        active or refused ones fall away (dropped). Returns what fell."""
+        now = now or _utcnow()
+        wanted = {str(r or "").strip().casefold() for r in refs if r}
+        if not wanted:
+            return []
+        dropped: list[dict] = []
+        with self._lock:
+            c = self._c()
+            rows = c.execute(
+                "SELECT * FROM being_plans WHERE being_id = ?"
+                " AND state IN ('open','active','refused')",
+                (being_id,)).fetchall()
+            for r in rows:
+                if r["id"].casefold() in wanted \
+                        or str(r["target"]).casefold() in wanted \
+                        or (r["detail"] and str(r["detail"]).casefold()
+                            in wanted):
+                    c.execute(
+                        "UPDATE being_plans SET state = 'dropped', done_at = ?"
+                        " WHERE id = ?", (_iso(now), r["id"]))
+                    dropped.append({"id": r["id"], "kind": r["kind"],
+                                    "target": r["target"]})
+            c.commit()
+        return dropped
+
+    def board_summary(self, being_id: str, since: datetime,
+                      now: datetime | None = None) -> dict:
+        """The mind's view of its board: still-open/active tasks, and what
+        the feet finished or refused since `since` (the last wake). Terminal
+        rows are read straight (no lapse write here — open_plan_steps owns
+        that)."""
+        now = now or _utcnow()
+        open_active = self.open_plan_steps(being_id, now=now)
+        rows = self._c().execute(
+            "SELECT * FROM being_plans WHERE being_id = ?"
+            " AND state IN ('done','refused') AND done_at >= ?"
+            " ORDER BY done_at", (being_id, _iso(since))).fetchall()
+        done = [dict(r) for r in rows if r["state"] == "done"]
+        refused = [dict(r) for r in rows if r["state"] == "refused"]
+        return {"open": [t for t in open_active if t["state"] == "open"],
+                "active": [t for t in open_active if t["state"] == "active"],
+                "done": done, "refused": refused}
+
+    def board_view(self, being_id: str, now: datetime | None = None) -> dict:
+        """The board for the UI panel: open/active plus the last handful of
+        done/refused tasks (a short memory, so the loop stays legible)."""
+        now = now or _utcnow()
+        open_active = self.open_plan_steps(being_id, now=now)
+        rows = self._c().execute(
+            "SELECT * FROM being_plans WHERE being_id = ?"
+            " AND state IN ('done','refused') ORDER BY done_at DESC LIMIT 6",
+            (being_id,)).fetchall()
+        recent = [dict(r) for r in rows]
+        return {"open": [t for t in open_active if t["state"] == "open"],
+                "active": [t for t in open_active if t["state"] == "active"],
+                "recent": recent}
 
     def fulfill_meet_plans(self, being_id: str, other_slug: str,
                            other_name: str,
                            now: datetime | None = None) -> bool:
-        """Co-presence fulfills any open 'meet' step for that being —
+        """Co-presence fulfills any open/active 'meet' task for that being —
         the world did what the mind asked; the mind hears it next tick."""
         now = now or _utcnow()
         done = False
@@ -2961,6 +3078,7 @@ class BeingsStore:
             "instincts": bool(b.get("instincts")),
             "intent": b.get("intent") or {},
             "plan": self.open_plan_steps(b["id"]),
+            "board": self.board_view(b["id"]),
             "tick_interval_minutes": b.get("tick_interval_minutes"),
             "cognition": b.get("cognition") or "faculties",
             "compact_mode": bool(b.get("compact_mode")),

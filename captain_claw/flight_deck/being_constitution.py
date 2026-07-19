@@ -97,10 +97,10 @@ OBJECT_AREA_PER_SLOT = 25_000    # plot units² per standing object (40 today)
 OBJECT_MIN_PER_BEING = 3         # every being may always keep a few standing
 
 # The body brain (docs/being-body-brain-plan.md): the mind may keep a few
-# standing intentions for its feet — small steps the reflex pass fulfills
-# between ticks. Bounded so plans stay plans, not a queue; stale steps
-# lapse quietly (a plan the world outran is not a debt).
-PLAN_STEPS_MAX = 5
+# tasks on the work board the feet work — the mind assigns, the feet take
+# up or refuse. Bounded so a board stays a board, not a queue; stale tasks
+# lapse quietly (a task the world outran is not a debt).
+PLAN_STEPS_MAX = 6
 PLAN_LAPSE_DAYS = 7
 
 # Procreation physics (plan §8): the dowry moves from the parents' savings

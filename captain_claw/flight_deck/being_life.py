@@ -2098,24 +2098,40 @@ def _normalize_digest(raw: dict) -> dict:
                           "path": str(reading_report["path"]).strip()[:200]}
     else:
         reading_report = None
-    # The body brain (docs/being-body-brain-plan.md): plan steps for the
-    # feet ([{go|meet|attend: target}] — attend is a kind of going) and
-    # standing pins ({"stay": bool, "avoid": [places]}).
+    # The work board (work-board plan): tasks for the feet ([{go|meet|attend:
+    # target}] — attend is a kind of going — plus {build: <kind>, at: place})
+    # and standing pins ({"stay": bool, "avoid": [places]}).
     plan = raw.get("plan")
     if isinstance(plan, list):
         steps = []
         for s in plan[:6]:
             if not isinstance(s, dict):
                 continue
+            if s.get("build") and str(s.get("at") or "").strip():
+                steps.append({"kind": "build",
+                              "target": str(s["at"]).strip()[:60],
+                              "detail": str(s["build"]).strip().lower()[:20]})
+                continue
             for key, kind in (("go", "go"), ("attend", "go"),
                               ("meet", "meet")):
                 if s.get(key) and str(s[key]).strip():
                     steps.append({"kind": kind,
-                                  "target": str(s[key]).strip()[:60]})
+                                  "target": str(s[key]).strip()[:60],
+                                  "detail": ""})
                     break
         plan = steps or None
     else:
         plan = None
+    # The mind drops tasks it no longer wants (by id or target/detail name).
+    drop_raw = raw.get("plan_drop")
+    if isinstance(drop_raw, str) and drop_raw.strip():
+        drop_raw = [drop_raw]
+    if isinstance(drop_raw, list):
+        plan_drop = [str(x).strip()[:60] for x in drop_raw
+                     if isinstance(x, (str, int, float)) and str(x).strip()]
+        plan_drop = plan_drop[:6] or None
+    else:
+        plan_drop = None
     intend = raw.get("intend")
     if isinstance(intend, dict):
         clean: dict = {}
@@ -2242,6 +2258,7 @@ def _normalize_digest(raw: dict) -> dict:
         "introduce": introduce,
         "commission": commission,
         "plan": plan,
+        "plan_drop": plan_drop,
         "intend": intend,
         "craft": craft,
         "place": place,
@@ -3636,15 +3653,19 @@ async def _tick_locked(
     # so it must sit AFTER the umwelt sweep).
     if any(p.startswith("A DISCOVERY:") for p in senses):
         _serve("explore")
-    # The feet take instruction (body-brain plan Phase 1): taught each
-    # morning while instincts are on — plans are fulfilled between thinks.
+    # The feet take instruction (work-board plan; grew from body-brain
+    # Phase 1): taught each morning while instincts are on — your feet WORK
+    # the board between thinks, picking the task that suits them, and tell
+    # you what they did, refused, or left open.
     if kind == "wake" and first_of_day and being.get("instincts"):
         senses.append(
-            'YOUR FEET CARRY PLANS: add "plan": [{"go": "library"}, '
-            '{"meet": "ada"}] to your digest and your body fulfills the '
-            'steps between thinks — a planned first visit still counts as '
-            'discovery. "intend": {"stay": true} keeps you home; '
-            '{"avoid": ["market"]} steers clear. Small steps, truly walked.')
+            'YOUR FEET WORK A BOARD: assign tasks with "plan": [{"go": '
+            '"library"}, {"meet": "ada"}, {"build": "bench", "at": "the '
+            'plaza"}] — your feet walk, meet, and BREAK GROUND on the build '
+            "(you name and finish that beginning later). A planned first "
+            'visit still counts as discovery. Drop what is stale with '
+            '"plan_drop": ["the mill"]. "intend": {"stay": true} keeps you '
+            'home; {"avoid": ["market"]} steers clear. Small steps, walked.')
     # Illness as consequence (roadmap T2.13): fever and confusion computed
     # from the last day of the REAL ledger — never dice. Fever also floors
     # the cadence below (the body spaces itself out) and colors affect.
@@ -4181,7 +4202,7 @@ async def _tick_locked(
             listed: list[dict] | None = None
             for s in digest["plan"]:
                 t = s["target"]
-                if s["kind"] == "go":
+                if s["kind"] in ("go", "build"):     # both name real ground
                     place_id = store.resolve_place_ref(owner, t)
                     if place_id is None:
                         store.record_event(
@@ -4190,7 +4211,8 @@ async def _tick_locked(
                              "reason": f"there is no place called {t[:40]!r} "
                              "here — read commons/village/MAP.md"}, now=now)
                         continue
-                    steps.append({"kind": "go", "target": place_id})
+                    steps.append({"kind": s["kind"], "target": place_id,
+                                  "detail": s.get("detail", "")})
                 else:                                    # meet
                     if listed is None:
                         listed = store.list(owner)
@@ -4207,16 +4229,32 @@ async def _tick_locked(
                              "reason": f"no one here goes by {t[:40]!r}"},
                             now=now)
                         continue
-                    steps.append({"kind": "meet", "target": other["slug"]})
+                    steps.append({"kind": "meet", "target": other["slug"],
+                                  "detail": ""})
             if steps:
                 added = store.add_plan_steps(bid, steps, now=now)
                 if added:
                     store.record_event(
                         bid, "plan_set",
-                        {"steps": [f'{s["kind"]}:{s["target"]}'
+                        {"steps": [f'{s["kind"]}:{s["detail"]}@{s["target"]}'
+                                   if s.get("detail")
+                                   else f'{s["kind"]}:{s["target"]}'
                                    for s in added]}, now=now)
         except Exception as e:  # noqa: BLE001
             log.warning("plan handling failed", slug=being["slug"],
+                        error=str(e))
+    # The mind edits its board: drop tasks it no longer wants (work-board
+    # plan) — the "remove" half of "each tick, add or remove".
+    if digest.get("plan_drop"):
+        try:
+            dropped = store.drop_plan_steps(bid, digest["plan_drop"], now=now)
+            if dropped:
+                store.record_event(
+                    bid, "plan_dropped",
+                    {"steps": [f'{d["kind"]}:{d["target"]}'
+                               for d in dropped]}, now=now)
+        except Exception as e:  # noqa: BLE001
+            log.warning("plan_drop handling failed", slug=being["slug"],
                         error=str(e))
     # Standing pins for the feet: stay home / avoid places. Overwritten
     # whole each time the mind speaks — the newest word is the word.

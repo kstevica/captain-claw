@@ -22,6 +22,7 @@ by the same code path as every other thought.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -41,6 +42,7 @@ FEET_MAX_TOKENS = 120            # one line of JSON, not an essay
 FEET_TIER = "fast"               # the cheapest named tier (infants run on it)
 FEET_IDLE_MINUTES = 45           # restlessness stirs after ~45 quiet minutes
 FEET_PLAN_MINUTES = 30           # an open plan presses every half hour
+FEET_TASK_MINUTES = 5            # an actionable task may interrupt every ~5 min
 FEET_MIN_WALLET = 50_000         # headroom above reserve before feet think
 
 FEET_SYSTEM = (
@@ -69,6 +71,7 @@ _TRIGGER_TEXT = {
     "arrived": "you just arrived here",
     "company": "someone crossed your path",
     "plan": "the mind's plan waits",
+    "task": "a task on your mind's work board could be worked NOW",
     "restless": "quiet minutes piled up — the feet itch",
     "urge_to_build": "your hands itch to make something, right here",
 }
@@ -88,8 +91,6 @@ def wants_decision(store: BeingsStore, being: dict,
     call fires only when the ground moved — mid-walk, fevered, or pinned
     home there is nothing to decide, and quiet time is rate-limited."""
     loc = being.get("location") or {"at": "home"}
-    if not loc.get("at"):
-        return None                      # mid-walk — the road decides
     if (being.get("intent") or {}).get("stay"):
         return None                      # the mind said stay — feet rest
     try:
@@ -102,6 +103,27 @@ def wants_decision(store: BeingsStore, being: dict,
     except Exception:  # noqa: BLE001
         return None
     last_dec = next((e["at"] for e in events if e["kind"] == "instinct"), "")
+    anchor = last_dec or being.get("hatched_at") or being.get("born_at")
+    gap_min: float | None = None
+    if anchor:
+        try:
+            gap_min = (now - datetime.fromisoformat(anchor)
+                       ).total_seconds() / 60.0
+        except ValueError:
+            gap_min = None
+    try:
+        open_steps = store.open_plan_steps(being["id"], now=now)
+    except Exception:  # noqa: BLE001
+        open_steps = []
+    # The interrupt (work-board plan): a task the feet could take up NOW may
+    # stir a decision even MID-WALK — anyone can stop to seize a task —
+    # rate-limited so a fresh walk is not re-decided every reflex pass. Only
+    # go/build are the feet's to work; 'meet' stays world-fulfilled.
+    if gap_min is not None and gap_min >= FEET_TASK_MINUTES \
+            and any(t["kind"] in ("go", "build") for t in open_steps):
+        return "task"
+    if not loc.get("at"):
+        return None                      # mid-walk, no task — the road decides
     for e in events:                     # newest first; fresh = since last
         if last_dec and e["at"] <= last_dec:
             break
@@ -110,19 +132,9 @@ def wants_decision(store: BeingsStore, being: dict,
             return "arrived"
         if e["kind"] == "crossed_paths":
             return "company"
-    anchor = last_dec or being.get("hatched_at") or being.get("born_at")
-    if not anchor:
+    if gap_min is None:
         return None
-    try:
-        gap_min = (now - datetime.fromisoformat(anchor)
-                   ).total_seconds() / 60.0
-    except ValueError:
-        return None
-    try:
-        has_plan = bool(store.open_plan_steps(being["id"], now=now))
-    except Exception:  # noqa: BLE001
-        has_plan = False
-    if has_plan and gap_min >= FEET_PLAN_MINUTES:
+    if open_steps and gap_min >= FEET_PLAN_MINUTES:
         return "plan"
     # Impulse tunes the whole small brain (instinct-build plan): a restless
     # being's feet stir sooner; a deliberate one's wait longer.
@@ -215,10 +227,30 @@ def feet_prompt(store: BeingsStore, being: dict, now: datetime,
         lines.append("Company here: "
                      + ", ".join(x["name"] for x in present[:4]))
     try:
-        steps = store.open_plan_steps(being["id"], now=now)
-        if steps:
-            lines.append("The mind's plan: " + "; ".join(
-                f"{s['kind']} {s['target']}" for s in steps))
+        tasks = [t for t in store.open_plan_steps(being["id"], now=now)
+                 if t["kind"] in ("go", "build")]
+        if tasks:
+            try:
+                p = being_world.position_of(store, being, now)
+                origin = (int(p["xy"][0]), int(p["xy"][1]))
+            except Exception:  # noqa: BLE001
+                origin = None
+            rows = []
+            for i, t in enumerate(tasks[:6], 1):
+                lbl = being_world.task_label(store, being, t)
+                mins = ""
+                xy = being_world.task_target_xy(store, being, t)
+                if origin and xy:
+                    m = being_world.travel_minutes(being, origin, xy)
+                    mins = " (here)" if m < 1 else f" ({int(round(m))} min)"
+                on = " ·working" if t["state"] == "active" else ""
+                rows.append(f"[t{i}] {lbl}{mins}{on}")
+            lines.append("YOUR WORK BOARD — " + "; ".join(rows) + ".")
+            lines.append(
+                'Take one up: {"act": "do", "task": "t1"} — walk there, or '
+                "if you already stand at a build task's spot, break its "
+                'ground. Or refuse one: {"act": "refuse", "task": "t2", '
+                '"why": "a few words"}. Or ignore the board and just move.')
     except Exception:  # noqa: BLE001
         pass
     avoid = (being.get("intent") or {}).get("avoid") or []
@@ -268,7 +300,10 @@ def parse_feet_act(text: str) -> dict | None:
         act = str(obj["act"]).strip().lower()
         if act in ("attend", "go_to", "walk"):
             act = "go"
-        if act not in ("go", "linger", "hello", "browse", "home", "build"):
+        if act in ("take", "work"):
+            act = "do"
+        if act not in ("go", "linger", "hello", "browse", "home", "build",
+                       "do", "refuse"):
             return None
         if act == "go":
             to = str(obj.get("to") or "").strip()
@@ -279,6 +314,15 @@ def parse_feet_act(text: str) -> dict | None:
             # kind is a bodily choice; the physics floor decides if it lands
             return {"act": "build",
                     "kind": str(obj.get("kind") or "").strip().lower()[:20]}
+        if act in ("do", "refuse"):
+            # take up (or push back on) a task off the mind's work board
+            task = str(obj.get("task") or "").strip()
+            if not task:
+                return None
+            out = {"act": act, "task": task[:24]}
+            if act == "refuse":
+                out["why"] = str(obj.get("why") or "").strip()[:40]
+            return out
         return {"act": act}
     return None
 
@@ -344,7 +388,102 @@ def _apply_act(store: BeingsStore, being: dict, act: dict | None,
             return {"act": "build", "kind": row["kind"], "id": row["id"]}
         except BeingError as e:
             return {"act": "none", "note": str(e)[:120]}
+    if kind in ("do", "refuse"):
+        # Work the mind's board (work-board plan). The feet SELECT a task
+        # off it, or push back with a reason — the loop's downward half.
+        try:
+            tasks = [t for t in store.open_plan_steps(being["id"], now=now)
+                     if t["kind"] in ("go", "build")]
+        except Exception:  # noqa: BLE001
+            tasks = []
+        task = _resolve_task(tasks, act.get("task") or "")
+        if task is None:
+            return {"act": "none", "task": act.get("task"),
+                    "note": "no such task"}
+        label = being_world.task_label(store, being, task)
+        if kind == "refuse":
+            why = act.get("why") or "not now"
+            store.refuse_plan_step(being["id"], task["id"], why, now=now)
+            return {"act": "refuse", "task": task["id"], "what": label,
+                    "why": why}
+        return _work_task(store, being, task, label, now)
     return {"act": "linger"}
+
+
+def _resolve_task(tasks: list[dict], handle: str) -> dict | None:
+    """A feet handle → a board task. `t1`..`tN` index the actionable list in
+    the SAME oldest-first order the prompt showed; a raw id or a
+    target/detail name also matches."""
+    h = (handle or "").strip().lower()
+    if not h:
+        return None
+    if h.startswith("t") and h[1:].isdigit():
+        i = int(h[1:]) - 1
+        if 0 <= i < len(tasks):
+            return tasks[i]
+    for t in tasks:
+        if str(t["id"]).lower() == h:
+            return t
+    for t in tasks:
+        if str(t.get("target") or "").lower() == h \
+                or str(t.get("detail") or "").lower() == h:
+            return t
+    return None
+
+
+def _work_task(store: BeingsStore, being: dict, task: dict, label: str,
+               now: datetime) -> dict:
+    """Take up one task. A `go` task departs toward its place (claimed →
+    the arrival settle marks it done). A `build` task at/near its spot
+    breaks ground THERE (done, linked to the stake the mind will finish);
+    far off, the feet walk toward it (claimed) and stake on a later pass."""
+    owner, slug = being["owner_id"], being["slug"]
+    loc = being.get("location") or {"at": "home"}
+    if task["kind"] == "go":
+        pid = task["target"]
+        if loc.get("at") == pid:
+            store.fulfill_plan_step(being["id"], task["id"], now=now)
+            return {"act": "linger", "task": task["id"], "what": label,
+                    "note": "already there"}
+        store.claim_plan_step(being["id"], task["id"], now=now)
+        try:
+            store.depart(owner, slug, pid, now=now, by="feet")
+        except BeingError as e:
+            return {"act": "none", "task": task["id"], "note": str(e)[:120]}
+        return {"act": "go", "to": pid, "task": task["id"], "what": label}
+    # A build task: near enough to break ground, or walk toward it first.
+    xy = being_world.task_target_xy(store, being, task)
+    try:
+        pos = being_world.position_of(store, being, now)
+        here = (int(pos["xy"][0]), int(pos["xy"][1]))
+    except Exception:  # noqa: BLE001
+        here = None
+    near = xy is not None and here is not None \
+        and math.dist(here, xy) <= being_world.TASK_BUILD_REACH
+    if near:
+        try:
+            row = being_world.stake_object(store, being, task.get("detail")
+                                           or "", now=now, on_task=True)
+        except BeingError as e:
+            # can't stake yet (a beginning already waits) — keep it claimed;
+            # the mind will finish the waiting stake and free the ground.
+            store.claim_plan_step(being["id"], task["id"], now=now)
+            return {"act": "none", "task": task["id"], "note": str(e)[:120]}
+        store.fulfill_plan_step(being["id"], task["id"], object_id=row["id"],
+                                now=now)
+        return {"act": "build", "kind": row["kind"], "id": row["id"],
+                "task": task["id"], "what": label}
+    pid = task["target"]
+    store.claim_plan_step(being["id"], task["id"], now=now)
+    if loc.get("at") == pid:
+        return {"act": "linger", "task": task["id"], "what": label,
+                "note": "at the place"}
+    try:
+        store.depart(owner, slug, pid, now=now, by="feet")
+    except BeingError as e:
+        return {"act": "none", "task": task["id"], "note": str(e)[:120]}
+    return {"act": "go", "to": pid, "task": task["id"], "what": label,
+            "note": "toward the build"}
 
 
 # ── The one-shot call (the architect pattern) ─────────────────────────────

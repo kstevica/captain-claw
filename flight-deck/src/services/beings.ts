@@ -73,6 +73,18 @@ export interface BeingListItem {
   allowance_preset: string | null
 }
 
+export interface BoardTask {
+  id: string
+  kind: 'go' | 'meet' | 'build' | string
+  target: string
+  detail: string           // a build task's object kind; '' otherwise
+  state: 'open' | 'active' | 'done' | 'refused' | string
+  note: string             // a refusal reason, when refused
+  object_id: string        // the stake a done build task made
+  created_at: string
+  done_at: string | null
+}
+
 export interface BeingVitals {
   slug: string
   name: string
@@ -132,6 +144,13 @@ export interface BeingVitals {
   instincts: boolean
   intent: { stay?: boolean; avoid?: string[] }
   plan: { id: string; kind: string; target: string }[]
+  // The work board (work-board plan): the mind assigns tasks, the feet
+  // actively work them and mark them done / active / refused-with-reason.
+  board?: {
+    open: BoardTask[]
+    active: BoardTask[]
+    recent: BoardTask[]   // last handful of done/refused, newest first
+  }
   avatar: { c: number; p: string }
   body_archetype: string
   // An explicit body connection, or {} for the stage-tier default. The key

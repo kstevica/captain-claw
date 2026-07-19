@@ -112,9 +112,11 @@ async def test_plan_steps_cap_dedup_and_fulfill(store):
                   {"kind": "dance", "target": "p9"}], now=NOW)
     assert again == []
     open_now = store.open_plan_steps(b["id"], now=NOW)
-    assert [s["target"] for s in open_now] == [f"p{i}" for i in range(5)]
+    assert [s["target"] for s in open_now] \
+        == [f"p{i}" for i in range(constitution.PLAN_STEPS_MAX)]
     store.fulfill_plan_step(b["id"], open_now[0]["id"], now=NOW)
-    assert len(store.open_plan_steps(b["id"], now=NOW)) == 4
+    assert len(store.open_plan_steps(b["id"], now=NOW)) \
+        == constitution.PLAN_STEPS_MAX - 1
 
 
 async def test_stale_plan_steps_lapse_quietly(store):
@@ -135,9 +137,9 @@ def test_normalize_digest_plan_and_intend():
         "plan": [{"go": "Library"}, {"attend": "square"}, {"meet": "Ada"},
                  "junk", {"x": 1}],
         "intend": {"stay": True, "avoid": ["market", ""], "junk": 1}})
-    assert d["plan"] == [{"kind": "go", "target": "Library"},
-                         {"kind": "go", "target": "square"},
-                         {"kind": "meet", "target": "Ada"}]
+    assert d["plan"] == [{"kind": "go", "target": "Library", "detail": ""},
+                         {"kind": "go", "target": "square", "detail": ""},
+                         {"kind": "meet", "target": "Ada", "detail": ""}]
     assert d["intend"] == {"stay": True, "avoid": ["market"]}
     d2 = life._normalize_digest({"intend": {"junk": 1}, "plan": "walk"})
     assert d2["plan"] is None and d2["intend"] is None
@@ -322,7 +324,7 @@ async def test_morning_teaches_the_plan_fields_when_instincts_on(store):
 
     await life.tick(db, store, store.get(OWNER, b["slug"]), now=NOW,
                     send_fn=send, usage_fn=_usage)
-    assert any("YOUR FEET CARRY PLANS" in p for p in seen)
+    assert any("YOUR FEET WORK A BOARD" in p for p in seen)
 
 
 # ═══════════════════ Phase 2 — the tiny decision brain ════════════════════
@@ -370,13 +372,20 @@ async def test_wants_decision_arrivals_and_company(store):
 async def test_wants_decision_plan_restless_stay_and_road(store):
     p = await _being(store, name="Planka", now=NOW - timedelta(hours=2))
     world.ensure_village(store, OWNER, now=NOW - timedelta(days=1))
-    # an open plan presses after FEET_PLAN_MINUTES, not before
+    # an actionable go/build task presses as "task" after FEET_TASK_MINUTES
+    # (the active board supersedes the old passive plan nudge for it)
     store.add_plan_steps(p["id"], [{"kind": "go", "target": "library"}],
                          now=NOW - timedelta(hours=1))
-    _mark(store, p["id"], instinct.FEET_PLAN_MINUTES + 1)
-    assert instinct.wants_decision(store, p, NOW) == "plan"
-    _mark(store, p["id"], 5)
+    _mark(store, p["id"], instinct.FEET_TASK_MINUTES + 1)
+    assert instinct.wants_decision(store, p, NOW) == "task"
+    _mark(store, p["id"], 2)                       # too soon — rate-limited
     assert instinct.wants_decision(store, p, NOW) is None
+    # a meet-only board is world-fulfilled: it presses gently as "plan"
+    m = await _being(store, name="Meetka", now=NOW - timedelta(hours=2))
+    store.add_plan_steps(m["id"], [{"kind": "meet", "target": "ada"}],
+                         now=NOW - timedelta(hours=1))
+    _mark(store, m["id"], instinct.FEET_PLAN_MINUTES + 1)
+    assert instinct.wants_decision(store, m, NOW) == "plan"
     # plain restlessness needs the longer gap (no plan on this one)
     r = await _being(store, name="Mirna", now=NOW - timedelta(hours=2))
     _mark(store, r["id"], instinct.FEET_IDLE_MINUTES + 1)

@@ -2486,18 +2486,22 @@ def staked_object_of(store: BeingsStore, being: dict) -> dict | None:
 
 
 def stake_object(store: BeingsStore, being: dict, kind: str,
-                 now: datetime | None = None) -> dict:
+                 now: datetime | None = None, *, on_task: bool = False) -> dict:
     """The feet break ground where they stand: a `staked` row (kind + a
     snapped spot, no file, no fee, no boost). Physics gates the impulse
     itself (a deliberate being never stakes, even if the model hallucinates
     the verb), one beginning at a time, civic ground slid out (the feet are
     not the steward's hand). An unknown kind falls to the simplest primitive
-    so the impulse still lands."""
+    so the impulse still lands.
+
+    `on_task` (work-board plan): the MIND assigned this build, so the
+    impulse floor does not apply — a deliberate being still carries out its
+    own plan. Everything else (one-at-a-time, civic slide-out) still holds."""
     now = now or _utcnow()
     owner = being["owner_id"]
     if being.get("state") != "alive":
         raise BeingError("only the living break ground")
-    if impulsiveness(being) < BUILD_IMPULSE_MIN:
+    if not on_task and impulsiveness(being) < BUILD_IMPULSE_MIN:
         raise BeingError("not restless enough — building begins in the mind")
     kind = (kind or "").strip().lower()
     if kind not in OBJECT_KINDS:
@@ -2826,6 +2830,84 @@ def stake_confirm_percept(store: BeingsStore, being: dict, now: datetime,
         f'"abandon": {{"object_id": "{s["id"]}"}}.']
 
 
+# ── The work board: the mind assigns, the feet work ──────────────────────
+
+# How close to a build task's spot the feet must stand to break ground on
+# it (world units ≈ 3 tiles): an arrival lands the body on the place, well
+# inside this reach; a build task farther than this makes the feet walk.
+TASK_BUILD_REACH = 60
+# How long a completed/refused task stays "fresh" on the mind's board — long
+# enough for the mind to react at its next wake, then it ages out of view.
+BOARD_FRESH_HOURS = 18
+
+
+def task_target_xy(store: BeingsStore, being: dict,
+                   task: dict) -> tuple[int, int] | None:
+    """Where a go/build task points — the place (or home / made thing) its
+    `target` names, in world units. None if that ground no longer exists."""
+    try:
+        return place_xy(store, being, str(task.get("target") or ""))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def task_label(store: BeingsStore, being: dict, task: dict) -> str:
+    """A short, human line for one task — the place by NAME, the build KIND
+    if any — shared by the mind's percept and the feet's prompt."""
+    kind = task.get("kind")
+    try:
+        where = place_name(store, being, str(task.get("target") or ""))
+    except Exception:  # noqa: BLE001
+        where = str(task.get("target") or "")
+    if kind == "build":
+        what = str(task.get("detail") or "a thing")
+        return f"build a {what} at {where}"
+    if kind == "meet":
+        return f"meet {where}"
+    return f"go to {where}"
+
+
+def board_percept(store: BeingsStore, being: dict, now: datetime,
+                  kind: str, first_of_day: bool) -> list[str]:
+    """The mind meets its work board (work-board plan): the tasks still
+    open or being worked, and what the feet FINISHED or REFUSED (with the
+    reason) since it last looked. This is the loop's upward half — the mind
+    reads its plan's progress here and edits it in the same digest."""
+    if kind != "wake":
+        return []
+    try:
+        since = now - timedelta(hours=BOARD_FRESH_HOURS)
+        board = store.board_summary(being["id"], since, now=now)
+    except Exception:  # noqa: BLE001
+        return []
+    open_t, active = board["open"], board["active"]
+    done, refused = board["done"], board["refused"]
+    if not (open_t or active or done or refused):
+        return []
+    parts: list[str] = []
+    if open_t:
+        parts.append("open — " + "; ".join(
+            task_label(store, being, t) for t in open_t[:6]))
+    if active:
+        parts.append("your feet are on — " + "; ".join(
+            task_label(store, being, t) for t in active[:4]))
+    if done:
+        parts.append("the feet finished — " + "; ".join(
+            task_label(store, being, t) for t in done[:4]))
+    if refused:
+        parts.append("the feet refused — " + "; ".join(
+            f"{task_label(store, being, t)}"
+            + (f" ({t['note']})" if t.get("note") else "")
+            for t in refused[:4]))
+    return [
+        "YOUR WORK BOARD (your feet work what you assign): "
+        + ". ".join(parts) + '. Adjust it — assign with "plan": '
+        '[{"go": "the library"}, {"build": "bench", "at": "the plaza"}], '
+        'and drop what no longer serves with "plan_drop": ["the mill"]. '
+        "A build task your feet finished waits, unfinished, for you to "
+        "name and make it real."]
+
+
 def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,
                     kind: str, first_of_day: bool) -> list[str]:
     """Everything the world says to a being this tick, in one honest sweep.
@@ -2851,7 +2933,8 @@ def umwelt_percepts(store: BeingsStore, being: dict, *, now: datetime,
     if note:
         lines.append(note)
     for fn in (location_percepts, market_percepts, steward_percepts,
-               commission_percepts, object_percepts, stake_confirm_percept):
+               commission_percepts, object_percepts, stake_confirm_percept,
+               board_percept):
         try:
             lines += fn(store, being, now, kind, first_of_day)
         except Exception:  # noqa: BLE001
