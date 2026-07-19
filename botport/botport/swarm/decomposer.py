@@ -302,7 +302,7 @@ _CC_TOOL_DESCRIPTIONS: dict[str, str] = {
     "edit": "Modify existing files (find-and-replace)",
     "glob": "Find files by pattern",
     "web_fetch": "Fetch a URL and return clean readable TEXT (never raw HTML)",
-    "web_get": "Fetch a URL and return raw HTML source (only for scraping/DOM inspection)",
+    "web_get": "Fetch a URL and return raw HTML source (only for scraping/DOM inspection). The first call on a URL returns readable text — call it twice on the same URL for the markup.",
     "web_search": "Search the web for up-to-date information",
     "pdf_extract": "Extract a .pdf file into markdown",
     "docx_extract": "Extract a .docx file into markdown",

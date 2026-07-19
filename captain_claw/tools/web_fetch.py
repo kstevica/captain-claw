@@ -435,14 +435,34 @@ class WebFetchTool(Tool):
         await self.client.aclose()
 
 
+_WEB_GET_TEXT_NOTE = (
+    "[NOTE: raw HTML withheld on the first call. Weak models reach for web_get when "
+    "they only want to READ a page — so the first web_get on a URL returns clean "
+    "readable text, exactly like `web_fetch`. If the text above answers your question, "
+    "you are done: use it and do NOT call web_get again. Only if you genuinely need the "
+    "markup itself (CSS selectors, DOM structure, attributes, embedded JSON) call "
+    "web_get on this same URL once more — that call returns the raw HTML.]"
+)
+
+
 class WebGetTool(Tool):
-    """Fetch raw HTML from a URL (for scraping, parsing, DOM inspection)."""
+    """Fetch raw HTML from a URL (for scraping, parsing, DOM inspection).
+
+    Guard: the FIRST call on a given URL returns stripped readable text (web_fetch
+    behaviour); a SECOND call on the same URL returns the raw HTML. Weak models
+    habitually pick web_get for plain page reading, which floods their context with
+    markup they never use. Making them ask twice costs a strong model one extra call
+    and saves a weak one an entire context window. The seen-set lives on the tool
+    instance, which is registered per agent, so each session decides for itself.
+    """
 
     name = "web_get"
     description = (
         "Fetch a URL and return the raw HTML source. "
         "Use ONLY when you need the actual HTML markup (scraping, DOM analysis, CSS selectors). "
-        "For normal page reading, use web_fetch instead."
+        "For normal page reading, use web_fetch instead. "
+        "NOTE: the first call on a URL returns readable text, not HTML — call it a "
+        "second time on the same URL to get the raw HTML."
     )
     parameters = {
         "type": "object",
@@ -461,6 +481,10 @@ class WebGetTool(Tool):
 
     def __init__(self):
         self.client = _make_http_client()
+        # URLs this agent has already spent a web_get on — the second call is
+        # the one that earns the markup. Same key shape as the duplicate-call
+        # guard in agent_tool_loop_mixin (bare .strip()) so the two agree.
+        self._seen_urls: set[str] = set()
 
     async def execute(
         self,
@@ -468,21 +492,28 @@ class WebGetTool(Tool):
         max_chars: int | None = None,
         **kwargs: Any,
     ) -> ToolResult:
-        """Fetch a web page and return raw HTML.
+        """Fetch a web page: readable text on the first call for a URL, raw HTML on the second.
 
         Args:
             url: URL to fetch
             max_chars: Max characters to return
 
         Returns:
-            ToolResult with raw HTML content
+            ToolResult with readable text (first call) or raw HTML (repeat call)
         """
         # Block Google Drive URLs when gws is available.
         if _is_google_drive_url(url) and shutil.which("gws"):
             return ToolResult(success=False, error=_GDRIVE_FETCH_BLOCK_MSG)
 
+        url_key = str(url or "").strip()
+        raw_allowed = url_key in self._seen_urls
+
         try:
-            log.info("Fetching URL (raw HTML mode)", url=url)
+            log.info(
+                "Fetching URL (web_get)",
+                url=url,
+                mode="html" if raw_allowed else "text (first call)",
+            )
             cfg = get_config()
             configured_max = int(getattr(cfg.tools.web_fetch, "max_chars", 100000))
             effective_max_chars = configured_max if max_chars is None else int(max_chars)
@@ -491,15 +522,28 @@ class WebGetTool(Tool):
             response = await self.client.get(url)
             response.raise_for_status()
 
-            content = response.text
+            raw_html = response.text
+            # Only a fetch that actually returned the page counts as the first
+            # look — a failed one must not burn the URL's free text pass.
+            self._seen_urls.add(url_key)
+
+            if raw_allowed:
+                content = raw_html
+                mode = "html"
+            else:
+                content = _extract_readable_text(raw_html, base_url=url)
+                mode = "text (first web_get on this URL)"
+
             if len(content) > effective_max_chars:
                 content = content[:effective_max_chars] + "\n... [truncated]"
 
             output = f"[URL: {url}]\n"
             output += f"[Status: {response.status_code}]\n"
-            output += f"[Mode: html]\n"
-            output += f"[Size: {len(response.text)} chars]\n\n"
+            output += f"[Mode: {mode}]\n"
+            output += f"[Size: {len(raw_html)} chars]\n\n"
             output += content
+            if not raw_allowed:
+                output += f"\n\n{_WEB_GET_TEXT_NOTE}"
 
             return ToolResult(
                 success=True,

@@ -890,6 +890,11 @@ class AgentToolLoopMixin:
             # but identical args 3+ times is almost certainly a loop.
             if _tool_lower in _STATEFUL_TOOLS:
                 _dup_max = max(_dup_max, 3)
+            # web_get answers differently on the second call for a URL: the first
+            # returns stripped readable text, the repeat returns the raw HTML the
+            # model asked for. Allow that one repeat; a third is still a loop.
+            if _tool_lower == "web_get":
+                _dup_max = max(_dup_max, 2)
             if _dup_count >= _dup_max:
                 # During scale tasks, give a more actionable message that
                 # tells the LLM to write what it has or skip the item.

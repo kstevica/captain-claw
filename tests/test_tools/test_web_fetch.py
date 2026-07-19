@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from captain_claw.config import get_config, set_config
-from captain_claw.tools.web_fetch import WebFetchTool
+from captain_claw.tools.web_fetch import WebFetchTool, WebGetTool
 
 
 class _FakeResponse:
@@ -124,3 +124,81 @@ async def test_web_fetch_deep_fetch_calls_playwright():
     assert "Loaded via JS." in result.content
     assert "<html>" not in result.content  # Still extracts text, not raw HTML.
     mock_df.assert_awaited_once_with("https://example.com/lazy")
+
+
+# ── web_get: text on the first call per URL, raw HTML on the repeat ──
+
+_GET_HTML = """
+<html>
+  <head><title>Shop</title><script>var hidden = 1;</script></head>
+  <body><div class="price">$42</div></body>
+</html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_web_get_first_call_returns_stripped_text():
+    tool = WebGetTool()
+    tool.client = _FakeClient(_FakeResponse(_GET_HTML))
+
+    result = await tool.execute(url="https://example.com/shop")
+
+    assert result.success is True
+    assert "[Mode: text (first web_get on this URL)]" in result.content
+    assert "Shop" in result.content
+    assert "$42" in result.content
+    assert "<div" not in result.content
+    assert "hidden" not in result.content
+    assert "call web_get on this same URL once more" in result.content
+
+
+@pytest.mark.asyncio
+async def test_web_get_second_call_on_same_url_returns_raw_html():
+    tool = WebGetTool()
+    tool.client = _FakeClient(_FakeResponse(_GET_HTML))
+
+    await tool.execute(url="https://example.com/shop")
+    result = await tool.execute(url="https://example.com/shop")
+
+    assert result.success is True
+    assert "[Mode: html]" in result.content
+    assert '<div class="price">$42</div>' in result.content
+    assert "raw HTML withheld" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_web_get_tracks_urls_independently():
+    """A second call on a DIFFERENT URL is still that URL's first look."""
+    tool = WebGetTool()
+    tool.client = _FakeClient(_FakeResponse(_GET_HTML))
+
+    await tool.execute(url="https://example.com/shop")
+    result = await tool.execute(url="https://example.com/other")
+
+    assert "[Mode: text (first web_get on this URL)]" in result.content
+    assert "<div" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_web_get_failed_fetch_does_not_burn_the_text_pass():
+    """A URL that errored was never seen — the next call still gets text."""
+    class _FailingOnceClient:
+        def __init__(self, response):
+            self._response = response
+            self.calls = 0
+
+        async def get(self, url: str):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("boom")
+            return self._response
+
+    tool = WebGetTool()
+    tool.client = _FailingOnceClient(_FakeResponse(_GET_HTML))
+
+    failed = await tool.execute(url="https://example.com/shop")
+    assert failed.success is False
+
+    result = await tool.execute(url="https://example.com/shop")
+    assert result.success is True
+    assert "[Mode: text (first web_get on this URL)]" in result.content
