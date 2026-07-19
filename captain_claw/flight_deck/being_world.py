@@ -1780,9 +1780,17 @@ def location_percepts(store: BeingsStore, being: dict, now: datetime,
                 minutes=max(1, int(round(pos["minutes_left"]))))]
         except Exception:  # noqa: BLE001
             return []
-    if not first_of_day:
-        return []
     here = pos["at"]
+    here_name = place_name(store, being, here)
+    if not first_of_day:
+        # Grounded EVERY wake, not just the morning: the body's real place
+        # NOW, so a letter or journal written mid-day isn't composed from a
+        # stale sense of where it stood (beings wrote of the meadow while
+        # standing at the well). The full map + walk times stays a morning
+        # thing below; this is the cheap, always-on anchor.
+        return [f"WHERE YOU ARE: you stand at {here_name} right now. Write "
+                "and act from where you are; if you speak of another place, "
+                "place it in the past — do not narrate it as here and now."]
     try:
         places = [p for p in store.village_places(being["owner_id"])
                   if p["id"] != here]

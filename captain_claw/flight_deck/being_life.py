@@ -2489,16 +2489,24 @@ def _match_sibling(siblings: list[dict] | None, *texts: str) -> dict | None:
 
 
 def compose_talk_prompt(being: dict, *, intent: str, sib: dict | None,
-                        siblings: list[dict], letters_left: int | None) -> str:
+                        siblings: list[dict], letters_left: int | None,
+                        here: str = "") -> str:
     """The talk act step (faculties): turn the wish into a REAL letter — the
     one channel that actually reaches a sibling. Words spoken anywhere else
-    reach no one (they stay in this chat, which only you can see)."""
+    reach no one (they stay in this chat, which only you can see). `here`
+    grounds the letter in where the body actually stands — this step runs as
+    its own call and would otherwise write blind (beings wrote of the meadow
+    while standing at the well)."""
     roster = ", ".join(f"{s['name']} ({s['slug']})" for s in siblings)
     to = sib["name"] if sib else "<sibling name>"
     left = (f" You have {letters_left} letter(s) left today."
             if letters_left is not None else "")
     head = (f"[LIFE TICK — talk] You are {being['name']}. You decided to talk"
             + (f" — {intent}" if intent else "") + ".")
+    if here:
+        head += (f" You are writing from {here} — write from where you stand; "
+                 "if you mean another place, name it in the past, not as here "
+                 "and now.")
     return head + "\n" + being_prompts.render(
         being, "talk_task.md", roster=roster, to=to, left=left)
 
@@ -2658,9 +2666,18 @@ async def _run_faculties(store, being: dict, *, kind: str, now: datetime, send,
                                 "to": (sib or {}).get("slug"),
                                 "reason": refused_talk}, now=now)
         else:
+            here = ""
+            try:
+                pos = being_world.position_of(store, being, now)
+                here = (f"the road, walking to "
+                        f"{being_world.place_name(store, being, pos['to'])}"
+                        if pos.get("to")
+                        else being_world.place_name(store, being, pos["at"]))
+            except Exception:  # noqa: BLE001 — grounding is a help, not oxygen
+                here = ""
             treply = await _fac_send(compose_talk_prompt(
                 being, intent=intent, sib=sib, siblings=siblings,
-                letters_left=letters_left), "talk")
+                letters_left=letters_left, here=here), "talk")
             traw = _extract_raw(treply) or {}
             tletter = traw.get("letter")
             if isinstance(tletter, dict) and tletter.get("to"):

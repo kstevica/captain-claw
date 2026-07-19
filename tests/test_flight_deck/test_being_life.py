@@ -10,6 +10,7 @@ import pytest
 
 from captain_claw import vfs
 from captain_claw.flight_deck import being_life as life
+from captain_claw.flight_deck import being_world as world
 from captain_claw.flight_deck import beings_loop
 from captain_claw.flight_deck.beings import BeingError, BeingNotFound, BeingsStore
 
@@ -1829,6 +1830,37 @@ async def test_a_visiting_being_cannot_letter_a_home_sibling(store):
                if e["kind"] == "society_refused"
                and e["data"].get("what") == "letter"]
     assert refused and "visiting" in refused[0]["data"]["reason"]
+
+
+async def test_a_letter_is_grounded_in_where_the_being_stands(store):
+    """The place-grounding fix (staging: Zvjezdana wrote of the meadow while
+    standing at the well, because place was sensed only on the morning wake
+    and the talk step ran blind). Now EVERY wake anchors the current place,
+    and the letter step writes FROM it."""
+    db = FakeDB()
+    b = _born(store, name="Zvjezdana", stage="child", port=0)
+    _born(store, name="Lada", stage="child", port=0)
+    store.set_cognition(OWNER, b["slug"], "faculties", now=NOW)  # opt into the split tick
+    await life.build_home(b)
+    world.ensure_village(store, OWNER, now=NOW)
+    store.depart(OWNER, b["slug"], "well", now=NOW - timedelta(days=1))  # parked at the Well
+    b = store.get(OWNER, b["slug"])
+    # #1 a non-first-of-day wake still names where the body is
+    lp = world.location_percepts(store, b, NOW, "wake", first_of_day=False)
+    assert lp and "WHERE YOU ARE" in lp[0] and "the Well" in lp[0]
+    # #2 the faculties talk step writes FROM the Well
+    prompts: list[str] = []
+
+    async def send(being, prompt):
+        prompts.append(prompt)
+        return _digest_reply(act_kind="talk", served_drive="connect",
+                             summary="write Lada",
+                             journal_entry="I wrote Lada.",
+                             letter={"to": "Lada", "body": "zdravo"})
+
+    await life.tick(db, store, b, now=NOW, send_fn=send,
+                    usage_fn=_usage_async_100k)
+    assert any("writing from the Well" in p for p in prompts)
 
 
 def test_orient_offers_the_same_society_as_the_monolith(store):
