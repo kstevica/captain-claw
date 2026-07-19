@@ -1799,6 +1799,38 @@ async def test_monolith_talk_with_real_letter_stays_talk(store):
     assert after > before
 
 
+async def test_a_visiting_being_cannot_letter_a_home_sibling(store):
+    """Out visiting another village, a letter to a HOME sibling is refused
+    LOUDLY, never delivered silently — the being's audience is the village it
+    stands in (penpal). Covers the reported bug: Ada, away visiting, wrote a
+    'welcome to the fleet' letter to a home sibling instead of the host."""
+    db = FakeDB()
+    b = _born(store, name="Ada", stage="child", port=0)
+    sib = _born(store, name="Kvenka", stage="child", port=0)
+    await life.build_home(b)
+    store.set_visit_context(
+        store.get(OWNER, b["slug"])["id"],
+        {"village": "Glasses", "at": "the Square", "near": [],
+         "others": ["Nikola"]})
+    b = store.get(OWNER, b["slug"])
+
+    async def send(being, prompt):
+        return _digest_reply(act_kind="talk", served_drive="connect",
+                             summary="welcomed Kvenka",
+                             journal_entry="Welcome to the fleet, sister.",
+                             letter={"to": "Kvenka", "body": "welcome sister"})
+
+    await life.tick(db, store, b, now=NOW, send_fn=send,
+                    usage_fn=_usage_async_100k)
+    # the home letter never landed
+    assert store.unread_letters(sib["id"]) == []
+    # and it was refused loudly, pointing her at the village she stands in
+    refused = [e for e in store.events(OWNER, b["slug"])
+               if e["kind"] == "society_refused"
+               and e["data"].get("what") == "letter"]
+    assert refused and "visiting" in refused[0]["data"]["reason"]
+
+
 def test_orient_offers_the_same_society_as_the_monolith(store):
     """The faculties split must not amputate society: a child's orient step
     offers the letter field and an honest talk menu; an infant's offers

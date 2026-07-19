@@ -284,6 +284,44 @@ def test_visit_context_grounds_the_tick_prompt(store):
         fresh, now=NOW, wallet=store.wallet_view(fresh))
 
 
+def test_a_visiting_being_writes_the_host_village_not_home_siblings(store):
+    # a child (letters unlocked) with a home sibling, sent out visiting
+    ada = _being(store, owner="sender", name="Ada")
+    store.set_stage("sender", ada["slug"], "child", now=NOW)
+    kvenka = _being(store, owner="sender", name="Kvenka")
+    store.set_stage("sender", kvenka["slug"], "child", now=NOW)
+    ada = store.get("sender", ada["slug"])
+    sibs = store.siblings("sender", ada["slug"])
+    assert any(s["name"] == "Kvenka" for s in sibs)
+
+    # at HOME the sibling-letter faculty is offered
+    home = life.society_prompt_fields(ada, sibs, letters_left=3)
+    assert any('"letter"' in f and "sibling" in f for f in home)
+
+    # OUT visiting "Glasses", host beings Nikola/Sara are near
+    store.set_visit_context(ada["id"], {
+        "village": "Glasses", "at": "the Square", "near": ["the Well"],
+        "others": ["Nikola", "Sara"]})
+    away = store.get("sender", ada["slug"])
+    assert life._is_visiting(away)
+
+    # the home-sibling letter/gift are WITHHELD; the host village is the
+    # audience, reached by penpal, by name
+    fields = life.society_prompt_fields(
+        away, sibs, letters_left=3, penpal_reach=["Nikola", "Sara"])
+    assert not any('"letter"' in f and "sibling" in f for f in fields)
+    assert not any('"gift"' in f for f in fields)
+    assert any('"penpal"' in f and "Nikola" in f for f in fields)
+
+    # the prompt reframes the home roster and points her at the host village
+    p = life.compose_tick_prompt(
+        away, now=NOW, wallet=store.wallet_view(away), siblings=sibs,
+        letters_left=3, penpal_reach=["Nikola", "Sara"])
+    assert "back in your home village" in p
+    assert "Nikola" in p and "Glasses" in p
+    assert 'penpal' in p           # she is told HOW to reach them
+
+
 # ═══ Visiting beings — mutual proximity sensing (§3) ═══════════════════════
 
 def _guest_at(store, place, *, thought="", stage="child", state="alive",

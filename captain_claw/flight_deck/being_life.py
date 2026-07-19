@@ -1423,6 +1423,16 @@ def home_manifest(being: dict) -> dict[str, list[str]]:
     return out
 
 
+def _is_visiting(being: dict) -> bool:
+    """Is this being OUT visiting another village right now? The host streams
+    a visit_context (village + where + who's near) while the link is live and
+    clears it on drop — so its presence is the honest 'away, and aware of it'
+    signal. While visiting, a being's social world is the HOST village, not
+    its home siblings (a home letter must wait for its return)."""
+    vc = being.get("visit_context")
+    return bool(isinstance(vc, dict) and vc.get("village"))
+
+
 def society_prompt_fields(being: dict, siblings: list[dict] | None,
                           letters_left: int | None,
                           penpal_reach: list[str] | None = None,
@@ -1435,11 +1445,14 @@ def society_prompt_fields(being: dict, siblings: list[dict] | None,
     prompt and the faculties orient step, so the two cognitions offer the same
     society. Never offers what physics would refuse (letters below child,
     a spent daily quota, trades below adolescence, pen-pals with no live
-    link within reach)."""
+    link within reach). While OUT visiting, the home-sibling letter/gift are
+    withheld — the being's letters go to the village it stands in (penpal)."""
     caps = constitution.capabilities(being["stage"])
+    visiting = _is_visiting(being)
     fields: list[str] = []
     if siblings:
-        if "letters" in caps and (letters_left is None or letters_left > 0):
+        if "letters" in caps and not visiting \
+                and (letters_left is None or letters_left > 0):
             left = (f" — {letters_left} left today"
                     if letters_left is not None else "")
             fields.append(
@@ -1450,9 +1463,10 @@ def society_prompt_fields(being: dict, siblings: list[dict] | None,
             fields.append(
                 '"publish": {"path": "skills/<file>.md", "title": "...", '
                 '"note": "one line", "price_tokens": 0}')
-            fields.append(
-                '"gift": {"to": "<sibling name>", "tokens": 100000, '
-                '"note": "why"}')
+            if not visiting:
+                fields.append(
+                    '"gift": {"to": "<sibling name>", "tokens": 100000, '
+                    '"note": "why"}')
         if "commons_read" in caps:
             fields.append(
                 '"adopt": {"publication_id": "<id from a commons percept>"}'
@@ -1658,12 +1672,18 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
         others = vc.get("others") or []
         who = (f" Nearby beings of this village: {', '.join(others)}."
                if others else " No one of this village is right beside you.")
+        reach = (f'address them by name — {{"penpal": {{"to": '
+                 f'"{others[0]}", "body": "short and true"}}}}'
+                 if others else "address a being of this village by name")
         lines += [
             "",
             f"YOU ARE VISITING **{vc['village']}** — a village not your own, "
             f"as a guest. Right now you are at {where}. Close by: {near}.{who} "
             "You walk its streets and can leave signs; your parent may guide "
-            "your steps here. Let this visit color what you notice and write.",
+            "your steps here. While you are away, the beings you can greet and "
+            f"write are the beings of THIS village — {reach}. Your own siblings "
+            "are back in your home village; a letter to them must wait until "
+            "you return. Let this visit color what you notice and write.",
         ]
     _att = attention_note(being, w)
     if _att:
@@ -1699,8 +1719,18 @@ def compose_tick_prompt(being: dict, *, kind: str = "wake",
             f"{s['name']} ({s['stage']}" + (f", {s['mood']}" if s.get("mood")
                                             else "") + ")"
             for s in siblings)
-        lines.append(f"YOUR SIBLINGS: {roster}. You share the commons and "
-                     "nothing else — their homes and memories are their own.")
+        if _is_visiting(being):
+            # Away visiting: the home roster is context, not a reachable
+            # audience — a letter home waits until she returns.
+            lines.append(
+                f"YOUR SIBLINGS (back in your home village, not here): "
+                f"{roster}. You are away visiting, so you cannot write them "
+                "now — greet and write the beings of the village you stand in "
+                "instead.")
+        else:
+            lines.append(f"YOUR SIBLINGS: {roster}. You share the commons and "
+                         "nothing else — their homes and memories are their "
+                         "own.")
         if "letters" not in caps:
             # Never offer what physics will refuse (the Zvjezdana→Lada
             # lesson): an infant sees its siblings but cannot write them yet.
@@ -3604,8 +3634,18 @@ async def _tick_locked(
         if being.get("visit_url"):
             from captain_claw.flight_deck import being_federation
             if being_federation.village_client.is_up(being["slug"]):
-                penpal_reach.append("any being of the village you are "
-                                    "visiting (address it by name)")
+                # Out visiting: the host streams who is near in ITS village —
+                # name them so a letter has a real, concrete recipient (else
+                # the being reaches for its home siblings instead).
+                vc = being.get("visit_context") \
+                    if isinstance(being.get("visit_context"), dict) else None
+                near_others = list(dict.fromkeys(
+                    (vc or {}).get("others") or []))
+                if near_others:
+                    penpal_reach += near_others
+                else:
+                    penpal_reach.append("any being of the village you are "
+                                        "visiting (address it by name)")
     except Exception:  # noqa: BLE001 — reach is an offer, never oxygen
         penpal_reach = []
     # Introductions (space plan Phase 5): when the being has no reach of
@@ -3925,6 +3965,20 @@ async def _tick_locked(
         except Exception as e:  # noqa: BLE001
             log.warning("reading handling failed", slug=being["slug"],
                         error=str(e))
+    # Out visiting, a home-sibling letter/gift is not the being's to send —
+    # its audience is the village it stands in (penpal). The offer was
+    # withheld; refuse a stray one loudly so the refusal teaches next tick,
+    # never a silent letter home.
+    if _is_visiting(being):
+        for k in ("letter", "gift"):
+            if isinstance(digest.get(k), dict):
+                store.record_event(
+                    bid, "society_refused",
+                    {"what": k, "to": digest[k].get("to"),
+                     "reason": "you are away visiting another village — greet "
+                     "and write the beings THERE (penpal, by name); a letter "
+                     "to a home sibling must wait until you return"}, now=now)
+                digest[k] = None
     if any(digest.get(k) for k in ("letter", "publish", "adopt", "gift")):
         try:
             being_society.handle_society_digest(store, being, digest, now=now)
