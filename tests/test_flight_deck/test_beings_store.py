@@ -219,3 +219,55 @@ def test_vitals_shape_is_honest(store):
     assert "organ_runs" not in v["capabilities"]
     assert v["wallet"]["effective_preset"] == "5M"
     assert store.liabilities(OWNER)["total_tokens"] == v["wallet"]["balance_tokens"]
+
+
+# ═══ One ticker per village: the beings-loop owner lock ══════════════════
+# Two Flight Decks that shared one beings.db (the FD_DATA_DIR-unset trap) each
+# spawned bodies for the SAME Iskre and re-pinned agent_port to their own ports
+# every tick — ~50% of thinks timed out and the homeostat collapsed (staging,
+# 2026-07-20). Readers stay unrestricted; only the TICK is claimed.
+
+def test_only_one_flight_deck_may_tick_a_beings_db(store):
+    ours, owner = store.claim_beings_loop(pid=1111, host="h1")
+    assert ours and int(owner["pid"]) == 1111
+    # a second, LIVE deployment is refused and told who holds it
+    ours2, held = store.claim_beings_loop(pid=2222, host="h2")
+    assert not ours2 and int(held["pid"]) == 1111
+    # the holder re-claims freely (restarted loop, same process)
+    assert store.claim_beings_loop(pid=1111, host="h1")[0]
+    # heartbeats: the holder keeps it, the outsider is told it lost
+    assert store.heartbeat_beings_loop(pid=1111, host="h1")
+    assert not store.heartbeat_beings_loop(pid=2222, host="h2")
+
+
+def test_a_cold_owner_lock_is_taken_over(store):
+    from captain_claw.flight_deck.beings import LOOP_OWNER_STALE_SECONDS
+    t0 = NOW
+    store.claim_beings_loop(pid=1111, host="h1", now=t0)
+    # still beating → refused
+    assert not store.claim_beings_loop(
+        pid=2222, host="h2", now=t0 + timedelta(seconds=60))[0]
+    # gone cold (crash, kill -9) → the next Flight Deck takes the tick, no
+    # operator step needed
+    ours, owner = store.claim_beings_loop(
+        pid=2222, host="h2",
+        now=t0 + timedelta(seconds=LOOP_OWNER_STALE_SECONDS + 5))
+    assert ours and int(owner["pid"]) == 2222
+    # and the old owner learns it lost the lock, so its loop stands down
+    assert not store.heartbeat_beings_loop(pid=1111, host="h1")
+
+
+def test_a_crashed_owner_on_this_host_is_caught_by_pid(store):
+    import os
+    import socket
+    host = socket.gethostname()
+    store.claim_beings_loop(pid=999_999, host=host)   # a pid that is not alive
+    # the heartbeat is fresh, but nobody is home → we may take over
+    ours, owner = store.claim_beings_loop(pid=os.getpid(), host=host)
+    assert ours and int(owner["pid"]) == os.getpid()
+
+
+def test_release_hands_the_tick_back_at_once(store):
+    store.claim_beings_loop(pid=1111, host="h1")
+    store.release_beings_loop(pid=1111, host="h1")
+    assert store.claim_beings_loop(pid=2222, host="h2")[0]

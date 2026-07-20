@@ -24,7 +24,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import sqlite3
+import sys
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -35,6 +37,12 @@ from captain_claw.flight_deck import being_genome as genome_mod
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
+
+# A beings-loop owner that has not beaten for this long is presumed gone
+# (crash, kill -9, a machine that went away) and the next Flight Deck may take
+# the tick over. Generous against a slow pass — the loop beats every
+# BEINGS_POLL_SECONDS (default 60).
+LOOP_OWNER_STALE_SECONDS = 300
 
 STATES = ("alive", "paused", "torpor", "dead", "emigrated")
 TRANSFER_REASONS = (
@@ -88,11 +96,35 @@ class BurnCapExceeded(BeingError):
     status = 429
 
 
+def _default_data_dir() -> Path:
+    """Mirror server.py::_default_data_dir so the beings db and the process
+    registry stand on the SAME ground. They used to disagree: the registry
+    went to ./fd-data (per checkout) while the db fell back to
+    ~/.captain-claw (user-GLOBAL). So every checkout a user ran with
+    FD_DATA_DIR unset silently shared ONE beings.db while keeping its OWN
+    registry — two Flight Decks adopted the same two Iskre and re-pinned
+    their bodies to each other's ports every tick (staging, 2026-07-20)."""
+    if getattr(sys, "_MEIPASS", None):
+        return Path.home() / ".captain-claw" / "fd-data"
+    return Path("./fd-data")
+
+
 def _db_path() -> Path:
     base = os.environ.get("FD_DATA_DIR", "").strip()
     if base:
         return Path(base).expanduser().resolve() / "beings.db"
-    return Path("~/.captain-claw/beings.db").expanduser()
+    here = _default_data_dir().expanduser().resolve() / "beings.db"
+    legacy = Path("~/.captain-claw/beings.db").expanduser()
+    if not here.exists() and legacy.exists():
+        # An existing install keeps its beings (moving them is the operator's
+        # call) — but say so loudly, because this one path is shared by every
+        # checkout on the host. The loop owner lock below is the hard guard.
+        log.warning(
+            "beings db: falling back to the legacy user-global path — set "
+            "FD_DATA_DIR (or move the file) so this deployment owns its own "
+            "beings", path=str(legacy), suggested=str(here))
+        return legacy
+    return here
 
 
 def _utcnow() -> datetime:
@@ -532,6 +564,21 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_being_plans
                     ON being_plans(being_id, state);
+
+                -- Exactly ONE Flight Deck may TICK a given beings.db. Readers
+                -- (the UI, the API) are unrestricted; it is the beings loop
+                -- that must be single-owner. Without this, two deployments
+                -- sharing a db each spawned bodies for the same Iskre and
+                -- re-pinned agent_port to their own ports every tick — ~50%
+                -- of thinks timed out and the homeostat collapsed.
+                CREATE TABLE IF NOT EXISTS beings_loop_owner (
+                    id           INTEGER PRIMARY KEY CHECK (id = 1),
+                    pid          INTEGER NOT NULL,
+                    host         TEXT NOT NULL,
+                    data_dir     TEXT NOT NULL DEFAULT '',
+                    claimed_at   TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL
+                );
 
                 -- Signs in the grass (FPV plan Phase 3): a note the parent
                 -- (author_kind 'parent') or a public visitor ('visitor')
@@ -1590,6 +1637,88 @@ class BeingsStore:
                                    "name": other_name}, now=now)
                 done = True
         return done
+
+    # ── One ticker per village: the beings-loop owner lock ────────────────
+
+    def _loop_owner_row(self) -> dict | None:
+        try:
+            r = self._c().execute(
+                "SELECT * FROM beings_loop_owner WHERE id = 1").fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return dict(r) if r else None
+
+    def claim_beings_loop(self, *, pid: int | None = None,
+                          host: str = "", data_dir: str = "",
+                          now: datetime | None = None,
+                          stale_after: int = LOOP_OWNER_STALE_SECONDS,
+                          ) -> tuple[bool, dict | None]:
+        """Claim the right to TICK this beings.db. Exactly one Flight Deck may
+        run the loop; readers are unrestricted. A live owner (heartbeat inside
+        `stale_after`, and — on this host — a pid that still exists) keeps it
+        and we refuse. A crashed owner goes cold and the next FD takes over, so
+        this self-heals with no operator step. Returns (ours, current_owner)."""
+        now = now or _utcnow()
+        pid = int(pid if pid is not None else os.getpid())
+        host = host or socket.gethostname()
+        with self._lock:
+            c = self._c()
+            cur = self._loop_owner_row()
+            if cur and not (int(cur["pid"]) == pid and cur["host"] == host):
+                fresh = False
+                try:
+                    beat = datetime.fromisoformat(str(cur["heartbeat_at"]))
+                    fresh = (now - beat).total_seconds() < stale_after
+                except (TypeError, ValueError):
+                    fresh = False
+                alive = True
+                if fresh and cur["host"] == host:
+                    try:
+                        os.kill(int(cur["pid"]), 0)   # signal 0 = "are you there"
+                    except (OSError, ProcessLookupError):
+                        alive = False                 # died without releasing
+                if fresh and alive:
+                    return False, cur
+            c.execute(
+                "INSERT INTO beings_loop_owner (id, pid, host, data_dir,"
+                " claimed_at, heartbeat_at) VALUES (1,?,?,?,?,?)"
+                " ON CONFLICT(id) DO UPDATE SET pid=excluded.pid,"
+                " host=excluded.host, data_dir=excluded.data_dir,"
+                " claimed_at=excluded.claimed_at,"
+                " heartbeat_at=excluded.heartbeat_at",
+                (pid, host, data_dir, _iso(now), _iso(now)))
+            c.commit()
+        return True, self._loop_owner_row()
+
+    def heartbeat_beings_loop(self, *, pid: int | None = None,
+                              host: str = "",
+                              now: datetime | None = None) -> bool:
+        """Keep the claim warm. False when the lock moved on (another FD took
+        it while we were away) — the caller should stand down."""
+        now = now or _utcnow()
+        pid = int(pid if pid is not None else os.getpid())
+        host = host or socket.gethostname()
+        with self._lock:
+            c = self._c()
+            c.execute(
+                "UPDATE beings_loop_owner SET heartbeat_at = ?"
+                " WHERE id = 1 AND pid = ? AND host = ?",
+                (_iso(now), pid, host))
+            c.commit()
+        cur = self._loop_owner_row()
+        return bool(cur and int(cur["pid"]) == pid and cur["host"] == host)
+
+    def release_beings_loop(self, *, pid: int | None = None,
+                            host: str = "") -> None:
+        """Hand the lock back on a clean shutdown so a restart claims it at
+        once instead of waiting out the staleness window."""
+        pid = int(pid if pid is not None else os.getpid())
+        host = host or socket.gethostname()
+        with self._lock:
+            self._c().execute(
+                "DELETE FROM beings_loop_owner WHERE id = 1 AND pid = ?"
+                " AND host = ?", (pid, host))
+            self._c().commit()
 
     # ── Elderhood + the village radio (roadmap T3.14 / T3.16) ─────────
 

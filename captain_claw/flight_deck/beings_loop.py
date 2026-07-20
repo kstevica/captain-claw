@@ -135,8 +135,35 @@ async def _instinct_pass(db, now: datetime | None = None) -> int:
 
 
 async def beings_loop(db, stop_event: asyncio.Event) -> None:
+    # ONE Flight Deck ticks a given beings.db. Two deployments that share one
+    # db (the FD_DATA_DIR-unset trap) each spawned bodies for the same Iskre
+    # and re-pinned agent_port to their own ports every tick — half the thinks
+    # timed out and the homeostat collapsed. Readers are untouched; only the
+    # tick is claimed. A dead owner's claim goes cold and we take over.
+    try:
+        store = get_store()
+        ours, owner = store.claim_beings_loop(
+            data_dir=str(getattr(store, "db_path", "") or ""))
+        if not ours:
+            log.error(
+                "beings loop NOT started — another Flight Deck already ticks "
+                "this beings.db; this one will serve reads only. Give each "
+                "deployment its own FD_DATA_DIR.",
+                held_by_pid=(owner or {}).get("pid"),
+                held_by_host=(owner or {}).get("host"),
+                held_since=(owner or {}).get("claimed_at"))
+            return
+    except Exception as e:  # noqa: BLE001 — a lock we cannot take is not a
+        log.warning("beings loop owner lock unavailable", error=str(e))  # reason to stop living
     log.info("beings loop started", poll_seconds=POLL_SECONDS)
     while not stop_event.is_set():
+        try:
+            if not get_store().heartbeat_beings_loop():
+                log.error("beings loop stopping — the owner lock moved to "
+                          "another Flight Deck")
+                break
+        except Exception as e:  # noqa: BLE001
+            log.warning("beings loop heartbeat failed", error=str(e))
         try:
             n = await _pass(db)
             if n:
@@ -180,6 +207,12 @@ async def beings_loop(db, stop_event: asyncio.Event) -> None:
     try:
         from captain_claw.flight_deck import being_federation
         await being_federation.village_client.stop_all()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        # Hand the tick back so a restart claims it at once, instead of
+        # waiting out the staleness window in silence.
+        get_store().release_beings_loop()
     except Exception:  # noqa: BLE001
         pass
     log.info("beings loop stopped")
