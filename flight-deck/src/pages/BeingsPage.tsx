@@ -234,7 +234,8 @@ function summarizeEventData(e: BeingEvent): string {
     case 'arrived': return `arrived at ${d.name || d.place}${d.hhmm ? ` at ${d.hhmm}` : ''}`
     case 'crossed_paths': return `crossed paths with ${d.name} at ${d.place_name || d.place}`
     case 'instinct': {
-      const trig = d.trigger ? ` (${d.trigger})` : ''
+      // A retry is two calls' worth of tokens — say so where the cost shows.
+      const trig = `${d.trigger ? ` (${d.trigger})` : ''}${d.retried ? ' · asked twice' : ''}`
       switch (d.act) {
         case 'go': return `feet set out for ${d.to}${d.what ? ` — ${d.what}` : ''}${trig}`
         case 'build': return `feet broke ground on a ${d.kind}${d.what ? ` — ${d.what}` : ''}${trig}`

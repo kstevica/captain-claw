@@ -374,3 +374,60 @@ async def test_a_feet_call_that_never_returns_is_still_logged(store):
     ev = next(e for e in store.events(OWNER, b["slug"]) if e["kind"] == "instinct")
     assert ev["data"]["note"] == "the call failed"
     assert "no tier configured" in ev["data"]["why"]
+
+
+# ═══ Room to think ══════════════════════════════════════════════════════
+# What that legible trail then showed: the feet's model REASONS before it
+# answers, and a budget sized for the answer alone ended mid-thought — 14 of
+# 16 staging calls, surfacing either deliberation or `{"act": "go", "to`.
+# Room is cheap; a being that stands still all day is not.
+
+def test_the_log_names_a_line_that_was_cut_off():
+    why = instinct._unparsed_why
+    assert "cut off mid-JSON" in why('{"act": "go", "to')   # the staging reply
+    # prose is still prose — the two causes must not blur together
+    assert "wrote prose" in why("We are at the Garden. Pressing drives: grow")
+
+
+def test_the_feet_get_room_to_think():
+    # 120 tokens is what starved them; the ceiling stays bounded either way
+    assert 400 <= instinct.FEET_MAX_TOKENS <= 2000
+
+
+def test_a_reply_that_ran_out_of_room_is_told_from_a_mute_one():
+    ran_out = instinct._ran_out_of_room
+    assert ran_out("We are at the Garden. Pressing drives: grow 0.49")
+    assert ran_out('{"act": "go", "to')
+    assert not ran_out('{"act": "linger"}')     # a whole answer, however wrong
+    assert not ran_out("")                      # a mute tier stays mute
+
+
+async def test_a_starved_reply_is_asked_once_more_plainly(store):
+    b = await _being(store, preset="explorer", now=NOW - timedelta(days=2))
+    world.ensure_village(store, OWNER, now=NOW - timedelta(days=1))
+    seen = []
+
+    async def send(_user):
+        seen.append(_user)
+        if len(seen) == 1:                      # thought instead of answering
+            return "We are at the Meadow. Pressing drives: survive 0.87, then"
+        return '{"act": "linger"}'              # asked plainly, it answers
+
+    out = await instinct.decide(FakeDB(), store, b, now=NOW, send_fn=send)
+    assert len(seen) == 2                       # once more, not twice more
+    assert out["act"] == "linger"               # the feet actually moved
+    assert out["retried"] is True               # and the cost is admitted
+    assert "why" not in out                     # no wasted-call story to tell
+
+
+async def test_a_reply_that_lands_is_never_asked_twice(store):
+    b = await _being(store, preset="explorer", now=NOW - timedelta(days=2))
+    world.ensure_village(store, OWNER, now=NOW - timedelta(days=1))
+    calls = []
+
+    async def send(_user):
+        calls.append(_user)
+        return '{"act": "linger"}'
+
+    out = await instinct.decide(FakeDB(), store, b, now=NOW, send_fn=send)
+    assert len(calls) == 1 and "retried" not in out

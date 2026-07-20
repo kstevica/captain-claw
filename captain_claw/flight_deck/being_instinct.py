@@ -38,7 +38,13 @@ log = get_logger(__name__)
 FEET_CONTEXT_CAP = max(256, min(10_000, int(os.environ.get(
     "FEET_CONTEXT_CAP", "1000") or 1000)))
 _CHARS_PER_TOKEN = 4
-FEET_MAX_TOKENS = 120            # one line of JSON, not an essay
+# The answer we want is one line of JSON — but a thinking-mode model spends
+# this budget REASONING first, and 120 tokens ran out mid-thought: staging's
+# feet (deepseek-v4-flash) died this way in 14 of 16 calls, surfacing either
+# cut-off deliberation or a line clipped at `{"act": "go", "to`. Room to think
+# is cheap here; the context cap above is what actually bounds the spend.
+FEET_MAX_TOKENS = max(120, min(2000, int(os.environ.get(
+    "FEET_MAX_TOKENS", "600") or 600)))
 FEET_TIER = "fast"               # the cheapest named tier (infants run on it)
 FEET_IDLE_MINUTES = 45           # restlessness stirs after ~45 quiet minutes
 FEET_PLAN_MINUTES = 30           # an open plan presses every half hour
@@ -58,6 +64,12 @@ FEET_SYSTEM = (
     "Never words, money, or promises — those belong to the mind. Honor "
     "the mind's plan and pins when they exist; otherwise walk toward "
     "ground that serves the pressing drives.")
+
+# Said again, plainly, after a reply that ran out of room to think. Once —
+# twice is a habit, three times is an essay.
+FEET_PLAIN_SYSTEM = FEET_SYSTEM + (
+    "\n\nDo NOT reason, explain, weigh options, or restate the question. "
+    "Your whole reply is the one line of JSON and nothing else.")
 
 # When the being is restless-handed enough (impulse ≥ BUILD_IMPULSE_MIN)
 # and stands on open ground, the feet gain ONE more gesture: breaking
@@ -336,6 +348,9 @@ def _unparsed_why(text: str) -> str:
         return "the model returned nothing"
     found = list(_JSON_RE.finditer(body))
     if not found:
+        if body.count("{") > body.count("}"):
+            return ("the line was cut off mid-JSON — the output budget ran "
+                    "out before it closed")
         return "no JSON object in the reply — the model wrote prose"
     for m in found:
         try:
@@ -353,6 +368,18 @@ def _unparsed_why(text: str) -> str:
             return f'act "{act}" with no "task"'
         return f'act "{act[:24]}" is not one the feet can do'
     return "a JSON object the parser could not read"
+
+
+def _ran_out_of_room(text: str) -> bool:
+    """True when a reply looks like a call that ran out of ROOM rather than a
+    model that had nothing to say: deliberation with no JSON in it, or a line
+    cut before it closed. Both are one bug wearing two faces — a thinking
+    model handed a budget sized for the answer alone. Worth asking again;
+    an empty reply is not (a mute tier stays mute)."""
+    body = (text or "").strip()
+    if not body:
+        return False
+    return not list(_JSON_RE.finditer(body))
 
 
 def _apply_act(store: BeingsStore, being: dict, act: dict | None,
@@ -558,11 +585,14 @@ async def decide(db, store: BeingsStore, being: dict,
                              < FEET_MIN_WALLET):
         return None                      # too hungry to spend on walking
     system, user = feet_prompt(store, being, now, trigger)
-    try:
+
+    async def _ask(sys_text: str) -> tuple[str, dict | None]:
         if send_fn is not None:
-            text, usage = await send_fn(user), None
-        else:
-            text, usage = await _one_shot(db, being, system, user)
+            return await send_fn(user), None
+        return await _one_shot(db, being, sys_text, user)
+
+    try:
+        text, usage = await _ask(system)
     except Exception as e:  # noqa: BLE001 — no tier, no net: feet stand still
         log.warning("feet call failed", slug=being["slug"], error=str(e))
         # Say it on the BEING's own log too, not just ours: a feet call that
@@ -577,19 +607,41 @@ async def decide(db, store: BeingsStore, being: dict,
             pass
         return None
     act = parse_feet_act(text)
+    said = [(text, usage)]
+    retried = False
+    if act is None and _ran_out_of_room(text):
+        # It thought instead of answering, and the budget ended mid-thought.
+        # Ask once more without the room to deliberate — cheaper than a being
+        # that stands still all day.
+        retried = True
+        try:
+            text2, usage2 = await _ask(FEET_PLAIN_SYSTEM)
+        except Exception as e:  # noqa: BLE001 — the first reply still stands
+            log.warning("feet retry failed", slug=being["slug"], error=str(e))
+        else:
+            said.append((text2, usage2))
+            act2 = parse_feet_act(text2)
+            if act2 is not None:
+                act, text = act2, text2
+            else:
+                text = text2          # log the second refusal, not the first
     applied = _apply_act(store, being, act, now=now)
     spent = 0
-    try:
-        est = usage if usage and usage.get("prompt_tokens") else {
-            "prompt_tokens": max(1, (len(system) + len(user))
-                                 // _CHARS_PER_TOKEN),
-            "completion_tokens": max(1, len(text or "")
-                                     // _CHARS_PER_TOKEN)}
-        spent = store.debit_usage(being["id"], FEET_TIER, est,
-                                  note="instinct", now=now)
-    except Exception as e:  # noqa: BLE001 — the thought happened; record it
-        log.warning("feet metering failed", slug=being["slug"], error=str(e))
+    for said_text, said_usage in said:
+        try:
+            est = said_usage if said_usage and said_usage.get("prompt_tokens") \
+                else {"prompt_tokens": max(1, (len(system) + len(user))
+                                           // _CHARS_PER_TOKEN),
+                      "completion_tokens": max(1, len(said_text or "")
+                                               // _CHARS_PER_TOKEN)}
+            spent += store.debit_usage(being["id"], FEET_TIER, est,
+                                       note="instinct", now=now)
+        except Exception as e:  # noqa: BLE001 — the thought happened; record it
+            log.warning("feet metering failed", slug=being["slug"],
+                        error=str(e))
     ev = {**applied, "trigger": trigger, "tokens": spent}
+    if retried:
+        ev["retried"] = True          # two calls' worth of tokens, honestly
     if act is None:
         # The whole story of a wasted call: why the line failed, and the words
         # the model actually sent back (trimmed) so the cause is visible.
