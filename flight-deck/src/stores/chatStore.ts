@@ -328,6 +328,55 @@ function _fireAutoComplete(containerId: string, itemId: string) {
   state.markQueueItemDone(containerId, itemId)
 }
 
+// ── Slash commands in the queue ──
+//
+// A slash command runs synchronously on the server and answers with a
+// `command_result` — never an assistant reply, and never `next_steps`. The
+// normal completion path (reply → arm watch → next_steps/fallback) therefore
+// never fires, so the item stays `dispatched` forever: its row spinner keeps
+// turning and `queueDispatchedId` blocks every later item.
+//
+// Tick it done as soon as the command answers. This runs in BOTH auto and
+// manual mode on purpose — a command has no output for the user to judge, and
+// leaving it in-flight strands the whole queue.
+function isSlashCommand(text: string): boolean {
+  return /^\//.test((text || '').trim())
+}
+
+function completeDispatchedCommand(containerId: string) {
+  const state = useChatStore.getState()
+  const session = state.sessions.get(containerId)
+  const dispatchedId = session?.queueDispatchedId
+  if (!session || !dispatchedId) return
+  const item = session.queue.find((q) => q.id === dispatchedId)
+  if (!item || !isSlashCommand(item.content)) return
+  cancelCommandWatch(containerId)
+  state.markQueueItemDone(containerId, dispatchedId)
+}
+
+// Safety net for the handful of commands that answer out-of-band instead of
+// with a `command_result` (a deferred `/flow`, a dropped socket frame). Armed
+// on dispatch, disarmed by the `command_result` handler.
+const _commandWatches = new Map<string, ReturnType<typeof setTimeout>>()
+const COMMAND_FALLBACK_MS = 20000
+
+function armCommandWatch(containerId: string) {
+  cancelCommandWatch(containerId)
+  _commandWatches.set(containerId, setTimeout(() => {
+    _commandWatches.delete(containerId)
+    // Still busy → the command turned into real work; let the reply path own it.
+    if (useChatStore.getState().sessions.get(containerId)?.busy) return
+    completeDispatchedCommand(containerId)
+  }, COMMAND_FALLBACK_MS))
+}
+
+function cancelCommandWatch(containerId: string) {
+  const timer = _commandWatches.get(containerId)
+  if (!timer) return
+  clearTimeout(timer)
+  _commandWatches.delete(containerId)
+}
+
 // Heuristic: did the agent's reply actually complete the task, or is it
 // asking the user something? Auto-mode shouldn't tick a queue item done
 // when the agent is mid-flight waiting for a clarification.
@@ -944,6 +993,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // the "Thinking..." spinner stays pinned after `/plan`, `/help`,
       // `/clear`, etc., because no later token/usage event clears busy.
       updateSession(containerId, { busy: false, statusText: '' })
+      // …and if the command came from the queue, retire it so the row stops
+      // spinning and the next item can go out. Must run after busy is cleared
+      // — tryDispatchNext refuses to send while the session is busy.
+      cancelCommandWatch(containerId)
+      completeDispatchedCommand(containerId)
     })
 
     // Forward orchestrator trace spans to the trace store for
@@ -1495,6 +1549,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (session.queueDispatchedId === id) {
       patch.queueDispatchedId = null
       cancelAutoCompleteWatch(containerId)
+      cancelCommandWatch(containerId)
       resetStallNudges(containerId)
     }
     updateSession(containerId, patch)
@@ -1513,6 +1568,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (session.queueDispatchedId === id) {
       patch.queueDispatchedId = null
       cancelAutoCompleteWatch(containerId)
+      cancelCommandWatch(containerId)
       resetStallNudges(containerId)
     }
     updateSession(containerId, patch)
@@ -1563,6 +1619,7 @@ function tryDispatchNext(containerId: string) {
       : q,
   )
   updateSession(containerId, { queue, queueDispatchedId: next.id })
+  if (isSlashCommand(next.content)) armCommandWatch(containerId)
   state.sendMessage(containerId, next.content)
 }
 
