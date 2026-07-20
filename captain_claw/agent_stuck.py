@@ -20,6 +20,15 @@ MSG_BUDGET_EXHAUSTED = (
 MSG_STUCK = (
     f"I got stuck and couldn't make further progress. {RETRY_HINT}"
 )
+# The model returned zero-length content until the iteration budget ran
+# out. Distinct from the three above: nothing failed and nothing was
+# refused — the model simply produced nothing, which weak local models do
+# when a decoding grammar, a reasoning block, or an oversized KV cache
+# eats the whole generation. Ends with RETRY_HINT, so the existing
+# "simplify the task" marker already covers it downstream.
+MSG_EMPTY_RESPONSE = (
+    f"The model returned an empty response. {RETRY_HINT}"
+)
 
 # Lowercase substrings that identify a give-up reply — both the bare messages
 # above and the "⚠️ …here's what I have so far" partial variants. "simplify the

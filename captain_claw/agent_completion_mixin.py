@@ -19,10 +19,18 @@ orchestration loop and make the completion logic testable in isolation.
 import json
 from typing import Any
 
+from captain_claw.agent_stuck import MSG_EMPTY_RESPONSE
 from captain_claw.logging import get_logger
 
 
 log = get_logger(__name__)
+
+
+# How many times a zero-length reply may be re-rolled before the turn gives
+# up honestly. Mirrors MAX_STALL_RETRIES: two re-rolls convert a transient
+# empty generation into a real answer, and a model that is still empty on
+# the third attempt is not going to converge on the fourth.
+MAX_EMPTY_ANSWER_RETRIES = 2
 
 
 class AgentCompletionMixin:
@@ -811,6 +819,42 @@ class AgentCompletionMixin:
                     if iteration < (hard_turn_iterations - 1):
                         log.info("Finalize BLOCKED by contract_validation gate", iteration=iteration, failed=len(failed_items))
                         return False, "", finish_success, completion_feedback, python_worker_attempted
+
+        # ── Empty-answer floor ───────────────────────────────────────
+        # A blank reply is not an answer. Weak local models can return
+        # zero-length content over and over (a decoding grammar or a
+        # reasoning block eats the generation, or an oversized KV cache
+        # starves it). Without this floor the empty string passes every
+        # gate above, `_persist_assistant_response` drops it as unsavable,
+        # and the turn is reported as a SUCCESS — the user just sees an
+        # empty chat bubble with no indication anything went wrong.
+        #
+        # Bounded by MAX_EMPTY_ANSWER_RETRIES rather than the iteration
+        # budget: a model returning empty every time is not converging, and
+        # re-rolling it to the hard ceiling would spend 80+ LLM calls to
+        # reach the same conclusion three calls would.
+        if not str(final_response or "").strip():
+            _empty_retries = int(getattr(self, "_empty_answer_retries", 0))
+            if (
+                _empty_retries < MAX_EMPTY_ANSWER_RETRIES
+                and iteration < (hard_turn_iterations - 1)
+            ):
+                self._empty_answer_retries = _empty_retries + 1
+                log.warning(
+                    "Finalize BLOCKED — model returned an empty response",
+                    iteration=iteration,
+                )
+                completion_feedback = (
+                    "Your last response was completely empty — the user saw nothing. "
+                    "Produce the answer now, as plain text. If you cannot complete the "
+                    "task, say so explicitly and explain what is blocking you."
+                )
+                return False, "", finish_success, completion_feedback, python_worker_attempted
+            log.error(
+                "Model returned an empty response and the iteration budget is spent",
+                iteration=iteration,
+            )
+            return True, MSG_EMPTY_RESPONSE, False, completion_feedback, python_worker_attempted
 
         # ── Finalize: persist and return ─────────────────────────────
         log.info("All completion gates passed — finalizing response", iteration=iteration)

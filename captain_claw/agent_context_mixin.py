@@ -3414,6 +3414,16 @@ class AgentContextMixin:
             self._turn_system_prompt = (_sp_key, system_prompt, system_tokens, time.monotonic())
         messages = [Message(role="system", content=system_prompt)]
         context_budget = max(1, int(cfg.context.max_tokens))
+        # Never budget more history than the provider will actually accept.
+        # `context.max_tokens` is written once at spawn from the archetype's
+        # tier and then outlives the model it was sized for, so an agent moved
+        # onto a small local model keeps a frontier-sized budget. The trimmer
+        # would then pack a prompt the model silently truncates from the front
+        # — taking the system prompt with it. Providers that expose no
+        # `num_ctx` (every hosted one) are unaffected.
+        _provider_ctx = int(getattr(getattr(self, "provider", None), "num_ctx", 0) or 0)
+        if 0 < _provider_ctx < context_budget:
+            context_budget = _provider_ctx
         history_budget = max(0, context_budget - system_tokens)
 
         candidate_messages: list[dict[str, Any]] = []

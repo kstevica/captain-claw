@@ -1713,6 +1713,79 @@ def _resolve_ollama_think(raw: bool | str | None, model: str) -> bool | str:
     return bool(_OLLAMA_THINKING_MODEL_RE.search(model or ""))
 
 
+# Ceiling on `num_ctx` for LOCALLY-hosted Ollama models. Ollama allocates
+# the KV cache for the full num_ctx up front, so a frontier-sized context
+# budget handed to a small local model is not merely wasteful — it is
+# fatal. A 9B model asked for 200k ctx wants tens of GB of KV cache; on a
+# workstation that spills to swap, throughput collapses (measured: 0.2
+# tok/s), and the starved generation comes back empty.
+#
+# This bites because `context.max_tokens` is written once at spawn from
+# the archetype's tier (`reason` = 200000) and then outlives the model it
+# was sized for — swapping an agent onto a local model leaves the frontier
+# budget in place. Clamping here catches every such agent regardless of
+# how its config was produced.
+#
+# `:cloud` models are exempt: those run on Ollama's hosted hardware, where
+# a large context is both legitimate and free of local memory pressure.
+# Raise the ceiling with CLAW_OLLAMA_MAX_NUM_CTX if you have the memory.
+_OLLAMA_DEFAULT_MAX_NUM_CTX = 32768
+
+
+def _clamp_ollama_num_ctx(num_ctx: int, model: str) -> int:
+    """Clamp a requested context window to what a local Ollama box can hold."""
+    requested = max(1, int(num_ctx))
+    if str(model or "").strip().endswith(":cloud"):
+        return requested
+    try:
+        ceiling = int(
+            os.getenv("CLAW_OLLAMA_MAX_NUM_CTX", "") or _OLLAMA_DEFAULT_MAX_NUM_CTX
+        )
+    except ValueError:
+        ceiling = _OLLAMA_DEFAULT_MAX_NUM_CTX
+    if ceiling <= 0 or requested <= ceiling:
+        return requested
+    log.warning(
+        "Clamping Ollama num_ctx — requested window would blow up the local KV cache",
+        model=model,
+        requested=requested,
+        clamped_to=ceiling,
+        override_env="CLAW_OLLAMA_MAX_NUM_CTX",
+    )
+    return ceiling
+
+
+def _forced_tool_call_schema(tools: list[ToolDefinition]) -> dict[str, Any] | None:
+    """JSON schema that forces the model to emit exactly one tool call.
+
+    Ollama's native ``/api/chat`` has no ``tool_choice``, so the agent
+    loop's ``_tool_choice_override = "required"`` (its strongest lever
+    against a stalling model) was a silent no-op on precisely the local
+    models that stall most. Grammar-constrained decoding via ``format``
+    is the equivalent Ollama *does* provide.
+
+    Shape is a flat object with an enum discriminator rather than a
+    ``oneOf`` union over per-tool argument schemas — same reasoning as
+    ``mrav.protocol.ACT_RESPONSE_SCHEMA``: flat + enum is far more
+    robust for small models and for grammar engines.
+    """
+    names = [
+        str(t.get("name", "")).strip()
+        for t in (tools or [])
+        if str(t.get("name", "")).strip()
+    ]
+    if not names:
+        return None
+    return {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string", "enum": names},
+            "arguments": {"type": "object"},
+        },
+        "required": ["tool", "arguments"],
+    }
+
+
 class OllamaProvider(LLMProvider):
     """Direct Ollama API provider."""
 
@@ -1732,7 +1805,7 @@ class OllamaProvider(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.num_ctx = max(1, int(num_ctx))
+        self.num_ctx = _clamp_ollama_num_ctx(num_ctx, model)
         self.api_key = api_key
         self.think = _resolve_ollama_think(think, model)
         if self.think:
@@ -1786,6 +1859,29 @@ class OllamaProvider(LLMProvider):
             # Ollama structured outputs: `format` takes a full JSON schema
             # and constrains decoding via grammar (GBNF-backed).
             body["format"] = response_schema
+
+        # ── Forced tool call (stall recovery) ─────────────────────────
+        # Honor the agent loop's `_tool_choice_override = "required"`.
+        # Consumed once, then reset — same contract as the LiteLLM and
+        # ChatGPT providers. `tools` stays in the body so the prompt
+        # template still renders the argument schemas; `think` is
+        # disabled because a reasoning block plus a decoding grammar is
+        # a known-bad combination on small models (mrav forces the same).
+        _forced_tool = False
+        _tc_override = getattr(self, "_tool_choice_override", None)
+        if _tc_override:
+            self._tool_choice_override = None
+            if str(_tc_override) == "required" and ollama_tools and not response_schema:
+                _forced_schema = _forced_tool_call_schema(tools or [])
+                if _forced_schema:
+                    body["format"] = _forced_schema
+                    body.pop("think", None)
+                    _forced_tool = True
+                    log.info(
+                        "Ollama forced tool call via grammar",
+                        model=self.model,
+                        tool_count=len(ollama_tools),
+                    )
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -1874,6 +1970,37 @@ class OllamaProvider(LLMProvider):
                         name=call_name,
                         arguments=args,
                     ))
+
+                # Grammar-forced tool call: the model emitted our
+                # {"tool": ..., "arguments": {...}} object as *content*,
+                # not as a native tool_call. Convert it back so the agent
+                # loop sees a normal tool call and the JSON never leaks
+                # into the reply.
+                if _forced_tool and not tool_calls:
+                    _forced_obj = _safe_json_loads(content)
+                    _forced_name = ""
+                    if isinstance(_forced_obj, dict):
+                        _forced_name = str(_forced_obj.get("tool", "") or "").strip()
+                    if _forced_name:
+                        _forced_args = _forced_obj.get("arguments", {})
+                        if not isinstance(_forced_args, dict):
+                            _forced_args = {}
+                        tool_calls.append(ToolCall(
+                            id="ollama_forced_1",
+                            name=_forced_name,
+                            arguments=_forced_args,
+                        ))
+                        content = ""
+                        log.info(
+                            "Ollama forced tool call parsed",
+                            tool=_forced_name,
+                            arg_keys=sorted(_forced_args)[:10],
+                        )
+                    else:
+                        log.warning(
+                            "Ollama forced tool call did not parse",
+                            preview=content[:160].replace("\n", " "),
+                        )
 
                 usage = {
                     "prompt_tokens": int(_obj_get(data, "prompt_eval_count", 0) or 0),

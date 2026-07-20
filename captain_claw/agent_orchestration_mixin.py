@@ -280,6 +280,48 @@ _STALL_MAX_LEN = 60
 # length messages that open with a stall phrase but actually continue
 # with a real answer (e.g. "Let me explain why X. First, …").
 _STALL_FOLLOWTHROUGH_MIN_CHARS = 40
+# Phrases that LOOK like a stall opener but hand control back to the user
+# rather than promising more work ("Let me know if you'd like more detail.").
+# These are the normal way a *completed* turn signs off — treating them as
+# stalls would re-roll finished work, so they veto the stall verdict on
+# both the opening and the closing sentence.
+_STALL_HANDBACK_RE = _re.compile(
+    r"^\s*(?:"
+    r"let me know\b"
+    r"|let'?s (?:discuss|talk|chat|connect)\b"
+    r"|i'?ll be (?:here|around|happy|glad)\b"
+    r"|i'?ll wait\b"
+    r"|i'?ll stand by\b"
+    r")",
+    _re.IGNORECASE,
+)
+# Upper length bound for the CLOSING-sentence stall check. Weak models
+# often prefix a short observation before the stall ("Great data from
+# GitHub. Let me grab a few more sources.") which anchoring on the first
+# sentence misses entirely. Kept tight: a real answer that happens to end
+# on "I'll …" is virtually always longer than this.
+_STALL_TRAILING_MAX_LEN = 160
+
+
+def _closing_sentence_stalls(stripped: str) -> bool:
+    """Return True for a short message whose FINAL sentence is a stall.
+
+    Covers the shape that anchoring on the first sentence misses: a weak
+    model reports on what it just saw, then announces the next step and
+    stops — "Great data from GitHub. Let me grab a few more key sources
+    for depth." Requires at least two sentences (a one-sentence stall is
+    already handled by the anchored check) and a short overall message,
+    so a real answer that merely closes on "I'll …" is not caught.
+    """
+    if len(stripped) > _STALL_TRAILING_MAX_LEN:
+        return False
+    sentences = [s.strip() for s in _re.split(r"(?<=[.!?])\s+", stripped) if s.strip()]
+    if len(sentences) < 2:
+        return False
+    last = sentences[-1]
+    if _STALL_HANDBACK_RE.match(last):
+        return False
+    return bool(_STALL_FIRST_LINE_RE.match(last))
 
 
 def _looks_like_stall(text: str) -> bool:
@@ -310,8 +352,11 @@ def _looks_like_stall(text: str) -> bool:
             break
     if not first_line:
         return True
-    if not _STALL_FIRST_LINE_RE.match(first_line):
+    if _STALL_HANDBACK_RE.match(first_line):
+        # "Let me know if …" — a sign-off, not a stall.
         return False
+    if not _STALL_FIRST_LINE_RE.match(first_line):
+        return _closing_sentence_stalls(stripped)
     if len(stripped) <= _STALL_MAX_LEN:
         return True
     # Medium-length message that opens with a stall phrase. Look past
@@ -688,6 +733,12 @@ class AgentOrchestrationMixin:
         # stall ("Let me…", "I'll fetch…").  Capped by MAX_STALL_RETRIES
         # so a genuinely-stuck turn still terminates.
         self._stall_retry_count: int = 0
+        # Reset per-turn empty-answer retry counter. Bumped each time the
+        # completion gate refuses to finalize a zero-length reply. Capped by
+        # MAX_EMPTY_ANSWER_RETRIES: without a cap, a model that returns empty
+        # every time would re-roll all the way to the hard iteration ceiling
+        # (80+ LLM calls) instead of failing in three.
+        self._empty_answer_retries: int = 0
         # New turn → re-render the system prompt once (it embeds the clock;
         # _build_messages freezes it for the rest of the turn so the
         # provider's prompt-prefix cache hits on every tool-loop call).
@@ -2555,6 +2606,21 @@ class AgentOrchestrationMixin:
                         "or 'consult', with agent_name and file/message). Otherwise do "
                         "the task yourself. Never claim an action you didn't perform."
                     )
+                elif not _stall_resp_text.strip():
+                    # Empty output, not an intent announcement — the generic
+                    # "you narrated instead of acting" scolding describes
+                    # something the model didn't do, which reads as noise to
+                    # a small model. Name what actually happened instead.
+                    _retry_instruction = (
+                        "Your last response was completely empty. "
+                        + (
+                            "Call one tool now — a single call, with concrete arguments."
+                            if _has_tools
+                            else "Write the answer now, as plain text."
+                        )
+                        + " If you are unable to proceed, say that in one sentence "
+                        "and explain why."
+                    )
                 else:
                     _retry_instruction = (
                         "You announced intent without acting. Do NOT narrate "
@@ -2572,7 +2638,14 @@ class AgentOrchestrationMixin:
                     force_tool=_has_tools,
                     preview=_stall_resp_text[:120],
                 )
-                self._add_session_message(role="assistant", content=_stall_resp_text)
+                # Only commit the stall text when there IS text. An empty
+                # stall (weak models return zero-length content) would
+                # otherwise write an empty assistant turn into the history
+                # the retry then reads back — demonstrating to the model
+                # that answering with nothing is acceptable here, which
+                # makes the next re-roll *more* likely to stall, not less.
+                if _stall_resp_text.strip():
+                    self._add_session_message(role="assistant", content=_stall_resp_text)
                 self._add_session_message(role="user", content=_retry_instruction)
                 # Force tool use on the very next provider call so the
                 # retry can't repeat the same intent-only stall. The
