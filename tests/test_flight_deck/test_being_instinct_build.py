@@ -332,3 +332,45 @@ async def test_the_mind_can_abandon_the_stake(store):
     assert store.village_objects(OWNER, state="staked") == []
     kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
     assert "stake_abandoned" in kinds
+
+
+# ═══ The feet leave a legible trail ═════════════════════════════════════
+# Staging burned 170-400 tokens on 155 of 168 feet calls and the log said only
+# "unparsed" — true, useless, unfixable. A call that produces nothing must
+# still record WHY and WHAT the model actually said.
+
+def test_unparsed_feet_say_why_and_what_they_said():
+    why = instinct._unparsed_why
+    assert "wrote prose" in why("I think I will go to the library today.")
+    assert "returned nothing" in why("")
+    assert "not one the feet can do" in why('{"act": "dance"}')
+    assert 'with no "to"' in why('{"act": "go"}')
+    assert "without an" in why('{"kind": "bench"}')
+
+
+async def test_a_wasted_feet_call_records_the_reason_and_the_reply(store):
+    b = await _being(store, preset="explorer", now=NOW - timedelta(days=2))
+    world.ensure_village(store, OWNER, now=NOW - timedelta(days=1))
+
+    async def send(_user):                      # a model that ignores the form
+        return "Sure! I would love to wander toward the meadow today."
+
+    out = await instinct.decide(FakeDB(), store, b, now=NOW, send_fn=send)
+    assert out["act"] == "none"
+    assert "wrote prose" in out["why"]          # the cause, not just "unparsed"
+    assert "wander toward the meadow" in out["reply"]   # its actual words
+    ev = next(e for e in store.events(OWNER, b["slug"]) if e["kind"] == "instinct")
+    assert ev["data"]["why"] and ev["data"]["reply"]    # and it is on the ledger
+
+
+async def test_a_feet_call_that_never_returns_is_still_logged(store):
+    b = await _being(store, preset="explorer", now=NOW - timedelta(days=2))
+    world.ensure_village(store, OWNER, now=NOW - timedelta(days=1))
+
+    async def boom(_user):
+        raise RuntimeError("no tier configured")
+
+    assert await instinct.decide(FakeDB(), store, b, now=NOW, send_fn=boom) is None
+    ev = next(e for e in store.events(OWNER, b["slug"]) if e["kind"] == "instinct")
+    assert ev["data"]["note"] == "the call failed"
+    assert "no tier configured" in ev["data"]["why"]

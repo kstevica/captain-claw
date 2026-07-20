@@ -242,7 +242,13 @@ function summarizeEventData(e: BeingEvent): string {
         case 'hello': return `feet greeted ${(d.with as string[] | undefined)?.join(', ') || 'the company'}${trig}`
         case 'browse': return `feet browsed the stalls${trig}`
         case 'linger': return `feet lingered${d.note ? ` — ${d.note}` : ''}${trig}`
-        default: return `feet stood still${d.note ? ` — ${d.note}` : ''}${trig}`
+        default: {
+          // A feet call that produced nothing still has a story: why the line
+          // failed, and what the model actually said.
+          const why = d.why ? ` — ${d.why}` : (d.note ? ` — ${d.note}` : '')
+          const said = d.reply ? ` · said: “${String(d.reply).slice(0, 90)}”` : ''
+          return `feet stood still${why}${trig}${said}`
+        }
       }
     }
     case 'browsed': return (d.titles as string[] | undefined)?.length
@@ -3196,10 +3202,19 @@ function BeingCard({ item, meta, onChanged }: {
                 <div key={i} className="flex items-baseline gap-1.5 text-[11px] text-zinc-500">
                   <span className={`inline-block h-1.5 w-1.5 shrink-0 translate-y-[-1px] rounded-full ${EVENT_DOT[e.kind] || 'bg-zinc-700'}`} />
                   <span className="shrink-0 tabular-nums text-zinc-600">{e.at.slice(11, 16)}</span>
-                  <span className="truncate">
+                  <span className="truncate" title={summarizeEventData(e)}>
                     <span className="text-zinc-400">{e.kind}</span>
-                    {typeof e.data.summary === 'string' && e.data.summary ? ` — ${e.data.summary}` : ''}
-                    {typeof e.data.preview === 'string' && e.data.preview ? ` — “${e.data.preview}”` : ''}
+                    {(() => {
+                      // Every kind tells its own story here (the same line the
+                      // full log shows) — a bare "instinct" said nothing about
+                      // what fired, what it chose, or how it ended. Kinds the
+                      // summarizer doesn't name (tick) keep their old line.
+                      const s = summarizeEventData(e)
+                      if (s && !s.startsWith('{')) return ` — ${s}`
+                      if (typeof e.data.summary === 'string' && e.data.summary) return ` — ${e.data.summary}`
+                      if (typeof e.data.preview === 'string' && e.data.preview) return ` — “${e.data.preview}”`
+                      return ''
+                    })()}
                   </span>
                 </div>
               ))}

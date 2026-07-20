@@ -327,6 +327,34 @@ def parse_feet_act(text: str) -> dict | None:
     return None
 
 
+def _unparsed_why(text: str) -> str:
+    """WHY the feet's line didn't land. Without this the log only ever read
+    'unparsed' — true, useless, and unfixable (staging: 155 of 168 feet calls
+    died here and nobody could see what the model had actually said)."""
+    body = (text or "").strip()
+    if not body:
+        return "the model returned nothing"
+    found = list(_JSON_RE.finditer(body))
+    if not found:
+        return "no JSON object in the reply — the model wrote prose"
+    for m in found:
+        try:
+            obj = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            return "JSON, but not an object"
+        if not obj.get("act"):
+            return f"JSON without an \"act\" key: {sorted(obj)[:4]}"
+        act = str(obj["act"]).strip().lower()
+        if act == "go":
+            return 'act "go" with no "to"'
+        if act in ("do", "refuse"):
+            return f'act "{act}" with no "task"'
+        return f'act "{act[:24]}" is not one the feet can do'
+    return "a JSON object the parser could not read"
+
+
 def _apply_act(store: BeingsStore, being: dict, act: dict | None,
                now: datetime) -> dict:
     """Position-only effects. Every refusal stays INSIDE the instinct
@@ -537,8 +565,19 @@ async def decide(db, store: BeingsStore, being: dict,
             text, usage = await _one_shot(db, being, system, user)
     except Exception as e:  # noqa: BLE001 — no tier, no net: feet stand still
         log.warning("feet call failed", slug=being["slug"], error=str(e))
+        # Say it on the BEING's own log too, not just ours: a feet call that
+        # never came back is a real thing that happened to it, and an
+        # invisible one is a thing nobody fixes.
+        try:
+            store.record_event(being["id"], "instinct",
+                               {"act": "none", "note": "the call failed",
+                                "why": str(e)[:160], "trigger": trigger,
+                                "tokens": 0}, now=now)
+        except Exception:  # noqa: BLE001
+            pass
         return None
-    applied = _apply_act(store, being, parse_feet_act(text), now=now)
+    act = parse_feet_act(text)
+    applied = _apply_act(store, being, act, now=now)
     spent = 0
     try:
         est = usage if usage and usage.get("prompt_tokens") else {
@@ -550,7 +589,11 @@ async def decide(db, store: BeingsStore, being: dict,
                                   note="instinct", now=now)
     except Exception as e:  # noqa: BLE001 — the thought happened; record it
         log.warning("feet metering failed", slug=being["slug"], error=str(e))
-    store.record_event(being["id"], "instinct",
-                       {**applied, "trigger": trigger, "tokens": spent},
-                       now=now)
-    return {**applied, "trigger": trigger, "tokens": spent}
+    ev = {**applied, "trigger": trigger, "tokens": spent}
+    if act is None:
+        # The whole story of a wasted call: why the line failed, and the words
+        # the model actually sent back (trimmed) so the cause is visible.
+        ev["why"] = _unparsed_why(text)
+        ev["reply"] = " ".join((text or "").split())[:200]
+    store.record_event(being["id"], "instinct", ev, now=now)
+    return ev
