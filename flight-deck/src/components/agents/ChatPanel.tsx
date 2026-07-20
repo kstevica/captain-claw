@@ -46,6 +46,7 @@ import { PlanCard } from './PlanCard'
 import TraceTimeline from '../observability/TraceTimeline'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
 import { AgentFilesPanel } from './AgentFilesPanel'
+import { AgentDatastorePanel } from './AgentDatastorePanel'
 import type { ChatMessage, TokenUsage } from '../../services/agentChat'
 
 interface Attachment {
@@ -833,6 +834,7 @@ function usePersistedSize(key: string, def: number, min: number, max: number, ax
 function QueueSidebar({ containerId }: { containerId: string }) {
   const width = usePersistedSize('fd:queue-sidebar-width', 288, 220, 640, 'x')
   const filesH = usePersistedSize('fd:queue-sidebar-files-height', 260, 96, 900, 'y')
+  const dsH = usePersistedSize('fd:queue-sidebar-datastore-height', 200, 96, 900, 'y')
 
   return (
     <aside
@@ -843,9 +845,19 @@ function QueueSidebar({ containerId }: { containerId: string }) {
       <div className="min-h-0 shrink-0 overflow-hidden" style={{ height: filesH.size }}>
         <AgentFilesPanel containerId={containerId} />
       </div>
-      {/* Vertical divider (drag to resize files vs queue) */}
+      {/* Vertical divider (drag to resize files vs datastore) */}
       <div
         onMouseDown={filesH.onResizeStart}
+        title="Drag to resize"
+        className="h-1 shrink-0 cursor-row-resize border-y border-zinc-800 bg-zinc-900 transition-colors hover:bg-violet-500/40"
+      />
+      {/* Middle: datastore tables */}
+      <div className="min-h-0 shrink-0 overflow-hidden" style={{ height: dsH.size }}>
+        <AgentDatastorePanel containerId={containerId} />
+      </div>
+      {/* Vertical divider (drag to resize datastore vs queue) */}
+      <div
+        onMouseDown={dsH.onResizeStart}
         title="Drag to resize"
         className="h-1 shrink-0 cursor-row-resize border-y border-zinc-800 bg-zinc-900 transition-colors hover:bg-violet-500/40"
       />

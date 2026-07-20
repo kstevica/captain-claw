@@ -31,7 +31,7 @@ const TYPE_COLORS: Record<string, string> = {
 // Resolve the full agent endpoint (id + name + connection) for a chat container.
 // Mirrors DesktopPage's allAgentEndpoints construction so pinning/transfer keys
 // line up with the rest of the app.
-function useAgentEndpoint(containerId: string): AgentEndpoint | null {
+export function useAgentEndpoint(containerId: string): AgentEndpoint | null {
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
   const localAgents = useLocalAgentStore((s) => s.agents)
