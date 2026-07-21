@@ -67,17 +67,17 @@ Captain Claw is **MIT licensed and free forever** — your data stays on your ma
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
 
-## What's New in 0.7.7
+## What's New in 0.7.8
 
-**Mrav — small models do real work · the village in first person.** A parallel micro agentic runtime runs real tool-using loops on 2–4B models (Gemma 4 E2B/E4B, Qwen3.5 4B) under a **hard 8k-token input cap per LLM call** — locally via Ollama or **in your browser tab** via WebGPU. And Iskra's village becomes a place you can **enter in first person**. Everything opt-in; defaults byte-identical.
+**Lanes, queues that finish · Iskre shape their world.** Long work that runs unattended: one agent gains **three parallel lanes**, the task queue stops stranding itself and learns to **plan its own batches**, and the datastore tool stops turning one fumbled argument into thirty tool calls of hunting. Everything opt-in — **lane A *is* the agent you already have**.
 
-- **The Mrav runtime** — a hard token ledger, blackboard state outside the model, a step-decomposed loop (plan → act-one-tool → digest → compress), and **grammar-constrained JSON** at every step. Switch any agent to it live (agent-card toggle + violet badge), pick it at spawn, flag it on Quick chat, or mint archetypes that are born micro. Live-evaled: Qwen3.5-4B 5/6 · Gemma 4 E4B 4/6 · E2B 3/6.
-- **Browser LLM** (Sidebar → System) — your tab becomes an inference worker: WebLLM on WebGPU, 61 models (up to **Qwen3.5 9B at 6.3 GB**), an engine-window picker, a downloaded-weights manager, and a usage log. Tools stay on the server; only tokens are made in the tab — prod needs no GPU. 0.35s/step once the KV pin is warm.
-- **Beings think micro** — a third cognition routes the JSON faculties (orient/talk/journal/connect) grammar-locked to the micro tier (~1–2k tokens instead of a 34–36k body turn); ACT and the anti-theater write gate stay on the body. Per-call wallet metering; loud fallback events.
-- **Vatra micro workers** — an opt-in Quality lever spawns extract/digest/format-shaped subtasks on the mrav runtime while reasoning roles keep their tiers; an archetype tier of `micro` always means mrav.
-- **The village in first person** — roam Iskra's village as a quiet ghost: a three.js voxel world on the real village clock, Iskre walking their true routes (they sense you near), signs that land as percepts, reading stands for any building's work, a live ghost roster (parent + public visitors see each other), full mobile controls. Plus: visiting federated beings now have real bodies in the host village, letters read like an inbox, wallet recharge, and a mind graph that can't be wiped by a timed-out dream.
+- **Lanes A/B/C** — three rooms on one agent process, each with its own session, transcript, queue and busy flag, running at the same time. Three id ranges enrich in parallel against the same table. An omitted lane resolves to A, so WhatsApp, cron, botport and every existing client are untouched. A tab strip shows each lane's state and marks the one that produced output while you looked away.
+- **A queue that finishes** — four ways it could stall are closed: a slash command that answered out of band, a trailing question read as "waiting for you", a give-up reply ticked off as success (it now **re-runs** the task — verbatim, then nudged to how it failed — and after three tries **stops rather than skipping**), and lanes silently opening in MANUAL. Each card reports what its run cost: times, elapsed, tools, tokens.
+- **The Task Planner** — describe a repetitive job once, attach files, get a plan you read and edit before **anything** is queued. The model returns one **template plus a range**, never the messages, so every task is byte-identical except its range and no rule can drift between batch 3 and batch 19. Ranges come from the table's real MIN/MAX. Continue where the last sitting stopped, free.
+- **The datastore tool answers a fumbled call** — a dropped `table` recovers or refuses with a filled-in retry, synonyms (`data`, `select`, `order`, …) are renamed instead of silently ignored, a SQL write comes back translated, and every way a model asks for a range now works. One repeated `where` key used to widen a 10-row read into **1.38M characters** of context.
+- **Iskre shape their world** — beings craft and place objects, name their homes, break ground on impulse (a new *Impulse* genome stat), and hand work between their two brains on a visible work board. The keeper paints roads, grows the plot, and builds anywhere from the map or in first person.
 
-See [RELEASE_NOTES_0.7.7.md](release-notes/RELEASE_NOTES_0.7.7.md).
+See [RELEASE_NOTES_0.7.8.md](release-notes/RELEASE_NOTES_0.7.8.md).
 
 ## What's New in 0.7.6
 

@@ -4308,6 +4308,44 @@ Three cross-mode capabilities landed in 0.7.3 for Basna, Vatra, and Code. **All 
 
 **Max parallel agents.** A **Max parallel** input (0 = unlimited) caps how many agent turns run at once — set it low (e.g. 2) for local models so parallel prefills don't exhaust the serving box's memory.
 
+### Lanes — three parallel contexts on one agent (NEW in 0.7.8)
+
+An agent used to hold **one** conversation at a time: one busy flag, one active session, every token broadcast to every client. Lanes give the same process **three rooms** — `A`, `B`, `C` — each with its own session, transcript, queue and busy flag, **running at the same time**. Three id ranges enrich in parallel against the same table instead of one after another.
+
+**Lane A *is* the agent you already have.** An omitted lane resolves to A, so WhatsApp, the glasses bridge, botport, cron turns and every REST caller keep the agent and session they always had — lanes are additive, not a migration. Anything arriving from outside lands in A, which makes A the noisy lane: put long unattended runs in B and C.
+
+**Using them.** Open a chat and the strip above it reads `A - <agent>`, `B - …`, `C - …`. Click a lane to switch; its socket opens on first view (no cost for lanes you never use). The dot tells you which of four states it's in — grey never opened, pulsing violet running, amber waiting on an answer, emerald idle — plus a pending count and a **blue mark** when a lane produced output while you were looking elsewhere.
+
+**Shared vs per-lane.** Per lane: session, transcript, queue, auto-mode, busy flag, `/new`, `/model`, planning state. Shared: the agent's files, its **datastore** (the point — one `fund_portfolio` for all three), memory, and the LLM provider. Two lanes writing the same rows will fight; give each a disjoint id range.
+
+### The task queue — long work that runs unattended (NEW in 0.7.8)
+
+The fullscreen chat's left sidebar holds a **queue**: messages dispatched one at a time, each waiting for the previous to finish. 0.7.8 makes it finish.
+
+- **AUTO / MANUAL** — in auto, an item is ticked done when the agent's reply reads as complete; in manual you tick it. A new lane inherits the setting from the agent's existing lane.
+- **A question no longer strands it.** A trailing `?` on a long, substantive reply counts as complete (the courtesy question after a finished job). A genuine short question holds the queue for **three minutes**, shows an amber `?` on the row saying why, and then moves on. Answering in chat cancels the hold.
+- **A give-up reply re-runs the task.** `I got stuck…`, retries or budget exhausted — the item is **not** ticked off. It's re-sent verbatim, and if that fails too, with a nudge shaped to the failure: budget-exhausted agents are told to keep what they produced and work in smaller steps; stuck ones to work through the obstacle. After three attempts the queue **stops rather than skipping**, marks the row, and says so.
+- **Slash commands** (`/new`, `/clear`, …) complete properly instead of spinning forever.
+- **Run cost per card** — start and end clock times to the second, elapsed (ticking while it runs), tool calls, and tokens in/cached/out, accumulated across re-runs.
+- **Clear finished** empties the completed items; pending and in-flight stay.
+
+Queued turns skip the post-turn "suggested next steps" call and the **task rephrase** — the next message is already written, and rephrasing rewrites instructions you chose word by word.
+
+### The Task Planner — one description becomes a queue (NEW in 0.7.8)
+
+Press **Plan** in the queue header. Describe the whole job once, attach files if it needs them, pick the table, the batch key, rows per task and the target lane — and get back a plan you **read and edit before anything is queued**.
+
+**How it works.** The model is never asked for the messages. It returns **one template plus the overall range**, and Flight Deck expands it. A batch message is ~90% standing rules, and a model asked to reproduce them twenty-five times paraphrases, compresses, and eventually drops the clause that looked redundant — `never do +1 on the id!`, say, which corrupts a table. Expanding in Python means every task is byte-identical except its range, one LLM call whether there are three batches or two hundred, and slicing that cannot overlap, gap, or go off by one.
+
+- **Ranges are facts** — the agent's real tables, columns and the MIN/MAX of the batching key are read before the call, so a plan can't cover rows that don't exist.
+- **Edit the template** and every task re-renders instantly (free — no model call). A task you hand-edit is **pinned** so template edits stop overwriting it.
+- **Attach files** — they upload to the agent (tasks reference the path) and are previewed for the planner (so it can see the ids inside). xlsx/docx/pdf/pptx/csv all read.
+- **`/new` between tasks** (on by default) gives each task a fresh session, which is what makes them independent.
+- **Continue where it stopped** — reopening says *"last plan covered `_id` up to 490 — 25 tasks, 3h ago"* and offers the next stretch from 491, reusing the approved template with **no model call**.
+- The planner uses **the agent's own model and key**, not Flight Deck's.
+
+Guards: max 50 tasks by default (ceiling 200), batch size 1–50, and nothing is enqueued until you press Send.
+
 ### Mrav — the micro runtime & Browser LLM (NEW in 0.7.7)
 
 **Mrav** is a parallel agentic runtime for small models (Gemma 4 E2B/E4B, Qwen3.5 4B class) with a **hard 8,192-token input cap per LLM call**. The classic agent is untouched — Mrav shares its tools, tiers and chat transport, but replaces prompt assembly entirely: a token ledger enforces the cap, state lives on a blackboard outside the model, and the loop runs in small steps (plan → act-one-tool → digest → compress) with **grammar-constrained JSON** replies (Ollama structured outputs / WebLLM xgrammar). Honest by design: failures surface as errors, never silent upgrades; an optional escalation retry is off by default.
