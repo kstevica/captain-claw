@@ -27,6 +27,7 @@ import {
   Play,
   Trash2,
   CircleDot,
+  HelpCircle,
   Workflow,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
@@ -894,6 +895,18 @@ function QueuePanel({ containerId }: { containerId: string }) {
     taRef.current?.focus()
   }, [])
 
+  // Queued items are long instructions, so the box starts at 5 rows and grows
+  // with the draft up to ~40% of the panel before handing over to its own
+  // scrollbar — the list above keeps the rest of the height.
+  const QUEUE_INPUT_MIN_PX = 92
+  useEffect(() => {
+    const ta = taRef.current
+    if (!ta) return
+    ta.style.height = 'auto'
+    const cap = Math.max(QUEUE_INPUT_MIN_PX, Math.round((ta.closest('.flex.h-full')?.clientHeight ?? 600) * 0.4))
+    ta.style.height = `${Math.min(Math.max(ta.scrollHeight, QUEUE_INPUT_MIN_PX), cap)}px`
+  }, [draft])
+
   if (!session) return null
   const queue = session.queue
   const auto = session.queueAutoMode
@@ -954,8 +967,9 @@ function QueuePanel({ containerId }: { containerId: string }) {
         </button>
       </div>
 
-      {/* Items */}
-      <div className="flex-1 overflow-y-auto px-2 py-2">
+      {/* Items — min-h-0 so this is the column's scroll region: cards keep
+          their full height and the list scrolls past them. */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         {queue.length === 0 ? (
           <p className="px-2 py-6 text-center text-[11px] text-zinc-500">
             Add a message below to queue it. Items dispatch one at a time after the previous finishes.
@@ -1012,9 +1026,10 @@ function QueuePanel({ containerId }: { containerId: string }) {
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={handleKey}
           onPaste={handlePasteEvent}
-          rows={2}
+          rows={5}
           placeholder="Queue a message, paste image, or drop files…"
-          className="w-full resize-none rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+          className="w-full resize-y overflow-y-auto rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+          style={{ minHeight: QUEUE_INPUT_MIN_PX }}
         />
         <input
           ref={fileInputRef}
@@ -1088,8 +1103,14 @@ function QueueItemRow({
       }`}
     >
       <div className="flex items-start gap-1.5">
-        <span className="mt-0.5 shrink-0" title={item.status}>
-          {isDispatched && <Loader2 className="h-3 w-3 animate-spin text-violet-300" />}
+        <span
+          className="mt-0.5 shrink-0"
+          title={item.awaitingAnswer
+            ? 'The agent asked a question — answer it in chat, or the queue moves on in 3 min'
+            : item.status}
+        >
+          {isDispatched && item.awaitingAnswer && <HelpCircle className="h-3 w-3 text-amber-400" />}
+          {isDispatched && !item.awaitingAnswer && <Loader2 className="h-3 w-3 animate-spin text-violet-300" />}
           {isPending && <CircleDot className="h-3 w-3 text-zinc-500" />}
           {isDone && <Check className="h-3 w-3 text-emerald-400" />}
         </span>
@@ -1098,7 +1119,9 @@ function QueueItemRow({
             isDone ? 'line-through' : ''
           } ${isDispatched ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-300'}`}
         >
-          {item.content.length > 240 ? item.content.slice(0, 240) + '…' : item.content}
+          {/* Full text: a queued task is an instruction the user needs to read
+              back before it runs. The card grows to fit; the list scrolls. */}
+          {item.content}
         </span>
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
           {isDispatched && !autoMode && (

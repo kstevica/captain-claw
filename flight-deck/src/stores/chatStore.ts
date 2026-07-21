@@ -217,6 +217,9 @@ export interface QueuedMessage {
   createdAt: number
   dispatchedAt?: number
   completedAt?: number
+  // Auto-mode is holding this item because the agent asked something. The row
+  // shows it, and the hold expires (see armQuestionWatch).
+  awaitingAnswer?: boolean
 }
 
 let _queueCounter = 0
@@ -265,6 +268,58 @@ function cancelAutoCompleteWatch(containerId: string) {
   if (!watch) return
   clearTimeout(watch.timer)
   _autoCompleteWatches.delete(containerId)
+}
+
+// ── Waiting on an answer (bounded) ──
+//
+// When a reply reads as a genuine clarifying question, auto-mode holds the
+// item so the user can answer. It used to hold it FOREVER: no timer, no UI
+// signal, just a spinner that never stopped and a queue that never moved.
+//
+// So the hold is now bounded and visible. The item is flagged
+// `awaitingAnswer` (the row shows why it stopped), and if no answer arrives
+// the queue moves on rather than stranding every item behind it. This timer
+// is deliberately separate from the auto-complete watch — `next_steps` fires
+// within seconds of a turn ending and would otherwise cut the wait short.
+const _questionWatches = new Map<string, ReturnType<typeof setTimeout>>()
+const QUESTION_HOLD_MS = 180000   // 3 min
+
+function armQuestionWatch(containerId: string, itemId: string) {
+  cancelQuestionWatch(containerId)
+  _setAwaitingAnswer(containerId, itemId, true)
+  _questionWatches.set(containerId, setTimeout(() => {
+    _questionWatches.delete(containerId)
+    const state = useChatStore.getState()
+    const session = state.sessions.get(containerId)
+    if (!session || !session.queueAutoMode) return
+    if (session.queueDispatchedId !== itemId) return
+    if (session.busy) return          // the user answered and it's working
+    state.addLocalNote(containerId,
+      'Queue moved on: the agent ended with a question and no answer arrived in 3 minutes.')
+    state.markQueueItemDone(containerId, itemId)
+  }, QUESTION_HOLD_MS))
+}
+
+function cancelQuestionWatch(containerId: string) {
+  const timer = _questionWatches.get(containerId)
+  if (timer) {
+    clearTimeout(timer)
+    _questionWatches.delete(containerId)
+  }
+  const session = useChatStore.getState().sessions.get(containerId)
+  if (session?.queue.some((q) => q.awaitingAnswer)) {
+    updateSession(containerId, {
+      queue: session.queue.map((q) => (q.awaitingAnswer ? { ...q, awaitingAnswer: false } : q)),
+    })
+  }
+}
+
+function _setAwaitingAnswer(containerId: string, itemId: string, value: boolean) {
+  const session = useChatStore.getState().sessions.get(containerId)
+  if (!session) return
+  updateSession(containerId, {
+    queue: session.queue.map((q) => (q.id === itemId ? { ...q, awaitingAnswer: value } : q)),
+  })
 }
 
 // ── Stall detection (client-side safety net) ──
@@ -408,11 +463,17 @@ function isLikelyTaskComplete(text: string): boolean {
   const lastLine = lastIdx >= 0 ? lines[lastIdx].trim() : ''
   // Strip trailing punctuation pairings like ?**, ?", ?_
   const lastChar = lastLine.replace(/[\s*_"'`)\]]+$/g, '').slice(-1)
-  if (lastChar === '?') return false
-  // Confirmation-seeking phrases. Only treat as "waiting" if the message is
-  // reasonably short — a 5KB report that mentions "let me know if" is fine.
   const lower = trimmed.toLowerCase()
   const SHORT_LIMIT = 1200
+  // A trailing "?" blocks only on a SHORT reply — the same gate the
+  // confirmation phrases below already use, and for the same reason. An
+  // agent that did the work, printed a ten-row table of results, and then
+  // offered "Did you mean a different range? Perhaps 910-919?" has finished
+  // its task; the question is a courtesy, not a blocker. Treating that as a
+  // clarification parked one user's queue indefinitely.
+  if (lastChar === '?' && trimmed.length <= SHORT_LIMIT) return false
+  // Confirmation-seeking phrases. Only treat as "waiting" if the message is
+  // reasonably short — a 5KB report that mentions "let me know if" is fine.
   if (trimmed.length <= SHORT_LIMIT) {
     const patterns = [
       /\bconfirm with\b/,
@@ -827,9 +888,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }
           } else if (isLikelyTaskComplete(cleanContent)) {
             resetStallNudges(containerId)
+            cancelQuestionWatch(containerId)
             armAutoCompleteWatch(containerId, dispatchedId)
+          } else {
+            // A question. Hold for the user — but bounded and visible, never
+            // the silent forever-park this used to be.
+            armQuestionWatch(containerId, dispatchedId)
           }
-          // else: question — do nothing, user will answer.
         }
       }
     })
@@ -1420,6 +1485,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sendMessage: (containerId, content) => {
     const session = get().sessions.get(containerId)
     if (!session) return
+    // An answer ends the hold — the agent's next reply is re-evaluated fresh.
+    cancelQuestionWatch(containerId)
     // Add user message to local state
     const msg: ChatMessage = {
       id: nextId(),
@@ -1550,6 +1617,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       patch.queueDispatchedId = null
       cancelAutoCompleteWatch(containerId)
       cancelCommandWatch(containerId)
+      cancelQuestionWatch(containerId)
       resetStallNudges(containerId)
     }
     updateSession(containerId, patch)
@@ -1569,6 +1637,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       patch.queueDispatchedId = null
       cancelAutoCompleteWatch(containerId)
       cancelCommandWatch(containerId)
+      cancelQuestionWatch(containerId)
       resetStallNudges(containerId)
     }
     updateSession(containerId, patch)
@@ -1582,7 +1651,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     updateSession(containerId, { queueAutoMode: next })
     // Turning auto-mode off cancels any pending watch so it doesn't fire
     // after the user has switched to manual.
-    if (!next) cancelAutoCompleteWatch(containerId)
+    if (!next) { cancelAutoCompleteWatch(containerId); cancelQuestionWatch(containerId) }
     // Turning auto-mode on while idle should kick the queue.
     if (next) tryDispatchNext(containerId)
   },
