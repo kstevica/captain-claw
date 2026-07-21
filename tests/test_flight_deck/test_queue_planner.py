@@ -145,7 +145,8 @@ def test_prompt_carries_facts_batch_size_and_shape():
     assert "enrich the portfolio" in p
     assert "min=1, max=1818" in p
     assert "Batch size: 10" in p
-    assert '"batches"' in p and '"template"' in p
+    # The shape asks for a range now, not an enumeration (see below).
+    assert '"range"' in p and '"template"' in p
 
 
 def test_prompt_includes_file_notes_only_when_present():
@@ -359,3 +360,193 @@ async def test_continue_endpoint_needs_a_template():
     with pytest.raises(HTTPException) as e:
         await continue_plan(ContinueRequest(template="", start=1), user={"id": 1})
     assert e.value.status_code == 400
+
+
+# ── The planner borrows the agent's model and key ──
+# Falling back to Flight Deck's registry tier fails with "Missing Anthropic API
+# Key" on a machine where nothing is broken: the keys live with the AGENT, in
+# fd-data/<slug>/.env. Same principle the flow engine uses when it spawns a
+# specialist — use the keys of the agent you're talking to.
+
+@pytest.fixture
+def fake_agent_dir(tmp_path, monkeypatch):
+    from captain_claw.flight_deck import queue_planner as qp
+
+    slug = "deep-researcher-xik6"
+    d = tmp_path / slug
+    d.mkdir()
+    (d / "config.yaml").write_text(
+        "model:\n"
+        "  provider: openai\n"
+        "  model: deepseek-v4-pro\n"
+        "  api_key: ''\n"
+        "  base_url: https://api.deepseek.com\n"
+    )
+    (d / ".env").write_text("OPENAI_API_KEY=sk-agent-key\nBRAVE_API_KEY=b\n")
+
+    import captain_claw.flight_deck.server as srv
+    monkeypatch.setattr(srv, "DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(srv, "_load_process_registry",
+                        lambda: {slug: {"web_port": 24080, "provider": "openai",
+                                        "model": "deepseek-v4-pro"}}, raising=False)
+    return qp
+
+
+def test_agent_model_comes_from_its_own_config(fake_agent_dir):
+    got = fake_agent_dir.resolve_agent_model(24080)
+    assert got["provider"] == "openai"
+    assert got["model"] == "deepseek-v4-pro"
+    assert got["base_url"] == "https://api.deepseek.com"
+
+
+def test_the_key_is_found_in_the_agent_s_env(fake_agent_dir):
+    """config.yaml has api_key: '' — the real key lives in .env."""
+    assert fake_agent_dir.resolve_agent_model(24080)["api_key"] == "sk-agent-key"
+
+
+def test_an_unknown_port_resolves_to_nothing(fake_agent_dir):
+    """Falls through to the registry tier rather than guessing."""
+    assert fake_agent_dir.resolve_agent_model(9999) == {}
+    assert fake_agent_dir.resolve_agent_model(0) == {}
+
+
+def test_provider_decides_the_key_var_not_the_base_url():
+    """An 'openai' agent pointed at api.deepseek.com still uses OPENAI_API_KEY."""
+    from captain_claw.flight_deck.queue_planner import _PROVIDER_KEY_VARS
+
+    assert _PROVIDER_KEY_VARS["openai"] == ("OPENAI_API_KEY",)
+    assert "ANTHROPIC_AUTH_TOKEN" in _PROVIDER_KEY_VARS["anthropic"]
+
+
+def test_env_parsing_skips_comments_and_blanks(tmp_path):
+    from captain_claw.flight_deck.queue_planner import _read_env_file
+
+    f = tmp_path / ".env"
+    f.write_text("# a comment\n\nOPENAI_API_KEY=sk-1\nBROKEN\nB=2\n")
+    assert _read_env_file(f) == {"OPENAI_API_KEY": "sk-1", "B": "2"}
+
+
+def test_a_missing_env_file_is_not_an_error(tmp_path):
+    from captain_claw.flight_deck.queue_planner import _read_env_file
+
+    assert _read_env_file(tmp_path / "nope.env") == {}
+
+
+def test_a_stale_entry_on_the_same_port_does_not_win(tmp_path, monkeypatch):
+    """Observed live: port 24101 held both a dead `gpt-test` and the running
+    agent. Taking the first match planned with the wrong model and no key."""
+    from captain_claw.flight_deck import queue_planner as qp
+    import captain_claw.flight_deck.server as srv
+
+    for slug, model, key in (("gpt-test", "gpt-5.3-codex", "sk-stale"),
+                             ("live-agent", "deepseek-v4-pro", "sk-live")):
+        d = tmp_path / slug
+        d.mkdir()
+        (d / "config.yaml").write_text(f"model:\n  provider: openai\n  model: {model}\n")
+        (d / ".env").write_text(f"OPENAI_API_KEY={key}\n")
+
+    monkeypatch.setattr(srv, "DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(srv, "_load_process_registry", lambda: {
+        "gpt-test": {"web_port": 24101, "provider": "openai"},      # dead, listed first
+        "live-agent": {"web_port": 24101, "provider": "openai"},
+    }, raising=False)
+    monkeypatch.setattr(srv, "_process_is_alive", lambda s: s == "live-agent", raising=False)
+
+    got = qp.resolve_agent_model(24101)
+    assert got["model"] == "deepseek-v4-pro" and got["api_key"] == "sk-live"
+
+
+def test_all_entries_dead_still_yields_one(tmp_path, monkeypatch):
+    """Better the wrong-but-plausible model than no planner at all."""
+    from captain_claw.flight_deck import queue_planner as qp
+    import captain_claw.flight_deck.server as srv
+
+    d = tmp_path / "only"
+    d.mkdir()
+    (d / "config.yaml").write_text("model:\n  provider: openai\n  model: m\n")
+    monkeypatch.setattr(srv, "DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(srv, "_load_process_registry",
+                        lambda: {"only": {"web_port": 1, "provider": "openai"}}, raising=False)
+    monkeypatch.setattr(srv, "_process_is_alive", lambda s: False, raising=False)
+    assert qp.resolve_agent_model(1)["model"] == "m"
+
+
+def test_a_liveness_check_that_throws_is_not_fatal(tmp_path, monkeypatch):
+    from captain_claw.flight_deck import queue_planner as qp
+    import captain_claw.flight_deck.server as srv
+
+    d = tmp_path / "only"
+    d.mkdir()
+    (d / "config.yaml").write_text("model:\n  provider: openai\n  model: m\n")
+    monkeypatch.setattr(srv, "DATA_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(srv, "_load_process_registry",
+                        lambda: {"only": {"web_port": 1, "provider": "openai"}}, raising=False)
+
+    def boom(_):
+        raise RuntimeError("ps failed")
+
+    monkeypatch.setattr(srv, "_process_is_alive", boom, raising=False)
+    assert qp.resolve_agent_model(1)["model"] == "m"
+
+
+# ── The reply must stay small ──
+# Observed: "Expecting ',' delimiter: line 135 column 31 (char 4544)" — the
+# model was enumerating 50 batches and ran out of output tokens mid-JSON.
+# Raising the cap only postpones that; the batches are arithmetic, so the model
+# shouldn't be writing them at all.
+
+def test_the_shape_asks_for_a_range_not_an_enumeration():
+    from captain_claw.flight_deck.queue_planner import _SHAPE, _SYSTEM
+
+    assert '"range"' in _SHAPE and '"batch_size"' in _SHAPE
+    assert "Do NOT list the individual batches" in _SHAPE
+    assert "do NOT enumerate the batches" in _SYSTEM
+
+
+def test_a_range_reply_is_a_fraction_of_an_enumerated_one():
+    """The point of the change, in bytes."""
+    import json
+
+    ranged = json.dumps({"template": "t", "range": {"start": 1, "end": 500},
+                         "batch_size": 10})
+    enumerated = json.dumps({"template": "t", "batches": [
+        {"from": i, "to": i + 9} for i in range(1, 501, 10)]})
+    assert len(ranged) * 5 < len(enumerated)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("241", 241), (241, 241), (" 12 ", 12), ("nope", None), (None, None), (True, None),
+])
+def test_numbers_arriving_as_strings_still_parse(raw, expected):
+    from captain_claw.flight_deck.queue_planner import _as_int
+
+    assert _as_int(raw) == expected
+
+
+def test_a_truncated_reply_says_it_was_cut_off():
+    """'did not return JSON' sends you looking for the wrong bug."""
+    from captain_claw.flight_deck.queue_planner import parse_plan
+
+    with pytest.raises(HTTPException) as e:
+        parse_plan('{"template": "long…", "batches": [{"from": 1, "to": 10}, {"from"')
+    assert "cut off" in e.value.detail and "shorten" in e.value.detail
+
+
+def test_a_genuinely_malformed_reply_still_reads_as_malformed():
+    from captain_claw.flight_deck.queue_planner import parse_plan
+
+    with pytest.raises(HTTPException) as e:
+        parse_plan("{'template': 'single quotes are not JSON'}")
+    assert "did not return JSON" in e.value.detail
+
+
+def test_range_slicing_covers_the_whole_span():
+    """1..1818 in tens is 182 batches, the last one short — no gap at the end."""
+    from captain_claw.flight_deck.queue_planner import make_batches
+
+    size, start, end = 10, 1, 1818
+    count = (end - start + size) // size
+    batches, _ = make_batches(start, size, count, key_max=end)
+    assert len(batches) == 182
+    assert batches[0] == {"from": 1, "to": 10}
+    assert batches[-1] == {"from": 1811, "to": 1818}

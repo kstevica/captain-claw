@@ -109,6 +109,16 @@ def clamp_batches(batches: list[dict[str, Any]], max_tasks: int) -> tuple[list[d
     )
 
 
+def _as_int(value: Any) -> int | None:
+    """Models write numbers as strings often enough to matter."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def make_batches(start: int, size: int, count: int,
                  key_max: int | None = None) -> tuple[list[dict[str, int]], str | None]:
     """Consecutive ranges from *start* — the arithmetic half of a plan.
@@ -295,6 +305,109 @@ async def build_file_notes(host: str, port: int, auth: str,
     return "\n".join(notes)
 
 
+# ── Whose model does the planning? ───────────────────────────────────
+#
+# The agent you are planning FOR already has a working model and the key to
+# call it. Falling back to a registry tier means the planner fails with
+# "Missing Anthropic API Key" on a machine where nothing is broken — the keys
+# simply live with the agent, in fd-data/<slug>/.env, not in FD's environment.
+#
+# Same principle the flow engine already uses when it spawns a specialist:
+# use the keys of the agent you're talking to.
+
+# provider name → the env var its key lives under. The provider name is what
+# matters, not the base_url: an agent on "openai" pointed at api.deepseek.com
+# still keeps its key in OPENAI_API_KEY.
+_PROVIDER_KEY_VARS: dict[str, tuple[str, ...]] = {
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "groq": ("GROQ_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY", "OPENAI_API_KEY"),
+    "mistral": ("MISTRAL_API_KEY",),
+    "xai": ("XAI_API_KEY",),
+}
+
+
+def _read_env_file(path: pathlib.Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip():
+                out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+def _safe_alive(is_alive: Any, slug: str) -> bool:
+    try:
+        return bool(is_alive(slug))
+    except Exception:
+        return False
+
+
+def resolve_agent_model(port: int) -> dict[str, str]:
+    """The target agent's own provider, model, base_url and key.
+
+    Empty dict when the agent can't be identified — the caller then falls back
+    to the registry tier, which is right for a Flight Deck that does have its
+    own key configured.
+    """
+    if not port:
+        return {}
+    try:
+        from captain_claw.flight_deck.server import (
+            DATA_DIR, _load_process_registry, _process_is_alive,
+        )
+    except Exception:  # pragma: no cover — server not importable in isolation
+        return {}
+
+    # A port is not unique in the registry: a dead agent's entry lingers, and a
+    # new agent takes the freed port. Observed live — 24101 held both a stale
+    # `gpt-test` and the running `deep-researcher-xik6`, and taking the first
+    # match planned with the wrong agent's model and no key at all. Prefer the
+    # entry whose process is actually alive, exactly as _resolve_agent_auth does.
+    matches = [(s_, e) for s_, e in (_load_process_registry() or {}).items()
+               if int(e.get("web_port") or 0) == int(port)]
+    if not matches:
+        return {}
+    slug, entry = next(
+        ((s_, e) for s_, e in matches if _safe_alive(_process_is_alive, s_)), matches[0])
+
+    out: dict[str, str] = {
+        "provider": str(entry.get("provider") or ""),
+        "model": str(entry.get("model") or ""),
+    }
+    # config.yaml carries base_url (and sometimes the key itself).
+    try:
+        import yaml
+
+        cfg = yaml.safe_load((DATA_DIR / slug / "config.yaml").read_text()) or {}
+        model_cfg = cfg.get("model") or {}
+        out["provider"] = str(model_cfg.get("provider") or out["provider"])
+        out["model"] = str(model_cfg.get("model") or out["model"])
+        out["base_url"] = str(model_cfg.get("base_url") or "")
+        if model_cfg.get("api_key"):
+            out["api_key"] = str(model_cfg["api_key"])
+    except Exception as e:
+        log.debug("agent config unreadable for planner", slug=slug, error=str(e))
+
+    if not out.get("api_key"):
+        env = _read_env_file(DATA_DIR / slug / ".env")
+        for var in _PROVIDER_KEY_VARS.get(out["provider"].lower(), ()):
+            if env.get(var):
+                out["api_key"] = env[var]
+                break
+    return {k: v for k, v in out.items() if v}
+
+
 # ── Prompt ───────────────────────────────────────────────────────────
 
 _SYSTEM = (
@@ -302,10 +415,12 @@ _SYSTEM = (
     "The queue runs each task in its own fresh session, one after another, with no "
     "memory of the others. So every task must be self-contained: all the standing "
     "rules, every time, plus the one thing that differs (usually an id range).\n\n"
-    "You do NOT write the tasks. You write ONE template and the list of ranges to "
-    "expand it over — the caller expands them verbatim. This is deliberate: it "
-    "keeps every task identical except its range, so no rule can be dropped or "
-    "reworded between batch 3 and batch 19.\n\n"
+    "You do NOT write the tasks, and you do NOT enumerate the batches. You write "
+    "ONE template plus the OVERALL range and the batch size; the caller slices "
+    "that range and expands the template over it. This is deliberate: it keeps "
+    "every task identical except its range, no rule can be dropped or reworded "
+    "between batch 3 and batch 19, and the slicing is arithmetic that cannot "
+    "produce an overlap, a gap, or an off-by-one.\n\n"
     "Rules for the template:\n"
     "- Carry EVERY standing rule the user gave, in their words. Do not summarize, "
     "shorten, or 'improve' them. A rule you drop is a rule the agent breaks.\n"
@@ -316,21 +431,26 @@ _SYSTEM = (
     "If files are attached: their paths are given. A task that needs a file must "
     "name its path so the agent can open it — the agent cannot see your preview, "
     "only the file itself.\n\n"
-    "Rules for the batches:\n"
+    "Rules for the range:\n"
     "- Stay strictly inside the real min/max you are given. Never invent rows.\n"
-    "- Use the requested batch size; the last batch may be smaller.\n"
+    "- Give the FIRST and LAST value to cover, and the batch size. Nothing else.\n"
     "- If the user asks for more than exists, cover what exists and say so in "
-    "warnings.\n\n"
+    "warnings.\n"
+    "- Only if the work is NOT a contiguous range (e.g. a specific list of ids "
+    "from an attached file) may you enumerate `batches` instead.\n\n"
     "Return ONLY a JSON object, no prose."
 )
 
 _SHAPE = (
     "{\n"
     '  "template": "<the full task text, with {from} and {to}>",\n'
-    '  "batches": [{"from": <n>, "to": <n>}, …],\n'
+    '  "range": {"start": <first value>, "end": <last value>},\n'
+    '  "batch_size": <rows per task>,\n'
     '  "rationale": "1-2 sentences on how you split it",\n'
     '  "warnings": ["…"]\n'
-    "}"
+    "}\n"
+    "Do NOT list the individual batches — `range` + `batch_size` is the whole plan, "
+    "and enumerating 50 of them is how this reply gets truncated."
 )
 
 
@@ -359,6 +479,14 @@ def parse_plan(raw: str) -> dict[str, Any]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
+        # An unterminated object means the reply was cut off mid-write, which
+        # says something quite different from "the model ignored the format".
+        cut_off = text.count("{") > text.count("}") or text.rstrip().endswith((",", '"', ":"))
+        if cut_off:
+            raise HTTPException(502, (
+                "The planner's reply was cut off before the JSON finished "
+                f"({e}). The template is probably very long — shorten the "
+                "standing rules, or plan fewer tasks at a time."))
         raise HTTPException(502, f"The planner did not return JSON: {e}")
     if not isinstance(data, dict):
         raise HTTPException(502, "The planner returned JSON that is not an object")
@@ -498,14 +626,18 @@ async def plan_tasks(body: PlanRequest, user: dict = Depends(get_current_user)):
         facts = await gather_datastore_facts(
             body.host, body.port, body.auth, body.table, body.key_column)
 
+    # Precedence: what the caller asked for, then the AGENT'S own model and
+    # key, then Flight Deck's registry tier.
+    agent_model = resolve_agent_model(body.port)
     from captain_claw.flight_deck.basna_routes import _load_registry
 
     registry = _load_registry()
     tiers = registry.get("tiers", {})
     fast = tiers.get("reason", {}) or tiers.get("fast", {})
-    provider = body.provider or fast.get("provider", "anthropic")
-    model = body.model or fast.get("model", "")
-    base_url = body.base_url or fast.get("base_url", "")
+    provider = body.provider or agent_model.get("provider") or fast.get("provider", "anthropic")
+    model = body.model or agent_model.get("model") or fast.get("model", "")
+    base_url = body.base_url or agent_model.get("base_url") or fast.get("base_url", "")
+    api_key = body.api_key or agent_model.get("api_key") or None
 
     file_notes = body.file_notes or ""
     if body.files and body.port:
@@ -518,25 +650,40 @@ async def plan_tasks(body: PlanRequest, user: dict = Depends(get_current_user)):
         from captain_claw.llm import Message, create_provider
 
         prov = create_provider(provider=provider, model=model,
-                               api_key=body.api_key or None, base_url=base_url or None,
-                               temperature=0.2, max_tokens=4000)
+                               api_key=api_key, base_url=base_url or None,
+                               temperature=0.2, max_tokens=8000)
         resp = await prov.complete(
             messages=[Message(role="system", content=_SYSTEM),
                       Message(role="user", content=user_prompt)],
-            temperature=0.2, max_tokens=4000)
+            temperature=0.2, max_tokens=8000)
     except Exception as e:
-        log.warning("queue planner call failed", error=str(e))
-        raise HTTPException(502, f"Planner call failed: {e}")
+        log.warning("queue planner call failed", error=str(e),
+                    provider=provider, model=model, used_agent_key=bool(agent_model.get("api_key")))
+        raise HTTPException(502, f"Planner call failed ({provider}:{model}): {e}")
 
     data = parse_plan(getattr(resp, "content", "") or "")
     template = str(data.get("template") or "").strip()
     if not template:
         raise HTTPException(502, "The planner returned no template")
+    warnings = [str(w) for w in (data.get("warnings") or [])]
+    # An explicit list wins (a non-contiguous job — specific ids from a file),
+    # but the normal answer is a range we slice ourselves.
     batches = [b for b in (data.get("batches") or []) if isinstance(b, dict)]
     if not batches:
-        raise HTTPException(502, "The planner returned no batches")
-
-    warnings = [str(w) for w in (data.get("warnings") or [])]
+        rng = data.get("range") if isinstance(data.get("range"), dict) else {}
+        start, end = _as_int(rng.get("start")), _as_int(rng.get("end"))
+        if start is None or end is None:
+            raise HTTPException(
+                502, "The planner returned neither a range nor any batches")
+        size = _as_int(data.get("batch_size")) or batch_size
+        size = max(MIN_BATCH, min(MAX_BATCH, size))
+        key_max = _as_int(facts.get("key_max"))
+        if key_max is not None:
+            end = min(end, key_max)
+        count = max(0, (end - start + size) // size)
+        batches, note = make_batches(start, size, count, key_max)
+        if note:
+            warnings.append(note)
     batches, cap_note = clamp_batches(batches, max_tasks)
     if cap_note:
         warnings.append(cap_note)
