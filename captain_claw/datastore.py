@@ -537,6 +537,24 @@ class DatastoreManager:
                 if col not in valid_columns:
                     raise ValueError(f"Unknown column in where: {key}")
 
+            # A list of conditions on ONE column, ANDed together — this is how
+            # a range is expressed: {"id": [{"op": ">=", "value": 370},
+            # {"op": "<=", "value": 379}]}. A JSON object cannot carry two
+            # "id" keys (the second silently wins), so without this form a
+            # model asking for 370..379 gets everything up to 379 instead.
+            if isinstance(val, list) and val and all(isinstance(v, dict) for v in val):
+                for cond in val:
+                    sub_clause, sub_params = self._build_where({key: cond}, valid_columns)
+                    clauses.append(sub_clause[len("WHERE "):] if sub_clause.startswith("WHERE ") else sub_clause)
+                    params.extend(sub_params)
+                continue
+            if isinstance(val, list):
+                # Plain list of values → IN, the obvious reading.
+                placeholders = ", ".join("?" for _ in val)
+                clauses.append(f'"{col}" IN ({placeholders})')
+                params.extend(val)
+                continue
+
             if isinstance(val, dict):
                 op = str(val.get("op", "=")).upper().strip()
                 if op not in _ALLOWED_OPS:

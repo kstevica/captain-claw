@@ -1081,6 +1081,11 @@ class DatastoreConfig(BaseModel):
     max_tables: int = 50
     max_query_rows: int = 500
     max_export_rows: int = 50_000
+    # Hard ceiling on the characters ONE query result may add to the context.
+    # Rows of long prose add up fast: an unbounded 379-row read of a 20-column
+    # table once cost 1.38M characters — 71% of a 200k-token window in a single
+    # tool message. Rows past the budget are dropped with a visible note.
+    max_result_chars: int = 20_000
 
 
 class BotPortClientConfig(BaseModel):

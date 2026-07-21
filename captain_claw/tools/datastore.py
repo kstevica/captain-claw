@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
+from captain_claw.config import get_config
 from captain_claw.datastore import (
     ProtectedError,
     resolve_datastore_manager,
@@ -41,6 +43,52 @@ def _parse_json_str(value: Any | None, label: str) -> Any:
         raise ValueError(f"Invalid JSON for '{label}': {e}") from e
 
 
+def _parse_where(value: Any | None) -> tuple[Any, str | None]:
+    """Parse a `where` filter, rescuing repeated keys.
+
+    A model asking for a range writes the only thing that looks right:
+
+        {"id": {"op": ">=", "value": 370}, "id": {"op": "<=", "value": 379}}
+
+    JSON cannot hold two "id" keys. Standard parsing keeps the LAST one, so
+    the lower bound vanishes without a sound and the filter silently becomes
+    `id <= 379` — one observed call returned 379 rows of prose instead of 10
+    and swallowed 1.38M characters of the agent's context.
+
+    Repeated keys are collected into a list, which `_build_where` ANDs
+    together — exactly what was meant.
+    """
+    if value is None or value == "":
+        return None, None
+    if isinstance(value, (dict, list)):
+        return value, None
+
+    repeated: list[str] = []
+
+    def _hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for k, v in pairs:
+            if k in out:
+                repeated.append(k)
+                prev = out[k]
+                out[k] = [*prev, v] if isinstance(prev, list) else [prev, v]
+            else:
+                out[k] = v
+        return out
+
+    try:
+        parsed = json.loads(value, object_pairs_hook=_hook)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ValueError(f"Invalid JSON for 'where': {e}") from e
+    if not repeated:
+        return parsed, None
+    cols = ", ".join(f"`{c}`" for c in dict.fromkeys(repeated))
+    return parsed, (f"(`where` repeated {cols} — a JSON object can only hold a key once, so "
+                    "the earlier condition would have been dropped. Combined them with AND. "
+                    'For a range, send one key with a list: {"id": [{"op": ">=", "value": 370}, '
+                    '{"op": "<=", "value": 379}]}.)')
+
+
 def _parse_columns(value: Any | None) -> list[str] | None:
     """Parse a columns parameter that may be a list, JSON string, or CSV."""
     if value is None:
@@ -56,10 +104,322 @@ def _parse_columns(value: Any | None) -> list[str] | None:
     return [c.strip() for c in value.split(",") if c.strip()]
 
 
+# ── argument aliases ─────────────────────────────────────────────────
+#
+# Models reach for the name the rest of the world uses — `data` for a
+# payload, `table_name` for a table, `select` for columns. One agent's log
+# over 190 datastore calls: data×3, table_name×2, select×2, order×3, sql×1,
+# column_type×1, column_name×1.
+#
+# Half of those raise a confusing error ("'set_values' is required" when the
+# model plainly sent the values, under `data`). The other half are worse:
+# `select` and `order` are simply dropped, so the call SUCCEEDS and quietly
+# returns every column in arbitrary order. Nothing tells the model its
+# filter went missing.
+#
+# So: accept the synonym, rename it to the canonical parameter, and say so
+# in the result. Never override a canonical value the model did send.
+_ALIASES: dict[str, tuple[str, ...]] = {
+    "table": ("table_name", "tableName", "table_id"),
+    "where": ("filter", "filters", "condition", "conditions", "criteria"),
+    "sql_query": ("sql", "statement", "query_sql"),
+    "columns": ("select", "cols", "column_names"),
+    "order_by": ("order", "sort", "sort_by", "orderBy"),
+    "col_type": ("column_type", "coltype", "type"),
+    "column": ("column_name", "col"),
+    "file_path": ("path", "file", "filename"),
+    "new_name": ("rename_to", "to"),
+    "set_values": ("values", "set", "fields", "updates", "changes"),
+    "rows": ("records", "items", "row"),
+}
+
+# `data` means different things per action, so it can't live in the table above.
+_DATA_TARGET_BY_ACTION: dict[str, str] = {
+    "update": "set_values", "update_column": "set_values",
+    "insert": "rows", "upsert": "rows", "import_file": "rows",
+}
+
+
+def _normalize_arg_aliases(action: str, kwargs: dict[str, Any]) -> str | None:
+    """Rename known synonyms onto canonical parameters. Returns a note if any moved."""
+    renamed: list[str] = []
+
+    def _move(src: str, dst: str) -> None:
+        if kwargs.get(dst) not in (None, ""):
+            return                      # the model sent the real one — leave it
+        val = kwargs.get(src)
+        if val in (None, ""):
+            return
+        kwargs[dst] = val
+        kwargs.pop(src, None)
+        renamed.append(f"`{src}` → `{dst}`")
+
+    for canonical, aliases in _ALIASES.items():
+        for alias in aliases:
+            if alias in kwargs:
+                _move(alias, canonical)
+    if "data" in kwargs:
+        _move("data", _DATA_TARGET_BY_ACTION.get(action, "rows"))
+
+    # Shape slips that cost a round-trip: one row sent bare, or a set of values
+    # wrapped in a pointless list.
+    rows = kwargs.get("rows")
+    if isinstance(rows, dict):
+        kwargs["rows"] = [rows]
+        renamed.append("wrapped a single `rows` object in an array")
+    sv = kwargs.get("set_values")
+    if isinstance(sv, list) and len(sv) == 1 and isinstance(sv[0], dict):
+        kwargs["set_values"] = sv[0]
+        renamed.append("unwrapped `set_values` from a single-item array")
+
+    if not renamed:
+        return None
+    return ("(Adjusted arguments: " + "; ".join(renamed)
+            + ". Use the documented parameter names next time.)")
+
+
+# ── `table` pre-flight ───────────────────────────────────────────────
+#
+# "Error: 'table' is required." is the most-seen datastore failure. It shows
+# up mid-loop: the model upserts into the same table twenty times, then one
+# call comes back without `table` — usually because a large `rows` payload
+# crowded the argument out. The old error was a dead end. It named no tables,
+# showed no way back, and discarded the payload the model had just built, so
+# a weak model's next move was to re-send the same broken call.
+#
+# Two answers, split by blast radius:
+#   - Where a wrong guess is harmless or self-evident (reads, and appends that
+#     land in a table the model was already writing to), infer the table and
+#     say so in the result, so the model sees the correction.
+#   - Where a wrong guess would mangle data (update/delete/drop/rename/column
+#     surgery), never infer — but fail with the table list and a filled-in
+#     example so the retry succeeds on the next turn instead of the fifth.
+
+# Operate on an existing table; a wrong guess costs a re-read or an append.
+_INFERABLE_TABLE_ACTIONS = frozenset({
+    "describe", "query", "export", "insert", "upsert",
+})
+# Need no table at all.
+_NO_TABLE_ACTIONS = frozenset({"list_tables", "sql"})
+# `table` is optional — derived from the filename when omitted.
+_OPTIONAL_TABLE_ACTIONS = frozenset({"import_file"})
+
+# Last table each (datastore, session) actually touched. This is what makes
+# the mid-loop recovery precise: the model isn't guessing at "the only table",
+# it's continuing the table it named on the previous call.
+_LAST_TABLE: dict[str, str] = {}
+_LAST_TABLE_MAX = 512
+
+
+def _scope_key(dm: Any, session_id: str | None) -> str:
+    return f"{getattr(dm, 'db_path', '?')}::{session_id or 'default'}"
+
+
+def _remember_table(dm: Any, session_id: str | None, table: str) -> None:
+    if len(_LAST_TABLE) >= _LAST_TABLE_MAX:
+        _LAST_TABLE.clear()
+    _LAST_TABLE[_scope_key(dm, session_id)] = table
+
+
+def _missing_table_error(action: str, tables: list[Any], kwargs: dict[str, Any]) -> str:
+    """The error a model can actually act on: what exists, and the exact retry."""
+    if action == "create_table":
+        return ("'table' is required for create_table — it names the table to create, "
+                'e.g. {"action": "create_table", "table": "fund_portfolio", '
+                '"columns": [{"name": "id", "type": "integer"}]}.')
+    if not tables:
+        return (f"'table' is required for {action}, but this datastore has no tables yet. "
+                "Create one first with action=create_table.")
+    listing = ", ".join(f"{t.name} ({t.row_count} rows)" for t in tables[:20])
+    example = {"action": action, "table": tables[0].name}
+    for k in ("rows", "set_values", "where", "column", "new_name"):
+        if kwargs.get(k) is not None:
+            example[k] = "…"
+    return (f"'table' is required for {action}. Tables in this datastore: {listing}. "
+            f"Re-send the SAME call with `table` filled in, e.g. "
+            f"{json.dumps(example, ensure_ascii=False)} "
+            "— the arguments you already built are still valid.")
+
+
+# ── SQL writes → the structured action that does the same thing ──────
+#
+# `action="sql"` is SELECT-only, and stays that way: protection rules
+# (_ds_protections) are enforced in the structured write paths, so a raw
+# UPDATE would drive straight through them. But "Only SELECT queries are
+# allowed" tells a model nothing about where to go instead, and it burns a
+# turn — sometimes several — rediscovering the `update` action.
+#
+# So when a write arrives here, translate it and hand back the structured
+# call, filled in. We refuse and explain in the same breath.
+
+_SQL_VERB_TO_ACTION: dict[str, str] = {
+    "UPDATE": "update", "INSERT": "insert", "REPLACE": "upsert",
+    "DELETE": "delete", "CREATE": "create_table", "DROP": "drop_table",
+    "ALTER": "add_column",
+}
+
+
+def _split_top_level(text: str, sep: str = ",") -> list[str]:
+    """Split on `sep`, ignoring separators inside quotes or parentheses."""
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    quote: str | None = None
+    for ch in text:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"":
+            quote = ch
+            buf.append(ch)
+        elif ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth -= 1
+            buf.append(ch)
+        elif ch == sep and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append("".join(buf))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _sql_literal(token: str) -> Any:
+    """Best-effort SQL literal → Python value. Unrecognized tokens stay strings."""
+    t = token.strip()
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in "'\"":
+        return t[1:-1].replace("''", "'")
+    if t.upper() == "NULL":
+        return None
+    if t.upper() in ("TRUE", "FALSE"):
+        return t.upper() == "TRUE"
+    try:
+        return int(t)
+    except ValueError:
+        pass
+    try:
+        return float(t)
+    except ValueError:
+        return t
+
+
+def _sql_where_to_filter(clause: str) -> dict[str, Any] | None:
+    """`id = 5 AND status = 'x'` → {"id": 5, "status": "x"}. None if not that simple."""
+    out: dict[str, Any] = {}
+    for cond in re.split(r"\bAND\b", clause, flags=re.IGNORECASE):
+        m = re.match(r"^\s*[\"'`]?(\w+)[\"'`]?\s*=\s*(.+?)\s*$", cond, re.DOTALL)
+        if not m:
+            return None
+        out[m.group(1)] = _sql_literal(m.group(2))
+    return out or None
+
+
+def _sql_write_to_call(sql: str) -> dict[str, Any] | None:
+    """Translate a simple single-table write into the equivalent tool call."""
+    s = sql.strip().rstrip(";")
+    m = re.match(r"^UPDATE\s+[\"'`]?(\w+)[\"'`]?\s+SET\s+(.+?)(?:\s+WHERE\s+(.+))?$",
+                 s, re.IGNORECASE | re.DOTALL)
+    if m:
+        table, sets, where = m.group(1), m.group(2), m.group(3)
+        values: dict[str, Any] = {}
+        for assign in _split_top_level(sets):
+            a = re.match(r"^[\"'`]?(\w+)[\"'`]?\s*=\s*(.+)$", assign, re.DOTALL)
+            if not a:
+                return None
+            values[a.group(1)] = _sql_literal(a.group(2))
+        call = {"action": "update", "table": table, "set_values": values}
+        if where:
+            filt = _sql_where_to_filter(where)
+            if filt is None:
+                return None
+            call["where"] = filt
+        return call
+
+    m = re.match(r"^INSERT\s+INTO\s+[\"'`]?(\w+)[\"'`]?\s*\((.+?)\)\s*VALUES\s*\((.+)\)$",
+                 s, re.IGNORECASE | re.DOTALL)
+    if m:
+        cols = [c.strip().strip('"\'`') for c in _split_top_level(m.group(2))]
+        vals = [_sql_literal(v) for v in _split_top_level(m.group(3))]
+        if len(cols) != len(vals):
+            return None
+        return {"action": "insert", "table": m.group(1), "rows": [dict(zip(cols, vals))]}
+
+    m = re.match(r"^DELETE\s+FROM\s+[\"'`]?(\w+)[\"'`]?(?:\s+WHERE\s+(.+))?$",
+                 s, re.IGNORECASE | re.DOTALL)
+    if m:
+        call = {"action": "delete", "table": m.group(1)}
+        if m.group(2):
+            filt = _sql_where_to_filter(m.group(2))
+            if filt is None:
+                return None
+            call["where"] = filt
+        return call
+    return None
+
+
+def _sql_write_error(sql: str) -> str:
+    """Refuse a write through raw SQL, and say exactly what to send instead."""
+    verb = (re.match(r"^\s*(\w+)", sql or "") or [None, ""])[1].upper()
+    head = ("`action=\"sql\"` runs SELECT only — writes go through the structured "
+            "actions so protection rules still apply.")
+    call = _sql_write_to_call(sql)
+    if call:
+        return (f"{head} This is a {verb}; re-send it as: "
+                f"{json.dumps(call, ensure_ascii=False)}")
+    action = _SQL_VERB_TO_ACTION.get(verb)
+    if action:
+        return (f"{head} Use action=\"{action}\" instead of a {verb} statement "
+                "(action=\"upsert\" for insert-or-update on a unique key).")
+    return f"{head} Send a SELECT, or use one of the structured actions."
+
+
+def _missing_payload_error(action: str, param: str, kwargs: dict[str, Any], example: str) -> str:
+    """A missing payload error that shows what DID arrive — usually the tell."""
+    got = sorted(k for k, v in kwargs.items()
+                 if not k.startswith("_") and v not in (None, "") and k != "action")
+    got_str = ", ".join(f"`{k}`" for k in got) if got else "nothing but `action`"
+    return (f"'{param}' is required for {action} — it holds the data. "
+            f"This call carried {got_str}. Re-send as: {example}")
+
+
+def _result_char_budget() -> int:
+    try:
+        return int(get_config().datastore.max_result_chars)
+    except Exception:
+        return 20_000
+
+
 def _format_table(columns: list[str], rows: list[list[Any]], total: int | None = None) -> str:
-    """Format query results as a compact markdown table."""
+    """Format query results as a compact markdown table, inside a size budget.
+
+    A read of a wide table can be enormous — rows of prose, padded to column
+    width. One 379-row read cost 1.38M characters and took 71% of a 200k
+    context in a single message. Rows are dropped once the budget is spent,
+    and the result SAYS so along with how to narrow the query: silent
+    truncation would read as "that's all of it".
+    """
     if not rows:
         return "No rows returned."
+
+    budget = _result_char_budget()
+    kept = rows
+    if budget > 0:
+        used = sum(len(str(c)) + 3 for c in columns) * 2
+        for i, row in enumerate(rows):
+            used += sum(len(str(v)) + 3 for v in row)
+            if used > budget:
+                kept = rows[:i]
+                break
+    dropped = len(rows) - len(kept)
+    if dropped and not kept:
+        kept = rows[:1]     # always show something to act on
+        dropped = len(rows) - 1
+    rows = kept
 
     # Compute column widths
     widths = [len(str(c)) for c in columns]
@@ -88,6 +448,14 @@ def _format_table(columns: list[str], rows: list[list[Any]], total: int | None =
     result = "\n".join(lines)
     if total is not None:
         result += f"\n\n({len(rows)} of {total} total rows)"
+    if dropped:
+        result += (
+            f"\n\n⚠ {dropped} more row(s) matched but were NOT shown — the result hit the "
+            f"{budget:,}-character limit. This is a display cap, not the data. "
+            "Narrow it: pass `columns` to fetch only the fields you need, tighten `where` "
+            '(a range is one key with a list: {"id": [{"op": ">=", "value": 1}, '
+            '{"op": "<=", "value": 10}]}), or page with `limit` + `offset`.'
+        )
     return result
 
 
@@ -126,7 +494,11 @@ class DatastoreTool(Tool):
             },
             "table": {
                 "type": "string",
-                "description": "Target table name.",
+                "description": (
+                    "Target table name. REQUIRED for every action except list_tables "
+                    "and sql (and export, when sql_query is given). Send it on every "
+                    "call — do not assume the previous call's table carries over."
+                ),
             },
             "project": {
                 "type": "string",
@@ -195,7 +567,11 @@ class DatastoreTool(Tool):
                 "type": "string",
                 "description": (
                     'JSON filter: {"age": {"op": ">", "value": 25}, "status": "active"}. '
-                    "Simple equality: {\"name\": \"Alice\"}."
+                    'Simple equality: {"name": "Alice"}. A RANGE on one column is a LIST '
+                    'under a single key — {"id": [{"op": ">=", "value": 370}, '
+                    '{"op": "<=", "value": 379}]} — never two "id" keys in one object '
+                    '(JSON keeps only the last, so the other bound is silently lost). '
+                    'A list of plain values means IN: {"id": [1, 2, 3]}.'
                 ),
             },
             "order_by": {
@@ -212,7 +588,7 @@ class DatastoreTool(Tool):
             },
             "sql_query": {
                 "type": "string",
-                "description": "Raw SELECT SQL query (for 'sql' and 'export' actions). For export with sql_query, the query result is exported directly — useful for JOINs across tables.",
+                "description": "Raw SELECT SQL query (for 'sql' and 'export' actions). SELECT only — to change data use action=insert/upsert/update/delete, never an UPDATE/INSERT/DELETE statement here. For export with sql_query, the query result is exported directly — useful for JOINs across tables.",
             },
             "file_path": {
                 "type": "string",
@@ -271,6 +647,32 @@ class DatastoreTool(Tool):
         _log_args = {k: v for k, v in kwargs.items() if not k.startswith("_") and v is not None}
         log.info("Datastore tool call", action=action, **_log_args)
 
+        # Fold synonyms onto the real parameter names (`data` → `set_values`,
+        # `select` → `columns`, …) before anything reads them.
+        alias_note = _normalize_arg_aliases(action, kwargs)
+        if alias_note:
+            log.info("Datastore normalized argument aliases", action=action, note=alias_note)
+
+        # Parse `where` centrally so a repeated key is rescued rather than
+        # silently dropped by json.loads (see _parse_where).
+        try:
+            _where, where_note = _parse_where(kwargs.get("where"))
+        except ValueError as e:
+            return ToolResult(success=False, error=str(e))
+        if _where is not None:
+            kwargs["where"] = _where
+        if where_note:
+            log.warning("Datastore repaired a repeated `where` key", action=action)
+
+        # Recover or explain a missing `table` before the action handlers see
+        # it (see _INFERABLE_TABLE_ACTIONS above). Mutates kwargs["table"].
+        table_note, table_error = await self._preflight_table(dm, action, kwargs, session_id)
+        if table_error is not None:
+            log.warning("Datastore tool result", action=action, success=False,
+                        error=table_error.error)
+            return table_error
+        notes = [n for n in (alias_note, where_note, table_note) if n]
+
         try:
             if action == "list_tables":
                 result = await self._list_tables(dm)
@@ -326,6 +728,12 @@ class DatastoreTool(Tool):
             log.error("Datastore tool error", action=action, error=str(e))
             result = ToolResult(success=False, error=str(e))
 
+        # Tell the model what we assumed or renamed, so the next call arrives
+        # correct instead of leaning on the recovery again.
+        if result.success and notes:
+            head = "\n".join(notes)
+            result.content = f"{head}\n{result.content}" if result.content else head
+
         # Log result
         if result.success:
             # Truncate long content for log readability
@@ -335,6 +743,47 @@ class DatastoreTool(Tool):
             log.warning("Datastore tool result", action=action, success=False, error=result.error)
 
         return result
+
+    @staticmethod
+    async def _preflight_table(
+        dm: Any, action: str, kwargs: dict[str, Any], session_id: str | None,
+    ) -> tuple[str | None, ToolResult | None]:
+        """Fill in a missing `table`, or fail with a retryable error.
+
+        Returns ``(note, error)``: ``note`` is a line to prepend to a
+        successful result when the table was inferred; ``error`` is a
+        ToolResult to return immediately. At most one is ever set.
+        """
+        table = str(kwargs.get("table") or "").strip()
+        if table:
+            kwargs["table"] = table
+            _remember_table(dm, session_id, table)
+            return None, None
+        if action in _NO_TABLE_ACTIONS or action in _OPTIONAL_TABLE_ACTIONS:
+            return None, None
+        # export accepts a raw query instead of a table.
+        if action == "export" and kwargs.get("sql_query"):
+            return None, None
+
+        try:
+            tables = await dm.list_tables()
+        except Exception as e:  # a broken store is the handler's problem, not ours
+            log.debug("table pre-flight could not list tables", error=str(e))
+            return None, None
+
+        if action in _INFERABLE_TABLE_ACTIONS:
+            names = [t.name for t in tables]
+            last = _LAST_TABLE.get(_scope_key(dm, session_id))
+            guess = last if last in names else (names[0] if len(names) == 1 else None)
+            if guess:
+                kwargs["table"] = guess
+                log.info("Datastore inferred missing table", action=action, table=guess,
+                         via="last-used" if guess == last else "only-table")
+                return (f"(This call omitted `table`; used **{guess}**. "
+                        "Include `table` explicitly next time.)"), None
+
+        return None, ToolResult(
+            success=False, error=_missing_table_error(action, tables, kwargs))
 
     # ── action handlers ──────────────────────────────────────────────
 
@@ -383,12 +832,16 @@ class DatastoreTool(Tool):
 
     @staticmethod
     async def _upsert(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
+        _action = "upsert"
         table = kwargs.get("table")
         rows_raw = kwargs.get("rows")
         if not table:
             return ToolResult(success=False, error="'table' is required.")
         if not rows_raw:
-            return ToolResult(success=False, error="'rows' is required (JSON array).")
+            return ToolResult(success=False, error=_missing_payload_error(
+                _action, "rows", kwargs,
+                '{"action": "%s", "table": "%s", "rows": [{"col": "value"}]}'
+                % (_action, table or "your_table")))
         rows = _parse_json_str(rows_raw, "rows")
         if not isinstance(rows, list):
             return ToolResult(success=False, error="'rows' must be a JSON array of objects.")
@@ -468,12 +921,16 @@ class DatastoreTool(Tool):
 
     @staticmethod
     async def _insert(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
+        _action = "insert"
         table = kwargs.get("table")
         rows_raw = kwargs.get("rows")
         if not table:
             return ToolResult(success=False, error="'table' is required.")
         if not rows_raw:
-            return ToolResult(success=False, error="'rows' is required (JSON array).")
+            return ToolResult(success=False, error=_missing_payload_error(
+                _action, "rows", kwargs,
+                '{"action": "%s", "table": "%s", "rows": [{"col": "value"}]}'
+                % (_action, table or "your_table")))
         rows = _parse_json_str(rows_raw, "rows")
         if not isinstance(rows, list):
             return ToolResult(success=False, error="'rows' must be a JSON array of objects.")
@@ -488,7 +945,10 @@ class DatastoreTool(Tool):
         if not table:
             return ToolResult(success=False, error="'table' is required.")
         if not set_raw:
-            return ToolResult(success=False, error="'set_values' is required (JSON object).")
+            return ToolResult(success=False, error=_missing_payload_error(
+                "update", "set_values", kwargs,
+                '{"action": "update", "table": "%s", "set_values": {"col": "value"}, '
+                '"where": {"id": 1}}' % (table or "your_table")))
         set_values = _parse_json_str(set_raw, "set_values")
         where = _parse_json_str(where_raw, "where") if where_raw else None
         count = await dm.update_rows(table, set_values, where)
@@ -556,6 +1016,10 @@ class DatastoreTool(Tool):
         sql_query = kwargs.get("sql_query")
         if not sql_query:
             return ToolResult(success=False, error="'sql_query' is required.")
+        # Catch writes before the store's guard does, so the refusal can carry
+        # the structured call that would have worked.
+        if not re.match(r"^\s*SELECT\b", str(sql_query), re.IGNORECASE):
+            return ToolResult(success=False, error=_sql_write_error(str(sql_query)))
         result = await dm.raw_select(sql_query)
         return ToolResult(
             success=True,
