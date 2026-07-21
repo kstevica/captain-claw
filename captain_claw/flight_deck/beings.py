@@ -2092,16 +2092,37 @@ class BeingsStore:
     def resolve_place_ref(self, owner_id: str, ref: str) -> str | None:
         """A being's words → a real place id: 'home', an exact id, the
         slugified ref, or the place's name (case-insensitive, 'the '
-        optional). None means there is no such ground."""
+        optional). None means there is no such ground.
+
+        Idempotent — feed it an id it minted and the same id comes back."""
         def _bare(s: str) -> str:
             s = s.casefold().strip()
             return s[4:].strip() if s.startswith("the ") else s
+
+        def _thing(word: str) -> str | None:
+            """A standing made thing is real ground too (world-shaping plan
+            Phase 1): walkable by name, namespaced so every consumer knows
+            which layer it landed on."""
+            try:
+                oid = self.resolve_object_ref(owner_id, word,
+                                              standing_only=True)
+            except Exception:  # noqa: BLE001
+                oid = None
+            return f"object:{oid}" if oid else None
         r = (ref or "").strip()
         if not r:
             return None
+        low = r.casefold()
+        # A walk resolves its destination TWICE — once where the words are
+        # read, once inside depart — so the namespace has to DECODE as well
+        # as encode. It only encoded, and so every being who set out for a
+        # made thing was told the thing wasn't there. No place can be named
+        # 'object:…' (ids are kebab), so the prefix is unambiguous.
+        if low.startswith("object:"):
+            return _thing(r[7:].strip())
         if _bare(r) == "home":
             return "home"
-        low, slug = r.casefold(), _slugify(r)
+        slug = _slugify(r)
         places = self.village_places(owner_id)
         for p in places:
             if p["id"] == low or p["id"] == slug:
@@ -2109,14 +2130,7 @@ class BeingsStore:
         for p in places:
             if _bare(p["name"]) == _bare(r):
                 return p["id"]
-        # A standing made thing is real ground too (world-shaping plan
-        # Phase 1): walkable by name, namespaced so every consumer knows
-        # which layer it landed on. Places always win a name collision.
-        try:
-            oid = self.resolve_object_ref(owner_id, r, standing_only=True)
-        except Exception:  # noqa: BLE001
-            oid = None
-        return f"object:{oid}" if oid else None
+        return _thing(r)                 # places win a name collision
 
     def settle_location(self, being: dict, now: datetime | None = None,
                         ) -> dict | None:

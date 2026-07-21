@@ -330,6 +330,56 @@ async def test_go_to_a_made_thing_by_its_name(store):
     assert store.resolve_place_ref(OWNER, "meadow") == "meadow"
 
 
+async def test_a_made_things_id_survives_being_resolved_twice(store):
+    """A walk resolves its destination TWICE — once where the being's words
+    are read, once again inside depart — so an id this layer MINTS has to
+    come back through it whole. It didn't: 'object:' only ever encoded, and
+    every being who set out for a made thing was told the thing wasn't
+    there. Zvjezdana learned the name of Lada's hearth from a letter, walked
+    for it, and the village answered `no place called 'object:tiho-svjetlo'`
+    — the resolved id, right there in the refusal."""
+    b = await _being(store)
+    world.ensure_village(store, OWNER, now=NOW)
+    row = _craft(store, b)
+    ask = _legal_asks(store, b, 1)[0]
+    world.place_object(store, store.get(OWNER, b["slug"]), row["id"],
+                       x=ask[0], y=ask[1], now=NOW)
+    pid = store.resolve_place_ref(OWNER, "Sun Cairn")
+    assert store.resolve_place_ref(OWNER, pid) == pid          # idempotent
+    assert store.depart(OWNER, b["slug"], pid, now=NOW)["location"]["to"] \
+        == pid
+    # Decoding the namespace is not a licence to skip the ground's own law:
+    # a thing that no longer stands is no longer walkable, by either word.
+    world.unplace_object(store, store.get(OWNER, b["slug"]), row["id"],
+                         now=NOW)
+    assert store.resolve_place_ref(OWNER, pid) is None
+    assert store.resolve_place_ref(OWNER, "Sun Cairn") is None
+    assert store.resolve_place_ref(OWNER, "object:no-such-thing") is None
+
+
+async def test_the_mind_walks_to_a_made_thing_it_only_heard_named(store):
+    """The whole staging path end to end: the tick names a thing in words,
+    being_life resolves it, depart resolves it again — and the feet leave
+    the ground. A refusal here means the round trip broke."""
+    db = FakeDB()
+    b = await _being(store, now=NOW - timedelta(days=2))
+    world.ensure_village(store, OWNER, now=NOW)
+    row = _craft(store, b)
+    ask = _legal_asks(store, b, 1)[0]
+    world.place_object(store, store.get(OWNER, b["slug"]), row["id"],
+                       x=ask[0], y=ask[1], now=NOW)
+
+    async def send_go(being, prompt):
+        return _reply(go_to="Sun Cairn")
+
+    await life.tick(db, store, store.get(OWNER, b["slug"]), now=NOW,
+                    send_fn=send_go, usage_fn=_usage)
+    kinds = [e["kind"] for e in store.events(OWNER, b["slug"])]
+    assert "society_refused" not in kinds
+    assert store.get(OWNER, b["slug"])["location"]["to"] \
+        == f"object:{row['id']}"
+
+
 async def test_two_beings_at_one_made_thing_cross_paths(store):
     """Co-presence works on object ground out of the box — a cairn in the
     wilds is a meeting place the moment two beings walk to it."""
