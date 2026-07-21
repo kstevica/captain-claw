@@ -292,3 +292,62 @@ def test_welcome_and_replay_follow_the_socket_s_lane():
     assert "server._session_info(_welcome_agent)" in src
     assert "replay_session = _welcome_agent.session" in src
     assert "replay_session = server.agent.session" not in src
+
+
+# ── Each lane gets its own provider view ──
+# The orchestration loop forces tool use after a stall by setting
+# `_tool_choice_override` on the PROVIDER. Shared across lanes, the next
+# lane's call consumes it: that lane is forced into a tool call it never
+# needed, and the lane that stalled loses its forcing and stalls again.
+
+class FakeProvider:
+    def __init__(self):
+        self.model = "deepseek-v4-pro"
+        self.client = object()            # connection pool — must stay shared
+        self.rate_limiter = object()      # account TPM window — must stay shared
+
+
+def test_lane_provider_does_not_leak_the_tool_choice_override(server):
+    server.agent = types.SimpleNamespace(provider=FakeProvider())
+    lane_b = server._scoped_provider()
+    lane_c = server._scoped_provider()
+
+    # Lane B stalls and forces tool use on its next call.
+    lane_b._tool_choice_override = "required"
+
+    assert getattr(lane_c, "_tool_choice_override", None) is None
+    assert getattr(server.agent.provider, "_tool_choice_override", None) is None
+
+
+def test_lane_provider_keeps_sharing_what_should_be_shared(server):
+    """Three lanes must not each get the configured rate, or their own pool."""
+    server.agent = types.SimpleNamespace(provider=FakeProvider())
+    lane = server._scoped_provider()
+
+    assert lane is not server.agent.provider
+    assert lane.client is server.agent.provider.client
+    assert lane.rate_limiter is server.agent.provider.rate_limiter
+
+
+def test_a_lane_can_switch_model_without_touching_the_others(server):
+    server.agent = types.SimpleNamespace(provider=FakeProvider())
+    lane_b = server._scoped_provider()
+
+    lane_b.model = "gpt-5"
+
+    assert server.agent.provider.model == "deepseek-v4-pro"
+
+
+def test_uncopyable_provider_falls_back_to_sharing(server):
+    class NoCopy:
+        def __copy__(self):
+            raise TypeError("nope")
+
+    shared = NoCopy()
+    server.agent = types.SimpleNamespace(provider=shared)
+    assert server._scoped_provider() is shared      # degraded, not broken
+
+
+def test_no_agent_means_no_provider(server):
+    server.agent = None
+    assert server._scoped_provider() is None

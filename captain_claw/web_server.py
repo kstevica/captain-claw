@@ -1,6 +1,7 @@
 """Web UI server for Captain Claw."""
 
 import asyncio
+import copy
 import json
 import os
 import re
@@ -504,6 +505,32 @@ class WebServer:
             return self
         return _LaneServerView(self, agent, self._lane_send(lane))
 
+    def _scoped_provider(self) -> Any:
+        """A per-scope view of the shared LLM provider.
+
+        A shallow copy, deliberately: the HTTP client, credentials and token
+        rate limiter stay SHARED — one connection pool, and one account-level
+        TPM window rather than three lanes each granted the configured rate —
+        while the provider's per-call scratch state gets its own home.
+
+        That scratch state is why this exists. After a stall the orchestration
+        loop forces tool use by setting ``_tool_choice_override`` ON THE
+        PROVIDER, one-shot, consumed by whichever payload is built next. Shared
+        across lanes, that next payload can belong to a DIFFERENT lane: it gets
+        forced into a tool call it never needed, and the lane that actually
+        stalled loses its forcing and stalls again — burning another iteration
+        toward its budget every time.
+        """
+        base = self.agent.provider if self.agent else None
+        if base is None:
+            return None
+        try:
+            return copy.copy(base)
+        except Exception as e:  # pragma: no cover — provider without copy support
+            log.warning("scoped provider copy failed; sharing the main provider",
+                        error=str(e))
+            return base
+
     async def _build_scoped_agent(self, session: Any, send: Any) -> Agent:
         """Build an Agent whose output goes to *send* instead of _broadcast.
 
@@ -594,7 +621,7 @@ class WebServer:
             return result_holder[0]
 
         agent = Agent(
-            provider=self.agent.provider if self.agent else None,
+            provider=self._scoped_provider(),
             status_callback=status_cb,
             tool_output_callback=tool_output_cb,
             approval_callback=approval_cb,
