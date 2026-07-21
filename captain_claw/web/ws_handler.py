@@ -47,6 +47,14 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     else:
         ws._is_admin = True  # type: ignore[attr-defined]
 
+    # ── Lane binding ──────────────────────────────────────────────
+    # `?lane=B` puts this socket on a parallel context with its own agent,
+    # session and busy flag. Absent or unrecognised → lane A, which IS the
+    # shared main agent, so every existing client is unaffected.
+    lane = server.normalize_lane(request.query.get("lane", ""))
+    ws._lane = lane  # type: ignore[attr-defined]
+    server._lane_sockets.setdefault(lane, set()).add(ws)
+
     server.clients.add(ws)
 
     # Send welcome payload
@@ -83,10 +91,14 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         }
         _sess_meta = (pub_session.metadata if pub_session else {}) or {}
     else:
-        session_info = server._session_info()
+        # A lane socket must see ITS lane's session in the welcome payload and
+        # in the replay below — otherwise lane B opens showing lane A's name,
+        # model and entire history.
+        _welcome_agent = await server.resolve_agent(ws)
+        session_info = server._session_info(_welcome_agent)
         _sess_meta = {}
-        if server.agent and server.agent.session:
-            _sess_meta = server.agent.session.metadata or {}
+        if _welcome_agent and _welcome_agent.session:
+            _sess_meta = _welcome_agent.session.metadata or {}
 
     await server._send(ws, {
         "type": "welcome",
@@ -109,8 +121,8 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     replay_session = None
     if public_session_id:
         replay_session = await _sm.load_session(public_session_id)
-    elif server.agent and server.agent.session:
-        replay_session = server.agent.session
+    elif _welcome_agent and _welcome_agent.session:
+        replay_session = _welcome_agent.session
 
     if replay_session:
         batch: list[dict] = []
@@ -175,6 +187,7 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         pass
     finally:
         server.clients.discard(ws)
+        server._lane_sockets.get(getattr(ws, "_lane", ""), set()).discard(ws)
 
     return ws
 
@@ -282,6 +295,8 @@ async def handle_ws_message(
                 deny_tools=[str(t) for t in (data.get("deny_tools") or [])],
                 no_tools=bool(data.get("no_tools", False)),
                 no_broadcast=bool(data.get("no_broadcast", False)),
+                # Queue-dispatched turns skip the post-turn "what next?" call.
+                no_next_steps=bool(data.get("no_next_steps", False)),
             )
 
     elif msg_type == "run_tool":
@@ -328,7 +343,10 @@ async def handle_ws_message(
         command = str(data.get("command", "")).strip()
         if command:
             from captain_claw.web.slash_commands import handle_command
-            await handle_command(server, ws, command)
+            # On a lane, `/new`, `/model`, `/planning` … must act on THAT
+            # lane's agent and reply into that lane, not lane A's.
+            _cmd_agent = await server.resolve_agent(ws)
+            await handle_command(server.lane_view(ws, _cmd_agent), ws, command)
 
     elif msg_type == "notification":
         # System notification — inject into session history without triggering LLM.
@@ -394,7 +412,7 @@ async def handle_ws_message(
             return
 
         # No trigger requested — inject silently into session history.
-        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        _target_agent = await server.resolve_agent(ws)
         if _target_agent and _target_agent.session:
             _target_agent.session.add_message("user", notif_content)
             log.info("Notification injected into session", content_len=len(notif_content),
@@ -404,7 +422,7 @@ async def handle_ws_message(
         # Inject additional instructions while a task is running.
         btw_content = str(data.get("content", "")).strip()
         _pub_sid = getattr(ws, "_public_session_id", None)
-        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        _target_agent = await server.resolve_agent(ws)
         if btw_content and _target_agent:
             if not hasattr(_target_agent, "_btw_instructions"):
                 _target_agent._btw_instructions = []
@@ -538,7 +556,7 @@ async def handle_ws_message(
         playbook_id = str(data.get("playbook_id", "")).strip()
         # Resolve the target agent — public users have their own agent.
         _pub_sid = getattr(ws, "_public_session_id", None)
-        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        _target_agent = await server.resolve_agent(ws)
         if not _target_agent:
             _target_agent = server.agent  # fallback
         if _target_agent:
@@ -580,7 +598,7 @@ async def handle_ws_message(
         ts = str(data.get("timestamp", "")).strip()
         fb = data.get("feedback")  # "good", "bad", or null to clear
         _pub_sid = getattr(ws, "_public_session_id", None)
-        _fb_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        _fb_agent = await server.resolve_agent(ws)
         if ts and _fb_agent and _fb_agent.session:
             from captain_claw.session import get_session_manager
             session = _fb_agent.session
@@ -596,7 +614,7 @@ async def handle_ws_message(
 
     elif msg_type == "cancel":
         _pub_sid = getattr(ws, "_public_session_id", None)
-        _cancel_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        _cancel_agent = await server.resolve_agent(ws)
         if _cancel_agent and hasattr(_cancel_agent, "cancel_event"):
             _cancel_agent.cancel_event.set()
             log.info("Cancel signal received via WebSocket", public=bool(_pub_sid))
@@ -606,7 +624,7 @@ async def handle_ws_message(
         # Works for both public and admin sessions.
         _pub_sid = getattr(ws, "_public_session_id", None)
         _is_ws_admin = getattr(ws, "_is_admin", False)
-        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        _target_agent = await server.resolve_agent(ws)
         if not _target_agent:
             _target_agent = server.agent
         if _target_agent and _target_agent.session:
@@ -655,7 +673,7 @@ async def handle_ws_message(
         # Flight Deck sends info about other available agents so this
         # agent can be aware of its peers and recommend handoffs.
         _pub_sid = getattr(ws, "_public_session_id", None)
-        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        _target_agent = await server.resolve_agent(ws)
         if not _target_agent:
             _target_agent = server.agent
         if _target_agent:

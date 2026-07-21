@@ -2693,16 +2693,37 @@ async def get_container(container_id: str, request: Request, user: dict | None =
     }
 
 
+def _agent_ws_url(host: str, port: int, auth: str = "", lane: str = "") -> str:
+    """The agent /ws URL for a proxied chat connection.
+
+    `lane` rides along untouched — the agent owns lane normalization, and an
+    omitted lane means A, the agent's main context.
+    """
+    from urllib.parse import quote
+
+    query = []
+    if auth:
+        query.append(f"token={quote(str(auth), safe='')}")
+    if lane:
+        query.append(f"lane={quote(str(lane), safe='')}")
+    return f"ws://{host}:{port}/ws" + (("?" + "&".join(query)) if query else "")
+
+
 @app.websocket("/fd/agent-ws/{host}/{port}")
-async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = ""):
-    """Proxy WebSocket to a CC agent — avoids browser CORS restrictions."""
+async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", lane: str = ""):
+    """Proxy WebSocket to a CC agent — avoids browser CORS restrictions.
+
+    `lane` selects a parallel context on the agent (docs/queue-lanes-plan.md).
+    It is forwarded verbatim; the agent normalizes it, and an absent or
+    unknown lane resolves to A — which IS the agent's main context, so every
+    caller that never heard of lanes is unaffected.
+    """
     import websockets
 
     await ws.accept()
     # Auto-resolve auth token if the caller didn't provide one
     auth = token or _resolve_agent_auth(port)
-    params = f"?token={auth}" if auth else ""
-    agent_url = f"ws://{host}:{port}/ws{params}"
+    agent_url = _agent_ws_url(host, port, auth, lane)
 
     try:
         # ping_interval/ping_timeout keep the upstream link alive through any

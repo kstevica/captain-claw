@@ -150,6 +150,7 @@ async def handle_chat(
     deny_tools: list[str] | None = None,
     no_tools: bool = False,
     no_broadcast: bool = False,
+    no_next_steps: bool = False,
 ) -> None:
     """Process a chat message through the agent.
 
@@ -170,6 +171,8 @@ async def handle_chat(
     # ── Resolve the agent to use ─────────────────────────────────
     public_session_id: str | None = getattr(ws, "_public_session_id", None)
     is_public = bool(public_session_id)
+    # Lane A is the main agent, so `lane` only changes anything for B, C, …
+    lane = server.normalize_lane(getattr(ws, "_lane", ""))
 
     if is_public:
         # Per-session agent for public users — no global busy check.
@@ -189,8 +192,22 @@ async def handle_chat(
             return
         # Register the WS for this session so callbacks can reach it.
         server._public_active_ws[public_session_id] = ws
+    elif lane != server.LANE_MAIN:
+        # A parallel lane: its own agent, its own busy flag, its own sockets.
+        # Runs concurrently with lane A and every other lane.
+        try:
+            agent = await server._get_lane_agent(lane)
+        except Exception as e:
+            await server._send(ws, {"type": "error", "message": f"Lane error: {e}"})
+            return
+        if getattr(agent, "_lane_busy", False):
+            await server._send(ws, {
+                "type": "error",
+                "message": f"Lane {lane} is busy processing another request. Please wait.",
+            })
+            return
     else:
-        # Admin / normal mode — use the main shared agent.
+        # Admin / normal mode — use the main shared agent (lane A).
         if server._busy:
             await server._send(ws, {
                 "type": "error",
@@ -330,10 +347,15 @@ async def handle_chat(
     # ── Send to the right targets ────────────────────────────────
     # For public users we send directly to their WS; for admin we
     # broadcast to all admin connections.
-    if is_public:
+    if is_public or lane != server.LANE_MAIN:
         import json as _json_mod
-        def _send_msg(msg: dict) -> None:
-            fire_and_forget_send(ws, _json_mod.dumps(msg, default=str))
+        # A lane echoes to every socket watching it; a public session to the
+        # one socket it owns.
+        if is_public:
+            def _send_msg(msg: dict) -> None:
+                fire_and_forget_send(ws, _json_mod.dumps(msg, default=str))
+        else:
+            _send_msg = server._lane_send(lane)
         _send_msg({"type": "status", "status": "thinking"})
         _send_msg({
             "type": "chat_message", "role": "user",
@@ -397,6 +419,7 @@ async def handle_chat(
     task = asyncio.create_task(_run_agent(
         server, ws, agent, effective_content, naming_task,
         is_public=is_public,
+        lane=lane,
         public_session_id=public_session_id,
         video_attachments=video_attachments,
         image_attachments=image_attachments,
@@ -404,6 +427,7 @@ async def handle_chat(
         deny_tools=deny_tools,
         no_tools=no_tools,
         no_broadcast=no_broadcast,
+        no_next_steps=no_next_steps,
         flow_text=content,
         flow_attach={
             "image_path": image_path or (image_paths[0] if image_paths else ""),
@@ -412,8 +436,8 @@ async def handle_chat(
         },
     ))
 
-    if is_public:
-        # Store per-session so it isn't garbage-collected.
+    if is_public or lane != server.LANE_MAIN:
+        # Store per-session/per-lane so it isn't garbage-collected.
         agent._public_task = task  # type: ignore[attr-defined]
     else:
         server._active_task = task
@@ -615,6 +639,7 @@ async def _run_agent(
     naming_task: asyncio.Task | None = None,
     *,
     is_public: bool = False,
+    lane: str = "A",
     public_session_id: str | None = None,
     video_attachments: list[str] | None = None,
     image_attachments: list[str] | None = None,
@@ -622,6 +647,7 @@ async def _run_agent(
     deny_tools: list[str] | None = None,
     no_tools: bool = False,
     no_broadcast: bool = False,
+    no_next_steps: bool = False,
     flow_text: str = "",
     flow_attach: dict | None = None,
 ) -> None:
@@ -636,10 +662,20 @@ async def _run_agent(
     # no_broadcast (flow consult): reply ONLY to the requesting socket, never
     # broadcast to the agent's channels/UI — prevents double-delivery when the
     # step runs on a channel-connected agent (e.g. the WhatsApp origin agent).
-    send = _send_to_ws if (is_public or no_broadcast) else (lambda msg: server._broadcast(msg))
+    # A lane streams to every socket watching that lane; lane A (and anything
+    # with no lane) still broadcasts, because lane A IS the main agent.
+    _is_side_lane = lane != server.LANE_MAIN
+    if is_public or no_broadcast:
+        send = _send_to_ws
+    elif _is_side_lane:
+        send = server._lane_send(lane)
+    else:
+        send = lambda msg: server._broadcast(msg)
 
     if is_public:
         agent._public_busy = True  # type: ignore[attr-defined]
+    elif _is_side_lane:
+        agent._lane_busy = True  # type: ignore[attr-defined]
 
     _video_policy_slug = None  # set when a video turn restricts script/shell tools
     try:
@@ -762,8 +798,13 @@ async def _run_agent(
             # workers (Basna/Vatra/Council/Code): they're orchestrated, headless,
             # and have no interactive user to offer follow-ups to (each call is
             # also an extra LLM round-trip we don't want to spend per worker turn).
+            #
+            # A queue-dispatched turn is the same situation wearing a different
+            # hat: the next message is already written and waiting, so asking
+            # the model "what next?" buys nothing and costs a round-trip per
+            # queued item. The client sets no_next_steps for those.
             from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
-            if get_config().ui.next_steps and not _is_fd_spawned_worker():
+            if get_config().ui.next_steps and not no_next_steps and not _is_fd_spawned_worker():
                 try:
                     steps = await extract_next_steps(agent.provider, response)
                     if steps:
@@ -783,10 +824,13 @@ async def _run_agent(
         })
 
         if not is_public:
-            server._broadcast({
-                "type": "session_info",
-                **server._session_info(),
-            })
+            # Built from the agent that just ran, and delivered to the lane
+            # that ran it — lane B's header must not describe lane A.
+            _info = {"type": "session_info", **server._session_info(agent)}
+            if _is_side_lane:
+                send(_info)
+            else:
+                server._broadcast(_info)
 
         # Consciousness background jobs — each an EXTRA, CONCURRENT LLM call
         # fired after the turn (create_task, not awaited).
@@ -879,6 +923,8 @@ async def _run_agent(
                 pass
         if is_public:
             agent._public_busy = False  # type: ignore[attr-defined]
+        elif _is_side_lane:
+            agent._lane_busy = False  # type: ignore[attr-defined]
         else:
             server._busy = False
             server._active_task = None

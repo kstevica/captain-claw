@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 from pathlib import Path
@@ -195,6 +196,41 @@ COMMANDS: list[dict[str, str]] = [
 ]
 
 
+class _LaneServerView:
+    """A read-through view of the WebServer bound to one lane's agent.
+
+    Everything except `agent` and `_broadcast` passes to the real server, so
+    handlers written against `server.agent` operate on the lane without
+    knowing lanes exist — and a broadcast from lane B reaches lane B's
+    sockets instead of every admin client.
+    """
+
+    __slots__ = ("_server", "agent", "_send")
+
+    def __init__(self, server: "WebServer", agent: Agent, send: Any) -> None:
+        object.__setattr__(self, "_server", server)
+        object.__setattr__(self, "agent", agent)
+        object.__setattr__(self, "_send", send)
+
+    def _broadcast(self, msg: dict[str, Any]) -> None:
+        self._send(msg)
+
+    def _session_info(self, agent: Any = None) -> dict[str, Any]:
+        # Describe THIS lane's session, not the main agent's — otherwise
+        # `/new` on lane B reports lane A's session back to the user.
+        return self._server._session_info(agent or self.agent)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._server, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # `agent` is fixed for the lifetime of the view; anything else a
+        # handler assigns (e.g. server._busy) belongs to the real server.
+        if name in ("agent", "_server", "_send"):
+            raise AttributeError(f"{name} is read-only on a lane view")
+        setattr(self._server, name, value)
+
+
 class WebServer:
     """Captain Claw web UI server."""
 
@@ -248,6 +284,11 @@ class WebServer:
         # Hotkey daemon state
         self._hotkey_listener: Any = None
         self._hotkey_state: Any = None
+        # Lanes: parallel contexts on one process. Lane A is `self.agent`, so
+        # only the extra lanes live here (see _get_lane_agent).
+        self._lane_agents: dict[str, Agent] = {}
+        self._lane_locks: dict[str, asyncio.Lock] = {}
+        self._lane_sockets: dict[str, set[web.WebSocketResponse]] = {}
         # Public-run mode: per-session agent isolation.
         self._public_agents: dict[str, Agent] = {}
         self._public_agent_locks: dict[str, asyncio.Lock] = {}
@@ -354,119 +395,249 @@ class WebServer:
                         fire_and_forget_send(ws, json.dumps(msg, default=str))
                 return _send_msg
 
-            send = _make_send(session_id)
-
-            def status_cb(status: str) -> None:
-                send({"type": "status", "status": status})
-
-            def thinking_cb(text: str, tool: str = "", phase: str = "tool") -> None:
-                send({"type": "thinking", "text": text, "tool": tool, "phase": phase})
-
-            def tool_stream_cb(chunk: str) -> None:
-                send({"type": "tool_stream", "chunk": chunk})
-
-            def response_stream_cb(text: str) -> None:
-                send({"type": "response_stream", "text": text})
-
-            def tool_output_cb(tool_name: str, arguments: dict, output: str) -> None:
-                send({
-                    "type": "monitor",
-                    "tool_name": tool_name,
-                    "arguments": arguments,
-                    "output": output,
-                })
-                normalized = str(tool_name or "").strip().lower()
-                if normalized == "task_rephrase":
-                    send({
-                        "type": "chat_message",
-                        "role": "rephrase",
-                        "content": str(output or ""),
-                    })
-                if normalized in ("image_gen", "termux", "browser") and output and not str(output).strip().lower().startswith("error"):
-                    from captain_claw.platform_adapter import extract_image_paths_from_tool_output
-                    for img_path in extract_image_paths_from_tool_output(str(output)):
-                        send({"type": "chat_message", "role": "image", "content": str(img_path)})
-                if normalized == "write" and output and not str(output).strip().lower().startswith("error"):
-                    import re as _re
-                    html_match = _re.search(r"to\s+(\S+\.(?:html|htm|svg))", str(output))
-                    if html_match:
-                        send({"type": "chat_message", "role": "html_file", "content": html_match.group(1).strip()})
-                if normalized not in self._THINKING_SILENT_TOOLS:
-                    from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
-                    summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, arguments or {})
-                    raw = str(output or "")
-                    truncated = raw[:3000]
-                    if len(raw) > 3000:
-                        truncated += f"\n... [{len(raw)} total chars]"
-                    send({"type": "tool_output_inline", "tool": tool_name, "summary": summary, "output": truncated})
-
-            def approval_cb(message: str) -> bool:
-                send({"type": "approval_notice", "message": message})
-                return True
-
-            # Playbook approval callback scoped to this public session's WS.
-            async def _public_playbook_approval(message: str, _send=send) -> bool:
-                import uuid as _uuid
-                request_id = str(_uuid.uuid4())
-                event = asyncio.Event()
-                result_holder: list[bool] = [True]  # default: approve on timeout
-                self._pending_playbook_approvals[request_id] = (event, result_holder)
-                _send({
-                    "type": "approval_request",
-                    "id": request_id,
-                    "message": message,
-                    "category": "playbook",
-                })
-                try:
-                    await asyncio.wait_for(event.wait(), timeout=60.0)
-                except asyncio.TimeoutError:
-                    pass
-                finally:
-                    self._pending_playbook_approvals.pop(request_id, None)
-                return result_holder[0]
-
-            agent = Agent(
-                provider=self.agent.provider if self.agent else None,
-                status_callback=status_cb,
-                tool_output_callback=tool_output_cb,
-                approval_callback=approval_cb,
-                thinking_callback=thinking_cb,
-                tool_stream_callback=tool_stream_cb,
-            )
-            agent.response_stream_callback = response_stream_cb
-            agent.playbook_approval_callback = _public_playbook_approval
-            # Route tool-side broadcasts (interim status / system messages, peer
-            # activity) to THIS public session's WS — admin's _broadcast won't
-            # reach public users. `send` re-reads the active WS each call, so it
-            # survives reconnects.
-            agent.ws_broadcast = send
-
-            # Bind to the public session (skip default session loading).
-            agent.session = session
-            agent.session_manager = sm
-            agent._sync_runtime_flags_from_session()
-            agent._register_default_tools()
-            agent.instructions = self.agent.instructions if self.agent else agent.instructions
-            agent._initialized = True
-            agent._byok_active = False
-
-            # Warm up context caches that initialize() would normally populate.
-            try:
-                await agent._refresh_insights_context_cache()
-            except Exception:
-                pass
-            try:
-                await agent._refresh_nervous_system_cache()
-            except Exception:
-                pass
-            try:
-                await agent._refresh_briefing_context_cache()
-            except Exception:
-                pass
-
+            agent = await self._build_scoped_agent(session, _make_send(session_id))
             self._public_agents[session_id] = agent
             log.info("Created public agent", session_id=session_id, session_name=session.name)
             return agent
+
+    # ── Lanes ─────────────────────────────────────────────────────────
+    #
+    # A lane is a named parallel context on ONE agent process: its own
+    # session, its own transcript, its own busy flag. Lane A *is* the shared
+    # `self.agent` — an omitted lane resolves to A — so every existing client
+    # (WhatsApp, glasses, botport, cron, REST) keeps hitting the agent and
+    # session it always has. B, C, … are additional Agent instances built the
+    # same way public-session agents are, streaming only to their own sockets.
+
+    LANE_MAIN = "A"
+
+    @staticmethod
+    def normalize_lane(raw: Any) -> str:
+        """Map anything a client sends to a lane id. Empty/garbage → A."""
+        lane = re.sub(r"[^A-Za-z0-9_-]", "", str(raw or "")).upper()[:8]
+        return lane or WebServer.LANE_MAIN
+
+    def _lane_send(self, lane: str):
+        """A sender bound to one lane — fans out to every socket on it."""
+        def _send_msg(msg: dict) -> None:
+            data = json.dumps(msg, default=str)
+            for ws in list(self._lane_sockets.get(lane, ())):
+                if not ws.closed:
+                    fire_and_forget_send(ws, data)
+        return _send_msg
+
+    async def _get_lane_agent(self, lane: str) -> Agent:
+        """Return (or lazily create) the Agent driving *lane*.
+
+        Lane A is the main agent, unchanged. Any other lane gets its own
+        Agent bound to a `lane-<id>` session, reused across reconnects and
+        restarts so a lane keeps its history.
+        """
+        lane = self.normalize_lane(lane)
+        if lane == self.LANE_MAIN:
+            return self.agent
+
+        agent = self._lane_agents.get(lane)
+        if agent is not None:
+            return agent
+
+        lock = self._lane_locks.setdefault(lane, asyncio.Lock())
+        async with lock:
+            agent = self._lane_agents.get(lane)
+            if agent is not None:
+                return agent
+
+            session = await self._lane_session(lane)
+            agent = await self._build_scoped_agent(session, self._lane_send(lane))
+            self._lane_agents[lane] = agent
+            log.info("Created lane agent", lane=lane, session_id=session.id)
+            return agent
+
+    async def _lane_session(self, lane: str) -> Any:
+        """The `lane-<id>` session, rejoined if it already exists.
+
+        A lane keeps its history across reconnects and restarts — reopening
+        lane B should show what lane B was doing, not an empty room.
+        """
+        from captain_claw.session import get_session_manager
+
+        sm = get_session_manager()
+        name = f"lane-{lane}"
+        try:
+            for s in await sm.list_sessions(limit=200):
+                if s.name == name:
+                    session = await sm.load_session(s.id)
+                    if session is not None:
+                        return session
+                    break
+        except Exception as e:
+            log.debug("lane session lookup failed", lane=lane, error=str(e))
+        return await sm.create_session(name=name)
+
+    async def resolve_agent(self, ws: Any) -> Agent:
+        """The Agent this socket talks to: its public session, its lane, or main.
+
+        One resolver so every message type (chat, set_model, cancel, slash
+        commands, feedback) lands on the same agent for a given socket.
+        """
+        sid = getattr(ws, "_public_session_id", None)
+        if sid:
+            return self._public_agents.get(sid) or self.agent
+        lane = self.normalize_lane(getattr(ws, "_lane", ""))
+        if lane != self.LANE_MAIN:
+            # Create on demand: /model or /new may be the lane's first message.
+            return await self._get_lane_agent(lane)
+        return self.agent
+
+    def lane_view(self, ws: Any, agent: Agent) -> Any:
+        """A server facade whose `.agent` is *agent* and whose broadcasts stay
+        on this socket's lane.
+
+        Slash commands reach through `server.agent` in ~100 places. Rather
+        than thread a lane id through all of them, hand them a view: the
+        attribute they read resolves to the lane's agent, and the one thing
+        that would leak across lanes — `_broadcast` — is redirected to the
+        lane's own sockets.
+        """
+        lane = self.normalize_lane(getattr(ws, "_lane", ""))
+        if lane == self.LANE_MAIN or agent is self.agent:
+            return self
+        return _LaneServerView(self, agent, self._lane_send(lane))
+
+    async def _build_scoped_agent(self, session: Any, send: Any) -> Agent:
+        """Build an Agent whose output goes to *send* instead of _broadcast.
+
+        Shared by public sessions and lanes: both need an Agent that lives
+        alongside the main one, runs concurrently with it, and streams to a
+        subset of sockets rather than to every admin client.
+        """
+        from captain_claw.session import get_session_manager
+
+        sm = get_session_manager()
+
+        def status_cb(status: str) -> None:
+            send({"type": "status", "status": status})
+
+        def thinking_cb(text: str, tool: str = "", phase: str = "tool") -> None:
+            send({"type": "thinking", "text": text, "tool": tool, "phase": phase})
+
+        def tool_stream_cb(chunk: str) -> None:
+            send({"type": "tool_stream", "chunk": chunk})
+
+        def narration_cb(text: str, iteration: int = 0) -> None:
+            from datetime import datetime, timezone
+            send({
+                "type": "narration",
+                "text": text,
+                "iteration": iteration,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        def response_stream_cb(text: str) -> None:
+            send({"type": "response_stream", "text": text})
+
+        def tool_output_cb(tool_name: str, arguments: dict, output: str) -> None:
+            send({
+                "type": "monitor",
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "output": output,
+            })
+            normalized = str(tool_name or "").strip().lower()
+            if normalized == "task_rephrase":
+                send({
+                    "type": "chat_message",
+                    "role": "rephrase",
+                    "content": str(output or ""),
+                })
+            if normalized in ("image_gen", "termux", "browser") and output and not str(output).strip().lower().startswith("error"):
+                from captain_claw.platform_adapter import extract_image_paths_from_tool_output
+                for img_path in extract_image_paths_from_tool_output(str(output)):
+                    send({"type": "chat_message", "role": "image", "content": str(img_path)})
+            if normalized == "write" and output and not str(output).strip().lower().startswith("error"):
+                import re as _re
+                html_match = _re.search(r"to\s+(\S+\.(?:html|htm|svg))", str(output))
+                if html_match:
+                    send({"type": "chat_message", "role": "html_file", "content": html_match.group(1).strip()})
+            if normalized not in self._THINKING_SILENT_TOOLS:
+                from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
+                summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, arguments or {})
+                raw = str(output or "")
+                truncated = raw[:3000]
+                if len(raw) > 3000:
+                    truncated += f"\n... [{len(raw)} total chars]"
+                send({"type": "tool_output_inline", "tool": tool_name, "summary": summary, "output": truncated})
+
+        def approval_cb(message: str) -> bool:
+            send({"type": "approval_notice", "message": message})
+            return True
+
+        # Playbook approval callback scoped to this public session's WS.
+        async def _public_playbook_approval(message: str, _send=send) -> bool:
+            import uuid as _uuid
+            request_id = str(_uuid.uuid4())
+            event = asyncio.Event()
+            result_holder: list[bool] = [True]  # default: approve on timeout
+            self._pending_playbook_approvals[request_id] = (event, result_holder)
+            _send({
+                "type": "approval_request",
+                "id": request_id,
+                "message": message,
+                "category": "playbook",
+            })
+            try:
+                await asyncio.wait_for(event.wait(), timeout=60.0)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                self._pending_playbook_approvals.pop(request_id, None)
+            return result_holder[0]
+
+        agent = Agent(
+            provider=self.agent.provider if self.agent else None,
+            status_callback=status_cb,
+            tool_output_callback=tool_output_cb,
+            approval_callback=approval_cb,
+            thinking_callback=thinking_cb,
+            tool_stream_callback=tool_stream_cb,
+            # Without this the agent's between-step narration is DROPPED, not
+            # merely misrouted: Agent._emit_narration bails when the callback
+            # is absent. The main agent has always had one; scoped agents
+            # (public sessions, and now lanes B/C) never did.
+            narration_callback=narration_cb,
+        )
+        agent.response_stream_callback = response_stream_cb
+        agent.playbook_approval_callback = _public_playbook_approval
+        # Route tool-side broadcasts (interim status / system messages, peer
+        # activity) to THIS public session's WS — admin's _broadcast won't
+        # reach public users. `send` re-reads the active WS each call, so it
+        # survives reconnects.
+        agent.ws_broadcast = send
+
+        # Bind to the caller's session (skip default session loading).
+        agent.session = session
+        agent.session_manager = sm
+        agent._sync_runtime_flags_from_session()
+        agent._register_default_tools()
+        agent.instructions = self.agent.instructions if self.agent else agent.instructions
+        agent._initialized = True
+        agent._byok_active = False
+
+        # Warm up context caches that initialize() would normally populate.
+        try:
+            await agent._refresh_insights_context_cache()
+        except Exception:
+            pass
+        try:
+            await agent._refresh_nervous_system_cache()
+        except Exception:
+            pass
+        try:
+            await agent._refresh_briefing_context_cache()
+        except Exception:
+            pass
+
+        return agent
 
     # ── Callbacks ─────────────────────────────────────────────────────
 
@@ -667,6 +838,11 @@ class WebServer:
             # In public mode, only broadcast to admin connections.
             if public_mode and not getattr(ws, "_is_admin", False):
                 continue
+            # Sockets on a non-main lane are served by that lane's own
+            # callbacks — broadcasting to them would leak lane A's turn into
+            # lane B's transcript. Lane A *is* the main agent, so it stays.
+            if self.normalize_lane(getattr(ws, "_lane", "")) != self.LANE_MAIN:
+                continue
             try:
                 fire_and_forget_send(ws, data)
             except Exception:
@@ -701,15 +877,21 @@ class WebServer:
 
     # ── Session helpers ──────────────────────────────────────────────
 
-    def _session_info(self) -> dict[str, Any]:
-        """Current session info payload."""
-        if not self.agent or not self.agent.session:
+    def _session_info(self, agent: Any = None) -> dict[str, Any]:
+        """Session info payload for *agent* (default: the main agent).
+
+        Lanes each run their own agent and their own session, so the header a
+        lane shows — session name, model, message count — has to be built from
+        THAT agent, not from lane A's.
+        """
+        agent = agent or self.agent
+        if not agent or not agent.session:
             return {}
-        s = self.agent.session
-        model_details = self.agent.get_runtime_model_details()
+        s = agent.session
+        model_details = agent.get_runtime_model_details()
 
         # Active user profile for the web UI (describes who the agent talks to).
-        active_pid = getattr(self.agent, "_active_personality_id", None)
+        active_pid = getattr(agent, "_active_personality_id", None)
         personality_name = ""
         if active_pid:
             from captain_claw.personality import load_user_personality
@@ -717,8 +899,8 @@ class WebServer:
             personality_name = up.name if up else ""
 
         # Active playbook override for the web UI.
-        active_pbid = getattr(self.agent, "_playbook_override", None) or ""
-        playbook_name = getattr(self.agent, "_playbook_override_name", "") or ""
+        active_pbid = getattr(agent, "_playbook_override", None) or ""
+        playbook_name = getattr(agent, "_playbook_override_name", "") or ""
         if not playbook_name:
             if active_pbid == "__none__":
                 playbook_name = "None"
@@ -732,16 +914,16 @@ class WebServer:
             "provider": model_details.get("provider", ""),
             "description": (s.metadata or {}).get("description", ""),
             "message_count": len(s.messages),
-            "tools": self.agent.tools.list_tools() if self.agent else [],
+            "tools": agent.tools.list_tools() if agent else [],
             "skills": [
                 {"name": cmd.name, "skill": cmd.skill_name, "description": cmd.description}
-                for cmd in (self.agent.list_user_invocable_skills() if self.agent else [])
+                for cmd in (agent.list_user_invocable_skills() if agent else [])
             ],
             "personality_id": active_pid or "",
             "personality_name": personality_name,
             "playbook_id": active_pbid,
             "playbook_name": playbook_name,
-            "force_script": bool(getattr(self.agent, "_force_script_mode", False)),
+            "force_script": bool(getattr(agent, "_force_script_mode", False)),
         }
 
     # ── Cron runtime context ─────────────────────────────────────────
