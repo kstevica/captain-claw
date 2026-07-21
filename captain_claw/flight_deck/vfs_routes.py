@@ -73,6 +73,20 @@ def _assert_writable(user_id: str, project: str) -> None:
         raise HTTPException(403, "this linked folder is read-only")
 
 
+def _dm():
+    """The deep memory service, imported lazily.
+
+    Every ``on_*`` hook below is fire-and-forget: they no-op unless the project
+    opted into indexing, and they swallow their own failures, because a
+    Typesense outage must never turn a successful file write into a failed
+    request. Imported inside the call to keep this module free of a startup
+    dependency on the FD server's import graph.
+    """
+    from captain_claw.flight_deck import deep_memory_service
+
+    return deep_memory_service
+
+
 _STATS_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
 
 
@@ -457,6 +471,7 @@ async def write_file(body: WriteBody, user: dict = Depends(get_current_user)):
         raise HTTPException(400, "path is a directory")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(body.content, encoding="utf-8")
+    _dm().on_write(oid, body.project, body.path)
     return {"ok": True, "size": target.stat().st_size}
 
 
@@ -500,6 +515,7 @@ async def upload_files(
         target = _resolve(oid, project, rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
+        _dm().on_write(oid, project, rel)
         saved.append({"name": name, "size": len(content)})
     return {"ok": True, "files": saved}
 
@@ -514,6 +530,7 @@ async def rename_entry(body: RenameBody, user: dict = Depends(get_current_user))
         raise HTTPException(404, "source not found")
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
+    _dm().on_rename(oid, body.project, body.path, body.to)
     return {"ok": True}
 
 
@@ -530,12 +547,14 @@ async def delete_entry(project: str, path: str, recursive: bool = False, owner: 
         raise HTTPException(400, "refusing to delete a project root without recursive=true")
     if not target.exists():
         raise HTTPException(404, "not found")
-    if target.is_dir():
+    is_dir = target.is_dir()
+    if is_dir:
         if not recursive and any(target.iterdir()):
             raise HTTPException(400, "directory not empty; pass recursive=true")
         shutil.rmtree(target)
     else:
         target.unlink()
+    _dm().on_delete(oid, project, path, is_dir=is_dir)
     return {"ok": True}
 
 
@@ -551,6 +570,7 @@ async def delete_project(project: str, user: dict = Depends(get_current_user)):
     if not root.is_dir():
         raise HTTPException(404, "project not found")
     shutil.rmtree(root)
+    _dm().on_delete(user["id"], project, "", is_dir=True)
     return {"ok": True}
 
 

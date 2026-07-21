@@ -183,9 +183,17 @@ fields: [
     chunk_index, start_line, end_line,
     tags,          # Faceted filtering
     updated_at,
-    embedding      # float array (1536 dims default)
+    embedding      # float array, width auto-detected from the provider
 ]
 ```
+
+**Vector width is auto-detected.** `deep_memory.embedding_dims: 0` (the
+default) means "probe the embedding chain"; the width is resolved as
+**live collection schema > probed provider > config**. Pinning a value by hand
+that disagrees with the provider is the one way to disable hybrid search —
+vectors of the wrong width are rejected at both index and query time, leaving
+deep memory keyword-only. `reembed_all()` backfills vectors from each
+document's stored `text` if that ever happens.
 
 Facets: `source`, `reference`, `tags`
 
@@ -199,9 +207,15 @@ Facets: `source`, `reference`, `tags`
 
 ### Retrieval
 
-- `search(query, max_results, filter_by, vector_query)` — hybrid search
+- `search(query, max_results, filter_by, vector_query, min_score)` — hybrid search
 - Auto-generates vector query if embedding chain available
-- BM25 + optional vector similarity
+- BM25 + optional vector similarity, issued as `POST /multi_search` (a GET
+  query string caps at 4000 chars, which an inlined vector exceeds by ~190 dims)
+- Scored on an absolute 0..1 scale — the better of keyword coverage and cosine
+  similarity. Deliberately *not* `rank_fusion_score`, which is positional
+  (`0.3 × 1/rank`) rather than a measure of relevance.
+- `min_score` gates prompt injection; the floor drops when the user explicitly
+  asks for the archive (`_DEEP_MEMORY_TRIGGERS`)
 - Facet filtering by source/tags
 - Group by `doc_id` for unique documents
 

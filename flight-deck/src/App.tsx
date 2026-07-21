@@ -36,6 +36,7 @@ import { FlowsPage } from './pages/FlowsPage'
 import { ObservatoryPage } from './pages/ObservatoryPage'
 import { AutonomousWorkPage } from './pages/AutonomousWorkPage'
 import { VFSPage } from './pages/VFSPage'
+import { DeepMemoryPage } from './pages/DeepMemoryPage'
 import { AgentFoldersPage } from './pages/AgentFoldersPage'
 import { SystemPage } from './pages/SystemPage'
 import { BrowserLLMPage } from './pages/BrowserLLMPage'
@@ -325,6 +326,7 @@ function AppContent() {
       {view === 'code' && <CodePage />}
       {view === 'dubina' && <DubinaPage />}
       {view === 'vfs' && <VFSPage />}
+      {view === 'deep-memory' && <DeepMemoryPage />}
       {view === 'hosting' && <HostingPage />}
       {view === 'agent-folders' && <AgentFoldersPage />}
       {view === 'system' && <SystemPage />}

@@ -26,6 +26,7 @@ import {
   Library,
   Cpu,
   FolderTree,
+  Database,
   Mountain,
   HardDrive,
   Code2,
@@ -66,6 +67,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
     title: 'Files',
     items: [
       { id: 'vfs', icon: FolderTree, label: 'VFS' },
+      { id: 'deep-memory', icon: Database, label: 'Deep Memory' },
       { id: 'hosting', icon: Globe, label: 'Hosting' },
     ],
   },

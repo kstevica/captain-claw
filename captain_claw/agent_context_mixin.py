@@ -380,7 +380,16 @@ class AgentContextMixin:
         # replacement for the SQLite semantic memory.
         self._deep_memory = None
         dm_cfg = getattr(cfg, "deep_memory", None)
-        if dm_cfg is not None and bool(getattr(dm_cfg, "enabled", False)):
+        # Under Flight Deck the agent holds no Typesense connection of its own:
+        # the `typesense` tool proxies through FD, which owns the credentials
+        # and stamps the owner. Building a local index here would open a second,
+        # unscoped path to the same server from the agent's own config — exactly
+        # the multi-tenant hole the proxy exists to close.
+        from captain_claw.fd_client import is_under_flight_deck
+
+        if is_under_flight_deck():
+            log.debug("Deep memory: proxying through Flight Deck (no local index)")
+        elif dm_cfg is not None and bool(getattr(dm_cfg, "enabled", False)):
             try:
                 from captain_claw.deep_memory import DeepMemoryIndex
 
@@ -395,8 +404,9 @@ class AgentContextMixin:
                     protocol=str(getattr(dm_cfg, "protocol", "http")),
                     api_key=str(getattr(dm_cfg, "api_key", "")),
                     collection_name=str(getattr(dm_cfg, "collection_name", "captain_claw_deep_memory")),
-                    embedding_dims=int(getattr(dm_cfg, "embedding_dims", 1536)),
+                    embedding_dims=int(getattr(dm_cfg, "embedding_dims", 0)),
                     auto_embed=bool(getattr(dm_cfg, "auto_embed", True)),
+                    min_score=float(getattr(dm_cfg, "min_score", 0.12)),
                     chunk_chars=int(getattr(getattr(cfg, "memory", None), "chunk_chars", 1400)) if getattr(cfg, "memory", None) else 1400,
                     chunk_overlap_chars=int(getattr(getattr(cfg, "memory", None), "chunk_overlap_chars", 200)) if getattr(cfg, "memory", None) else 200,
                     embedding_chain=embedding_chain,
@@ -2046,8 +2056,11 @@ class AgentContextMixin:
         *layer* controls snippet granularity: ``"l1"`` (one-liner), ``"l2"`` (summary),
         ``"l3"`` (full text). Defaults to ``"l2"`` for context notes.
 
-        Always searches when deep memory is available — relevance scoring
-        in Typesense already filters out low-quality matches.
+        Searches on every turn, but the archive only earns prompt space when a
+        hit clears ``DeepMemoryConfig.min_score``.  When the user *explicitly*
+        asks for the archive (``_DEEP_MEMORY_TRIGGERS``) the ask itself is
+        evidence, so the floor drops and more items are allowed through — the
+        one case where a marginal hit still beats saying nothing.
         """
         if getattr(self, "_suppress_memory_context", False):
             return "", ""
@@ -2057,12 +2070,14 @@ class AgentContextMixin:
         deep_memory = getattr(self, "_deep_memory", None)
         if deep_memory is None:
             return "", ""
+        explicit = self._should_search_deep_memory(cleaned)
         try:
             return deep_memory.build_context_note(
                 cleaned,
-                max_items=max_items,
+                max_items=max_items * 2 if explicit else max_items,
                 max_snippet_chars=max_snippet_chars,
-                layer=layer,
+                layer="l3" if explicit else layer,
+                min_score=0.0 if explicit else None,
             )
         except Exception as e:
             log.debug("Deep memory note generation failed", error=str(e))

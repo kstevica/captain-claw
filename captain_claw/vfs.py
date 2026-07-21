@@ -135,6 +135,19 @@ def user_root(*, create: bool = False) -> Path:
     return root
 
 
+def user_root_of(user_id: str, *, create: bool = False) -> Path:
+    """Return the VFS root of an EXPLICIT user, ignoring this process's env.
+
+    The :func:`user_root` counterpart for the Flight Deck server, which serves
+    many users and must never key off its own environment — the same split as
+    :func:`resolve_vfs_path` vs :func:`resolve_under`.
+    """
+    root = (vfs_base() / _sanitize(user_id or "", fallback=_DEFAULT_USER)).resolve()
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 # ── Linked folders ("mounts") ─────────────────────────────────────────
 # A per-user registry maps a VFS project name to an external absolute path, so
 # `vfs:<name>/...` transparently resolves to a folder living anywhere on disk —
