@@ -449,12 +449,15 @@ def _format_table(columns: list[str], rows: list[list[Any]], total: int | None =
     if total is not None:
         result += f"\n\n({len(rows)} of {total} total rows)"
     if dropped:
+        # ONE concrete next step, not a menu. A list of options reads as "your
+        # query was wrong" and sends the model rephrasing the same question in
+        # new ways; `offset` is simply where it left off.
+        shown = len(rows)
         result += (
-            f"\n\n⚠ {dropped} more row(s) matched but were NOT shown — the result hit the "
-            f"{budget:,}-character limit. This is a display cap, not the data. "
-            "Narrow it: pass `columns` to fetch only the fields you need, tighten `where` "
-            '(a range is one key with a list: {"id": [{"op": ">=", "value": 1}, '
-            '{"op": "<=", "value": 10}]}), or page with `limit` + `offset`.'
+            f"\n\n⚠ Shown: the first {shown} matching row(s). {dropped} more matched but "
+            f"did not fit the {budget:,}-character display cap — the query was CORRECT and "
+            "the data is there. To read the rest, re-run this exact call with "
+            f'`offset` = {shown} (and add `columns` if you only need some fields).'
         )
     return result
 
@@ -567,11 +570,13 @@ class DatastoreTool(Tool):
                 "type": "string",
                 "description": (
                     'JSON filter: {"age": {"op": ">", "value": 25}, "status": "active"}. '
-                    'Simple equality: {"name": "Alice"}. A RANGE on one column is a LIST '
-                    'under a single key — {"id": [{"op": ">=", "value": 370}, '
-                    '{"op": "<=", "value": 379}]} — never two "id" keys in one object '
-                    '(JSON keeps only the last, so the other bound is silently lost). '
-                    'A list of plain values means IN: {"id": [1, 2, 3]}.'
+                    'Simple equality: {"name": "Alice"}. RANGE on one column — any of '
+                    'these work: {"id": {"op": "BETWEEN", "value": [370, 379]}}, '
+                    '{"id": {"op": [">=", "<="], "value": [370, 379]}}, or '
+                    '{"id": [{"op": ">=", "value": 370}, {"op": "<=", "value": 379}]}. '
+                    'Never two "id" keys in one object (JSON keeps only the last, so the '
+                    'other bound is silently lost). A list of plain values means IN: '
+                    '{"id": [1, 2, 3]}.'
                 ),
             },
             "order_by": {

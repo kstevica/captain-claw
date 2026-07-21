@@ -556,9 +556,52 @@ class DatastoreManager:
                 continue
 
             if isinstance(val, dict):
-                op = str(val.get("op", "=")).upper().strip()
+                # Paired operators — {"op": [">=", "<="], "value": [241, 250]}.
+                # Another way a model reaches for a range, and one that used to
+                # dead-end at "Unsupported operator: ['>=', '<=']" while it kept
+                # trying new phrasings of the same question.
+                _raw_op = val.get("op", "=")
+                if isinstance(_raw_op, list):
+                    _vals = val.get("value")
+                    _vals = _vals if isinstance(_vals, list) else [_vals] * len(_raw_op)
+                    if len(_raw_op) != len(_vals):
+                        raise ValueError(
+                            f"'op' has {len(_raw_op)} operators but 'value' has "
+                            f"{len(_vals)} values — they must pair up, e.g. "
+                            '{"op": [">=", "<="], "value": [1, 10]}'
+                        )
+                    for _o, _v in zip(_raw_op, _vals):
+                        sub_clause, sub_params = self._build_where(
+                            {key: {"op": _o, "value": _v}}, valid_columns)
+                        clauses.append(sub_clause[len("WHERE "):]
+                                       if sub_clause.startswith("WHERE ") else sub_clause)
+                        params.extend(sub_params)
+                    continue
+
+                op = str(_raw_op).upper().strip()
+                # BETWEEN is what a model writes when it thinks in SQL. Accept
+                # it as the two comparisons it stands for.
+                if op in ("BETWEEN", "NOT BETWEEN"):
+                    bounds = val.get("value")
+                    if not isinstance(bounds, list) or len(bounds) != 2:
+                        raise ValueError(
+                            f"{op} needs exactly two values, e.g. "
+                            '{"op": "BETWEEN", "value": [1, 10]}'
+                        )
+                    lo, hi = bounds
+                    negate = op.startswith("NOT")
+                    clauses.append(
+                        f'"{col}" {"NOT " if negate else ""}BETWEEN ? AND ?')
+                    params.extend([lo, hi])
+                    continue
                 if op not in _ALLOWED_OPS:
-                    raise ValueError(f"Unsupported operator: {op}")
+                    raise ValueError(
+                        f"Unsupported operator: {op}. Allowed: "
+                        f"{', '.join(sorted(_ALLOWED_OPS))}, BETWEEN. "
+                        'For a range use one key with paired operators — '
+                        '{"id": {"op": [">=", "<="], "value": [241, 250]}} — or '
+                        '{"id": {"op": "BETWEEN", "value": [241, 250]}}.'
+                    )
                 if op in ("IS NULL", "IS NOT NULL"):
                     clauses.append(f'"{col}" {op}')
                 elif op in ("IN", "NOT IN"):

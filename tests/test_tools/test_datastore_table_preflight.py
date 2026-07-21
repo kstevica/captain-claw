@@ -6,6 +6,8 @@ just built. These tests pin the two halves of the answer: infer where a
 wrong guess is cheap, and where it isn't, fail with a retryable message.
 """
 
+import re
+
 import pytest
 
 from captain_claw.datastore import DatastoreManager
@@ -250,11 +252,128 @@ def test_a_clean_where_is_left_alone():
 async def test_one_result_cannot_eat_the_context(wide):
     res = await DatastoreTool()._query(wide, {"table": "t"})
     assert res.success
-    assert len(res.content) < 30_000          # 59 rows × 2KB would be ~120k
-    assert "were NOT shown" in res.content    # never a silent cap
-    assert "columns" in res.content           # and it says how to narrow
+    assert len(res.content) < 50_000          # 59 rows × 2KB would be ~120k
+    assert "did not fit" in res.content       # never a silent cap
+    assert "`offset`" in res.content          # and it says exactly how to resume
 
 
 async def test_a_small_result_gets_no_truncation_notice(wide):
     res = await DatastoreTool()._query(wide, {"table": "t", "columns": "id", "limit": 5})
     assert res.success and "NOT shown" not in res.content
+
+
+# ── A read after a write is not a duplicate ──
+# query → upsert → query-to-verify is the prescribed workflow, and the verify
+# query is byte-identical to the first. Blocked as a duplicate, the model is
+# told "the content has not changed" about a table it just wrote to — and goes
+# hunting for "a fresh query pattern to avoid the duplicate guard" until the
+# turn dies. Observed: 31 tool calls, all of them that hunt.
+
+def test_datastore_counts_as_a_stateful_tool():
+    import inspect
+    from captain_claw import agent_tool_loop_mixin as m
+
+    src = inspect.getsource(m)
+    stateful = src[src.index("_STATEFUL_TOOLS = {"):]
+    stateful = stateful[:stateful.index("}")]
+    assert '"datastore"' in stateful
+
+
+def test_a_write_clears_the_turn_s_datastore_read_history():
+    import inspect
+    from captain_claw import agent_tool_loop_mixin as m
+
+    src = inspect.getsource(m)
+    assert "_DATASTORE_WRITE_ACTIONS" in src
+    # Only datastore keys are cleared — other tools keep their counters.
+    assert 'k.startswith("datastore|")' in src
+    for action in ("upsert", "update", "insert", "delete"):
+        assert f'"{action}"' in src[src.index("_DATASTORE_WRITE_ACTIONS"):][:600]
+
+
+def test_stateful_block_message_does_not_claim_the_data_is_unchanged():
+    import inspect
+    from captain_claw import agent_tool_loop_mixin as m
+
+    src = inspect.getsource(m)
+    block = src[src.index("elif _tool_lower in _STATEFUL_TOOLS:"):]
+    # The message itself, not the comment above it (which quotes the old text).
+    msg = block[block.index("dup_msg = ("):block.index("else:")]
+    # Splice the adjacent string literals back together so an assertion isn't
+    # at the mercy of where the source happens to wrap.
+    flat = re.sub(r'"\s*f?"', "", " ".join(msg.split()))
+    assert "nothing written in between" in flat
+    assert "content has not changed" not in flat
+    # And it names the failure mode we actually saw.
+    assert "reword" in flat
+
+
+async def test_a_batch_sized_read_is_not_truncated(tmp_path):
+    """~10 wide rows is the common case and must arrive whole — a partial
+    answer reads as a failed query and starts the rephrasing hunt."""
+    mgr = DatastoreManager(db_path=tmp_path / "wide.db")
+    cols = [{"name": "id", "type": "integer"}] + [
+        {"name": f"c{i}", "type": "text"} for i in range(19)
+    ]
+    await mgr.create_table("t", cols, unique=["id"])
+    await mgr.upsert_rows("t", [
+        {"id": i, **{f"c{j}": "x" * 180 for j in range(19)}} for i in range(1, 11)
+    ])
+    res = await DatastoreTool()._query(mgr, {"table": "t"})
+    assert res.success
+    assert "did not fit" not in res.content        # all 10 rows survived
+    await mgr.close()
+
+
+async def test_truncation_gives_one_concrete_next_step(wide):
+    res = await DatastoreTool()._query(wide, {"table": "t"})
+    if "did not fit" in res.content:
+        assert "the query was CORRECT" in res.content
+        assert "`offset`" in res.content
+
+
+# ── Every way a model reaches for a range ──
+# Observed in the wild, each one a separate dead end at the time:
+#   two "id" keys           → JSON drops one, filter silently widens
+#   {"op": [">=", "<="]}    → "Unsupported operator: ['>=', '<=']"
+#   BETWEEN                 → "Unsupported operator: BETWEEN"
+
+async def test_paired_operators(wide):
+    res = await wide.query("t", where={"id": {"op": [">=", "<="], "value": [10, 12]}})
+    assert res["total"] == 3
+
+
+async def test_between(wide):
+    res = await wide.query("t", where={"id": {"op": "BETWEEN", "value": [10, 12]}})
+    assert res["total"] == 3
+
+
+async def test_not_between(wide):
+    res = await wide.query("t", where={"id": {"op": "NOT BETWEEN", "value": [3, 59]}})
+    assert res["total"] == 2          # ids 1 and 2
+
+
+async def test_all_four_range_forms_agree(wide):
+    forms = [
+        {"id": {"op": "BETWEEN", "value": [10, 19]}},
+        {"id": {"op": [">=", "<="], "value": [10, 19]}},
+        {"id": [{"op": ">=", "value": 10}, {"op": "<=", "value": 19}]},
+    ]
+    totals = [(await wide.query("t", where=f))["total"] for f in forms]
+    assert totals == [10, 10, 10]
+
+
+async def test_mismatched_pairs_say_how_to_pair_them(wide):
+    with pytest.raises(ValueError, match="pair up"):
+        await wide.query("t", where={"id": {"op": [">=", "<="], "value": [10]}})
+
+
+async def test_between_needs_two_bounds(wide):
+    with pytest.raises(ValueError, match="exactly two values"):
+        await wide.query("t", where={"id": {"op": "BETWEEN", "value": 10}})
+
+
+async def test_unknown_operator_shows_the_range_forms(wide):
+    with pytest.raises(ValueError) as e:
+        await wide.query("t", where={"id": {"op": "~~", "value": 1}})
+    assert "BETWEEN" in str(e.value) and "Allowed:" in str(e.value)
