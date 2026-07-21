@@ -226,6 +226,10 @@ export interface QueuedMessage {
   // The agent gave up as often as we're willing to retry, so the queue is
   // holding here rather than advancing past unfinished work.
   stuck?: boolean
+  // What the run cost. Accumulated across re-runs, so a task that gave up
+  // twice reports what it actually spent, not just the last attempt.
+  usage?: TokenUsage
+  toolCount?: number
 }
 
 let _queueCounter = 0
@@ -325,6 +329,20 @@ function _setAwaitingAnswer(containerId: string, itemId: string, value: boolean)
   if (!session) return
   updateSession(containerId, {
     queue: session.queue.map((q) => (q.id === itemId ? { ...q, awaitingAnswer: value } : q)),
+  })
+}
+
+
+/** Add a turn's cost to the item that is currently dispatched. */
+function creditDispatchedItem(
+  key: string,
+  patch: (prev: QueuedMessage) => Partial<QueuedMessage>,
+) {
+  const session = useChatStore.getState().sessions.get(key)
+  const id = session?.queueDispatchedId
+  if (!session || !id) return
+  updateSession(key, {
+    queue: session.queue.map((q) => (q.id === id ? { ...q, ...patch(q) } : q)),
   })
 }
 
@@ -1154,6 +1172,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const toolName = data.tool_name as string || ''
       const output = data.output as string || ''
       if (toolName && !data.replay) {
+        // Attribute the call to the queued task that is running it.
+        creditDispatchedItem(key, (prev) => ({ toolCount: (prev.toolCount ?? 0) + 1 }))
         const msg: ChatMessage = {
           id: nextId(),
           role: 'tool',
@@ -1593,6 +1613,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // the queue the turn is over — without it, every queued item would
       // wait out the 6s fallback timer instead.
       fireAutoCompleteWatch(key)
+      // Same numbers onto the queued item, ADDED to what it already spent —
+      // a task that gave up twice should report its true cost, not just the
+      // cost of the attempt that finally worked.
+      creditDispatchedItem(key, (prev) => {
+        const p = prev.usage || {}
+        return {
+          usage: {
+            prompt_tokens: (p.prompt_tokens || 0) + (last.prompt_tokens || 0),
+            completion_tokens: (p.completion_tokens || 0) + (last.completion_tokens || 0),
+            cache_read_input_tokens:
+              (p.cache_read_input_tokens || 0) + (last.cache_read_input_tokens || 0),
+            cache_creation_input_tokens:
+              (p.cache_creation_input_tokens || 0) + (last.cache_creation_input_tokens || 0),
+            total_tokens: (p.total_tokens || 0) + (last.total_tokens || 0),
+          },
+        }
+      })
       // Freeze the turn's final usage onto the most recent tool message so the
       // activity group keeps showing its own token counts after it collapses
       // (and old groups don't all show the latest turn's numbers). Then clear

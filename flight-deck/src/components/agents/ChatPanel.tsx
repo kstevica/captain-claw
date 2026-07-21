@@ -1167,6 +1167,31 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
   )
 }
 
+
+// ── Queue item run stats ──
+
+/** "14:32:07" on the same day, "Jul 21 14:32:07" otherwise. */
+function fmtClock(ms?: number): string {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const time = d.toLocaleTimeString(undefined, { hour12: false })
+  const sameDay = new Date().toDateString() === d.toDateString()
+  return sameDay
+    ? time
+    : `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${time}`
+}
+
+/** Elapsed as 42s / 3m 07s / 1h 04m. */
+function fmtElapsed(from?: number, to?: number): string {
+  if (!from || !to || to < from) return ''
+  const secs = Math.round((to - from) / 1000)
+  if (secs < 60) return `${secs}s`
+  const m = Math.floor(secs / 60)
+  const rest = secs % 60
+  if (m < 60) return `${m}m ${String(rest).padStart(2, '0')}s`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+}
+
 function QueueItemRow({
   item,
   onRemove,
@@ -1253,7 +1278,45 @@ function QueueItemRow({
           </button>
         </div>
       </div>
+
+      {/* What the run cost. Only once it has actually started. */}
+      {item.dispatchedAt && <QueueItemStats item={item} />}
     </li>
+  )
+}
+
+function QueueItemStats({ item }: { item: QueuedMessage }) {
+  const started = fmtClock(item.dispatchedAt)
+  // A finished item is fixed in time; a running one ticks against now.
+  const [, force] = useState(0)
+  const running = item.status === 'dispatched'
+  useEffect(() => {
+    if (!running) return
+    const t = setInterval(() => force((n) => n + 1), 1000)
+    return () => clearInterval(t)
+  }, [running])
+
+  const ended = item.completedAt
+  const elapsed = fmtElapsed(item.dispatchedAt, ended ?? Date.now())
+  const u = item.usage
+  const cached = (u?.cache_read_input_tokens || 0) + (u?.cache_creation_input_tokens || 0)
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-zinc-800/60 pt-1 pl-[18px] text-[9px] text-zinc-500">
+      <span title={`Started ${new Date(item.dispatchedAt!).toLocaleString()}`}>▶ {started}</span>
+      {ended ? (
+        <span title={`Finished ${new Date(ended).toLocaleString()}`}>■ {fmtClock(ended)}</span>
+      ) : null}
+      {elapsed && (
+        <span className={running ? 'text-violet-400' : 'text-zinc-400'}>{elapsed}</span>
+      )}
+      {!!item.toolCount && <span title="Tool calls">{item.toolCount} tools</span>}
+      {u && (
+        <span title={`In ${u.prompt_tokens || 0} · cached ${cached} · out ${u.completion_tokens || 0} tokens`}>
+          {fmtTokens(u.prompt_tokens)}↑ {fmtTokens(cached)}⚡ {fmtTokens(u.completion_tokens)}↓
+        </span>
+      )}
+    </div>
   )
 }
 
