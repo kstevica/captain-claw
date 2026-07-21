@@ -925,6 +925,7 @@ from captain_claw.flight_deck.dubina_routes import router as dubina_router
 from captain_claw.flight_deck.vfs_routes import router as vfs_router
 from captain_claw.flight_deck.hosting_routes import router as hosting_router
 from captain_claw.flight_deck.code_routes import router as code_router
+from captain_claw.flight_deck.queue_planner import router as queue_router
 from captain_claw.flight_deck.google_oauth_routes import router as google_oauth_router
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
 from captain_claw.flight_deck.games_routes import router as games_router
@@ -965,6 +966,7 @@ app.include_router(dubina_router)
 app.include_router(vfs_router)
 app.include_router(hosting_router)
 app.include_router(code_router)
+app.include_router(queue_router)
 app.include_router(google_oauth_router)
 app.include_router(codex_oauth_router)
 app.include_router(games_router)

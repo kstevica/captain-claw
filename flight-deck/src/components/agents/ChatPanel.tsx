@@ -29,6 +29,7 @@ import {
   AlertTriangle,
   CircleDot,
   HelpCircle,
+  Wand2,
   Workflow,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
@@ -49,6 +50,7 @@ import TraceTimeline from '../observability/TraceTimeline'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
 import { AgentFilesPanel } from './AgentFilesPanel'
 import { AgentDatastorePanel } from './AgentDatastorePanel'
+import { QueuePlannerModal } from './QueuePlannerModal'
 import type { ChatMessage, TokenUsage } from '../../services/agentChat'
 
 interface Attachment {
@@ -964,6 +966,7 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
   const clearFinished = useChatStore((s) => s.clearQueueFinished)
   const [draft, setDraft] = useState('')
   const [dragOver, setDragOver] = useState(false)
+  const [showPlanner, setShowPlanner] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const conn = useAgentConnection(agentId)
@@ -1033,6 +1036,15 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
             </span>
           )}
         </div>
+        <div className="flex items-center gap-1">
+        <button
+          onClick={() => setShowPlanner(true)}
+          title="Plan tasks — turn one description into a batched queue"
+          className="flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400 transition-colors hover:border-violet-500/40 hover:text-violet-300"
+        >
+          <Wand2 className="h-3 w-3" />
+          Plan
+        </button>
         <button
           onClick={() => toggleAuto(containerId)}
           title={auto ? 'Auto-progress: ON — items marked done when agent replies' : 'Auto-progress: OFF — mark items done manually'}
@@ -1044,7 +1056,19 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
         >
           {auto ? 'Auto' : 'Manual'}
         </button>
+        </div>
       </div>
+
+      {showPlanner && conn && (
+        <QueuePlannerModal
+          agentId={agentId}
+          agentName={session.containerName}
+          host={conn.host}
+          port={conn.port}
+          auth={conn.auth}
+          onClose={() => setShowPlanner(false)}
+        />
+      )}
 
       {/* Items — min-h-0 so this is the column's scroll region: cards keep
           their full height and the list scrolls past them. */}
