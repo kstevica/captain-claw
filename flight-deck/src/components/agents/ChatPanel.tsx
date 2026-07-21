@@ -26,6 +26,7 @@ import {
   Minimize2,
   Play,
   Trash2,
+  AlertTriangle,
   CircleDot,
   HelpCircle,
   Workflow,
@@ -1194,12 +1195,17 @@ function QueueItemRow({
       <div className="flex items-start gap-1.5">
         <span
           className="mt-0.5 shrink-0"
-          title={item.awaitingAnswer
-            ? 'The agent asked a question — answer it in chat, or the queue moves on in 3 min'
-            : item.status}
+          title={item.stuck
+            ? `The agent gave up ${item.attempts ?? 0} times — the queue is holding here`
+            : item.awaitingAnswer
+              ? 'The agent asked a question — answer it in chat, or the queue moves on in 3 min'
+              : item.attempts && item.attempts > 1
+                ? `Attempt ${item.attempts} — the agent got stuck on the previous try`
+                : item.status}
         >
-          {isDispatched && item.awaitingAnswer && <HelpCircle className="h-3 w-3 text-amber-400" />}
-          {isDispatched && !item.awaitingAnswer && <Loader2 className="h-3 w-3 animate-spin text-violet-300" />}
+          {isDispatched && item.stuck && <AlertTriangle className="h-3 w-3 text-red-400" />}
+          {isDispatched && !item.stuck && item.awaitingAnswer && <HelpCircle className="h-3 w-3 text-amber-400" />}
+          {isDispatched && !item.stuck && !item.awaitingAnswer && <Loader2 className="h-3 w-3 animate-spin text-violet-300" />}
           {isPending && <CircleDot className="h-3 w-3 text-zinc-500" />}
           {isDone && <Check className="h-3 w-3 text-emerald-400" />}
         </span>
@@ -1211,6 +1217,13 @@ function QueueItemRow({
           {/* Full text: a queued task is an instruction the user needs to read
               back before it runs. The card grows to fit; the list scrolls. */}
           {item.content}
+          {(item.attempts ?? 0) > 1 && (
+            <span className={`ml-1.5 rounded px-1 py-0.5 text-[9px] font-medium ${
+              item.stuck ? 'bg-red-500/20 text-red-300' : 'bg-amber-500/20 text-amber-300'
+            }`}>
+              {item.stuck ? `gave up ×${item.attempts}` : `attempt ${item.attempts}`}
+            </span>
+          )}
         </span>
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
           {isDispatched && !autoMode && (

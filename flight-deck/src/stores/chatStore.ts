@@ -220,6 +220,12 @@ export interface QueuedMessage {
   // Auto-mode is holding this item because the agent asked something. The row
   // shows it, and the hold expires (see armQuestionWatch).
   awaitingAnswer?: boolean
+  // Times this item has been sent (1 = the original dispatch). >1 means the
+  // agent gave up and the queue re-ran it.
+  attempts?: number
+  // The agent gave up as often as we're willing to retry, so the queue is
+  // holding here rather than advancing past unfinished work.
+  stuck?: boolean
 }
 
 let _queueCounter = 0
@@ -320,6 +326,112 @@ function _setAwaitingAnswer(containerId: string, itemId: string, value: boolean)
   updateSession(containerId, {
     queue: session.queue.map((q) => (q.id === itemId ? { ...q, awaitingAnswer: value } : q)),
   })
+}
+
+// ── Give-up detection ──
+//
+// The agent runtime has canned replies for when it cannot proceed — "I got
+// stuck and couldn't make further progress…", retries/budget exhausted, empty
+// response. A queued item that ends this way did NOT get done, and completing
+// it would drop real work on the floor while the queue marched on.
+//
+// The marker strings are NOT duplicated here: they come from the same endpoint
+// the Council UI uses, whose single source is captain_claw/agent_stuck.py.
+// Until they load, detection is simply off — never guessed at.
+let _stuckMarkers: string[] = []
+
+async function loadStuckMarkers(): Promise<void> {
+  if (_stuckMarkers.length) return
+  try {
+    const res = await fetch('/fd/council/stuck-markers', {
+      headers: _chatHeaders(), credentials: 'include',
+    })
+    if (!res.ok) return
+    const data = await res.json()
+    if (Array.isArray(data.markers)) {
+      _stuckMarkers = data.markers.map((m: string) => String(m).toLowerCase())
+    }
+  } catch { /* leave detection off rather than guess at the strings */ }
+}
+
+function isStuckReply(text: string): boolean {
+  if (_stuckMarkers.length === 0) return false
+  const t = (text || '').toLowerCase()
+  return _stuckMarkers.some((m) => t.includes(m))
+}
+
+// Re-runs of a stuck item, keyed by container. Capped: a task the agent
+// genuinely cannot do would otherwise retry forever, burning tokens on every
+// attempt. On the last failure the queue STOPS rather than skipping ahead —
+// the item is real work, and silently advancing past it loses it.
+const _stuckRetries = new Map<string, { itemId: string; count: number }>()
+const MAX_STUCK_RETRIES = 3
+
+// Escalation. The first re-run sends the task VERBATIM: give-ups are often
+// transient (a failed fetch, one bad tool call), and the plain task is the
+// cleanest thing to retry. Only when that fails too do we add a nudge — and
+// which nudge depends on how it gave up. Running out of iterations is not the
+// same failure as getting stuck, and telling a budget-exhausted agent to
+// "work through the obstacle" aims at the wrong problem.
+const NUDGE_BUDGET =
+  '\n\nNOTE: your previous attempt ran out of its iteration budget. Do NOT start over — ' +
+  'keep what you already produced, work in smaller steps, and finish only the part that ' +
+  'is still missing. Save partial results as you go so nothing is lost if you run out again.'
+const NUDGE_STUCK =
+  '\n\nNOTE: your previous attempt ended by reporting that you got stuck. Do not give up ' +
+  'and do not repeat that message. Pick up exactly where you left off and work through the ' +
+  'obstacle step by step. If a tool call failed, try a different approach or reason it ' +
+  'through directly. Deliver the actual result now.'
+
+function nudgeFor(reply: string): string {
+  return /budget exhausted/i.test(reply || '') ? NUDGE_BUDGET : NUDGE_STUCK
+}
+
+function resetStuckRetries(containerId: string) {
+  _stuckRetries.delete(containerId)
+}
+
+/** Re-dispatch the stuck item: verbatim first, nudged after. False when spent. */
+function retryStuckItem(containerId: string, itemId: string, reply: string): boolean {
+  const state = useChatStore.getState()
+  const session = state.sessions.get(containerId)
+  if (!session) return false
+  const item = session.queue.find((q) => q.id === itemId)
+  if (!item) return false
+
+  const entry = _stuckRetries.get(containerId)
+  const used = entry && entry.itemId === itemId ? entry.count : 0
+  if (used >= MAX_STUCK_RETRIES) {
+    _stuckRetries.delete(containerId)
+    updateSession(containerId, {
+      queue: session.queue.map((q) =>
+        q.id === itemId ? { ...q, attempts: used + 1, stuck: true } : q),
+    })
+    state.addLocalNote(containerId,
+      `The agent gave up on this task ${used + 1} times. The queue is holding here — ` +
+      'edit or remove the item to continue.')
+    return false
+  }
+
+  _stuckRetries.set(containerId, { itemId, count: used + 1 })
+  updateSession(containerId, {
+    queue: session.queue.map((q) =>
+      q.id === itemId ? { ...q, attempts: used + 1 } : q),
+  })
+  // First re-run: the task as written. After that: the task plus a nudge
+  // aimed at the way it actually failed.
+  const nudged = used > 0
+  const content = nudged ? item.content + nudgeFor(reply) : item.content
+  state.addLocalNote(containerId,
+    `The agent gave up — re-running this task${nudged ? ' with a nudge' : ''} ` +
+    `(attempt ${used + 2} of ${MAX_STUCK_RETRIES + 1}).`)
+  // Small delay so the re-send lands after the turn's trailing events.
+  setTimeout(() => {
+    const s = useChatStore.getState().sessions.get(containerId)
+    if (!s || s.queueDispatchedId !== itemId || s.busy) return
+    useChatStore.getState().sendMessage(containerId, content, { fromQueue: true })
+  }, 800)
+  return true
 }
 
 // ── Stall detection (client-side safety net) ──
@@ -757,6 +869,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       )
     }
 
+    // Give-up markers come from the backend (single source: agent_stuck.py);
+    // fetch them now so a stuck reply is recognised on the very first turn.
+    void loadStuckMarkers()
+
     // Wire up event handlers
     ws.on('_connected', () => {
       updateSession(key, { connected: true })
@@ -924,7 +1040,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const cur = useChatStore.getState().sessions.get(key)
         if (cur && cur.queueAutoMode && cur.queueDispatchedId) {
           const dispatchedId = cur.queueDispatchedId
-          if (isLikelyStall(cleanContent)) {
+          if (isStuckReply(cleanContent)) {
+            // The agent gave up. This item is NOT done — re-run it rather
+            // than completing it and marching past unfinished work.
+            cancelAutoCompleteWatch(key)
+            cancelQuestionWatch(key)
+            retryStuckItem(key, dispatchedId, cleanContent)
+          } else if (isLikelyStall(cleanContent)) {
             const entry = _stallNudges.get(key)
             const used = entry && entry.itemId === dispatchedId ? entry.count : 0
             if (used < MAX_STALL_NUDGES) {
@@ -1785,6 +1907,8 @@ function tryDispatchNext(containerId: string) {
       : q,
   )
   updateSession(containerId, { queue, queueDispatchedId: next.id })
+  // A new item starts with a fresh retry budget.
+  resetStuckRetries(containerId)
   if (isSlashCommand(next.content)) armCommandWatch(containerId)
   state.sendMessage(containerId, next.content, { fromQueue: true })
 }
