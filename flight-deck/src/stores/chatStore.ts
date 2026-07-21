@@ -544,8 +544,44 @@ export interface PlanState {
   errorMessage?: string
 }
 
+// ── Lanes ──
+//
+// A lane is a parallel context on ONE agent: its own transcript, queue and
+// CC session, running at the same time as the others (docs/queue-lanes-plan.md).
+//
+// The store keys `sessions` by a LANE KEY rather than a container id — but
+// lane A's key IS the container id, because lane A is the agent's existing
+// context. That single choice is what keeps this change additive: every
+// pre-lane call site, every persisted `fd.queue.<id>` entry, and every
+// server-side chat row keeps working untouched, and only lanes B and C ever
+// see a composite key.
+export const LANE_MAIN = 'A'
+export const LANES = ['A', 'B', 'C'] as const
+
+export function laneKey(containerId: string, lane: string = LANE_MAIN): string {
+  return !lane || lane === LANE_MAIN ? containerId : `${containerId}::${lane}`
+}
+
+/** Split a lane key back into its parts. */
+export function parseLaneKey(key: string): { containerId: string; lane: string } {
+  const at = key.lastIndexOf('::')
+  return at < 0
+    ? { containerId: key, lane: LANE_MAIN }
+    : { containerId: key.slice(0, at), lane: key.slice(at + 2) }
+}
+
 interface ChatSession {
+  /** The agent's container id — NOT the store key. Use `key` for store calls
+   *  and `containerId` for anything that addresses the agent itself. */
   containerId: string
+  /** This session's key in the `sessions` map: `containerId` on lane A,
+   *  `containerId::LANE` elsewhere. */
+  key: string
+  lane: string
+  /** This lane produced output while you were looking at another lane.
+   *  Without this, parallel lanes are worse than serial ones: work finishes
+   *  unseen. Cleared when the lane is selected. */
+  unread?: boolean
   containerName: string
   host: string
   port: number
@@ -585,16 +621,23 @@ interface ChatSession {
 interface ChatStore {
   sessions: Map<string, ChatSession>
   activeChatId: string | null
+  /** agent container id → the lane currently shown for it. Absent means A. */
+  activeLane: Record<string, string>
   chatOpen: boolean
   // Fullscreen mode: hides sidebar/director/main/tool panels and gives the
   // chat panel the full width. The queue panel is only available here.
   chatFullscreen: boolean
 
-  openChat: (id: string, name: string, host: string, port: number, auth: string) => void
+  /** Open (or focus) a chat. `lane` picks the parallel context — omit for A,
+   *  which is the agent's main context and today's behaviour exactly. */
+  openChat: (id: string, name: string, host: string, port: number, auth: string, lane?: string) => void
+  /** Which lane the UI is showing for a given agent (agent id → lane). */
+  setActiveLane: (containerId: string, lane: string) => void
   closeChat: () => void
   switchChat: (containerId: string) => void
   disconnectChat: (containerId: string) => void
-  sendMessage: (containerId: string, content: string) => void
+  /** `fromQueue` marks a turn the queue dispatched: no next-step suggestions. */
+  sendMessage: (containerId: string, content: string, opts?: { fromQueue?: boolean }) => void
   sendBtw: (containerId: string, content: string) => void
   /** Append a local system note to the chat (no agent turn) — e.g. "started flow X". */
   addLocalNote: (containerId: string, content: string) => void
@@ -614,6 +657,8 @@ interface ChatStore {
   markQueueItemDone: (containerId: string, id: string) => void
   toggleQueueAutoMode: (containerId: string) => void
   clearQueue: (containerId: string) => void
+  /** Drop the finished items, keeping pending and in-flight ones. */
+  clearQueueFinished: (containerId: string) => void
 }
 
 let msgCounter = 0
@@ -622,32 +667,42 @@ function nextId() { return `msg-${Date.now()}-${++msgCounter}` }
 export const useChatStore = create<ChatStore>((set, get) => ({
   sessions: new Map(),
   activeChatId: null,
+  activeLane: {},
   chatOpen: false,
   chatFullscreen: false,
 
-  openChat: (containerId, containerName, host, port, auth) => {
-    const existing = get().sessions.get(containerId)
+  openChat: (containerId, containerName, host, port, auth, lane = LANE_MAIN) => {
+    const key = laneKey(containerId, lane)
+    const existing = get().sessions.get(key)
     if (existing) {
       // Already have a session, just activate it
       if (!existing.connected) {
         // Clear old replay messages — agent will resend them on reconnect
         const kept = existing.messages.filter((m) => !m.replay)
         if (kept.length !== existing.messages.length) {
-          updateSession(containerId, { messages: kept })
+          updateSession(key, { messages: kept })
         }
         existing.ws.connect()
       }
-      set({ activeChatId: containerId, chatOpen: true })
+      set({ activeChatId: key, chatOpen: true })
       return
     }
 
-    const ws = new AgentChatWS(containerId, host, port, auth)
+    const ws = new AgentChatWS(containerId, host, port, auth, lane)
     // Re-hydrate any persisted plan slice so the PlanCard reappears instantly
     // after a page refresh. Live ws events will keep updating it from here.
-    const persisted = loadPlanSlice(containerId)
-    const persistedQueue = loadQueueSlice(containerId)
+    const persisted = loadPlanSlice(key)
+    const persistedQueue = loadQueueSlice(key)
+    // Auto-progress is a habit you set for an AGENT, not for one room of it.
+    // A fresh lane has no persisted slice, so without this it silently opens
+    // in MANUAL while lane A says AUTO — and every queued item on B and C
+    // sits dispatched forever waiting for a tick that never comes.
+    const sibling = get().sessions.get(containerId)
+      ?? [...get().sessions.values()].find((s) => s.containerId === containerId)
     const session: ChatSession = {
       containerId,
+      key,
+      lane,
       containerName,
       host,
       port,
@@ -673,28 +728,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       planCardCollapsed: persisted?.planCardCollapsed ?? false,
       nextStepOptions: [],
       queue: persistedQueue?.queue ?? [],
-      queueAutoMode: persistedQueue?.queueAutoMode ?? false,
+      queueAutoMode: persistedQueue?.queueAutoMode ?? sibling?.queueAutoMode ?? false,
       queueDispatchedId: null,
     }
 
     const sessions = new Map(get().sessions)
-    sessions.set(containerId, session)
-    set({ sessions, activeChatId: containerId, chatOpen: true })
+    sessions.set(key, session)
+    set({ sessions, activeChatId: key, chatOpen: true })
 
     // Server-side chat persistence: upsert session & load history
     if (useAuthStore.getState().authEnabled) {
-      serverUpsertSession(containerId, containerId, containerName).then(() =>
-        serverLoadMessages(containerId).then((history) => {
+      serverUpsertSession(key, containerId, containerName).then(() =>
+        serverLoadMessages(key).then((history) => {
           if (history.length > 0) {
             useChatStore.setState((state) => {
-              const s = state.sessions.get(containerId)
+              const s = state.sessions.get(key)
               if (!s) return state
               // Only prepend history if session still has no real messages (avoid duplication)
               if (s.messages.length > 0 && !s.messages[0].replay) return state
               const merged = [...history, ...s.messages.filter((m) => !m.replay)]
               const updated = { ...s, messages: merged }
               const newSessions = new Map(state.sessions)
-              newSessions.set(containerId, updated)
+              newSessions.set(key, updated)
               return { sessions: newSessions }
             })
           }
@@ -704,21 +759,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // Wire up event handlers
     ws.on('_connected', () => {
-      updateSession(containerId, { connected: true })
+      updateSession(key, { connected: true })
       // If we hydrated a queue with pending items and auto-mode is on, kick
       // off the first dispatch now that the socket is live.
-      const cur = useChatStore.getState().sessions.get(containerId)
+      const cur = useChatStore.getState().sessions.get(key)
       if (cur && cur.queueAutoMode && !cur.queueDispatchedId) {
-        tryDispatchNext(containerId)
+        tryDispatchNext(key)
       }
     })
 
     ws.on('_disconnected', () => {
-      updateSession(containerId, { connected: false, busy: false, statusText: '' })
+      updateSession(key, { connected: false, busy: false, statusText: '' })
       // A dropped socket means we won't see the next_steps event. Cancel
       // any pending auto-mark — when the agent reconnects, replay or fresh
       // events will drive the queue forward again.
-      cancelAutoCompleteWatch(containerId)
+      cancelAutoCompleteWatch(key)
     })
 
     ws.on('welcome', (data) => {
@@ -728,7 +783,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const personalities = (data.personalities as AgentPersonalityInfo[] || [])
       const patch: Partial<ChatSession> = { models, personalities }
       if (name) patch.statusText = `Session: ${name}`
-      updateSession(containerId, patch)
+      updateSession(key, patch)
 
       // Send peer agent awareness to the connected agent
       const containers = useContainerStore.getState().containers
@@ -825,12 +880,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           description: o.description ? String(o.description) : undefined,
         }))
         .filter((o) => o.label && o.action)
-      console.debug('[chatStore] next_steps received', { containerId, rawCount: raw.length, validCount: options.length, options })
-      updateSession(containerId, { nextStepOptions: options })
+      console.debug('[chatStore] next_steps received', { key, rawCount: raw.length, validCount: options.length, options })
+      updateSession(key, { nextStepOptions: options })
       // next_steps is the explicit "agent finished its turn" signal — fire
       // any armed auto-complete watcher now instead of waiting for the
       // fallback timer.
-      fireAutoCompleteWatch(containerId)
+      fireAutoCompleteWatch(key)
     })
 
     ws.on('chat_message', (data) => {
@@ -849,9 +904,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         replay: data.replay as boolean || false,
         model: data.model as string || '',
       }
-      addMessage(containerId, msg)
+      addMessage(key, msg)
       if (data.role === 'assistant' && !data.replay) {
-        updateSession(containerId, { busy: false, statusText: '' })
+        const onScreen = useChatStore.getState().activeChatId === key
+        updateSession(key, {
+          busy: false, statusText: '', ...(onScreen ? {} : { unread: true }),
+        })
         // Queue auto-mode: decide what this reply means for the dispatched
         // queue item.
         //
@@ -863,37 +921,37 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         //   (c) Real completion: arm the auto-complete watcher (which fires
         //       on the next_steps event or a fallback timer) so we don't
         //       race the agent's post-turn work.
-        const cur = useChatStore.getState().sessions.get(containerId)
+        const cur = useChatStore.getState().sessions.get(key)
         if (cur && cur.queueAutoMode && cur.queueDispatchedId) {
           const dispatchedId = cur.queueDispatchedId
           if (isLikelyStall(cleanContent)) {
-            const entry = _stallNudges.get(containerId)
+            const entry = _stallNudges.get(key)
             const used = entry && entry.itemId === dispatchedId ? entry.count : 0
             if (used < MAX_STALL_NUDGES) {
-              _stallNudges.set(containerId, { itemId: dispatchedId, count: used + 1 })
+              _stallNudges.set(key, { itemId: dispatchedId, count: used + 1 })
               // Small delay so the nudge lands after any trailing events
               // (next_steps, status) from the same turn.
               setTimeout(() => {
-                const s = useChatStore.getState().sessions.get(containerId)
+                const s = useChatStore.getState().sessions.get(key)
                 // Bail if user already moved on (toggled auto off, removed
                 // the item, or marked it done manually).
                 if (!s || !s.queueAutoMode) return
                 if (s.queueDispatchedId !== dispatchedId) return
                 if (s.busy) return
-                useChatStore.getState().sendMessage(containerId, 'Continue the task.')
+                useChatStore.getState().sendMessage(key, 'Continue the task.', { fromQueue: true })
               }, 800)
             } else {
               // Out of nudges — treat as completion so the queue moves on.
-              armAutoCompleteWatch(containerId, dispatchedId)
+              armAutoCompleteWatch(key, dispatchedId)
             }
           } else if (isLikelyTaskComplete(cleanContent)) {
-            resetStallNudges(containerId)
-            cancelQuestionWatch(containerId)
-            armAutoCompleteWatch(containerId, dispatchedId)
+            resetStallNudges(key)
+            cancelQuestionWatch(key)
+            armAutoCompleteWatch(key, dispatchedId)
           } else {
             // A question. Hold for the user — but bounded and visible, never
             // the silent forever-park this used to be.
-            armQuestionWatch(containerId, dispatchedId)
+            armQuestionWatch(key, dispatchedId)
           }
         }
       }
@@ -904,7 +962,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (messages.length === 0) return
       // Clear old replay messages before adding new batch (prevents piling on reconnect)
       useChatStore.setState((state) => {
-        const s = state.sessions.get(containerId)
+        const s = state.sessions.get(key)
         if (!s) return state
         const kept = s.messages.filter((m) => !m.replay)
         const replayed: ChatMessage[] = messages.map((d) => {
@@ -934,13 +992,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         })
         const updated = { ...s, messages: [...replayed, ...kept] }
         const newSessions = new Map(state.sessions)
-        newSessions.set(containerId, updated)
+        newSessions.set(key, updated)
         return { sessions: newSessions }
       })
     })
 
     ws.on('replay_done', () => {
-      updateSession(containerId, { busy: false, statusText: '' })
+      updateSession(key, { busy: false, statusText: '' })
     })
 
     ws.on('status', (data) => {
@@ -950,10 +1008,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const patch: Partial<ChatSession> = { busy: !idle, statusText: idle ? '' : text }
       // Record when agent first becomes busy (for tok/s calculation)
       if (!idle) {
-        const s = useChatStore.getState().sessions.get(containerId)
+        const s = useChatStore.getState().sessions.get(key)
         if (s && !s.busy) patch._busyStartedAt = Date.now()
       }
-      updateSession(containerId, patch)
+      updateSession(key, patch)
     })
 
     ws.on('narration', (data) => {
@@ -961,7 +1019,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // while a long task runs (same as WhatsApp/glasses).
       const text = String(data.text || '').trim()
       if (!text) return
-      addMessage(containerId, {
+      addMessage(key, {
         id: nextId(),
         role: 'system',
         content: text,
@@ -983,14 +1041,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           tool_arguments: data.arguments as Record<string, unknown>,
           tool_output: output,
         }
-        addMessage(containerId, msg)
+        addMessage(key, msg)
       }
       // The monitor event arrives AFTER the tool finished (it carries the
       // output) — setting "Using X..." here would show a stale phase while
       // the agent is already back in the (slow) LLM call. The backend now
       // emits accurate phase statuses ("Using X...", "Calling LLM (...)")
       // via the `status` event, so only keep the busy flag here.
-      updateSession(containerId, { busy: true })
+      updateSession(key, { busy: true })
     })
 
     ws.on('approval_request', (data) => {
@@ -1002,7 +1060,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         approval_request_id: data.id as string,
         approval_category: data.category as string || '',
       }
-      addMessage(containerId, msg)
+      addMessage(key, msg)
     })
 
     ws.on('peer_activity', (data) => {
@@ -1026,7 +1084,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         tool_name: toolName,
         peer_name: peerName,
       }
-      addMessage(containerId, msg)
+      addMessage(key, msg)
     })
 
     ws.on('error', (data) => {
@@ -1036,15 +1094,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         content: data.message as string || 'Unknown error',
         timestamp: new Date().toISOString(),
       }
-      addMessage(containerId, msg)
-      updateSession(containerId, { busy: false })
+      addMessage(key, msg)
+      updateSession(key, { busy: false })
     })
 
     ws.on('command_result', (data) => {
       const command = (data.command as string || '').trim().toLowerCase()
       // If /clear was executed, wipe local messages first
       if (command === '/clear') {
-        clearMessages(containerId)
+        clearMessages(key)
       }
       const msg: ChatMessage = {
         id: nextId(),
@@ -1052,17 +1110,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         content: data.content as string || '',
         timestamp: new Date().toISOString(),
       }
-      addMessage(containerId, msg)
+      addMessage(key, msg)
       // Slash commands run synchronously in the handler — once the
       // command_result arrives the agent is idle again. Without this
       // the "Thinking..." spinner stays pinned after `/plan`, `/help`,
       // `/clear`, etc., because no later token/usage event clears busy.
-      updateSession(containerId, { busy: false, statusText: '' })
+      updateSession(key, { busy: false, statusText: '' })
       // …and if the command came from the queue, retire it so the row stops
       // spinning and the next item can go out. Must run after busy is cleared
       // — tryDispatchNext refuses to send while the session is busy.
-      cancelCommandWatch(containerId)
-      completeDispatchedCommand(containerId)
+      cancelCommandWatch(key)
+      completeDispatchedCommand(key)
     })
 
     // Forward orchestrator trace spans to the trace store for
@@ -1074,6 +1132,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (event === 'trace_span') {
         const span = data as unknown as TraceSpan
         if (span?.span_id) {
+          // NOTE: traces stay keyed by agent — lanes share one trace timeline.
           useTraceStore.getState().handleSpanEvent(containerId, span)
         }
         return
@@ -1085,7 +1144,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       switch (event) {
         case 'task_started':
-          updatePlan(containerId, (prev) => {
+          updatePlan(key, (prev) => {
             if (!prev) return prev
             const steps = prev.steps.map((s) =>
               s.id === taskId
@@ -1102,7 +1161,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           break
 
         case 'task_step':
-          updatePlan(containerId, (prev) => {
+          updatePlan(key, (prev) => {
             if (!prev) return prev
             const phase = data.phase ? String(data.phase) : undefined
             const tool = data.tool ? String(data.tool) : undefined
@@ -1122,7 +1181,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           break
 
         case 'task_completed':
-          updatePlan(containerId, (prev) => {
+          updatePlan(key, (prev) => {
             if (!prev) return prev
             const usage = (data.usage as Record<string, number> | undefined) || undefined
             const steps = prev.steps.map((s) =>
@@ -1144,7 +1203,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           break
 
         case 'task_failed':
-          updatePlan(containerId, (prev) => {
+          updatePlan(key, (prev) => {
             if (!prev) return prev
             const error = String(data.error ?? 'task failed')
             const steps = prev.steps.map((s) =>
@@ -1165,7 +1224,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           break
 
         case 'task_validation_retry':
-          updatePlan(containerId, (prev) => {
+          updatePlan(key, (prev) => {
             if (!prev) return prev
             const reason = data.reason ? String(data.reason) : ''
             const steps = prev.steps.map((s) =>
@@ -1182,7 +1241,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           break
 
         case 'task_validation_failed':
-          updatePlan(containerId, (prev) => {
+          updatePlan(key, (prev) => {
             if (!prev) return prev
             const notes = data.notes ? String(data.notes) : ''
             const steps = prev.steps.map((s) =>
@@ -1211,7 +1270,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         status: 'pending',
         revisionCount: 0,
       }))
-      updatePlan(containerId, () => ({
+      updatePlan(key, () => ({
         startedAt: new Date().toISOString(),
         startedAtMs: Date.now(),
         status: 'running',
@@ -1220,13 +1279,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         revisions: [],
       }))
       // Auto-expand the plan card when a new plan starts
-      updateSession(containerId, { planCardCollapsed: false })
+      updateSession(key, { planCardCollapsed: false })
     })
 
     ws.on('plan_orchestrate_expanded', (data) => {
       const expansions = (data.expansions as Array<Record<string, unknown>>) || []
       if (expansions.length === 0) return
-      updatePlan(containerId, (prev) => {
+      updatePlan(key, (prev) => {
         if (!prev) return prev
         // Expansions are appended sub-steps; merge by id when present.
         const byId = new Map(prev.steps.map((s) => [s.id, s]))
@@ -1254,7 +1313,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const taskId = String(data.task_id ?? '')
       const passed = Boolean(data.passed)
       const notes = String(data.notes ?? '')
-      updatePlan(containerId, (prev) => {
+      updatePlan(key, (prev) => {
         if (!prev) return prev
         const steps = prev.steps.map((s) =>
           s.id === taskId
@@ -1279,7 +1338,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         revised_description: String(data.revised_description ?? ''),
         previous_verification_notes: String(data.previous_verification_notes ?? ''),
       }
-      updatePlan(containerId, (prev) => {
+      updatePlan(key, (prev) => {
         if (!prev) return prev
         const steps = prev.steps.map((s) =>
           s.id === taskId
@@ -1298,7 +1357,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     ws.on('plan_execution_verified', (data) => {
       const verified = (data.verified as string[]) || []
-      updatePlan(containerId, (prev) => {
+      updatePlan(key, (prev) => {
         if (!prev) return prev
         const verifiedSet = new Set(verified)
         const steps = prev.steps.map((s) =>
@@ -1315,7 +1374,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const cancelled = Boolean(data.cancelled)
       const failedStep = (data.failed_step as string) || (data.verification_failed_step as string) || undefined
       const verificationNotes = (data.verification_notes as string) || undefined
-      updatePlan(containerId, (prev) => {
+      updatePlan(key, (prev) => {
         if (!prev) return prev
         const completedSet = new Set(completed)
         const verifiedSet = new Set(verified)
@@ -1345,7 +1404,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     ws.on('plan_execution_failed', (data) => {
       const error = String(data.error ?? 'plan execution failed')
-      updatePlan(containerId, (prev) => {
+      updatePlan(key, (prev) => {
         if (!prev) return prev
         return { ...prev, status: 'failed', errorMessage: error }
       })
@@ -1373,9 +1432,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       //   "Plan-mode auto-routing **disabled**."          (after `/planning off`)
       //   "Plan-mode auto-routing: **on|off**. ..."       (after bare `/planning` query)
       if (/auto-rout(?:e|ing)\s+enabled|auto-rout(?:e|ing):\s*on\b|currently\s+on\b/.test(content)) {
-        updateSession(containerId, { planningEnabled: true })
+        updateSession(key, { planningEnabled: true })
       } else if (/auto-rout(?:e|ing)\s+disabled|auto-rout(?:e|ing):\s*off\b|currently\s+off\b/.test(content)) {
-        updateSession(containerId, { planningEnabled: false })
+        updateSession(key, { planningEnabled: false })
       }
       // Plan-mode level confirmations:
       //   "Plan-mode level set to **<name>**."         (after `/planning level <name>`)
@@ -1385,7 +1444,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Match all three with one regex over markdown-stripped content.
       const lvlMatch = content.match(/plan-mode\s+(?:level\s+set\s+to|level:|auto-rout(?:e|ing):[^()]*\(level:)\s*(plain|enriched|insightful|complete)\b/)
       if (lvlMatch) {
-        updateSession(containerId, { planLevel: lvlMatch[1] })
+        updateSession(key, { planLevel: lvlMatch[1] })
       }
     })
 
@@ -1393,7 +1452,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Live cumulative token usage for the in-flight turn — drives the
     // input/output/cache counts in the activity-panel header.
     ws.on('turn_usage', (data) => {
-      updateSession(containerId, {
+      updateSession(key, {
         liveTurnUsage: {
           prompt_tokens: (data.prompt_tokens as number) || 0,
           completion_tokens: (data.completion_tokens as number) || 0,
@@ -1407,6 +1466,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ws.on('usage', (data) => {
       const last = data.last as Record<string, number> | undefined
       if (!last) return
+      // Turn-final usage lands exactly where next_steps would have. A
+      // queue-dispatched turn suppresses next_steps, so this is what tells
+      // the queue the turn is over — without it, every queued item would
+      // wait out the 6s fallback timer instead.
+      fireAutoCompleteWatch(key)
       // Freeze the turn's final usage onto the most recent tool message so the
       // activity group keeps showing its own token counts after it collapses
       // (and old groups don't all show the latest turn's numbers). Then clear
@@ -1420,7 +1484,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           total_tokens: last.total_tokens || 0,
         }
         useChatStore.setState((state) => {
-          const s = state.sessions.get(containerId)
+          const s = state.sessions.get(key)
           if (!s) return state
           const msgs = s.messages.slice()
           for (let i = msgs.length - 1; i >= 0; i--) {
@@ -1430,15 +1494,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }
           }
           const next = new Map(state.sessions)
-          next.set(containerId, { ...s, messages: msgs, liveTurnUsage: null })
+          next.set(key, { ...s, messages: msgs, liveTurnUsage: null })
           return { sessions: next }
         })
       } else {
-        updateSession(containerId, { liveTurnUsage: null })
+        updateSession(key, { liveTurnUsage: null })
       }
       const completionTokens = last.completion_tokens || 0
       if (completionTokens <= 0) return
-      const s = useChatStore.getState().sessions.get(containerId)
+      const s = useChatStore.getState().sessions.get(key)
       if (!s || !s._busyStartedAt) return
       const elapsedSec = (Date.now() - s._busyStartedAt) / 1000
       if (elapsedSec <= 0) return
@@ -1448,7 +1512,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Real LLM speed from backend latency_ms (pure API call time)
       const latencyMs = last.latency_ms || 0
       const llmTokPerSec = latencyMs > 0 ? (completionTokens / latencyMs) * 1000 : 0
-      updateSession(containerId, {
+      updateSession(key, {
         lastTokPerSec: tokPerSec,
         avgTokPerSec: newAvg,
         _tokSamples: samples,
@@ -1458,6 +1522,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     })
 
     ws.connect()
+  },
+
+  setActiveLane: (containerId, lane) => {
+    const target = lane || LANE_MAIN
+    const key = laneKey(containerId, target)
+    const state = get()
+    // Every lane rides on the same agent, so a lane that has never been
+    // looked at has no socket yet. Open it on first view rather than holding
+    // three connections for a user who only ever uses A.
+    const existing = state.sessions.get(key)
+    if (!existing) {
+      const anyLane = state.sessions.get(containerId)
+        || [...state.sessions.values()].find((s) => s.containerId === containerId)
+      if (!anyLane) return          // the agent isn't open at all
+      state.openChat(containerId, anyLane.containerName, anyLane.host,
+                     anyLane.port, anyLane.auth, target)
+    } else if (!existing.connected) {
+      existing.ws.connect()
+    }
+    set((s) => ({
+      activeLane: { ...s.activeLane, [containerId]: target },
+      activeChatId: key,
+    }))
+    if (get().sessions.get(key)?.unread) updateSession(key, { unread: false })
   },
 
   closeChat: () => {
@@ -1482,7 +1570,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  sendMessage: (containerId, content) => {
+  sendMessage: (containerId, content, opts) => {
     const session = get().sessions.get(containerId)
     if (!session) return
     // An answer ends the hold — the agent's next reply is re-evaluated fresh.
@@ -1502,7 +1590,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       nextStepOptions: [],
       liveTurnUsage: null,
     })
-    session.ws.send(content)
+    session.ws.send(content, { noNextSteps: !!opts?.fromQueue })
   },
 
   sendBtw: (containerId, content) => {
@@ -1656,6 +1744,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (next) tryDispatchNext(containerId)
   },
 
+  clearQueueFinished: (containerId) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    // A long run leaves a wall of struck-through items between you and the
+    // work still to come. Keep everything not yet finished.
+    const queue = session.queue.filter((q) => q.status !== 'done')
+    if (queue.length !== session.queue.length) updateSession(containerId, { queue })
+  },
+
   clearQueue: (containerId) => {
     const session = get().sessions.get(containerId)
     if (!session) return
@@ -1689,7 +1786,7 @@ function tryDispatchNext(containerId: string) {
   )
   updateSession(containerId, { queue, queueDispatchedId: next.id })
   if (isSlashCommand(next.content)) armCommandWatch(containerId)
-  state.sendMessage(containerId, next.content)
+  state.sendMessage(containerId, next.content, { fromQueue: true })
 }
 
 // Helpers that update a session inside the map

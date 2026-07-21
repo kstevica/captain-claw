@@ -34,7 +34,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { useChatStore, PLAN_LEVELS, type PlanLevel, type NextStepOption, type QueuedMessage } from '../../stores/chatStore'
+import { useChatStore, PLAN_LEVELS, LANE_MAIN, LANES, laneKey, type PlanLevel, type NextStepOption, type QueuedMessage } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
@@ -227,18 +227,23 @@ export function ChatPanel() {
 
   if (!chatOpen || !session) return null
 
-  const chatTabs = Array.from(sessions.values())
+  // One tab per AGENT. A lane is a context inside an agent, not another
+  // agent, so lane sessions don't get their own top-level tab.
+  const chatTabs = Array.from(sessions.values()).filter((s) => s.lane === LANE_MAIN)
 
-  // Build target list for context transfer (all reachable agents except the current one)
+  // Build target list for context transfer (all reachable agents except the
+  // current one). Compare against the AGENT id — `activeChatId` is a lane key,
+  // so on lane B it would otherwise fail to exclude this very agent.
+  const activeAgentId = session.containerId
   const targets = [
     ...containers
-      .filter((c) => c.status === 'running' && c.web_port && c.id !== activeChatId)
+      .filter((c) => c.status === 'running' && c.web_port && c.id !== activeAgentId)
       .map((c) => ({ id: c.id, name: c.agent_name || c.name, host: 'localhost', port: c.web_port!, auth: c.web_auth })),
     ...processes
-      .filter((p) => p.status === 'running' && p.web_port && `proc-${p.slug}` !== activeChatId)
+      .filter((p) => p.status === 'running' && p.web_port && `proc-${p.slug}` !== activeAgentId)
       .map((p) => ({ id: `proc-${p.slug}`, name: p.name, host: 'localhost', port: p.web_port, auth: p.web_auth })),
     ...localAgents
-      .filter((a) => a.status === 'online' && a.id !== activeChatId)
+      .filter((a) => a.status === 'online' && a.id !== activeAgentId)
       .map((a) => ({ id: a.id, name: a.name, host: a.host, port: a.port, auth: a.authToken })),
   ]
 
@@ -249,10 +254,10 @@ export function ChatPanel() {
         <div className="flex flex-1 items-center gap-0.5 overflow-x-auto px-1 py-1">
           {chatTabs.map((s) => (
             <button
-              key={s.containerId}
-              onClick={() => switchChat(s.containerId)}
+              key={s.key}
+              onClick={() => switchChat(s.key)}
               className={`group flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                s.containerId === activeChatId
+                s.key === activeChatId
                   ? 'bg-zinc-800 text-zinc-100'
                   : 'text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-300'
               }`}
@@ -260,7 +265,7 @@ export function ChatPanel() {
               <span className={`h-1.5 w-1.5 rounded-full ${s.connected ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
               <span className="max-w-[100px] truncate">{s.containerName}</span>
               <button
-                onClick={(e) => { e.stopPropagation(); disconnectChat(s.containerId) }}
+                onClick={(e) => { e.stopPropagation(); disconnectChat(s.key) }}
                 className="ml-0.5 rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-zinc-300 group-hover:opacity-100"
               >
                 <X className="h-3 w-3" />
@@ -319,7 +324,7 @@ export function ChatPanel() {
                 onClick={() => {
                   // Always send /planning off, even if FD thinks it's already
                   // off — same staleness concern as the level picker below.
-                  setPlanningEnabled(session.containerId, false)
+                  setPlanningEnabled(session.key, false)
                   setPlanLevelMenuOpen(false)
                 }}
                 className={`flex w-full flex-col items-start gap-0.5 border-b border-zinc-800 px-3 py-2 text-left text-xs transition-colors ${
@@ -353,8 +358,8 @@ export function ChatPanel() {
                       // double-send when state already matches is harmless.
                       // Set level first so the /planning on confirmation
                       // already reflects the new level.
-                      setPlanLevel(session.containerId, lvl)
-                      setPlanningEnabled(session.containerId, true)
+                      setPlanLevel(session.key, lvl)
+                      setPlanningEnabled(session.key, true)
                       setPlanLevelMenuOpen(false)
                     }}
                     className={`flex w-full flex-col items-start gap-0.5 border-b border-zinc-800 px-3 py-2 text-left text-xs last:border-b-0 transition-colors ${
@@ -404,6 +409,13 @@ export function ChatPanel() {
       </div>
 
       {/* Trace panel (replaces chat when active) */}
+      {/* Lanes: three parallel contexts on this one agent. */}
+      <LaneStrip
+        agentId={session.containerId}
+        activeLane={session.lane}
+        agentName={session.containerName}
+      />
+
       {showTracePanel ? (
         <div className="flex flex-1 flex-col overflow-hidden">
           <div className="flex items-center gap-2 border-b border-zinc-800/50 bg-zinc-900/30 px-3 py-2">
@@ -423,13 +435,13 @@ export function ChatPanel() {
         /* Chat content (optionally with queue panel on the left in fullscreen) */
         <div className="flex flex-1 overflow-hidden">
           {chatFullscreen && (
-            <QueueSidebar containerId={session.containerId} />
+            <QueueSidebar sessionKey={session.key} agentId={session.containerId} />
           )}
           <ChatContent
             session={session}
-            containerId={session.containerId}
-            onSend={(content) => sendMessage(session.containerId, content)}
-            onCancel={() => cancelTask(session.containerId)}
+            sessionKey={session.key}
+            onSend={(content) => sendMessage(session.key, content)}
+            onCancel={() => cancelTask(session.key)}
           />
         </div>
       )}
@@ -480,12 +492,14 @@ function useAgentConnection(containerId: string) {
 
 function ChatContent({
   session,
-  containerId,
+  sessionKey,
   onSend,
   onCancel,
 }: {
   session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null }
-  containerId: string
+  /** This lane's store key — for anything that reads or writes session state.
+   *  The agent id lives on `session.containerId`. */
+  sessionKey: string
   onSend: (content: string) => void
   onCancel: () => void
 }) {
@@ -582,7 +596,7 @@ function ChatContent({
 
       {/* Plan monitor — pinned above the scroll area so it stays visible
           while messages flow underneath during /plan-execute. */}
-      <PlanCard containerId={containerId} />
+      <PlanCard containerId={sessionKey} />
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto py-3">
@@ -832,7 +846,68 @@ function usePersistedSize(key: string, def: number, min: number, max: number, ax
 // The chat's left sidebar: an agent files view on top, the run queue on the
 // bottom, with a draggable divider between them and a draggable right edge for
 // the whole column. Both sizes persist to localStorage.
-function QueueSidebar({ containerId }: { containerId: string }) {
+
+// ── Lanes ────────────────────────────────────────────────────────────
+//
+// Three parallel contexts on ONE agent (docs/queue-lanes-plan.md). Lane A is
+// the agent's existing context, so switching to A shows the conversation that
+// was always there; B and C are additional rooms that run at the same time.
+function LaneStrip({ agentId, activeLane, agentName }: {
+  agentId: string
+  activeLane: string
+  agentName: string
+}) {
+  const sessions = useChatStore((s) => s.sessions)
+  const setActiveLane = useChatStore((s) => s.setActiveLane)
+
+  return (
+    <div className="flex items-center gap-1 border-b border-zinc-800 bg-zinc-900/40 px-2 py-1">
+      {LANES.map((lane) => {
+        const s = sessions.get(laneKey(agentId, lane))
+        const isActive = lane === activeLane
+        const pending = s ? s.queue.filter((q) => q.status === 'pending').length : 0
+        const awaiting = s ? s.queue.some((q) => q.awaitingAnswer) : false
+        return (
+          <button
+            key={lane}
+            onClick={() => setActiveLane(agentId, lane)}
+            title={
+              !s ? `Lane ${lane} — not started`
+                : awaiting ? `Lane ${lane} — waiting on an answer`
+                : s.busy ? `Lane ${lane} — running`
+                : `Lane ${lane} — idle`
+            }
+            className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+              isActive
+                ? 'bg-violet-600/20 text-violet-700 dark:text-violet-200'
+                : 'text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-300'
+            }`}
+          >
+            {/* State: running (pulsing) · waiting · idle · never opened */}
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                !s ? 'bg-zinc-700'
+                  : awaiting ? 'bg-amber-400'
+                  : s.busy ? 'animate-pulse bg-violet-400'
+                  : 'bg-emerald-400'
+              }`}
+            />
+            <span>{lane} - {agentName}</span>
+            {pending > 0 && (
+              <span className="rounded-full bg-zinc-800 px-1 text-[9px] text-zinc-400">{pending}</span>
+            )}
+            {/* Something finished here while you were looking elsewhere. */}
+            {s?.unread && !isActive && (
+              <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
+            )}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function QueueSidebar({ sessionKey, agentId }: { sessionKey: string; agentId: string }) {
   const width = usePersistedSize('fd:queue-sidebar-width', 288, 220, 640, 'x')
   const filesH = usePersistedSize('fd:queue-sidebar-files-height', 260, 96, 900, 'y')
   const dsH = usePersistedSize('fd:queue-sidebar-datastore-height', 200, 96, 900, 'y')
@@ -844,7 +919,7 @@ function QueueSidebar({ containerId }: { containerId: string }) {
     >
       {/* Top: files */}
       <div className="min-h-0 shrink-0 overflow-hidden" style={{ height: filesH.size }}>
-        <AgentFilesPanel containerId={containerId} />
+        <AgentFilesPanel containerId={agentId} />
       </div>
       {/* Vertical divider (drag to resize files vs datastore) */}
       <div
@@ -854,7 +929,7 @@ function QueueSidebar({ containerId }: { containerId: string }) {
       />
       {/* Middle: datastore tables */}
       <div className="min-h-0 shrink-0 overflow-hidden" style={{ height: dsH.size }}>
-        <AgentDatastorePanel containerId={containerId} />
+        <AgentDatastorePanel containerId={agentId} />
       </div>
       {/* Vertical divider (drag to resize datastore vs queue) */}
       <div
@@ -864,7 +939,7 @@ function QueueSidebar({ containerId }: { containerId: string }) {
       />
       {/* Bottom: queue */}
       <div className="min-h-0 flex-1">
-        <QueuePanel containerId={containerId} />
+        <QueuePanel sessionKey={sessionKey} agentId={agentId} />
       </div>
       {/* Right edge (drag to resize the whole column) */}
       <div
@@ -876,18 +951,21 @@ function QueueSidebar({ containerId }: { containerId: string }) {
   )
 }
 
-function QueuePanel({ containerId }: { containerId: string }) {
+function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: string }) {
+  // Queue state is per lane; uploads go to the agent that owns every lane.
+  const containerId = sessionKey
   const session = useChatStore((s) => s.sessions.get(containerId))
   const enqueue = useChatStore((s) => s.enqueueQueueMessage)
   const removeItem = useChatStore((s) => s.removeQueueItem)
   const markDone = useChatStore((s) => s.markQueueItemDone)
   const toggleAuto = useChatStore((s) => s.toggleQueueAutoMode)
   const clearQueue = useChatStore((s) => s.clearQueue)
+  const clearFinished = useChatStore((s) => s.clearQueueFinished)
   const [draft, setDraft] = useState('')
   const [dragOver, setDragOver] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const conn = useAgentConnection(containerId)
+  const conn = useAgentConnection(agentId)
   const { attachments, addFiles, removeAttachment, clearAttachments, handlePasteEvent, pasteFromClipboard } = useFileAttachments(conn)
 
   const pasteText = useCallback((text: string) => {
@@ -993,15 +1071,26 @@ function QueuePanel({ containerId }: { containerId: string }) {
       {(doneCount > 0 || queue.length > 0) && (
         <div className="flex items-center justify-between border-t border-zinc-800 px-3 py-1.5 text-[10px] text-zinc-500">
           <span>{doneCount} done · {pendingCount} pending</span>
-          {pendingCount > 0 && (
-            <button
-              onClick={() => clearQueue(containerId)}
-              className="rounded px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-              title="Clear pending items"
-            >
-              Clear pending
-            </button>
-          )}
+          <div className="flex items-center gap-0.5">
+            {doneCount > 0 && (
+              <button
+                onClick={() => clearFinished(containerId)}
+                className="rounded px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+                title={`Remove ${doneCount} finished item${doneCount === 1 ? '' : 's'} — pending and in-flight stay`}
+              >
+                Clear finished
+              </button>
+            )}
+            {pendingCount > 0 && (
+              <button
+                onClick={() => clearQueue(containerId)}
+                className="rounded px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+                title="Clear pending items"
+              >
+                Clear pending
+              </button>
+            )}
+          </div>
         </div>
       )}
 

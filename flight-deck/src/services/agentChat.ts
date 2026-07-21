@@ -48,12 +48,17 @@ export class AgentChatWS {
   readonly host: string
   readonly port: number
   readonly auth: string
+  readonly lane: string
 
-  constructor(agentId: string, host: string, port: number, auth: string) {
+  constructor(agentId: string, host: string, port: number, auth: string, lane: string = '') {
     this.agentId = agentId
     this.host = host
     this.port = port
     this.auth = auth
+    // Which parallel context on the agent this socket talks to. Empty (or 'A')
+    // means the agent's main context, so nothing about existing callers
+    // changes — see docs/queue-lanes-plan.md.
+    this.lane = lane
   }
 
   get connected() { return this._connected }
@@ -66,9 +71,14 @@ export class AgentChatWS {
 
   private _openSocket() {
     // Route through FD backend proxy to avoid CORS
-    const tokenParam = this.auth ? `?token=${encodeURIComponent(this.auth)}` : ''
+    const params = new URLSearchParams()
+    if (this.auth) params.set('token', this.auth)
+    // Lane A is the agent's main context — send nothing, so the URL is
+    // byte-identical to what every pre-lane client produced.
+    if (this.lane && this.lane !== 'A') params.set('lane', this.lane)
+    const qs = params.toString() ? `?${params}` : ''
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${wsProto}//${window.location.host}/fd/agent-ws/${encodeURIComponent(this.host)}/${this.port}${tokenParam}`
+    const url = `${wsProto}//${window.location.host}/fd/agent-ws/${encodeURIComponent(this.host)}/${this.port}${qs}`
 
     this.ws = new WebSocket(url)
 
@@ -136,9 +146,15 @@ export class AgentChatWS {
     this._connected = false
   }
 
-  send(content: string) {
+  send(content: string, opts?: { noNextSteps?: boolean }) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(JSON.stringify({ type: 'chat', content }))
+    this.ws.send(JSON.stringify({
+      type: 'chat',
+      content,
+      // Queue-dispatched turns don't want the post-turn "suggested next
+      // steps" round-trip — the next message is already written.
+      ...(opts?.noNextSteps ? { no_next_steps: true } : {}),
+    }))
   }
 
   sendBtw(content: string) {
