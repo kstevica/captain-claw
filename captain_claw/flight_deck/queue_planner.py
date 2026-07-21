@@ -20,6 +20,7 @@ Nothing here has side effects. The result is a proposal the user reviews.
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 from typing import Any
 
@@ -175,6 +176,99 @@ def facts_summary(facts: dict[str, Any]) -> str:
     return "\n".join(lines) or "(no tables)"
 
 
+# ── Attachments ──────────────────────────────────────────────────────
+#
+# A file the user attaches serves two different purposes, and conflating them
+# is how this goes wrong:
+#
+#   1. The TASKS need its path, so the agent can open it at run time.
+#   2. The PLANNER needs a peek INSIDE it — "how many rows?", "what are the id
+#      columns called?" — or it is guessing at the very ranges we went to the
+#      trouble of grounding in the datastore.
+#
+# So the path always goes into the prompt; the content goes in only as a small
+# preview, capped hard, because this is one small call and a 170 KB
+# spreadsheet would swamp it.
+
+_PREVIEW_CHARS = 3000
+_PREVIEW_ROWS = 25
+_MAX_PREVIEW_BYTES = 8 * 1024 * 1024
+
+
+async def _fetch_agent_file(host: str, port: int, auth: str, path: str) -> bytes | None:
+    """Pull an uploaded file back from the agent that stored it."""
+    import urllib.parse
+
+    qs = f"path={urllib.parse.quote(path)}"
+    if auth:
+        qs += f"&token={urllib.parse.quote(auth)}"
+    url = f"http://{host}:{port}/api/files/download?{qs}"
+    try:
+        async with httpx.AsyncClient(timeout=_FACTS_TIMEOUT) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200 or len(resp.content) > _MAX_PREVIEW_BYTES:
+                return None
+            return resp.content
+    except httpx.HTTPError:
+        return None
+
+
+def preview_file(name: str, blob: bytes) -> str:
+    """A short, text-shaped look inside an attachment.
+
+    Reuses the extractors the document tools already own rather than growing a
+    second understanding of what an .xlsx is. Anything unreadable degrades to
+    a size note — the planner still gets the path, which is the part the tasks
+    actually need.
+    """
+    import tempfile
+
+    suffix = pathlib.Path(name).suffix.lower()
+    try:
+        if suffix in (".txt", ".md", ".csv", ".tsv", ".json", ".yaml", ".yml", ".sql"):
+            text = blob.decode("utf-8", errors="replace")
+            head = "\n".join(text.splitlines()[:_PREVIEW_ROWS])
+            return head[:_PREVIEW_CHARS]
+        if suffix in (".xlsx", ".docx", ".pdf", ".pptx"):
+            from captain_claw.tools import document_extract as de
+
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+                tmp.write(blob)
+                tmp.flush()
+                target = pathlib.Path(tmp.name)
+                if suffix == ".xlsx":
+                    md = de._extract_xlsx_markdown(target, _PREVIEW_ROWS)
+                elif suffix == ".docx":
+                    md = de._extract_docx_markdown(target)
+                elif suffix == ".pptx":
+                    md = de._extract_pptx_markdown(target, 5)
+                else:
+                    md, _ = de._extract_pdf_markdown(target, 3)
+                return (md or "")[:_PREVIEW_CHARS]
+    except Exception as e:  # a preview is a nicety; never fail the plan for it
+        log.debug("attachment preview failed", file=name, error=str(e))
+    return f"(binary or unreadable, {len(blob):,} bytes)"
+
+
+async def build_file_notes(host: str, port: int, auth: str,
+                           files: list[dict[str, Any]]) -> str:
+    """The attachments block for the prompt: path first, then a peek inside."""
+    notes: list[str] = []
+    for f in files[:8]:
+        path = str(f.get("path") or "").strip()
+        name = str(f.get("filename") or path.rsplit("/", 1)[-1] or "file")
+        if not path:
+            continue
+        blob = await _fetch_agent_file(host, port, auth, path)
+        preview = preview_file(name, blob) if blob else "(could not be read back)"
+        notes.append(
+            f"- `{path}` ({name})\n"
+            f"  The agent can open this path directly. First rows / first page:\n"
+            f"  {preview.strip()[:_PREVIEW_CHARS]}"
+        )
+    return "\n".join(notes)
+
+
 # ── Prompt ───────────────────────────────────────────────────────────
 
 _SYSTEM = (
@@ -193,6 +287,9 @@ _SYSTEM = (
     "- State the range as a hard boundary: work only these ids, do not continue to "
     "the next batch, do not touch ids outside the range.\n"
     "- Write it as an instruction to the agent, in the user's language of choice.\n\n"
+    "If files are attached: their paths are given. A task that needs a file must "
+    "name its path so the agent can open it — the agent cannot see your preview, "
+    "only the file itself.\n\n"
     "Rules for the batches:\n"
     "- Stay strictly inside the real min/max you are given. Never invent rows.\n"
     "- Use the requested batch size; the last batch may be smaller.\n"
@@ -254,6 +351,8 @@ class PlanRequest(BaseModel):
     batch_size: int = 10
     max_tasks: int = DEFAULT_MAX_TASKS
     file_notes: str = ""
+    # Files already uploaded to the agent: [{"path": …, "filename": …}]
+    files: list[dict] = Field(default_factory=list)
     provider: str = ""
     model: str = ""
     api_key: str = ""
@@ -327,8 +426,13 @@ async def plan_tasks(body: PlanRequest, user: dict = Depends(get_current_user)):
     model = body.model or fast.get("model", "")
     base_url = body.base_url or fast.get("base_url", "")
 
+    file_notes = body.file_notes or ""
+    if body.files and body.port:
+        fetched = await build_file_notes(body.host, body.port, body.auth, body.files)
+        file_notes = f"{file_notes}\n{fetched}".strip() if file_notes else fetched
+
     user_prompt = build_user_prompt(
-        intent, facts, batch_size, body.key_column, body.file_notes)
+        intent, facts, batch_size, body.key_column, file_notes)
     try:
         from captain_claw.llm import Message, create_provider
 

@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { X, Wand2, Loader2, AlertTriangle, Trash2, Pin, ListPlus } from 'lucide-react'
+import { X, Wand2, Loader2, AlertTriangle, Trash2, Pin, ListPlus, Paperclip, FileText } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 import { useChatStore, LANES, LANE_MAIN, laneKey } from '../../stores/chatStore'
+import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
 
 /**
  * Turn one description of a repetitive job into a reviewed list of queue tasks.
@@ -59,6 +60,11 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
   const [lane, setLane] = useState(activeLane)
   const [newSession, setNewSession] = useState(true)
 
+  // Attachments live on the AGENT: the tasks reference the path at run time,
+  // and the planner reads a short preview so it can see the ids/headers inside
+  // instead of guessing at the very ranges we grounded in the datastore.
+  const [files, setFiles] = useState<{ path: string; filename: string; size: number }[]>([])
+  const [uploading, setUploading] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [plan, setPlan] = useState<PlanResult | null>(null)
@@ -76,6 +82,21 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  const addFiles = async (list: FileList | null) => {
+    if (!list || list.length === 0) return
+    setUploading((n) => n + list.length)
+    for (const file of Array.from(list)) {
+      try {
+        const up = await uploadFileToAgent(host, port, auth, file)
+        setFiles((prev) => [...prev, { path: up.path, filename: up.filename, size: up.size }])
+      } catch (e) {
+        setError(`Upload failed for ${file.name}: ${e instanceof Error ? e.message : e}`)
+      } finally {
+        setUploading((n) => Math.max(0, n - 1))
+      }
+    }
+  }
+
   const runPlan = async () => {
     if (!intent.trim() || busy) return
     setBusy(true); setError(''); setSent(0)
@@ -83,6 +104,7 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
       const res = await fdPost<PlanResult>('/queue/plan', {
         intent, host, port, auth, table, key_column: keyColumn,
         batch_size: batchSize, max_tasks: maxTasks,
+        files: files.map((f) => ({ path: f.path, filename: f.filename })),
       })
       setPlan(res)
       setTemplate(res.template)
@@ -183,6 +205,41 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
               Rules are copied into <em>every</em> task verbatim — each one runs in its own
               session and can't see the others.
             </p>
+
+            {/* Attachments */}
+            <div
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation() }}
+              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); void addFiles(e.dataTransfer.files) }}
+              className="rounded-md border border-dashed border-zinc-700 p-2"
+            >
+              <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-400 hover:text-zinc-200">
+                <Paperclip className="h-3 w-3" />
+                Attach files{uploading > 0 && <Loader2 className="h-3 w-3 animate-spin" />}
+                <input type="file" multiple className="hidden"
+                  onChange={(e) => { void addFiles(e.target.files); e.target.value = '' }} />
+              </label>
+              {files.length > 0 && (
+                <ul className="mt-1.5 flex flex-col gap-1">
+                  {files.map((f, i) => (
+                    <li key={f.path} className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                      <FileText className="h-3 w-3 shrink-0 text-zinc-600" />
+                      <span className="truncate" title={f.path}>{f.filename}</span>
+                      <span className="shrink-0 text-zinc-600">{formatSize(f.size)}</span>
+                      <button
+                        onClick={() => setFiles((prev) => prev.filter((_, idx) => idx !== i))}
+                        className="ml-auto shrink-0 rounded p-0.5 text-zinc-600 hover:bg-red-500/20 hover:text-red-300"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-1 text-[9px] leading-relaxed text-zinc-600">
+                Uploaded to the agent. Tasks get the path; the planner reads the first
+                rows so it can see what's inside.
+              </p>
+            </div>
 
             <div className="grid grid-cols-2 gap-2">
               <Field label="Table">

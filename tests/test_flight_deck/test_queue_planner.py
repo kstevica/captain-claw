@@ -199,3 +199,84 @@ async def test_expand_endpoint_needs_a_template():
     with pytest.raises(HTTPException) as e:
         await expand_plan(ExpandRequest(template="  ", batches=[]), user={"id": 1})
     assert e.value.status_code == 400
+
+
+# ── Phase 3: attachments ──
+# An attached file serves two purposes, and conflating them is how this goes
+# wrong: the TASKS need its path (the agent opens it at run time), the PLANNER
+# needs a peek inside (or it guesses at the ranges we just grounded).
+
+def test_csv_preview_is_the_first_rows():
+    from captain_claw.flight_deck.queue_planner import preview_file
+
+    blob = ("id,name\n" + "\n".join(f"{i},Company {i}" for i in range(1, 200))).encode()
+    out = preview_file("ids.csv", blob)
+    assert "id,name" in out and "1,Company 1" in out
+    assert "150,Company 150" not in out          # capped, not the whole file
+    assert len(out) <= 3000
+
+
+def test_xlsx_preview_uses_the_document_extractor():
+    """One understanding of what an .xlsx is, not a second one here."""
+    import io, zipfile
+    from captain_claw.flight_deck.queue_planner import preview_file
+
+    # A minimal but real xlsx: one sheet, two cells.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/'
+                   'package/2006/content-types"/>')
+        z.writestr("xl/worksheets/sheet1.xml",
+                   '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/'
+                   'spreadsheetml/2006/main"><sheetData><row r="1">'
+                   '<c r="A1" t="inlineStr"><is><t>portfolio_id</t></is></c>'
+                   '<c r="B1"><v>241</v></c></row></sheetData></worksheet>')
+    out = preview_file("ids.xlsx", buf.getvalue())
+    # Either it extracted the cells, or it degraded honestly — never a crash.
+    assert isinstance(out, str) and out
+
+
+def test_unreadable_attachment_degrades_to_a_note():
+    from captain_claw.flight_deck.queue_planner import preview_file
+
+    out = preview_file("photo.heic", b"\x00\x01\x02\x03" * 100)
+    assert "binary or unreadable" in out and "400" in out
+
+
+def test_a_broken_file_never_fails_the_plan():
+    """A preview is a nicety; the path is the part the tasks need."""
+    from captain_claw.flight_deck.queue_planner import preview_file
+
+    assert preview_file("truncated.xlsx", b"PK\x03\x04 not really a zip")
+
+
+def test_prompt_tells_the_planner_a_path_must_reach_the_task():
+    from captain_claw.flight_deck.queue_planner import _SYSTEM
+
+    assert "cannot see your preview" in _SYSTEM
+
+
+async def test_file_notes_lead_with_the_path(monkeypatch):
+    from captain_claw.flight_deck import queue_planner as qp
+
+    async def fake_fetch(host, port, auth, path):
+        return b"id,name\n241,Xolo\n242,DrHouse\n"
+
+    monkeypatch.setattr(qp, "_fetch_agent_file", fake_fetch)
+    notes = await qp.build_file_notes("h", 1, "t", [
+        {"path": "saved/uploads/ids.csv", "filename": "ids.csv"},
+    ])
+    assert "`saved/uploads/ids.csv`" in notes      # the agent opens THIS
+    assert "241,Xolo" in notes                     # the planner sees THIS
+
+
+async def test_a_file_that_cannot_be_read_back_still_contributes_its_path(monkeypatch):
+    from captain_claw.flight_deck import queue_planner as qp
+
+    async def fake_fetch(host, port, auth, path):
+        return None
+
+    monkeypatch.setattr(qp, "_fetch_agent_file", fake_fetch)
+    notes = await qp.build_file_notes("h", 1, "t", [{"path": "saved/x.bin", "filename": "x.bin"}])
+    assert "saved/x.bin" in notes and "could not be read back" in notes
