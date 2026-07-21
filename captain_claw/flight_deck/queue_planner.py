@@ -109,6 +109,32 @@ def clamp_batches(batches: list[dict[str, Any]], max_tasks: int) -> tuple[list[d
     )
 
 
+def make_batches(start: int, size: int, count: int,
+                 key_max: int | None = None) -> tuple[list[dict[str, int]], str | None]:
+    """Consecutive ranges from *start* — the arithmetic half of a plan.
+
+    Continuing a job needs no model at all: the template is already written and
+    approved, and "the next 25 batches of 10 from 491" is arithmetic. Doing it
+    here rather than in the client keeps one implementation, and lets it stop
+    at the real end of the table instead of planning rows that don't exist.
+    """
+    size = max(MIN_BATCH, min(MAX_BATCH, int(size)))
+    batches: list[dict[str, int]] = []
+    note: str | None = None
+    cur = int(start)
+    for _ in range(max(0, int(count))):
+        if key_max is not None and cur > key_max:
+            note = (f"Stopped at {key_max}, the last row in the table — asked for "
+                    f"{count} batches, made {len(batches)}.")
+            break
+        hi = cur + size - 1
+        if key_max is not None and hi > key_max:
+            hi = key_max
+        batches.append({"from": cur, "to": hi})
+        cur = hi + 1
+    return batches, note
+
+
 # ── Facts ────────────────────────────────────────────────────────────
 
 async def gather_datastore_facts(
@@ -397,6 +423,61 @@ async def expand_plan(body: ExpandRequest, user: dict = Depends(get_current_user
             f"as literal text: {', '.join(left)}."
         )
     return {"messages": messages, "batches": batches, "warnings": warnings}
+
+
+class ContinueRequest(BaseModel):
+    template: str
+    start: int
+    batch_size: int = 10
+    count: int = 10
+    max_tasks: int = DEFAULT_MAX_TASKS
+    # Optional, but worth passing: it stops the continuation at the real end
+    # of the table instead of inventing rows past it.
+    host: str = "localhost"
+    port: int = 0
+    auth: str = ""
+    table: str = ""
+    key_column: str = "_id"
+
+
+@router.post("/continue")
+async def continue_plan(body: ContinueRequest, user: dict = Depends(get_current_user)):
+    """The next N batches from where a previous plan stopped. No model call.
+
+    The template was written and approved once; carrying on is arithmetic. A
+    continuation that costs an LLM call would also risk a *different* template
+    for the second half of the same job.
+    """
+    template = (body.template or "").strip()
+    if not template:
+        raise HTTPException(400, "template is required")
+    max_tasks = max(1, min(MAX_TASKS_CEILING, int(body.max_tasks or DEFAULT_MAX_TASKS)))
+
+    facts: dict[str, Any] = {}
+    key_max: int | None = None
+    if body.port:
+        facts = await gather_datastore_facts(
+            body.host, body.port, body.auth, body.table, body.key_column)
+        raw_max = facts.get("key_max")
+        if isinstance(raw_max, (int, float)):
+            key_max = int(raw_max)
+
+    batches, note = make_batches(body.start, body.batch_size,
+                                 min(int(body.count or 10), max_tasks), key_max)
+    warnings = [note] if note else []
+    if not batches:
+        warnings.append(
+            f"Nothing to do: {body.start} is past the last row"
+            + (f" ({key_max})." if key_max is not None else ".")
+        )
+    messages = expand_template(template, batches)
+    left = unresolved_placeholders(messages)
+    if left:
+        warnings.append(
+            "These placeholders had nothing to fill them: " + ", ".join(left) + "."
+        )
+    return {"template": template, "batches": batches, "messages": messages,
+            "rationale": "", "warnings": warnings, "facts": facts}
 
 
 @router.post("/plan", response_model=PlanResponse)

@@ -280,3 +280,82 @@ async def test_a_file_that_cannot_be_read_back_still_contributes_its_path(monkey
     monkeypatch.setattr(qp, "_fetch_agent_file", fake_fetch)
     notes = await qp.build_file_notes("h", 1, "t", [{"path": "saved/x.bin", "filename": "x.bin"}])
     assert "saved/x.bin" in notes and "could not be read back" in notes
+
+
+# ── Phase 4: continuing where a plan stopped ──
+# A 1,818-row table is not one sitting. Continuing needs no model: the template
+# was written and approved once, and "the next 25 batches of 10 from 491" is
+# arithmetic. A continuation that called the model again would also risk a
+# DIFFERENT template for the second half of one job.
+
+def test_batches_run_consecutively_from_the_start():
+    from captain_claw.flight_deck.queue_planner import make_batches
+
+    batches, note = make_batches(491, 10, 3)
+    assert batches == [{"from": 491, "to": 500}, {"from": 501, "to": 510},
+                       {"from": 511, "to": 520}]
+    assert note is None
+
+
+def test_batches_never_overlap_or_skip():
+    from captain_claw.flight_deck.queue_planner import make_batches
+
+    batches, _ = make_batches(1, 7, 20)
+    for a, b in zip(batches, batches[1:]):
+        assert b["from"] == a["to"] + 1          # the bug this whole feature exists to avoid
+
+
+def test_continuation_stops_at_the_real_end_of_the_table():
+    """Planning past the last row is tasks that can only fail."""
+    from captain_claw.flight_deck.queue_planner import make_batches
+
+    batches, note = make_batches(1800, 10, 10, key_max=1818)
+    assert batches == [{"from": 1800, "to": 1809}, {"from": 1810, "to": 1818}]
+    assert "Stopped at 1818" in note
+
+
+def test_starting_past_the_end_makes_nothing():
+    from captain_claw.flight_deck.queue_planner import make_batches
+
+    batches, note = make_batches(2000, 10, 5, key_max=1818)
+    assert batches == [] and "Stopped at 1818" in note
+
+
+def test_batch_size_is_clamped_like_everywhere_else():
+    from captain_claw.flight_deck.queue_planner import make_batches
+
+    batches, _ = make_batches(1, 9999, 1)
+    assert batches[0]["to"] - batches[0]["from"] + 1 <= 50
+
+
+async def test_continue_endpoint_reuses_the_template_verbatim():
+    from captain_claw.flight_deck.queue_planner import ContinueRequest, continue_plan
+
+    tpl = "enrich _id from {from} to {to}. never do +1 on the id!"
+    out = await continue_plan(
+        ContinueRequest(template=tpl, start=491, batch_size=10, count=2), user={"id": 1})
+    assert out["template"] == tpl                 # not re-written
+    assert out["messages"][0] == "enrich _id from 491 to 500. never do +1 on the id!"
+    assert out["messages"][1] == "enrich _id from 501 to 510. never do +1 on the id!"
+
+
+async def test_continue_endpoint_says_when_there_is_nothing_left(monkeypatch):
+    from captain_claw.flight_deck import queue_planner as qp
+
+    async def facts(host, port, auth, table, key):
+        return {"key_max": 100, "table": "t", "tables": []}
+
+    monkeypatch.setattr(qp, "gather_datastore_facts", facts)
+    out = await qp.continue_plan(
+        qp.ContinueRequest(template="rows {from}-{to}", start=200, count=5, port=1234),
+        user={"id": 1})
+    assert out["messages"] == []
+    assert any("past the last row" in w for w in out["warnings"])
+
+
+async def test_continue_endpoint_needs_a_template():
+    from captain_claw.flight_deck.queue_planner import ContinueRequest, continue_plan
+
+    with pytest.raises(HTTPException) as e:
+        await continue_plan(ContinueRequest(template="", start=1), user={"id": 1})
+    assert e.value.status_code == 400

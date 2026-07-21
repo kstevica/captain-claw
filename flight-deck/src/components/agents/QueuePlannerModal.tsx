@@ -40,6 +40,53 @@ async function fdPost<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>
 }
 
+// ── Remembering where a job got to ──
+//
+// A 1,818-row table is not one sitting. Reopening the modal tomorrow should
+// know that last time covered 241–490, and offer the next stretch with the
+// SAME template — continuing costs no model call at all, and can't drift into
+// a different template for the second half of one job.
+interface LastPlan {
+  template: string
+  lastTo: number
+  keyColumn: string
+  batchSize: number
+  table: string
+  count: number
+  at: number
+}
+
+function lastPlanKey(agentId: string, table: string) {
+  return `fd.queue.plan.${agentId}.${table || '_'}`
+}
+
+function loadLastPlan(agentId: string, table: string): LastPlan | null {
+  try {
+    const raw = window.localStorage.getItem(lastPlanKey(agentId, table))
+    return raw ? (JSON.parse(raw) as LastPlan) : null
+  } catch { return null }
+}
+
+function saveLastPlan(agentId: string, p: LastPlan) {
+  try {
+    window.localStorage.setItem(lastPlanKey(agentId, p.table), JSON.stringify(p))
+  } catch { /* quota — the plan still went out */ }
+}
+
+function highestTo(batches: Record<string, unknown>[]): number {
+  return batches.reduce((max, b) => {
+    const v = Number(b.to ?? b.end ?? NaN)
+    return Number.isFinite(v) && v > max ? v : max
+  }, 0)
+}
+
+function ago(ms: number): string {
+  const mins = Math.round((Date.now() - ms) / 60000)
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.round(mins / 60)
+  return hrs < 24 ? `${hrs}h ago` : `${Math.round(hrs / 24)}d ago`
+}
+
 export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClose }: {
   agentId: string
   agentName: string
@@ -75,6 +122,10 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
   const [pinned, setPinned] = useState<Set<number>>(new Set())
   const [warnings, setWarnings] = useState<string[]>([])
   const [sent, setSent] = useState(0)
+  const [last, setLast] = useState<LastPlan | null>(() => loadLastPlan(agentId, ''))
+  const [continueCount, setContinueCount] = useState(10)
+
+  useEffect(() => { setLast(loadLastPlan(agentId, table)) }, [agentId, table])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -111,6 +162,33 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
       setMessages(res.messages)
       setWarnings(res.warnings || [])
       setPinned(new Set())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runContinue = async () => {
+    if (!last || busy) return
+    setBusy(true); setError(''); setSent(0)
+    try {
+      const res = await fdPost<PlanResult>('/queue/continue', {
+        template: last.template,
+        start: last.lastTo + 1,
+        batch_size: last.batchSize,
+        count: continueCount,
+        max_tasks: maxTasks,
+        host, port, auth, table: last.table, key_column: last.keyColumn,
+      })
+      setPlan(res)
+      setTemplate(res.template)
+      setMessages(res.messages)
+      setWarnings(res.warnings || [])
+      setPinned(new Set())
+      setTable(last.table)
+      setKeyColumn(last.keyColumn)
+      setBatchSize(last.batchSize)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -164,6 +242,18 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
       enqueue(key, m)
     })
     setSent(messages.length)
+    // Remember where this got to, so the next sitting can carry straight on.
+    if (plan) {
+      const to = highestTo(plan.batches)
+      if (to > 0) {
+        const record: LastPlan = {
+          template, lastTo: to, keyColumn, batchSize,
+          table: plan.facts?.table || table, count: messages.length, at: Date.now(),
+        }
+        saveLastPlan(agentId, record)
+        setLast(record)
+      }
+    }
   }
 
   const laneLabel = (l: string) => `${l} - ${agentName}`
@@ -191,6 +281,37 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
         <div className="flex min-h-0 flex-1">
           {/* ── Request ── */}
           <div className="flex w-[380px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-zinc-800 p-4">
+            {last && (
+              <div className="rounded-md border border-violet-500/30 bg-violet-500/10 p-2">
+                <p className="text-[11px] text-violet-200">
+                  Last plan covered {last.keyColumn} up to <strong>{last.lastTo}</strong>
+                  {last.table ? ` in ${last.table}` : ''} — {last.count} tasks, {ago(last.at)}.
+                </p>
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  <span className="text-[10px] text-zinc-400">Continue with</span>
+                  <input
+                    type="number" min={1} max={200} value={continueCount}
+                    onChange={(e) => setContinueCount(Number(e.target.value))}
+                    className="w-14 rounded border border-zinc-700 bg-zinc-950 px-1 py-0.5 text-[11px] text-zinc-200"
+                  />
+                  <span className="text-[10px] text-zinc-400">
+                    more, from {last.lastTo + 1}
+                  </span>
+                  <button
+                    onClick={runContinue}
+                    disabled={busy}
+                    title="Same template, no model call"
+                    className="ml-auto rounded-md bg-violet-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                  >
+                    Continue
+                  </button>
+                </div>
+                <p className="mt-1 text-[9px] text-zinc-500">
+                  Reuses the approved template — free, and can't drift from the first half.
+                </p>
+              </div>
+            )}
+
             <label className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
               What needs doing
             </label>
