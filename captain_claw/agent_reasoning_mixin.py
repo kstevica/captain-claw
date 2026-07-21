@@ -1232,6 +1232,14 @@ class AgentReasoningMixin:
         # list pipeline).  Never rephrase.
         if self._scale_system_disabled():
             return user_input, False
+        # A queued task is already a written brief: exact id range, standing
+        # rules, explicit prohibitions ("never do +1 on the id!"). Rephrasing
+        # it is a weaker model rewriting instructions the user chose word by
+        # word — the same drift the task planner avoids by expanding one
+        # approved template instead of writing each message. Same reasoning as
+        # the FD-worker skip below, different origin.
+        if getattr(self, "_suppress_rephrase", False):
+            return user_input, False
         if not self._should_rephrase_task(user_input):
             return user_input, False
 

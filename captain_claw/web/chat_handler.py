@@ -151,6 +151,7 @@ async def handle_chat(
     no_tools: bool = False,
     no_broadcast: bool = False,
     no_next_steps: bool = False,
+    no_rephrase: bool = False,
 ) -> None:
     """Process a chat message through the agent.
 
@@ -428,6 +429,7 @@ async def handle_chat(
         no_tools=no_tools,
         no_broadcast=no_broadcast,
         no_next_steps=no_next_steps,
+        no_rephrase=no_rephrase,
         flow_text=content,
         flow_attach={
             "image_path": image_path or (image_paths[0] if image_paths else ""),
@@ -648,6 +650,7 @@ async def _run_agent(
     no_tools: bool = False,
     no_broadcast: bool = False,
     no_next_steps: bool = False,
+    no_rephrase: bool = False,
     flow_text: str = "",
     flow_attach: dict | None = None,
 ) -> None:
@@ -671,6 +674,9 @@ async def _run_agent(
         send = server._lane_send(lane)
     else:
         send = lambda msg: server._broadcast(msg)
+
+    if no_rephrase:
+        agent._suppress_rephrase = True  # type: ignore[attr-defined]
 
     if is_public:
         agent._public_busy = True  # type: ignore[attr-defined]
@@ -914,6 +920,7 @@ async def _run_agent(
     finally:
         try:
             agent._suppress_memory_context = False  # type: ignore[attr-defined]
+            agent._suppress_rephrase = False  # type: ignore[attr-defined]
         except Exception:
             pass
         if _video_policy_slug is not None:

@@ -152,8 +152,10 @@ export class AgentChatWS {
       type: 'chat',
       content,
       // Queue-dispatched turns don't want the post-turn "suggested next
-      // steps" round-trip — the next message is already written.
-      ...(opts?.noNextSteps ? { no_next_steps: true } : {}),
+      // steps" round-trip — the next message is already written — nor a
+      // task-rephrase, which would rewrite instructions the user chose
+      // word by word.
+      ...(opts?.noNextSteps ? { no_next_steps: true, no_rephrase: true } : {}),
     }))
   }
 

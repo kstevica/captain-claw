@@ -87,6 +87,23 @@ function ago(ms: number): string {
   return hrs < 24 ? `${hrs}h ago` : `${Math.round(hrs / 24)}d ago`
 }
 
+interface TableInfo {
+  name: string
+  columns: { name: string; type: string }[]
+  row_count: number
+}
+
+async function fdGet<T>(path: string): Promise<T> {
+  const { token, authEnabled } = useAuthStore.getState()
+  const headers: Record<string, string> = {}
+  if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+  const call = () => fetch(`/fd${path}`, { headers, credentials: 'include' })
+  let res = await call()
+  if (res.status === 401 && authEnabled && await refreshAccessToken()) res = await call()
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json() as Promise<T>
+}
+
 export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClose }: {
   agentId: string
   agentName: string
@@ -122,10 +139,36 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
   const [pinned, setPinned] = useState<Set<number>>(new Set())
   const [warnings, setWarnings] = useState<string[]>([])
   const [sent, setSent] = useState(0)
+  // The agent's real tables and columns, so table and key are PICKED, not
+  // typed. A typo in either is a plan built against nothing.
+  const [tables, setTables] = useState<TableInfo[]>([])
+  const [tablesError, setTablesError] = useState('')
   const [last, setLast] = useState<LastPlan | null>(() => loadLastPlan(agentId, ''))
   const [continueCount, setContinueCount] = useState(10)
 
+  useEffect(() => {
+    if (!host || !port) return
+    const qs = auth ? `&token=${encodeURIComponent(auth)}` : ''
+    fdGet<TableInfo[]>(`/agent-datastore/${host}/${port}/tables?_=1${qs}`)
+      .then((data) => {
+        const list = Array.isArray(data) ? data : []
+        setTables(list)
+        // Pre-select the table the planner would have defaulted to anyway, so
+        // what's on screen matches what it will use.
+        setTable((cur) => cur || (list[0]?.name ?? ''))
+      })
+      .catch((e) => setTablesError(e instanceof Error ? e.message : String(e)))
+  }, [host, port, auth])
+
   useEffect(() => { setLast(loadLastPlan(agentId, table)) }, [agentId, table])
+
+  // Switching tables can strand the key on a column the new table doesn't
+  // have — which would plan against a filter that matches nothing.
+  useEffect(() => {
+    const cols = tables.find((t) => t.name === table)?.columns
+    if (!cols) return
+    if (keyColumn !== '_id' && !cols.some((c) => c.name === keyColumn)) setKeyColumn('_id')
+  }, [table, tables, keyColumn])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -256,6 +299,13 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
     }
   }
 
+  // `_id` is the implicit primary key — it isn't in the column list, and it's
+  // the usual batching key, so it leads.
+  const keyOptions = (() => {
+    const cols = tables.find((t) => t.name === table)?.columns ?? []
+    return ['_id', ...cols.map((c) => c.name).filter((n) => n !== '_id')]
+  })()
+
   const laneLabel = (l: string) => `${l} - ${agentName}`
   const pendingIn = (l: string) =>
     sessions.get(laneKey(agentId, l))?.queue.filter((q) => q.status === 'pending').length || 0
@@ -364,11 +414,29 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
 
             <div className="grid grid-cols-2 gap-2">
               <Field label="Table">
-                <input value={table} onChange={(e) => setTable(e.target.value)}
-                  placeholder="(first table)" className={inputCls} />
+                {tables.length > 0 ? (
+                  <select value={table} onChange={(e) => setTable(e.target.value)} className={inputCls}>
+                    {tables.map((t) => (
+                      <option key={t.name} value={t.name}>
+                        {t.name} ({t.row_count.toLocaleString()})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  // The agent is unreachable — typing still beats being stuck.
+                  <input value={table} onChange={(e) => setTable(e.target.value)}
+                    placeholder={tablesError ? 'agent unreachable' : 'loading…'}
+                    className={inputCls} />
+                )}
               </Field>
               <Field label="Batch key">
-                <input value={keyColumn} onChange={(e) => setKeyColumn(e.target.value)} className={inputCls} />
+                {keyOptions.length > 1 ? (
+                  <select value={keyColumn} onChange={(e) => setKeyColumn(e.target.value)} className={inputCls}>
+                    {keyOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                ) : (
+                  <input value={keyColumn} onChange={(e) => setKeyColumn(e.target.value)} className={inputCls} />
+                )}
               </Field>
               <Field label="Rows per task">
                 <input type="number" min={1} max={50} value={batchSize}

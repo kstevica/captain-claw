@@ -297,6 +297,7 @@ async def handle_ws_message(
                 no_broadcast=bool(data.get("no_broadcast", False)),
                 # Queue-dispatched turns skip the post-turn "what next?" call.
                 no_next_steps=bool(data.get("no_next_steps", False)),
+                no_rephrase=bool(data.get("no_rephrase", False)),
             )
 
     elif msg_type == "run_tool":
