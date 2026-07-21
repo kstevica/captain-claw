@@ -1085,7 +1085,13 @@ class DatastoreConfig(BaseModel):
     # Rows of long prose add up fast: an unbounded 379-row read of a 20-column
     # table once cost 1.38M characters — 71% of a 200k-token window in a single
     # tool message. Rows past the budget are dropped with a visible note.
-    max_result_chars: int = 20_000
+    #
+    # Sized to fit the common case whole: reading one batch (~10 rows) of a
+    # wide, prose-heavy table runs ~36k characters. Truncating THAT is worse
+    # than the disease — the model reads a partial answer as a failed query and
+    # goes hunting for "a fresh approach" until the turn dies. Still ~35x below
+    # the runaway read above.
+    max_result_chars: int = 40_000
 
 
 class BotPortClientConfig(BaseModel):

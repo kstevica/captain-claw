@@ -854,10 +854,17 @@ class AgentToolLoopMixin:
             # — not the full args.  Re-reading the same file with different
             # limits is still a duplicate.
             _dup_max = max(1, int(get_config().tools.duplicate_call_max))
+            # Datastore actions that change the table (see the write-invalidates
+            # -reads rule below).
+            _DATASTORE_WRITE_ACTIONS = {
+                "insert", "upsert", "update", "update_column", "delete",
+                "import_file", "create_table", "drop_table", "rename_table",
+                "add_column", "rename_column", "drop_column", "change_column_type",
+            }
             _tool_lower = str(tc.name or "").strip().lower()
             # Stateful tools that modify data between calls — allow more
             # repeated calls (CRUD patterns) but still catch infinite loops.
-            _STATEFUL_TOOLS = {"typesense", "todo", "contacts", "scripts", "apis", "send_mail", "browser", "gws"}
+            _STATEFUL_TOOLS = {"typesense", "todo", "contacts", "scripts", "apis", "send_mail", "browser", "gws", "datastore"}
             # During scale-progress tasks, give extra headroom so the LLM
             # can recover from a failed first attempt or a write-before-read
             # situation without being permanently locked out of a file.
@@ -915,6 +922,17 @@ class AgentToolLoopMixin:
                         "to write it again. You are DONE writing. Now respond with a "
                         "brief TEXT summary of what you created (file name, description). "
                         "Do NOT call any more tools."
+                    )
+                elif _tool_lower in _STATEFUL_TOOLS:
+                    # Don't claim "the content has not changed" about a store
+                    # the model may have written to — say what's actually true.
+                    dup_msg = (
+                        f"DUPLICATE CALL BLOCKED: `{tc.name}` has been called with these "
+                        f"exact arguments {_dup_count} times this turn with nothing "
+                        "written in between, so the answer would be the same. Use the "
+                        "result you already have. Do NOT reword the call to get around "
+                        "this — a different phrasing of the same question returns the "
+                        "same rows."
                     )
                 else:
                     dup_msg = (
@@ -1275,6 +1293,23 @@ class AgentToolLoopMixin:
                     "success": result.success,
                     "content": _result_content if result.success else result.error,
                 })
+
+                # ── A write invalidates this turn's read history ──
+                # query → upsert → query-to-verify is the prescribed
+                # datastore workflow, and the verify query is byte-identical
+                # to the first one. Blocking it as a duplicate tells the model
+                # "the content has not changed" about a table it JUST wrote
+                # to — which is false, and sends it inventing "fresh query
+                # patterns to avoid the duplicate guard" until the turn dies.
+                if (
+                    _tool_lower == "datastore"
+                    and result.success
+                    and isinstance(arguments, dict)
+                    and str(arguments.get("action", "")).strip().lower() in _DATASTORE_WRITE_ACTIONS
+                ):
+                    _dc = getattr(self, "_turn_tool_call_counts", {})
+                    for _k in [k for k in _dc if k.startswith("datastore|")]:
+                        _dc.pop(_k, None)
 
                 # ── Dup-counter rollback on failure ──────────────
                 # If the call failed (e.g. wrong path), roll back the
