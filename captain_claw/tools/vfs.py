@@ -92,14 +92,27 @@ class VfsTool(Tool):
                 return ToolResult(success=False, error=f"Unknown action: {action}. Valid: {', '.join(_ACTIONS)}")
 
             if action == "info":
+                import os as _os
+
+                root = user_root()
+                projects = list_projects()
+                drivers = [f"{k}={_os.environ[k]}" for k in
+                           ("CLAW_VFS_ROOT", "CLAW_VFS_USER", "FD_OWNER_ID", "FD_DATA_DIR")
+                           if _os.environ.get(k)]
+                drivers_line = ", ".join(drivers) or '(none set → user defaults to "local")'
+                exists = "exists" if root.is_dir() else "MISSING"
                 return ToolResult(success=True, content=(
                     f"Shared VFS\n"
                     f"  user:            {vfs_user()}\n"
                     f"  default project: {default_project()}\n"
-                    f"  root:            {user_root()}\n"
+                    f"  root:            {root}  ({exists})\n"
                     f"  base:            {vfs_base()}\n"
-                    f"  projects:        {', '.join(list_projects()) or '(none yet)'}\n"
-                    f"Address files as vfs:<project>/<path> with read/write/edit/glob/grep."
+                    f"  resolved from:   {drivers_line}\n"
+                    f"  projects ({len(projects)}):    {', '.join(projects) or '(none here)'}\n"
+                    f"Address files as vfs:<project>/<path> with read/write/edit/glob/grep.\n"
+                    f"If a folder shown in the Flight Deck panel is missing above, this "
+                    f"agent's root differs from the panel's — align CLAW_VFS_USER to the "
+                    f"owner id and restart this agent."
                 ))
 
             if action == "list_projects":

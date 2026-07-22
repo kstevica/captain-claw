@@ -127,3 +127,69 @@ class TestVfsToolUX:
         r = await VfsTool().execute(action="ls", path="totally-absent")
         assert r.success is False
         assert "CLAUDE-SKILLS" in r.error and "commons" in r.error
+
+    async def test_info_surfaces_root_and_projects(self, vroot):
+        # The diagnostic that makes a root mismatch obvious on staging.
+        r = await VfsTool().execute(action="info")
+        assert r.success is True
+        assert "root:" in r.content and "resolved from:" in r.content
+        assert "CLAUDE-SKILLS" in r.content and "CLAW_VFS_USER" in r.content
+
+
+class TestPhysicalMountDiscovery:
+    """A Drive mount is discoverable and addressable from its physical .drive/
+    tree even when .vfs-links.json doesn't list it — the failure that made the
+    agent report 'VFS completely empty' while the mount plainly existed."""
+
+    @pytest.fixture()
+    def linkless(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("CLAW_VFS_USER", "local")
+        monkeypatch.delenv("FD_OWNER_ID", raising=False)
+        monkeypatch.delenv("CLAW_VFS_SCOPE", raising=False)
+        monkeypatch.delenv("CLAW_VFS_PROJECT", raising=False)
+        uroot = tmp_path / "local"
+        mount = uroot / ".drive" / "FRC2-Carry-Participation"
+        mount.mkdir(parents=True)
+        (mount / ".drive-manifest.json").write_text('{"folder_id":"X","dirs":{},"files":{}}')
+        (mount / "signed.pdf").write_text("pdf")
+        # deliberately NO .vfs-links.json — only the physical tree exists
+        return uroot
+
+    def test_listed_without_a_link(self, linkless):
+        assert vfs.list_projects() == ["FRC2-Carry-Participation"]
+
+    def test_exact_resolves_without_a_link(self, linkless):
+        p = vfs.resolve_vfs_path("vfs:FRC2-Carry-Participation/signed.pdf")
+        assert p is not None and p.exists()
+
+    def test_fragment_resolves_to_the_mount(self, linkless):
+        assert vfs.resolve_project_name("carry participation") == "FRC2-Carry-Participation"
+        p = vfs.resolve_vfs_path("vfs:carry participation/signed.pdf")
+        assert p is not None and p.exists()
+
+    def test_mount_is_readonly_without_a_link(self, linkless):
+        # A Drive mount is inherently read-only; a missing registry row must not
+        # make it writable.
+        assert vfs.project_is_readonly("carry participation") is True
+
+    def test_display_hides_the_dot_drive_holder(self, linkless):
+        disp = vfs.to_display(linkless / ".drive" / "FRC2-Carry-Participation" / "signed.pdf")
+        assert disp == "vfs:FRC2-Carry-Participation/signed.pdf"
+
+    async def test_vfs_tool_ls_finds_it(self, linkless):
+        r = await VfsTool().execute(action="ls", path="carry participation")
+        assert r.success is True and "signed.pdf" in r.content
+
+
+class TestFragmentAmbiguity:
+    def test_ambiguous_fragment_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("CLAW_VFS_USER", "local")
+        monkeypatch.delenv("FD_OWNER_ID", raising=False)
+        monkeypatch.delenv("CLAW_VFS_SCOPE", raising=False)
+        uroot = tmp_path / "local"
+        (uroot / "carry-participation-2023").mkdir(parents=True)
+        (uroot / "carry-participation-2024").mkdir(parents=True)
+        # a fragment of BOTH → ambiguous → refuse to guess
+        assert vfs.resolve_project_name("carry participation") is None

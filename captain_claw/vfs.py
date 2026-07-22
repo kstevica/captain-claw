@@ -183,6 +183,43 @@ def link_target_at(root: Path, name: str) -> Path | None:
     return None
 
 
+# Google Drive mounts live under this dotdir at the user root, each a
+# ``<name>/`` directory carrying a manifest (see vfs_drive.MOUNTS_DIRNAME /
+# MANIFEST_NAME). Mirrored here to avoid an import cycle — vfs_drive imports vfs.
+_DRIVE_MOUNTS_DIR = ".drive"
+_DRIVE_MANIFEST = ".drive-manifest.json"
+
+
+def _drive_mount_names(root: Path) -> list[str]:
+    """Names of Google Drive mounts physically present under *root*.
+
+    Ground truth for mount discovery — a ``.drive/<name>/`` directory with a
+    manifest IS a mount, whether or not ``.vfs-links.json`` records it. Reading
+    the tree directly keeps a mount visible when the link registry is missing or
+    out of sync (a restore, a manual move, a root the writer and reader disagree
+    on), which is exactly when "the folder vanished" bites.
+    """
+    base = root / _DRIVE_MOUNTS_DIR
+    if not base.is_dir():
+        return []
+    out: list[str] = []
+    try:
+        for p in base.iterdir():
+            if p.is_dir() and (p / _DRIVE_MANIFEST).is_file():
+                out.append(p.name)
+    except OSError:
+        pass
+    return out
+
+
+def _drive_mount_root(root: Path, name: str) -> Path | None:
+    """The ``.drive/<name>`` mount path if it exists physically, else None."""
+    if not name:
+        return None
+    p = root / _DRIVE_MOUNTS_DIR / name
+    return p.resolve() if (p.is_dir() and (p / _DRIVE_MANIFEST).is_file()) else None
+
+
 def project_is_readonly(project: str = "") -> bool:
     """True when *project* is a linked folder mounted read-only (``mode: "ro"``).
 
@@ -194,7 +231,9 @@ def project_is_readonly(project: str = "") -> bool:
     """
     raw = project or default_project()
     proj = _sanitize(raw, fallback=_DEFAULT_PROJECT)
-    links = read_links()
+    root = user_root()
+    links = read_links_at(root)
+    canon = None
     ent = links.get(proj)
     if not isinstance(ent, dict):
         # Judge the same forgiving name project_root resolves, so a write to
@@ -203,7 +242,15 @@ def project_is_readonly(project: str = "") -> bool:
         canon = resolve_project_name(raw)
         if canon:
             ent = links.get(canon)
-    return bool(isinstance(ent, dict) and str(ent.get("mode", "rw")).lower() == "ro")
+    if isinstance(ent, dict):
+        return str(ent.get("mode", "rw")).lower() == "ro"
+    # No link entry, but a Google Drive mount is inherently read-only — refuse
+    # writes to one discovered physically even if its link registry row is gone.
+    if _drive_mount_root(root, proj) is not None:
+        return True
+    if canon is None:
+        canon = resolve_project_name(raw)
+    return bool(canon and _drive_mount_root(root, canon) is not None)
 
 
 def scope_projects() -> frozenset[str] | None:
@@ -239,6 +286,7 @@ def _known_projects() -> list[str]:
             if p.is_dir() and not p.name.startswith("."):
                 names.add(p.name)
     names.update(read_links_at(root).keys())
+    names.update(_drive_mount_names(root))  # physical Drive mounts, link or not
     return sorted(names)
 
 
@@ -270,7 +318,19 @@ def resolve_project_name(name: str) -> str | None:
     if not target:
         return None
     matches = sorted({k for k in known if _normalize_project_key(k) == target})
-    return matches[0] if len(matches) == 1 else None
+    if matches:
+        return matches[0] if len(matches) == 1 else None  # ambiguous → don't guess
+    # Last resort: a UNIQUE containment match — the user typed a fragment of the
+    # real name ("carry participation" for "FRC2-Carry-Participation") or a
+    # superset. Min length guards a tiny fragment from matching everything.
+    if len(target) >= 3:
+        subs = sorted({
+            k for k in known
+            if target in _normalize_project_key(k) or _normalize_project_key(k) in target
+        })
+        if len(subs) == 1:
+            return subs[0]
+    return None
 
 
 def project_root(project: str = "", *, create: bool = False) -> Path:
@@ -300,6 +360,11 @@ def project_root(project: str = "", *, create: bool = False) -> Path:
         if create:
             base.mkdir(parents=True, exist_ok=True)
         return base
+    # A Google Drive mount physically present but not resolvable via a link (its
+    # registry row is missing/out of sync). The tree is the ground truth.
+    dm = _drive_mount_root(root, proj)
+    if dm is not None:
+        return dm
     # Forgiving resolution for a read of a not-yet-exact name. Unique match only;
     # scope still applies.
     canon = resolve_project_name(raw)
@@ -307,6 +372,9 @@ def project_root(project: str = "", *, create: bool = False) -> Path:
         canon_tgt = link_target_at(root, canon)
         if canon_tgt is not None:
             return canon_tgt
+        canon_dm = _drive_mount_root(root, canon)
+        if canon_dm is not None:
+            return canon_dm
         canon_base = (root / canon).resolve()
         if canon_base.is_dir():
             return canon_base
@@ -428,7 +496,12 @@ def to_display(path: Path) -> str:
     parts = rel.parts
     if not parts:
         return _SCHEME
-    project, *rest = parts
+    # A Drive mount lives under .drive/<name>/…; show it as its project name
+    # (vfs:<name>/…), not the internal .drive holder the user never typed.
+    if parts[0] == _DRIVE_MOUNTS_DIR and len(parts) >= 2:
+        project, rest = parts[1], parts[2:]
+    else:
+        project, rest = parts[0], parts[1:]
     return f"{_SCHEME}{project}" + ("/" + "/".join(rest) if rest else "")
 
 
