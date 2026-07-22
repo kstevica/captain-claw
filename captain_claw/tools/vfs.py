@@ -20,7 +20,9 @@ from captain_claw.vfs import (
     is_vfs_path,
     list_projects,
     project_root,
+    resolve_project_name,
     resolve_vfs_path,
+    split_scheme,
     to_display,
     user_root,
     vfs_base,
@@ -117,7 +119,7 @@ class VfsTool(Tool):
 
             if action == "ls":
                 if not target.exists():
-                    return ToolResult(success=False, error=f"Not found: {to_display(target)}")
+                    return ToolResult(success=False, error=self._not_found(path, target))
                 if target.is_file():
                     return ToolResult(success=True, content=self._fmt_entry(target))
                 entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
@@ -128,7 +130,7 @@ class VfsTool(Tool):
 
             if action == "tree":
                 if not target.exists():
-                    return ToolResult(success=False, error=f"Not found: {to_display(target)}")
+                    return ToolResult(success=False, error=self._not_found(path, target))
                 lines: list[str] = []
                 self._tree(target, target, lines)
                 more = "\n  … (truncated)" if len(lines) >= _TREE_MAX else ""
@@ -136,7 +138,7 @@ class VfsTool(Tool):
 
             if action == "stat":
                 if not target.exists():
-                    return ToolResult(success=False, error=f"Not found: {to_display(target)}")
+                    return ToolResult(success=False, error=self._not_found(path, target))
                 return ToolResult(success=True, content=self._fmt_entry(target, verbose=True))
 
             if action == "mkdir":
@@ -155,7 +157,7 @@ class VfsTool(Tool):
 
             if action == "rm":
                 if not target.exists():
-                    return ToolResult(success=False, error=f"Not found: {to_display(target)}")
+                    return ToolResult(success=False, error=self._not_found(path, target))
                 # Guard against removing a whole project/user root by accident.
                 if target.resolve() == user_root().resolve():
                     return ToolResult(success=False, error="Refusing to remove the VFS user root.")
@@ -174,6 +176,25 @@ class VfsTool(Tool):
             return ToolResult(success=False, error=str(e))
 
     # ── helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _not_found(path: str, target: Path) -> str:
+        """A not-found error that helps the caller recover: name the closest
+        real project (if the typed name folds onto one) and list what exists —
+        so an agent that guessed 'claude skills' learns the folder is
+        'CLAUDE-SKILLS' instead of concluding it doesn't exist."""
+        msg = f"Not found: {to_display(target)}."
+        try:
+            proj = split_scheme(_as_vfs(path))[0]
+            canon = resolve_project_name(proj)
+            projects = list_projects()
+            if canon and canon != proj:
+                msg += f" Did you mean project '{canon}'?"
+            elif projects:
+                msg += f" Known projects: {', '.join(projects)}."
+        except Exception:
+            pass
+        return msg
 
     @staticmethod
     def _fmt_entry(p: Path, *, verbose: bool = False) -> str:

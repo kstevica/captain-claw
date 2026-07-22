@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -191,8 +192,17 @@ def project_is_readonly(project: str = "") -> bool:
     agent-side write/edit tools resolve a ``vfs:`` path with no mode check and
     a "read-only" mount is writable.
     """
-    proj = _sanitize(project or default_project(), fallback=_DEFAULT_PROJECT)
-    ent = read_links().get(proj)
+    raw = project or default_project()
+    proj = _sanitize(raw, fallback=_DEFAULT_PROJECT)
+    links = read_links()
+    ent = links.get(proj)
+    if not isinstance(ent, dict):
+        # Judge the same forgiving name project_root resolves, so a write to
+        # 'claude skills' is checked against the 'CLAUDE-SKILLS' mount's mode —
+        # otherwise a fuzzy-matched write could slip past a read-only mount.
+        canon = resolve_project_name(raw)
+        if canon:
+            ent = links.get(canon)
     return bool(isinstance(ent, dict) and str(ent.get("mode", "rw")).lower() == "ro")
 
 
@@ -217,14 +227,67 @@ def _scope_allows(project: str) -> bool:
     return scope is None or project in scope
 
 
+def _known_projects() -> list[str]:
+    """Every addressable project for the current user: real directories under the
+    user root (dotdirs and mount internals excluded) plus link-registry keys
+    (linked folders and Google Drive mounts). This is the set the Flight Deck
+    sidebar shows, so the agent's discovery matches what the user sees."""
+    root = user_root()
+    names: set[str] = set()
+    if root.is_dir():
+        for p in root.iterdir():
+            if p.is_dir() and not p.name.startswith("."):
+                names.add(p.name)
+    names.update(read_links_at(root).keys())
+    return sorted(names)
+
+
+def _normalize_project_key(name: str) -> str:
+    """Fold case and separators so ``claude skills``, ``Claude_Skills`` and
+    ``CLAUDE-SKILLS`` all compare equal."""
+    return re.sub(r"[\s._-]+", "", str(name or "")).lower()
+
+
+def resolve_project_name(name: str) -> str | None:
+    """Map a loosely-typed project *name* to a real project, or ``None``.
+
+    A user (or a weak model) types ``claude skills`` for a mount named
+    ``CLAUDE-SKILLS``. Resolution order: exact, then the sanitised form
+    :func:`project_root` would use, then a case/separator-insensitive match — the
+    last only when it is UNAMBIGUOUS, so a forgiving guess never silently lands on
+    the wrong project. Scoped processes (``CLAW_VFS_SCOPE``) match only within
+    their wall.
+    """
+    if not str(name or "").strip():
+        return None
+    known = [k for k in _known_projects() if _scope_allows(_sanitize(k, fallback=""))]
+    if name in known:
+        return name
+    san = _sanitize(name, fallback="")
+    if san and san in known:
+        return san
+    target = _normalize_project_key(name)
+    if not target:
+        return None
+    matches = sorted({k for k in known if _normalize_project_key(k) == target})
+    return matches[0] if len(matches) == 1 else None
+
+
 def project_root(project: str = "", *, create: bool = False) -> Path:
     """Return the on-disk root for ``<project>``.
 
     A linked project resolves to its external path (never created here); an
     ordinary project resolves to ``<user_root>/<project>``. A scoped process
     (``CLAW_VFS_SCOPE``) may not address projects outside its wall.
+
+    On a miss (the sanitised name is neither a link nor an existing directory)
+    and only when *not* creating, fall back to a forgiving match so a user's
+    ``claude skills`` finds the ``CLAUDE-SKILLS`` mount. Creation stays literal —
+    a new project is made under exactly the name asked for, never folded into a
+    look-alike.
     """
-    proj = _sanitize(project or default_project(), fallback=_DEFAULT_PROJECT)
+    raw = project or default_project()
+    proj = _sanitize(raw, fallback=_DEFAULT_PROJECT)
     if not _scope_allows(proj):
         raise PermissionError(
             f"project {proj!r} is outside this process's CLAW_VFS_SCOPE")
@@ -233,8 +296,20 @@ def project_root(project: str = "", *, create: bool = False) -> Path:
     if tgt is not None:
         return tgt
     base = (root / proj).resolve()
-    if create:
-        base.mkdir(parents=True, exist_ok=True)
+    if create or base.is_dir():
+        if create:
+            base.mkdir(parents=True, exist_ok=True)
+        return base
+    # Forgiving resolution for a read of a not-yet-exact name. Unique match only;
+    # scope still applies.
+    canon = resolve_project_name(raw)
+    if canon and canon != proj and _scope_allows(_sanitize(canon, fallback="")):
+        canon_tgt = link_target_at(root, canon)
+        if canon_tgt is not None:
+            return canon_tgt
+        canon_base = (root / canon).resolve()
+        if canon_base.is_dir():
+            return canon_base
     return base
 
 
@@ -427,11 +502,11 @@ def read_authors(proj_root: str | Path) -> dict[str, dict]:
 
 
 def list_projects() -> list[str]:
-    """List existing project namespaces for the current user."""
-    root = user_root()
-    if not root.is_dir():
-        return []
-    return sorted(p.name for p in root.iterdir() if p.is_dir())
+    """List project namespaces for the current user — real directories plus
+    linked folders and Google Drive mounts (what the FD sidebar shows). Dotdirs
+    and mount internals (e.g. ``.drive``) are hidden; a linked mount appears
+    under its link name, not the ``.drive`` directory that physically holds it."""
+    return _known_projects()
 
 
 # ──────────────────────────────────────────────────────────────────────
