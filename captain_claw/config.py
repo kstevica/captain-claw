@@ -525,6 +525,12 @@ class ToolsConfig(BaseModel):
         "google_drive", "google_calendar", "google_mail",
         "whatsapp_send_file", "intentions", "video_vision", "cv", "topics",
         "history", "vfs",
+        # Deep memory is reached through Flight Deck, which owns the Typesense
+        # connection and the credentials — so from an agent's side the archive
+        # is simply always there. A per-agent opt-in would mean an agent could
+        # be silently unable to see its own long-term memory; when Flight Deck
+        # has no connection configured, FD says so in the tool's error instead.
+        "typesense",
     })
 
     @model_validator(mode="after")
@@ -1066,9 +1072,19 @@ class DeepMemoryConfig(BaseModel):
     protocol: str = "http"
     api_key: str = ""
     collection_name: str = "captain_claw_deep_memory"
-    embedding_dims: int = 1536
+    # 0 = auto-detect from the embedding provider, which is almost always what
+    # you want.  A hand-set value that disagrees with the provider is the one
+    # way to turn hybrid search off: vectors of the wrong width are rejected at
+    # both index and query time, leaving deep memory keyword-only.
+    embedding_dims: int = 0
     auto_embed: bool = True
     layered_summaries: bool = True
+    # Relevance floor for prompt injection, on an absolute 0..1 score (the
+    # better of keyword coverage and cosine similarity).  Deliberately
+    # permissive: with the default static embedder the related and unrelated
+    # similarity distributions overlap, so a tight floor drops real hits.
+    # Raise it if you switch to a transformer embedder (ollama/litellm).
+    min_score: float = 0.12
 
 
 class DatastoreConfig(BaseModel):

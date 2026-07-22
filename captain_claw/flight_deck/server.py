@@ -623,6 +623,14 @@ async def lifespan(app: FastAPI):
         await _fd_db.init()
         set_auth_db(_fd_db)
         app.state.fd_db = _fd_db
+        # Prime the Typesense connection (Connections → Typesense) before any
+        # request lands — an agent's proxied search may well be the first one.
+        try:
+            from captain_claw.flight_deck.deep_memory_routes import load_connection
+
+            await load_connection()
+        except Exception as _exc:
+            log.debug("Deep memory connection not primed", error=str(_exc))
         # Persist the owning user id into the project-local .env so the
         # standalone main agent resolves the SAME VFS user as the dashboard
         # (otherwise it falls back to "local" and its vfs:<project>/ files
@@ -923,6 +931,7 @@ from captain_claw.flight_deck.basna_routes import router as basna_router
 from captain_claw.flight_deck.vatra_routes import router as vatra_router
 from captain_claw.flight_deck.dubina_routes import router as dubina_router
 from captain_claw.flight_deck.vfs_routes import router as vfs_router
+from captain_claw.flight_deck.deep_memory_routes import router as deep_memory_router
 from captain_claw.flight_deck.hosting_routes import router as hosting_router
 from captain_claw.flight_deck.code_routes import router as code_router
 from captain_claw.flight_deck.queue_planner import router as queue_router
@@ -964,6 +973,7 @@ app.include_router(basna_router)
 app.include_router(vatra_router)
 app.include_router(dubina_router)
 app.include_router(vfs_router)
+app.include_router(deep_memory_router)
 app.include_router(hosting_router)
 app.include_router(code_router)
 app.include_router(queue_router)

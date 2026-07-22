@@ -467,8 +467,9 @@ deep_memory:
   protocol: http
   api_key: 'xyz'
   collection_name: captain_claw_deep_memory
-  embedding_dims: 1536
+  embedding_dims: 0  # 0 = auto-detect from the embedding provider
   auto_embed: true
+  min_score: 0.12
 datastore:
   enabled: true
   path: ~/.captain-claw/datastore.db

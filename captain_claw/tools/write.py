@@ -8,7 +8,7 @@ from typing import Any
 
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
-from captain_claw.vfs import is_vfs_path, resolve_vfs_path
+from captain_claw.vfs import is_vfs_path, project_is_readonly, resolve_vfs_path, split_scheme
 
 # Heuristic markers that indicate a "status confirmation" message rather
 # than substantive deliverable content. Used by the deliverable-protection
@@ -180,6 +180,14 @@ class WriteTool(Tool):
             # Shared VFS write (vfs:<project>/...) — real file in the
             # cross-agent tree, bypassing per-session saved/ scoping.
             if is_vfs_path(path):
+                if project_is_readonly(split_scheme(path)[0]):
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"'{split_scheme(path)[0]}' is a read-only folder "
+                            "(e.g. a Google Drive mount) — it cannot be written to."
+                        ),
+                    )
                 file_path = resolve_vfs_path(path, create_parents=True)
                 if file_path is None:
                     return ToolResult(

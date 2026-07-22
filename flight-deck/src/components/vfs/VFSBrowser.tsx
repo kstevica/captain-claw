@@ -20,8 +20,11 @@ import {
   Database,
   Share2,
   Users,
+  Cloud,
+  Sparkles,
 } from 'lucide-react'
 import { useVFSStore, type VFSEntry, type VFSProject } from '../../stores/vfsStore'
+import { DriveConnect } from './DriveConnect'
 import { VFSFileViewer } from './VFSFileViewer'
 import { DatastoreBrowser } from '../agents/DatastoreBrowser'
 import { ShareModal } from '../common/ShareModal'
@@ -54,11 +57,12 @@ const KIND_BADGE: Record<string, string> = {
   vatra: 'border-violet-500/40 bg-violet-500/10 text-violet-300',
   council: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
   link: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+  gdrive: 'border-blue-500/40 bg-blue-500/10 text-blue-600 dark:text-blue-300',
 }
 
 // Project-list filter chips. A "run folder" is one a multi-agent run auto-created
 // (kind basna/vatra/council); a "project" is a plain user/agent folder (no kind).
-type KindFilter = 'all' | 'project' | 'basna' | 'vatra' | 'council' | 'link'
+type KindFilter = 'all' | 'project' | 'basna' | 'vatra' | 'council' | 'link' | 'gdrive'
 type SortBy = 'recent' | 'name' | 'size'
 const CHIPS: { key: KindFilter; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -67,6 +71,7 @@ const CHIPS: { key: KindFilter; label: string }[] = [
   { key: 'basna', label: 'Basna' },
   { key: 'council', label: 'Council' },
   { key: 'link', label: 'Linked' },
+  { key: 'gdrive', label: 'Drive' },
 ]
 
 const _isRun = (p: VFSProject) => p.kind === 'basna' || p.kind === 'vatra' || p.kind === 'council'
@@ -91,6 +96,11 @@ export function VFSBrowser() {
   // Shared-datastore viewer: the project whose vfs:<project>/.datastore is open.
   const [dsProject, setDsProject] = useState<string | null>(null)
   const [shareProject, setShareProject] = useState<string | null>(null)
+  // Google Drive: the connect modal, and a transient status line from a
+  // refresh/clone action, plus which mount is mid-action (for the spinner).
+  const [driveConnecting, setDriveConnecting] = useState(false)
+  const [driveBusy, setDriveBusy] = useState<string>('')
+  const [driveNote, setDriveNote] = useState<string>('')
   // Project-list controls: search, kind filter, sort, and folded run folders.
   const [query, setQuery] = useState('')
   const [kindFilter, setKindFilter] = useState<KindFilter>('all')
@@ -117,6 +127,30 @@ export function VFSBrowser() {
     if (!projectName.trim()) return
     await s.newProject(projectName)
     setProjectName(''); setCreatingProject(false)
+  }
+
+  // Drive mount actions — each sets a transient note and clears the busy mark.
+  const runDrive = async (name: string, fn: () => Promise<string | void>) => {
+    setDriveBusy(name); setDriveNote('')
+    try {
+      const msg = await fn()
+      if (typeof msg === 'string') setDriveNote(msg)
+    } catch (e) {
+      setDriveNote(e instanceof Error ? e.message : 'Drive action failed')
+    } finally {
+      setDriveBusy('')
+    }
+  }
+  const onDriveRefresh = (name: string) => runDrive(name, () => s.refreshDrive(name))
+  const onDriveClone = (name: string, on: boolean) => runDrive(name, () => s.toggleClonemd(name, on))
+  const onDriveUnmount = (p: VFSProject) => {
+    if (!confirm(`Unmount "${p.name}"? Nothing in Google Drive is touched.`)) return
+    const cloned = p.drive?.cloned || 0
+    // Only decide the fate of cloned Markdown when there is any; keep by default.
+    const keep = cloned > 0
+      ? !confirm(`Also delete the ${cloned} cloned Markdown file(s) on disk?\n\nOK deletes them · Cancel keeps them.`)
+      : true
+    runDrive(p.name, () => s.unmountDrive(p.name, keep))
   }
 
   // File upload into the current directory (in-project view).
@@ -148,10 +182,10 @@ export function VFSBrowser() {
 
   // Kind counts for the chips (from the full list, so they don't jitter while filtering).
   const counts = useMemo(() => {
-    const c: Record<KindFilter, number> = { all: s.projects.length, project: 0, basna: 0, vatra: 0, council: 0, link: 0 }
+    const c: Record<KindFilter, number> = { all: s.projects.length, project: 0, basna: 0, vatra: 0, council: 0, link: 0, gdrive: 0 }
     for (const p of s.projects) {
       if (!p.kind) c.project++
-      else if (p.kind === 'basna' || p.kind === 'vatra' || p.kind === 'council' || p.kind === 'link') c[p.kind]++
+      else if (p.kind === 'basna' || p.kind === 'vatra' || p.kind === 'council' || p.kind === 'link' || p.kind === 'gdrive') c[p.kind]++
     }
     return c
   }, [s.projects])
@@ -194,6 +228,12 @@ export function VFSBrowser() {
               className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
             >
               <Link2 className="h-3.5 w-3.5" /> Link folder
+            </button>
+            <button
+              onClick={() => setDriveConnecting(true)}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <Cloud className="h-3.5 w-3.5" /> Connect Drive
             </button>
             <button
               onClick={() => s.loadProjects()}
@@ -354,6 +394,13 @@ export function VFSBrowser() {
         )}
         <div className="flex-1 overflow-auto p-4">
           {s.error && <div className="mb-3 rounded bg-red-950/50 px-3 py-2 text-xs text-red-300">{s.error}</div>}
+          {driveNote && (
+            <div className="mb-3 flex items-start gap-2 rounded border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs text-zinc-300">
+              <Cloud className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-500 dark:text-blue-400" />
+              <span className="min-w-0 flex-1">{driveNote}</span>
+              <button onClick={() => setDriveNote('')} className="shrink-0 text-zinc-500 hover:text-zinc-200"><X className="h-3.5 w-3.5" /></button>
+            </div>
+          )}
           {s.projects.length === 0 && !s.loading && (
             <div className="mt-16 text-center text-sm text-zinc-500">
               <HardDrive className="mx-auto mb-3 h-8 w-8 text-zinc-700" />
@@ -387,6 +434,13 @@ export function VFSBrowser() {
                   ? <span className={`truncate font-mono text-[10px] ${p.missing ? 'text-red-400' : 'text-zinc-600'}`} title={p.link_path}>
                       {p.missing ? '⚠ missing: ' : '↪ '}{p.link_path}
                     </span>
+                  : p.kind === 'gdrive'
+                  ? <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                      {p.drive?.clonemd
+                        ? <span className="text-emerald-600 dark:text-emerald-400">cloned to Markdown</span>
+                        : <span>on-demand{p.drive?.uncloned ? ` · ${p.drive.uncloned} not cloned` : ''}</span>}
+                      {p.drive?.synced_at ? <span className="text-zinc-600">· synced {fmtTime(p.drive.synced_at)}</span> : null}
+                    </span>
                   : p.title && <span className="truncate font-mono text-[10px] text-zinc-600">{p.name}</span>}
                 <div className="flex items-center justify-between text-[11px] text-zinc-500">
                   <span title={fmtFull(p.mtime)}>
@@ -394,6 +448,34 @@ export function VFSBrowser() {
                     {p.mtime ? ` · ${fmtTime(p.mtime)}` : ''}
                   </span>
                   <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                    {p.kind === 'gdrive' ? (
+                      <>
+                        <button
+                          onClick={() => onDriveRefresh(p.name)}
+                          disabled={driveBusy === p.name}
+                          className="hover:text-blue-300 disabled:opacity-40"
+                          title="Refresh from Google Drive"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${driveBusy === p.name ? 'animate-spin' : ''}`} />
+                        </button>
+                        <button
+                          onClick={() => onDriveClone(p.name, !p.drive?.clonemd)}
+                          disabled={driveBusy === p.name}
+                          className={`disabled:opacity-40 ${p.drive?.clonemd ? 'text-emerald-500 dark:text-emerald-400' : 'hover:text-emerald-300'}`}
+                          title={p.drive?.clonemd ? 'Cloning on — click to turn off' : 'Clone files to Markdown'}
+                        >
+                          <Sparkles className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={() => onDriveUnmount(p)}
+                          className="hover:text-red-400"
+                          title="Unmount (Google Drive is not touched)"
+                        >
+                          <Cloud className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    ) : (
+                    <>
                     {p.kind !== 'link' && (
                       <button
                         onClick={() => setDsProject(p.name)}
@@ -448,6 +530,8 @@ export function VFSBrowser() {
                         </button>
                       </>
                     )}
+                    </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -467,6 +551,15 @@ export function VFSBrowser() {
             </button>
           )}
         </div>
+        {driveConnecting && (
+          <DriveConnect
+            onClose={() => setDriveConnecting(false)}
+            onDone={(name) => {
+              setDriveConnecting(false)
+              setDriveNote(`Mounted "${name}" from Google Drive.`)
+            }}
+          />
+        )}
         {dsProject && (
           <DatastoreBrowser vfsProject={dsProject} title={`Datastore — ${dsProject}`} onClose={() => setDsProject(null)} />
         )}

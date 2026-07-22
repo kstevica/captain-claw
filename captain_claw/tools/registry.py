@@ -434,6 +434,25 @@ class ToolRegistry:
             # Never let the gating check break tool listing.
             pass
 
+        # Same idea for deep memory. Under Flight Deck the tool always shows:
+        # FD owns the Typesense connection and can gain one at any moment, and
+        # its error names the exact place to fix it. Standalone with no key and
+        # no local index, though, the tool cannot do anything but fail — and an
+        # advertised tool that always fails is worse than an absent one.
+        try:
+            from captain_claw.fd_client import is_under_flight_deck
+
+            if not is_under_flight_deck():
+                cfg = get_config()
+                dm = getattr(cfg, "deep_memory", None)
+                usable = bool(dm and getattr(dm, "enabled", False)) or bool(
+                    str(getattr(cfg.tools.typesense, "api_key", "") or "").strip()
+                )
+                if not usable:
+                    tools = [t for t in tools if t.name != "typesense"]
+        except Exception:
+            pass
+
         return tools
 
     def get(self, name: str) -> Tool:

@@ -167,11 +167,14 @@ export const useGoogleAuthStore = create<GoogleAuthStore>((set, get) => ({
 
   connect: () => {
     // The login endpoint is a 302 to Google, so open it as a popup.
-    // Note: /fd/google/login is intentionally unauthenticated (the user
-    // already signed into Flight Deck to trigger this), so we don't
-    // need to attach an Authorization header here — popups can't carry
-    // custom headers anyway.
-    const url = '/fd/google/login'
+    // A popup can't carry an Authorization header, so pass the JWT as
+    // ?fd_token= — /fd/google/login reads it to record WHICH user is
+    // connecting, so the tokens are stored against the right account
+    // (per-user connections). Omitted when auth is off (no token).
+    const { token } = useAuthStore.getState()
+    const url = token
+      ? `/fd/google/login?fd_token=${encodeURIComponent(token)}`
+      : '/fd/google/login'
     const w = 520
     const h = 640
     const left = window.screenX + (window.outerWidth - w) / 2

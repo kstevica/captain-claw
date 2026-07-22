@@ -33,12 +33,18 @@ class TypesenseTool(Tool):
 
     name = "typesense"
     description = (
-        "Index, search, and delete documents in deep memory (Typesense). "
-        "All operations use the configured deep memory collection — you cannot "
-        "create or choose collections. "
-        "Actions: index (store text with auto-chunking and embedding), "
-        "search (hybrid keyword + vector), "
-        "delete (remove documents by ID or filter)."
+        "Search and store long-term memory — the persistent archive of files "
+        "and notes that outlives this conversation. Use 'search' to look for "
+        "anything the user may have saved earlier, including uploaded "
+        "documents; it matches by meaning as well as by keyword, so a "
+        "description of the content works even when you don't know the exact "
+        "wording. Results whose reference starts with 'vfs:' are real files — "
+        "pass that reference straight to the read tool to open the full "
+        "document. "
+        "Actions: search (hybrid keyword + vector), index (store text for "
+        "later recall), delete (remove documents by ID or filter). "
+        "All operations use one configured collection — you cannot create or "
+        "choose collections."
     )
     timeout_seconds = 60.0
     parameters = {
@@ -117,6 +123,7 @@ class TypesenseTool(Tool):
     def __init__(self, deep_memory: DeepMemoryIndex | None = None) -> None:
         self._deep_memory = deep_memory
         cfg = get_config().tools.typesense
+        self._fd: Any = None
         self._base_url = f"{cfg.protocol}://{cfg.host}:{cfg.port}"
         self._api_key = cfg.api_key
         self._default_collection = cfg.default_collection
@@ -124,6 +131,37 @@ class TypesenseTool(Tool):
         self._connection_timeout = float(cfg.connection_timeout)
         self._client: httpx.AsyncClient | None = None
         self._collection_ensured = False
+
+    # ------------------------------------------------------------------
+    # Flight Deck proxy
+    # ------------------------------------------------------------------
+
+    def _fd_client(self) -> Any:
+        """Return an ``FDClient`` when running under Flight Deck, else ``None``.
+
+        Under FD the agent holds no Typesense key at all: index/search go over
+        ``/fd/deep-memory/agent/*`` and FD stamps the owner from its own
+        records. Standalone, the direct ``DeepMemoryIndex`` path below still
+        applies — that is what the single-user install uses.
+        """
+        from captain_claw.fd_client import FDClient, is_under_flight_deck
+
+        if not is_under_flight_deck():
+            return None
+        if self._fd is None:
+            self._fd = FDClient(timeout=self.timeout_seconds)
+        return self._fd
+
+    def _fd_headers(self) -> dict[str, str]:
+        """Add this agent's unique ``web_auth`` token to the FD-internal headers.
+
+        ``X-Agent-Secret`` is shared across every agent, so it proves only that
+        the caller is an FD-spawned process. The per-agent token is what lets FD
+        resolve *which* owner's archive this is — and it resolves it from the
+        registry, so the agent never gets to assert a tenant.
+        """
+        token = str(getattr(getattr(get_config(), "web", None), "auth_token", "") or "")
+        return {"X-Agent-Auth": token} if token else {}
 
     # ------------------------------------------------------------------
     # Collection resolution & bootstrap
@@ -172,7 +210,11 @@ class TypesenseTool(Tool):
         from captain_claw.deep_memory import _COLLECTION_SCHEMA_TEMPLATE
 
         dm_cfg = getattr(get_config(), "deep_memory", None)
-        embedding_dims = int(getattr(dm_cfg, "embedding_dims", 1536)) if dm_cfg else 1536
+        # 0 = auto-detect, but this fallback path has no embedding chain to
+        # probe, so it creates the collection without a vector field and lets
+        # DeepMemoryIndex.ensure_collection() add one at the provider's true
+        # width on first real use.
+        embedding_dims = int(getattr(dm_cfg, "embedding_dims", 0)) if dm_cfg else 0
 
         schema: dict[str, Any] = {
             "name": coll,
@@ -249,6 +291,30 @@ class TypesenseTool(Tool):
         ):
             kwargs.pop(k, None)
 
+        # Under Flight Deck the agent is *supposed* to have no key — FD holds it,
+        # and EVERY action goes through the proxy. From the agent's side deep
+        # memory is simply always there; if Flight Deck has no Typesense
+        # connection configured, FD says so in the error and the agent has
+        # nothing to fix on its end.
+        if self._fd_client() is not None:
+            proxied = {
+                "search": self._fd_search,
+                "index": self._fd_index,
+                "delete": self._fd_delete,
+            }.get(action)
+            if proxied is None:
+                return ToolResult(
+                    success=False,
+                    error=f"Unknown action '{action}'. Available: index, search, delete.",
+                )
+            try:
+                return await proxied(**kwargs)
+            except Exception as exc:
+                log.warning("Deep memory proxy call failed", action=action, error=str(exc))
+                return ToolResult(
+                    success=False, error=f"Deep memory is unavailable: {exc}"
+                )
+
         if not self._api_key and self._deep_memory is None:
             return ToolResult(
                 success=False,
@@ -310,6 +376,129 @@ class TypesenseTool(Tool):
         except Exception as exc:
             log.warning("Typesense tool error", action=action, error=str(exc))
             return ToolResult(success=False, error=str(exc))
+
+    # ------------------------------------------------------------------
+    # Proxied action handlers (Flight Deck)
+    # ------------------------------------------------------------------
+
+    async def _fd_search(
+        self,
+        query: str = "",
+        filter_by: str = "",
+        max_results: int | float | None = None,
+        **_kw: Any,
+    ) -> ToolResult:
+        if not query or not query.strip():
+            return ToolResult(success=False, error="'query' is required for search.")
+        resp = await self._fd_client().post(
+            "/fd/deep-memory/agent/search",
+            json={
+                "query": query.strip(),
+                "max_results": min(int(max_results or 10), 250),
+                "filter_by": filter_by or "",
+            },
+            headers=self._fd_headers(),
+        )
+        if resp.status_code != 200:
+            return ToolResult(
+                success=False,
+                error=f"Deep memory search failed ({resp.status_code}): {resp.text[:300]}",
+            )
+        hits = resp.json().get("results", [])
+        if not hits:
+            return ToolResult(
+                success=True,
+                content=f"No results found in deep memory for: {query.strip()}",
+            )
+        lines = [f"Found {len(hits)} result(s) in deep memory:"]
+        for h in hits:
+            body = h.get("summary") or h.get("snippet") or ""
+            if len(body) > 300:
+                body = body[:300] + "..."
+            ref = h.get("reference", "")
+            loc = f"{ref}:{h['start_line']}" if h.get("start_line") else ref
+            lines.append(f"  - [{h.get('source', '')}] {loc} (score={h.get('score', 0):.2f}) {body}")
+        # A vfs: reference is the exact string the read tool accepts, so say so —
+        # the hit is a pointer to open, not just a snippet to quote.
+        if any(str(h.get("reference", "")).startswith("vfs:") for h in hits):
+            lines.append(
+                "  (use the read tool on a vfs: reference above to open the full file)"
+            )
+        return ToolResult(success=True, content="\n".join(lines))
+
+    async def _fd_index(
+        self,
+        text: str = "",
+        file_path: str = "",
+        source: str = "manual",
+        reference: str = "",
+        tags: str = "",
+        **_kw: Any,
+    ) -> ToolResult:
+        if file_path and file_path.strip():
+            try:
+                with open(file_path.strip(), "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError as exc:
+                return ToolResult(success=False, error=f"Cannot read file {file_path}: {exc}")
+            reference = reference or file_path.strip()
+        if not text or not text.strip():
+            return ToolResult(
+                success=False, error="'text' or 'file_path' is required for indexing."
+            )
+        resp = await self._fd_client().post(
+            "/fd/deep-memory/agent/index",
+            json={
+                "text": text.strip(),
+                "reference": reference.strip(),
+                "source": source.strip() or "agent",
+                # Summarising is one LLM call per chunk; the agent does not get
+                # to opt a whole document into that cost implicitly.
+                "summarize": False,
+            },
+            headers=self._fd_headers(),
+        )
+        if resp.status_code != 200:
+            return ToolResult(
+                success=False,
+                error=f"Deep memory index failed ({resp.status_code}): {resp.text[:300]}",
+            )
+        data = resp.json()
+        return ToolResult(
+            success=True,
+            content=(
+                f"Indexed into deep memory: {data.get('chunks', 0)} chunk(s), "
+                f"reference={data.get('reference', '')}"
+            ),
+        )
+
+    async def _fd_delete(
+        self,
+        document_id: str = "",
+        filter_by: str = "",
+        reference: str = "",
+        **_kw: Any,
+    ) -> ToolResult:
+        ref = (reference or document_id or "").strip()
+        if not ref and not filter_by:
+            return ToolResult(
+                success=False,
+                error="Provide 'document_id' or 'filter_by' to specify what to delete.",
+            )
+        resp = await self._fd_client().post(
+            "/fd/deep-memory/agent/delete",
+            json={"reference": ref, "filter_by": filter_by or ""},
+            headers=self._fd_headers(),
+        )
+        if resp.status_code != 200:
+            return ToolResult(
+                success=False,
+                error=f"Deep memory delete failed ({resp.status_code}): {resp.text[:300]}",
+            )
+        return ToolResult(
+            success=True,
+            content=f"Deleted {resp.json().get('deleted', 0)} chunk(s) from deep memory.",
+        )
 
     # ------------------------------------------------------------------
     # Action handlers

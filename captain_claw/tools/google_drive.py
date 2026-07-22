@@ -28,7 +28,17 @@ log = get_logger(__name__)
 
 _DRIVE_API = "https://www.googleapis.com/drive/v3"
 _UPLOAD_API = "https://www.googleapis.com/upload/drive/v3"
-_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+# Any Drive scope grants read; write actions additionally need the check below.
+_DRIVE_READ_SCOPES = frozenset({
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive.file",
+})
+_DRIVE_WRITE_SCOPES = frozenset({
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.file",
+})
+_WRITE_ACTIONS = frozenset({"upload", "create", "update"})
 
 # Fields to request from the files endpoint.
 _FILE_FIELDS = "id,name,mimeType,size,modifiedTime,createdTime,parents,webViewLink,owners"
@@ -139,7 +149,7 @@ class GoogleDriveTool(Tool):
         kwargs.pop("_task_id", None)
 
         try:
-            token = await self._get_access_token()
+            token = await self._get_access_token(write=action in _WRITE_ACTIONS)
         except RuntimeError as e:
             return ToolResult(success=False, error=str(e))
 
@@ -174,11 +184,14 @@ class GoogleDriveTool(Tool):
     # Token access
     # ------------------------------------------------------------------
 
-    async def _get_access_token(self) -> str:
+    async def _get_access_token(self, *, write: bool = False) -> str:
         """Retrieve a valid Google OAuth access token.
 
-        Raises RuntimeError if Google is not connected or tokens are
-        expired and cannot be refreshed.
+        Raises RuntimeError if Google is not connected, or if the granted
+        scopes don't cover the operation. Read actions accept any Drive scope
+        including ``drive.readonly``; only write actions require a writable one.
+        The tool previously demanded full read/write ``drive`` for *everything*,
+        so a read-only connection couldn't even list a folder.
         """
         from captain_claw.google_oauth_manager import GoogleOAuthManager
         from captain_claw.session import get_session_manager
@@ -192,14 +205,19 @@ class GoogleDriveTool(Tool):
                 "navigate to /auth/google/login in your browser."
             )
 
-        # Check if the Drive scope is present.
         granted = set(tokens.scope.split()) if tokens.scope else set()
-        if _DRIVE_SCOPE not in granted:
-            raise RuntimeError(
-                "Google Drive scope not granted. Your current OAuth connection "
-                "does not include Drive access. Please disconnect and reconnect "
-                "your Google account to grant Drive permissions."
-            )
+        # An empty scope string means the token endpoint didn't report scopes
+        # (Flight Deck client mode sometimes omits them); don't block on that —
+        # the API returns 403 if the scope is genuinely missing.
+        if granted:
+            needed = _DRIVE_WRITE_SCOPES if write else _DRIVE_READ_SCOPES
+            if not granted.intersection(needed):
+                raise RuntimeError(
+                    "Google Drive "
+                    + ("write " if write else "")
+                    + "scope not granted. Reconnect your Google account and "
+                    + ("grant Drive edit access." if write else "grant Drive access (read-only is enough).")
+                )
 
         return tokens.access_token
 
@@ -263,7 +281,9 @@ class GoogleDriveTool(Tool):
         limit = min(int(max_results or 20), 100)
         order = order_by or "modifiedTime desc"
 
-        q = f"'{folder_id}' in parents and trashed = false"
+        from captain_claw.drive_client import escape_query_value
+
+        q = f"'{escape_query_value(folder_id)}' in parents and trashed = false"
         params = {
             "q": q,
             "fields": _LIST_FIELDS,

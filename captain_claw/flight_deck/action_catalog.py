@@ -119,12 +119,9 @@ CATALOG: dict[str, dict[str, Any]] = {
         "risk": "high", "reversibility": "irreversible", "reverse": None,
         "grant": "messaging", "human_only": True,
     },
-    "drive.delete": {
-        "label": "Delete a Drive file", "home": "agent", "tool": "google_drive",
-        "base_args": {"action": "delete"}, "required": ["file_id"], "optional": [],
-        "risk": "high", "reversibility": "irreversible", "reverse": None,
-        "grant": "drive", "human_only": True,
-    },
+    # (No drive.delete: the google_drive tool has no delete action, so the
+    # entry that used to sit here dispatched to a nonexistent action and always
+    # errored. Drive access is read-oriented; deletion isn't offered.)
 }
 
 

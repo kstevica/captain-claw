@@ -135,6 +135,19 @@ def user_root(*, create: bool = False) -> Path:
     return root
 
 
+def user_root_of(user_id: str, *, create: bool = False) -> Path:
+    """Return the VFS root of an EXPLICIT user, ignoring this process's env.
+
+    The :func:`user_root` counterpart for the Flight Deck server, which serves
+    many users and must never key off its own environment — the same split as
+    :func:`resolve_vfs_path` vs :func:`resolve_under`.
+    """
+    root = (vfs_base() / _sanitize(user_id or "", fallback=_DEFAULT_USER)).resolve()
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 # ── Linked folders ("mounts") ─────────────────────────────────────────
 # A per-user registry maps a VFS project name to an external absolute path, so
 # `vfs:<name>/...` transparently resolves to a folder living anywhere on disk —
@@ -167,6 +180,20 @@ def link_target_at(root: Path, name: str) -> Path | None:
         if p.is_absolute():
             return p.resolve()
     return None
+
+
+def project_is_readonly(project: str = "") -> bool:
+    """True when *project* is a linked folder mounted read-only (``mode: "ro"``).
+
+    The write tools consult this so a read-only link — a Google Drive mount, or
+    any folder the user linked ``ro`` — refuses agent writes, the same way the
+    Flight Deck panel refuses them via ``_assert_writable``. Without it, the
+    agent-side write/edit tools resolve a ``vfs:`` path with no mode check and
+    a "read-only" mount is writable.
+    """
+    proj = _sanitize(project or default_project(), fallback=_DEFAULT_PROJECT)
+    ent = read_links().get(proj)
+    return bool(isinstance(ent, dict) and str(ent.get("mode", "rw")).lower() == "ro")
 
 
 def scope_projects() -> frozenset[str] | None:

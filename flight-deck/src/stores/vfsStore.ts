@@ -19,7 +19,20 @@ export interface VFSProject {
   owner_email?: string
   owner_name?: string
   permission?: string // 'view' | 'edit' (shared folders only)
+  drive?: DriveMeta | null // present when kind === 'gdrive'
 }
+
+export interface DriveMeta {
+  folder_id: string
+  clonemd: boolean
+  synced_at?: number
+  // Materialisation counts, enriched by /fd/vfs/projects from the manifest.
+  total?: number
+  cloned?: number
+  uncloned?: number
+}
+
+export interface DriveFolder { id: string; name: string }
 
 export interface VFSEntry {
   name: string
@@ -114,6 +127,12 @@ interface VFSStore {
   deleteProject: (name: string) => Promise<void>
   addLink: (name: string, path: string, mode: string) => Promise<void>
   browseFs: (path: string) => Promise<FsListing>
+  // Google Drive mounts
+  browseDrive: (folderId: string) => Promise<{ folders: DriveFolder[]; truncated: boolean }>
+  mountDrive: (name: string, folderId: string, clonemd: boolean) => Promise<void>
+  refreshDrive: (name: string) => Promise<string>
+  toggleClonemd: (name: string, clonemd: boolean) => Promise<string>
+  unmountDrive: (name: string, keepCloned: boolean) => Promise<void>
 }
 
 export interface FsDir { name: string; hidden: boolean; is_git: boolean }
@@ -358,5 +377,58 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     const res = await _authedFetch(`/fd/vfs/browse-fs?${qp({ path })}`)
     if (!res.ok) return { path, parent: '', dirs: [] }
     return res.json()
+  },
+
+  browseDrive: async (folderId) => {
+    const res = await _authedFetch(`/fd/vfs/drive/browse?${qp({ folder_id: folderId || 'root' })}`)
+    if (!res.ok) throw new Error((await res.text()) || 'Drive browse failed')
+    return res.json()
+  },
+
+  mountDrive: async (name, folderId, clonemd) => {
+    const res = await _authedFetch('/fd/vfs/links/gdrive', {
+      method: 'POST',
+      body: JSON.stringify({ name, folder_id: folderId, clonemd }),
+    })
+    if (!res.ok) throw new Error((await res.text()) || 'mount failed')
+    await get().loadProjects()
+  },
+
+  refreshDrive: async (name) => {
+    const res = await _authedFetch(`/fd/vfs/links/gdrive/${encodeURIComponent(name)}/refresh`, {
+      method: 'POST',
+    })
+    if (!res.ok) throw new Error((await res.text()) || 'refresh failed')
+    const d = await res.json()
+    await get().loadProjects()
+    if (get().project === name) await get().browse(get().path)
+    const parts = [`${d.files} file(s)`]
+    if (d.cloned) parts.push(`${d.cloned} cloned`)
+    if (d.truncated) parts.push('capped')
+    return parts.join(', ')
+  },
+
+  toggleClonemd: async (name, clonemd) => {
+    const res = await _authedFetch(`/fd/vfs/links/gdrive/${encodeURIComponent(name)}/clonemd`, {
+      method: 'POST',
+      body: JSON.stringify({ clonemd }),
+    })
+    if (!res.ok) throw new Error((await res.text()) || 'toggle failed')
+    const d = await res.json()
+    await get().loadProjects()
+    if (get().project === name) await get().browse(get().path)
+    return clonemd
+      ? `Cloning on — ${d.cloned ?? 0} file(s) converted to Markdown.`
+      : 'Cloning off. Existing Markdown files kept.'
+  },
+
+  unmountDrive: async (name, keepCloned) => {
+    const res = await _authedFetch(
+      `/fd/vfs/links/gdrive/${encodeURIComponent(name)}?${qp({ keep_cloned: String(keepCloned) })}`,
+      { method: 'DELETE' },
+    )
+    if (!res.ok) throw new Error((await res.text()) || 'unmount failed')
+    if (get().project === name) get().closeProject()
+    await get().loadProjects()
   },
 }))

@@ -148,16 +148,37 @@ class GrepTool(Tool):
                     if len(files) >= _MAX_FILES:
                         break
 
+            # Google Drive mounts: a placeholder has only a marker on disk, so
+            # searching it would silently miss content that is really there.
+            # Skip those and say how many, rather than returning a confident but
+            # incomplete "no matches". Cloned files search normally.
+            drive_skipped = 0
+            try:
+                from captain_claw.vfs_drive import filter_searchable
+
+                files, drive_skipped = filter_searchable(files)
+            except Exception as _e:
+                log.debug("Drive grep filter skipped", error=str(_e))
+
             loop = asyncio.get_event_loop()
             lines, matched, scanned, truncated = await loop.run_in_executor(
                 None, lambda: self._scan(files, rx, rel_base, limit)
             )
 
+            drive_note = ""
+            if drive_skipped:
+                drive_note = (
+                    f"\n\n({drive_skipped} file(s) in a Google Drive mount were "
+                    "not searched — they are not cloned locally. Enable clonemd "
+                    "on the folder, or read a file directly to fetch it.)"
+                )
+
             if not lines:
                 where = f" in {path}" if path else ""
                 return ToolResult(
                     success=True,
-                    content=f"No matches for {pattern!r}{where} ({scanned} file(s) searched).",
+                    content=f"No matches for {pattern!r}{where} ({scanned} file(s) searched)."
+                    + drive_note,
                 )
 
             header = (
@@ -165,7 +186,7 @@ class GrepTool(Tool):
                 + (" — output truncated, narrow the search" if truncated else "")
                 + ":\n"
             )
-            return ToolResult(success=True, content=header + "\n".join(lines))
+            return ToolResult(success=True, content=header + "\n".join(lines) + drive_note)
 
         except Exception as e:
             log.error("grep failed", pattern=pattern, error=str(e))
