@@ -467,8 +467,14 @@ async def refresh_drive(name: str, user: dict = Depends(get_current_user)):
 @router.post("/links/gdrive/{name}/clonemd")
 async def toggle_clonemd(name: str, body: DriveToggleBody,
                          user: dict = Depends(get_current_user)):
-    """Turn clonemd on/off for a mount (conversion itself lands in Phase 3)."""
+    """Turn clonemd on/off for a mount.
+
+    Enabling converts the tree to real Markdown now (a full sync). Disabling
+    only sets the flag — existing cloned files are left in place, since the
+    user may have come to treat them as their own; unmount removes them.
+    """
     from captain_claw import vfs_drive
+    from captain_claw.drive_client import DriveError
 
     root = _user_root(user["id"])
     key = safe_name(name, fallback="")
@@ -476,15 +482,25 @@ async def toggle_clonemd(name: str, body: DriveToggleBody,
     ent = links.get(key)
     if not vfs_drive.is_drive_link(ent):
         raise HTTPException(404, "not a Drive mount")
-    ent.setdefault("drive", {})["clonemd"] = bool(body.clonemd)
+    enabled = bool(body.clonemd)
+    ent.setdefault("drive", {})["clonemd"] = enabled
     links[key] = ent
     _write_links(root, links)
-    # Mirror the flag into the manifest so the mount subsystem sees it too.
     mroot = vfs_drive.mount_root(user["id"], key)
     man = vfs_drive.Manifest.load(mroot)
-    man.clonemd = bool(body.clonemd)
+    man.clonemd = enabled
     man.save(mroot)
-    return {"ok": True, "name": key, "clonemd": bool(body.clonemd)}
+
+    summary: dict = {}
+    if enabled:
+        client = _drive_client()
+        try:
+            summary = await vfs_drive.sync(client, mroot)
+        except (DriveError, ValueError) as exc:
+            raise HTTPException(400, str(exc))
+        finally:
+            await client.close()
+    return {"ok": True, "name": key, "clonemd": enabled, **summary}
 
 
 @router.delete("/links/gdrive/{name}")

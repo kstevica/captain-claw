@@ -26,8 +26,14 @@ class FakeDrive:
                              modified_time="2026-07-20T00:00:00Z")],
         }
 
+        # file_id -> (bytes, ext), set by tests that exercise clonemd.
+        self.content: dict = {}
+
     async def list_folder(self, fid, *, order_by="folder,name", max_files=None, sleep=None):
         return list(self.tree.get(fid, [])), False
+
+    async def fetch(self, f, *, sleep=None):
+        return self.content[f.id]
 
     async def close(self):
         pass
@@ -95,16 +101,26 @@ class TestDriveMountRoutes:
             )
         assert exc.value.status_code == 403  # mode: ro
 
-    async def test_clonemd_toggle(self, env):
-        vr, vfs_drive, tmp, _ = env
+    async def test_clonemd_toggle_converts_now(self, env):
+        vr, vfs_drive, tmp, fake = env
+        # Give the mount fetchable text so enabling clonemd produces real files.
+        fake.content = {"f1": (b"the merger closed in Q3", ".txt"),
+                        "f2": (b"# deep\n\nnested note", ".md")}
         await vr.mount_drive(vr.DriveMountBody(name="acme", folder_id="ROOT"), USER)
+        mount = tmp / "vfs" / "local" / ".drive" / "acme"
+        # Before: a.txt is a placeholder marker.
+        assert "Google Drive" in (mount / "a.txt").read_text()
+
         r = await vr.toggle_clonemd("acme", vr.DriveToggleBody(clonemd=True), USER)
-        assert r["clonemd"] is True
-        # Reflected in the projects listing and mirrored into the manifest.
+        assert r["clonemd"] is True and r.get("cloned", 0) >= 1
+
+        # After: real content on disk, manifest cloned, listing reflects it.
+        assert (mount / "a.txt").read_text() == "the merger closed in Q3"
+        man = vfs_drive.Manifest.load(mount)
+        assert man.clonemd is True
+        assert man.files["a.txt"]["state"] == "cloned"
         acme = next(p for p in (await vr.list_projects(USER))["projects"] if p["name"] == "acme")
         assert acme["drive"]["clonemd"] is True
-        man = vfs_drive.Manifest.load(tmp / "vfs" / "local" / ".drive" / "acme")
-        assert man.clonemd is True
 
     async def test_refresh_prunes_vanished(self, env):
         vr, vfs_drive, tmp, fake = env

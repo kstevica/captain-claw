@@ -174,6 +174,16 @@ gws path, and a Doc with inline images will otherwise blow up the context window
 
 ## Phase 3 — clonemd
 
+**SHIPPED.** Enabling clonemd converts the tree to real Markdown now; refresh
+keeps it in delta. Cloned files are ordinary on disk, so grep searches them
+with no caveat and deep memory can index the mount. 13 new tests.
+
+Notes as built: the verbatim-vs-rename decision is on the *source* extension,
+not the export format (a Google Doc has no text extension, so it renames to
+`.md` rather than being copied verbatim); an unconvertible file is marked so a
+refresh doesn't re-download it to fail again; and a corrupt download degrades to
+a placeholder instead of raising.
+
 A per-mount toggle. When on, a refresh materialises **real Markdown files** and
 the mount stops being virtual for those paths.
 

@@ -459,3 +459,147 @@ class TestReadToolIntegration:
         }))
         r = await ReadTool().execute(path="vfs:acme/nope.txt")
         assert r.success is False and "not found" in r.error.lower()
+
+
+# ── Phase 3: clonemd (convert to real local Markdown) ─────────────────
+
+
+def _clonable_drive():
+    """Deterministic clone content: a Google Doc, a plain-text note, another
+    Google Doc, and an image that stays a placeholder. Native docs export to
+    markdown bytes that decode directly, so no real PDF/Office parsing is
+    involved — clone ROUTING and naming are what these tests pin."""
+    return FakeDrive(
+        {"ROOT": [
+            _file("g1", "Report", mime="application/vnd.google-apps.document"),
+            _file("f2", "notes.txt"),
+            _file("g3", "Quarterly Review",
+                  mime="application/vnd.google-apps.document"),
+            _file("i1", "logo.png", mime="image/png"),
+        ]},
+        content={
+            "g1": (b"# Report\n\nThe merger closed.", ".md"),
+            "f2": (b"the merger closed in Q3", ".txt"),
+            "g3": (b"# Quarterly Review\n\nRevenue up.", ".md"),
+            "i1": (b"\x89PNG", ".png"),
+        },
+    )
+
+
+class TestClonemd:
+    async def test_clone_creates_real_markdown_and_drops_placeholder(self, mount):
+        drive = _clonable_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        # "Report" (Google Doc) -> Report.md with real content.
+        assert (root / "Report.md").is_file()
+        assert "merger closed" in (root / "Report.md").read_text()
+        man = vfs_drive.Manifest.load(root)
+        assert man.files["Report"]["state"] == "cloned"
+        assert man.files["Report"]["cloned_path"] == "Report.md"
+
+    async def test_docx_style_rename_drops_original(self, mount):
+        # A .docx-named source (with markdown-export bytes so no real parsing):
+        # report.docx -> report.md, original placeholder path gone.
+        drive = FakeDrive(
+            {"ROOT": [_file("d1", "report.docx", mime="text/markdown")]},
+            content={"d1": (b"converted body", ".md")},
+        )
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        assert (root / "report.md").is_file()
+        assert not (root / "report.docx").exists()
+
+    async def test_plain_text_cloned_verbatim_keeps_name(self, mount):
+        drive = _clonable_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        assert (root / "notes.txt").read_text() == "the merger closed in Q3"
+        assert vfs_drive.Manifest.load(root).files["notes.txt"]["state"] == "cloned"
+
+    async def test_unconvertible_stays_placeholder(self, mount):
+        drive = _clonable_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        assert vfs_drive.Manifest.load(root).files["logo.png"]["state"] == "placeholder"
+        assert "Google Drive" in (root / "logo.png").read_text()
+
+    async def test_corrupt_convertible_falls_back_to_placeholder(self, mount):
+        # A .pdf whose bytes aren't a real PDF: conversion fails, and clone must
+        # degrade to a placeholder rather than crash.
+        drive = FakeDrive(
+            {"ROOT": [_file("f1", "broken.pdf", mime="application/pdf")]},
+            content={"f1": (b"not really a pdf", ".pdf")},
+        )
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        assert vfs_drive.Manifest.load(root).files["broken.pdf"]["state"] == "placeholder"
+        assert (root / "broken.pdf").is_file()
+
+    async def test_collision_keeps_distinct_names(self, mount):
+        # Two same-stem sources both want the same .md name; the second falls
+        # back to keeping its full name.
+        drive = FakeDrive(
+            {"ROOT": [
+                _file("g1", "Report", mime="application/vnd.google-apps.document"),
+                _file("d2", "Report.docx", mime="text/markdown"),
+            ]},
+            content={"g1": (b"# doc", ".md"), "d2": (b"converted", ".md")},
+        )
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        files = {p.name for p in root.iterdir() if p.is_file() and not p.name.startswith(".")}
+        assert "Report.md" in files
+        assert "Report.docx.md" in files  # collision fallback keeps the ext
+
+    async def test_cloned_files_are_grep_searchable(self, mount):
+        drive = _clonable_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        paths = [root / "notes.txt", root / "Report.md", root / "logo.png"]
+        searchable, skipped = vfs_drive.filter_searchable(paths)
+        assert (root / "notes.txt") in searchable
+        assert (root / "Report.md") in searchable
+        assert skipped == 1  # only the image placeholder
+
+    async def test_unchanged_reclone_skips_refetch(self, mount):
+        drive = _clonable_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        drive.fetch_calls.clear()
+        await vfs_drive.sync(drive, root)
+        assert drive.fetch_calls == []  # nothing changed → no refetch
+
+    async def test_changed_upstream_reconverts(self, mount):
+        drive = _clonable_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        for f in drive.tree["ROOT"]:
+            if f.name == "notes.txt":
+                f.modified_time = "2026-09-01T00:00:00Z"
+        drive.content["f2"] = (b"restated: closed in Q4", ".txt")
+        drive.fetch_calls.clear()
+        await vfs_drive.sync(drive, root)
+        assert "f2" in drive.fetch_calls
+        assert (root / "notes.txt").read_text() == "restated: closed in Q4"
+
+    async def test_vanished_cloned_output_is_pruned(self, mount):
+        drive = _clonable_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        assert (root / "Report.md").is_file()
+        drive.tree["ROOT"] = [f for f in drive.tree["ROOT"] if f.name != "Report"]
+        await vfs_drive.sync(drive, root)
+        assert not (root / "Report.md").exists()  # cloned output removed too
+        assert "Report" not in vfs_drive.Manifest.load(root).files
+
+    async def test_disabling_clonemd_is_nondestructive(self, mount):
+        drive = _clonable_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", clonemd=True)
+        root = vfs_drive.mount_root("alice", "acme")
+        man = vfs_drive.Manifest.load(root)
+        man.clonemd = False
+        man.save(root)
+        await vfs_drive.sync(drive, root)
+        assert (root / "Report.md").is_file()  # left in place
+        assert vfs_drive.Manifest.load(root).files["Report"]["state"] == "cloned"
