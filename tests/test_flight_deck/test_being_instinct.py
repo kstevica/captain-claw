@@ -311,6 +311,65 @@ async def test_fulfilled_plan_surfaces_as_percept(store):
     assert any(ln.startswith("AS YOU PLANNED") for ln in lines)
 
 
+async def test_a_fresh_walk_makes_the_mind_speak_of_the_place(store):
+    """The mandate half of the arrived-trigger rate limit: the FIRST wake
+    after a walk is made to comment on where the feet landed — and only that
+    wake (a later tick sees no fresh arrival, so staying on costs no further
+    words). Home is the one arrival with no mandate — it is terminal rest."""
+    b = await _being(store, now=NOW - timedelta(hours=3))
+    world.ensure_village(store, OWNER, now=NOW - timedelta(days=1))
+    bid = b["id"]
+    # the mind last woke an hour ago; then the feet walked to the Well
+    store.tick_bookkeeping(bid, drives={}, next_wake_at=NOW,
+                           now=NOW - timedelta(hours=1))
+    store.record_event(bid, "arrived",
+                       {"place": "well", "name": "the Well", "by": "feet"},
+                       now=NOW - timedelta(minutes=5))
+    lines = life.percepts_since(store, store.get(OWNER, b["slug"]))
+    assert any("MUST BE ABOUT the Well" in ln and "not optional" in ln
+               for ln in lines)
+    # the mind witnesses it — a later wake carries no fresh arrival, so
+    # staying another tick demands no further comment
+    store.tick_bookkeeping(bid, drives={}, next_wake_at=NOW,
+                           now=NOW - timedelta(minutes=2))
+    lines = life.percepts_since(store, store.get(OWNER, b["slug"]))
+    assert not any("MUST BE ABOUT" in ln for ln in lines)
+    # coming HOME is terminal rest — the walk is felt, but nothing is demanded
+    store.record_event(bid, "arrived", {"place": "home", "by": "feet"},
+                       now=NOW - timedelta(minutes=1))
+    lines = life.percepts_since(store, store.get(OWNER, b["slug"]))
+    assert any("home" in ln for ln in lines)
+    assert not any("MUST BE ABOUT" in ln for ln in lines)
+
+
+async def test_the_wake_after_a_walk_carries_the_mandate_into_the_prompt(store):
+    """End to end: the feet carry the body somewhere, the walk settles, and
+    the very next mind tick is handed the speak-of-the-place mandate in its
+    actual prompt — not just in percepts_since."""
+    db = FakeDB()
+    b = await _being(store, now=NOW - timedelta(days=1))
+    world.ensure_village(store, OWNER, now=NOW - timedelta(days=1))
+
+    async def send0(being, prompt):
+        return _reply()
+
+    await life.tick(db, store, store.get(OWNER, b["slug"]), now=NOW,
+                    send_fn=send0, usage_fn=_usage)          # grounds "last woke"
+    store.depart(OWNER, b["slug"], "library", now=NOW + timedelta(minutes=1),
+                 by="feet")
+    world.reflex_pass(store, store.get(OWNER, b["slug"]),
+                      NOW + timedelta(hours=8))               # the walk finishes
+    seen: list[str] = []
+
+    async def send(being, prompt):
+        seen.append(prompt)
+        return _reply()
+
+    await life.tick(db, store, store.get(OWNER, b["slug"]),
+                    now=NOW + timedelta(hours=9), send_fn=send, usage_fn=_usage)
+    assert seen and "MUST BE ABOUT the Library" in seen[0]
+
+
 async def test_morning_teaches_the_plan_fields_when_instincts_on(store):
     db = FakeDB()
     b = await _being(store)
@@ -342,31 +401,58 @@ def _mark(store, bid, minutes_ago, act="linger"):
                        now=NOW - timedelta(minutes=minutes_ago))
 
 
-async def test_wants_decision_arrivals_and_company(store):
+async def test_wants_decision_rests_the_feet_until_the_mind_witnesses_a_walk(
+        store):
+    """The arrived-trigger rate limit: once the feet set the body down
+    somewhere new it STAYS there until the next mind tick, which is made to
+    speak of the place. Before this a fresh arrival re-fired the feet and a
+    being paced the village all day (staging: ~50 walks between one pair of
+    hourly ticks). Home is terminal rest — no gate."""
     b = await _being(store, now=NOW - timedelta(hours=2))
     world.ensure_village(store, OWNER, now=NOW - timedelta(days=1))
     bid = b["id"]
-    # restless: no decision since hatching two hours ago
+    # a long quiet gap would ordinarily stir the feet
+    _mark(store, bid, instinct.FEET_IDLE_MINUTES * 2)
     assert instinct.wants_decision(store, b, NOW) == "restless"
-    # a recent decision quiets the feet
-    _mark(store, bid, 10)
-    assert instinct.wants_decision(store, b, NOW) is None
-    # a fresh UNPLANNED arrival stirs them
+    # but a fresh arrival RESTS them — the body stays where it landed
     store.record_event(bid, "arrived", {"place": "square", "by": "feet"},
                        now=NOW - timedelta(minutes=5))
-    assert instinct.wants_decision(store, b, NOW) == "arrived"
-    # ...but a PLANNED arrival was the destination — consumed, no stir
-    _mark(store, bid, 4)
+    assert instinct.wants_decision(store, store.get(OWNER, b["slug"]),
+                                   NOW) is None
+    # even the mind's own go_to lands the same way — reach it, wait to be seen
     store.record_event(bid, "arrived",
-                       {"place": "square", "by": "feet", "planned": True},
-                       now=NOW - timedelta(minutes=3))
+                       {"place": "well", "by": "mind", "planned": True},
+                       now=NOW - timedelta(minutes=4))
+    assert instinct.wants_decision(store, store.get(OWNER, b["slug"]),
+                                   NOW) is None
+    # the mind ticks (and is made to speak of the place) — the gate lifts and
+    # the freed, still long-quiet feet stir again
+    store.tick_bookkeeping(bid, drives={},
+                           next_wake_at=NOW + timedelta(hours=1),
+                           now=NOW - timedelta(minutes=3))
+    assert instinct.wants_decision(store, store.get(OWNER, b["slug"]),
+                                   NOW) == "restless"
+    # arriving HOME is terminal rest — no gate holds them there
+    store.record_event(bid, "arrived", {"place": "home", "by": "feet"},
+                       now=NOW - timedelta(minutes=1))
+    assert instinct.wants_decision(store, store.get(OWNER, b["slug"]),
+                                   NOW) == "restless"
+
+
+async def test_wants_decision_company_still_stirs(store):
+    b = await _being(store, now=NOW - timedelta(hours=2))
+    world.ensure_village(store, OWNER, now=NOW - timedelta(days=1))
+    bid = b["id"]
+    _mark(store, bid, 10)                       # a fresh decision quiets
     assert instinct.wants_decision(store, b, NOW) is None
     # company crossing the path stirs them; deciding consumes it
     store.record_event(bid, "crossed_paths", {"with": "x", "name": "X"},
                        now=NOW - timedelta(minutes=2))
-    assert instinct.wants_decision(store, b, NOW) == "company"
+    assert instinct.wants_decision(store, store.get(OWNER, b["slug"]),
+                                   NOW) == "company"
     _mark(store, bid, 1)
-    assert instinct.wants_decision(store, b, NOW) is None
+    assert instinct.wants_decision(store, store.get(OWNER, b["slug"]),
+                                   NOW) is None
 
 
 async def test_wants_decision_plan_restless_stay_and_road(store):
