@@ -25,12 +25,19 @@ class FakeDrive:
             "F1": [DriveFile(id="f2", name="b.md", mime_type="text/markdown", size=20,
                              modified_time="2026-07-20T00:00:00Z")],
         }
+        self.tree["root"] = self.tree["ROOT"]  # 'root' is Drive's My-Drive alias
 
         # file_id -> (bytes, ext), set by tests that exercise clonemd.
         self.content: dict = {}
+        # Shared (Team) Drives the account can see, for the picker.
+        self.shared = [DriveFile(id="SD1", name="Team Drive", mime_type=FOLDER_MIME)]
 
-    async def list_folder(self, fid, *, order_by="folder,name", max_files=None, sleep=None):
+    async def list_folder(self, fid, *, drive_id="", order_by="folder,name",
+                          max_files=None, sleep=None):
         return list(self.tree.get(fid, [])), False
+
+    async def list_shared_drives(self, *, sleep=None):
+        return list(self.shared)
 
     async def fetch(self, f, *, sleep=None):
         return self.content[f.id]
@@ -69,6 +76,20 @@ async def env(monkeypatch):
 
 
 class TestDriveMountRoutes:
+    async def test_browse_root_surfaces_shared_drives(self, env):
+        vr, _, _, _ = env
+        out = await vr.drive_browse(folder_id="root", drive_id="", user=USER)
+        assert [d["name"] for d in out["shared_drives"]] == ["Team Drive"]
+        assert {"id": "F1", "name": "sub"} in out["folders"]  # My Drive folders too
+
+    async def test_mount_a_shared_drive_threads_its_id(self, env):
+        vr, vfs_drive, tmp, _ = env
+        await vr.mount_drive(
+            vr.DriveMountBody(name="team", folder_id="SD1", drive_id="SD1"), USER
+        )
+        man = vfs_drive.Manifest.load(tmp / "vfs" / "local" / ".drive" / "team")
+        assert man.shared_drive_id == "SD1"
+
     async def test_mount_populates_tree_and_lists_as_gdrive(self, env):
         vr, vfs_drive, tmp, _ = env
         summary = await vr.mount_drive(

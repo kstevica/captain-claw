@@ -241,6 +241,7 @@ class DriveClient:
         self,
         folder_id: str = "root",
         *,
+        drive_id: str = "",
         order_by: str = "folder,name",
         max_files: int | None = None,
         sleep=asyncio.sleep,
@@ -251,6 +252,12 @@ class DriveClient:
         cut the listing short, so a caller can warn instead of silently showing
         a partial tree. The old tool requested ``nextPageToken`` and never read
         it, so any folder over 100 children was quietly incomplete.
+
+        Pass *drive_id* to list inside a Shared (Team) Drive: the default
+        ``user`` corpus does not include shared-drive items, so without it a
+        shared-drive folder reads back empty. A shared drive's top level is
+        ``list_folder(drive_id, drive_id=drive_id)`` (its root folder id equals
+        the drive id).
         """
         q = f"'{escape_query_value(folder_id)}' in parents and trashed = false"
         files: list[DriveFile] = []
@@ -273,6 +280,9 @@ class DriveClient:
                 "supportsAllDrives": "true",
                 "includeItemsFromAllDrives": "true",
             }
+            if drive_id:
+                params["corpora"] = "drive"
+                params["driveId"] = drive_id
             if page_token:
                 params["pageToken"] = page_token
             resp = await self._request("GET", f"{_DRIVE_API}/files", params=params, sleep=sleep)
@@ -283,6 +293,36 @@ class DriveClient:
                 break
 
         return files, truncated
+
+    async def list_shared_drives(self, *, sleep=asyncio.sleep) -> list[DriveFile]:
+        """List the Shared (Team) Drives the account can access.
+
+        A separate endpoint (``/drives``) from ``/files`` — shared drives are
+        top-level containers, not children of My Drive. Returned as folder-typed
+        ``DriveFile``s (id = drive id, which is also the drive's root folder id)
+        so a picker can treat them like any other folder to descend into.
+        """
+        drives: list[DriveFile] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {
+                "pageSize": 100,
+                "fields": "nextPageToken,drives(id,name)",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await self._request("GET", f"{_DRIVE_API}/drives", params=params, sleep=sleep)
+            data = resp.json()
+            for d in data.get("drives", []):
+                drives.append(DriveFile(
+                    id=str(d.get("id", "")),
+                    name=str(d.get("name", "")),
+                    mime_type=FOLDER_MIME,
+                ))
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+        return drives
 
     async def get_metadata(self, file_id: str, *, sleep=asyncio.sleep) -> DriveFile:
         resp = await self._request(

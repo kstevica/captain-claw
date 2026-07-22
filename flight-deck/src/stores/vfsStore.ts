@@ -128,8 +128,8 @@ interface VFSStore {
   addLink: (name: string, path: string, mode: string) => Promise<void>
   browseFs: (path: string) => Promise<FsListing>
   // Google Drive mounts
-  browseDrive: (folderId: string) => Promise<{ folders: DriveFolder[]; truncated: boolean }>
-  mountDrive: (name: string, folderId: string, clonemd: boolean) => Promise<void>
+  browseDrive: (folderId: string, driveId?: string) => Promise<{ folders: DriveFolder[]; shared_drives: DriveFolder[]; truncated: boolean }>
+  mountDrive: (name: string, folderId: string, clonemd: boolean, driveId?: string) => Promise<void>
   refreshDrive: (name: string) => Promise<string>
   toggleClonemd: (name: string, clonemd: boolean) => Promise<string>
   unmountDrive: (name: string, keepCloned: boolean) => Promise<void>
@@ -379,16 +379,18 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     return res.json()
   },
 
-  browseDrive: async (folderId) => {
-    const res = await _authedFetch(`/fd/vfs/drive/browse?${qp({ folder_id: folderId || 'root' })}`)
+  browseDrive: async (folderId, driveId = '') => {
+    const res = await _authedFetch(
+      `/fd/vfs/drive/browse?${qp({ folder_id: folderId || 'root', ...(driveId ? { drive_id: driveId } : {}) })}`,
+    )
     if (!res.ok) throw new Error((await res.text()) || 'Drive browse failed')
     return res.json()
   },
 
-  mountDrive: async (name, folderId, clonemd) => {
+  mountDrive: async (name, folderId, clonemd, driveId = '') => {
     const res = await _authedFetch('/fd/vfs/links/gdrive', {
       method: 'POST',
-      body: JSON.stringify({ name, folder_id: folderId, clonemd }),
+      body: JSON.stringify({ name, folder_id: folderId, clonemd, drive_id: driveId }),
     })
     if (!res.ok) throw new Error((await res.text()) || 'mount failed')
     await get().loadProjects()

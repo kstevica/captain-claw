@@ -96,13 +96,16 @@ class Manifest:
     path (``""`` = mount root) to the Drive folder id backing it — needed to
     list a subfolder lazily, since its id is only learned when its parent is
     listed. ``files`` maps a relative POSIX file path to its Drive metadata and
-    materialisation ``state``.
+    materialisation ``state``. ``shared_drive_id`` is set when the mount root
+    lives in a Shared (Team) Drive — every listing then needs that drive as its
+    corpus, or shared-drive folders read back empty.
     """
 
     folder_id: str
     dirs: dict[str, str]
     files: dict[str, dict[str, Any]]
     clonemd: bool = False
+    shared_drive_id: str = ""
 
     @classmethod
     def load(cls, root: Path) -> "Manifest":
@@ -115,6 +118,7 @@ class Manifest:
             dirs=dict(d.get("dirs", {}) or {}),
             files=dict(d.get("files", {}) or {}),
             clonemd=bool(d.get("clonemd", False)),
+            shared_drive_id=str(d.get("shared_drive_id", "")),
         )
 
     def save(self, root: Path) -> None:
@@ -126,6 +130,7 @@ class Manifest:
                     "dirs": self.dirs,
                     "files": self.files,
                     "clonemd": self.clonemd,
+                    "shared_drive_id": self.shared_drive_id,
                 },
                 indent=2,
                 sort_keys=True,
@@ -289,12 +294,13 @@ async def list_dir(
     summary; the tree itself is the filesystem.
     """
     man = Manifest.load(mount)
-    drive_id = man.dirs.get(rel)
-    if drive_id is None:
+    folder_id = man.dirs.get(rel)
+    if folder_id is None:
         raise ValueError(f"directory {rel!r} is not part of this mount")
 
     children, truncated = await client.list_folder(
-        drive_id, max_files=max(1, max_files - len(man.files))
+        folder_id, drive_id=man.shared_drive_id,
+        max_files=max(1, max_files - len(man.files)),
     )
     n_dirs = 0
     n_files = 0
@@ -443,12 +449,14 @@ async def sync(
 
     while queue:
         rel = queue.pop(0)
-        drive_id = seen_dirs[rel]
+        folder_id = seen_dirs[rel]
         remaining = max_files - total_files
         if remaining <= 0:
             truncated = True
             break
-        children, page_truncated = await client.list_folder(drive_id, max_files=remaining)
+        children, page_truncated = await client.list_folder(
+            folder_id, drive_id=man.shared_drive_id, max_files=remaining
+        )
         truncated = truncated or page_truncated
         for child in children:
             child_rel = f"{rel}/{child.name}".lstrip("/") if rel else child.name
@@ -576,6 +584,7 @@ async def create_mount(
     folder_id: str,
     *,
     clonemd: bool = False,
+    shared_drive_id: str = "",
     max_files: int = DEFAULT_MAX_FILES,
 ) -> dict[str, Any]:
     """Create the placeholder tree and the ``.vfs-links.json`` entry.
@@ -583,19 +592,24 @@ async def create_mount(
     Returns the sync summary. Idempotent on the link entry — re-mounting the
     same project refreshes it. Writing the link is the caller's (FD route's)
     job via :func:`link_entry`, kept separate so this stays FD-free.
+    Pass *shared_drive_id* when the root lives in a Shared (Team) Drive.
     """
     root = mount_root(user_id, project)
     root.mkdir(parents=True, exist_ok=True)
     man = Manifest.load(root)
     man.folder_id = folder_id
     man.clonemd = clonemd
+    man.shared_drive_id = shared_drive_id
     man.dirs.setdefault("", folder_id)
     man.save(root)
     summary = await sync(client, root, max_files=max_files)
     return summary
 
 
-def link_entry(user_id: str, project: str, folder_id: str, *, clonemd: bool = False) -> dict[str, Any]:
+def link_entry(
+    user_id: str, project: str, folder_id: str, *,
+    clonemd: bool = False, shared_drive_id: str = "",
+) -> dict[str, Any]:
     """The ``.vfs-links.json`` value for a Drive mount.
 
     ``path`` points at the local placeholder tree, so every existing resolver
@@ -607,7 +621,8 @@ def link_entry(user_id: str, project: str, folder_id: str, *, clonemd: bool = Fa
         "path": str(mount_root(user_id, project)),
         "mode": "ro",
         "kind": "gdrive",
-        "drive": {"folder_id": folder_id, "clonemd": bool(clonemd), "synced_at": 0},
+        "drive": {"folder_id": folder_id, "clonemd": bool(clonemd),
+                  "shared_drive_id": shared_drive_id, "synced_at": 0},
     }
 
 

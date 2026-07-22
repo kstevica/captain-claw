@@ -258,9 +258,20 @@ themes pass contrast, no console errors.
   placeholder tree, and should *ask* before deleting cloned Markdown, which the
   user may have come to treat as their own files.
 
+## Shared (Team) Drives — SHIPPED
+
+The default `user` corpus excludes shared-drive items, so the first cut only saw
+"My Drive". Now: `DriveClient.list_shared_drives()` (the `/drives` endpoint) plus
+`list_folder(..., drive_id=…)` which scopes to a drive's corpus
+(`corpora=drive&driveId`). The mount manifest carries `shared_drive_id`, threaded
+into every `sync`/`list_dir` listing so a shared-drive folder doesn't read back
+empty. The Connect picker shows a **Shared drives** section at My Drive root and
+descends into one carrying its id; mounting persists it. Verified live: browse
+lists both, descending scopes correctly, and a mounted shared drive's manifest
+records the drive id and materialises its contents.
+
 ## Deliberately out of scope
 
 Write-back to Drive; realtime sync (`changes` API / webhooks — none exists today,
-and manual refresh is the brief); Shared Drives beyond what the picker already
-lists; OCR of images; and any attempt at a general virtual-filesystem backend
-behind `project_root()`.
+and manual refresh is the brief); OCR of images; and any attempt at a general
+virtual-filesystem backend behind `project_root()`.

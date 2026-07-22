@@ -383,6 +383,7 @@ class DriveMountBody(BaseModel):
     name: str
     folder_id: str
     clonemd: bool = False
+    drive_id: str = ""  # set when the folder lives in a Shared (Team) Drive
 
 
 class DriveToggleBody(BaseModel):
@@ -414,16 +415,26 @@ def _stamp_synced(user_id: str, name: str) -> None:
 
 
 @router.get("/drive/browse")
-async def drive_browse(folder_id: str = "root", user: dict = Depends(get_current_user)):
+async def drive_browse(folder_id: str = "root", drive_id: str = "",
+                       user: dict = Depends(get_current_user)):
     """List Drive folders under *folder_id*, for the mount picker.
 
     Folders only — this is a place to choose a mount root, not a file browser.
+    At My Drive root (``folder_id=root`` and no *drive_id*) the response also
+    carries the account's Shared (Team) Drives so the picker can offer them;
+    descending into one passes its id as *drive_id* so the listing uses that
+    drive's corpus (the default corpus excludes shared-drive items).
     """
     from captain_claw.drive_client import FOLDER_MIME, DriveError
 
     client = _drive_client()
     try:
-        files, truncated = await client.list_folder(folder_id, max_files=500)
+        files, truncated = await client.list_folder(
+            folder_id, drive_id=drive_id, max_files=500
+        )
+        shared = []
+        if folder_id == "root" and not drive_id:
+            shared = [{"id": d.id, "name": d.name} for d in await client.list_shared_drives()]
     except DriveError as exc:
         raise HTTPException(400, str(exc))
     finally:
@@ -433,7 +444,8 @@ async def drive_browse(folder_id: str = "root", user: dict = Depends(get_current
         for f in files
         if f.mime_type == FOLDER_MIME
     ]
-    return {"folder_id": folder_id, "folders": folders, "truncated": truncated}
+    return {"folder_id": folder_id, "folders": folders,
+            "shared_drives": shared, "truncated": truncated}
 
 
 @router.post("/links/gdrive")
@@ -454,10 +466,12 @@ async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_use
     if existing and existing.get("kind") != "gdrive":
         raise HTTPException(409, f"a link named '{name}' already exists")
 
+    drive_id = body.drive_id.strip()
     client = _drive_client()
     try:
         summary = await vfs_drive.create_mount(
-            client, user["id"], name, body.folder_id.strip(), clonemd=body.clonemd
+            client, user["id"], name, body.folder_id.strip(),
+            clonemd=body.clonemd, shared_drive_id=drive_id,
         )
     except DriveError as exc:
         raise HTTPException(400, str(exc))
@@ -468,7 +482,8 @@ async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_use
 
     links = read_links_at(root)
     root.mkdir(parents=True, exist_ok=True)
-    entry = vfs_drive.link_entry(user["id"], name, body.folder_id.strip(), clonemd=body.clonemd)
+    entry = vfs_drive.link_entry(user["id"], name, body.folder_id.strip(),
+                                 clonemd=body.clonemd, shared_drive_id=drive_id)
     entry["drive"]["synced_at"] = int(time.time())
     links[name] = entry
     _write_links(root, links)

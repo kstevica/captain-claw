@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Cloud, Folder, ArrowLeft, X, Loader2, Sparkles, ChevronRight } from 'lucide-react'
+import { Cloud, Folder, ArrowLeft, X, Loader2, Sparkles, ChevronRight, Users } from 'lucide-react'
 import { useVFSStore, type DriveFolder } from '../../stores/vfsStore'
 
 /** Connect a Google Drive folder as a read-only VFS mount.
@@ -9,10 +9,15 @@ import { useVFSStore, type DriveFolder } from '../../stores/vfsStore'
  * mounts. Nothing is mirrored unless clonemd is on; otherwise the tree is
  * placeholders fetched on demand.
  */
+// A breadcrumb frame. `driveId` is the enclosing Shared Drive ('' = My Drive),
+// carried down so every listing/mount uses the right corpus.
+interface Frame { id: string; name: string; driveId: string }
+
 export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone: (name: string) => void }) {
   const s = useVFSStore()
-  const [stack, setStack] = useState<{ id: string; name: string }[]>([{ id: 'root', name: 'My Drive' }])
+  const [stack, setStack] = useState<Frame[]>([{ id: 'root', name: 'My Drive', driveId: '' }])
   const [folders, setFolders] = useState<DriveFolder[]>([])
+  const [sharedDrives, setSharedDrives] = useState<DriveFolder[]>([])
   const [loading, setLoading] = useState(false)
   const [truncated, setTruncated] = useState(false)
   const [err, setErr] = useState('')
@@ -21,42 +26,52 @@ export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone:
   const [mounting, setMounting] = useState(false)
 
   const here = stack[stack.length - 1]
+  const atRoot = stack.length === 1
 
-  const load = async (folderId: string) => {
+  const load = async (frame: Frame) => {
     setLoading(true); setErr('')
     try {
-      const d = await s.browseDrive(folderId)
+      const d = await s.browseDrive(frame.id, frame.driveId)
       setFolders(d.folders)
+      setSharedDrives(d.shared_drives || [])
       setTruncated(d.truncated)
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Could not reach Google Drive')
-      setFolders([])
+      setFolders([]); setSharedDrives([])
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => { load('root') }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(stack[0]) }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const enter = (f: DriveFolder) => {
-    setStack((st) => [...st, f])
+  const enter = (f: DriveFolder, driveId: string) => {
+    const frame: Frame = { id: f.id, name: f.name, driveId }
+    setStack((st) => [...st, frame])
     // Default the mount name to the folder you step into.
     setName(f.name.replace(/[^a-zA-Z0-9._-]/g, '-'))
-    load(f.id)
+    load(frame)
   }
+  // A shared drive: its id is both the folder to open and the drive corpus.
+  const enterSharedDrive = (d: DriveFolder) => enter(d, d.id)
+  // A normal folder inherits the current frame's driveId.
+  const enterFolder = (f: DriveFolder) => enter(f, here.driveId)
   const up = () => {
     if (stack.length < 2) return
     const st = stack.slice(0, -1)
     setStack(st)
-    load(st[st.length - 1].id)
+    load(st[st.length - 1])
   }
 
   const mount = async () => {
     const n = name.trim()
     if (!n) return
+    // A whole Shared Drive can't be mounted at its very top by name alone here
+    // unless the user descends into it — but its own frame IS mountable (id ==
+    // driveId), which we support.
     setMounting(true); setErr('')
     try {
-      await s.mountDrive(n, here.id, clonemd)
+      await s.mountDrive(n, here.id, clonemd, here.driveId)
       onDone(n)
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'mount failed')
@@ -101,16 +116,40 @@ export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone:
               {err}
             </div>
           )}
-          {!loading && !err && folders.length === 0 && (
+          {!loading && !err && folders.length === 0 && sharedDrives.length === 0 && (
             <div className="py-10 text-center text-xs text-zinc-500">No sub-folders here. Mount this folder itself below.</div>
+          )}
+          {/* Shared (Team) Drives — only at My Drive root */}
+          {!loading && atRoot && sharedDrives.length > 0 && (
+            <>
+              <div className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+                Shared drives
+              </div>
+              {sharedDrives.map((d) => (
+                <div key={d.id} className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-zinc-900">
+                  <Users className="h-4 w-4 shrink-0 text-indigo-500 dark:text-indigo-400" />
+                  <button onClick={() => enterSharedDrive(d)} className="min-w-0 flex-1 truncate text-left text-sm text-zinc-200">
+                    {d.name}
+                  </button>
+                  <button onClick={() => enterSharedDrive(d)} className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="Open">
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+              {folders.length > 0 && (
+                <div className="px-2 pb-1 pt-3 text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+                  My Drive
+                </div>
+              )}
+            </>
           )}
           {!loading && folders.map((f) => (
             <div key={f.id} className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-zinc-900">
               <Folder className="h-4 w-4 shrink-0 text-blue-500 dark:text-blue-400" />
-              <button onClick={() => enter(f)} className="min-w-0 flex-1 truncate text-left text-sm text-zinc-200">
+              <button onClick={() => enterFolder(f)} className="min-w-0 flex-1 truncate text-left text-sm text-zinc-200">
                 {f.name}
               </button>
-              <button onClick={() => enter(f)} className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="Open">
+              <button onClick={() => enterFolder(f)} className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="Open">
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             </div>

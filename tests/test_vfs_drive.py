@@ -22,10 +22,13 @@ class FakeDrive:
         # file_id -> (bytes, ext) returned by fetch()
         self.content = content or {}
         self.list_calls: list[str] = []
+        self.drive_ids: list[str] = []  # the shared-drive corpus of each list_folder call
         self.fetch_calls: list[str] = []
 
-    async def list_folder(self, folder_id, *, order_by="folder,name", max_files=None, sleep=None):
+    async def list_folder(self, folder_id, *, drive_id="", order_by="folder,name",
+                          max_files=None, sleep=None):
         self.list_calls.append(folder_id)
+        self.drive_ids.append(drive_id)
         children = self.tree.get(folder_id, [])
         if max_files is not None and len(children) > max_files:
             return children[:max_files], True
@@ -603,3 +606,26 @@ class TestClonemd:
         await vfs_drive.sync(drive, root)
         assert (root / "Report.md").is_file()  # left in place
         assert vfs_drive.Manifest.load(root).files["Report"]["state"] == "cloned"
+
+
+class TestSharedDriveMount:
+    """A mount rooted in a Shared Drive threads its drive id into every listing,
+    so folders read back with the right corpus (not the empty default)."""
+
+    async def test_shared_drive_id_flows_into_listings(self, mount):
+        drive = _sample_drive()
+        await vfs_drive.create_mount(drive, "alice", "team", "ROOT", shared_drive_id="DRIVE-X")
+        # Every list_folder during the sync carried the shared-drive corpus.
+        assert drive.drive_ids and all(d == "DRIVE-X" for d in drive.drive_ids)
+        man = vfs_drive.Manifest.load(vfs_drive.mount_root("alice", "team"))
+        assert man.shared_drive_id == "DRIVE-X"
+
+    async def test_my_drive_mount_uses_no_corpus(self, mount):
+        drive = _sample_drive()
+        await vfs_drive.create_mount(drive, "alice", "mine", "ROOT")
+        assert all(d == "" for d in drive.drive_ids)  # default corpus
+        assert vfs_drive.Manifest.load(vfs_drive.mount_root("alice", "mine")).shared_drive_id == ""
+
+    def test_link_entry_carries_shared_drive_id(self):
+        ent = vfs_drive.link_entry("alice", "team", "ROOT", shared_drive_id="DRIVE-X")
+        assert ent["drive"]["shared_drive_id"] == "DRIVE-X"

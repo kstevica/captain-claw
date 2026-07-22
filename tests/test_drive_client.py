@@ -204,3 +204,43 @@ class TestDriveFile:
         f = DriveFile.from_api({"id": "d", "name": "F",
                                 "mimeType": "application/vnd.google-apps.folder"})
         assert f.is_folder
+
+
+class TestSharedDrives:
+    @pytest.mark.asyncio
+    async def test_list_shared_drives(self):
+        c, fake = _client([
+            _resp(200, {"drives": [{"id": "D1", "name": "Team A"},
+                                   {"id": "D2", "name": "Team B"}]}),
+        ])
+        drives = await c.list_shared_drives(sleep=_nosleep)
+        assert [(d.id, d.name) for d in drives] == [("D1", "Team A"), ("D2", "Team B")]
+        assert all(d.is_folder for d in drives)  # rendered as folders for the picker
+        assert fake.calls[0]["url"].endswith("/drives")
+
+    @pytest.mark.asyncio
+    async def test_list_shared_drives_paginates(self):
+        c, fake = _client([
+            _resp(200, {"drives": [{"id": "D1", "name": "A"}], "nextPageToken": "P2"}),
+            _resp(200, {"drives": [{"id": "D2", "name": "B"}]}),
+        ])
+        drives = await c.list_shared_drives(sleep=_nosleep)
+        assert [d.id for d in drives] == ["D1", "D2"]
+        assert fake.calls[1]["params"]["pageToken"] == "P2"
+
+    @pytest.mark.asyncio
+    async def test_list_folder_scopes_to_a_shared_drive(self):
+        c, fake = _client([_resp(200, {"files": []})])
+        await c.list_folder("FOLDER", drive_id="DRIVE", sleep=_nosleep)
+        p = fake.calls[0]["params"]
+        assert p["corpora"] == "drive"
+        assert p["driveId"] == "DRIVE"
+        assert p["includeItemsFromAllDrives"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_my_drive_listing_sets_no_corpus(self):
+        # Without drive_id, the default (user) corpus is used — unchanged behavior.
+        c, fake = _client([_resp(200, {"files": []})])
+        await c.list_folder("root", sleep=_nosleep)
+        assert "corpora" not in fake.calls[0]["params"]
+        assert "driveId" not in fake.calls[0]["params"]
