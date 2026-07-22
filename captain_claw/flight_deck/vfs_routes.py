@@ -630,13 +630,41 @@ async def read_file(project: str, path: str, owner: str = "",
 @router.get("/download")
 async def download_file(project: str, path: str, owner: str = "",
                         user: dict = Depends(get_current_user)):
-    """Stream a file as a download."""
+    """Stream a file as a download.
+
+    For a Google Drive mount the panel *previews* the converted markdown, but a
+    download must be the ORIGINAL file (the real .docx/.pdf/.xls), not the
+    placeholder marker on disk. Fetch the real bytes on demand and serve them
+    under the original name; cloned and ordinary files serve straight from disk.
+    """
     oid = await _eff_owner(user["id"], project, owner, write=False)
     target = _resolve(oid, project, path)
     if not target.is_file():
         raise HTTPException(404, "file not found")
-    media = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-    return FileResponse(target, filename=target.name, media_type=media)
+
+    serve = target
+    download_name = target.name
+    try:
+        from captain_claw import vfs_drive
+        from captain_claw.drive_client import DriveError
+
+        try:
+            real = await vfs_drive.materialize(target)
+        except DriveError as exc:
+            raise HTTPException(502, f"Could not fetch the original from Google Drive: {exc}")
+        if real is not None:
+            serve = real
+            # A Google-native doc (no source extension) exports to .md/.xlsx/…;
+            # give the download that extension so it opens correctly.
+            if not Path(target.name).suffix and serve.suffix:
+                download_name = target.name + serve.suffix
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.debug("Drive download materialize skipped: %s", exc)
+
+    media = mimetypes.guess_type(download_name)[0] or "application/octet-stream"
+    return FileResponse(serve, filename=download_name, media_type=media)
 
 
 @router.get("/download-zip")

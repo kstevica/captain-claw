@@ -147,6 +147,32 @@ class TestDriveMountRoutes:
         acme = next(p for p in (await vr.list_projects(USER))["projects"] if p["name"] == "acme")
         assert acme["drive"]["clonemd"] is True
 
+    async def test_download_serves_the_original_not_the_marker(self, env, monkeypatch):
+        # The panel previews converted markdown, but a download must be the real
+        # file. materialize() reaches Drive via make_client(), so patch that too.
+        vr, vfs_drive, tmp, fake = env
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: fake)
+        fake.content = {"f1": (b"%PDF-1.4 real original bytes", ".txt")}
+        await vr.mount_drive(vr.DriveMountBody(name="acme", folder_id="ROOT"), USER)
+        mount = tmp / "vfs" / "local" / ".drive" / "acme"
+        assert "Google Drive" in (mount / "a.txt").read_text()  # on disk = marker
+
+        resp = await vr.download_file(project="acme", path="a.txt", user=USER)
+        assert resp.filename == "a.txt"                          # original name
+        assert Path(resp.path).read_bytes() == b"%PDF-1.4 real original bytes"
+
+    async def test_download_serves_from_the_byte_cache(self, env, monkeypatch):
+        # The served file is the materialised blob under .drive-cache, not the
+        # placeholder marker sitting at the mount path.
+        vr, vfs_drive, tmp, fake = env
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: fake)
+        fake.content = {"f1": (b"bytes", ".txt")}
+        await vr.mount_drive(vr.DriveMountBody(name="acme", folder_id="ROOT"), USER)
+        resp = await vr.download_file(project="acme", path="a.txt", user=USER)
+        served = Path(resp.path)
+        assert ".drive-cache" in served.parts and served.read_bytes() == b"bytes"
+        assert served != (tmp / "vfs" / "local" / ".drive" / "acme" / "a.txt")
+
     async def test_refresh_prunes_vanished(self, env):
         vr, vfs_drive, tmp, fake = env
         await vr.mount_drive(vr.DriveMountBody(name="acme", folder_id="ROOT"), USER)
