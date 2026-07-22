@@ -123,6 +123,29 @@ class TestVfsToolUX:
         r = await VfsTool().execute(action="list_projects")
         assert r.success is True and "CLAUDE-SKILLS" in r.content
 
+    async def test_list_projects_surfaces_drive_source_path(self, tmp_path, monkeypatch):
+        # The agent must SEE the mount's Drive path, so it can connect a request
+        # like "performance reports" to a short-named mount like "VC".
+        monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("CLAW_VFS_USER", "local")
+        monkeypatch.delenv("FD_OWNER_ID", raising=False)
+        monkeypatch.delenv("CLAW_VFS_SCOPE", raising=False)
+        uroot = tmp_path / "local"
+        mount = uroot / ".drive" / "VC"
+        mount.mkdir(parents=True)
+        (mount / ".drive-manifest.json").write_text('{"folder_id":"X","dirs":{},"files":{}}')
+        (mount / "report.pdf").write_text("x")
+        (uroot / ".vfs-links.json").write_text(json.dumps({
+            "VC": {"path": str(mount), "mode": "ro", "kind": "gdrive",
+                   "drive": {"folder_id": "X",
+                             "source_path": "FRC3/Reporting/Performance/VC"}},
+        }))
+        r = await VfsTool().execute(action="list_projects")
+        assert r.success is True
+        assert "VC" in r.content
+        assert "FRC3 / Reporting / Performance / VC" in r.content  # path visible
+        assert "(1 file)" in r.content  # .drive-manifest.json excluded from count
+
     async def test_not_found_lists_known_projects(self, vroot):
         r = await VfsTool().execute(action="ls", path="totally-absent")
         assert r.success is False

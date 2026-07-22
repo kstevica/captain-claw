@@ -119,10 +119,36 @@ class VfsTool(Tool):
                 projects = list_projects()
                 if not projects:
                     return ToolResult(success=True, content="No projects yet. Writing vfs:<project>/<file> creates one.")
+                from captain_claw.vfs import read_links
+
+                links = read_links()
                 lines = []
                 for proj in projects:
-                    n = sum(1 for p in project_root(proj).rglob("*") if p.is_file())
-                    lines.append(f"  {proj}  ({n} file{'s' if n != 1 else ''})")
+                    root_p = project_root(proj)
+                    # Count real files, skipping Drive mount internals
+                    # (.drive-cache, .drive-manifest.json) so the number matches
+                    # what the user sees.
+                    n = 0
+                    for p in root_p.rglob("*"):
+                        if not p.is_file():
+                            continue
+                        try:
+                            first = p.relative_to(root_p).parts[0]
+                        except (ValueError, IndexError):
+                            first = ""
+                        if first.startswith(".drive"):
+                            continue
+                        n += 1
+                    # Surface a Drive mount's full source path so the agent can
+                    # connect a request ("performance reports") to the right
+                    # folder — a short name like "VC" alone is ambiguous.
+                    note = ""
+                    ent = links.get(proj)
+                    if isinstance(ent, dict) and ent.get("kind") == "gdrive":
+                        sp = str((ent.get("drive") or {}).get("source_path", "")).strip()
+                        note = (f"  ·  Google Drive: {sp.replace('/', ' / ')}"
+                                if sp else "  ·  Google Drive")
+                    lines.append(f"  {proj}  ({n} file{'s' if n != 1 else ''}){note}")
                 return ToolResult(success=True, content="Projects:\n" + "\n".join(lines))
 
             # Remaining actions need a resolved path.
