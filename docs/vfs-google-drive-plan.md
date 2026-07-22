@@ -139,6 +139,11 @@ though it is `gws`-CLI-only and needs porting to the OAuth path), and
 
 ## Phase 2 — reading remote files as if local
 
+**SHIPPED.** Hydrate-on-read, grep skip-with-count, and read-only enforcement
+across the agent write/edit tools and the FD preview. 29 new tests (93 total in
+the Drive/VFS suite). clonemd conversion (Phase 3) reuses the same
+`bytes_to_text` converter built here.
+
 Four interception points, all thin, all calling into `vfs_drive`.
 
 | Reader | Behaviour |

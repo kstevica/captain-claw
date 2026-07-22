@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from captain_claw import vfs
-from captain_claw.drive_client import DriveClient, DriveFile, FOLDER_MIME
+from captain_claw.drive_client import DriveClient, DriveError, DriveFile, FOLDER_MIME
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -34,6 +34,18 @@ MANIFEST_NAME = ".drive-manifest.json"
 CACHE_DIRNAME = ".drive-cache"  # materialised bytes (Phase 2); created lazily.
 
 DEFAULT_MAX_FILES = 5000
+
+# Extensions read verbatim as text; everything else convertible goes through the
+# document extractors, and the rest can't be read as text at all.
+TEXT_EXTS = frozenset({
+    ".txt", ".md", ".markdown", ".rst", ".csv", ".tsv", ".json", ".jsonl",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml", ".html", ".htm", ".log",
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".sql", ".go", ".rs", ".java",
+    ".c", ".h", ".cpp", ".rb", ".php", ".swift",
+})
+_CONVERT_EXTS = frozenset({".pdf", ".docx", ".xlsx", ".pptx"})
+
+_MAX_FETCH_BYTES = 50 * 1024 * 1024
 
 # Placeholder state, recorded per file in the manifest. `placeholder` = a marker
 # only; `hydrated` = real bytes fetched on demand into the cache; `cloned` =
@@ -166,6 +178,89 @@ def is_placeholder(mount: Path, rel: str) -> bool:
     """True when *rel* is a not-yet-materialised placeholder, per the manifest."""
     entry = Manifest.load(mount).files.get(rel)
     return bool(entry and entry.get("state") == STATE_PLACEHOLDER)
+
+
+# ---------------------------------------------------------------------------
+# Finding a mount from an absolute path (the interception primitive)
+# ---------------------------------------------------------------------------
+
+
+def find_mount(abs_path: Path) -> tuple[Path, str] | None:
+    """If *abs_path* lives inside a Drive mount, return ``(mount_root, rel)``.
+
+    Walks up looking for a ``.drive-manifest.json``. This is how the read/grep
+    hooks recognise a Drive placeholder without threading mount state through
+    every tool — an absolute path is all they have.
+    """
+    try:
+        p = abs_path.resolve()
+    except OSError:
+        return None
+    for anc in [p, *p.parents]:
+        if (anc / MANIFEST_NAME).is_file():
+            try:
+                rel = p.relative_to(anc).as_posix()
+            except ValueError:
+                return None
+            return anc, ("" if rel == "." else rel)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Conversion (shared by read-hydration and, later, clonemd)
+# ---------------------------------------------------------------------------
+
+
+def bytes_to_text(data: bytes, ext: str, name: str) -> str | None:
+    """Render fetched bytes as readable text, or ``None`` if it isn't text.
+
+    Text extensions decode directly; Office/PDF go through the same
+    ``document_extract`` helpers the extract tools use. Anything else (images,
+    archives, unknown binaries) returns ``None`` — the caller explains rather
+    than dumping bytes.
+    """
+    ext = ext.lower()
+    if ext in TEXT_EXTS:
+        return data.decode("utf-8", errors="replace")
+    if ext not in _CONVERT_EXTS:
+        return None
+
+    import tempfile
+
+    from captain_claw.tools.document_extract import (
+        _extract_docx_markdown,
+        _extract_pdf_markdown,
+        _extract_pptx_markdown,
+        _extract_xlsx_markdown,
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = Path(tmp.name)
+    try:
+        if ext == ".pdf":
+            md, err = _extract_pdf_markdown(tmp_path, 200)
+            return md if md is not None else f"_(could not extract PDF: {err})_"
+        if ext == ".docx":
+            return _extract_docx_markdown(tmp_path)
+        if ext == ".xlsx":
+            return _extract_xlsx_markdown(tmp_path, 10_000)
+        if ext == ".pptx":
+            return _extract_pptx_markdown(tmp_path, 500)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    return None
+
+
+def _entry_as_file(rel: str, entry: dict[str, Any]) -> DriveFile:
+    return DriveFile(
+        id=str(entry.get("file_id", "")),
+        name=Path(rel).name,
+        mime_type=str(entry.get("mime", "")),
+        size=entry.get("size"),
+        modified_time=str(entry.get("modified", "")),
+        md5=str(entry.get("md5", "")),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +469,116 @@ def link_entry(user_id: str, project: str, folder_id: str, *, clonemd: bool = Fa
         "kind": "gdrive",
         "drive": {"folder_id": folder_id, "clonemd": bool(clonemd), "synced_at": 0},
     }
+
+
+def _cache_path(mount: Path, file_id: str) -> Path:
+    return mount / CACHE_DIRNAME / file_id
+
+
+async def hydrate(client: DriveClient, mount: Path, rel: str, *, sleep=None) -> str:
+    """Fetch a placeholder's content on demand, cache it, return readable text.
+
+    Idempotent and cheap on repeat: the cached text is reused while the file's
+    ``modifiedTime`` is unchanged. Marks the manifest entry ``hydrated`` — the
+    on-disk file stays a marker (so the tree is untouched), which is why grep,
+    which reads the disk, does not count a hydrated file as searchable.
+    """
+    import asyncio
+
+    sleep = sleep or asyncio.sleep
+    man = Manifest.load(mount)
+    entry = man.files.get(rel)
+    if entry is None:
+        raise ValueError(f"{rel!r} is not part of this mount")
+
+    cache = _cache_path(mount, str(entry["file_id"]))
+    if (
+        entry.get("state") in (STATE_HYDRATED, STATE_CLONED)
+        and entry.get("cached_modified") == entry.get("modified")
+        and cache.is_file()
+    ):
+        return cache.read_text(encoding="utf-8")
+
+    f = _entry_as_file(rel, entry)
+    if f.size and f.size > _MAX_FETCH_BYTES:
+        raise DriveError(f"{f.name} is too large to fetch ({f.size} bytes)")
+    data, ext = await client.fetch(f, sleep=sleep)
+    text = bytes_to_text(data, ext, f.name)
+    if text is None:
+        raise DriveError(
+            f"{f.name} is a binary file ({f.mime_type or ext}) and can't be read as text."
+        )
+
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(text, encoding="utf-8")
+    entry["state"] = STATE_HYDRATED
+    entry["cached_modified"] = entry.get("modified")
+    man.save(mount)
+    return text
+
+
+async def read_through(abs_path: Path) -> str | None:
+    """Content for a Drive placeholder at *abs_path*, or ``None`` to read normally.
+
+    The read tool calls this for any ``vfs:`` path. ``None`` means "not a Drive
+    placeholder — read the file as usual" (covers non-mount paths and cloned
+    files whose real bytes are already on disk). Drive errors surface as a
+    readable note rather than an exception, so a read never hard-fails on a
+    transient outage — it falls back to the marker with the reason.
+    """
+    found = find_mount(abs_path)
+    if not found:
+        return None
+    mount, rel = found
+    entry = Manifest.load(mount).files.get(rel)
+    if entry is None or entry.get("state") == STATE_CLONED:
+        return None  # untracked, or real content already on disk
+
+    from captain_claw.drive_client import make_client
+
+    client = make_client()
+    try:
+        return await hydrate(client, mount, rel)
+    except DriveError as exc:
+        marker = ""
+        try:
+            marker = abs_path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+        return f"[Google Drive — could not fetch this file: {exc}]\n\n{marker}"
+    finally:
+        await client.close()
+
+
+def filter_searchable(paths: list[Path]) -> tuple[list[Path], int]:
+    """Split *paths* into (searchable, n_skipped_placeholders) for grep.
+
+    A Drive placeholder (or a hydrated-to-cache file) has only a marker on disk,
+    so searching it would silently miss content that is really there — grep
+    skips it and reports the count instead. Cloned files and non-mount files are
+    searchable. Mount-internal files (the manifest, the cache dir) are dropped
+    quietly, neither searched nor counted.
+    """
+    manifests: dict[Path, Manifest] = {}
+    searchable: list[Path] = []
+    skipped = 0
+    for p in paths:
+        found = find_mount(p)
+        if not found:
+            searchable.append(p)
+            continue
+        mount, rel = found
+        if rel == MANIFEST_NAME or rel.split("/", 1)[0] == CACHE_DIRNAME:
+            continue
+        man = manifests.get(mount)
+        if man is None:
+            man = manifests[mount] = Manifest.load(mount)
+        entry = man.files.get(rel)
+        if entry is None or entry.get("state") == STATE_CLONED:
+            searchable.append(p)
+        else:
+            skipped += 1
+    return searchable, skipped
 
 
 def remove_mount(user_id: str, project: str, *, keep_cloned: bool = True) -> dict[str, Any]:

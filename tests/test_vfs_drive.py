@@ -17,9 +17,12 @@ from captain_claw.drive_client import DriveFile, FOLDER_MIME
 class FakeDrive:
     """An in-memory Drive: folder_id -> list of child DriveFiles."""
 
-    def __init__(self, tree: dict[str, list[DriveFile]]):
+    def __init__(self, tree: dict[str, list[DriveFile]], content: dict | None = None):
         self.tree = tree
+        # file_id -> (bytes, ext) returned by fetch()
+        self.content = content or {}
         self.list_calls: list[str] = []
+        self.fetch_calls: list[str] = []
 
     async def list_folder(self, folder_id, *, order_by="folder,name", max_files=None, sleep=None):
         self.list_calls.append(folder_id)
@@ -27,6 +30,13 @@ class FakeDrive:
         if max_files is not None and len(children) > max_files:
             return children[:max_files], True
         return list(children), False
+
+    async def fetch(self, f, *, sleep=None):
+        self.fetch_calls.append(f.id)
+        return self.content[f.id]
+
+    async def close(self):
+        pass
 
 
 def _folder(fid, name):
@@ -195,3 +205,257 @@ class TestRemoveMount:
         root = vfs_drive.mount_root("alice", "acme")
         vfs_drive.remove_mount("alice", "acme", keep_cloned=False)
         assert not root.exists()
+
+
+# ── Phase 2: reading remote files as if local ─────────────────────────
+
+from captain_claw.drive_client import DriveError
+
+
+class TestBytesToText:
+    def test_plain_text_decodes(self):
+        assert vfs_drive.bytes_to_text(b"hello\nworld", ".txt", "a.txt") == "hello\nworld"
+
+    def test_unknown_binary_is_not_text(self):
+        assert vfs_drive.bytes_to_text(b"\x89PNG\r\n", ".png", "img.png") is None
+
+    def test_xlsx_converts_to_markdown(self):
+        import io
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Name", "Score"])
+        ws.append(["Ada", 99])
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = vfs_drive.bytes_to_text(buf.getvalue(), ".xlsx", "s.xlsx")
+        # Routing is what matters here: .xlsx bytes go through the xlsx
+        # extractor (which emits a markdown doc), not decoded as raw text.
+        assert out is not None and out.lstrip().startswith("#")
+
+
+class TestFindMount:
+    async def test_finds_mount_and_rel(self, mount):
+        drive = _sample_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        found = vfs_drive.find_mount(root / "sub" / "deep.md")
+        assert found == (root, "sub/deep.md")
+
+    async def test_outside_any_mount_is_none(self, mount):
+        assert vfs_drive.find_mount(mount / "nowhere.txt") is None
+
+
+def _text_drive():
+    """A mount whose files carry real fetchable text."""
+    drive = FakeDrive(
+        {"ROOT": [_file("f1", "notes.txt"), _file("f2", "data.csv")]},
+        content={"f1": (b"the quarterly revenue rose sharply", ".txt"),
+                 "f2": (b"a,b\n1,2", ".csv")},
+    )
+    return drive
+
+
+class TestHydrate:
+    async def test_hydrate_fetches_caches_and_marks(self, mount):
+        drive = _text_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        text = await vfs_drive.hydrate(drive, root, "notes.txt")
+        assert "quarterly revenue" in text
+        man = vfs_drive.Manifest.load(root)
+        assert man.files["notes.txt"]["state"] == "hydrated"
+        # cache file written under .drive-cache/<file_id>
+        assert (root / ".drive-cache" / "f1").is_file()
+
+    async def test_second_hydrate_uses_cache_no_refetch(self, mount):
+        drive = _text_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        await vfs_drive.hydrate(drive, root, "notes.txt")
+        drive.fetch_calls.clear()
+        await vfs_drive.hydrate(drive, root, "notes.txt")
+        assert drive.fetch_calls == []  # served from cache
+
+    async def test_changed_upstream_refetches(self, mount):
+        drive = _text_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        await vfs_drive.hydrate(drive, root, "notes.txt")
+        # simulate a refresh that bumped modifiedTime for this file
+        man = vfs_drive.Manifest.load(root)
+        man.files["notes.txt"]["modified"] = "2026-08-01T00:00:00Z"
+        man.save(root)
+        drive.fetch_calls.clear()
+        await vfs_drive.hydrate(drive, root, "notes.txt")
+        assert drive.fetch_calls == ["f1"]  # cache was stale
+
+    async def test_binary_file_raises_readable_error(self, mount):
+        drive = FakeDrive({"ROOT": [_file("f1", "pic.png", mime="image/png")]},
+                          content={"f1": (b"\x89PNG", ".png")})
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        with pytest.raises(DriveError):
+            await vfs_drive.hydrate(drive, root, "pic.png")
+
+
+class TestReadThrough:
+    async def test_placeholder_returns_content(self, mount, monkeypatch):
+        drive = _text_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+        out = await vfs_drive.read_through(root / "notes.txt")
+        assert out is not None and "quarterly revenue" in out
+
+    async def test_non_mount_path_returns_none(self, mount):
+        assert await vfs_drive.read_through(mount / "loose.txt") is None
+
+    async def test_cloned_file_reads_normally(self, mount, monkeypatch):
+        drive = _text_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        man = vfs_drive.Manifest.load(root)
+        man.files["notes.txt"]["state"] = "cloned"
+        man.save(root)
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+        # cloned => read the real on-disk file, not a fetch
+        assert await vfs_drive.read_through(root / "notes.txt") is None
+
+    async def test_drive_error_falls_back_to_marker(self, mount, monkeypatch):
+        class Boom(FakeDrive):
+            async def fetch(self, f, *, sleep=None):
+                raise DriveError("network down")
+
+        drive = Boom({"ROOT": [_file("f1", "notes.txt")]}, content={})
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+        out = await vfs_drive.read_through(root / "notes.txt")
+        assert "could not fetch" in out and "network down" in out
+
+
+class TestFilterSearchable:
+    async def test_placeholders_skipped_and_counted(self, mount):
+        drive = _sample_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        paths = [root / "report.pdf", root / "notes.txt", root / "sub" / "deep.md"]
+        searchable, skipped = vfs_drive.filter_searchable(paths)
+        assert searchable == []  # all placeholders
+        assert skipped == 3
+
+    async def test_cloned_is_searchable(self, mount):
+        drive = _sample_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        man = vfs_drive.Manifest.load(root)
+        man.files["notes.txt"]["state"] = "cloned"
+        man.save(root)
+        searchable, skipped = vfs_drive.filter_searchable([root / "notes.txt", root / "report.pdf"])
+        assert searchable == [root / "notes.txt"]
+        assert skipped == 1
+
+    async def test_non_mount_files_pass_through(self, mount):
+        loose = mount / "x.txt"
+        searchable, skipped = vfs_drive.filter_searchable([loose])
+        assert searchable == [loose] and skipped == 0
+
+    async def test_manifest_and_cache_are_excluded_not_counted(self, mount):
+        drive = _sample_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        paths = [root / ".drive-manifest.json", root / ".drive-cache" / "f1"]
+        searchable, skipped = vfs_drive.filter_searchable(paths)
+        assert searchable == [] and skipped == 0  # internal, neither searched nor counted
+
+
+class TestReadOnlyWrites:
+    """Agent-side write/edit must refuse a mode:ro link, not just the FD panel."""
+
+    def _ro_link(self, tmp, monkeypatch):
+        import json as _json
+
+        monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp))
+        monkeypatch.setenv("CLAW_VFS_USER", "local")
+        monkeypatch.delenv("FD_OWNER_ID", raising=False)
+        uroot = tmp / "local"
+        uroot.mkdir(parents=True, exist_ok=True)
+        (uroot / ".drive" / "acme").mkdir(parents=True, exist_ok=True)
+        (uroot / ".vfs-links.json").write_text(_json.dumps({
+            "acme": {"path": str(uroot / ".drive" / "acme"), "mode": "ro", "kind": "gdrive"}
+        }))
+
+    def test_project_is_readonly_reads_the_link(self, tmp_path, monkeypatch):
+        from captain_claw import vfs
+
+        self._ro_link(tmp_path, monkeypatch)
+        assert vfs.project_is_readonly("acme") is True
+        assert vfs.project_is_readonly("not-a-link") is False
+
+    async def test_write_tool_refuses_ro_mount(self, tmp_path, monkeypatch):
+        from captain_claw.tools.write import WriteTool
+
+        self._ro_link(tmp_path, monkeypatch)
+        r = await WriteTool().execute(path="vfs:acme/x.txt", content="nope")
+        assert r.success is False
+        assert "read-only" in r.error.lower()
+
+    async def test_edit_tool_refuses_ro_mount(self, tmp_path, monkeypatch):
+        from captain_claw.tools.edit import EditTool
+
+        self._ro_link(tmp_path, monkeypatch)
+        r = await EditTool().execute(
+            path="vfs:acme/x.txt", action="replace_string",
+            old_string="a", new_string="b",
+        )
+        assert r.success is False
+        assert "read-only" in r.error.lower()
+
+
+class TestReadToolIntegration:
+    """The read tool itself returns Drive content for a placeholder path —
+    the actual 'read remote files as if local' behaviour, end to end."""
+
+    async def test_read_tool_hydrates_placeholder(self, tmp_path, monkeypatch):
+        import json as _json
+
+        from captain_claw.tools.read import ReadTool
+
+        # Align every root: the agent resolver (vfs.user_root via CLAW_VFS_ROOT)
+        # and vfs_drive.user_root must land on the same tree.
+        monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("CLAW_VFS_USER", "local")
+        monkeypatch.delenv("FD_OWNER_ID", raising=False)
+        monkeypatch.setattr(vfs_drive, "user_root", lambda uid: tmp_path / uid)
+
+        drive = _text_drive()
+        await vfs_drive.create_mount(drive, "local", "acme", "ROOT")
+        uroot = tmp_path / "local"
+        (uroot / ".vfs-links.json").write_text(_json.dumps({
+            "acme": vfs_drive.link_entry("local", "acme", "ROOT"),
+        }))
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+
+        r = await ReadTool().execute(path="vfs:acme/notes.txt")
+        assert r.success is True
+        assert "quarterly revenue" in r.content  # fetched, not the marker
+
+    async def test_read_tool_on_missing_mount_file_is_clean_404(self, tmp_path, monkeypatch):
+        import json as _json
+
+        from captain_claw.tools.read import ReadTool
+
+        monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path))
+        monkeypatch.setenv("CLAW_VFS_USER", "local")
+        monkeypatch.delenv("FD_OWNER_ID", raising=False)
+        monkeypatch.setattr(vfs_drive, "user_root", lambda uid: tmp_path / uid)
+        drive = _text_drive()
+        await vfs_drive.create_mount(drive, "local", "acme", "ROOT")
+        uroot = tmp_path / "local"
+        (uroot / ".vfs-links.json").write_text(_json.dumps({
+            "acme": vfs_drive.link_entry("local", "acme", "ROOT"),
+        }))
+        r = await ReadTool().execute(path="vfs:acme/nope.txt")
+        assert r.success is False and "not found" in r.error.lower()

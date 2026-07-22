@@ -126,6 +126,21 @@ class EditTool(Tool):
         **kwargs: Any,
     ) -> ToolResult:
         try:
+            # Read-only linked folders (e.g. Google Drive mounts) refuse edits
+            # up front — before action/param validation — so a ro mount is
+            # rejected the same way regardless of what edit was attempted.
+            if is_vfs_path(path):
+                from captain_claw.vfs import project_is_readonly, split_scheme
+
+                if project_is_readonly(split_scheme(path)[0]):
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"'{split_scheme(path)[0]}' is a read-only folder "
+                            "(e.g. a Google Drive mount) — it cannot be edited."
+                        ),
+                    )
+
             batch_mode = bool(edits)
             if not batch_mode:
                 # Single-edit mode needs an action. If it's omitted but

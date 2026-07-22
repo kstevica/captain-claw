@@ -182,7 +182,21 @@ class ReadTool(Tool):
                     success=False,
                     error=f"Not a file: {path}",
                 )
-            
+
+            # Google Drive mount: a placeholder path fetches its content on
+            # demand and returns it as if the file were local. Only for vfs:
+            # paths, so ordinary reads pay nothing. On a Drive outage this falls
+            # through to reading the marker file below rather than failing.
+            if vfs_target is not None:
+                try:
+                    from captain_claw.vfs_drive import read_through
+
+                    hydrated = await read_through(file_path)
+                    if hydrated is not None:
+                        return ToolResult(success=True, content=hydrated)
+                except Exception as _e:
+                    log.debug("Drive read-through skipped", path=path, error=str(_e))
+
             # Images / binaries aren't text — guide the agent to the right tool
             # instead of choking on a size limit or a utf-8 decode error.
             _img_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".heic"}

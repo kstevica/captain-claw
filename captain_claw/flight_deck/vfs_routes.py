@@ -538,6 +538,18 @@ async def read_file(project: str, path: str, owner: str = "",
     target = _resolve(oid, project, path)
     if not target.is_file():
         raise HTTPException(404, "file not found")
+    # Drive mount: preview the fetched content, not the placeholder marker, so
+    # the panel shows the real file just like the read tool does.
+    try:
+        from captain_claw import vfs_drive
+
+        hydrated = await vfs_drive.read_through(target)
+        if hydrated is not None:
+            return {"project": project, "path": path, "name": target.name,
+                    "size": len(hydrated.encode("utf-8")), "binary": False,
+                    "truncated": False, "text": hydrated}
+    except Exception as exc:
+        log.debug("Drive preview hydration skipped: %s", exc)
     size = target.stat().st_size
     if size > _PREVIEW_MAX_BYTES:
         return {"project": project, "path": path, "name": target.name, "size": size,

@@ -182,6 +182,20 @@ def link_target_at(root: Path, name: str) -> Path | None:
     return None
 
 
+def project_is_readonly(project: str = "") -> bool:
+    """True when *project* is a linked folder mounted read-only (``mode: "ro"``).
+
+    The write tools consult this so a read-only link — a Google Drive mount, or
+    any folder the user linked ``ro`` — refuses agent writes, the same way the
+    Flight Deck panel refuses them via ``_assert_writable``. Without it, the
+    agent-side write/edit tools resolve a ``vfs:`` path with no mode check and
+    a "read-only" mount is writable.
+    """
+    proj = _sanitize(project or default_project(), fallback=_DEFAULT_PROJECT)
+    ent = read_links().get(proj)
+    return bool(isinstance(ent, dict) and str(ent.get("mode", "rw")).lower() == "ro")
+
+
 def scope_projects() -> frozenset[str] | None:
     """Optional per-process VFS containment (``CLAW_VFS_SCOPE``).
 
