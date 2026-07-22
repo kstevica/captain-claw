@@ -80,7 +80,8 @@ FEET_BUILD_LINE = (
     "impulse; your mind will name it and make it real later")
 
 _TRIGGER_TEXT = {
-    "arrived": "you just arrived here",
+    # (no "arrived" — a fresh arrival now RESTS the feet until the mind has
+    # witnessed the place; it is no longer a reason to decide, see wants_decision)
     "company": "someone crossed your path",
     "plan": "the mind's plan waits",
     "task": "a task on your mind's work board could be worked NOW",
@@ -114,6 +115,21 @@ def wants_decision(store: BeingsStore, being: dict,
         events = store.events(being["owner_id"], being["slug"], limit=30)
     except Exception:  # noqa: BLE001
         return None
+    # STAY until the mind wakes to witness the walk (the arrived-trigger rate
+    # limit): once the feet set the body down somewhere new, it STAYS there
+    # until the next mind tick — which is made to speak of the place. Without
+    # this every arrival re-fired the feet and a being paced the village all
+    # day (staging: ~50 walks between one pair of hourly ticks). The mind's own
+    # go_to lands the same way — reach the destination, then wait to be seen —
+    # so at most one walk resolves per heartbeat. Home is terminal rest, no
+    # gate; a task may still divert the feet MID-walk (loc has no 'at' yet).
+    last_tick = being.get("last_tick_at") or ""
+    for e in events:                         # newest first; latest walk wins
+        if e["kind"] != "arrived":
+            continue
+        if e["at"] > last_tick and (e["data"].get("place") or "home") != "home":
+            return None                      # arrived, not yet witnessed — stay
+        break
     last_dec = next((e["at"] for e in events if e["kind"] == "instinct"), "")
     anchor = last_dec or being.get("hatched_at") or being.get("born_at")
     gap_min: float | None = None
@@ -139,9 +155,8 @@ def wants_decision(store: BeingsStore, being: dict,
     for e in events:                     # newest first; fresh = since last
         if last_dec and e["at"] <= last_dec:
             break
-        if e["kind"] == "arrived" and e["data"].get("place") != "home" \
-                and not e["data"].get("planned"):
-            return "arrived"
+        # (a fresh arrival never reaches here — the stay-gate above already
+        # rested the feet until the mind witnesses it; company still stirs)
         if e["kind"] == "crossed_paths":
             return "company"
     if gap_min is None:

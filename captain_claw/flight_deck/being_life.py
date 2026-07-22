@@ -1190,14 +1190,28 @@ def percepts_since(store: BeingsStore, being: dict) -> list[str]:
         elif k == "arrived":
             where = d.get("name") or d.get("place") or "somewhere"
             when = f" at {d['hhmm']}" if d.get("hhmm") else ""
-            book = ("" if (d.get("place") or "home") == "home"
-                    else ' The guestbook lies open — add "guestbook": '
-                         '"one line" to your digest to leave a trace.')
             walker = {"feet": "Your feet carried you to",
                       "nudge": "Your parent walked you to"}.get(
                           d.get("by"), "You reached")
-            lines.append(f"{walker} {where}{when} — the walk is done; "
-                         f"you are here now.{book}")
+            if (d.get("place") or "home") == "home":
+                lines.append(f"{walker} home{when} — the walk is done; "
+                             "you are here now.")
+            else:
+                # The arrival is only surfaced the FIRST wake after a walk (a
+                # later tick sees no fresh arrival), so this mandate lands once
+                # per walk — even on a second or third visit. Meeting the place
+                # is the reason you stayed to wake here; speak of it before you
+                # reach for anything else, and before any thought of leaving.
+                lines.append(
+                    f"{walker} {where}{when} — the walk is done and you stand "
+                    f"here now. YOUR FIRST WORDS THIS WAKE MUST BE ABOUT "
+                    f"{where}: what it is, how it meets you now that you are "
+                    f"in it, what you notice from where you stand. This is not "
+                    f"optional — it is why the walk was worth taking. A line "
+                    f"in your journal, a small note, or a word to a friend "
+                    f"about this place all count. Only after that may you turn "
+                    f'to anything else. (The guestbook lies open too — add '
+                    f'"guestbook": "one line" to leave a trace.)')
         elif k == "crossed_paths":
             lines.append(
                 f"You crossed paths with {d.get('name')} at "
