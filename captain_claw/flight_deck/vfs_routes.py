@@ -449,9 +449,13 @@ async def drive_browse(folder_id: str = "root", drive_id: str = "",
             "shared_drives": shared, "truncated": truncated}
 
 
-@router.post("/links/gdrive")
-async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_user)):
-    """Mount a Drive folder as a read-only VFS folder and populate its tree."""
+async def _mount_core(user_id: str, body: "DriveMountBody", progress=None) -> dict:
+    """Mount a Drive folder + write its link entry; return ``{"name", **summary}``.
+
+    Shared by the plain JSON route and the streaming one. *progress* is forwarded
+    to the tree walk so the streaming route can report "what's happening".
+    Raises HTTPException on bad input / Drive errors.
+    """
     from captain_claw import vfs_drive
     from captain_claw.drive_client import DriveError
 
@@ -460,7 +464,7 @@ async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_use
         raise HTTPException(400, "invalid mount name")
     if not body.folder_id.strip():
         raise HTTPException(400, "folder_id is required")
-    root = _user_root(user["id"])
+    root = _user_root(user_id)
     if (root / name).exists():
         raise HTTPException(409, f"a physical project named '{name}' already exists")
     existing = read_links_at(root).get(name)
@@ -471,8 +475,8 @@ async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_use
     client = _drive_client()
     try:
         summary = await vfs_drive.create_mount(
-            client, user["id"], name, body.folder_id.strip(),
-            clonemd=body.clonemd, shared_drive_id=drive_id,
+            client, user_id, name, body.folder_id.strip(),
+            clonemd=body.clonemd, shared_drive_id=drive_id, progress=progress,
         )
     except DriveError as exc:
         raise HTTPException(400, str(exc))
@@ -483,13 +487,66 @@ async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_use
 
     links = read_links_at(root)
     root.mkdir(parents=True, exist_ok=True)
-    entry = vfs_drive.link_entry(user["id"], name, body.folder_id.strip(),
+    entry = vfs_drive.link_entry(user_id, name, body.folder_id.strip(),
                                  clonemd=body.clonemd, shared_drive_id=drive_id,
                                  source_path=body.path.strip())
     entry["drive"]["synced_at"] = int(time.time())
     links[name] = entry
     _write_links(root, links)
-    return {"ok": True, "name": name, **summary}
+    return {"name": name, **summary}
+
+
+@router.post("/links/gdrive")
+async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_user)):
+    """Mount a Drive folder as a read-only VFS folder and populate its tree."""
+    return {"ok": True, **(await _mount_core(user["id"], body))}
+
+
+@router.post("/links/gdrive/stream")
+async def mount_drive_stream(body: DriveMountBody, user: dict = Depends(get_current_user)):
+    """Mount a Drive folder, streaming progress as newline-delimited JSON.
+
+    A large folder can take a while to walk (and longer to clone), so the picker
+    uses this to show a live "what's happening" line instead of a bare spinner.
+    Each line is a JSON object: ``{"event":"progress", "phase", …}`` while the
+    tree is read/converted, then a final ``{"event":"done", …summary}`` or
+    ``{"event":"error","detail":…}``.
+    """
+    import asyncio
+    import json as _json
+
+    from fastapi.responses import StreamingResponse
+
+    queue: asyncio.Queue = asyncio.Queue()
+    uid = user["id"]
+
+    async def run() -> None:
+        # Called synchronously from the tree walk (same loop) — never blocks.
+        def on_progress(ev: dict) -> None:
+            queue.put_nowait(("progress", ev))
+
+        try:
+            core = await _mount_core(uid, body, on_progress)
+            await queue.put(("done", core))
+        except HTTPException as exc:
+            await queue.put(("error", {"detail": str(exc.detail), "status": exc.status_code}))
+        except Exception as exc:  # noqa: BLE001 — surface, don't crash the stream
+            await queue.put(("error", {"detail": str(exc)}))
+        finally:
+            await queue.put(("__end__", None))
+
+    async def gen():
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                kind, payload = await queue.get()
+                if kind == "__end__":
+                    break
+                yield _json.dumps({"event": kind, **(payload or {})}) + "\n"
+        finally:
+            await task
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 @router.post("/links/gdrive/{name}/refresh")

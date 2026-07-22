@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Cloud, Folder, ArrowLeft, X, Loader2, Sparkles, ChevronRight, Users } from 'lucide-react'
-import { useVFSStore, type DriveFolder } from '../../stores/vfsStore'
+import { useVFSStore, type DriveFolder, type DriveMountEvent } from '../../stores/vfsStore'
 
 /** Connect a Google Drive folder as a read-only VFS mount.
  *
@@ -43,6 +43,7 @@ export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone:
   const [name, setName] = useState('')
   const [clonemd, setClonemd] = useState(false)
   const [mounting, setMounting] = useState(false)
+  const [status, setStatus] = useState('')  // live "what's happening" during mount
 
   const here = stack[stack.length - 1]
   const atRoot = stack.length === 1
@@ -96,13 +97,18 @@ export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone:
     // A whole Shared Drive can't be mounted at its very top by name alone here
     // unless the user descends into it — but its own frame IS mountable (id ==
     // driveId), which we support.
-    setMounting(true); setErr('')
+    setMounting(true); setErr(''); setStatus('Connecting to Google Drive…')
+    const describe = (ev: DriveMountEvent): string => {
+      if (ev.phase === 'cloning')
+        return `Converting to Markdown… ${ev.done ?? 0} file${ev.done === 1 ? '' : 's'}${ev.name ? ` · ${ev.name}` : ''}`
+      return `Reading Google Drive… ${ev.folders ?? 0} folder${ev.folders === 1 ? '' : 's'}, ${ev.files ?? 0} file${ev.files === 1 ? '' : 's'}`
+    }
     try {
-      await s.mountDrive(n, here.id, clonemd, here.driveId, storePath)
+      await s.mountDrive(n, here.id, clonemd, here.driveId, storePath, (ev) => setStatus(describe(ev)))
       onDone(n)
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'mount failed')
-      setMounting(false)
+      setMounting(false); setStatus('')
     }
   }
 
@@ -213,6 +219,12 @@ export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone:
               Mount folder
             </button>
           </div>
+          {mounting && status && (
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-blue-600 dark:text-blue-400">
+              <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+              <span className="truncate">{status}</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

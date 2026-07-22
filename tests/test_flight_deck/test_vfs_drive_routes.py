@@ -127,6 +127,44 @@ class TestDriveMountRoutes:
         vc = next(p for p in (await vr.list_projects(USER))["projects"] if p["name"] == "VC")
         assert vc["drive"]["source_path"] == "FRC3/Reporting/Startup reports/Performance/VC"
 
+    async def test_mount_stream_reports_progress_then_done(self, env):
+        # The streaming mount emits progress lines while walking, then a final
+        # done with the summary — what the picker shows as a live status line.
+        import json as _json
+
+        vr, vfs_drive, tmp, _ = env
+        resp = await vr.mount_drive_stream(
+            vr.DriveMountBody(name="acme", folder_id="ROOT"), USER
+        )
+        events = []
+        async for chunk in resp.body_iterator:
+            text = chunk.decode() if isinstance(chunk, (bytes, bytearray)) else chunk
+            for ln in text.splitlines():
+                if ln.strip():
+                    events.append(_json.loads(ln))
+
+        kinds = [e["event"] for e in events]
+        assert "progress" in kinds
+        done = [e for e in events if e["event"] == "done"]
+        assert done and done[0]["name"] == "acme" and done[0]["files"] == 2
+        # …and the mount really landed.
+        assert "acme" in {p["name"] for p in (await vr.list_projects(USER))["projects"]}
+
+    async def test_mount_stream_reports_an_error_event(self, env):
+        import json as _json
+
+        vr, _, _, _ = env
+        resp = await vr.mount_drive_stream(
+            vr.DriveMountBody(name="", folder_id="ROOT"), USER  # invalid name → 400
+        )
+        events = []
+        async for chunk in resp.body_iterator:
+            text = chunk.decode() if isinstance(chunk, (bytes, bytearray)) else chunk
+            for ln in text.splitlines():
+                if ln.strip():
+                    events.append(_json.loads(ln))
+        assert any(e["event"] == "error" for e in events)
+
     async def test_read_only_mount_refuses_writes(self, env):
         vr, _, _, _ = env
         from fastapi import HTTPException

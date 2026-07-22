@@ -37,6 +37,17 @@ export interface DriveMeta {
 
 export interface DriveFolder { id: string; name: string }
 
+// A live event streamed while a Drive folder mounts (see mountDrive).
+export interface DriveMountEvent {
+  event: 'progress' | 'done' | 'error'
+  phase?: 'reading' | 'cloning'
+  folders?: number
+  files?: number
+  done?: number
+  name?: string
+  detail?: string
+}
+
 export interface VFSEntry {
   name: string
   type: 'dir' | 'file'
@@ -132,7 +143,7 @@ interface VFSStore {
   browseFs: (path: string) => Promise<FsListing>
   // Google Drive mounts
   browseDrive: (folderId: string, driveId?: string) => Promise<{ folders: DriveFolder[]; shared_drives: DriveFolder[]; truncated: boolean }>
-  mountDrive: (name: string, folderId: string, clonemd: boolean, driveId?: string, path?: string) => Promise<void>
+  mountDrive: (name: string, folderId: string, clonemd: boolean, driveId?: string, path?: string, onProgress?: (ev: DriveMountEvent) => void) => Promise<void>
   refreshDrive: (name: string) => Promise<string>
   toggleClonemd: (name: string, clonemd: boolean) => Promise<string>
   unmountDrive: (name: string, keepCloned: boolean) => Promise<void>
@@ -390,12 +401,35 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     return res.json()
   },
 
-  mountDrive: async (name, folderId, clonemd, driveId = '', path = '') => {
-    const res = await _authedFetch('/fd/vfs/links/gdrive', {
+  mountDrive: async (name, folderId, clonemd, driveId = '', path = '', onProgress) => {
+    // Stream NDJSON progress so a large folder shows a live status line instead
+    // of a bare spinner. Each line is a DriveMountEvent; 'error' aborts, the
+    // stream simply ends on success.
+    const res = await _authedFetch('/fd/vfs/links/gdrive/stream', {
       method: 'POST',
       body: JSON.stringify({ name, folder_id: folderId, clonemd, drive_id: driveId, path }),
     })
-    if (!res.ok) throw new Error((await res.text()) || 'mount failed')
+    if (!res.ok || !res.body) throw new Error((await res.text().catch(() => '')) || 'mount failed')
+    const reader = res.body.getReader()
+    const dec = new TextDecoder()
+    let buf = ''
+    let failed: string | null = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      let nl: number
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim()
+        buf = buf.slice(nl + 1)
+        if (!line) continue
+        let ev: DriveMountEvent
+        try { ev = JSON.parse(line) as DriveMountEvent } catch { continue }
+        if (ev.event === 'error') failed = ev.detail || 'mount failed'
+        else if (ev.event === 'progress') onProgress?.(ev)
+      }
+    }
+    if (failed) throw new Error(failed)
     await get().loadProjects()
   },
 

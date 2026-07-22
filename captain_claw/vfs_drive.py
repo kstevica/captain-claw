@@ -423,6 +423,7 @@ async def sync(
     mount: Path,
     *,
     max_files: int = DEFAULT_MAX_FILES,
+    progress=None,
 ) -> dict[str, Any]:
     """Walk the whole mount breadth-first, (re)creating the placeholder tree.
 
@@ -430,6 +431,11 @@ async def sync(
     blow up the mount; the cap is reported, never silently applied. This is what
     a manual refresh runs. Files that vanished upstream are removed locally so a
     mount does not accumulate ghosts.
+
+    *progress*, if given, is called with small dict events as work proceeds
+    (``{"phase": "reading", "folders": …, "files": …}`` per folder listed,
+    ``{"phase": "cloning", "done": …, "name": …}`` per file converted) so a
+    caller can stream "what's happening" to the user while a large folder mounts.
     """
     man = Manifest.load(mount)
     if not man.folder_id:
@@ -499,6 +505,8 @@ async def sync(
                         local.unlink(missing_ok=True)
                     man.files[child_rel] = entry
                     cloned += 1
+                    if progress:
+                        progress({"phase": "cloning", "done": cloned, "name": child.name})
                     continue
                 # Unconvertible (image, archive): placeholder, and remember so a
                 # later refresh doesn't re-fetch it.
@@ -532,6 +540,10 @@ async def sync(
                 # keep cloned_path/cached_modified when carrying a cloned entry
                 new_entry = prior
             man.files[child_rel] = new_entry
+
+        if progress:
+            progress({"phase": "reading", "folders": len(seen_dirs) - 1,
+                      "files": total_files})
 
     _prune_vanished(mount, man, seen_files, seen_dirs)
     man.dirs = seen_dirs
@@ -590,6 +602,7 @@ async def create_mount(
     clonemd: bool = False,
     shared_drive_id: str = "",
     max_files: int = DEFAULT_MAX_FILES,
+    progress=None,
 ) -> dict[str, Any]:
     """Create the placeholder tree and the ``.vfs-links.json`` entry.
 
@@ -597,6 +610,7 @@ async def create_mount(
     same project refreshes it. Writing the link is the caller's (FD route's)
     job via :func:`link_entry`, kept separate so this stays FD-free.
     Pass *shared_drive_id* when the root lives in a Shared (Team) Drive.
+    *progress* is forwarded to :func:`sync` for live "what's happening" events.
     """
     root = mount_root(user_id, project)
     root.mkdir(parents=True, exist_ok=True)
@@ -606,7 +620,7 @@ async def create_mount(
     man.shared_drive_id = shared_drive_id
     man.dirs.setdefault("", folder_id)
     man.save(root)
-    summary = await sync(client, root, max_files=max_files)
+    summary = await sync(client, root, max_files=max_files, progress=progress)
     return summary
 
 

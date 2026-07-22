@@ -608,6 +608,35 @@ class TestClonemd:
         assert vfs_drive.Manifest.load(root).files["Report"]["state"] == "cloned"
 
 
+class TestSyncProgress:
+    """sync() reports what it's doing so a mount of many files isn't a silent
+    spinner — folders/files as it walks, filenames as it converts."""
+
+    async def test_reading_events_track_the_walk(self, mount):
+        drive = _sample_drive()  # 3 files across root + one subfolder
+        events: list[dict] = []
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT", progress=events.append)
+        reading = [e for e in events if e.get("phase") == "reading"]
+        assert reading, "expected at least one reading event"
+        assert reading[-1]["files"] == 3 and reading[-1]["folders"] == 1
+
+    async def test_cloning_events_name_each_file(self, mount):
+        drive = _clonable_drive()  # 2 Google Docs + a text note clone; image doesn't
+        events: list[dict] = []
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT",
+                                     clonemd=True, progress=events.append)
+        cloning = [e for e in events if e.get("phase") == "cloning"]
+        assert len(cloning) >= 3
+        assert all("name" in e and "done" in e for e in cloning)
+        assert cloning[-1]["done"] == max(e["done"] for e in cloning)  # monotonic
+
+    async def test_no_progress_callback_is_fine(self, mount):
+        drive = _sample_drive()
+        # The default path (no callback) must still work unchanged.
+        summary = await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        assert summary["files"] == 3
+
+
 class TestSharedDriveMount:
     """A mount rooted in a Shared Drive threads its drive id into every listing,
     so folders read back with the right corpus (not the empty default)."""
