@@ -498,6 +498,15 @@ class FlightDeckDB:
             rows = await cur.fetchall()
             return {r["key"]: r["value"] for r in rows}
 
+    async def get_setting(self, user_id: str, key: str) -> str | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT value FROM user_settings WHERE user_id = ? AND key = ?",
+            (user_id, key),
+        ) as cur:
+            row = await cur.fetchone()
+            return row["value"] if row else None
+
     async def set_settings(self, user_id: str, settings: dict[str, str]) -> None:
         assert self._db is not None
         now = _utcnow()

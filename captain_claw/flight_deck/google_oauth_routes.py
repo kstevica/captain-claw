@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
-from captain_claw.flight_deck.auth import get_current_user, get_db
+from captain_claw.flight_deck.auth import _LOCAL_USER, get_current_user, get_db, get_optional_user
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.google_oauth import (
     DEFAULT_SCOPES,
@@ -147,8 +147,50 @@ async def _effective_oauth(db: FlightDeckDB) -> dict[str, Any] | None:
     }
 
 
-async def _load_tokens(db: FlightDeckDB) -> GoogleOAuthTokens | None:
-    raw = await db.get_system_setting(_K_TOKENS)
+# ── per-user identity ───────────────────────────────────────────────
+#
+# The OAuth *client* (client_id/secret/project/scopes) is one per deployment
+# and stays in system_settings. The *tokens* — who is actually signed in — are
+# per Flight Deck user, in user_settings. A single Google account shared across
+# every FD user was the multi-tenant hole this closes.
+
+_primary_owner_cache: dict[str, Any] = {"id": None}
+
+
+async def _primary_owner(db: FlightDeckDB) -> str:
+    """The deployment's primary owner (single user, or oldest admin).
+
+    Used as the fallback owner when a caller can't be pinned to a specific user
+    — and as the account that transparently inherits any legacy global tokens.
+    Cached; connection changes don't move it.
+    """
+    if _primary_owner_cache["id"] is None:
+        try:
+            from captain_claw.flight_deck.server import _resolve_primary_owner
+
+            _primary_owner_cache["id"] = (await _resolve_primary_owner(db)) or _LOCAL_USER["id"]
+        except Exception:
+            _primary_owner_cache["id"] = _LOCAL_USER["id"]
+    return _primary_owner_cache["id"]
+
+
+def _effective_owner(user: dict | None) -> str:
+    """Owner for a dashboard call: the logged-in user, else the local user
+    (auth-disabled deployments have no login)."""
+    return str((user or {}).get("id") or _LOCAL_USER["id"])
+
+
+async def _load_tokens(db: FlightDeckDB, user_id: str) -> GoogleOAuthTokens | None:
+    """This user's stored tokens.
+
+    Falls back to the legacy deployment-wide key for the primary owner only, so
+    a deployment that connected Google before per-user storage keeps working
+    with no migration step — the fallback is retired the moment that user
+    reconnects or a refresh rewrites the tokens per-user.
+    """
+    raw = await db.get_setting(user_id, _K_TOKENS)
+    if not raw and user_id == await _primary_owner(db):
+        raw = await db.get_system_setting(_K_TOKENS)
     if not raw:
         return None
     try:
@@ -158,33 +200,36 @@ async def _load_tokens(db: FlightDeckDB) -> GoogleOAuthTokens | None:
         return None
 
 
-async def get_valid_google_access_token() -> str | None:
+async def get_valid_google_access_token(user_id: str | None = None) -> str | None:
     """FD-side: a currently-valid Google access token (refreshed if needed), or
     None when Google isn't connected. Used by the event-spine pollers (#2) to call
-    the Calendar/Gmail APIs directly from Flight Deck."""
+    the Calendar/Gmail APIs directly from Flight Deck. Defaults to the primary
+    owner when no user is given (the pollers are not yet per-user)."""
     try:
         db = get_db()
         client = await _token_client(db)
         if not client:
             return None
-        tokens = await _load_tokens(db)
+        uid = user_id or await _primary_owner(db)
+        tokens = await _load_tokens(db, uid)
         if not tokens or not tokens.refresh_token:
             return None
-        tokens = await _refresh_if_needed(db, client, tokens)
+        tokens = await _refresh_if_needed(db, uid, client, tokens)
         return tokens.access_token if tokens else None
     except Exception:
         return None
 
 
-async def _store_tokens(db: FlightDeckDB, tokens: GoogleOAuthTokens) -> None:
-    await db.set_system_setting(
-        _K_TOKENS,
-        json.dumps(tokens.to_dict(), ensure_ascii=True),
+async def _store_tokens(db: FlightDeckDB, user_id: str, tokens: GoogleOAuthTokens) -> None:
+    await db.set_settings(
+        user_id, {_K_TOKENS: json.dumps(tokens.to_dict(), ensure_ascii=True)}
     )
 
 
-async def _load_user(db: FlightDeckDB) -> dict[str, Any] | None:
-    raw = await db.get_system_setting(_K_USER)
+async def _load_user(db: FlightDeckDB, user_id: str) -> dict[str, Any] | None:
+    raw = await db.get_setting(user_id, _K_USER)
+    if not raw and user_id == await _primary_owner(db):
+        raw = await db.get_system_setting(_K_USER)
     if not raw:
         return None
     try:
@@ -193,8 +238,8 @@ async def _load_user(db: FlightDeckDB) -> dict[str, Any] | None:
         return None
 
 
-async def _store_user(db: FlightDeckDB, user: dict[str, Any]) -> None:
-    await db.set_system_setting(_K_USER, json.dumps(user, ensure_ascii=True))
+async def _store_user(db: FlightDeckDB, user_id: str, user: dict[str, Any]) -> None:
+    await db.set_settings(user_id, {_K_USER: json.dumps(user, ensure_ascii=True)})
 
 
 async def _token_client(db: FlightDeckDB) -> dict[str, Any] | None:
@@ -220,8 +265,32 @@ async def _token_client(db: FlightDeckDB) -> dict[str, Any] | None:
     }
 
 
-async def _clear_oauth_state(db: FlightDeckDB) -> None:
-    # system_settings has no per-row delete helper — overwrite with empty JSON.
+async def _clear_oauth_state(db: FlightDeckDB, user_id: str) -> None:
+    """Disconnect this user. Clears their per-user tokens, and — when they are
+    the primary owner — the legacy global keys too, so the fallback can't
+    silently re-connect them after a logout."""
+    await db.delete_setting(user_id, _K_TOKENS)
+    await db.delete_setting(user_id, _K_USER)
+    if user_id == await _primary_owner(db):
+        await db.set_system_setting(_K_TOKENS, "")
+        await db.set_system_setting(_K_USER, "")
+        await db.set_system_setting(_K_TOKEN_MODE, "")
+
+
+async def _clear_all_oauth_state(db: FlightDeckDB) -> None:
+    """Disconnect EVERY user. Rotating the deployment's OAuth client or changing
+    its scopes invalidates all tokens — a refresh token is bound to the client
+    that minted it, and a scope change needs fresh consent — so this can't be
+    per-user."""
+    try:
+        users = await db.list_users(limit=10000)
+    except Exception:
+        users = []
+    for u in users:
+        uid = str(u.get("id", ""))
+        if uid:
+            await db.delete_setting(uid, _K_TOKENS)
+            await db.delete_setting(uid, _K_USER)
     await db.set_system_setting(_K_TOKENS, "")
     await db.set_system_setting(_K_USER, "")
     await db.set_system_setting(_K_TOKEN_MODE, "")
@@ -274,13 +343,14 @@ async def google_status(
     request: Request,
     _user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Return Google OAuth connection status for the UI."""
+    """Return Google OAuth connection status for the UI (this user)."""
     db = get_db()
+    uid = _effective_owner(_user)
     eff = await _effective_oauth(db)
 
-    tokens = await _load_tokens(db)
+    tokens = await _load_tokens(db, uid)
     connected = bool(eff and tokens and tokens.refresh_token)
-    user = await _load_user(db) if connected else None
+    user = await _load_user(db, uid) if connected else None
     scopes = tokens.scope.split() if tokens and tokens.scope else []
 
     return {
@@ -297,7 +367,7 @@ async def google_status(
 @router.get("/probe")
 async def google_probe(
     _user: dict = Depends(get_current_user),
-) -> dict[str, Any]:
+) -> dict[str, Any]:  # noqa: C901
     """Live read-only health probe of the Google connection.
 
     Unlike ``/status`` (which only checks that a refresh token is stored),
@@ -309,16 +379,17 @@ async def google_probe(
     - userinfo succeeds                  → healthy (green)
     """
     db = get_db()
+    uid = _effective_owner(_user)
     client = await _token_client(db)
     if not client:
         return {"configured": False, "connected": False, "ok": False,
                 "error": "Google OAuth not configured"}
-    tokens = await _load_tokens(db)
+    tokens = await _load_tokens(db, uid)
     if not tokens or not tokens.refresh_token:
         return {"configured": True, "connected": False, "ok": False,
                 "error": "Not connected — no stored tokens"}
     try:
-        tokens = await _refresh_if_needed(db, client, tokens)
+        tokens = await _refresh_if_needed(db, uid, client, tokens)
     except Exception as exc:  # defensive — _refresh_if_needed swallows most
         return {"configured": True, "connected": True, "ok": False,
                 "error": f"Token refresh failed: {exc}"}
@@ -390,7 +461,7 @@ async def google_config_post(
         await db.set_system_setting(_K_CLIENT_SECRET, "")
         await db.set_system_setting(_K_PROJECT_ID, "")
         await db.set_system_setting(_K_SCOPES, "")
-        await _clear_oauth_state(db)
+        await _clear_all_oauth_state(db)
         return {"ok": True, "cleared": True}
 
     def _clean(v: str | None) -> str | None:
@@ -431,7 +502,7 @@ async def google_config_post(
     # the stored tokens — the refresh token is bound to the client that
     # minted it, and scope changes require a fresh consent.
     if will_change_client or scopes_changed:
-        await _clear_oauth_state(db)
+        await _clear_all_oauth_state(db)
 
     return {"ok": True, "mode": "custom", "scopes_changed": scopes_changed}
 
@@ -440,14 +511,17 @@ async def google_config_post(
 
 
 @router.get("/login")
-async def google_login(request: Request) -> RedirectResponse:
+async def google_login(
+    request: Request,
+    _user: dict | None = Depends(get_optional_user),
+) -> RedirectResponse:
     """Start the OAuth flow by redirecting to Google's consent screen.
 
-    This endpoint is intentionally unauthenticated: it is opened as a
-    popup from the Flight Deck UI, which means cookies / Authorization
-    headers may not ride along, and the user has already authenticated
-    into Flight Deck to click the button. Google's own login then
-    gates the actual credential exchange.
+    Opened as a popup from the Flight Deck UI. A popup can't carry an
+    ``Authorization`` header, so the UI appends ``?fd_token=<jwt>`` and we
+    resolve *which* user is connecting from that (falling back to the primary
+    owner). That user id is stashed in the PKCE state so ``/callback`` stores
+    the tokens against the right account — the crux of per-user connections.
     """
     db = get_db()
     eff = await _effective_oauth(db)
@@ -461,11 +535,13 @@ async def google_login(request: Request) -> RedirectResponse:
 
     _purge_stale_pending()
 
+    owner = str((_user or {}).get("id") or await _primary_owner(db))
     state = secrets.token_urlsafe(32)
     verifier, challenge = generate_pkce_pair()
     _pending_oauth[state] = {
         "verifier": verifier,
         "ts": time.time(),
+        "owner": owner,
     }
 
     auth_url = build_authorization_url(
@@ -523,10 +599,11 @@ async def google_callback(request: Request) -> HTMLResponse:
         log.warning("Failed to fetch Google user info: %s", exc)
         user = {}
 
-    await _store_tokens(db, tokens)
+    owner = str(pending.get("owner") or await _primary_owner(db))
+    await _store_tokens(db, owner, tokens)
     await db.set_system_setting(_K_TOKEN_MODE, "custom")
     if user:
-        await _store_user(db, user)
+        await _store_user(db, owner, user)
 
     return _callback_html(
         ok=True,
@@ -538,15 +615,16 @@ async def google_callback(request: Request) -> HTMLResponse:
 
 @router.post("/logout")
 async def google_logout(_user: dict = Depends(get_current_user)) -> dict[str, Any]:
-    """Revoke tokens and clear all stored Google OAuth state."""
+    """Revoke this user's tokens and clear their stored Google OAuth state."""
     db = get_db()
-    tokens = await _load_tokens(db)
+    uid = _effective_owner(_user)
+    tokens = await _load_tokens(db, uid)
     if tokens:
         if tokens.refresh_token:
             await revoke_token(tokens.refresh_token)
         elif tokens.access_token:
             await revoke_token(tokens.access_token)
-    await _clear_oauth_state(db)
+    await _clear_oauth_state(db, uid)
     return {"disconnected": True}
 
 
@@ -567,6 +645,9 @@ def _authorize_agent_call(request: Request) -> None:
     2. Request originating from loopback (127.0.0.1 / ::1). Agents
        typically run on the same host as Flight Deck, and the OS-level
        localhost boundary is a reasonable trust zone.
+
+    This only proves the caller is *an* FD-spawned agent — never *which* one.
+    That's what :func:`_agent_owner` is for.
     """
     secret = _agent_shared_secret()
     if secret:
@@ -582,12 +663,43 @@ def _authorize_agent_call(request: Request) -> None:
     raise HTTPException(status_code=401, detail="Unauthorized agent call")
 
 
+async def _agent_owner(request: Request) -> str:
+    """Which user's Google connection an agent call should use.
+
+    Resolved from Flight Deck's own records, never from the agent's word: the
+    per-agent ``web_auth`` token (``X-Agent-Auth``, unique per agent, stored in
+    the process registry / Docker label at spawn), then the source port, then
+    the primary owner. Same ladder deep memory uses — the shared agent secret
+    is a gate, not an identity.
+    """
+    from captain_claw.flight_deck.server import (
+        _resolve_agent_owner,
+        _resolve_agent_owner_by_auth,
+    )
+
+    owner = ""
+    token = request.headers.get("X-Agent-Auth", "")
+    if token:
+        try:
+            owner = _resolve_agent_owner_by_auth(token) or ""
+        except Exception:
+            owner = ""
+    if not owner:
+        port = getattr(getattr(request, "client", None), "port", 0) or 0
+        try:
+            owner = _resolve_agent_owner(int(port)) or ""
+        except Exception:
+            owner = ""
+    return owner or await _primary_owner(get_db())
+
+
 async def _refresh_if_needed(
     db: FlightDeckDB,
+    user_id: str,
     client: dict[str, Any],
     tokens: GoogleOAuthTokens,
 ) -> GoogleOAuthTokens | None:
-    """Refresh *tokens* when near expiry; persist the new pair.
+    """Refresh *tokens* when near expiry; persist the new pair for *user_id*.
 
     *client* must be the OAuth client that originally minted the
     refresh token (use :func:`_token_client`).
@@ -605,22 +717,23 @@ async def _refresh_if_needed(
     except Exception as exc:
         log.warning("Google token refresh failed: %s", exc)
         return None
-    await _store_tokens(db, fresh)
+    await _store_tokens(db, user_id, fresh)
     return fresh
 
 
 @router.get("/access_token")
 async def google_access_token(request: Request) -> dict[str, Any]:
-    """Return a currently-valid access token for a captain-claw agent."""
+    """Return a currently-valid access token for the calling agent's owner."""
     _authorize_agent_call(request)
     db = get_db()
+    owner = await _agent_owner(request)
     client = await _token_client(db)
     if not client:
         raise HTTPException(status_code=404, detail="Google OAuth not configured")
-    tokens = await _load_tokens(db)
+    tokens = await _load_tokens(db, owner)
     if not tokens:
         raise HTTPException(status_code=404, detail="No stored Google OAuth tokens")
-    tokens = await _refresh_if_needed(db, client, tokens)
+    tokens = await _refresh_if_needed(db, owner, client, tokens)
     if not tokens:
         raise HTTPException(status_code=401, detail="Could not refresh Google access token")
     return {
@@ -641,6 +754,7 @@ async def google_credentials(request: Request) -> dict[str, Any]:
     """
     _authorize_agent_call(request)
     db = get_db()
+    owner = await _agent_owner(request)
     client = await _token_client(db)
     if not client:
         raise HTTPException(status_code=404, detail="Google OAuth not configured")
@@ -652,10 +766,10 @@ async def google_credentials(request: Request) -> dict[str, Any]:
                 "your Google OAuth credentials on the Connections page."
             ),
         )
-    tokens = await _load_tokens(db)
+    tokens = await _load_tokens(db, owner)
     if not tokens:
         raise HTTPException(status_code=404, detail="No stored Google OAuth tokens")
-    tokens = await _refresh_if_needed(db, client, tokens)
+    tokens = await _refresh_if_needed(db, owner, client, tokens)
     if not tokens:
         raise HTTPException(status_code=401, detail="Could not refresh Google access token")
     return {

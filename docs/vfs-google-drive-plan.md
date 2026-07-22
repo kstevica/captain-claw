@@ -71,21 +71,29 @@ below reframed from a blocker into a deferrable swap:
   need a writable scope; `folder_id` escaped in the list query.
 - **`action_catalog`**: dropped the dead `drive.delete` entry.
 
-**Per-user Google tokens — DEFERRED, and here is why it is safe to.** The client
-takes a `token_provider` callback. Today it uses `global_token_provider` (the
-deployment-wide connection every Google tool already uses); a per-user provider
-that resolves the *mount owner's* token slots in with no other code change. So
-per-user tokens stopped being a prerequisite and became a drop-in.
+**Per-user Google tokens — SHIPPED.** Google was one deployment-wide
+connection (`system_settings` has no `user_id`), so every FD user shared one
+account and any user's connect overwrote everyone's. Now:
 
-It still matters — `system_settings` is `(key, value, updated_at)` with **no
-`user_id`** (`flight_deck/db.py:94-98`), so one Google account is shared across
-every FD user and `POST /fd/google/config` overwrites everyone's connection. But
-that is a *multi-tenant safety* gap, not a *does-it-work* gap: on a
-single-operator deployment the global connection is correct. When it's needed,
-it's a `google_oauth_user_tokens(user_id, …)` table + a per-user
-`/fd/google/*` flow (mirroring deep-memory's `_agent_owner` resolution) +
-migrating the existing global row to the primary owner — and swapping the
-provider. Nothing in the client or the mount changes.
+- Tokens + user identity live per-user in `user_settings` (the OAuth *client* —
+  id/secret/project/scopes — stays global; it's the deployment's app).
+- `/fd/google/login` records the connecting user (the popup passes `?fd_token=`)
+  into the PKCE state, so `/callback` stores the tokens against the right
+  account.
+- `/access_token` and `/credentials` resolve the *calling agent's* owner from
+  FD's records (`X-Agent-Auth` web_auth token → registry, then port, then
+  primary owner) — the same ladder deep memory uses; the shared agent secret is
+  a gate, not an identity. The agent-side `GoogleOAuthManager` now sends
+  `X-Agent-Auth`.
+- `/status`, `/probe`, `/logout` are scoped to the logged-in user. Rotating the
+  client or changing scopes clears **all** users (a refresh token is bound to
+  the client that minted it); a normal logout clears just the one.
+- **No migration step:** the primary owner transparently reads any legacy global
+  token until they reconnect or a refresh rewrites it per-user.
+
+This makes every Google tool — Drive mounts included — multi-tenant safe. The
+`DriveClient` still uses `global_token_provider`, which under FD calls the
+manager, which now resolves per-owner; no Drive code changed.
 
 ---
 

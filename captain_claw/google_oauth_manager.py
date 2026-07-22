@@ -108,12 +108,20 @@ class GoogleOAuthManager:
 
     @staticmethod
     def _flight_deck_headers() -> dict[str, str]:
+        headers: dict[str, str] = {}
         secret = (get_config().google_oauth.flight_deck_secret or "").strip()
         if not secret:
             secret = (os.environ.get("FD_AGENT_SHARED_SECRET", "") or "").strip()
         if secret:
-            return {"X-Agent-Secret": secret}
-        return {}
+            headers["X-Agent-Secret"] = secret
+        # The per-agent web_auth token lets Flight Deck resolve WHICH user's
+        # Google connection to return — the shared secret can't. Without it, FD
+        # falls back to the primary owner (correct single-user, wrong once the
+        # deployment has more than one connected user).
+        token = str(getattr(getattr(get_config(), "web", None), "auth_token", "") or "").strip()
+        if token:
+            headers["X-Agent-Auth"] = token
+        return headers
 
     def _is_flight_deck_client(self) -> bool:
         return bool(self._flight_deck_base())
