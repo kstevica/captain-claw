@@ -118,10 +118,19 @@ _COCO_CLASSES = (
 
 
 def _resolve_input(path: str, kwargs: dict[str, Any]) -> tuple[Path | None, str | None]:
-    """Resolve an input file that may be a real path or a ``vfs:`` path."""
+    """Resolve an input file that may be a real path, a ``vfs:`` path, or a
+    Google Drive placeholder.
+
+    cv ops run in a worker thread (``asyncio.to_thread``) with no event loop, so
+    a placeholder's bytes are fetched through the *sync* materialise bridge; an
+    async tool would use ``vfs_drive.materialize`` instead. A Drive fetch failure
+    is surfaced as a clear message; anything unexpected fails open to the resolved
+    path (so a non-Drive file, or a Drive subsystem that can't load, still reads).
+    """
     raw = str(path or "").strip()
     if not raw:
         return None, "Missing path"
+    file_path: Path | None = None
     try:
         from captain_claw.vfs import is_vfs_path, resolve_vfs_path
 
@@ -131,12 +140,35 @@ def _resolve_input(path: str, kwargs: dict[str, Any]) -> tuple[Path | None, str 
                 return None, f"Could not resolve VFS path: {raw}"
             if not p.is_file():
                 return None, f"File not found: {raw}"
-            return p, None
+            file_path = p
     except Exception:  # pragma: no cover — vfs module should always import
         pass
-    from captain_claw.tools.document_extract import _require_existing_file
+    if file_path is None:
+        from captain_claw.tools.document_extract import _require_existing_file
 
-    return _require_existing_file(raw, runtime_base_path=kwargs.get("_runtime_base_path"))
+        fp, err = _require_existing_file(raw, runtime_base_path=kwargs.get("_runtime_base_path"))
+        if err:
+            return None, err
+        file_path = fp
+
+    # Google Drive placeholder → fetch its real bytes so OpenCV decodes the
+    # actual image, not the marker text.
+    try:
+        from captain_claw.drive_client import DriveError
+        from captain_claw.vfs_drive import materialize_sync
+
+        try:
+            real = materialize_sync(file_path)
+            if real is not None:
+                file_path = real
+        except DriveError as exc:
+            return None, (
+                f"'{file_path.name}' lives in Google Drive and its content could "
+                f"not be fetched: {exc}"
+            )
+    except Exception:  # Drive subsystem unavailable → treat as a local file
+        pass
+    return file_path, None
 
 
 def _resolve_output(out: str | None, kwargs: dict[str, Any], default_name: str) -> tuple[Path, str]:

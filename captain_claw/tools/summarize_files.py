@@ -184,8 +184,16 @@ class SummarizeFilesTool(Tool):
                 f"📄 [{idx + 1}/{len(files)}] Reading: {file_path.name}",
             )
 
-            # Read content
-            content, read_error = self._read_file_content(file_path)
+            # Read content. Drive-aware: a mounted Google Drive folder holds
+            # placeholder markers, not bytes — fetch the real file on demand so a
+            # folder mounted from Drive summarises actual content, not markers.
+            # Naming below still uses the original path, not the fetched blob.
+            read_path, mat_error = await self._materialize_for_read(file_path)
+            if mat_error:
+                self._log(stream_cb, f"   ⚠️  Skip ({mat_error})")
+                errors.append(f"{file_path.name}: {mat_error}")
+                continue
+            content, read_error = self._read_file_content(read_path)
             if read_error:
                 self._log(stream_cb, f"   ⚠️  Skip ({read_error})")
                 errors.append(f"{file_path.name}: {read_error}")
@@ -499,6 +507,29 @@ class SummarizeFilesTool(Tool):
         return out
 
     # ── file reading ──────────────────────────────────────────────
+
+    @staticmethod
+    async def _materialize_for_read(file_path: Path) -> tuple[Path, str | None]:
+        """Return a readable path, fetching a Drive placeholder's real bytes.
+
+        A non-Drive file (the common case) returns unchanged after a couple of
+        stat calls. A Drive fetch failure is reported so the file is skipped with
+        a clear reason rather than a downstream parse error; any other hiccup
+        fails open to the original path.
+        """
+        try:
+            from captain_claw.drive_client import DriveError
+            from captain_claw.vfs_drive import materialize
+
+            try:
+                real = await materialize(file_path)
+            except DriveError as exc:
+                return file_path, f"Google Drive fetch failed: {exc}"
+            if real is not None:
+                return real, None
+        except Exception:
+            pass
+        return file_path, None
 
     @staticmethod
     def _read_file_content(file_path: Path) -> tuple[str | None, str | None]:

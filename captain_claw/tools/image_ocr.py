@@ -11,7 +11,7 @@ from typing import Any
 
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
-from captain_claw.tools.document_extract import _require_existing_file
+from captain_claw.tools.document_extract import _require_existing_file, _resolve_readable_file
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
@@ -266,7 +266,9 @@ class _BaseImageLLMTool(Tool):
             return ToolResult(success=False, error="Missing required argument: path")
 
         runtime_base = kwargs.get("_runtime_base_path")
-        file_path, error = _require_existing_file(path_str, runtime_base_path=runtime_base)
+        # vfs- and Drive-aware: a mounted Drive image is fetched to real bytes on
+        # demand so the vision model sees the picture, not the placeholder marker.
+        file_path, error = await _resolve_readable_file(path_str, runtime_base_path=runtime_base)
         if error:
             return ToolResult(success=False, error=error)
 

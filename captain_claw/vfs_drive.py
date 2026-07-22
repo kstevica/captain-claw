@@ -169,9 +169,13 @@ def placeholder_text(f: DriveFile) -> str:
     head = " · ".join(bits)
     return (
         head
-        + "\n\nThis file lives in Google Drive and has not been downloaded. "
-        "Read this path to fetch it on demand, or enable clonemd on the folder "
-        "to convert it to a local Markdown file.\n"
+        + "\n\nThis file lives in Google Drive and has not been downloaded yet. "
+        "It IS reachable — the file tools fetch its real content on demand: use "
+        "`read` for text/documents, the extract tools (pdf_extract/docx_extract/"
+        "xlsx_extract/pptx_extract) for Office files, or the vision tools for "
+        "images/video, all on THIS path. Do NOT use the google_drive tool to "
+        "re-download it and do NOT treat this marker as the file's content. To "
+        "make it a permanent local file, enable clonemd on the folder.\n"
     )
 
 
@@ -714,6 +718,103 @@ async def read_through(abs_path: Path) -> str | None:
         return f"[Google Drive — could not fetch this file: {exc}]\n\n{marker}"
     finally:
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Byte materialisation — the seam for binary readers
+# ---------------------------------------------------------------------------
+
+
+def _blob_cache_path(mount: Path, file_id: str, ext: str) -> Path:
+    """On-disk slot for a placeholder's *raw* bytes.
+
+    Distinct from :func:`_cache_path`, which holds converted *text* for the read
+    tool: a binary reader (docx/pdf/xlsx/pptx, image_ocr, video_vision, cv) needs
+    the original bytes, and the real extension is kept in the name so a tool that
+    validates by suffix accepts the returned path.
+    """
+    safe = ext if ext.startswith(".") else (f".{ext}" if ext else "")
+    return mount / CACHE_DIRNAME / f"{file_id}.blob{safe}"
+
+
+async def materialize(abs_path: Path, *, sleep=None) -> Path | None:
+    """Ensure a Drive placeholder's real bytes are on disk; return a readable path.
+
+    The byte-level sibling of :func:`read_through` (which returns converted
+    *text* for the read tool). Any tool that opens a file with a binary reader —
+    the document extractors, image_ocr/image_vision, video_vision, cv — calls
+    this so a mounted Drive file behaves like a local one: the returned path is a
+    real file, holding the actual bytes, carrying the source extension.
+
+    Returns ``None`` when *abs_path* is not a materialisable Drive placeholder —
+    an ordinary file, a mount-internal file, or a clonemd file whose real bytes
+    are already on disk — so the caller uses the path unchanged (and pays only a
+    couple of stat calls for the common non-Drive case). Raises
+    :class:`DriveError` when the file is known but its bytes can't be fetched
+    (outage, too large, no export path), so the caller surfaces a clear reason
+    rather than a downstream "not a valid ZIP"/decode error.
+
+    Cached by Drive ``modifiedTime``: a repeat call while the file is unchanged
+    reuses the cached bytes and never touches the network.
+    """
+    import asyncio
+
+    found = find_mount(abs_path)
+    if not found:
+        return None
+    mount, rel = found
+    if rel == MANIFEST_NAME or rel.split("/", 1)[0] == CACHE_DIRNAME:
+        return None  # the manifest and the cache dir are ordinary files
+    man = Manifest.load(mount)
+    entry = man.files.get(rel)
+    if entry is None or entry.get("state") == STATE_CLONED:
+        return None  # untracked, or real content already on disk (clonemd)
+
+    ext = PurePosix(rel).suffix.lower()
+    blob = _blob_cache_path(mount, str(entry["file_id"]), ext)
+    if blob.is_file() and entry.get("blob_modified") == entry.get("modified"):
+        return blob
+
+    f = _entry_as_file(rel, entry)
+    if f.size and f.size > _MAX_FETCH_BYTES:
+        raise DriveError(f"{f.name} is too large to fetch ({f.size} bytes).")
+
+    from captain_claw.drive_client import make_client
+
+    client = make_client()
+    try:
+        data, got_ext = await client.fetch(f, sleep=sleep or asyncio.sleep)
+    finally:
+        await client.close()
+
+    if not ext and got_ext:
+        # An extension-less source (rare for a binary reader) — name the cache by
+        # the fetched/export extension so a suffix check still sees the type.
+        blob = _blob_cache_path(mount, str(entry["file_id"]), got_ext)
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_bytes(data)
+    entry["blob_modified"] = entry.get("modified")
+    man.save(mount)
+    return blob
+
+
+def materialize_sync(abs_path: Path) -> Path | None:
+    """Blocking :func:`materialize`, for callers running OFF the event loop.
+
+    cv's ops run in a worker thread (``asyncio.to_thread``), where there is no
+    running loop and ``await`` is impossible; they use this. It must never be
+    called from within a running loop — an async caller uses :func:`materialize`
+    directly.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(materialize(abs_path))
+    raise RuntimeError(
+        "materialize_sync() called from within an event loop — use materialize()"
+    )
 
 
 def filter_searchable(paths: list[Path]) -> tuple[list[Path], int]:

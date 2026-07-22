@@ -629,3 +629,97 @@ class TestSharedDriveMount:
     def test_link_entry_carries_shared_drive_id(self):
         ent = vfs_drive.link_entry("alice", "team", "ROOT", shared_drive_id="DRIVE-X")
         assert ent["drive"]["shared_drive_id"] == "DRIVE-X"
+
+
+# ── Byte materialisation — the seam binary readers use ────────────────
+
+
+class TestMaterialize:
+    """materialize() fetches a placeholder's RAW bytes (not converted text) to a
+    real cache file, so a binary reader (docx/pdf/image/…) opens the document
+    instead of the marker. Unlike hydrate(), it works for images too."""
+
+    async def test_fetches_raw_bytes_and_keeps_source_extension(self, mount, monkeypatch):
+        drive = FakeDrive({"ROOT": [_file("f1", "report.docx", mime="application/octet-stream")]},
+                          content={"f1": (b"PK\x03\x04 raw zip bytes", ".docx")})
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+        p = await vfs_drive.materialize(root / "report.docx")
+        assert p is not None
+        assert p.read_bytes() == b"PK\x03\x04 raw zip bytes"  # bytes, not the marker
+        assert p.suffix == ".docx"  # a suffix-validating tool still sees .docx
+        man = vfs_drive.Manifest.load(root)
+        assert man.files["report.docx"]["blob_modified"] == "2026-07-20T10:00:00Z"
+
+    async def test_second_call_uses_cache_no_refetch(self, mount, monkeypatch):
+        drive = FakeDrive({"ROOT": [_file("f1", "a.bin", mime="application/octet-stream")]},
+                          content={"f1": (b"bytes", ".bin")})
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+        await vfs_drive.materialize(root / "a.bin")
+        drive.fetch_calls.clear()
+        await vfs_drive.materialize(root / "a.bin")
+        assert drive.fetch_calls == []  # served from the byte cache
+
+    async def test_changed_upstream_refetches(self, mount, monkeypatch):
+        drive = FakeDrive({"ROOT": [_file("f1", "a.bin", mime="application/octet-stream")]},
+                          content={"f1": (b"old", ".bin")})
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+        await vfs_drive.materialize(root / "a.bin")
+        man = vfs_drive.Manifest.load(root)
+        man.files["a.bin"]["modified"] = "2026-08-01T00:00:00Z"  # a refresh bumped it
+        man.save(root)
+        drive.content["f1"] = (b"new", ".bin")
+        drive.fetch_calls.clear()
+        p = await vfs_drive.materialize(root / "a.bin")
+        assert drive.fetch_calls == ["f1"] and p.read_bytes() == b"new"
+
+    async def test_cloned_returns_none(self, mount, monkeypatch):
+        drive = FakeDrive({"ROOT": [_file("f1", "a.bin", mime="application/octet-stream")]},
+                          content={"f1": (b"x", ".bin")})
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        man = vfs_drive.Manifest.load(root)
+        man.files["a.bin"]["state"] = "cloned"
+        man.save(root)
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+        assert await vfs_drive.materialize(root / "a.bin") is None  # real bytes already local
+
+    async def test_non_mount_path_returns_none(self, mount):
+        assert await vfs_drive.materialize(mount / "loose.bin") is None
+
+    async def test_mount_internals_return_none(self, mount, monkeypatch):
+        drive = _sample_drive()
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        assert await vfs_drive.materialize(root / ".drive-manifest.json") is None
+        assert await vfs_drive.materialize(root / ".drive-cache" / "f1") is None
+
+    async def test_too_large_raises_clear_error(self, mount, monkeypatch):
+        drive = FakeDrive({"ROOT": [_file("f1", "big.bin", size=200 * 1024 * 1024,
+                                          mime="application/octet-stream")]}, content={})
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+        with pytest.raises(DriveError):
+            await vfs_drive.materialize(root / "big.bin")
+
+    async def test_image_materializes_where_hydrate_rejects(self, mount, monkeypatch):
+        # hydrate() raises for an image (not text); materialize returns its bytes,
+        # which is what the vision/cv tools need.
+        drive = FakeDrive({"ROOT": [_file("i1", "pic.png", mime="image/png")]},
+                          content={"i1": (b"\x89PNG\r\n\x1a\n data", ".png")})
+        await vfs_drive.create_mount(drive, "alice", "acme", "ROOT")
+        root = vfs_drive.mount_root("alice", "acme")
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
+        p = await vfs_drive.materialize(root / "pic.png")
+        assert p is not None and p.read_bytes() == b"\x89PNG\r\n\x1a\n data"
+
+    async def test_materialize_sync_refuses_a_running_loop(self, mount):
+        # The sync bridge is only for off-loop callers (cv's worker thread).
+        with pytest.raises(RuntimeError):
+            vfs_drive.materialize_sync(mount / "whatever")

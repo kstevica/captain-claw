@@ -60,6 +60,66 @@ def _require_existing_file(
     return file_path, None
 
 
+async def _resolve_readable_file(
+    path: str,
+    runtime_base_path: str | Path | None = None,
+) -> tuple[Path | None, str | None]:
+    """Resolve a tool path to a real, readable local file — vfs- and Drive-aware.
+
+    The superset of :func:`_require_existing_file` that every binary reader
+    should use so a remote file behaves like a local one:
+
+    - a ``vfs:<project>/…`` path resolves into the shared cross-agent tree (as
+      the ``read`` tool does), instead of being looked up literally and missing;
+    - a Google Drive placeholder is materialised to its real bytes on demand and
+      the cached real file (same extension) is returned, so a parser opens the
+      actual document/image rather than the "not cloned" marker text;
+    - a Drive fetch failure becomes a clear message here, not an "invalid ZIP" or
+      utf-8 decode error three layers down.
+
+    Returns ``(path, None)`` on success or ``(None, error)``. Non-Drive paths
+    pay only a couple of stat calls (the mount probe short-circuits).
+    """
+    from captain_claw.vfs import is_vfs_path, resolve_vfs_path
+
+    if is_vfs_path(str(path)):
+        target = resolve_vfs_path(str(path))
+        if target is None:
+            return None, f"Invalid vfs path (escapes user root): {path}"
+        if not target.exists():
+            return None, f"File not found: {path}"
+        if not target.is_file():
+            return None, f"Not a file: {path}"
+        file_path: Path = target
+    else:
+        file_path_opt, error = _require_existing_file(path, runtime_base_path=runtime_base_path)
+        if error:
+            return None, error
+        assert file_path_opt is not None
+        file_path = file_path_opt
+
+    # Google Drive mount: fetch the real bytes for a placeholder and hand back the
+    # cached real file. A non-Drive path returns None (used unchanged). The Drive
+    # subsystem is imported lazily so a deployment without it still resolves
+    # ordinary files.
+    try:
+        from captain_claw.drive_client import DriveError
+        from captain_claw.vfs_drive import materialize
+    except Exception:
+        return file_path, None
+    try:
+        real = await materialize(file_path)
+    except DriveError as exc:
+        return None, (
+            f"'{file_path.name}' lives in Google Drive and its content could not "
+            f"be fetched: {exc}"
+        )
+    except Exception as exc:  # never turn a resolver hiccup into a hard failure
+        log.debug("Drive materialize skipped", path=str(path), error=str(exc))
+        return file_path, None
+    return (real or file_path), None
+
+
 def _local_name(tag: str) -> str:
     """Return XML local name for namespaced tags."""
     if "}" in tag:
@@ -363,7 +423,7 @@ class PdfExtractTool(Tool):
     ) -> ToolResult:
         """Execute PDF extraction."""
         _runtime_base = kwargs.get("_runtime_base_path")
-        file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
+        file_path, error = await _resolve_readable_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
         ext = file_path.suffix.lower()
@@ -405,7 +465,7 @@ class DocxExtractTool(Tool):
     async def execute(self, path: str, max_chars: int = 120000, **kwargs: Any) -> ToolResult:
         """Execute DOCX extraction."""
         _runtime_base = kwargs.get("_runtime_base_path")
-        file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
+        file_path, error = await _resolve_readable_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
         ext = file_path.suffix.lower()
@@ -451,7 +511,7 @@ class XlsxExtractTool(Tool):
     ) -> ToolResult:
         """Execute XLSX extraction."""
         _runtime_base = kwargs.get("_runtime_base_path")
-        file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
+        file_path, error = await _resolve_readable_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
         ext = file_path.suffix.lower()
@@ -501,7 +561,7 @@ class PptxExtractTool(Tool):
     ) -> ToolResult:
         """Execute PPTX extraction."""
         _runtime_base = kwargs.get("_runtime_base_path")
-        file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
+        file_path, error = await _resolve_readable_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
         ext = file_path.suffix.lower()

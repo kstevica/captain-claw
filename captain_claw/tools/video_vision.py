@@ -411,10 +411,11 @@ class VideoVisionTool(Tool):
                 ),
             )
 
-        # Resolve the video file.
-        from captain_claw.tools.image_ocr import _require_existing_file
+        # Resolve the video file (vfs- and Drive-aware: a mounted Drive video is
+        # fetched to real bytes on demand so ffprobe/ffmpeg see the real file).
+        from captain_claw.tools.document_extract import _resolve_readable_file
         runtime_base = kwargs.get("_runtime_base_path")
-        file_path, error = _require_existing_file(path_str, runtime_base_path=runtime_base)
+        file_path, error = await _resolve_readable_file(path_str, runtime_base_path=runtime_base)
         if error:
             return ToolResult(success=False, error=error)
         if file_path.suffix.lower() not in _VIDEO_EXTS:
