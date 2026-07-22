@@ -200,6 +200,10 @@ async def list_projects(user: dict = Depends(get_current_user)):
         for proj in sorted(root.iterdir(), key=lambda p: p.name.lower()):
             if not proj.is_dir():
                 continue
+            # Skip FD-managed dot-directories (e.g. .drive mount trees) — they
+            # are not projects and back linked mounts listed further down.
+            if proj.name.startswith("."):
+                continue
             files = 0
             total = 0
             latest = 0.0
@@ -220,17 +224,21 @@ async def list_projects(user: dict = Depends(get_current_user)):
         p["title"] = titles.get(p.get("run_id") or "", "")
     # Linked folders (external dirs) — not physical children of the user root.
     for name, ent in sorted(read_links_at(root).items()):
+        is_drive = ent.get("kind") == "gdrive"
+        kind = "gdrive" if is_drive else "link"
+        drive_meta = ent.get("drive", {}) if is_drive else None
         tgt = link_target_at(root, name)
         if tgt is None or not tgt.is_dir():
             out.append({"name": name, "files": 0, "bytes": 0, "mtime": 0.0,
-                        "kind": "link", "run_id": "", "title": "",
+                        "kind": kind, "run_id": "", "title": "",
                         "link_path": str(ent.get("path", "")), "mode": ent.get("mode", "rw"),
-                        "missing": True})
+                        "missing": True, "drive": drive_meta})
             continue
         files, total, latest = _stats(tgt)
         out.append({"name": name, "files": files, "bytes": total, "mtime": latest,
-                    "kind": "link", "run_id": "", "title": "",
-                    "link_path": str(tgt), "mode": ent.get("mode", "rw")})
+                    "kind": kind, "run_id": "", "title": "",
+                    "link_path": str(tgt), "mode": ent.get("mode", "rw"),
+                    "drive": drive_meta})
     # Folders shared TO this user by other owners. Resolve the run's human title
     # from the *owner's* sessions (a shared vatra-<sid8> folder should show its
     # name, not the raw hash) — cached per owner to avoid repeat queries.
@@ -347,6 +355,153 @@ async def remove_link(name: str, user: dict = Depends(get_current_user)):
         del links[key]
         _write_links(root, links)
     return {"ok": True}
+
+
+# ── Google Drive mounts ───────────────────────────────────────────────
+# A Drive folder mounted as a read-only VFS folder: a real local tree of
+# placeholder files (see captain_claw/vfs_drive). The link entry uses the same
+# .vfs-links.json registry, so every resolver treats it as an ordinary folder.
+
+
+class DriveMountBody(BaseModel):
+    name: str
+    folder_id: str
+    clonemd: bool = False
+
+
+class DriveToggleBody(BaseModel):
+    clonemd: bool
+
+
+def _drive_client():
+    """A DriveClient over the deployment's Google connection.
+
+    Per-user tokens are a later swap (the client is provider-agnostic); today
+    every mount uses the shared connection, which is correct single-operator.
+    """
+    from captain_claw.drive_client import make_client
+
+    return make_client()
+
+
+@router.get("/drive/browse")
+async def drive_browse(folder_id: str = "root", user: dict = Depends(get_current_user)):
+    """List Drive folders under *folder_id*, for the mount picker.
+
+    Folders only — this is a place to choose a mount root, not a file browser.
+    """
+    from captain_claw.drive_client import FOLDER_MIME, DriveError
+
+    client = _drive_client()
+    try:
+        files, truncated = await client.list_folder(folder_id, max_files=500)
+    except DriveError as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        await client.close()
+    folders = [
+        {"id": f.id, "name": f.name}
+        for f in files
+        if f.mime_type == FOLDER_MIME
+    ]
+    return {"folder_id": folder_id, "folders": folders, "truncated": truncated}
+
+
+@router.post("/links/gdrive")
+async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_user)):
+    """Mount a Drive folder as a read-only VFS folder and populate its tree."""
+    from captain_claw import vfs_drive
+    from captain_claw.drive_client import DriveError
+
+    name = safe_name(body.name, fallback="")
+    if not name:
+        raise HTTPException(400, "invalid mount name")
+    if not body.folder_id.strip():
+        raise HTTPException(400, "folder_id is required")
+    root = _user_root(user["id"])
+    if (root / name).exists():
+        raise HTTPException(409, f"a physical project named '{name}' already exists")
+    existing = read_links_at(root).get(name)
+    if existing and existing.get("kind") != "gdrive":
+        raise HTTPException(409, f"a link named '{name}' already exists")
+
+    client = _drive_client()
+    try:
+        summary = await vfs_drive.create_mount(
+            client, user["id"], name, body.folder_id.strip(), clonemd=body.clonemd
+        )
+    except DriveError as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        await client.close()
+
+    links = read_links_at(root)
+    root.mkdir(parents=True, exist_ok=True)
+    links[name] = vfs_drive.link_entry(
+        user["id"], name, body.folder_id.strip(), clonemd=body.clonemd
+    )
+    _write_links(root, links)
+    return {"ok": True, "name": name, **summary}
+
+
+@router.post("/links/gdrive/{name}/refresh")
+async def refresh_drive(name: str, user: dict = Depends(get_current_user)):
+    """Re-walk a mount: new files appear, vanished ones are pruned locally."""
+    from captain_claw import vfs_drive
+    from captain_claw.drive_client import DriveError
+
+    key = safe_name(name, fallback="")
+    ent = read_links_at(_user_root(user["id"])).get(key)
+    if not vfs_drive.is_drive_link(ent):
+        raise HTTPException(404, "not a Drive mount")
+    client = _drive_client()
+    try:
+        summary = await vfs_drive.sync(client, vfs_drive.mount_root(user["id"], key))
+    except (DriveError, ValueError) as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        await client.close()
+    return {"ok": True, "name": key, **summary}
+
+
+@router.post("/links/gdrive/{name}/clonemd")
+async def toggle_clonemd(name: str, body: DriveToggleBody,
+                         user: dict = Depends(get_current_user)):
+    """Turn clonemd on/off for a mount (conversion itself lands in Phase 3)."""
+    from captain_claw import vfs_drive
+
+    root = _user_root(user["id"])
+    key = safe_name(name, fallback="")
+    links = read_links_at(root)
+    ent = links.get(key)
+    if not vfs_drive.is_drive_link(ent):
+        raise HTTPException(404, "not a Drive mount")
+    ent.setdefault("drive", {})["clonemd"] = bool(body.clonemd)
+    links[key] = ent
+    _write_links(root, links)
+    # Mirror the flag into the manifest so the mount subsystem sees it too.
+    mroot = vfs_drive.mount_root(user["id"], key)
+    man = vfs_drive.Manifest.load(mroot)
+    man.clonemd = bool(body.clonemd)
+    man.save(mroot)
+    return {"ok": True, "name": key, "clonemd": bool(body.clonemd)}
+
+
+@router.delete("/links/gdrive/{name}")
+async def unmount_drive(name: str, keep_cloned: bool = True,
+                        user: dict = Depends(get_current_user)):
+    """Remove a Drive mount. Cloned Markdown is kept unless keep_cloned=false."""
+    from captain_claw import vfs_drive
+
+    root = _user_root(user["id"])
+    key = safe_name(name, fallback="")
+    links = read_links_at(root)
+    if not vfs_drive.is_drive_link(links.get(key)):
+        raise HTTPException(404, "not a Drive mount")
+    result = vfs_drive.remove_mount(user["id"], key, keep_cloned=keep_cloned)
+    del links[key]
+    _write_links(root, links)
+    return {"ok": True, "name": key, **result}
 
 
 @router.get("/list")

@@ -57,45 +57,48 @@ behaviours read the `drive` block.
 
 ---
 
-## Phase 0 — unblock (nothing works without this)
+## Phase 0 — unblock
 
-The Drive integration is not currently in a state a filesystem can sit on.
+**SHIPPED (commit 34db19b)** — everything except per-user tokens, which the work
+below reframed from a blocker into a deferrable swap:
 
-1. **Per-user Google tokens.** `system_settings` is `(key, value, updated_at)` —
-   **no `user_id`** (`flight_deck/db.py:94-98`), so one Google account is shared
-   by every Flight Deck user, and `POST /fd/google/config` by any logged-in user
-   overwrites everyone's connection. VFS is per-user
-   (`<fd-data>/vfs/<fd-user-id>/…`). A per-user mount has no per-user token to
-   hang off. Needs a `google_oauth_user_tokens(user_id, …)` table and a migration
-   of the existing global row to the primary owner.
-   *This is the one item that is a genuine blocker rather than a nuisance.*
+- **New `captain_claw/drive_client.py`** — the structured, paginated, retrying
+  client the mount consumes. Pagination (the tool discarded `nextPageToken`),
+  backoff on 429/5xx honouring `Retry-After`, scope-flexible auth, query
+  escaping, and Google-native export standardised on Sheet→xlsx / Slides→pptx.
+  Returns `DriveFile` objects, not prose. 17 tests.
+- **`google_drive` tool**: read actions accept `drive.readonly`; only writes
+  need a writable scope; `folder_id` escaped in the list query.
+- **`action_catalog`**: dropped the dead `drive.delete` entry.
 
-2. **Pagination.** `google_drive.py:35` requests `nextPageToken` and **nothing
-   ever reads it**. A folder with >100 children silently truncates — a mount
-   would show a partial tree and never say so.
+**Per-user Google tokens — DEFERRED, and here is why it is safe to.** The client
+takes a `token_provider` callback. Today it uses `global_token_provider` (the
+deployment-wide connection every Google tool already uses); a per-user provider
+that resolves the *mount owner's* token slots in with no other code change. So
+per-user tokens stopped being a prerequisite and became a drop-in.
 
-3. **Accept `drive.readonly`.** `google_drive.py:31,196-202` hardcodes the full
-   read/write `drive` scope and refuses to run without it, so a read-only mount
-   currently requires granting write access to all of Drive. Widen the check the
-   way `google_mail.py:287-293` already does.
-
-4. **Retry/backoff.** There is none anywhere in the Google tools; 429 is reported
-   and dropped (`google_drive.py:239-243`). A mount doing per-directory listings
-   will hit user-rate-limit 403s on its first real folder. `tenacity` is already
-   a declared dependency and unused.
-
-5. **Structured returns.** Every action returns prose for an LLM. The mount needs
-   metadata, not sentences — promote `_get_file_metadata` (`:717`) and add a
-   listing that returns dicts.
-
-Also worth folding in, cheap: escape `folder_id` in the query
-(`google_drive.py:266` is unescaped; `_gws_drive.py:100` shows the fix), and drop
-the dead `drive.delete` catalog entry (`action_catalog.py:124` calls an action
-that does not exist).
+It still matters — `system_settings` is `(key, value, updated_at)` with **no
+`user_id`** (`flight_deck/db.py:94-98`), so one Google account is shared across
+every FD user and `POST /fd/google/config` overwrites everyone's connection. But
+that is a *multi-tenant safety* gap, not a *does-it-work* gap: on a
+single-operator deployment the global connection is correct. When it's needed,
+it's a `google_oauth_user_tokens(user_id, …)` table + a per-user
+`/fd/google/*` flow (mirroring deep-memory's `_agent_owner` resolution) +
+migrating the existing global row to the primary owner — and swapping the
+provider. Nothing in the client or the mount changes.
 
 ---
 
 ## Phase 1 — the mount
+
+**SHIPPED.** `captain_claw/vfs_drive.py` + Drive routes on `vfs_routes` +
+44 tests (client + mount + routes). The mount is a real placeholder tree, a
+manual refresh reflects upstream adds/removes, and it lists in the panel as
+`kind: "gdrive"`. Read-hydration and clonemd conversion are still Phases 2–3;
+today reading a placeholder returns its marker text and the clonemd toggle only
+records the flag.
+
+Design as built:
 
 **New module `captain_claw/vfs_drive.py`** — the only thing that knows a folder
 is Drive-backed. No FD imports, mirroring `vfs.py`.
