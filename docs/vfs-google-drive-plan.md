@@ -215,12 +215,24 @@ become searchable long-term memory, which is the pay-off for the whole exercise.
 
 ---
 
-## Phase 4 — UI
+## Phase 4 — UI (SHIPPED)
 
-In the VFS panel, beside the existing link affordances: a "Connect Google Drive"
-entry in the folder picker, a cloud badge on mounted projects, a **clonemd**
-toggle, a **Refresh** button with last-synced time, and — importantly — a visible
-count of un-cloned files, so "this folder is partly virtual" is never a surprise.
+In the VFS panel: a **Connect Drive** header button opening a `DriveConnect`
+modal that browses Drive folders (folders only), names the mount, and offers a
+clone-to-Markdown checkbox; a **GDRIVE** badge + lock on mounted projects; a
+**Drive** filter chip; and per-mount hover controls — Refresh (with a
+"N file(s), M cloned" note), a clonemd toggle, and Unmount (which asks about
+deleting cloned Markdown only when there is any). The card's second line shows
+`cloned to Markdown` or `on-demand · N not cloned · synced <time>`, so a partly
+virtual folder is never a surprise. Backend enriched `/fd/vfs/projects` with
+per-mount `total`/`cloned`/`uncloned` counts and stamps `synced_at` on
+mount/refresh/clone.
+
+Verified live end to end against a fake Drive: connect → browse → mount with
+clone → the tree materialises (`CEE VC landscape.md` from a Google Doc,
+`notes.txt` verbatim, `chart.png` a placeholder), the cloned doc previews real
+content, refresh reports counts, the clonemd toggle flips card state, both
+themes pass contrast, no console errors.
 
 ---
 

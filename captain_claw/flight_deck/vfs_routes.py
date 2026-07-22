@@ -226,7 +226,23 @@ async def list_projects(user: dict = Depends(get_current_user)):
     for name, ent in sorted(read_links_at(root).items()):
         is_drive = ent.get("kind") == "gdrive"
         kind = "gdrive" if is_drive else "link"
-        drive_meta = ent.get("drive", {}) if is_drive else None
+        drive_meta = dict(ent.get("drive", {})) if is_drive else None
+        if is_drive and drive_meta is not None:
+            # Enrich with materialisation counts from the manifest so the panel
+            # can show "N of M cloned" and warn about un-cloned files.
+            try:
+                from captain_claw import vfs_drive
+
+                man = vfs_drive.Manifest.load(vfs_drive.mount_root(user["id"], name))
+                total_f = len(man.files)
+                cloned_f = sum(
+                    1 for e in man.files.values() if e.get("state") == "cloned"
+                )
+                drive_meta["total"] = total_f
+                drive_meta["cloned"] = cloned_f
+                drive_meta["uncloned"] = total_f - cloned_f
+            except Exception:  # noqa: BLE001 — counts are a nicety
+                pass
         tgt = link_target_at(root, name)
         if tgt is None or not tgt.is_dir():
             out.append({"name": name, "files": 0, "bytes": 0, "mtime": 0.0,
@@ -384,6 +400,19 @@ def _drive_client():
     return make_client()
 
 
+def _stamp_synced(user_id: str, name: str) -> None:
+    """Record the last-synced time on a mount's link entry (best-effort)."""
+    import time
+
+    root = _user_root(user_id)
+    links = read_links_at(root)
+    ent = links.get(name)
+    if isinstance(ent, dict) and ent.get("kind") == "gdrive":
+        ent.setdefault("drive", {})["synced_at"] = int(time.time())
+        links[name] = ent
+        _write_links(root, links)
+
+
 @router.get("/drive/browse")
 async def drive_browse(folder_id: str = "root", user: dict = Depends(get_current_user)):
     """List Drive folders under *folder_id*, for the mount picker.
@@ -435,11 +464,13 @@ async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_use
     finally:
         await client.close()
 
+    import time
+
     links = read_links_at(root)
     root.mkdir(parents=True, exist_ok=True)
-    links[name] = vfs_drive.link_entry(
-        user["id"], name, body.folder_id.strip(), clonemd=body.clonemd
-    )
+    entry = vfs_drive.link_entry(user["id"], name, body.folder_id.strip(), clonemd=body.clonemd)
+    entry["drive"]["synced_at"] = int(time.time())
+    links[name] = entry
     _write_links(root, links)
     return {"ok": True, "name": name, **summary}
 
@@ -461,6 +492,7 @@ async def refresh_drive(name: str, user: dict = Depends(get_current_user)):
         raise HTTPException(400, str(exc))
     finally:
         await client.close()
+    _stamp_synced(user["id"], key)
     return {"ok": True, "name": key, **summary}
 
 
@@ -500,6 +532,7 @@ async def toggle_clonemd(name: str, body: DriveToggleBody,
             raise HTTPException(400, str(exc))
         finally:
             await client.close()
+        _stamp_synced(user["id"], key)
     return {"ok": True, "name": key, "clonemd": enabled, **summary}
 
 

@@ -86,6 +86,10 @@ class TestDriveMountRoutes:
         assert names["acme"]["kind"] == "gdrive"
         assert names["acme"]["mode"] == "ro"
         assert ".drive" not in names  # the mount dotdir isn't itself a project
+        # Drive meta the UI reads: last-synced stamped, materialisation counts.
+        d = names["acme"]["drive"]
+        assert d["synced_at"] > 0
+        assert d["total"] == 2 and d["cloned"] == 0 and d["uncloned"] == 2
 
         listing = await vr.list_dir("acme", "", "", USER)
         assert {"a.txt", "sub"} <= {e["name"] for e in listing["entries"]}
