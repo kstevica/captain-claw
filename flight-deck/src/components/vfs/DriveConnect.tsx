@@ -13,6 +13,25 @@ import { useVFSStore, type DriveFolder } from '../../stores/vfsStore'
 // carried down so every listing/mount uses the right corpus.
 interface Frame { id: string; name: string; driveId: string }
 
+const cleanSeg = (s: string) =>
+  s.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-').replace(/^[-._]+|[-._]+$/g, '')
+
+/** Shortest suffix of the folder path that doesn't collide with an existing
+ * project: "VC", else "Performance-VC", else "Startup-reports-Performance-VC",
+ * … — a short but unambiguous default the user can still edit. */
+function uniqueMountName(segments: string[], taken: Set<string>): string {
+  const segs = segments.map(cleanSeg).filter(Boolean)
+  if (segs.length === 0) return 'drive'
+  for (let n = 1; n <= segs.length; n++) {
+    const cand = segs.slice(segs.length - n).join('-')
+    if (!taken.has(cand)) return cand
+  }
+  const base = segs.join('-')
+  let i = 2
+  while (taken.has(`${base}-${i}`)) i++
+  return `${base}-${i}`
+}
+
 export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone: (name: string) => void }) {
   const s = useVFSStore()
   const [stack, setStack] = useState<Frame[]>([{ id: 'root', name: 'My Drive', driveId: '' }])
@@ -27,6 +46,11 @@ export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone:
 
   const here = stack[stack.length - 1]
   const atRoot = stack.length === 1
+  // The breadcrumb below the root ("My Drive"): the folder's real location, used
+  // to disambiguate the mount and shown to the user before they commit.
+  const pathSegments = stack.slice(1).map((f) => f.name)
+  const fullPath = pathSegments.join(' / ')       // human display
+  const storePath = pathSegments.join('/')        // persisted for the subtitle
 
   const load = async (frame: Frame) => {
     setLoading(true); setErr('')
@@ -47,9 +71,12 @@ export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone:
 
   const enter = (f: DriveFolder, driveId: string) => {
     const frame: Frame = { id: f.id, name: f.name, driveId }
-    setStack((st) => [...st, frame])
-    // Default the mount name to the folder you step into.
-    setName(f.name.replace(/[^a-zA-Z0-9._-]/g, '-'))
+    const newStack = [...stack, frame]
+    setStack(newStack)
+    // Default to the shortest name (leaf, lengthened only to avoid colliding
+    // with an existing mount) so "VC" doesn't clash across many similar folders.
+    const segs = newStack.slice(1).map((fr) => fr.name)
+    setName(uniqueMountName(segs, new Set(s.projects.map((p) => p.name))))
     load(frame)
   }
   // A shared drive: its id is both the folder to open and the drive corpus.
@@ -71,7 +98,7 @@ export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone:
     // driveId), which we support.
     setMounting(true); setErr('')
     try {
-      await s.mountDrive(n, here.id, clonemd, here.driveId)
+      await s.mountDrive(n, here.id, clonemd, here.driveId, storePath)
       onDone(n)
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'mount failed')
@@ -164,7 +191,7 @@ export function DriveConnect({ onClose, onDone }: { onClose: () => void; onDone:
         {/* mount controls */}
         <div className="border-t border-zinc-800 px-4 py-3">
           <div className="mb-2 text-[11px] text-zinc-500">
-            Mounts <span className="text-zinc-300">{here.name}</span> as a read-only folder.
+            Mounts <span className="text-zinc-300">{fullPath || here.name}</span> as a read-only folder.
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <input

@@ -384,6 +384,7 @@ class DriveMountBody(BaseModel):
     folder_id: str
     clonemd: bool = False
     drive_id: str = ""  # set when the folder lives in a Shared (Team) Drive
+    path: str = ""  # human breadcrumb ("FRC3/Reporting/…/VC") for the sidebar
 
 
 class DriveToggleBody(BaseModel):
@@ -483,7 +484,8 @@ async def mount_drive(body: DriveMountBody, user: dict = Depends(get_current_use
     links = read_links_at(root)
     root.mkdir(parents=True, exist_ok=True)
     entry = vfs_drive.link_entry(user["id"], name, body.folder_id.strip(),
-                                 clonemd=body.clonemd, shared_drive_id=drive_id)
+                                 clonemd=body.clonemd, shared_drive_id=drive_id,
+                                 source_path=body.path.strip())
     entry["drive"]["synced_at"] = int(time.time())
     links[name] = entry
     _write_links(root, links)

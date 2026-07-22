@@ -26,6 +26,9 @@ export interface DriveMeta {
   folder_id: string
   clonemd: boolean
   synced_at?: number
+  // Human breadcrumb of the mounted Drive folder ("FRC3/Reporting/…/VC"),
+  // shown as a subtitle so a short mount name isn't ambiguous.
+  source_path?: string
   // Materialisation counts, enriched by /fd/vfs/projects from the manifest.
   total?: number
   cloned?: number
@@ -129,7 +132,7 @@ interface VFSStore {
   browseFs: (path: string) => Promise<FsListing>
   // Google Drive mounts
   browseDrive: (folderId: string, driveId?: string) => Promise<{ folders: DriveFolder[]; shared_drives: DriveFolder[]; truncated: boolean }>
-  mountDrive: (name: string, folderId: string, clonemd: boolean, driveId?: string) => Promise<void>
+  mountDrive: (name: string, folderId: string, clonemd: boolean, driveId?: string, path?: string) => Promise<void>
   refreshDrive: (name: string) => Promise<string>
   toggleClonemd: (name: string, clonemd: boolean) => Promise<string>
   unmountDrive: (name: string, keepCloned: boolean) => Promise<void>
@@ -387,10 +390,10 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     return res.json()
   },
 
-  mountDrive: async (name, folderId, clonemd, driveId = '') => {
+  mountDrive: async (name, folderId, clonemd, driveId = '', path = '') => {
     const res = await _authedFetch('/fd/vfs/links/gdrive', {
       method: 'POST',
-      body: JSON.stringify({ name, folder_id: folderId, clonemd, drive_id: driveId }),
+      body: JSON.stringify({ name, folder_id: folderId, clonemd, drive_id: driveId, path }),
     })
     if (!res.ok) throw new Error((await res.text()) || 'mount failed')
     await get().loadProjects()

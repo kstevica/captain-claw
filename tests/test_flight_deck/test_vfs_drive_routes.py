@@ -115,6 +115,18 @@ class TestDriveMountRoutes:
         listing = await vr.list_dir("acme", "", "", USER)
         assert {"a.txt", "sub"} <= {e["name"] for e in listing["entries"]}
 
+    async def test_mount_stores_and_surfaces_the_source_path(self, env):
+        # The human breadcrumb rides through to /projects so the sidebar can show
+        # it as a subtitle (disambiguates a short mount name like "VC").
+        vr, vfs_drive, tmp, _ = env
+        await vr.mount_drive(
+            vr.DriveMountBody(name="VC", folder_id="ROOT",
+                              path="FRC3/Reporting/Startup reports/Performance/VC"),
+            USER,
+        )
+        vc = next(p for p in (await vr.list_projects(USER))["projects"] if p["name"] == "VC")
+        assert vc["drive"]["source_path"] == "FRC3/Reporting/Startup reports/Performance/VC"
+
     async def test_read_only_mount_refuses_writes(self, env):
         vr, _, _, _ = env
         from fastapi import HTTPException

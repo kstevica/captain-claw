@@ -612,21 +612,24 @@ async def create_mount(
 
 def link_entry(
     user_id: str, project: str, folder_id: str, *,
-    clonemd: bool = False, shared_drive_id: str = "",
+    clonemd: bool = False, shared_drive_id: str = "", source_path: str = "",
 ) -> dict[str, Any]:
     """The ``.vfs-links.json`` value for a Drive mount.
 
     ``path`` points at the local placeholder tree, so every existing resolver
     (`link_target_at`, `project_root`, `resolve_under`) works unchanged;
     ``mode: "ro"`` makes the write tools refuse it; the ``drive`` block is read
-    only by this subsystem.
+    only by this subsystem. ``source_path`` is the human breadcrumb of the
+    mounted Drive folder (e.g. ``FRC3/Reporting/…/VC``), shown as a subtitle so a
+    short mount name like ``VC`` isn't ambiguous across many similar folders.
     """
     return {
         "path": str(mount_root(user_id, project)),
         "mode": "ro",
         "kind": "gdrive",
         "drive": {"folder_id": folder_id, "clonemd": bool(clonemd),
-                  "shared_drive_id": shared_drive_id, "synced_at": 0},
+                  "shared_drive_id": shared_drive_id, "source_path": source_path,
+                  "synced_at": 0},
     }
 
 

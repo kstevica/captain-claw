@@ -430,6 +430,12 @@ export function VFSBrowser() {
                   )}
                   {p.mode === 'ro' && <Lock className="h-3 w-3 shrink-0 text-zinc-500" aria-label="read-only" />}
                 </button>
+                {p.kind === 'gdrive' && p.drive?.source_path && (
+                  <span className="truncate text-[10px] text-zinc-500"
+                    title={p.drive.source_path.replace(/\//g, ' / ')}>
+                    {p.drive.source_path.replace(/\//g, ' / ')}
+                  </span>
+                )}
                 {p.kind === 'link'
                   ? <span className={`truncate font-mono text-[10px] ${p.missing ? 'text-red-400' : 'text-zinc-600'}`} title={p.link_path}>
                       {p.missing ? '⚠ missing: ' : '↪ '}{p.link_path}
