@@ -47,7 +47,7 @@ class GlobTool(Tool):
         "properties": {
             "pattern": {
                 "type": "string",
-                "description": "Glob pattern (e.g., '**/*.py', 'src/**/*.ts'). A vfs:<project>/<glob> pattern searches the shared cross-agent filesystem.",
+                "description": "Glob pattern (e.g., '**/*.py', 'src/**/*.ts'). A vfs:<project>/<glob> pattern searches the shared cross-agent filesystem; use vfs:**/<glob> (e.g. 'vfs:**/*leyr*') to search across ALL projects/mounts at once — matches the file's full path, so it finds files inside a folder named like the term too.",
             },
             "root": {
                 "type": "string",
@@ -95,14 +95,71 @@ class GlobTool(Tool):
             # Shared VFS glob (vfs:<project>/<glob>) — search the cross-agent
             # tree and return results as vfs: URIs.
             if is_vfs_path(pattern):
+                from captain_claw.vfs import list_projects
+
                 project, rel = split_scheme(pattern)
-                base_dir = project_root(project)
-                full = str(Path(base_dir) / (rel or "**/*"))
                 loop = asyncio.get_event_loop()
-                vfs_matches = await loop.run_in_executor(
-                    None, lambda: glob.glob(full, recursive=True)
-                )
-                vfs_matches = sorted(m for m in vfs_matches if Path(m).is_file())[:limit]
+                # A glob in the PROJECT position ("vfs:**/*", "vfs:*leyr*") means
+                # "search EVERY project" — a caller shouldn't have to know the
+                # mount name to find something. Without this, "**" parsed as a
+                # project name and collapsed to the empty default project, so a
+                # cross-project search silently found nothing (and the agent then
+                # fell back to the raw google_drive tool).
+                cross = (not project) or project in ("*", "**") or any(c in project for c in "*?[")
+
+                def _cross() -> list[str]:
+                    # Needle = the searchable stem of the pattern (last segment,
+                    # wildcards stripped); empty ⇒ every file. Matched against the
+                    # file's path RELATIVE to the user root (project + subpath),
+                    # so "vfs:**/*leyr*" also finds files inside a "Leyr/" folder,
+                    # not only files literally named *leyr*.
+                    src = rel or project
+                    last = src.replace("\\", "/").rstrip("/").split("/")[-1]
+                    needle = last.replace("*", "").replace("?", "").lower()
+                    out: list[str] = []
+                    for proj in list_projects():
+                        base = project_root(proj)
+                        if not Path(base).is_dir():
+                            continue
+                        for p in Path(base).rglob("*"):
+                            if len(out) >= limit:
+                                return out
+                            if not p.is_file():
+                                continue
+                            try:
+                                rp = p.relative_to(base)
+                            except ValueError:
+                                continue
+                            # Skip Drive mount internals (.drive-manifest.json,
+                            # .drive-cache/…) — they aren't user content.
+                            if any(part.startswith(".drive") for part in rp.parts):
+                                continue
+                            if not needle or needle in f"{proj}/{rp.as_posix()}".lower():
+                                out.append(str(p))
+                    return out
+
+                def _single() -> list[str]:
+                    base_dir = project_root(project)
+                    full = str(Path(base_dir) / (rel or "**/*"))
+                    out: list[str] = []
+                    for m in glob.glob(full, recursive=True):
+                        mp = Path(m)
+                        if not mp.is_file():
+                            continue
+                        try:
+                            parts = mp.relative_to(base_dir).parts
+                        except ValueError:
+                            parts = ()
+                        # Exclude mount internals by their in-project path (the
+                        # mount's own dir is .drive/<name>, so checking the
+                        # absolute path would wrongly drop every file).
+                        if any(part.startswith(".drive") for part in parts):
+                            continue
+                        out.append(m)
+                    return out
+
+                vfs_matches = await loop.run_in_executor(None, _cross if cross else _single)
+                vfs_matches = sorted(set(vfs_matches))[:limit]
                 if not vfs_matches:
                     return ToolResult(success=True, content=f"No files found matching: {pattern}")
                 disp = [to_display(Path(m)) for m in vfs_matches]
