@@ -9,7 +9,7 @@ import {
   RefreshCw, Search, ScrollText, Skull, SlidersHorizontal, Sparkles, Sprout,
   Trash2, Upload, Users, Wand2, Wrench, X, Zap, ZoomIn, ZoomOut,
 } from 'lucide-react'
-import Markdown from 'react-markdown'
+import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   type BeingEvent, type BeingListItem, type BeingsMeta, type BeingVitals,
@@ -3699,6 +3699,57 @@ function ReportStatusBadge({ status }: { status: string }) {
   return <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-400"><Loader2 className="h-3 w-3 animate-spin" /> {status}</span>
 }
 
+// A typographic treatment for the report body — real hierarchy (title, section,
+// sub-section), readable measure, themed for light + dark (zinc auto-inverts;
+// violet accents carry an explicit dark: variant so they hold contrast in both).
+const REPORT_MD: Components = {
+  h1: ({ children }) => <h1 className="mb-3 mt-1 border-b border-zinc-700 pb-2 text-xl font-bold tracking-tight text-zinc-100">{children}</h1>,
+  h2: ({ children }) => <h2 className="mb-2 mt-6 text-[15px] font-semibold text-violet-700 dark:text-violet-300">{children}</h2>,
+  h3: ({ children }) => <h3 className="mb-1.5 mt-4 text-[12px] font-semibold uppercase tracking-wide text-zinc-500">{children}</h3>,
+  p: ({ children }) => <p className="my-2 text-[13px] leading-relaxed text-zinc-300">{children}</p>,
+  ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-5 text-[13px] text-zinc-300 marker:text-zinc-600">{children}</ul>,
+  ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-5 text-[13px] text-zinc-300 marker:text-zinc-600">{children}</ol>,
+  li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+  strong: ({ children }) => <strong className="font-semibold text-zinc-100">{children}</strong>,
+  em: ({ children }) => <em className="italic text-zinc-400">{children}</em>,
+  a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer" className="text-violet-600 underline decoration-violet-400/40 hover:text-violet-500 dark:text-violet-400 dark:hover:text-violet-300">{children}</a>,
+  blockquote: ({ children }) => <blockquote className="my-3 border-l-2 border-violet-500/50 pl-3 text-[13px] italic text-zinc-400">{children}</blockquote>,
+  hr: () => <hr className="my-4 border-zinc-800" />,
+  code: ({ children }) => <code className="rounded bg-zinc-800 px-1 py-0.5 text-[12px] text-violet-700 dark:text-violet-300">{children}</code>,
+  pre: ({ children }) => <pre className="my-3 overflow-x-auto rounded-md bg-zinc-800/60 p-3 text-[12px] text-zinc-300">{children}</pre>,
+  table: ({ children }) => <div className="my-3 overflow-x-auto"><table className="w-full border-collapse text-[12px]">{children}</table></div>,
+  th: ({ children }) => <th className="border border-zinc-700 bg-zinc-800/60 px-2 py-1 text-left font-semibold text-zinc-200">{children}</th>,
+  td: ({ children }) => <td className="border border-zinc-800 px-2 py-1 text-zinc-300">{children}</td>,
+}
+
+function downloadReport(r: Report) {
+  const fromPath = r.vfs_path?.split('/').pop()
+  const name = (fromPath || `${(r.title || 'iskra-report').replace(/[^\w.-]+/g, '_')}.md`)
+  const blob = new Blob([r.report_md || ''], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name.endsWith('.md') ? name : `${name}.md`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+// The report's metadata line + typeset body — reused inline and fullscreen.
+function ReportContent({ r }: { r: Report }) {
+  return (
+    <>
+      <div className="mb-3 text-[10px] text-zinc-500">
+        {r.label} · {r.depth} · {r.tier}
+        {r.tokens > 0 && ` · ${r.tokens.toLocaleString()} tokens`}
+        {r.vfs_path && ` · ${r.vfs_path}`}
+      </div>
+      <Markdown remarkPlugins={[remarkGfm]} components={REPORT_MD}>{r.report_md}</Markdown>
+    </>
+  )
+}
+
 function ReportsSection() {
   const [reports, setReports] = useState<ReportSummary[]>([])
   const [selected, setSelected] = useState<Report | null>(null)
@@ -3708,7 +3759,15 @@ function ReportsSection() {
   const [cEnd, setCEnd] = useState(_ymd(0))
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [fullscreen, setFullscreen] = useState(false)
   const poll = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (!fullscreen) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [fullscreen])
 
   const refresh = useCallback(async () => {
     try { setReports((await listReports()).reports) } catch { /* transient */ }
@@ -3862,16 +3921,19 @@ function ReportsSection() {
             selected.status === 'failed' ? (
               <p className="text-[11px] text-red-400">This report failed: {selected.error}</p>
             ) : (
-              <div className="rounded-md border border-zinc-800 bg-zinc-950/40 p-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="text-[10px] text-zinc-500">
-                    {selected.label} · {selected.depth} · {selected.tier}
-                    {selected.tokens > 0 && ` · ${selected.tokens.toLocaleString()} tokens`}
-                    {selected.vfs_path && ` · ${selected.vfs_path}`}
-                  </span>
+              <div className="overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/40">
+                <div className="flex items-center justify-end gap-1 border-b border-zinc-800 px-2 py-1.5">
+                  <button onClick={() => downloadReport(selected)} title="Download as Markdown (.md)"
+                    className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                    <Download className="h-3.5 w-3.5" />
+                  </button>
+                  <button onClick={() => setFullscreen(true)} title="Read fullscreen"
+                    className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                    <Maximize2 className="h-3.5 w-3.5" />
+                  </button>
                 </div>
-                <div className="prose prose-invert prose-sm max-w-none prose-headings:text-zinc-200 prose-p:text-zinc-300 prose-li:text-zinc-300 prose-strong:text-zinc-100 prose-a:text-violet-400">
-                  <Markdown remarkPlugins={[remarkGfm]}>{selected.report_md}</Markdown>
+                <div className="max-h-[32rem] overflow-y-auto px-4 py-3">
+                  <ReportContent r={selected} />
                 </div>
               </div>
             )
@@ -3882,6 +3944,35 @@ function ReportsSection() {
           )}
         </div>
       </div>
+
+      {/* Fullscreen reader */}
+      {fullscreen && selected && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setFullscreen(false)}>
+          <div className="flex max-h-[92vh] w-full max-w-3xl flex-col rounded-lg border border-zinc-800 bg-zinc-900 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-2 border-b border-zinc-800 px-4 py-2.5">
+              <span className="flex min-w-0 items-center gap-1.5 text-xs font-medium text-zinc-300">
+                <ScrollText className="h-3.5 w-3.5 shrink-0 text-violet-400" />
+                <span className="truncate">{selected.title || selected.label}</span>
+              </span>
+              <div className="flex items-center gap-1">
+                <button onClick={() => downloadReport(selected)} title="Download as Markdown (.md)"
+                  className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                  <Download className="h-4 w-4" />
+                </button>
+                <button onClick={() => setFullscreen(false)} title="Close (Esc)"
+                  className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+            <div className="overflow-y-auto px-6 py-5">
+              <ReportContent r={selected} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
