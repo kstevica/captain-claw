@@ -121,7 +121,9 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
   const [keyColumn, setKeyColumn] = useState('_id')
   const [batchSize, setBatchSize] = useState(10)
   const [maxTasks, setMaxTasks] = useState(50)
-  const [lane, setLane] = useState(activeLane)
+  // One lane became many: the reviewed tasks are dealt out across every lane
+  // ticked here, not pushed onto one queue. At least one stays selected.
+  const [lanes, setLanes] = useState<string[]>([activeLane])
   const [newSession, setNewSession] = useState(true)
 
   // Attachments live on the AGENT: the tasks reference the path at run time,
@@ -273,15 +275,26 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
   }
 
   const send = () => {
-    const key = laneKey(agentId, lane)
-    if (!sessions.get(key)) {
-      // The lane has never been opened — open it so the queue has somewhere to land.
-      useChatStore.getState().setActiveLane(agentId, lane)
-    }
+    // Canonical A-B-C order regardless of the order lanes were ticked.
+    const dest = LANES.filter((l) => lanes.includes(l))
+    if (dest.length === 0 || messages.length === 0) return
+    // A lane that has never been opened has no queue to land in — open each
+    // target once so every one of them can receive its share.
+    dest.forEach((l) => {
+      if (!sessions.get(laneKey(agentId, l))) {
+        useChatStore.getState().setActiveLane(agentId, l)
+      }
+    })
+    // Deal the tasks out evenly, one lane after the next (round-robin), so the
+    // per-lane counts never differ by more than one. Within a lane a fresh
+    // session (/new) still precedes every task after its first, so each batch
+    // stays as self-contained as it was on a single lane.
+    const opened = new Set<string>()
     messages.forEach((m, i) => {
-      // A fresh session between tasks is what makes each one self-contained:
-      // no leftover working state from the previous batch.
-      if (newSession && i > 0) enqueue(key, '/new')
+      const l = dest[i % dest.length]
+      const key = laneKey(agentId, l)
+      if (newSession && opened.has(l)) enqueue(key, '/new')
+      opened.add(l)
       enqueue(key, m)
     })
     setSent(messages.length)
@@ -309,6 +322,25 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
   const laneLabel = (l: string) => `${l} - ${agentName}`
   const pendingIn = (l: string) =>
     sessions.get(laneKey(agentId, l))?.queue.filter((q) => q.status === 'pending').length || 0
+
+  // Which lanes get the work, in canonical A-B-C order, and how the tasks split
+  // across them. Counts are simulated with the SAME round-robin `send` uses, so
+  // the breakdown on screen is exactly what will be queued.
+  const targets = LANES.filter((l) => lanes.includes(l))
+  const perLane = targets.map((l) => ({ lane: l, count: 0 }))
+  if (perLane.length) messages.forEach((_, i) => { perLane[i % perLane.length].count++ })
+  const newCount = perLane.reduce((s, p) => s + Math.max(0, p.count - 1), 0)
+  const distText = targets.length <= 1
+    ? `lane ${targets[0] ?? ''}`
+    : perLane.map((p) => `${p.lane}·${p.count}`).join('  ')
+
+  const toggleLane = (l: string) => {
+    setLanes((prev) =>
+      prev.includes(l)
+        // At least one lane must stay selected — the last one won't turn off.
+        ? (prev.length === 1 ? prev : prev.filter((x) => x !== l))
+        : [...prev, l])
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
@@ -448,14 +480,34 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
               </Field>
             </div>
 
-            <Field label="Send to lane">
-              <select value={lane} onChange={(e) => setLane(e.target.value)} className={inputCls}>
-                {LANES.map((l) => (
-                  <option key={l} value={l}>
-                    {laneLabel(l)}{pendingIn(l) ? ` · ${pendingIn(l)} pending` : ''}
-                  </option>
-                ))}
-              </select>
+            <Field label="Distribute to lanes">
+              <div className="flex flex-wrap gap-1.5">
+                {LANES.map((l) => {
+                  const on = lanes.includes(l)
+                  const pend = pendingIn(l)
+                  return (
+                    <button
+                      key={l}
+                      type="button"
+                      onClick={() => toggleLane(l)}
+                      aria-pressed={on}
+                      className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] transition-colors ${
+                        on
+                          ? 'border-violet-500/60 bg-violet-600/20 text-violet-100'
+                          : 'border-zinc-700 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300'
+                      }`}
+                    >
+                      {laneLabel(l)}
+                      {pend ? <span className="text-zinc-500">· {pend} pending</span> : null}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-[10px] leading-relaxed text-zinc-500">
+                {targets.length <= 1
+                  ? 'All tasks go to this one lane.'
+                  : `Tasks are dealt out evenly across ${targets.length} lanes (${distText}).`}
+              </p>
             </Field>
 
             <label className="flex items-center gap-2 text-[11px] text-zinc-400">
@@ -550,8 +602,10 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
                 <div className="flex items-center justify-between border-t border-zinc-800 px-4 py-2.5">
                   <span className="text-[11px] text-zinc-500">
                     {sent > 0
-                      ? `${sent} task${sent === 1 ? '' : 's'} sent to lane ${lane}.`
-                      : `${messages.length} tasks${newSession ? ` + ${Math.max(0, messages.length - 1)} /new` : ''} → lane ${lane}`}
+                      ? (targets.length <= 1
+                          ? `${sent} task${sent === 1 ? '' : 's'} sent to lane ${targets[0] ?? ''}.`
+                          : `${sent} task${sent === 1 ? '' : 's'} distributed across ${targets.join(', ')}.`)
+                      : `${messages.length} tasks${newSession && newCount ? ` + ${newCount} /new` : ''} → ${distText}`}
                   </span>
                   <div className="flex items-center gap-2">
                     {sent > 0 && (
@@ -562,11 +616,15 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
                     )}
                     <button
                       onClick={send}
-                      disabled={messages.length === 0}
+                      disabled={messages.length === 0 || targets.length === 0}
                       className="flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
                     >
                       <ListPlus className="h-3.5 w-3.5" />
-                      {sent > 0 ? 'Send again' : `Send ${messages.length} to ${lane}`}
+                      {sent > 0
+                        ? 'Send again'
+                        : (targets.length <= 1
+                            ? `Send ${messages.length} to ${targets[0] ?? ''}`
+                            : `Send ${messages.length} across ${targets.length} lanes`)}
                     </button>
                   </div>
                 </div>
