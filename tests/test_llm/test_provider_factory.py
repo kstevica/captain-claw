@@ -186,6 +186,39 @@ async def test_acompletion_tolerant_retries_without_temperature(
 
 
 @pytest.mark.asyncio
+async def test_acompletion_tolerant_retries_on_temperature_pinned_to_one(
+    monkeypatch: pytest.MonkeyPatch, _reset_temperature_registry
+):
+    """An OpenAI-compatible "only 1 is allowed" 400 (e.g. kimi-k3 over an OpenAI
+    base path) is recovered like the deprecation case: drop temperature, retry,
+    remember the model. This is the streaming path's failure in the wild."""
+    calls: list[dict] = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs)
+        if "temperature" in kwargs:
+            raise RuntimeError(
+                "litellm.BadRequestError: OpenAIException - "
+                "invalid temperature: only 1 is allowed for this model"
+            )
+        return {"ok": True}
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    result = await llm_mod._acompletion_tolerant(
+        {"model": "kimi-k3", "temperature": 0.7, "messages": [], "stream": True}
+    )
+
+    assert result == {"ok": True}
+    assert len(calls) == 2
+    assert "temperature" not in calls[1]
+    # Learned globally, so later calls (even a fresh provider) omit it up front.
+    assert llm_mod._is_temperature_unsupported_model("openai", "kimi-k3")
+
+
+@pytest.mark.asyncio
 async def test_acompletion_tolerant_reraises_unrelated_error(
     monkeypatch: pytest.MonkeyPatch, _reset_temperature_registry
 ):

@@ -262,16 +262,32 @@ def _safe_json_loads(raw: str) -> dict[str, Any]:
         return {"raw": raw}
 
 
-def _is_temperature_deprecated_error(msg: str) -> bool:
-    """Whether *msg* (lowercased) is a "temperature not accepted" 400.
+def _is_temperature_rejected_error(msg: str) -> bool:
+    """Whether *msg* (lowercased) is a 400 rejecting the ``temperature`` value.
 
-    Covers Anthropic's "``temperature`` is deprecated for this model" as well
-    as generic "temperature is not supported / unsupported" phrasings, while
-    staying narrow enough not to swallow unrelated errors that merely mention
-    the word.
+    All of these are recovered the same way — drop ``temperature`` and let the
+    model fall back to its own default:
+
+    * Anthropic's "``temperature`` is deprecated for this model".
+    * Generic "temperature is not supported / unsupported".
+    * OpenAI-compatible endpoints that pin temperature to 1 and reject anything
+      else — e.g. kimi-k3 served over an OpenAI base path returns
+      "invalid temperature: only 1 is allowed for this model", and OpenAI's own
+      o-series returns "... does not support 0.7 ... Only the default (1) value
+      is supported".
+
+    Every branch also requires the word "temperature", staying narrow enough
+    not to swallow unrelated 400s that merely mention it.
     """
-    return "temperature" in msg and (
-        "deprecat" in msg or "not support" in msg or "unsupported" in msg
+    if "temperature" not in msg:
+        return False
+    return (
+        "deprecat" in msg
+        or "not support" in msg
+        or "unsupported" in msg
+        or "invalid temperature" in msg
+        or "only 1 is allowed" in msg
+        or "only the default" in msg
     )
 
 
@@ -289,10 +305,12 @@ async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) ->
       we drop the constraint and let the model answer normally. We also flag the
       provider so subsequent calls this session skip forcing tool_choice.
 
-    * **temperature** — newer Anthropic models (Opus 4.8, Sonnet 5, the Fable
-      family) reject ``temperature`` outright with a 400 "``temperature`` is
-      deprecated for this model". We retry without it and remember the model
-      globally so later calls omit the parameter up front.
+    * **temperature** — some models reject the temperature VALUE with a 400:
+      newer Anthropic models (Opus 4.8, Sonnet 5, the Fable family) deprecate it
+      outright, and OpenAI-compatible endpoints may pin it to 1 (e.g. kimi-k3:
+      "only 1 is allowed for this model"). We retry without it — the model then
+      uses its own default — and remember it globally so later calls omit the
+      parameter up front.
 
     Each offending parameter costs at most one wasted call.
     """
@@ -319,8 +337,12 @@ async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) ->
                 except Exception:
                     pass
 
-        # Model rejects temperature (Anthropic Opus 4.8 / Sonnet 5 / Fable).
-        if kwargs.get("temperature") is not None and _is_temperature_deprecated_error(msg):
+        # Model rejects the temperature VALUE — either deprecated outright
+        # (Anthropic Opus 4.8 / Sonnet 5 / Fable) or pinned to 1 by an
+        # OpenAI-compatible endpoint (e.g. kimi-k3: "only 1 is allowed for this
+        # model"). Dropping it lets the model use its default; remembering the
+        # model omits it up front on every later call.
+        if kwargs.get("temperature") is not None and _is_temperature_rejected_error(msg):
             retry_kwargs.pop("temperature", None)
             stripped.append("temperature")
             _remember_temperature_unsupported(kwargs.get("model", ""))
@@ -474,12 +496,15 @@ def _is_openai_gpt5_family(provider: str, model: str) -> bool:
     return base.startswith("gpt-5")
 
 
-# Model base-names discovered at runtime to reject ``temperature`` outright.
-# Populated by _acompletion_tolerant when a request 400s with "temperature is
-# deprecated/not supported"; consulted by _is_temperature_unsupported_model so
-# every subsequent call (even from a freshly-built provider instance) omits the
-# parameter instead of paying another failed round-trip. Newer Anthropic models
-# (Opus 4.8, Sonnet 5, …) deprecated temperature the way the Fable family did.
+# Model base-names discovered at runtime to reject the ``temperature`` value.
+# Populated by _acompletion_tolerant when a request 400s because temperature is
+# deprecated, unsupported, or pinned to 1; consulted by
+# _is_temperature_unsupported_model so every subsequent call (even from a
+# freshly-built provider instance) omits the parameter instead of paying another
+# failed round-trip. Covers newer Anthropic models (Opus 4.8, Sonnet 5, …) that
+# deprecated temperature like the Fable family, and OpenAI-compatible endpoints
+# that only accept temperature=1 (e.g. kimi-k3), for which omitting it — and so
+# letting the model use its default of 1 — is exactly right.
 _TEMPERATURE_UNSUPPORTED_MODELS: set[str] = set()
 
 
