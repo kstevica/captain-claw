@@ -623,6 +623,32 @@ class BeingsStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_village_objects
                     ON village_objects(owner_id, state);
+
+                -- Village reports (Iskra report tab): a period's activity is
+                -- deterministically scooped, examined by a temporary Deep-
+                -- Researcher agent, and the narrative saved here + to the VFS
+                -- so it can be re-read later. One row per generated report.
+                CREATE TABLE IF NOT EXISTS being_reports (
+                    id           TEXT PRIMARY KEY,
+                    owner_id     TEXT NOT NULL,
+                    label        TEXT NOT NULL DEFAULT '',
+                    period_start TEXT NOT NULL,
+                    period_end   TEXT NOT NULL,
+                    depth        TEXT NOT NULL DEFAULT 'quick',
+                    tier         TEXT NOT NULL DEFAULT '',
+                    status       TEXT NOT NULL DEFAULT 'collecting',
+                    progress     TEXT NOT NULL DEFAULT '[]',
+                    title        TEXT NOT NULL DEFAULT '',
+                    report_md    TEXT NOT NULL DEFAULT '',
+                    vfs_path     TEXT NOT NULL DEFAULT '',
+                    data_path    TEXT NOT NULL DEFAULT '',
+                    tokens       INTEGER NOT NULL DEFAULT 0,
+                    error        TEXT NOT NULL DEFAULT '',
+                    created_at   TEXT NOT NULL,
+                    finished_at  TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_being_reports
+                    ON being_reports(owner_id, created_at);
                 """
             )
             # Work can pay in coins (space plan Phase 2): the parent picks
@@ -3368,6 +3394,117 @@ class BeingsStore:
         ).fetchone()
         return ({"kind": r["kind"], "data": json.loads(r["data"]), "at": r["at"]}
                 if r else None)
+
+    def events_between(self, owner_id: str, start_iso: str, end_iso: str, *,
+                       kinds: list[str] | None = None) -> list[dict]:
+        """Every event across ALL of an owner's beings within [start, end),
+        oldest first, each tagged with its being's slug + name.
+
+        This is the report scooper's spine: it range-queries the indexed
+        ``at`` column (ISO8601-UTC sorts chronologically) instead of pulling a
+        fixed ``LIMIT`` and filtering in Python — so a busy being's whole
+        window comes back rather than being silently truncated (the trap the
+        older ``report_card`` walks into with ``events(limit=500)``)."""
+        q = ("SELECT b.slug AS slug, b.name AS name, e.kind AS kind, "
+             "e.data AS data, e.at AS at FROM being_events e "
+             "JOIN beings b ON b.id = e.being_id "
+             "WHERE b.owner_id = ? AND e.at >= ? AND e.at < ?")
+        args: list = [owner_id, start_iso, end_iso]
+        if kinds:
+            q += " AND e.kind IN (%s)" % ",".join("?" * len(kinds))
+            args += list(kinds)
+        q += " ORDER BY e.at"
+        rows = self._c().execute(q, args).fetchall()
+        return [{"slug": r["slug"], "name": r["name"], "kind": r["kind"],
+                 "data": json.loads(r["data"]), "at": r["at"]} for r in rows]
+
+    # ── Village reports (Iskra report tab) ───────────────────────────────
+    # A generated report's lifecycle row: collecting → researching → done |
+    # failed. The narrative lives both here (report_md, for the reader) and in
+    # the owner's VFS (vfs_path, for keeping). progress is a short JSON trail.
+    _REPORT_COLS = {"label", "period_start", "period_end", "depth", "tier",
+                    "status", "progress", "title", "report_md", "vfs_path",
+                    "data_path", "tokens", "error", "finished_at"}
+
+    @staticmethod
+    def _report_row(r: sqlite3.Row, *, brief: bool = False) -> dict:
+        d = {"id": r["id"], "label": r["label"],
+             "period_start": r["period_start"], "period_end": r["period_end"],
+             "depth": r["depth"], "tier": r["tier"], "status": r["status"],
+             "title": r["title"], "vfs_path": r["vfs_path"],
+             "data_path": r["data_path"], "tokens": r["tokens"],
+             "error": r["error"], "created_at": r["created_at"],
+             "finished_at": r["finished_at"],
+             "progress": json.loads(r["progress"] or "[]")}
+        if not brief:
+            d["report_md"] = r["report_md"]
+        return d
+
+    def create_report(self, owner_id: str, *, label: str, period_start: str,
+                       period_end: str, depth: str = "quick", tier: str = "",
+                       now: datetime | None = None) -> dict:
+        now = now or _utcnow()
+        rid = uuid.uuid4().hex
+        with self._lock:
+            self._c().execute(
+                "INSERT INTO being_reports (id, owner_id, label, period_start,"
+                " period_end, depth, tier, status, progress, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (rid, owner_id, label, period_start, period_end, depth, tier,
+                 "collecting", "[]", _iso(now)))
+            self._c().commit()
+        return self.get_report(owner_id, rid)
+
+    def update_report(self, report_id: str, **fields) -> None:
+        fields = {k: v for k, v in fields.items() if k in self._REPORT_COLS}
+        if not fields:
+            return
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        with self._lock:
+            self._c().execute(
+                f"UPDATE being_reports SET {cols} WHERE id = ?",
+                (*fields.values(), report_id))
+            self._c().commit()
+
+    def append_report_progress(self, report_id: str, msg: str,
+                               now: datetime | None = None) -> None:
+        now = now or _utcnow()
+        with self._lock:
+            row = self._c().execute(
+                "SELECT progress FROM being_reports WHERE id = ?",
+                (report_id,)).fetchone()
+            if not row:
+                return
+            prog = json.loads(row["progress"] or "[]")
+            prog.append({"at": _iso(now), "msg": msg})
+            self._c().execute(
+                "UPDATE being_reports SET progress = ? WHERE id = ?",
+                (json.dumps(prog[-60:]), report_id))
+            self._c().commit()
+
+    def get_report(self, owner_id: str, report_id: str) -> dict:
+        r = self._c().execute(
+            "SELECT * FROM being_reports WHERE id = ? AND owner_id = ?",
+            (report_id, owner_id)).fetchone()
+        if not r:
+            raise BeingError("no such report", 404)
+        return self._report_row(r)
+
+    def list_reports(self, owner_id: str, limit: int = 50) -> list[dict]:
+        rows = self._c().execute(
+            "SELECT * FROM being_reports WHERE owner_id = ?"
+            " ORDER BY created_at DESC LIMIT ?", (owner_id, limit)).fetchall()
+        return [self._report_row(r, brief=True) for r in rows]
+
+    def delete_report(self, owner_id: str, report_id: str) -> dict:
+        with self._lock:
+            cur = self._c().execute(
+                "DELETE FROM being_reports WHERE id = ? AND owner_id = ?",
+                (report_id, owner_id))
+            self._c().commit()
+        if not cur.rowcount:
+            raise BeingError("no such report", 404)
+        return {"ok": True}
 
     # ── Life support (Phase 1: beings loop bookkeeping) ──────────────
 

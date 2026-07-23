@@ -45,6 +45,8 @@ import {
   setAvatar, setCadence, setCognition, setCompactMode, setHouseRules, setInstincts, setMediaDiet,
   setStage, setVentureState,
   tickBeing, wakeBeing, GRANT_AMOUNTS, TICK_INTERVAL_CHOICES,
+  createReport, listReports, getReport, deleteReport,
+  type Report, type ReportSummary,
 } from '../services/beings'
 import { PROVIDERS, INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS } from '../services/tierConfig'
 import { CtxSelect } from '../components/common/CtxSelect'
@@ -3676,6 +3678,214 @@ function LettersObservatory({ data }: { data: LettersOverview | null }) {
   )
 }
 
+// ── Reports: a period of the village, scooped deterministically and narrated
+//    by a temporary Deep-Researcher agent (operator + story). On-demand; each
+//    result is saved (row + VFS) and re-readable here later.
+const REPORT_PERIODS = [
+  'today', 'yesterday', 'this week', 'last 7 days', 'this month', 'last 30 days',
+] as const
+
+function _ymd(offsetDays = 0): string {
+  const d = new Date()
+  d.setDate(d.getDate() - offsetDays)
+  return d.toISOString().slice(0, 10)
+}
+
+function ReportStatusBadge({ status }: { status: string }) {
+  if (status === 'done')
+    return <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-emerald-400"><Check className="h-3 w-3" /> ready</span>
+  if (status === 'failed')
+    return <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-red-400"><X className="h-3 w-3" /> failed</span>
+  return <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-amber-400"><Loader2 className="h-3 w-3 animate-spin" /> {status}</span>
+}
+
+function ReportsSection() {
+  const [reports, setReports] = useState<ReportSummary[]>([])
+  const [selected, setSelected] = useState<Report | null>(null)
+  const [period, setPeriod] = useState<string>('yesterday')
+  const [depth, setDepth] = useState<'quick' | 'deep'>('quick')
+  const [cStart, setCStart] = useState(_ymd(7))
+  const [cEnd, setCEnd] = useState(_ymd(0))
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const poll = useRef<number | null>(null)
+
+  const refresh = useCallback(async () => {
+    try { setReports((await listReports()).reports) } catch { /* transient */ }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+    return () => { if (poll.current) window.clearInterval(poll.current) }
+  }, [refresh])
+
+  // While a report is generating, poll it until it settles, then open it.
+  useEffect(() => {
+    if (!busyId) return
+    poll.current = window.setInterval(async () => {
+      try {
+        const { report } = await getReport(busyId)
+        setReports((rs) => rs.map((r) => (r.id === report.id ? report : r)))
+        if (report.status === 'done' || report.status === 'failed') {
+          if (poll.current) window.clearInterval(poll.current)
+          setBusyId(null)
+          if (report.status === 'done') setSelected(report)
+          void refresh()
+        }
+      } catch { /* keep polling */ }
+    }, 2500)
+    return () => { if (poll.current) window.clearInterval(poll.current) }
+  }, [busyId, refresh])
+
+  const generate = async () => {
+    setError('')
+    try {
+      const isCustom = period === 'custom'
+      const { report } = await createReport(
+        period, depth, isCustom ? cStart : undefined, isCustom ? cEnd : undefined)
+      setReports((rs) => [report, ...rs])
+      setSelected(null)
+      setBusyId(report.id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'could not start the report')
+    }
+  }
+
+  const open = async (id: string) => {
+    try { setSelected((await getReport(id)).report) } catch { /* ignore */ }
+  }
+  const remove = async (id: string) => {
+    try {
+      await deleteReport(id)
+      setReports((rs) => rs.filter((r) => r.id !== id))
+      if (selected?.id === id) setSelected(null)
+    } catch { /* ignore */ }
+  }
+
+  const busy = reports.find((r) => r.id === busyId) || null
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-300">
+        <ScrollText className="h-3.5 w-3.5 text-violet-400" /> Reports — the village, examined
+        <span className="ml-2 text-[10px] font-normal text-zinc-500">
+          a Deep-Researcher reads the ledger and writes the story + the health
+        </span>
+      </div>
+
+      {/* Period + depth + generate */}
+      <div className="mb-3 flex flex-wrap items-center gap-1.5">
+        {REPORT_PERIODS.map((p) => (
+          <button key={p} onClick={() => setPeriod(p)}
+            className={`rounded-md border px-2.5 py-1 text-[11px] font-medium ${period === p ? 'border-violet-500/60 bg-violet-500/10 text-violet-300' : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}>
+            {p}
+          </button>
+        ))}
+        <button onClick={() => setPeriod('custom')}
+          className={`flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px] font-medium ${period === 'custom' ? 'border-violet-500/60 bg-violet-500/10 text-violet-300' : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}>
+          <CalendarDays className="h-3 w-3" /> custom
+        </button>
+        {period === 'custom' && (
+          <span className="flex items-center gap-1 text-[11px] text-zinc-400">
+            <input type="date" value={cStart} onChange={(e) => setCStart(e.target.value)}
+              className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-200" />
+            →
+            <input type="date" value={cEnd} onChange={(e) => setCEnd(e.target.value)}
+              className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-200" />
+          </span>
+        )}
+        <span className="mx-1 h-4 w-px bg-zinc-700" />
+        <div className="inline-flex overflow-hidden rounded-md border border-zinc-700">
+          {(['quick', 'deep'] as const).map((d) => (
+            <button key={d} onClick={() => setDepth(d)}
+              title={d === 'quick' ? 'One strong pass — fast' : 'Three researchers (behaviour, social, health) + a synthesis — richer, slower'}
+              className={`px-2.5 py-1 text-[11px] font-medium ${depth === d ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:bg-zinc-800'}`}>
+              {d === 'quick' ? 'Quick' : 'Deep'}
+            </button>
+          ))}
+        </div>
+        <button onClick={() => void generate()} disabled={!!busyId}
+          className="flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-50">
+          {busyId ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+          {busyId ? 'Researching…' : 'Generate'}
+        </button>
+      </div>
+
+      {error && <p className="mb-2 text-[11px] text-red-400">{error}</p>}
+
+      {/* Live progress while a report is being written */}
+      {busy && busy.status !== 'done' && (
+        <div className="mb-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-amber-300">
+            <Loader2 className="h-3 w-3 animate-spin" /> {busy.label} · {busy.depth}
+          </div>
+          <div className="mt-1 space-y-0.5">
+            {busy.progress.slice(-4).map((p, i) => (
+              <div key={i} className="text-[10px] text-zinc-500">· {p.msg}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="grid gap-3 md:grid-cols-[16rem_1fr]">
+        {/* Past reports */}
+        <div className="space-y-1">
+          {reports.length === 0 && !busyId ? (
+            <p className="text-[11px] text-zinc-600">
+              No reports yet. Pick a period and Generate — it'll appear here to re-read.
+            </p>
+          ) : (
+            reports.map((r) => (
+              <div key={r.id}
+                onClick={() => r.status === 'done' && void open(r.id)}
+                className={`group flex items-center gap-2 rounded-md border px-2 py-1.5 ${r.status === 'done' ? 'cursor-pointer hover:bg-zinc-800/60' : ''} ${selected?.id === r.id ? 'border-violet-500/50 bg-violet-500/5' : 'border-zinc-800'}`}>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[11px] font-medium text-zinc-300">
+                    {r.title || r.label}
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                    <span>{r.label}</span> · <span>{r.depth}</span> · <ReportStatusBadge status={r.status} />
+                  </div>
+                </div>
+                <button onClick={(e) => { e.stopPropagation(); void remove(r.id) }}
+                  className="opacity-0 transition group-hover:opacity-100" title="Delete report">
+                  <Trash2 className="h-3 w-3 text-zinc-600 hover:text-red-400" />
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Selected report */}
+        <div className="min-w-0">
+          {selected ? (
+            selected.status === 'failed' ? (
+              <p className="text-[11px] text-red-400">This report failed: {selected.error}</p>
+            ) : (
+              <div className="rounded-md border border-zinc-800 bg-zinc-950/40 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-[10px] text-zinc-500">
+                    {selected.label} · {selected.depth} · {selected.tier}
+                    {selected.tokens > 0 && ` · ${selected.tokens.toLocaleString()} tokens`}
+                    {selected.vfs_path && ` · ${selected.vfs_path}`}
+                  </span>
+                </div>
+                <div className="prose prose-invert prose-sm max-w-none prose-headings:text-zinc-200 prose-p:text-zinc-300 prose-li:text-zinc-300 prose-strong:text-zinc-100 prose-a:text-violet-400">
+                  <Markdown remarkPlugins={[remarkGfm]}>{selected.report_md}</Markdown>
+                </div>
+              </div>
+            )
+          ) : (
+            <div className="flex h-full min-h-[6rem] items-center justify-center rounded-md border border-dashed border-zinc-800 text-[11px] text-zinc-600">
+              {busyId ? 'Writing the report…' : 'Select a report to read it.'}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // The village's own words — a per-owner description shown atop the public
 // /village page. Collapsed by default; self-contained load/save. Can be drafted
 // by one of the beings' own agents (in its voice) via "Recommend a description".
@@ -4565,6 +4775,7 @@ export function BeingsPage() {
   const [village, setVillage] = useState<VillageItem[]>([])
   const [showLetters, setShowLetters] = useState(false)
   const [letters, setLetters] = useState<LettersOverview | null>(null)
+  const [showReports, setShowReports] = useState(false)
   const timer = useRef<number | null>(null)
   const villageOn = useRef(false)
   villageOn.current = showVillage
@@ -4678,6 +4889,15 @@ export function BeingsPage() {
                 <Users className="h-3.5 w-3.5" /> Village
               </button>
             )}
+            {beings.length >= 1 && (
+              <button
+                onClick={() => setShowReports(v => !v)}
+                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-zinc-800 ${showReports ? 'border-violet-500/50 text-violet-300' : 'border-zinc-700 text-zinc-300'}`}
+                title="Deep-Researcher reports on the village over a period — behaviour, story and health"
+              >
+                <ScrollText className="h-3.5 w-3.5" /> Reports
+              </button>
+            )}
             <input ref={importInput} type="file" accept="application/json,.json"
               className="hidden" onChange={onImportFile} />
             <button
@@ -4709,6 +4929,8 @@ export function BeingsPage() {
         {showBoard && <EarningBoard onChanged={() => void load(false)} />}
 
         {showLetters && <LettersObservatory data={letters} />}
+
+        {showReports && <ReportsSection />}
 
         {showVillage && (
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">

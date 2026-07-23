@@ -12,6 +12,8 @@ HTTPException.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -20,12 +22,17 @@ from captain_claw.flight_deck import being_genome as genome_mod
 from captain_claw.flight_deck import being_earning
 from captain_claw.flight_deck import being_life
 from captain_claw.flight_deck import being_mind
+from captain_claw.flight_deck import being_reports
 from captain_claw.flight_deck import being_selfmod
 from captain_claw.flight_deck import being_society
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck.beings import BeingError, get_store
 
 router = APIRouter(prefix="/fd/beings", tags=["beings"])
+
+# Hold a reference to each in-flight report task so the event loop doesn't
+# garbage-collect it mid-run (asyncio only keeps weak refs to bare tasks).
+_REPORT_TASKS: set = set()
 
 
 def _run(fn, *args, **kwargs):
@@ -723,6 +730,67 @@ async def import_being(manifest: dict, user: dict = Depends(get_current_user)):
     slug = result["being"]["slug"]
     return {"ok": True, "warnings": result["warnings"],
             "being": _run(get_store().vitals, user["id"], slug)}
+
+
+# ── Village reports (Iskra report tab) ───────────────────────────────────
+# On demand, a period's activity is deterministically scooped and handed to a
+# temporary Deep-Researcher agent that writes an operator+story narrative; the
+# result is saved (row + VFS) to re-read later. Registered ABOVE /{slug} so the
+# literal "reports" path is never read as a being slug.
+
+class ReportRequest(BaseModel):
+    period: str = "yesterday"        # today|yesterday|this week|last 7 days|…|custom
+    depth: str = "quick"             # quick (one pass) | deep (facet fan-out)
+    start: str | None = None         # custom: YYYY-MM-DD (local)
+    end: str | None = None
+
+
+@router.post("/reports")
+async def create_report(body: ReportRequest,
+                        user: dict = Depends(get_current_user)):
+    """Kick off a report for a period. Returns the row immediately; the agent
+    runs in the background — poll GET /reports/{id} for status + the result."""
+    depth = "deep" if str(body.depth).lower() == "deep" else "quick"
+    try:
+        start, end, display = being_reports.resolve_period(
+            body.period, start=body.start, end=body.end)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    db = _db_optional()
+    if db is None:
+        raise HTTPException(503, "the report agent needs the Flight Deck DB "
+                            "(model tiers) — unavailable in this mode")
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    tiers_map, _env = await _load_owner_tiers(db, user["id"])
+    tier_name, provider = being_reports.build_owner_provider(tiers_map)
+    if provider is None:
+        raise HTTPException(400, "no model tier is configured — set up your "
+                            "Library tiers first (a 'reason' tier is ideal)")
+    rep = _run(get_store().create_report, user["id"], label=display,
+               period_start=start, period_end=end, depth=depth, tier=tier_name)
+    task = asyncio.create_task(being_reports.run_report(
+        get_store(), user["id"], rep["id"], provider=provider,
+        tier_name=tier_name))
+    _REPORT_TASKS.add(task)
+    task.add_done_callback(_REPORT_TASKS.discard)
+    return {"report": rep}
+
+
+@router.get("/reports")
+async def list_reports(limit: int = 50,
+                       user: dict = Depends(get_current_user)):
+    return {"reports": _run(get_store().list_reports, user["id"], limit)}
+
+
+@router.get("/reports/{report_id}")
+async def get_report(report_id: str, user: dict = Depends(get_current_user)):
+    return {"report": _run(get_store().get_report, user["id"], report_id)}
+
+
+@router.delete("/reports/{report_id}")
+async def delete_report(report_id: str,
+                        user: dict = Depends(get_current_user)):
+    return _run(get_store().delete_report, user["id"], report_id)
 
 
 @router.get("/{slug}")

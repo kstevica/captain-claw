@@ -254,6 +254,43 @@ export interface VillageItem {
 export const getVillage = (limit = 40) =>
   fdFetch<{ items: VillageItem[] }>(`/beings/village?limit=${limit}`)
 
+// ── Village reports (Iskra report tab): a period scooped + narrated by a
+//    temporary Deep-Researcher agent, saved to re-read later. ──
+export interface ReportProgress { at: string; msg: string }
+export interface ReportSummary {
+  id: string
+  label: string
+  period_start: string
+  period_end: string
+  depth: string
+  tier: string
+  status: string          // collecting | researching | done | failed
+  title: string
+  vfs_path: string
+  data_path: string
+  tokens: number
+  error: string
+  created_at: string
+  finished_at: string | null
+  progress: ReportProgress[]
+}
+export interface Report extends ReportSummary {
+  report_md: string
+}
+export const listReports = (limit = 50) =>
+  fdFetch<{ reports: ReportSummary[] }>(`/beings/reports?limit=${limit}`)
+export const getReport = (id: string) =>
+  fdFetch<{ report: Report }>(`/beings/reports/${id}`)
+export const createReport = (
+  period: string, depth: 'quick' | 'deep', start?: string, end?: string,
+) =>
+  fdFetch<{ report: ReportSummary }>('/beings/reports', {
+    method: 'POST',
+    body: JSON.stringify({ period, depth, start: start || null, end: end || null }),
+  })
+export const deleteReport = (id: string) =>
+  fdFetch<{ ok: boolean }>(`/beings/reports/${id}`, { method: 'DELETE' })
+
 // ── Letters observatory: being↔being conversations (+ refused reaches) ──
 export interface LetterParticipant {
   slug: string
