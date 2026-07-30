@@ -206,7 +206,15 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
     @fd.get("/fd/archetypes/mine")
     async def my_archetypes(authorization: str | None = Header(default=None)):
         _need_auth(authorization)
-        return list(log["archetypes"].values())
+        return [{**a, "source": "user"} for a in log["archetypes"].values()]
+
+    @fd.get("/fd/archetypes")
+    async def merged_archetypes(authorization: str | None = Header(default=None)):
+        _need_auth(authorization)
+        base = [{"id": "deep-researcher", "role": "Deep Researcher", "source": "base"},
+                {"id": "analyst", "role": "Analyst", "source": "base"}]
+        mine = [{**a, "source": "user"} for a in log["archetypes"].values()]
+        return {"archetypes": base + mine}
 
     @fd.post("/fd/basna/route")
     async def basna_route(body: dict, authorization: str | None = Header(default=None)):
@@ -512,7 +520,15 @@ async def test_house_style_forge_save_and_pinned_cast(bff):
 
     r = await client.post("/api/archetypes", json=drafts[0], headers=h)
     assert r.status_code == 200
-    mine = (await client.get("/api/archetypes", headers=h)).json()["archetypes"]
+    # The default cast pool is the MERGED registry: system (source=base) +
+    # the saved house archetype (source=user), each tagged.
+    pool = (await client.get("/api/archetypes", headers=h)).json()["archetypes"]
+    by_source = {a["source"] for a in pool}
+    assert by_source == {"base", "user"}
+    assert any(a["id"] == "house-analyst" and a["source"] == "user" for a in pool)
+    assert any(a["source"] == "base" for a in pool)
+    # ?mine=true narrows to just the user's own (the House-style save target).
+    mine = (await client.get("/api/archetypes?mine=true", headers=h)).json()["archetypes"]
     assert [a["id"] for a in mine] == ["house-analyst"]
 
     stream_id = (await client.post("/api/streams", json={"title": "cast"},

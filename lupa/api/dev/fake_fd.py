@@ -414,7 +414,23 @@ async def put_archetype(aid: str, body: dict,
 @app.get("/fd/archetypes/mine")
 async def my_archetypes(authorization: str | None = Header(default=None)):
     _user_from(authorization)
-    return list(_ARCHETYPES.values())
+    return [{**a, "source": "user"} for a in _ARCHETYPES.values()]
+
+
+_BASE_ARCHETYPES = [
+    {"id": "deep-researcher", "role": "Deep Researcher", "source": "base"},
+    {"id": "analyst", "role": "Analyst", "source": "base"},
+    {"id": "editor-writer", "role": "Editor / Writer", "source": "base"},
+    {"id": "skeptic", "role": "Skeptic", "source": "base"},
+    {"id": "domain-expert", "role": "Domain Expert", "source": "base"},
+]
+
+
+@app.get("/fd/archetypes")
+async def merged_archetypes(authorization: str | None = Header(default=None)):
+    _user_from(authorization)
+    mine = [{**a, "source": "user"} for a in _ARCHETYPES.values()]
+    return {"archetypes": _BASE_ARCHETYPES + mine}
 
 
 # ── second opinion (Basna ensemble) ──────────────────────────────────

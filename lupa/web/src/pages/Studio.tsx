@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { BadgeCheck, CircleAlert, Factory, Loader2, Rocket, Wand2 } from 'lucide-react'
 import { api, post } from '../api'
+import ManifestEditor from '../components/ManifestEditor'
+
+type Manifest = Record<string, unknown>
 
 interface PackSummary {
   slug: string; status: string; version: number; owner_id: string
@@ -34,7 +37,7 @@ export default function Studio() {
   const [name, setName] = useState('')
 
   // Editors
-  const [manifestText, setManifestText] = useState('')
+  const [manifest, setManifest] = useState<Manifest | null>(null)
   const [genInstructions, setGenInstructions] = useState('')
   const [busy, setBusy] = useState('')
 
@@ -50,7 +53,7 @@ export default function Studio() {
     delete (m as Record<string, unknown>).slug
     delete (m as Record<string, unknown>).pack_status
     delete (m as Record<string, unknown>).pack_version
-    setManifestText(JSON.stringify(m, null, 2))
+    setManifest(m)
     return d
   }, [])
 
@@ -84,10 +87,9 @@ export default function Studio() {
   }, 'create')
 
   const saveManifest = () => act(async () => {
-    let m: unknown
-    try { m = JSON.parse(manifestText) } catch { throw new Error('The manifest is not valid JSON.') }
+    if (!manifest) return
     await api(`/api/packs/${selected}`, { method: 'PUT',
-                                          body: JSON.stringify({ manifest: m }) })
+                                          body: JSON.stringify({ manifest }) })
   }, 'save')
 
   const generate = () => act(async () => {
@@ -188,16 +190,11 @@ export default function Studio() {
           </div>
 
           {/* Review */}
-          <div className="rounded-xl border border-[var(--lp-border)] bg-[var(--lp-surface)] p-4 space-y-2">
+          <div className="rounded-xl border border-[var(--lp-border)] bg-[var(--lp-surface)] p-4 space-y-3">
             <div className="text-sm font-semibold">Review the manifest</div>
-            <textarea
-              value={manifestText}
-              onChange={(e) => setManifestText(e.target.value)}
-              rows={14} spellCheck={false}
-              className="w-full rounded-lg bg-[var(--lp-bg)] border border-[var(--lp-border)] px-3 py-2 text-xs font-mono outline-none focus:border-[var(--lp-accent)] resize-y"
-            />
+            {manifest && <ManifestEditor value={manifest} onChange={setManifest} />}
             <div className="flex justify-end">
-              <button onClick={() => void saveManifest()} disabled={busy !== ''}
+              <button onClick={() => void saveManifest()} disabled={busy !== '' || !manifest}
                       className="rounded-lg px-3.5 py-1.5 text-sm border border-[var(--lp-border)] hover:border-[var(--lp-accent)] disabled:opacity-40">
                 Save manifest
               </button>

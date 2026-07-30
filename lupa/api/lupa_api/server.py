@@ -912,13 +912,22 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         return {"drafts": drafts}
 
     @app.get("/api/archetypes")
-    async def list_archetypes(request: Request, user: dict = Depends(require_user)):
-        """The user's own (saved) archetypes — the pool the cast picker offers."""
-        r = await _fd(request).get("/fd/archetypes/mine", headers=_auth_headers(request))
+    async def list_archetypes(request: Request, mine: bool = False,
+                              user: dict = Depends(require_user)):
+        """The cast pool the picker offers. Default: the MERGED registry —
+        base/system archetypes + the user's own house cast + shared — each
+        tagged with its `source`. `?mine=true` narrows to the user's own
+        (the House-style save target)."""
+        path = "/fd/archetypes/mine" if mine else "/fd/archetypes"
+        r = await _fd(request).get(path, headers=_auth_headers(request))
         if r.status_code != 200:
             raise _fd_error(r)
         out = r.json()
-        return {"archetypes": out if isinstance(out, list) else out.get("archetypes", [])}
+        items = out if isinstance(out, list) else out.get("archetypes", [])
+        slim = [{"id": a.get("id", ""), "role": a.get("role") or a.get("id", ""),
+                 "source": a.get("source", "user")}
+                for a in items if a.get("id")]
+        return {"archetypes": slim}
 
     @app.post("/api/archetypes")
     async def save_archetype(request: Request, user: dict = Depends(require_user)):

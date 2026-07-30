@@ -26,7 +26,7 @@ interface StreamSettings {
   archetype_ids?: string[]
 }
 
-interface Archetype { id: string; role?: string }
+interface Archetype { id: string; role?: string; source?: string }
 
 type ContinueKind = 'continue' | 'revise' | 'fill_gaps'
 
@@ -305,6 +305,8 @@ function SettingsPanel({ streamId, settings, onSaved }:
   const sameCast = settings.same_cast ?? true
   const maxAgents = settings.max_agents ?? 6
   const pinned = new Set(settings.archetype_ids ?? [])
+  const sortedCast = [...cast].sort((a, b) =>
+    (a.role ?? a.id).localeCompare(b.role ?? b.id))
 
   const toggleCast = (id: string) => {
     const next = new Set(pinned)
@@ -350,19 +352,32 @@ function SettingsPanel({ streamId, settings, onSaved }:
       {cast.length > 0 && (
         <div>
           <div className="text-xs text-[var(--lp-text-dim)] mb-1.5">
-            House cast — pin your forged team for round 1 (empty = auto-route)
+            Cast — pin a team for round 1 (empty = the Lead auto-routes over everything)
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {cast.map((a) => (
-              <button key={a.id} type="button" onClick={() => toggleCast(a.id)}
-                      className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                        pinned.has(a.id)
-                          ? 'border-[var(--lp-accent)] text-[var(--lp-accent)]'
-                          : 'border-[var(--lp-border)] text-[var(--lp-text-dim)] hover:text-[var(--lp-text)]'}`}>
-                {a.role ?? a.id}
-              </button>
-            ))}
-          </div>
+          {/* House cast first, then system archetypes. */}
+          {(['user', 'system'] as const).map((group) => {
+            const items = sortedCast.filter((a) =>
+              group === 'user' ? a.source !== 'base' : a.source === 'base')
+            if (items.length === 0) return null
+            return (
+              <div key={group} className="mb-1.5">
+                <div className="text-[10px] uppercase tracking-wide text-[var(--lp-text-dim)] mb-1">
+                  {group === 'user' ? 'Your house cast' : 'System archetypes'}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {items.map((a) => (
+                    <button key={a.id} type="button" onClick={() => toggleCast(a.id)}
+                            className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                              pinned.has(a.id)
+                                ? 'border-[var(--lp-accent)] text-[var(--lp-accent)]'
+                                : 'border-[var(--lp-border)] text-[var(--lp-text-dim)] hover:text-[var(--lp-text)]'}`}>
+                      {a.role ?? a.id}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
