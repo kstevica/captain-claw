@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { Plus, RadioTower } from 'lucide-react'
 import { api } from '../api'
 import { usePack, useStreams, useVocab } from '../stores'
+import HouseStyle from '../components/HouseStyle'
 
 interface InboxRound {
   stream_id: string; stream_title: string; session_id: string
@@ -75,6 +76,8 @@ export default function Streams({ onOpen }: { onOpen: (id: string) => void }) {
           <Plus size={15} /> {v('new_stream', 'New stream')}
         </button>
       </form>
+
+      <HouseStyle />
 
       {streams.length === 0 ? (
         <div className="space-y-6">

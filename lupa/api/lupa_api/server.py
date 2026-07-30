@@ -133,6 +133,7 @@ class SettingsBody(BaseModel):
     quality_profile: str | None = None
     same_cast: bool | None = None
     max_agents: int | None = Field(default=None, ge=1, le=10)
+    archetype_ids: list[str] | None = None  # pinned house cast; [] clears
 
 
 class ApproveBody(BaseModel):
@@ -329,7 +330,7 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         settings = _stream_settings(stream)
         sent = body.model_dump(exclude_unset=True)
         for key, value in sent.items():
-            if value is None or value == "":
+            if value is None or value == "" or value == []:
                 settings.pop(key, None)  # explicit null/empty → back to default
             else:
                 settings[key] = value
@@ -358,11 +359,13 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             if rounds:
                 raise HTTPException(409, "stream already has rounds — continue it instead")
             max_agents = body.max_agents or int(settings.get("max_agents", 6))
-            r = await _fd(request).post(
-                "/fd/vatra/start",
-                json={"intent": body.brief, "title": stream["title"],
-                      "max_agents": max_agents, "quality": quality},
-                headers=_auth_headers(request))
+            payload = {"intent": body.brief, "title": stream["title"],
+                       "max_agents": max_agents, "quality": quality}
+            cast = settings.get("archetype_ids") or []
+            if cast:
+                payload["archetype_ids"] = cast  # pinned house team
+            r = await _fd(request).post("/fd/vatra/start", json=payload,
+                                        headers=_auth_headers(request))
             if r.status_code != 200:
                 raise _fd_error(r)
             sid = r.json()["session_id"]
@@ -538,6 +541,120 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             raise HTTPException(404, "stream not found")
         return await _fd_get(request, "/fd/vfs/read",
                              {"project": stream["vfs_project"], "path": path})
+
+    # ── house style: forge + archetypes ──────────────────────────────
+
+    @app.post("/api/forge")
+    async def forge(request: Request, user: dict = Depends(require_user)):
+        """Multipart proxy to FD's archetype forge: instructions + documents →
+        a batch of UNPERSISTED archetype drafts ("your methodology, encoded").
+        The client reviews and saves the keepers via POST /api/archetypes."""
+        form = await request.form()
+        data = {k: str(form.get(k) or "") for k in
+                ("instructions", "provider", "model", "count") if form.get(k)}
+        files = []
+        for uf in form.getlist("files"):
+            if hasattr(uf, "read"):
+                files.append(("files", (uf.filename or "doc",
+                                        await uf.read(),
+                                        uf.content_type or "application/octet-stream")))
+        r = await _fd(request).post("/fd/archetypes/forge", data=data,
+                                    files=files or None,
+                                    headers=_auth_headers(request), timeout=300.0)
+        if r.status_code != 200:
+            raise _fd_error(r)
+        out = r.json()
+        drafts = out if isinstance(out, list) else out.get("archetypes") or out.get("drafts") or []
+        return {"drafts": drafts}
+
+    @app.get("/api/archetypes")
+    async def list_archetypes(request: Request, user: dict = Depends(require_user)):
+        """The user's own (saved) archetypes — the pool the cast picker offers."""
+        r = await _fd(request).get("/fd/archetypes/mine", headers=_auth_headers(request))
+        if r.status_code != 200:
+            raise _fd_error(r)
+        out = r.json()
+        return {"archetypes": out if isinstance(out, list) else out.get("archetypes", [])}
+
+    @app.post("/api/archetypes")
+    async def save_archetype(request: Request, user: dict = Depends(require_user)):
+        """Persist one forged draft (PUT upsert on FD, so re-saving is safe)."""
+        body = await request.json()
+        arch_id = str(body.get("id") or "").strip()
+        if not arch_id:
+            raise HTTPException(400, "archetype id is required")
+        r = await _fd(request).put(f"/fd/archetypes/{arch_id}", json=body,
+                                   headers=_auth_headers(request))
+        if r.status_code != 200:
+            raise _fd_error(r)
+        return r.json()
+
+    # ── second opinion (Basna ensemble over the same brief) ──────────
+
+    async def _run_second_opinion(state, vatra_sid: str, basna_sid: str,
+                                  token: str) -> None:
+        """Background: Basna's execute is synchronous — run it off-request and
+        record the outcome. The UI polls the session for truth/confidence."""
+        try:
+            r = await state.fd.post("/fd/basna/execute",
+                                    json={"session_id": basna_sid},
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    timeout=3600.0)
+            await state.db.set_second_opinion_status(
+                vatra_sid, "done" if r.status_code == 200 else "error")
+        except Exception:  # noqa: BLE001
+            log.exception("second-opinion execute failed for %s", vatra_sid)
+            await state.db.set_second_opinion_status(vatra_sid, "error")
+
+    @app.post("/api/commissions/{session_id}/second-opinion")
+    async def start_second_opinion(session_id: str, request: Request,
+                                   user: dict = Depends(require_user)):
+        db = _db(request)
+        if not await db.stream_for_session(session_id, user["id"]):
+            raise HTTPException(404, "commission not found")
+        existing = await db.get_second_opinion(session_id, user["id"])
+        if existing:
+            return existing  # idempotent — one ensemble pass per round
+        detail = await _fd_get(request, f"/fd/basna/sessions/{session_id}")
+        intent = str(detail.get("intent") or "").strip()
+        if not intent:
+            raise HTTPException(409, "the commission has no brief to re-run")
+        r = await _fd(request).post("/fd/basna/route", json={"intent": intent},
+                                    headers=_auth_headers(request), timeout=120.0)
+        if r.status_code != 200:
+            raise _fd_error(r)
+        data = r.json()
+        basna_sid = str(data.get("session_id") or data.get("id") or "")
+        if not basna_sid:
+            raise HTTPException(502, "FD route returned no session id")
+        rec = await db.create_second_opinion(session_id, basna_sid, user["id"])
+        # Prefer a minted token (survives the 15-min access TTL on long runs).
+        secret = os.environ.get("FD_JWT_SECRET", "")
+        token = _mint_owner_token(user["id"], secret) if secret else _bearer(request)
+        state = request.app.state
+        task = asyncio.create_task(
+            _run_second_opinion(state, session_id, basna_sid, token))
+        state.bg_tasks = getattr(state, "bg_tasks", set())
+        state.bg_tasks.add(task)
+        task.add_done_callback(state.bg_tasks.discard)
+        return rec
+
+    @app.get("/api/commissions/{session_id}/second-opinion")
+    async def get_second_opinion(session_id: str, request: Request,
+                                 user: dict = Depends(require_user)):
+        db = _db(request)
+        if not await db.stream_for_session(session_id, user["id"]):
+            raise HTTPException(404, "commission not found")
+        rec = await db.get_second_opinion(session_id, user["id"])
+        if not rec:
+            return {"second_opinion": None}
+        out = {"second_opinion": rec}
+        detail = await _fd_try(request,
+                               f"/fd/basna/sessions/{rec['basna_session_id']}")
+        if detail:
+            out["truth"] = detail.get("truth") or ""
+            out["confidence"] = detail.get("confidence")
+        return out
 
     # ── standing briefs ──────────────────────────────────────────────
 

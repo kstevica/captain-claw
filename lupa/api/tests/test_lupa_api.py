@@ -8,12 +8,13 @@ progress → facts → report file — without a running Captain.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import httpx
 import jwt as pyjwt
 import pytest
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 
 from lupa_api.server import create_app
 
@@ -160,6 +161,56 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
                            "usage": {"prompt_tokens": 1000},
                            "at": "2026-07-30T10:00:00+00:00"}],
                 "count": 1, "priced": 1, "total_usd": 0.42}
+
+    log["archetypes"] = {}
+
+    @fd.post("/fd/archetypes/forge")
+    async def forge(instructions: str = Form(""), count: str = Form("0"),
+                    files: list[UploadFile] = File(default=[]),
+                    authorization: str | None = Header(default=None)):
+        _need_auth(authorization)
+        log["forge"] = {"instructions": instructions,
+                        "files": [f.filename for f in files]}
+        return {"archetypes": [
+            {"id": "house-analyst", "role": "House Analyst",
+             "instructions": "Analyze in the house style."},
+            {"id": "house-writer", "role": "House Writer",
+             "instructions": "Write in the house voice."}]}
+
+    @fd.put("/fd/archetypes/{aid}")
+    async def put_archetype(aid: str, body: dict,
+                            authorization: str | None = Header(default=None)):
+        _need_auth(authorization)
+        log["archetypes"][aid] = {**body, "id": aid}
+        return log["archetypes"][aid]
+
+    @fd.get("/fd/archetypes/mine")
+    async def my_archetypes(authorization: str | None = Header(default=None)):
+        _need_auth(authorization)
+        return list(log["archetypes"].values())
+
+    @fd.post("/fd/basna/route")
+    async def basna_route(body: dict, authorization: str | None = Header(default=None)):
+        _need_auth(authorization)
+        log["basna_route"] = body
+        sid = "basna-cccc3333"
+        log["sessions"][sid] = {"id": sid, "status": "routed",
+                                "intent": body["intent"], "truth": "",
+                                "confidence": 0.0, "route": {}, "analysis": {},
+                                "config": {"mode": "basna"}}
+        return {"session_id": sid, "selected": ["deep-researcher", "analyst"]}
+
+    @fd.post("/fd/basna/execute")
+    async def basna_execute(body: dict, authorization: str | None = Header(default=None)):
+        _need_auth(authorization)
+        s = log["sessions"].get(body["session_id"])
+        if not s:
+            raise HTTPException(404, "session not found")
+        s["status"] = "done"
+        s["truth"] = ("# Second read\nLargely agrees with the desk; flags the "
+                      "2030 CAGR as optimistic.")
+        s["confidence"] = 0.78
+        return {"session_id": s["id"], "truth": s["truth"], "confidence": 0.78}
 
     return fd, log
 
@@ -421,6 +472,77 @@ async def test_standing_brief_lifecycle(bff, monkeypatch):
                                 headers=h)).status_code == 200
     assert (await client.get(f"/api/streams/{stream_id}/brief",
                              headers=h)).json()["brief"] is None
+
+
+async def test_house_style_forge_save_and_pinned_cast(bff):
+    """Forge proxy → drafts; save via upsert; pinned cast reaches vatra/start."""
+    client, log, _ = bff
+    h = _auth()
+
+    r = await client.post(
+        "/api/forge", headers=h,
+        data={"instructions": "our diligence playbook, terse memos"},
+        files=[("files", ("playbook.md", b"# Playbook\nBe terse.", "text/markdown"))])
+    assert r.status_code == 200
+    drafts = r.json()["drafts"]
+    assert [d["id"] for d in drafts] == ["house-analyst", "house-writer"]
+    assert log["forge"]["instructions"].startswith("our diligence")
+    assert log["forge"]["files"] == ["playbook.md"]
+
+    r = await client.post("/api/archetypes", json=drafts[0], headers=h)
+    assert r.status_code == 200
+    mine = (await client.get("/api/archetypes", headers=h)).json()["archetypes"]
+    assert [a["id"] for a in mine] == ["house-analyst"]
+
+    stream_id = (await client.post("/api/streams", json={"title": "cast"},
+                                   headers=h)).json()["id"]
+    await client.patch(f"/api/streams/{stream_id}/settings",
+                       json={"archetype_ids": ["house-analyst"]}, headers=h)
+    await client.post(f"/api/streams/{stream_id}/commissions",
+                      json={"brief": "x"}, headers=h)
+    assert log["start_body"]["archetype_ids"] == ["house-analyst"]
+
+    # Clearing the cast removes the pin (and start omits the field).
+    r = await client.patch(f"/api/streams/{stream_id}/settings",
+                           json={"archetype_ids": []}, headers=h)
+    assert "archetype_ids" not in r.json()["settings"]
+
+
+async def test_second_opinion_lifecycle(bff):
+    """Route → background execute → poll shows the ensemble's truth; idempotent."""
+    client, log, _ = bff
+    h = _auth()
+    stream_id = (await client.post("/api/streams", json={"title": "s"},
+                                   headers=h)).json()["id"]
+    sid = (await client.post(f"/api/streams/{stream_id}/commissions",
+                             json={"brief": "size the market"},
+                             headers=h)).json()["session_id"]
+
+    r = await client.post(f"/api/commissions/{sid}/second-opinion", headers=h)
+    assert r.status_code == 200
+    rec = r.json()
+    assert rec["basna_session_id"] == "basna-cccc3333"
+    assert log["basna_route"]["intent"] == "size the market"
+
+    # Same call again → the same record, no second ensemble.
+    again = await client.post(f"/api/commissions/{sid}/second-opinion", headers=h)
+    assert again.json()["basna_session_id"] == rec["basna_session_id"]
+
+    # The background execute finishes; poll until the ensemble's truth lands.
+    got: dict = {}
+    for _ in range(50):
+        got = (await client.get(f"/api/commissions/{sid}/second-opinion",
+                                headers=h)).json()
+        if got["second_opinion"]["status"] == "done":
+            break
+        await asyncio.sleep(0.02)
+    assert got["second_opinion"]["status"] == "done"
+    assert "Second read" in got["truth"]
+    assert got["confidence"] == 0.78
+
+    # Owner-scoped.
+    assert (await client.post(f"/api/commissions/{sid}/second-opinion",
+                              headers=_auth("u2"))).status_code == 404
 
 
 async def test_cancel_at_plan_gate(bff):

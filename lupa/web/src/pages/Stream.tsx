@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ArrowLeft, ArrowLeftRight, FileText, Loader2, RadioTower, Send, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { ArrowLeft, ArrowLeftRight, FileText, Loader2, RadioTower, Scale, Send, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { api, post } from '../api'
 import { usePack, useVocab, type Round, type Stream } from '../stores'
 import ReceiptsPanel from '../components/Receipts'
@@ -21,7 +21,12 @@ interface ProgressEvent { i: number; stage: string; message: string; usd?: numbe
 
 interface Entry { name: string; dir?: boolean; size?: number }
 
-interface StreamSettings { quality_profile?: string; same_cast?: boolean; max_agents?: number }
+interface StreamSettings {
+  quality_profile?: string; same_cast?: boolean; max_agents?: number
+  archetype_ids?: string[]
+}
+
+interface Archetype { id: string; role?: string }
 
 type ContinueKind = 'continue' | 'revise' | 'fill_gaps'
 
@@ -202,6 +207,7 @@ export default function StreamView({ streamId, onBack }: { streamId: string; onB
             ? <RoundDiff prevSid={prevRound.session_id} currTruth={detail?.truth ?? ''} />
             : <Report streamId={streamId} truth={detail?.truth ?? ''} />}
           <ReceiptsPanel sid={activeSid} onFollowUp={tipDone ? followUp : undefined} />
+          <SecondOpinion sid={activeSid} />
         </>
       )}
 
@@ -280,6 +286,13 @@ function Composer({ placeholder, cta, value, onChange, kind, onKind, onSubmit }:
 function SettingsPanel({ streamId, settings, onSaved }:
   { streamId: string; settings: StreamSettings; onSaved: () => void }) {
   const [busy, setBusy] = useState(false)
+  const [cast, setCast] = useState<Archetype[]>([])
+
+  useEffect(() => {
+    void api<{ archetypes: Archetype[] }>('/api/archetypes')
+      .then((d) => setCast(d.archetypes ?? [])).catch(() => {})
+  }, [])
+
   const save = async (patch: Record<string, unknown>) => {
     setBusy(true)
     try {
@@ -291,39 +304,67 @@ function SettingsPanel({ streamId, settings, onSaved }:
   const quality = settings.quality_profile ?? ''
   const sameCast = settings.same_cast ?? true
   const maxAgents = settings.max_agents ?? 6
+  const pinned = new Set(settings.archetype_ids ?? [])
+
+  const toggleCast = (id: string) => {
+    const next = new Set(pinned)
+    next.has(id) ? next.delete(id) : next.add(id)
+    void save({ archetype_ids: [...next] })
+  }
+
   return (
-    <div className={`rounded-xl border border-[var(--lp-border)] bg-[var(--lp-surface)] px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm ${busy ? 'opacity-60' : ''}`}>
-      <label className="flex items-center gap-2">
-        <span className="text-[var(--lp-text-dim)]">Quality</span>
-        <select
-          value={quality}
-          onChange={(e) => void save({ quality_profile: e.target.value || null })}
-          className="rounded bg-[var(--lp-bg)] border border-[var(--lp-border)] px-2 py-1 text-sm outline-none"
-        >
-          <option value="">Pack default</option>
-          <option value="thorough">Thorough</option>
-          <option value="balanced">Balanced</option>
-          <option value="off">Off</option>
-        </select>
-      </label>
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input
-          type="checkbox" checked={sameCast}
-          onChange={(e) => void save({ same_cast: e.target.checked })}
-        />
-        <span className="text-[var(--lp-text-dim)]">Keep the same team across rounds</span>
-      </label>
-      <label className="flex items-center gap-2">
-        <span className="text-[var(--lp-text-dim)]">Max agents</span>
-        <input
-          type="number" min={1} max={10} value={maxAgents}
-          onChange={(e) => {
-            const n = Number(e.target.value)
-            if (n >= 1 && n <= 10) void save({ max_agents: n })
-          }}
-          className="w-16 rounded bg-[var(--lp-bg)] border border-[var(--lp-border)] px-2 py-1 text-sm outline-none"
-        />
-      </label>
+    <div className={`rounded-xl border border-[var(--lp-border)] bg-[var(--lp-surface)] px-4 py-3 space-y-3 text-sm ${busy ? 'opacity-60' : ''}`}>
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <label className="flex items-center gap-2">
+          <span className="text-[var(--lp-text-dim)]">Quality</span>
+          <select
+            value={quality}
+            onChange={(e) => void save({ quality_profile: e.target.value || null })}
+            className="rounded bg-[var(--lp-bg)] border border-[var(--lp-border)] px-2 py-1 text-sm outline-none"
+          >
+            <option value="">Pack default</option>
+            <option value="thorough">Thorough</option>
+            <option value="balanced">Balanced</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox" checked={sameCast}
+            onChange={(e) => void save({ same_cast: e.target.checked })}
+          />
+          <span className="text-[var(--lp-text-dim)]">Keep the same team across rounds</span>
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="text-[var(--lp-text-dim)]">Max agents</span>
+          <input
+            type="number" min={1} max={10} value={maxAgents}
+            onChange={(e) => {
+              const n = Number(e.target.value)
+              if (n >= 1 && n <= 10) void save({ max_agents: n })
+            }}
+            className="w-16 rounded bg-[var(--lp-bg)] border border-[var(--lp-border)] px-2 py-1 text-sm outline-none"
+          />
+        </label>
+      </div>
+      {cast.length > 0 && (
+        <div>
+          <div className="text-xs text-[var(--lp-text-dim)] mb-1.5">
+            House cast — pin your forged team for round 1 (empty = auto-route)
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {cast.map((a) => (
+              <button key={a.id} type="button" onClick={() => toggleCast(a.id)}
+                      className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                        pinned.has(a.id)
+                          ? 'border-[var(--lp-accent)] text-[var(--lp-accent)]'
+                          : 'border-[var(--lp-border)] text-[var(--lp-text-dim)] hover:text-[var(--lp-text)]'}`}>
+                {a.role ?? a.id}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -444,6 +485,83 @@ function BriefCard({ streamId, onFired }: { streamId: string; onFired: () => voi
             ? <>last ran {new Date(brief.last_run_at).toLocaleString()} · </>
             : <>hasn't run yet · </>}
           next {brief.next_run_at ? new Date(brief.next_run_at).toLocaleString() : '—'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SecondOpinion({ sid }: { sid: string }) {
+  interface SO { status: string }
+  const [record, setRecord] = useState<SO | null>(null)
+  const [truth, setTruth] = useState('')
+  const [confidence, setConfidence] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    const d = await api<{ second_opinion: SO | null; truth?: string; confidence?: number }>(
+      `/api/commissions/${sid}/second-opinion`)
+    setRecord(d.second_opinion)
+    setTruth(d.truth ?? '')
+    setConfidence(d.confidence ?? null)
+    return d.second_opinion?.status
+  }, [sid])
+
+  useEffect(() => {
+    setRecord(null); setTruth(''); setConfidence(null)
+    void load()
+  }, [load])
+
+  // Poll only while an ensemble is running.
+  useEffect(() => {
+    if (record?.status !== 'running') return
+    const iv = setInterval(() => { void load() }, 3000)
+    return () => clearInterval(iv)
+  }, [record?.status, load])
+
+  const start = async () => {
+    setBusy(true)
+    try { await post(`/api/commissions/${sid}/second-opinion`, {}); await load() }
+    finally { setBusy(false) }
+  }
+
+  if (!record) {
+    return (
+      <button
+        onClick={() => void start()} disabled={busy}
+        className="w-full rounded-xl border border-dashed border-[var(--lp-border)] bg-[var(--lp-surface)] px-4 py-3 text-sm text-[var(--lp-text-dim)] hover:border-[var(--lp-accent)] hover:text-[var(--lp-text)] flex items-center justify-center gap-2 disabled:opacity-40"
+      >
+        {busy ? <Loader2 size={14} className="animate-spin" /> : <Scale size={14} />}
+        Get an independent second opinion
+      </button>
+    )
+  }
+
+  return (
+    <div className="rounded-xl border border-[var(--lp-border)] bg-[var(--lp-surface)] p-5 space-y-3">
+      <div className="flex items-center gap-2">
+        <Scale size={15} style={{ color: 'var(--lp-accent)' }} />
+        <span className="font-semibold text-sm">Second opinion</span>
+        <span className="text-xs text-[var(--lp-text-dim)]">
+          An independent ensemble re-ran the same brief from scratch.
+        </span>
+        {confidence != null && (
+          <span className="text-[11px] px-1.5 py-0.5 rounded border border-[var(--lp-border)] text-[var(--lp-text-dim)]">
+            confidence {(confidence * 100).toFixed(0)}%
+          </span>
+        )}
+      </div>
+      {record.status === 'running' && (
+        <div className="flex items-center gap-2 text-sm text-[var(--lp-text-dim)]">
+          <Loader2 size={14} className="animate-spin" /> The second team is working…
+        </div>
+      )}
+      {record.status === 'error' && (
+        <div className="text-sm text-red-400">The second opinion failed to complete.</div>
+      )}
+      {record.status === 'done' && truth && (
+        <div className="lp-prose text-sm border-t border-[var(--lp-border)] pt-3">
+          <Markdown remarkPlugins={[remarkGfm]}>{truth}</Markdown>
         </div>
       )}
     </div>

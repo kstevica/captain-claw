@@ -5,7 +5,25 @@ let accessToken: string | null = null
 let onSession: ((token: string | null, user: unknown | null) => void) | null = null
 
 export function setAccessToken(t: string | null) { accessToken = t }
+export function getAccessToken() { return accessToken }
 export function onSessionChange(cb: typeof onSession) { onSession = cb }
+
+/** POST multipart/form-data with the bearer attached (fetch sets the
+ * Content-Type + boundary itself). Refreshes once on 401, like `api`. */
+export async function postForm<T = unknown>(path: string, form: FormData): Promise<T> {
+  const doFetch = () => fetch(path, {
+    method: 'POST', credentials: 'same-origin', body: form,
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+  })
+  let r = await doFetch()
+  if (r.status === 401 && await tryRefresh()) r = await doFetch()
+  if (!r.ok) {
+    let detail = r.statusText
+    try { detail = (await r.json()).detail ?? detail } catch { /* not json */ }
+    throw new ApiError(r.status, String(detail))
+  }
+  return r.json() as Promise<T>
+}
 
 async function tryRefresh(): Promise<boolean> {
   const r = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'same-origin' })

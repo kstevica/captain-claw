@@ -9,6 +9,7 @@ dependencies = [
     "httpx>=0.26",
     "aiosqlite>=0.19",
     "PyJWT>=2.8",
+    "python-multipart>=0.0.7",
 ]
 
 [project.optional-dependencies]

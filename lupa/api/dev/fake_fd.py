@@ -20,7 +20,7 @@ import time
 import uuid
 
 import jwt as pyjwt
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 
 SECRET = os.environ.get("FD_JWT_SECRET", "lupa-dev-secret")
 PLAN_SECONDS = 2.0
@@ -214,6 +214,14 @@ async def session_detail(sid: str, authorization: str | None = Header(default=No
     s = _sessions.get(sid)
     if not s:
         raise HTTPException(404, "session not found")
+    # A Basna (second-opinion) session carries its own truth once executed.
+    if s.get("basna"):
+        done = bool(s.get("basna_done"))
+        return {"id": sid, "status": "done" if done else "running",
+                "title": s["title"], "intent": s["intent"],
+                "truth": _SECOND_OPINION_MD if done else "",
+                "confidence": 0.79 if done else 0.0,
+                "config": {"mode": "basna"}, "route": {}, "analysis": {}}
     status = _status(s)
     report = _REPORT_MD if s.get("round", 1) == 1 else _REPORT_MD_R2
     detail: dict = {
@@ -358,6 +366,81 @@ async def costs(limit: int = 200, run_kind: str = "",
                          "at": "2026-07-30T10:00:00+00:00"})
     return {"costs": rows, "count": len(rows), "priced": len(rows),
             "total_usd": round(0.42 * len(rows), 2) or None}
+
+
+# ── house style: forge + archetypes ──────────────────────────────────
+
+_ARCHETYPES: dict[str, dict] = {}
+
+
+@app.post("/fd/archetypes/forge")
+async def forge(instructions: str = Form(""), count: str = Form("0"),
+                files: list[UploadFile] = File(default=[]),
+                authorization: str | None = Header(default=None)):
+    _user_from(authorization)
+    names = ", ".join(f.filename or "doc" for f in files) or "your instructions"
+    return {"archetypes": [
+        {"id": "house-lead-analyst", "role": "House Lead Analyst",
+         "tier": "reason",
+         "instructions": f"Lead the analysis in the house style, grounded in {names}."},
+        {"id": "house-fact-checker", "role": "House Fact-Checker",
+         "tier": "balanced",
+         "instructions": "Verify every figure against primary sources; house rigor."},
+        {"id": "house-writer", "role": "House Writer",
+         "tier": "balanced",
+         "instructions": "Assemble the memo in the house voice: terse, sourced, decision-first."}]}
+
+
+@app.put("/fd/archetypes/{aid}")
+async def put_archetype(aid: str, body: dict,
+                        authorization: str | None = Header(default=None)):
+    _user_from(authorization)
+    _ARCHETYPES[aid] = {**body, "id": aid, "source": "user"}
+    return _ARCHETYPES[aid]
+
+
+@app.get("/fd/archetypes/mine")
+async def my_archetypes(authorization: str | None = Header(default=None)):
+    _user_from(authorization)
+    return list(_ARCHETYPES.values())
+
+
+# ── second opinion (Basna ensemble) ──────────────────────────────────
+
+
+@app.post("/fd/basna/route")
+async def basna_route(body: dict, authorization: str | None = Header(default=None)):
+    _user_from(authorization)
+    sid = "basna-" + uuid.uuid4().hex[:8]
+    _sessions[sid] = {"created": time.time(), "approved": time.time(),
+                      "intent": body.get("intent", ""), "title": "second opinion",
+                      "round": 99, "basna": True}
+    return {"session_id": sid, "selected": ["deep-researcher", "analyst", "skeptic"]}
+
+
+@app.post("/fd/basna/execute")
+async def basna_execute(body: dict, authorization: str | None = Header(default=None)):
+    _user_from(authorization)
+    s = _sessions.get(body.get("session_id", ""))
+    if not s:
+        raise HTTPException(404, "session not found")
+    s["basna_done"] = True
+    return {"session_id": body["session_id"], "confidence": 0.79,
+            "truth": _SECOND_OPINION_MD}
+
+
+_SECOND_OPINION_MD = """# Independent second read
+
+An independent ensemble re-ran the same brief from scratch. **It broadly agrees
+with the desk**, with two differences worth your attention:
+
+- **2030 outlook.** The desk's €24.1B rests on a 9.2% CAGR; this ensemble reads
+  the subsidy normalization as steeper and lands at **€22.4B** (≈7% below).
+- **DE share.** Both put Germany near a third of the market — no disagreement.
+
+The ensemble did *not* find the Nordics under-weighting the desk flagged, so
+treat that as the desk's own signal, not a cross-confirmed finding.
+"""
 
 
 def main() -> None:

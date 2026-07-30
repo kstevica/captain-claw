@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS briefs (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_briefs_due ON briefs(enabled, next_run_at);
+
+CREATE TABLE IF NOT EXISTS second_opinions (
+    session_id TEXT PRIMARY KEY,
+    basna_session_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -214,6 +223,36 @@ class LupaDB:
             " ORDER BY ss.created_at DESC LIMIT ?", (user_id, limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+    # ── second opinions ──────────────────────────────────────────────
+
+    async def create_second_opinion(self, session_id: str, basna_session_id: str,
+                                    user_id: str) -> dict:
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.execute(
+            "INSERT INTO second_opinions (session_id, basna_session_id, user_id,"
+            " status, created_at, updated_at) VALUES (?, ?, ?, 'running', ?, ?)",
+            (session_id, basna_session_id, user_id, now, now))
+        await self._db.commit()
+        return {"session_id": session_id, "basna_session_id": basna_session_id,
+                "user_id": user_id, "status": "running", "created_at": now}
+
+    async def get_second_opinion(self, session_id: str, user_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM second_opinions WHERE session_id = ? AND user_id = ?",
+            (session_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def set_second_opinion_status(self, session_id: str, status: str) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE second_opinions SET status = ?, updated_at = ? WHERE session_id = ?",
+            (status, _utcnow(), session_id))
+        await self._db.commit()
 
     async def stream_for_session(self, session_id: str, user_id: str) -> dict | None:
         """The caller's stream containing this commission — the ownership check
