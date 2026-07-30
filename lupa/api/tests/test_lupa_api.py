@@ -120,6 +120,16 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
     _FAIL_MARKER = "MAKE_IT_FAIL"
     _FAIL_MSG = "Vatra Lead failed: missing Anthropic API key"
 
+    @fd.post("/fd/llm/complete")
+    async def llm_complete(body: dict, authorization: str | None = Header(default=None)):
+        # Manifest generation is a single completion on the owner's tier.
+        _need_auth(authorization)
+        log["llm_complete"] = body
+        if _FAIL_MARKER in (body.get("prompt", "") + body.get("system", "")):
+            raise HTTPException(502, "LLM call failed: missing Anthropic API key")
+        return {"content": KALUP_TRUTH, "provider": "openai",
+                "model": "deepseek-v4-pro"}
+
     @fd.get("/fd/basna/sessions/{sid}")
     async def session_detail(sid: str, authorization: str | None = Header(default=None)):
         _need_auth(authorization)
@@ -668,14 +678,16 @@ async def test_factory_generate_evaluate_publish(bff):
     r = await client.post("/api/packs/tender-desk/publish", headers=admin)
     assert r.status_code == 409
 
-    # Generate: a headless Vatra run drafts the manifest and it merges in.
+    # Generate: a SINGLE completion (not a Vatra run) drafts the manifest.
     r = await client.post("/api/packs/tender-desk/generate",
                           json={"instructions": "public-sector RFP analysis"},
                           headers=admin)
     assert r.status_code == 200
     body = await _wait_for(client, "/api/packs/tender-desk", admin,
                            ["generation", "status"], "done")
-    assert log["start_body"]["intent"].startswith("KALUP PACK DRAFT")
+    # Generation went through /fd/llm/complete on the reason tier, not vatra.
+    assert log["llm_complete"]["tier"] == "reason"
+    assert "public-sector RFP analysis" in log["llm_complete"]["prompt"]
     pack = body["pack"]
     assert pack["name"] == "Tender Desk"           # generated
     assert pack["vocabulary"]["stream"] == "Tender"
@@ -711,9 +723,9 @@ async def test_factory_generate_evaluate_publish(bff):
                              headers=h)).json()["streams"] == []
 
 
-async def test_factory_streams_progress(bff):
-    """The Studio can read the factory run's live event feed via the pack, and
-    the run's session id is stored so the feed is reachable."""
+async def test_factory_streams_eval_progress(bff):
+    """The Studio streams the EVALUATE golden run's live feed (the real
+    multi-agent run); its session id is stored so the feed is reachable."""
     client, _, _ = bff
     admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
     await client.post("/api/packs", json={"slug": "feed-desk", "name": "Feed"},
@@ -722,8 +734,10 @@ async def test_factory_streams_progress(bff):
                       json={"instructions": "a monitoring desk"}, headers=admin)
     await _wait_for(client, "/api/packs/feed-desk", admin,
                     ["generation", "status"], "done")
-    # The run's session id was recorded, and progress proxies the run's feed.
-    r = await client.get("/api/packs/feed-desk/progress?phase=generation", headers=admin)
+    await client.post("/api/packs/feed-desk/evaluate", headers=admin)
+    await _wait_for(client, "/api/packs/feed-desk", admin, ["eval", "verdict"], "green")
+    # The eval run's session id was recorded; progress proxies its feed.
+    r = await client.get("/api/packs/feed-desk/progress?phase=eval", headers=admin)
     assert r.status_code == 200
     events = r.json()["events"]
     assert any(e["stage"] == "phase" for e in events)
@@ -733,9 +747,9 @@ async def test_factory_streams_progress(bff):
                              headers=_auth("u2"))).status_code == 404
 
 
-async def test_factory_surfaces_specific_error(bff):
-    """A failed run reports its SPECIFIC reason (the Lead's failure line),
-    not just 'run ended with status error'."""
+async def test_generation_surfaces_specific_error(bff):
+    """A failed generation reports the SPECIFIC LLM error (the completion
+    endpoint's detail), not a generic 'error'."""
     client, _, _ = bff
     admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
     await client.post("/api/packs", json={"slug": "fail-desk", "name": "Fail"},

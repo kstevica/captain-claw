@@ -1018,6 +1018,7 @@ from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck.costs_routes import router as costs_router
+from captain_claw.flight_deck.llm_routes import router as llm_router
 from captain_claw.flight_deck.being_routes import router as being_router
 from captain_claw.flight_deck.being_public_routes import router as being_public_router
 from captain_claw.flight_deck.being_public_routes import village_router as being_village_router
@@ -1066,6 +1067,7 @@ app.include_router(agents_fs_router)
 app.include_router(system_router)
 app.include_router(share_router)
 app.include_router(costs_router)
+app.include_router(llm_router)
 app.include_router(being_router)
 app.include_router(being_public_router)
 app.include_router(being_village_router)

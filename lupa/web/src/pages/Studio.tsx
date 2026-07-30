@@ -84,27 +84,29 @@ export default function Studio() {
     if (selected) void loadDetail(selected)
   }, [selected, loadDetail])
 
-  // Poll while the factory is working on the selected pack — refresh the pack
-  // state AND stream the run's live event feed (the team-at-work log).
+  // Poll while the factory is working. Generation is a single completion (no
+  // feed); the EVALUATE golden run is the real multi-agent run, so stream its
+  // live event feed (the team-at-work log).
   const evalRunning = detail?.eval.status === 'running'
   const working = detail?.generation.status === 'running' || evalRunning
-  const phase = evalRunning ? 'eval' : 'generation'
   useEffect(() => {
     if (!selected) { setEvents([]); return }
     if (!working) return
     const tick = async () => {
       await loadDetail(selected)
       await loadList()
-      try {
-        const p = await api<{ events: ProgressEvent[] }>(
-          `/api/packs/${selected}/progress?phase=${phase}`)
-        setEvents(p.events ?? [])
-      } catch { /* best-effort */ }
+      if (evalRunning) {
+        try {
+          const p = await api<{ events: ProgressEvent[] }>(
+            `/api/packs/${selected}/progress?phase=eval`)
+          setEvents(p.events ?? [])
+        } catch { /* best-effort */ }
+      }
     }
     void tick()
     const iv = setInterval(() => { void tick() }, 2500)
     return () => clearInterval(iv)
-  }, [selected, working, phase, loadDetail, loadList])
+  }, [selected, working, evalRunning, loadDetail, loadList])
 
   const act = async (action: () => Promise<unknown>, label: string) => {
     setBusy(label); setError('')
@@ -209,7 +211,7 @@ export default function Studio() {
               </button>
               {detail.generation.status === 'running' && (
                 <span className="text-xs text-[var(--lp-text-dim)] flex items-center gap-1.5">
-                  <Loader2 size={12} className="animate-spin" /> the team is configuring the desk…
+                  <Loader2 size={12} className="animate-spin" /> drafting the desk manifest…
                 </span>
               )}
               {detail.generation.status === 'done' && (
@@ -219,7 +221,6 @@ export default function Studio() {
                 <span className="text-xs text-red-400">{detail.generation.message}</span>
               )}
             </div>
-            {detail.generation.status === 'running' && <RunFeed events={events} />}
           </div>
 
           {/* Review */}

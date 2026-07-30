@@ -362,22 +362,30 @@ def _extract_manifest(text: str) -> dict | None:
     return out if isinstance(out, dict) else None
 
 
-def _generate_intent(name: str, instructions: str) -> str:
-    return (
-        "KALUP PACK DRAFT — you are configuring a vertical research desk, not "
-        "writing a report. Produce ONLY a JSON object (in a ```json fence) that "
-        "is the desk's pack manifest, with keys: name, tagline, "
-        "theme {accent, accent_soft, bg, surface, border, text, text_dim}, "
-        "vocabulary {stream, streams, commission, brief, round, report, "
-        "plan_gate_title, plan_gate_hint, composer_placeholder, "
-        "continue_placeholder, empty_streams, new_stream, receipts_title, "
-        "receipts_hint, facts_title, cost_title, brief_title, brief_hint, "
-        "brief_placeholder, inbox_title}, intake {types: [{id, label, "
-        "description, default_max_agents}]}, quality {profile}, "
-        "briefs {presets: [{id, label, hours}]}, roi {analyst_hourly_usd, "
-        "analyst_label}, evals [{brief}], onboarding_md. Ground every string "
-        f"in this vertical:\nDesk name: {name}\n{instructions}"
-    )
+# Drafting a pack manifest is a single structured-output generation, NOT a
+# multi-agent research run — so it goes through /fd/llm/complete (one call on
+# the owner's Reasoning tier), never Vatra (whose Lead would try to decompose
+# "output this JSON" into a team and fail with "no usable subtasks"). The real
+# multi-agent run is the EVALUATE golden commission.
+_GEN_SYSTEM = (
+    "You configure a vertical research desk. Reply with ONLY a JSON object (in "
+    "a ```json fence) — the desk's pack manifest — and nothing else. Keys: "
+    "name, tagline, theme {accent, accent_soft, bg, surface, border, text, "
+    "text_dim} (all hex), vocabulary {stream, streams, commission, brief, "
+    "round, report, plan_gate_title, plan_gate_hint, composer_placeholder, "
+    "continue_placeholder, empty_streams, new_stream, receipts_title, "
+    "receipts_hint, facts_title, cost_title, brief_title, brief_hint, "
+    "brief_placeholder, inbox_title}, intake {types: [{id, label, description, "
+    "default_max_agents}]}, quality {profile: \"thorough\"|\"balanced\"}, "
+    "briefs {presets: [{id, label, hours}]}, roi {analyst_hourly_usd, "
+    "analyst_label}, evals [{brief}] (a representative golden task a customer "
+    "would commission), onboarding_md (markdown). Ground every string in the "
+    "vertical described."
+)
+
+
+def _generate_prompt(name: str, instructions: str) -> str:
+    return f"Desk name: {name}\n\nVertical:\n{instructions}"
 
 
 def _eval_verdict(analysis: dict) -> tuple[str, dict]:
@@ -808,21 +816,32 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
 
     async def _generate_pack(state, slug: str, name: str, instructions: str,
                              token: str) -> None:
-        async def _started(sid: str) -> None:
-            await state.db.update_pack(
-                slug, generation={"status": "running", "session_id": sid})
-        detail, err = await _run_headless_vatra(
-            state, token, _generate_intent(name, instructions),
-            {"profile": "balanced"}, on_started=_started)
-        if err:
-            await state.db.update_pack(slug, generation={"status": "error",
-                                                         "message": err})
+        # ONE completion on the owner's Reasoning tier — not a Vatra run.
+        try:
+            r = await state.fd.post(
+                "/fd/llm/complete",
+                json={"system": _GEN_SYSTEM,
+                      "prompt": _generate_prompt(name, instructions),
+                      "tier": "reason", "max_tokens": 8192, "temperature": 0.4},
+                headers={"Authorization": f"Bearer {token}"}, timeout=300.0)
+        except httpx.HTTPError as e:
+            await state.db.update_pack(slug, generation={
+                "status": "error", "message": f"generation request failed: {e}"})
             return
-        generated = _extract_manifest(str(detail.get("truth") or ""))
+        if r.status_code != 200:
+            try:
+                msg = r.json().get("detail") or r.text
+            except ValueError:
+                msg = r.text
+            await state.db.update_pack(slug, generation={
+                "status": "error", "message": str(msg)})
+            return
+        generated = _extract_manifest(str(r.json().get("content") or ""))
         if not generated:
-            await state.db.update_pack(
-                slug, generation={"status": "error",
-                                  "message": "no manifest in the run's conclusion"})
+            await state.db.update_pack(slug, generation={
+                "status": "error",
+                "message": "the model did not return a valid JSON manifest — "
+                           "try a stronger Reasoning tier or rephrase"})
             return
         row = await state.db.get_pack(slug)
         manifest = row_manifest(row) if row else {}
@@ -831,8 +850,7 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             generated.pop(k, None)
         manifest.update(generated)
         await state.db.update_pack(slug, manifest=manifest,
-                                   generation={"status": "done",
-                                               "session_id": detail.get("id", "")})
+                                   generation={"status": "done"})
 
     @app.post("/api/packs/{slug}/generate")
     async def generate_pack(slug: str, body: GenerateBody, request: Request,

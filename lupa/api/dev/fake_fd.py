@@ -411,6 +411,14 @@ async def put_archetype(aid: str, body: dict,
     return _ARCHETYPES[aid]
 
 
+@app.post("/fd/llm/complete")
+async def llm_complete(body: dict, authorization: str | None = Header(default=None)):
+    """Single completion on the owner's tier — how the Studio drafts a manifest.
+    Returns the Tender Desk manifest for the demo (a real model reads the prompt)."""
+    _user_from(authorization)
+    return {"content": _KALUP_TRUTH, "provider": "openai", "model": "deepseek-v4-pro"}
+
+
 @app.get("/fd/archetypes/mine")
 async def my_archetypes(authorization: str | None = Header(default=None)):
     _user_from(authorization)
