@@ -856,8 +856,14 @@ async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent:
     def _on_status(text: str) -> None:
         _progress(sid, "llm", f"{label} · {text}", agent=label, tool="llm", detail=text)
 
+    # Per-session-unique process name (like every other Vatra worker) — NOT the
+    # fixed "long-horizon-planner" slug. A fixed slug lets only one planner exist
+    # FD-wide: two concurrent Vatra runs (or an orphaned planner from a crashed
+    # run) collide with "process already running", blocking every future run.
+    # `label` stays the display name for the live card.
     sp = await _spawn_worker(
-        request, user, name=label, description="Draft the team coordination plan",
+        request, user, name=f"vatra-{sid[:8]}-planner",
+        description="Draft the team coordination plan",
         cognitive_mode=planner_arch.get("cognitive_mode") or "neutra",
         tools=["read", "glob"], tier=planner_arch.get("tier") or "reason",
         tiers=tiers, api_key=api_key, env_vars=env_vars)
