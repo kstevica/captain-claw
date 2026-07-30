@@ -4064,6 +4064,18 @@ async def start_vatra(body: VatraStartRequest, request: Request,
         raise HTTPException(400, "intent is required")
     db = get_db()
     title = (body.title or intent[:60]).strip()
+    # Tiers/env carry the model config + API keys. The FD UI sends them; an API
+    # caller (or a product BFF) may omit them — fall back to the owner's saved
+    # workspace tiers so the Group-0 Lead decompose uses the user's configured
+    # model, not the registry-default (anthropic) one. Mirrors the identical
+    # fallback in /plan/approve, which the UI-start path had been missing.
+    _tiers = body.tiers
+    _env = body.env_vars
+    if _tiers is None:
+        _owner_tiers, _owner_env = await _load_owner_tiers(db, user["id"])
+        _tiers = _owner_tiers
+        if _env is None:
+            _env = _owner_env
     sess = await db.create_basna_session(
         user["id"], intent, title=title,
         config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents,
@@ -4071,8 +4083,8 @@ async def start_vatra(body: VatraStartRequest, request: Request,
                            **({"horizon": body.horizon} if body.horizon else {})}))
     sid = sess["id"]
     exec_req = ExecuteRequest(
-        session_id=sid, tiers=body.tiers or None,
-        env_vars=body.env_vars or None, api_key=body.api_key or "",
+        session_id=sid, tiers=_tiers or None,
+        env_vars=_env or None, api_key=body.api_key or "",
         horizon=body.horizon or None, shared_datastore=body.shared_datastore,
         vfs_project=body.vfs_project or "")
     # Background task with a stub request carrying the owner (spawn_process reads
