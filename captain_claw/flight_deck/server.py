@@ -5723,9 +5723,17 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         registry[slug]["pid"] = proc.pid
         _save_process_registry(registry)
 
-    # Log usage
+    # Log usage. Use the auth module's DB (a single instance set at startup),
+    # NOT app.state.fd_db: when the server is launched as `python -m ...server`
+    # it runs as __main__ and the lifespan sets fd_db on __main__.app, but this
+    # function may be imported under the canonical module name (a second app
+    # instance whose lifespan never ran) — its app.state.fd_db is unset. The
+    # auth DB is the same connection and is always resolvable.
     if AUTH_ENABLED and user:
-        db = app.state.fd_db
+        db = getattr(app.state, "fd_db", None)
+        if db is None:
+            from captain_claw.flight_deck.auth import get_db as _get_auth_db
+            db = _get_auth_db()
         await db.log_usage(user["id"], "agent_spawn", json.dumps({"agent": slug, "type": "process", "provider": config.provider, "model": config.model}))
 
     # Let the child actually bind its TCP port (and potentially announce a
