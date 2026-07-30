@@ -55,6 +55,7 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
     async def vatra_start(body: dict, authorization: str | None = Header(default=None)):
         _need_auth(authorization)
         log["quality"].append(("start", body.get("quality")))
+        log["start_body"] = body
         sid = "sess-aaaa1111"
         log["sessions"][sid] = {
             "id": sid, "status": "planning", "intent": body["intent"],
@@ -285,6 +286,47 @@ async def test_commissions_are_owner_scoped(bff):
     assert (await client.get(f"/api/commissions/{sid}", headers=other)).status_code == 404
     assert (await client.post(f"/api/commissions/{sid}/approve", json={},
                               headers=other)).status_code == 404
+
+
+async def test_stream_settings_drive_commissions(bff):
+    """Stream overrides (quality, cast continuity, max agents) reach FD."""
+    client, log = bff
+    h = _auth()
+    stream_id = (await client.post("/api/streams", json={"title": "s"},
+                                   headers=h)).json()["id"]
+
+    r = await client.patch(f"/api/streams/{stream_id}/settings",
+                           json={"quality_profile": "balanced",
+                                 "same_cast": False, "max_agents": 4}, headers=h)
+    assert r.status_code == 200
+    assert r.json()["settings"] == {"quality_profile": "balanced",
+                                    "same_cast": False, "max_agents": 4}
+    bad = await client.patch(f"/api/streams/{stream_id}/settings",
+                             json={"quality_profile": "extreme"}, headers=h)
+    assert bad.status_code == 400
+
+    # Round 1 runs with the stream's quality + max_agents.
+    r = await client.post(f"/api/streams/{stream_id}/commissions",
+                          json={"brief": "x"}, headers=h)
+    sid = r.json()["session_id"]
+    assert log["start_body"]["quality"] == {"profile": "balanced"}
+    assert log["start_body"]["max_agents"] == 4
+
+    # Round 2 as an explicit revise, carrying same_cast=False.
+    r = await client.post(f"/api/streams/{stream_id}/commissions",
+                          json={"brief": "tighten it", "kind": "revise"}, headers=h)
+    assert r.status_code == 200 and r.json()["kind"] == "revise"
+    assert log["continued"]["kind"] == "revise"
+    assert log["continued"]["same_cast"] is False
+    assert log["continued"]["parent"] == sid
+
+    # Unknown kinds are rejected; explicit null resets an override.
+    assert (await client.post(f"/api/streams/{stream_id}/commissions",
+                              json={"brief": "x", "kind": "weird"},
+                              headers=h)).status_code == 400
+    r = await client.patch(f"/api/streams/{stream_id}/settings",
+                           json={"quality_profile": None}, headers=h)
+    assert "quality_profile" not in r.json()["settings"]
 
 
 async def test_receipts_aggregation(bff):

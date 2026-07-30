@@ -55,6 +55,37 @@ reading after the consistency pass — see the receipts panel for the trail.
 - The subsidy cliff scenario: what happens if Germany's BEG is cut in 2027?
 """
 
+_REPORT_MD_R2 = """# EU heat-pump market — deepened (round 2)
+
+**Bottom line:** the EU heat-pump market reached **€14.2B in 2024** and slows
+to ~9% CAGR through 2030 — but the Nordics carry more of that growth than the
+round-1 model assumed.
+
+## What the desk verified
+
+| Value | Status |
+|---|---|
+| 2024 market size €14.2B | verified against EHPA data |
+| 2030 outlook €24.1B | derived from the CAGR model |
+| DE share 31% | verified |
+| Nordics share 2024 18% | verified (new this round) |
+
+## Nordics deep-dive (new)
+
+Housing stock is heat-pump-ready in **74%** of SE/FI detached homes; the
+binding constraint is winter grid peaks, not adoption willingness. NO subsidy
+dependence is the lowest in the EU.
+
+## Where the team disagrees
+
+The structural-vs-cyclical read on the 2023 dip stands as cyclical; round 2's
+Nordics evidence weakens the structural case further.
+
+## Next questions worth a round
+
+- The subsidy cliff scenario: what happens if Germany's BEG is cut in 2027?
+"""
+
 
 def _token(sub: str) -> str:
     return pyjwt.encode({"sub": sub, "role": "user", "type": "access",
@@ -184,9 +215,10 @@ async def session_detail(sid: str, authorization: str | None = Header(default=No
     if not s:
         raise HTTPException(404, "session not found")
     status = _status(s)
+    report = _REPORT_MD if s.get("round", 1) == 1 else _REPORT_MD_R2
     detail: dict = {
         "id": sid, "status": status, "title": s["title"], "intent": s["intent"],
-        "truth": _REPORT_MD if status == "done" else "",
+        "truth": report if status == "done" else "",
         "config": {"mode": "vatra", "round": s.get("round", 1)},
         "route": {"group0_plan": {
             "steps": [

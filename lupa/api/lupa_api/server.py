@@ -120,11 +120,40 @@ class StreamCreate(BaseModel):
 class CommissionCreate(BaseModel):
     brief: str = Field(min_length=1)
     kind: str = "auto"  # auto | initial | continue | revise | fill_gaps
-    max_agents: int = Field(default=6, ge=1, le=10)
+    max_agents: int = Field(default=0, ge=0, le=10)  # 0 → stream/default
+
+
+class SettingsBody(BaseModel):
+    """Stream-level overrides; explicit null resets a knob to the pack default."""
+    quality_profile: str | None = None
+    same_cast: bool | None = None
+    max_agents: int | None = Field(default=None, ge=1, le=10)
 
 
 class ApproveBody(BaseModel):
     plan: dict | None = None
+
+
+_CONTINUE_KINDS = ("continue", "revise", "fill_gaps")
+_QUALITY_PROFILES = ("off", "balanced", "thorough")
+
+
+def _stream_settings(stream: dict) -> dict:
+    raw = stream.get("settings")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        return {}
+
+
+def _stream_quality(stream: dict, pack: dict) -> dict:
+    """The quality profile a commission runs with: stream override, else pack."""
+    prof = _stream_settings(stream).get("quality_profile")
+    if prof in _QUALITY_PROFILES:
+        return {"profile": prof}
+    return pack_quality(pack)
 
 
 # ── app ──────────────────────────────────────────────────────────────
@@ -190,7 +219,28 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         if not stream:
             raise HTTPException(404, "stream not found")
         stream["rounds"] = await db.list_rounds(stream_id)
+        stream["settings"] = _stream_settings(stream)
         return stream
+
+    @app.patch("/api/streams/{stream_id}/settings")
+    async def patch_settings(stream_id: str, body: SettingsBody, request: Request,
+                             user: dict = Depends(require_user)):
+        db = _db(request)
+        stream = await db.get_stream(stream_id, user["id"])
+        if not stream:
+            raise HTTPException(404, "stream not found")
+        if body.quality_profile is not None and body.quality_profile != "" \
+                and body.quality_profile not in _QUALITY_PROFILES:
+            raise HTTPException(400, f"quality_profile must be one of {_QUALITY_PROFILES}")
+        settings = _stream_settings(stream)
+        sent = body.model_dump(exclude_unset=True)
+        for key, value in sent.items():
+            if value is None or value == "":
+                settings.pop(key, None)  # explicit null/empty → back to default
+            else:
+                settings[key] = value
+        await db.set_stream_settings(stream_id, settings)
+        return {"settings": settings}
 
     # ── commissions (rounds) ─────────────────────────────────────────
 
@@ -202,18 +252,22 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         if not stream:
             raise HTTPException(404, "stream not found")
         rounds = await db.list_rounds(stream_id)
-        quality = pack_quality(request.app.state.pack)
+        settings = _stream_settings(stream)
+        quality = _stream_quality(stream, request.app.state.pack)
         kind = body.kind
         if kind == "auto":
             kind = "initial" if not rounds else "continue"
+        if kind != "initial" and kind not in _CONTINUE_KINDS:
+            raise HTTPException(400, f"kind must be initial or one of {_CONTINUE_KINDS}")
 
         if kind == "initial":
             if rounds:
                 raise HTTPException(409, "stream already has rounds — continue it instead")
+            max_agents = body.max_agents or int(settings.get("max_agents", 6))
             r = await _fd(request).post(
                 "/fd/vatra/start",
                 json={"intent": body.brief, "title": stream["title"],
-                      "max_agents": body.max_agents, "quality": quality},
+                      "max_agents": max_agents, "quality": quality},
                 headers=_auth_headers(request))
             if r.status_code != 200:
                 raise _fd_error(r)
@@ -227,7 +281,8 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             parent_sid = rounds[-1]["session_id"]
             r = await _fd(request).post(
                 f"/fd/vatra/sessions/{parent_sid}/continue",
-                json={"instruction": body.brief, "kind": kind, "same_cast": True},
+                json={"instruction": body.brief, "kind": kind,
+                      "same_cast": bool(settings.get("same_cast", True))},
                 headers=_auth_headers(request))
             if r.status_code != 200:
                 raise _fd_error(r)

@@ -61,3 +61,7 @@ logs/
 fd-data/
 profiles/
 models/lupa-data/
+
+# lupa web source is never a build artifact
+!lupa/web/src/lib/
+!lupa/web/src/lib/**

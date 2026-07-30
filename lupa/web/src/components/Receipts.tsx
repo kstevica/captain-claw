@@ -44,7 +44,8 @@ function Tile({ label, value, warn }: { label: string; value: string; warn?: boo
   )
 }
 
-export default function ReceiptsPanel({ sid }: { sid: string }) {
+export default function ReceiptsPanel({ sid, onFollowUp }:
+  { sid: string; onFollowUp?: (brief: string) => void }) {
   const v = useVocab()
   const [rec, setRec] = useState<Receipts | null>(null)
 
@@ -187,15 +188,26 @@ export default function ReceiptsPanel({ sid }: { sid: string }) {
             Open gaps
           </div>
           <ul className="space-y-1">
-            {rec.gaps.map((g, i) => (
-              <li key={i} className="text-sm flex items-center gap-2">
-                <Chip tone={g.severity === 'major'
-                  ? 'text-amber-400 border-amber-700/60' : ''}>
-                  {g.severity ?? 'minor'}
-                </Chip>
-                <span>{String(g.text ?? g.description ?? '')}</span>
-              </li>
-            ))}
+            {rec.gaps.map((g, i) => {
+              const text = String(g.text ?? g.description ?? '')
+              return (
+                <li key={i} className="text-sm flex items-center gap-2">
+                  <Chip tone={g.severity === 'major'
+                    ? 'text-amber-400 border-amber-700/60' : ''}>
+                    {g.severity ?? 'minor'}
+                  </Chip>
+                  <span>{text}</span>
+                  {onFollowUp && text && (
+                    <button
+                      onClick={() => onFollowUp(text)}
+                      className="text-[11px] px-1.5 py-0.5 rounded border border-[var(--lp-border)] text-[var(--lp-text-dim)] hover:border-[var(--lp-accent)] hover:text-[var(--lp-accent)] transition-colors whitespace-nowrap"
+                    >
+                      → next round
+                    </button>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         </div>
       )}

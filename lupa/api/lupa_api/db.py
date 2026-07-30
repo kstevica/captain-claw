@@ -51,6 +51,12 @@ class LupaDB:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(_SCHEMA)
+        # Additive migrations — each guarded so re-running is a no-op.
+        try:
+            await self._db.execute(
+                "ALTER TABLE streams ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'")
+        except aiosqlite.OperationalError:
+            pass  # column exists
         await self._db.commit()
 
     async def close(self) -> None:
@@ -95,6 +101,14 @@ class LupaDB:
         await self._db.execute(
             "UPDATE streams SET vfs_project = ?, updated_at = ? WHERE id = ?",
             (vfs_project, _utcnow(), stream_id))
+        await self._db.commit()
+
+    async def set_stream_settings(self, stream_id: str, settings: dict) -> None:
+        import json
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE streams SET settings = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(settings), _utcnow(), stream_id))
         await self._db.commit()
 
     # ── rounds ───────────────────────────────────────────────────────
