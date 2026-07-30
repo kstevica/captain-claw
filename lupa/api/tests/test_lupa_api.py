@@ -761,6 +761,51 @@ async def test_generation_surfaces_specific_error(bff):
     assert "missing Anthropic API key" in body["generation"]["message"]
 
 
+async def test_cancel_unsticks_a_stuck_evaluation(bff):
+    """A stuck 'running' eval blocks re-run (409); cancel resets it so the
+    creator can run evaluation again."""
+    client, _, app = bff
+    admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+    await client.post("/api/packs", json={"slug": "stuck-desk", "name": "Stuck"},
+                      headers=admin)
+    # Simulate a run wedged 'running' by a since-dead task.
+    await app.state.db.update_pack(
+        "stuck-desk", eval_state={"status": "running", "run_id": "old"})
+    assert (await client.post("/api/packs/stuck-desk/evaluate",
+                              headers=admin)).status_code == 409
+
+    # Cancel clears it.
+    r = await client.post("/api/packs/stuck-desk/cancel?phase=eval", headers=admin)
+    assert r.status_code == 200
+    detail = (await client.get("/api/packs/stuck-desk", headers=admin)).json()
+    assert detail["eval"]["status"] == "cancelled"
+    # Re-run is allowed again.
+    assert (await client.post("/api/packs/stuck-desk/evaluate",
+                              headers=admin)).status_code == 200
+    # Owner-scoped.
+    assert (await client.post("/api/packs/stuck-desk/cancel",
+                              headers=_auth("u2"))).status_code == 404
+
+
+async def test_startup_resets_stale_running_packs(bff):
+    """A pack left 'running' at boot is stale — reset_running_packs flips it to
+    a terminal state so it isn't wedged forever."""
+    client, _, app = bff
+    admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+    await client.post("/api/packs", json={"slug": "boot-desk", "name": "Boot"},
+                      headers=admin)
+    await app.state.db.update_pack(
+        "boot-desk", generation={"status": "running", "run_id": "x"},
+        eval_state={"status": "running", "run_id": "y"})
+
+    n = await app.state.db.reset_running_packs()
+    assert n == 1
+    detail = (await client.get("/api/packs/boot-desk", headers=admin)).json()
+    assert detail["generation"]["status"] == "error"
+    assert detail["eval"]["status"] == "error"
+    assert "interrupted" in detail["eval"]["message"]
+
+
 def test_eval_verdict_is_strict():
     from lupa_api.server import _eval_verdict
     green, _ = _eval_verdict({"quality_verdict": "pass",

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -407,6 +408,11 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.db = LupaDB(_data_dir() / "lupa.db")
         await app.state.db.init()
+        # A pack still marked generation/eval 'running' at boot is stale (its
+        # background task died with the previous process) — reset so it re-runs.
+        stale = await app.state.db.reset_running_packs()
+        if stale:
+            log.info("reset %d stale pack run(s) at startup", stale)
         app.state.fd = httpx.AsyncClient(
             base_url=_fd_url(), transport=fd_transport, timeout=60.0)
         # Seed the registry from repo packs, then serve the default pack FROM
@@ -732,6 +738,18 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         state.bg_tasks.add(task)
         task.add_done_callback(state.bg_tasks.discard)
 
+    async def _run_is_current(db, slug: str, key: str, run_id: str) -> bool:
+        """A background factory task may only write its result if it's still the
+        current run for that phase — a cancel or a re-run supersedes it (its
+        run_id no longer matches), so a stale task can't clobber a fresh one."""
+        row = await db.get_pack(slug)
+        if not row:
+            return False
+        try:
+            return json.loads(row.get(key) or "{}").get("run_id") == run_id
+        except (ValueError, TypeError):
+            return False
+
     def _pack_summary(row: dict) -> dict:
         m = row_manifest(row)
         gen = json.loads(row.get("generation") or "{}")
@@ -815,7 +833,11 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         return {"ok": True}
 
     async def _generate_pack(state, slug: str, name: str, instructions: str,
-                             token: str) -> None:
+                             token: str, run_id: str) -> None:
+        async def _fail(message: str) -> None:
+            if await _run_is_current(state.db, slug, "generation", run_id):
+                await state.db.update_pack(slug, generation={
+                    "status": "error", "message": message, "run_id": run_id})
         # ONE completion on the owner's Reasoning tier — not a Vatra run.
         try:
             r = await state.fd.post(
@@ -825,24 +847,22 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
                       "tier": "reason", "max_tokens": 8192, "temperature": 0.4},
                 headers={"Authorization": f"Bearer {token}"}, timeout=300.0)
         except httpx.HTTPError as e:
-            await state.db.update_pack(slug, generation={
-                "status": "error", "message": f"generation request failed: {e}"})
+            await _fail(f"generation request failed: {e}")
             return
         if r.status_code != 200:
             try:
                 msg = r.json().get("detail") or r.text
             except ValueError:
                 msg = r.text
-            await state.db.update_pack(slug, generation={
-                "status": "error", "message": str(msg)})
+            await _fail(str(msg))
             return
         generated = _extract_manifest(str(r.json().get("content") or ""))
         if not generated:
-            await state.db.update_pack(slug, generation={
-                "status": "error",
-                "message": "the model did not return a valid JSON manifest — "
-                           "try a stronger Reasoning tier or rephrase"})
+            await _fail("the model did not return a valid JSON manifest — "
+                        "try a stronger Reasoning tier or rephrase")
             return
+        if not await _run_is_current(state.db, slug, "generation", run_id):
+            return  # cancelled or superseded — don't clobber
         row = await state.db.get_pack(slug)
         manifest = row_manifest(row) if row else {}
         for k in ("slug", "pack_status", "pack_version"):
@@ -850,7 +870,7 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             generated.pop(k, None)
         manifest.update(generated)
         await state.db.update_pack(slug, manifest=manifest,
-                                   generation={"status": "done"})
+                                   generation={"status": "done", "run_id": run_id})
 
     @app.post("/api/packs/{slug}/generate")
     async def generate_pack(slug: str, body: GenerateBody, request: Request,
@@ -862,16 +882,17 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         gen = json.loads(row.get("generation") or "{}")
         if gen.get("status") == "running":
             raise HTTPException(409, "a generation is already running")
-        await db.update_pack(slug, generation={"status": "running"})
+        run_id = uuid.uuid4().hex
+        await db.update_pack(slug, generation={"status": "running", "run_id": run_id})
         secret = os.environ.get("FD_JWT_SECRET", "")
         token = _mint_owner_token(user["id"], secret) if secret else _bearer(request)
         name = row_manifest(row).get("name", slug)
         _spawn_bg(request.app.state,
                   _generate_pack(request.app.state, slug, name,
-                                 body.instructions, token))
+                                 body.instructions, token, run_id))
         return {"status": "running"}
 
-    async def _evaluate_pack(state, slug: str, token: str) -> None:
+    async def _evaluate_pack(state, slug: str, token: str, run_id: str) -> None:
         row = await state.db.get_pack(slug)
         manifest = row_manifest(row) if row else {}
         evals = manifest.get("evals") or []
@@ -880,14 +901,17 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             f"core question a customer of '{manifest.get('name', slug)}' would ask.")
 
         async def _started(sid: str) -> None:
-            await state.db.update_pack(
-                slug, eval_state={"status": "running", "session_id": sid})
+            if await _run_is_current(state.db, slug, "eval_state", run_id):
+                await state.db.update_pack(slug, eval_state={
+                    "status": "running", "session_id": sid, "run_id": run_id})
         detail, err = await _run_headless_vatra(
             state, token, brief, pack_quality(manifest) or {"profile": "thorough"},
             on_started=_started)
+        if not await _run_is_current(state.db, slug, "eval_state", run_id):
+            return  # cancelled or superseded by a re-run — don't clobber
         if err:
-            await state.db.update_pack(slug, eval_state={"status": "error",
-                                                         "message": err})
+            await state.db.update_pack(slug, eval_state={
+                "status": "error", "message": err, "run_id": run_id})
             return
         analysis = detail.get("analysis") or {}
         if isinstance(analysis, str):
@@ -898,7 +922,7 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         verdict, metrics = _eval_verdict(analysis)
         await state.db.update_pack(
             slug, eval_state={"status": "done", "verdict": verdict,
-                              "metrics": metrics,
+                              "metrics": metrics, "run_id": run_id,
                               "session_id": detail.get("id", "")})
 
     @app.post("/api/packs/{slug}/evaluate")
@@ -911,12 +935,33 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         ev = json.loads(row.get("eval_state") or "{}")
         if ev.get("status") == "running":
             raise HTTPException(409, "an evaluation is already running")
-        await db.update_pack(slug, eval_state={"status": "running"})
+        run_id = uuid.uuid4().hex
+        await db.update_pack(slug, eval_state={"status": "running", "run_id": run_id})
         secret = os.environ.get("FD_JWT_SECRET", "")
         token = _mint_owner_token(user["id"], secret) if secret else _bearer(request)
         _spawn_bg(request.app.state,
-                  _evaluate_pack(request.app.state, slug, token))
+                  _evaluate_pack(request.app.state, slug, token, run_id))
         return {"status": "running"}
+
+    @app.post("/api/packs/{slug}/cancel")
+    async def cancel_factory(slug: str, request: Request, phase: str = "eval",
+                             user: dict = Depends(require_user)):
+        """Reset a stuck/unwanted factory run so it can be re-run. Clears the
+        phase's run_id (so any still-alive background task can't clobber the
+        next run) and best-effort cancels the underlying FD session."""
+        db = _db(request)
+        row = await db.get_pack(slug)
+        if not row or not _can_touch(row, user):
+            raise HTTPException(404, "pack not found")
+        key = "eval_state" if phase == "eval" else "generation"
+        st = json.loads(row.get(key) or "{}")
+        sid = st.get("session_id")
+        if sid:
+            with suppress(httpx.HTTPError):
+                await _fd(request).post(f"/fd/basna/sessions/{sid}/cancel",
+                                        headers=_auth_headers(request))
+        await db.update_pack(slug, **{key: {"status": "cancelled"}})
+        return {"ok": True}
 
     @app.post("/api/packs/{slug}/publish")
     async def publish_pack(slug: str, request: Request,

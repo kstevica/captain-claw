@@ -132,6 +132,8 @@ export default function Studio() {
 
   const evaluate = () => act(() => post(`/api/packs/${selected}/evaluate`, {}), 'evaluate')
   const publish = () => act(() => post(`/api/packs/${selected}/publish`, {}), 'publish')
+  const cancel = (phase: 'generation' | 'eval') =>
+    act(() => post(`/api/packs/${selected}/cancel?phase=${phase}`, {}), 'cancel')
 
   const evalGreen = detail?.eval.verdict === 'green'
 
@@ -212,6 +214,8 @@ export default function Studio() {
               {detail.generation.status === 'running' && (
                 <span className="text-xs text-[var(--lp-text-dim)] flex items-center gap-1.5">
                   <Loader2 size={12} className="animate-spin" /> drafting the desk manifest…
+                  <button onClick={() => void cancel('generation')} disabled={busy !== ''}
+                          className="underline hover:text-[var(--lp-text)]">cancel</button>
                 </span>
               )}
               {detail.generation.status === 'done' && (
@@ -257,6 +261,8 @@ export default function Studio() {
               {detail.eval.status === 'running' && (
                 <span className="text-xs text-[var(--lp-text-dim)] flex items-center gap-1.5">
                   <Loader2 size={12} className="animate-spin" /> golden commission running…
+                  <button onClick={() => void cancel('eval')} disabled={busy !== ''}
+                          className="underline hover:text-[var(--lp-text)]">cancel</button>
                 </span>
               )}
               {detail.eval.status === 'done' && (

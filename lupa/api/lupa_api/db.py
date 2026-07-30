@@ -305,6 +305,35 @@ class LupaDB:
         await self._db.execute(f"UPDATE packs SET {', '.join(sets)} WHERE slug = ?", args)
         await self._db.commit()
 
+    async def reset_running_packs(self) -> int:
+        """On startup, any pack still marked generation/eval 'running' is stale —
+        the process that owned it is gone. Flip to a terminal state so it can be
+        re-run instead of wedging the Studio. Returns how many were reset."""
+        import json
+        assert self._db is not None
+        interrupted = json.dumps({"status": "error",
+                                  "message": "interrupted — the server restarted mid-run"})
+        n = 0
+        for r in await self.list_packs():
+            sets, args = [], []
+            for key in ("generation", "eval_state"):
+                try:
+                    st = json.loads(r.get(key) or "{}")
+                except (ValueError, TypeError):
+                    st = {}
+                if st.get("status") == "running":
+                    sets.append(f"{key} = ?")
+                    args.append(interrupted)
+            if sets:
+                sets.append("updated_at = ?")
+                args.extend([_utcnow(), r["slug"]])
+                await self._db.execute(
+                    f"UPDATE packs SET {', '.join(sets)} WHERE slug = ?", args)
+                n += 1
+        if n:
+            await self._db.commit()
+        return n
+
     async def is_creator(self, user_id: str) -> bool:
         assert self._db is not None
         async with self._db.execute(
