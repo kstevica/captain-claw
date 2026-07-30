@@ -27,7 +27,11 @@
     "receipts_title": "Receipts",
     "receipts_hint": "How this report was verified, and what it cost.",
     "facts_title": "Facts ledger",
-    "cost_title": "Cost"
+    "cost_title": "Cost",
+    "brief_title": "Standing brief",
+    "brief_hint": "The desk re-runs this question on a schedule and reports only what changed.",
+    "brief_placeholder": "What should the desk keep watching?",
+    "inbox_title": "Brief inbox"
   },
   "intake": {
     "types": [
@@ -41,6 +45,13 @@
   },
   "quality": {
     "profile": "thorough"
+  },
+  "briefs": {
+    "presets": [
+      { "id": "hourly", "label": "Hourly", "hours": 1 },
+      { "id": "daily", "label": "Daily", "hours": 24 },
+      { "id": "weekly", "label": "Weekly", "hours": 168 }
+    ]
   },
   "roi": {
     "analyst_hourly_usd": 60,

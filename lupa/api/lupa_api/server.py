@@ -11,10 +11,13 @@ with auth enabled. This process never imports captain_claw.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -37,6 +40,8 @@ def _data_dir() -> Path:
 
 _FD_COOKIE_PATH = "Path=/fd/auth"
 _OUR_COOKIE_PATH = "Path=/api/auth"
+
+log = logging.getLogger("lupa")
 
 # token → (user dict, expiry) for the /fd/auth/me fallback validator.
 _me_cache: dict[str, tuple[dict, float]] = {}
@@ -134,6 +139,12 @@ class ApproveBody(BaseModel):
     plan: dict | None = None
 
 
+class BriefBody(BaseModel):
+    instruction: str = Field(min_length=1)
+    cadence_hours: float = Field(gt=0, le=24 * 30)
+    enabled: bool = True
+
+
 _CONTINUE_KINDS = ("continue", "revise", "fill_gaps")
 _QUALITY_PROFILES = ("off", "balanced", "thorough")
 
@@ -156,6 +167,85 @@ def _stream_quality(stream: dict, pack: dict) -> dict:
     return pack_quality(pack)
 
 
+# ── standing-brief scheduler (product-side; deliberately NOT FD's
+#    global /scheduler/*, which has no user scoping) ─────────────────
+
+
+def _mint_owner_token(sub: str, secret: str) -> str:
+    """A short-lived access token for a brief's owner — the BFF shares
+    FD_JWT_SECRET with FD, so scheduled runs authenticate as the user."""
+    now = int(time.time())
+    return pyjwt.encode({"sub": sub, "role": "user", "type": "access",
+                         "iat": now, "exp": now + 900}, secret, algorithm="HS256")
+
+
+def _brief_instruction(text: str) -> str:
+    return ("Standing brief — this is a recurring monitoring round: report ONLY "
+            "what is new or changed since the previous round, in a short delta "
+            f"format. The standing question: {text}")
+
+
+async def fire_due_briefs(state) -> int:
+    """One scheduler pass; returns how many briefs fired. Kept separate from
+    the sleep loop so tests can drive it deterministically.
+
+    Continuation rounds inherit the parent run's quality profile, and both
+    `balanced` and `thorough` include the delta_rounds lever — so brief
+    rounds get delta behavior without any quality plumbing here."""
+    secret = os.environ.get("FD_JWT_SECRET", "")
+    if not secret:
+        return 0  # minting owner tokens requires the shared secret
+    db, fd = state.db, state.fd
+    now = datetime.now(timezone.utc)
+    fired = 0
+    for brief in await db.list_due_briefs(now.isoformat()):
+        try:
+            rounds = await db.list_rounds(brief["stream_id"])
+            if not rounds:
+                continue  # a brief needs an initial round to continue from
+            headers = {"Authorization":
+                       f"Bearer {_mint_owner_token(brief['user_id'], secret)}"}
+            tip = rounds[-1]["session_id"]
+            r = await fd.get(f"/fd/basna/sessions/{tip}", headers=headers)
+            if r.status_code != 200 or r.json().get("status") != "done":
+                continue  # tip still running/failed — retried next tick
+            stream = await db.get_stream(brief["stream_id"], brief["user_id"])
+            if not stream:
+                continue
+            settings = _stream_settings(stream)
+            resp = await fd.post(
+                f"/fd/vatra/sessions/{tip}/continue",
+                json={"instruction": _brief_instruction(brief["instruction"]),
+                      "kind": "continue",
+                      "same_cast": bool(settings.get("same_cast", True))},
+                headers=headers)
+            if resp.status_code != 200:
+                log.warning("brief continue failed for stream %s: %s",
+                            brief["stream_id"], resp.status_code)
+                continue
+            sid = resp.json().get("session_id") or ""
+            if not sid:
+                continue
+            await db.add_round(brief["stream_id"], sid, "brief")
+            nxt = (now + timedelta(hours=float(brief["cadence_hours"]))).isoformat()
+            await db.mark_brief_ran(brief["stream_id"], sid, nxt)
+            fired += 1
+        except Exception:  # noqa: BLE001 — one bad brief must not stop the rest
+            log.exception("brief scheduler pass failed for stream %s",
+                          brief.get("stream_id"))
+    return fired
+
+
+async def _brief_loop(state) -> None:
+    tick = float(os.environ.get("LUPA_BRIEF_TICK_SECONDS", "60"))
+    while True:
+        try:
+            await fire_due_briefs(state)
+        except Exception:  # noqa: BLE001
+            log.exception("brief scheduler tick failed")
+        await asyncio.sleep(tick)
+
+
 # ── app ──────────────────────────────────────────────────────────────
 
 
@@ -167,7 +257,11 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         app.state.fd = httpx.AsyncClient(
             base_url=_fd_url(), transport=fd_transport, timeout=60.0)
         app.state.pack = load_pack()
+        scheduler = asyncio.create_task(_brief_loop(app.state))
         yield
+        scheduler.cancel()
+        with suppress(asyncio.CancelledError):
+            await scheduler
         await app.state.fd.aclose()
         await app.state.db.close()
 
@@ -444,6 +538,39 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             raise HTTPException(404, "stream not found")
         return await _fd_get(request, "/fd/vfs/read",
                              {"project": stream["vfs_project"], "path": path})
+
+    # ── standing briefs ──────────────────────────────────────────────
+
+    @app.get("/api/streams/{stream_id}/brief")
+    async def get_brief(stream_id: str, request: Request,
+                        user: dict = Depends(require_user)):
+        if not await _db(request).get_stream(stream_id, user["id"]):
+            raise HTTPException(404, "stream not found")
+        return {"brief": await _db(request).get_brief(stream_id, user["id"])}
+
+    @app.put("/api/streams/{stream_id}/brief")
+    async def put_brief(stream_id: str, body: BriefBody, request: Request,
+                        user: dict = Depends(require_user)):
+        db = _db(request)
+        if not await db.get_stream(stream_id, user["id"]):
+            raise HTTPException(404, "stream not found")
+        if not await db.list_rounds(stream_id):
+            raise HTTPException(409, "run a first round before scheduling a brief")
+        brief = await db.upsert_brief(stream_id, user["id"], body.instruction.strip(),
+                                      body.cadence_hours, body.enabled)
+        return {"brief": brief}
+
+    @app.delete("/api/streams/{stream_id}/brief")
+    async def delete_brief(stream_id: str, request: Request,
+                           user: dict = Depends(require_user)):
+        if not await _db(request).get_stream(stream_id, user["id"]):
+            raise HTTPException(404, "stream not found")
+        await _db(request).delete_brief(stream_id, user["id"])
+        return {"ok": True}
+
+    @app.get("/api/inbox")
+    async def inbox(request: Request, user: dict = Depends(require_user)):
+        return {"rounds": await _db(request).list_brief_rounds(user["id"])}
 
     # ── costs ────────────────────────────────────────────────────────
 

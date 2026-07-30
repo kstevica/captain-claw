@@ -32,6 +32,20 @@ CREATE TABLE IF NOT EXISTS stream_sessions (
     created_at TEXT NOT NULL,
     PRIMARY KEY (stream_id, session_id)
 );
+
+CREATE TABLE IF NOT EXISTS briefs (
+    stream_id TEXT PRIMARY KEY REFERENCES streams(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    cadence_hours REAL NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run_at TEXT,
+    last_session_id TEXT,
+    next_run_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_briefs_due ON briefs(enabled, next_run_at);
 """
 
 
@@ -135,6 +149,69 @@ class LupaDB:
         async with self._db.execute(
             "SELECT * FROM stream_sessions WHERE stream_id = ? ORDER BY round_no",
             (stream_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    # ── standing briefs ──────────────────────────────────────────────
+
+    async def upsert_brief(self, stream_id: str, user_id: str, instruction: str,
+                           cadence_hours: float, enabled: bool) -> dict:
+        """One standing brief per stream. (Re)creating one schedules the first
+        run for NOW — the brief reports immediately, then every cadence."""
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.execute(
+            "INSERT INTO briefs (stream_id, user_id, instruction, cadence_hours,"
+            " enabled, next_run_at, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(stream_id) DO UPDATE SET instruction = excluded.instruction,"
+            " cadence_hours = excluded.cadence_hours, enabled = excluded.enabled,"
+            " updated_at = excluded.updated_at",
+            (stream_id, user_id, instruction, cadence_hours, int(enabled), now, now, now))
+        await self._db.commit()
+        return await self.get_brief(stream_id, user_id)  # type: ignore[return-value]
+
+    async def get_brief(self, stream_id: str, user_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM briefs WHERE stream_id = ? AND user_id = ?",
+            (stream_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def delete_brief(self, stream_id: str, user_id: str) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "DELETE FROM briefs WHERE stream_id = ? AND user_id = ?",
+            (stream_id, user_id))
+        await self._db.commit()
+
+    async def list_due_briefs(self, now: str) -> list[dict]:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM briefs WHERE enabled = 1 AND next_run_at <= ?", (now,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def mark_brief_ran(self, stream_id: str, session_id: str,
+                             next_run_at: str) -> None:
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.execute(
+            "UPDATE briefs SET last_run_at = ?, last_session_id = ?,"
+            " next_run_at = ?, updated_at = ? WHERE stream_id = ?",
+            (now, session_id, next_run_at, now, stream_id))
+        await self._db.commit()
+
+    async def list_brief_rounds(self, user_id: str, limit: int = 20) -> list[dict]:
+        """The inbox: recent scheduler-produced rounds across the user's streams."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT ss.*, s.title AS stream_title FROM stream_sessions ss"
+            " JOIN streams s ON s.id = ss.stream_id"
+            " WHERE s.user_id = ? AND ss.kind = 'brief'"
+            " ORDER BY ss.created_at DESC LIMIT ?", (user_id, limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 

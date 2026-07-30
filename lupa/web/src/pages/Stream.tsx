@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ArrowLeft, ArrowLeftRight, FileText, Loader2, Send, SlidersHorizontal } from 'lucide-react'
+import { ArrowLeft, ArrowLeftRight, FileText, Loader2, RadioTower, Send, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { api, post } from '../api'
-import { useVocab, type Round, type Stream } from '../stores'
+import { usePack, useVocab, type Round, type Stream } from '../stores'
 import ReceiptsPanel from '../components/Receipts'
 import { collapseSame, lineDiff } from '../lib/diff'
 
@@ -218,6 +218,8 @@ export default function StreamView({ streamId, onBack }: { streamId: string; onB
           />
         </div>
       )}
+
+      {tipSid && <BriefCard streamId={streamId} onFired={() => void loadStream(true)} />}
     </div>
   )
 }
@@ -322,6 +324,128 @@ function SettingsPanel({ streamId, settings, onSaved }:
           className="w-16 rounded bg-[var(--lp-bg)] border border-[var(--lp-border)] px-2 py-1 text-sm outline-none"
         />
       </label>
+    </div>
+  )
+}
+
+interface Brief {
+  instruction: string
+  cadence_hours: number
+  enabled: number | boolean
+  last_run_at?: string | null
+  last_session_id?: string | null
+  next_run_at?: string
+}
+
+function BriefCard({ streamId, onFired }: { streamId: string; onFired: () => void }) {
+  const v = useVocab()
+  const pack = usePack((s) => s.pack)
+  const presets = pack?.briefs?.presets ?? [
+    { id: 'daily', label: 'Daily', hours: 24 },
+    { id: 'weekly', label: 'Weekly', hours: 168 },
+  ]
+  const [brief, setBrief] = useState<Brief | null>(null)
+  const [instruction, setInstruction] = useState('')
+  const [hours, setHours] = useState(presets[0]?.hours ?? 24)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const lastFired = useRef<string | null>(null)
+
+  const load = useCallback(async () => {
+    const data = await api<{ brief: Brief | null }>(`/api/streams/${streamId}/brief`)
+    setBrief(data.brief)
+    if (data.brief) {
+      setInstruction(data.brief.instruction)
+      setHours(data.brief.cadence_hours)
+      // A new scheduled round landed since we last looked → refresh the stream.
+      // lastFired: null = first load (never fire); '' = loaded, no run yet.
+      const sid = data.brief.last_session_id ?? ''
+      if (sid && lastFired.current !== null && sid !== lastFired.current) onFired()
+      lastFired.current = sid
+    }
+  }, [streamId, onFired])
+
+  useEffect(() => {
+    void load()
+    const iv = setInterval(() => { void load() }, 10_000)
+    return () => clearInterval(iv)
+  }, [load])
+
+  const save = async (enabled = true) => {
+    setBusy(true); setError('')
+    try {
+      const data = await api<{ brief: Brief }>(`/api/streams/${streamId}/brief`, {
+        method: 'PUT',
+        body: JSON.stringify({ instruction: instruction.trim(),
+                               cadence_hours: hours, enabled }),
+      })
+      setBrief(data.brief)
+    } catch (e) { setError(e instanceof Error ? e.message : 'failed') }
+    finally { setBusy(false) }
+  }
+
+  const remove = async () => {
+    setBusy(true)
+    try {
+      await api(`/api/streams/${streamId}/brief`, { method: 'DELETE' })
+      setBrief(null); setInstruction('')
+    } finally { setBusy(false) }
+  }
+
+  const active = brief && (brief.enabled === true || brief.enabled === 1)
+  return (
+    <div className="rounded-xl border border-[var(--lp-border)] bg-[var(--lp-surface)] p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <RadioTower size={15}
+                    className={active ? '' : 'opacity-50'}
+                    style={{ color: active ? 'var(--lp-accent)' : 'var(--lp-text-dim)' }} />
+        <span className="font-semibold text-sm">{v('brief_title', 'Standing brief')}</span>
+        {active && (
+          <span className="text-[11px] px-1.5 py-0.5 rounded border border-emerald-700/60 text-emerald-400">
+            active
+          </span>
+        )}
+        <span className="text-xs text-[var(--lp-text-dim)]">{v('brief_hint', '')}</span>
+      </div>
+      <div className="flex flex-wrap gap-2 items-start">
+        <textarea
+          value={instruction}
+          onChange={(e) => setInstruction(e.target.value)}
+          placeholder={v('brief_placeholder', 'What should the desk keep watching?')}
+          rows={2}
+          className="flex-1 min-w-56 rounded-lg bg-[var(--lp-bg)] border border-[var(--lp-border)] px-3 py-2 text-sm outline-none focus:border-[var(--lp-accent)] resize-y"
+        />
+        <select
+          value={hours}
+          onChange={(e) => setHours(Number(e.target.value))}
+          className="rounded-lg bg-[var(--lp-bg)] border border-[var(--lp-border)] px-2 py-2 text-sm outline-none"
+        >
+          {presets.map((p) => <option key={p.id} value={p.hours}>{p.label}</option>)}
+        </select>
+        <button
+          onClick={() => void save(true)}
+          disabled={busy || !instruction.trim()}
+          className="rounded-lg px-3.5 py-2 text-sm font-semibold text-black disabled:opacity-40"
+          style={{ background: 'var(--lp-accent)' }}
+        >
+          {brief ? 'Update' : 'Start watching'}
+        </button>
+        {brief && (
+          <button onClick={() => void remove()} disabled={busy} title="Remove the brief"
+                  className="p-2 rounded-lg border border-[var(--lp-border)] text-[var(--lp-text-dim)] hover:text-red-400 disabled:opacity-40">
+            <Trash2 size={15} />
+          </button>
+        )}
+      </div>
+      {error && <div className="text-sm text-red-400">{error}</div>}
+      {brief && (
+        <div className="text-xs text-[var(--lp-text-dim)]">
+          {brief.last_run_at
+            ? <>last ran {new Date(brief.last_run_at).toLocaleString()} · </>
+            : <>hasn't run yet · </>}
+          next {brief.next_run_at ? new Date(brief.next_run_at).toLocaleString() : '—'}
+        </div>
+      )}
     </div>
   )
 }

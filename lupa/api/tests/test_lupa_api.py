@@ -166,15 +166,17 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
 
 @pytest.fixture
 async def bff(tmp_path, monkeypatch):
-    """(client, fd_log) — a lifespan-running BFF wired to the fake FD."""
+    """(client, fd_log, app) — a lifespan-running BFF wired to the fake FD."""
     monkeypatch.setenv("LUPA_DATA_DIR", str(tmp_path / "lupa-data"))
     monkeypatch.setenv("FD_JWT_SECRET", SECRET)
+    # Park the scheduler loop so tests drive fire_due_briefs deterministically.
+    monkeypatch.setenv("LUPA_BRIEF_TICK_SECONDS", "3600")
     fake_fd, log = make_fake_fd()
     app = create_app(fd_transport=httpx.ASGITransport(app=fake_fd))
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url="http://lupa.test") as client:
-            yield client, log
+            yield client, log, app
 
 
 def _auth(sub: str = "u1") -> dict:
@@ -182,7 +184,7 @@ def _auth(sub: str = "u1") -> dict:
 
 
 async def test_pack_is_served_and_vertical_free(bff):
-    client, _ = bff
+    client, _, _ = bff
     r = await client.get("/api/pack")
     assert r.status_code == 200
     pack = r.json()
@@ -193,7 +195,7 @@ async def test_pack_is_served_and_vertical_free(bff):
 
 
 async def test_login_proxy_rewrites_cookie_path(bff):
-    client, _ = bff
+    client, _, _ = bff
     r = await client.post("/api/auth/login", json={"email": "u1@test", "password": "x"})
     assert r.status_code == 200
     assert r.json()["access_token"] == "fd-access"
@@ -203,14 +205,14 @@ async def test_login_proxy_rewrites_cookie_path(bff):
 
 
 async def test_product_routes_require_token(bff):
-    client, _ = bff
+    client, _, _ = bff
     assert (await client.get("/api/streams")).status_code == 401
     bad = {"Authorization": "Bearer nope"}
     assert (await client.get("/api/streams", headers=bad)).status_code == 401
 
 
 async def test_full_commission_flow(bff):
-    client, log = bff
+    client, log, _ = bff
     h = _auth()
 
     # Stream.
@@ -273,7 +275,7 @@ async def test_full_commission_flow(bff):
 
 
 async def test_commissions_are_owner_scoped(bff):
-    client, _ = bff
+    client, _, _ = bff
     r = await client.post("/api/streams", json={"title": "mine"}, headers=_auth("u1"))
     stream_id = r.json()["id"]
     r = await client.post(f"/api/streams/{stream_id}/commissions",
@@ -290,7 +292,7 @@ async def test_commissions_are_owner_scoped(bff):
 
 async def test_stream_settings_drive_commissions(bff):
     """Stream overrides (quality, cast continuity, max agents) reach FD."""
-    client, log = bff
+    client, log, _ = bff
     h = _auth()
     stream_id = (await client.post("/api/streams", json={"title": "s"},
                                    headers=h)).json()["id"]
@@ -331,7 +333,7 @@ async def test_stream_settings_drive_commissions(bff):
 
 async def test_receipts_aggregation(bff):
     """One call assembles verdict + metrics + facts + contract + cost + ROI."""
-    client, _ = bff
+    client, _, _ = bff
     h = _auth()
     r = await client.post("/api/streams", json={"title": "s"}, headers=h)
     stream_id = r.json()["id"]
@@ -357,8 +359,72 @@ async def test_receipts_aggregation(bff):
                              headers=_auth("u2"))).status_code == 404
 
 
+async def test_standing_brief_lifecycle(bff, monkeypatch):
+    """PUT/GET/DELETE + the scheduler pass: running-guard, framed delta
+    instruction, minted owner token, round recorded as 'brief', inbox."""
+    from lupa_api.server import fire_due_briefs
+    client, log, app = bff
+    h = _auth()
+    stream_id = (await client.post("/api/streams", json={"title": "watch"},
+                                   headers=h)).json()["id"]
+
+    # No rounds yet → a brief has nothing to continue from.
+    r = await client.put(f"/api/streams/{stream_id}/brief",
+                         json={"instruction": "watch EU subsidies",
+                               "cadence_hours": 1}, headers=h)
+    assert r.status_code == 409
+
+    # Round 1 + approve (fake leaves it "running").
+    sid = (await client.post(f"/api/streams/{stream_id}/commissions",
+                             json={"brief": "baseline"}, headers=h)).json()["session_id"]
+    await client.post(f"/api/commissions/{sid}/approve", json={}, headers=h)
+
+    r = await client.put(f"/api/streams/{stream_id}/brief",
+                         json={"instruction": "watch EU subsidies",
+                               "cadence_hours": 1}, headers=h)
+    assert r.status_code == 200
+    assert r.json()["brief"]["enabled"] == 1
+
+    # Due immediately, but the tip round is still running → the guard holds.
+    assert await fire_due_briefs(app.state) == 0
+
+    # Tip finishes → the brief fires: framed instruction, brief-kind round.
+    log["sessions"][sid]["status"] = "done"
+    assert await fire_due_briefs(app.state) == 1
+    assert log["continued"]["parent"] == sid
+    assert log["continued"]["instruction"].startswith("Standing brief")
+    assert "watch EU subsidies" in log["continued"]["instruction"]
+
+    rounds = (await client.get(f"/api/streams/{stream_id}", headers=h)).json()["rounds"]
+    assert rounds[-1]["kind"] == "brief"
+
+    brief = (await client.get(f"/api/streams/{stream_id}/brief",
+                              headers=h)).json()["brief"]
+    assert brief["last_session_id"] == rounds[-1]["session_id"]
+    assert brief["next_run_at"] > brief["last_run_at"]  # pushed a cadence ahead
+
+    # Not due anymore.
+    assert await fire_due_briefs(app.state) == 0
+
+    # Inbox lists the scheduled round with its stream title.
+    inbox = (await client.get("/api/inbox", headers=h)).json()["rounds"]
+    assert inbox and inbox[0]["stream_title"] == "watch"
+    assert inbox[0]["kind"] == "brief"
+
+    # Without the shared secret the scheduler stands down entirely.
+    monkeypatch.delenv("FD_JWT_SECRET")
+    assert await fire_due_briefs(app.state) == 0
+    monkeypatch.setenv("FD_JWT_SECRET", SECRET)
+
+    # Delete → gone.
+    assert (await client.delete(f"/api/streams/{stream_id}/brief",
+                                headers=h)).status_code == 200
+    assert (await client.get(f"/api/streams/{stream_id}/brief",
+                             headers=h)).json()["brief"] is None
+
+
 async def test_cancel_at_plan_gate(bff):
-    client, _ = bff
+    client, _, _ = bff
     h = _auth()
     r = await client.post("/api/streams", json={"title": "s"}, headers=h)
     stream_id = r.json()["id"]
