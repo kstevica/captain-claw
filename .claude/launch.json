@@ -10,6 +10,15 @@
       "port": 4321
     },
     {
+      "name": "lupa",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/kstevica/Dev/captain-claw && LUPA_DATA_DIR=/tmp/lupa-dev-data ./.venv/bin/python -m uvicorn --app-dir lupa/api lupa_api.server:app --host 127.0.0.1 --port 25180"
+      ],
+      "port": 25180
+    },
+    {
       "name": "flight-deck",
       "runtimeExecutable": "/bin/bash",
       "runtimeArgs": [

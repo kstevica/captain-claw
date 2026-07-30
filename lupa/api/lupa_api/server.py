@@ -1,0 +1,355 @@
+"""Lupa BFF — FastAPI app.
+
+Single public surface for the product: serves the SPA, proxies auth to Flight
+Deck first-party (so FD's refresh cookie works cross-origin-free), verifies
+access JWTs locally when ``FD_JWT_SECRET`` is shared (falls back to proxying
+``/fd/auth/me``), and drives the commission lifecycle over FD's HTTP API.
+
+FD is expected on loopback (``LUPA_FD_URL``, default http://127.0.0.1:25080)
+with auth enabled. This process never imports captain_claw.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import httpx
+import jwt as pyjwt
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from lupa_api.db import LupaDB
+from lupa_api.packs import load_pack, pack_quality
+
+def _fd_url() -> str:
+    return os.environ.get("LUPA_FD_URL", "http://127.0.0.1:25080")
+
+
+def _data_dir() -> Path:
+    return Path(os.environ.get("LUPA_DATA_DIR", "./lupa-data"))
+
+
+_FD_COOKIE_PATH = "Path=/fd/auth"
+_OUR_COOKIE_PATH = "Path=/api/auth"
+
+# token → (user dict, expiry) for the /fd/auth/me fallback validator.
+_me_cache: dict[str, tuple[dict, float]] = {}
+_ME_CACHE_TTL = 60.0
+
+
+def _fd(request: Request) -> httpx.AsyncClient:
+    return request.app.state.fd
+
+
+def _db(request: Request) -> LupaDB:
+    return request.app.state.db
+
+
+def _bearer(request: Request) -> str:
+    h = request.headers.get("authorization", "")
+    return h[7:].strip() if h.lower().startswith("bearer ") else ""
+
+
+def _auth_headers(request: Request) -> dict:
+    tok = _bearer(request)
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
+async def require_user(request: Request) -> dict:
+    """The product-route auth dependency.
+
+    With ``FD_JWT_SECRET`` shared, verifies the FD-issued access JWT locally
+    (no round trip). Without it, validates by proxying ``GET /fd/auth/me``
+    (cached briefly) — slower but zero-config.
+    """
+    token = _bearer(request)
+    if not token:
+        raise HTTPException(401, "missing bearer token")
+    secret = os.environ.get("FD_JWT_SECRET", "")
+    if secret:
+        try:
+            payload = pyjwt.decode(token, secret, algorithms=["HS256"])
+        except pyjwt.PyJWTError:
+            raise HTTPException(401, "invalid or expired token")
+        if payload.get("type") not in (None, "access"):
+            raise HTTPException(401, "not an access token")
+        return {"id": payload.get("sub", ""), "role": payload.get("role", "user")}
+    cached = _me_cache.get(token)
+    if cached and cached[1] > time.monotonic():
+        return cached[0]
+    r = await _fd(request).get("/fd/auth/me",
+                               headers={"Authorization": f"Bearer {token}"})
+    if r.status_code != 200:
+        raise HTTPException(401, "invalid or expired token")
+    user = r.json()
+    _me_cache[token] = (user, time.monotonic() + _ME_CACHE_TTL)
+    return user
+
+
+async def _forward(resp: httpx.Response) -> Response:
+    """Pass an FD response through, rewriting the refresh-cookie path so the
+    browser scopes it to our proxy prefix instead of FD's."""
+    out = Response(content=resp.content, status_code=resp.status_code,
+                   media_type=resp.headers.get("content-type", "application/json"))
+    for sc in resp.headers.get_list("set-cookie"):
+        out.headers.append("set-cookie", sc.replace(_FD_COOKIE_PATH, _OUR_COOKIE_PATH))
+    return out
+
+
+def _fd_error(resp: httpx.Response) -> HTTPException:
+    try:
+        detail = resp.json().get("detail", resp.text)
+    except (ValueError, AttributeError):
+        detail = resp.text
+    return HTTPException(resp.status_code, detail)
+
+
+# ── request models ───────────────────────────────────────────────────
+
+
+class StreamCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
+class CommissionCreate(BaseModel):
+    brief: str = Field(min_length=1)
+    kind: str = "auto"  # auto | initial | continue | revise | fill_gaps
+    max_agents: int = Field(default=6, ge=1, le=10)
+
+
+class ApproveBody(BaseModel):
+    plan: dict | None = None
+
+
+# ── app ──────────────────────────────────────────────────────────────
+
+
+def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.db = LupaDB(_data_dir() / "lupa.db")
+        await app.state.db.init()
+        app.state.fd = httpx.AsyncClient(
+            base_url=_fd_url(), transport=fd_transport, timeout=60.0)
+        app.state.pack = load_pack()
+        yield
+        await app.state.fd.aclose()
+        await app.state.db.close()
+
+    app = FastAPI(title="Lupa", lifespan=lifespan)
+
+    # ── pack ─────────────────────────────────────────────────────────
+
+    @app.get("/api/pack")
+    async def get_pack(request: Request):
+        return request.app.state.pack
+
+    # ── auth proxy (first-party; cookie path rewritten) ──────────────
+
+    @app.post("/api/auth/{action}")
+    async def auth_proxy(action: str, request: Request):
+        if action not in ("login", "register", "refresh", "logout"):
+            raise HTTPException(404, "unknown auth action")
+        body = await request.body()
+        headers = {"content-type": request.headers.get("content-type", "application/json")}
+        cookie = request.headers.get("cookie", "")
+        if cookie:
+            headers["cookie"] = cookie
+        r = await _fd(request).post(f"/fd/auth/{action}", content=body, headers=headers)
+        return await _forward(r)
+
+    @app.get("/api/auth/me")
+    async def auth_me(request: Request):
+        r = await _fd(request).get("/fd/auth/me", headers=_auth_headers(request))
+        return await _forward(r)
+
+    # ── streams ──────────────────────────────────────────────────────
+
+    @app.get("/api/streams")
+    async def list_streams(request: Request, user: dict = Depends(require_user)):
+        return {"streams": await _db(request).list_streams(user["id"])}
+
+    @app.post("/api/streams")
+    async def create_stream(body: StreamCreate, request: Request,
+                            user: dict = Depends(require_user)):
+        pack = request.app.state.pack
+        return await _db(request).create_stream(user["id"], body.title.strip(),
+                                                pack.get("slug", ""))
+
+    @app.get("/api/streams/{stream_id}")
+    async def get_stream(stream_id: str, request: Request,
+                         user: dict = Depends(require_user)):
+        db = _db(request)
+        stream = await db.get_stream(stream_id, user["id"])
+        if not stream:
+            raise HTTPException(404, "stream not found")
+        stream["rounds"] = await db.list_rounds(stream_id)
+        return stream
+
+    # ── commissions (rounds) ─────────────────────────────────────────
+
+    @app.post("/api/streams/{stream_id}/commissions")
+    async def create_commission(stream_id: str, body: CommissionCreate,
+                                request: Request, user: dict = Depends(require_user)):
+        db = _db(request)
+        stream = await db.get_stream(stream_id, user["id"])
+        if not stream:
+            raise HTTPException(404, "stream not found")
+        rounds = await db.list_rounds(stream_id)
+        quality = pack_quality(request.app.state.pack)
+        kind = body.kind
+        if kind == "auto":
+            kind = "initial" if not rounds else "continue"
+
+        if kind == "initial":
+            if rounds:
+                raise HTTPException(409, "stream already has rounds — continue it instead")
+            r = await _fd(request).post(
+                "/fd/vatra/start",
+                json={"intent": body.brief, "title": stream["title"],
+                      "max_agents": body.max_agents, "quality": quality},
+                headers=_auth_headers(request))
+            if r.status_code != 200:
+                raise _fd_error(r)
+            sid = r.json()["session_id"]
+            # FD's default shared folder for a Vatra run; continuation rounds
+            # inherit it, so it is the stream's folder from round 1 on.
+            await db.set_stream_vfs_project(stream_id, f"vatra-{sid[:8]}")
+        else:
+            if not rounds:
+                raise HTTPException(409, "no prior round to continue from")
+            parent_sid = rounds[-1]["session_id"]
+            r = await _fd(request).post(
+                f"/fd/vatra/sessions/{parent_sid}/continue",
+                json={"instruction": body.brief, "kind": kind, "same_cast": True},
+                headers=_auth_headers(request))
+            if r.status_code != 200:
+                raise _fd_error(r)
+            data = r.json()
+            sid = data.get("session_id") or data.get("id") or ""
+            if not sid:
+                raise HTTPException(502, "FD continue returned no session id")
+
+        rec = await db.add_round(stream_id, sid, kind)
+        return {"session_id": sid, "round": rec["round_no"], "kind": kind,
+                "status": "planning" if kind == "initial" else "running"}
+
+    @app.post("/api/commissions/{session_id}/approve")
+    async def approve_commission(session_id: str, body: ApproveBody, request: Request,
+                                 user: dict = Depends(require_user)):
+        if not await _db(request).stream_for_session(session_id, user["id"]):
+            raise HTTPException(404, "commission not found")
+        quality = pack_quality(request.app.state.pack)
+        r = await _fd(request).post(
+            "/fd/vatra/plan/approve",
+            json={"session_id": session_id, "plan": body.plan, "quality": quality},
+            headers=_auth_headers(request))
+        if r.status_code != 200:
+            raise _fd_error(r)
+        return r.json()
+
+    @app.post("/api/commissions/{session_id}/cancel")
+    async def cancel_commission(session_id: str, request: Request,
+                                user: dict = Depends(require_user)):
+        if not await _db(request).stream_for_session(session_id, user["id"]):
+            raise HTTPException(404, "commission not found")
+        # At the plan gate → discard the plan; running → cancel the run.
+        r = await _fd(request).post("/fd/vatra/plan/cancel",
+                                    json={"session_id": session_id},
+                                    headers=_auth_headers(request))
+        if r.status_code != 200:
+            r = await _fd(request).post(f"/fd/basna/sessions/{session_id}/cancel",
+                                        headers=_auth_headers(request))
+            if r.status_code != 200:
+                raise _fd_error(r)
+        return {"ok": True}
+
+    async def _fd_get(request: Request, path: str, params: dict | None = None):
+        r = await _fd(request).get(path, params=params, headers=_auth_headers(request))
+        if r.status_code != 200:
+            raise _fd_error(r)
+        return r.json()
+
+    @app.get("/api/commissions/{session_id}")
+    async def commission_detail(session_id: str, request: Request,
+                                user: dict = Depends(require_user)):
+        if not await _db(request).stream_for_session(session_id, user["id"]):
+            raise HTTPException(404, "commission not found")
+        return await _fd_get(request, f"/fd/basna/sessions/{session_id}")
+
+    @app.get("/api/commissions/{session_id}/progress")
+    async def commission_progress(session_id: str, request: Request,
+                                  user: dict = Depends(require_user)):
+        if not await _db(request).stream_for_session(session_id, user["id"]):
+            raise HTTPException(404, "commission not found")
+        return await _fd_get(request, f"/fd/basna/sessions/{session_id}/progress")
+
+    @app.get("/api/commissions/{session_id}/facts")
+    async def commission_facts(session_id: str, request: Request,
+                               user: dict = Depends(require_user)):
+        if not await _db(request).stream_for_session(session_id, user["id"]):
+            raise HTTPException(404, "commission not found")
+        return await _fd_get(request, f"/fd/basna/sessions/{session_id}/facts")
+
+    # ── stream workspace files (the report reader's source) ──────────
+
+    @app.get("/api/streams/{stream_id}/files")
+    async def stream_files(stream_id: str, request: Request, path: str = "",
+                           user: dict = Depends(require_user)):
+        stream = await _db(request).get_stream(stream_id, user["id"])
+        if not stream:
+            raise HTTPException(404, "stream not found")
+        if not stream["vfs_project"]:
+            return {"entries": []}
+        return await _fd_get(request, "/fd/vfs/list",
+                             {"project": stream["vfs_project"], "path": path})
+
+    @app.get("/api/streams/{stream_id}/file")
+    async def stream_file(stream_id: str, path: str, request: Request,
+                          user: dict = Depends(require_user)):
+        stream = await _db(request).get_stream(stream_id, user["id"])
+        if not stream or not stream["vfs_project"]:
+            raise HTTPException(404, "stream not found")
+        return await _fd_get(request, "/fd/vfs/read",
+                             {"project": stream["vfs_project"], "path": path})
+
+    # ── costs ────────────────────────────────────────────────────────
+
+    @app.get("/api/costs")
+    async def costs(request: Request, run_kind: str = "", since: str = "",
+                    limit: int = 200, user: dict = Depends(require_user)):
+        return await _fd_get(request, "/fd/costs",
+                             {"run_kind": run_kind, "since": since, "limit": limit})
+
+    # ── SPA ──────────────────────────────────────────────────────────
+
+    static = Path(__file__).resolve().parent.parent / "static"
+    if (static / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=static, html=True), name="spa")
+
+    return app
+
+
+app = create_app()
+
+
+def main() -> None:
+    import argparse
+
+    import uvicorn
+
+    ap = argparse.ArgumentParser(description="Lupa BFF")
+    ap.add_argument("--host", default=os.environ.get("LUPA_HOST", "0.0.0.0"))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("LUPA_PORT", "25180")))
+    args = ap.parse_args()
+    uvicorn.run(app, host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

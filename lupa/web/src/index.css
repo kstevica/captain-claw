@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+/* Pack theme tokens — overwritten at runtime from /api/pack (see stores.ts).
+   Defaults mirror the research-desk pack so the first paint is on-brand. */
+:root {
+  --lp-accent: #e07a2f;
+  --lp-accent-soft: #f2b27a;
+  --lp-bg: #101012;
+  --lp-surface: #1a1a1e;
+  --lp-border: #2a2a30;
+  --lp-text: #e8e6e1;
+  --lp-text-dim: #9a968e;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--lp-bg);
+  color: var(--lp-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Report typography (react-markdown output) */
+.lp-prose h1 { font-size: 1.6rem; font-weight: 700; margin: 1.2em 0 .5em; }
+.lp-prose h2 { font-size: 1.25rem; font-weight: 650; margin: 1.1em 0 .45em; }
+.lp-prose h3 { font-size: 1.05rem; font-weight: 600; margin: 1em 0 .4em; }
+.lp-prose p { margin: .55em 0; line-height: 1.65; }
+.lp-prose ul, .lp-prose ol { margin: .55em 0 .55em 1.4em; line-height: 1.6; }
+.lp-prose ul { list-style: disc; }
+.lp-prose ol { list-style: decimal; }
+.lp-prose a { color: var(--lp-accent-soft); text-decoration: underline; }
+.lp-prose code { background: var(--lp-surface); border: 1px solid var(--lp-border);
+                 border-radius: 4px; padding: 0 .3em; font-size: .9em; }
+.lp-prose pre { background: var(--lp-surface); border: 1px solid var(--lp-border);
+                border-radius: 8px; padding: .8em 1em; overflow-x: auto; margin: .8em 0; }
+.lp-prose pre code { background: none; border: none; padding: 0; }
+.lp-prose table { border-collapse: collapse; margin: .8em 0; font-size: .92em; }
+.lp-prose th, .lp-prose td { border: 1px solid var(--lp-border); padding: .35em .7em; }
+.lp-prose blockquote { border-left: 3px solid var(--lp-accent);
+                       padding-left: .9em; color: var(--lp-text-dim); margin: .8em 0; }
