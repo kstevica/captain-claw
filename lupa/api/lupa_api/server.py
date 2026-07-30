@@ -160,6 +160,7 @@ class SettingsBody(BaseModel):
     same_cast: bool | None = None
     max_agents: int | None = Field(default=None, ge=1, le=10)
     archetype_ids: list[str] | None = None  # pinned house cast; [] clears
+    execution_groups: bool | None = None    # ordered phases vs one parallel wave
 
 
 class ApproveBody(BaseModel):
@@ -192,6 +193,21 @@ def _stream_quality(stream: dict, pack: dict) -> dict:
     if prof in _QUALITY_PROFILES:
         return {"profile": prof}
     return pack_quality(pack)
+
+
+def pack_execution_groups(pack: dict) -> bool:
+    """Whether the desk runs its team in ordered phases (A→B→C) rather than one
+    blind parallel wave — the pack's default."""
+    return bool((pack.get("run") or {}).get("execution_groups", False))
+
+
+def _stream_execution_groups(stream: dict, pack: dict) -> bool:
+    """Grouped-run choice for a commission: explicit stream override, else the
+    pack default."""
+    s = _stream_settings(stream).get("execution_groups")
+    if isinstance(s, bool):
+        return s
+    return pack_execution_groups(pack)
 
 
 # ── standing-brief scheduler (product-side; deliberately NOT FD's
@@ -302,14 +318,17 @@ async def _run_failure_reason(state, headers: dict, sid: str, status: str) -> st
 
 
 async def _run_headless_vatra(state, token: str, intent: str, quality: dict,
-                              on_started=None) -> tuple[dict | None, str]:
+                              on_started=None,
+                              execution_groups: bool = False) -> tuple[dict | None, str]:
     """Start → auto-approve at the gate → poll to a terminal state.
 
     The Studio's generate/evaluate runs are unattended, so the plan gate is
     auto-approved (the human gate stays for customer commissions). ``on_started``
     (async) is called with the run's session id as soon as it exists, so the
-    Studio can stream the live progress. Returns (session detail, "") or
-    (None, error) — the error is the run's specific failure line when available."""
+    Studio can stream the live progress. ``execution_groups`` runs the team in
+    ordered phases (A→B→C) instead of one blind parallel wave. Returns (session
+    detail, "") or (None, error) — the error is the run's specific failure line
+    when available."""
     headers = {"Authorization": f"Bearer {token}"}
     r = await state.fd.post("/fd/vatra/start",
                             json={"intent": intent, "quality": quality},
@@ -330,9 +349,11 @@ async def _run_headless_vatra(state, token: str, intent: str, quality: dict,
         detail = r.json()
         status = detail.get("status", "")
         if status == "awaiting_plan" and not approved:
-            ok = await state.fd.post("/fd/vatra/plan/approve",
-                                     json={"session_id": sid, "quality": quality},
-                                     headers=headers)
+            ok = await state.fd.post(
+                "/fd/vatra/plan/approve",
+                json={"session_id": sid, "quality": quality,
+                      "execution_groups": execution_groups},
+                headers=headers)
             approved = ok.status_code == 200
         elif status == "done":
             return detail, ""
@@ -572,12 +593,15 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     @app.post("/api/commissions/{session_id}/approve")
     async def approve_commission(session_id: str, body: ApproveBody, request: Request,
                                  user: dict = Depends(require_user)):
-        if not await _db(request).stream_for_session(session_id, user["id"]):
+        stream = await _db(request).stream_for_session(session_id, user["id"])
+        if not stream:
             raise HTTPException(404, "commission not found")
-        quality = pack_quality(request.app.state.pack)
+        pack = await _pack_by_slug(request, stream.get("pack") or "")
+        quality = _stream_quality(stream, pack)
         r = await _fd(request).post(
             "/fd/vatra/plan/approve",
-            json={"session_id": session_id, "plan": body.plan, "quality": quality},
+            json={"session_id": session_id, "plan": body.plan, "quality": quality,
+                  "execution_groups": _stream_execution_groups(stream, pack)},
             headers=_auth_headers(request))
         if r.status_code != 200:
             raise _fd_error(r)
@@ -906,7 +930,7 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
                     "status": "running", "session_id": sid, "run_id": run_id})
         detail, err = await _run_headless_vatra(
             state, token, brief, pack_quality(manifest) or {"profile": "thorough"},
-            on_started=_started)
+            on_started=_started, execution_groups=pack_execution_groups(manifest))
         if not await _run_is_current(state.db, slug, "eval_state", run_id):
             return  # cancelled or superseded by a re-run — don't clobber
         if err:

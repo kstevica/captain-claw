@@ -23,7 +23,7 @@ interface Entry { name: string; dir?: boolean; size?: number }
 
 interface StreamSettings {
   quality_profile?: string; same_cast?: boolean; max_agents?: number
-  archetype_ids?: string[]
+  archetype_ids?: string[]; execution_groups?: boolean
 }
 
 interface Archetype { id: string; role?: string; source?: string }
@@ -287,6 +287,7 @@ function SettingsPanel({ streamId, settings, onSaved }:
   { streamId: string; settings: StreamSettings; onSaved: () => void }) {
   const [busy, setBusy] = useState(false)
   const [cast, setCast] = useState<Archetype[]>([])
+  const pack = usePack((s) => s.pack)
 
   useEffect(() => {
     void api<{ archetypes: Archetype[] }>('/api/archetypes')
@@ -304,6 +305,7 @@ function SettingsPanel({ streamId, settings, onSaved }:
   const quality = settings.quality_profile ?? ''
   const sameCast = settings.same_cast ?? true
   const maxAgents = settings.max_agents ?? 6
+  const grouped = settings.execution_groups ?? pack?.run?.execution_groups ?? false
   const pinned = new Set(settings.archetype_ids ?? [])
   const sortedCast = [...cast].sort((a, b) =>
     (a.role ?? a.id).localeCompare(b.role ?? b.id))
@@ -336,6 +338,14 @@ function SettingsPanel({ streamId, settings, onSaved }:
             onChange={(e) => void save({ same_cast: e.target.checked })}
           />
           <span className="text-[var(--lp-text-dim)]">Keep the same team across rounds</span>
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer"
+               title="Run the team in ordered phases (A→B→C) so later agents build on earlier results, instead of one blind parallel wave.">
+          <input
+            type="checkbox" checked={grouped}
+            onChange={(e) => void save({ execution_groups: e.target.checked })}
+          />
+          <span className="text-[var(--lp-text-dim)]">Grouped phases</span>
         </label>
         <label className="flex items-center gap-2">
           <span className="text-[var(--lp-text-dim)]">Max agents</span>

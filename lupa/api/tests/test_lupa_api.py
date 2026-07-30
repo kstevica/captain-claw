@@ -84,6 +84,7 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
             raise HTTPException(404, "session not found")
         sess["status"] = "running"
         log["approved_plan"] = body.get("plan")
+        log["approve_body"] = body
         return {"ok": True, "session_id": body["session_id"], "status": "running"}
 
     @fd.post("/fd/vatra/plan/cancel")
@@ -314,6 +315,28 @@ async def test_product_routes_require_token(bff):
     assert (await client.get("/api/streams")).status_code == 401
     bad = {"Authorization": "Bearer nope"}
     assert (await client.get("/api/streams", headers=bad)).status_code == 401
+
+
+async def test_execution_groups_default_and_override(bff):
+    """The research-desk default runs grouped; a stream can override to flat."""
+    client, log, _ = bff
+    h = _auth()
+    # Pack default (research-desk → run.execution_groups: true) reaches approve.
+    stream_id = (await client.post("/api/streams", json={"title": "grouped"},
+                                   headers=h)).json()["id"]
+    sid = (await client.post(f"/api/streams/{stream_id}/commissions",
+                             json={"brief": "x"}, headers=h)).json()["session_id"]
+    await client.post(f"/api/commissions/{sid}/approve", json={}, headers=h)
+    assert log["approve_body"]["execution_groups"] is True
+
+    # An explicit stream override to flat wins over the pack default.
+    s2 = (await client.post("/api/streams", json={"title": "flat"}, headers=h)).json()["id"]
+    await client.patch(f"/api/streams/{s2}/settings",
+                       json={"execution_groups": False}, headers=h)
+    sid3 = (await client.post(f"/api/streams/{s2}/commissions",
+                              json={"brief": "z"}, headers=h)).json()["session_id"]
+    await client.post(f"/api/commissions/{sid3}/approve", json={}, headers=h)
+    assert log["approve_body"]["execution_groups"] is False
 
 
 async def test_full_commission_flow(bff):

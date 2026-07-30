@@ -67,6 +67,7 @@ export default function ManifestEditor({ value, onChange }: Props) {
   const vocab = (value.vocabulary as Record<string, string>) ?? {}
   const roi = (value.roi as Record<string, unknown>) ?? {}
   const quality = (value.quality as Record<string, unknown>) ?? {}
+  const run = (value.run as Record<string, unknown>) ?? {}
   const briefs = ((value.briefs as { presets?: { id: string; label: string; hours: number }[] })?.presets) ?? []
   const intakeTypes = ((value.intake as { types?: Record<string, unknown>[] })?.types) ?? []
   const evals = (value.evals as { brief?: string }[]) ?? []
@@ -201,6 +202,13 @@ export default function ManifestEditor({ value, onChange }: Props) {
                          className={inputCls} />
                 </Field>
               )}
+              <label className="flex items-center gap-2 text-sm cursor-pointer pt-1"
+                     title="Run the team in ordered phases (A→B→C) so later agents build on earlier results, instead of one blind parallel wave.">
+                <input type="checkbox" checked={Boolean(run.execution_groups)}
+                       onChange={(e) => onChange(set(value, 'run',
+                         { ...run, execution_groups: e.target.checked }))} />
+                <span>Grouped phases (recommended for research)</span>
+              </label>
             </Section>
             <Section title="ROI framing" hint="The “≈N× below …” chip on every report.">
               <Field label="Analyst hourly rate (USD)">

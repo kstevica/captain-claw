@@ -46,6 +46,9 @@
   "quality": {
     "profile": "thorough"
   },
+  "run": {
+    "execution_groups": true
+  },
   "briefs": {
     "presets": [
       { "id": "hourly", "label": "Hourly", "hours": 1 },

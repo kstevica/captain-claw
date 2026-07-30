@@ -11,6 +11,7 @@ export interface Pack {
   vocabulary: Record<string, string>
   intake: { types: { id: string; label: string; description: string; default_max_agents: number }[] }
   quality: Record<string, unknown>
+  run?: { execution_groups?: boolean }
   briefs?: { presets: { id: string; label: string; hours: number }[] }
   onboarding_md?: string
 }
