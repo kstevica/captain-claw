@@ -88,7 +88,8 @@ Nordics evidence weakens the structural case further.
 
 
 def _token(sub: str) -> str:
-    return pyjwt.encode({"sub": sub, "role": "user", "type": "access",
+    # Dev sandbox: everyone is an admin, so the Pack Studio is reachable.
+    return pyjwt.encode({"sub": sub, "role": "admin", "type": "access",
                          "iat": int(time.time()), "exp": int(time.time()) + 900},
                         SECRET, algorithm="HS256")
 
@@ -214,6 +215,17 @@ async def session_detail(sid: str, authorization: str | None = Header(default=No
     s = _sessions.get(sid)
     if not s:
         raise HTTPException(404, "session not found")
+    # A Kalup factory run: the "team" configures a desk instead of reporting.
+    if s["intent"].startswith("KALUP PACK DRAFT"):
+        status = _status(s)
+        return {"id": sid, "status": status, "title": "pack draft",
+                "intent": s["intent"],
+                "truth": _KALUP_TRUTH if status == "done" else "",
+                "config": {"mode": "vatra"},
+                "route": {"group0_plan": {"steps": [
+                    {"agent": "vertical-architect", "does": "derive vocabulary + intake"},
+                    {"agent": "editor-writer", "does": "onboarding + golden eval task"}]}},
+                "analysis": None}
     # A Basna (second-opinion) session carries its own truth once executed.
     if s.get("basna"):
         done = bool(s.get("basna_done"))
@@ -440,6 +452,61 @@ with the desk**, with two differences worth your attention:
 
 The ensemble did *not* find the Nordics under-weighting the desk flagged, so
 treat that as the desk's own signal, not a cross-confirmed finding.
+"""
+
+
+_KALUP_TRUTH = """The team configured the desk. Manifest:
+
+```json
+{
+  "name": "Tender Desk",
+  "tagline": "Public-sector RFPs, decoded",
+  "theme": {
+    "accent": "#2fb2a0",
+    "accent_soft": "#7ad4c8",
+    "bg": "#0e1413",
+    "surface": "#17201e",
+    "border": "#26332f",
+    "text": "#e6ece9",
+    "text_dim": "#93a39d"
+  },
+  "vocabulary": {
+    "stream": "Tender",
+    "streams": "Tenders",
+    "commission": "Analyze",
+    "brief": "Tender brief",
+    "round": "Pass",
+    "report": "Assessment",
+    "plan_gate_title": "Review the analysis plan",
+    "plan_gate_hint": "Your bid team drafted this plan. Approve to start, or cancel and rephrase.",
+    "composer_placeholder": "Paste the RFP scope or describe the tender: issuer, deadline, lot structure.",
+    "continue_placeholder": "Deepen this tender: compliance matrix, pricing angle, incumbent risk…",
+    "empty_streams": "No tenders yet. Add the first RFP to analyze.",
+    "new_stream": "New tender",
+    "receipts_title": "Receipts",
+    "receipts_hint": "How this assessment was verified, and what it cost.",
+    "facts_title": "Facts ledger",
+    "cost_title": "Cost",
+    "brief_title": "Tender watch",
+    "brief_hint": "The desk re-checks this tender on a schedule and reports only changes.",
+    "brief_placeholder": "What should the desk keep watching? (amendments, Q&A, deadlines)",
+    "inbox_title": "Watch inbox"
+  },
+  "intake": {
+    "types": [{"id": "tender", "label": "Tender analysis",
+               "description": "Eligibility, compliance matrix, scoring odds.",
+               "default_max_agents": 5}]
+  },
+  "quality": {"profile": "thorough"},
+  "briefs": {"presets": [
+    {"id": "daily", "label": "Daily", "hours": 24},
+    {"id": "weekly", "label": "Weekly", "hours": 168}
+  ]},
+  "roi": {"analyst_hourly_usd": 90, "analyst_label": "a bid consultant"},
+  "evals": [{"brief": "Analyze a sample municipal IT-services RFP: eligibility, compliance matrix, three scoring risks."}],
+  "onboarding_md": "# Welcome to Tender Desk\\n\\nPaste an RFP and the desk returns an assessment with receipts: eligibility, a compliance matrix, and scoring risks — each figure verified.\\n\\nSet a **Tender watch** and the desk re-checks amendments and Q&A on a schedule."
+}
+```
 """
 
 

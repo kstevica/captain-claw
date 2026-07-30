@@ -242,6 +242,13 @@ solution in 2–3 days (max 5), ship 20–30 branded vertical apps by end of 202
 Strategic anchor: Bessemer's "The Future of AI is Vertical" (bvp.com/atlas);
 implementation patterns borrowed from block/buzz.*
 
+*Status: K1 shipped — runtime pack registry (repo packs are seeds), creator
+roles, Studio (create → generate-via-Vatra → review → evaluate → publish with
+the ship-gate), desk gallery, /desks/<slug> activation, pack-scoped streams.
+Remaining: draft-fork/rollback of published packs, richer manifest editors with
+live preview, per-pack cast auto-forge in generation, custom domains
+(Host-header), kalup CLI, eval thresholds beyond the receipts verdict.*
+
 ## Why this works strategically (Bessemer thesis → our stack)
 
 The BVP argument maps almost one-to-one onto what Lupa already is:

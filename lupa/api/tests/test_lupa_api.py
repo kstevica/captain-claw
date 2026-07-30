@@ -90,7 +90,7 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
     async def plan_cancel(body: dict, authorization: str | None = Header(default=None)):
         _need_auth(authorization)
         sess = log["sessions"].get(body["session_id"])
-        if not sess or sess["status"] != "planning":
+        if not sess or sess["status"] not in ("planning", "awaiting_plan"):
             raise HTTPException(409, "not at the plan gate")
         sess["status"] = "cancelled"
         return {"ok": True}
@@ -110,12 +110,31 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
         log["continued"] = {"parent": sid, **body}
         return {"ok": True, "session_id": new_sid, "round": 2}
 
+    KALUP_TRUTH = ('Configured the desk.\n```json\n'
+                   '{"name": "Tender Desk", "tagline": "RFPs, decoded",'
+                   ' "theme": {"accent": "#2fb2a0"},'
+                   ' "vocabulary": {"stream": "Tender"},'
+                   ' "quality": {"profile": "thorough"},'
+                   ' "evals": [{"brief": "Analyze a sample RFP"}]}\n```')
+
     @fd.get("/fd/basna/sessions/{sid}")
     async def session_detail(sid: str, authorization: str | None = Header(default=None)):
         _need_auth(authorization)
         sess = log["sessions"].get(sid)
         if not sess:
             raise HTTPException(404, "session not found")
+        # Poll-driven progression so headless (factory) runs can complete:
+        # planning → awaiting_plan on first read; running → done after 2 reads.
+        if sess["status"] == "planning":
+            sess["status"] = "awaiting_plan"
+        elif sess["status"] == "running":
+            sess["polls"] = sess.get("polls", 0) + 1
+            if sess["polls"] >= 2:
+                sess["status"] = "done"
+                if not sess.get("truth"):
+                    sess["truth"] = (KALUP_TRUTH
+                                     if sess["intent"].startswith("KALUP PACK DRAFT")
+                                     else "# Golden run\nAll checks passed.")
         return sess
 
     @fd.get("/fd/basna/sessions/{sid}/progress")
@@ -222,6 +241,8 @@ async def bff(tmp_path, monkeypatch):
     monkeypatch.setenv("FD_JWT_SECRET", SECRET)
     # Park the scheduler loop so tests drive fire_due_briefs deterministically.
     monkeypatch.setenv("LUPA_BRIEF_TICK_SECONDS", "3600")
+    # Fast factory polling for the Studio generate/evaluate tests.
+    monkeypatch.setenv("LUPA_FACTORY_POLL_SECONDS", "0.01")
     fake_fd, log = make_fake_fd()
     app = create_app(fd_transport=httpx.ASGITransport(app=fake_fd))
     async with app.router.lifespan_context(app):
@@ -555,3 +576,116 @@ async def test_cancel_at_plan_gate(bff):
     sid = r.json()["session_id"]
     r = await client.post(f"/api/commissions/{sid}/cancel", headers=h)
     assert r.status_code == 200 and r.json()["ok"] is True
+
+
+# ── Kalup Part II: pack registry + Studio ────────────────────────────
+
+
+async def _wait_for(client, url, headers, path: list[str], value: str,
+                    tries: int = 200) -> dict:
+    """Poll a GET until a nested field reaches `value` (background factory)."""
+    body: dict = {}
+    for _ in range(tries):
+        body = (await client.get(url, headers=headers)).json()
+        cur = body
+        for key in path:
+            cur = (cur or {}).get(key) if isinstance(cur, dict) else None
+        if cur == value:
+            return body
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"{url} never reached {'.'.join(path)}={value}: {body}")
+
+
+async def test_registry_seeds_and_permissions(bff):
+    client, _, _ = bff
+    user, admin = _auth("u1"), {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+
+    # The repo pack was imported as a published system pack.
+    packs = (await client.get("/api/packs", headers=user)).json()["packs"]
+    assert any(p["slug"] == "research-desk" and p["status"] == "published"
+               for p in packs)
+
+    # Plain users can't create drafts; admins can; granted creators can.
+    assert (await client.post("/api/packs", json={"slug": "x-desk", "name": "X"},
+                              headers=user)).status_code == 403
+    assert (await client.post("/api/creators", json={"user_id": "u1"},
+                              headers=user)).status_code == 403
+    assert (await client.post("/api/creators", json={"user_id": "u1"},
+                              headers=admin)).status_code == 200
+    assert (await client.get("/api/creators/me", headers=user)).json()["creator"] is True
+    r = await client.post("/api/packs", json={"slug": "x-desk", "name": "X Desk"},
+                          headers=user)
+    assert r.status_code == 200
+    # The scaffold copies the default pack so a fresh draft renders.
+    assert r.json()["pack"]["vocabulary"]["stream"] == "Stream"
+
+    # Drafts are invisible to others (u2 sees only published).
+    others = (await client.get("/api/packs", headers=_auth("u2"))).json()["packs"]
+    assert all(p["slug"] != "x-desk" for p in others)
+
+
+async def test_factory_generate_evaluate_publish(bff):
+    """The 2-3-day factory line, compressed: draft → generate (Vatra writes the
+    manifest) → ship-gate blocks → evaluate (golden run) → green → publish."""
+    client, log, _ = bff
+    admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+
+    await client.post("/api/packs", json={"slug": "tender-desk", "name": "Tenders"},
+                      headers=admin)
+
+    # The gate is closed before any evaluation.
+    r = await client.post("/api/packs/tender-desk/publish", headers=admin)
+    assert r.status_code == 409
+
+    # Generate: a headless Vatra run drafts the manifest and it merges in.
+    r = await client.post("/api/packs/tender-desk/generate",
+                          json={"instructions": "public-sector RFP analysis"},
+                          headers=admin)
+    assert r.status_code == 200
+    body = await _wait_for(client, "/api/packs/tender-desk", admin,
+                           ["generation", "status"], "done")
+    assert log["start_body"]["intent"].startswith("KALUP PACK DRAFT")
+    pack = body["pack"]
+    assert pack["name"] == "Tender Desk"           # generated
+    assert pack["vocabulary"]["stream"] == "Tender"
+    assert pack["evals"][0]["brief"] == "Analyze a sample RFP"
+
+    # Evaluate: the golden commission runs and passes its own receipts.
+    r = await client.post("/api/packs/tender-desk/evaluate", headers=admin)
+    assert r.status_code == 200
+    body = await _wait_for(client, "/api/packs/tender-desk", admin,
+                           ["eval", "verdict"], "green")
+    assert log["start_body"]["intent"] == "Analyze a sample RFP"
+
+    # Publish: the gate opens on green; the desk appears for everyone.
+    r = await client.post("/api/packs/tender-desk/publish", headers=admin)
+    assert r.status_code == 200
+    packs = (await client.get("/api/packs", headers=_auth("u2"))).json()["packs"]
+    tender = next(p for p in packs if p["slug"] == "tender-desk")
+    assert tender["status"] == "published" and tender["version"] == 1
+
+    # Streams scope to the new desk and its quality profile drives runs.
+    h = _auth("u2")
+    r = await client.post("/api/streams",
+                          json={"title": "City RFP", "pack": "tender-desk"},
+                          headers=h)
+    stream_id = r.json()["id"]
+    await client.post(f"/api/streams/{stream_id}/commissions",
+                      json={"brief": "review the city RFP"}, headers=h)
+    assert log["start_body"]["quality"] == {"profile": "thorough"}
+    scoped = (await client.get("/api/streams", params={"pack": "tender-desk"},
+                               headers=h)).json()["streams"]
+    assert [s["id"] for s in scoped] == [stream_id]
+    assert (await client.get("/api/streams", params={"pack": "research-desk"},
+                             headers=h)).json()["streams"] == []
+
+
+def test_eval_verdict_is_strict():
+    from lupa_api.server import _eval_verdict
+    green, _ = _eval_verdict({"quality_verdict": "pass",
+                              "quality_metrics": {"contract_failed_critical": 0}})
+    assert green == "green"
+    red, _ = _eval_verdict({"quality_verdict": "pass",
+                            "quality_metrics": {"contract_failed_critical": 1}})
+    assert red == "red"
+    assert _eval_verdict({})[0] == "red"

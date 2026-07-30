@@ -55,6 +55,22 @@ CREATE TABLE IF NOT EXISTS second_opinions (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS packs (
+    slug TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    version INTEGER NOT NULL DEFAULT 0,
+    manifest TEXT NOT NULL DEFAULT '{}',
+    generation TEXT NOT NULL DEFAULT '{}',
+    eval_state TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS creators (
+    user_id TEXT PRIMARY KEY
+);
 """
 
 
@@ -100,14 +116,17 @@ class LupaDB:
         return {"id": sid, "user_id": user_id, "title": title, "pack": pack,
                 "vfs_project": "", "created_at": now, "updated_at": now}
 
-    async def list_streams(self, user_id: str) -> list[dict]:
+    async def list_streams(self, user_id: str, pack: str | None = None) -> list[dict]:
         assert self._db is not None
-        async with self._db.execute(
-            "SELECT s.*, COUNT(ss.session_id) AS rounds"
-            " FROM streams s LEFT JOIN stream_sessions ss ON ss.stream_id = s.id"
-            " WHERE s.user_id = ? GROUP BY s.id ORDER BY s.updated_at DESC",
-            (user_id,),
-        ) as cur:
+        q = ("SELECT s.*, COUNT(ss.session_id) AS rounds"
+             " FROM streams s LEFT JOIN stream_sessions ss ON ss.stream_id = s.id"
+             " WHERE s.user_id = ?")
+        args: list = [user_id]
+        if pack is not None:
+            q += " AND s.pack = ?"
+            args.append(pack)
+        q += " GROUP BY s.id ORDER BY s.updated_at DESC"
+        async with self._db.execute(q, args) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
     async def get_stream(self, stream_id: str, user_id: str) -> dict | None:
@@ -223,6 +242,81 @@ class LupaDB:
             " ORDER BY ss.created_at DESC LIMIT ?", (user_id, limit),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+    # ── pack registry (Kalup: verticals are data, runtime-managed) ───
+
+    async def upsert_seed_pack(self, slug: str, manifest: dict) -> None:
+        """Import a repo pack as a published SYSTEM pack (owner ''). Only
+        inserts — a runtime-edited row is never clobbered by a seed."""
+        import json
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.execute(
+            "INSERT OR IGNORE INTO packs (slug, owner_id, status, version,"
+            " manifest, created_at, updated_at)"
+            " VALUES (?, '', 'published', 1, ?, ?, ?)",
+            (slug, json.dumps(manifest), now, now))
+        await self._db.commit()
+
+    async def create_pack(self, slug: str, owner_id: str, manifest: dict) -> dict:
+        import json
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.execute(
+            "INSERT INTO packs (slug, owner_id, status, version, manifest,"
+            " created_at, updated_at) VALUES (?, ?, 'draft', 0, ?, ?, ?)",
+            (slug, owner_id, json.dumps(manifest), now, now))
+        await self._db.commit()
+        return (await self.get_pack(slug))  # type: ignore[return-value]
+
+    async def get_pack(self, slug: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM packs WHERE slug = ?", (slug,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_packs(self) -> list[dict]:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM packs ORDER BY status DESC, updated_at DESC",
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def update_pack(self, slug: str, *, manifest: dict | None = None,
+                          status: str | None = None, bump_version: bool = False,
+                          generation: dict | None = None,
+                          eval_state: dict | None = None) -> None:
+        import json
+        assert self._db is not None
+        sets, args = ["updated_at = ?"], [_utcnow()]
+        if manifest is not None:
+            sets.append("manifest = ?"); args.append(json.dumps(manifest))
+        if status is not None:
+            sets.append("status = ?"); args.append(status)
+        if bump_version:
+            sets.append("version = version + 1")
+        if generation is not None:
+            sets.append("generation = ?"); args.append(json.dumps(generation))
+        if eval_state is not None:
+            sets.append("eval_state = ?"); args.append(json.dumps(eval_state))
+        args.append(slug)
+        await self._db.execute(f"UPDATE packs SET {', '.join(sets)} WHERE slug = ?", args)
+        await self._db.commit()
+
+    async def is_creator(self, user_id: str) -> bool:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT 1 FROM creators WHERE user_id = ?", (user_id,),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def add_creator(self, user_id: str) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "INSERT OR IGNORE INTO creators (user_id) VALUES (?)", (user_id,))
+        await self._db.commit()
 
     # ── second opinions ──────────────────────────────────────────────
 

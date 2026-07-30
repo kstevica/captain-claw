@@ -30,10 +30,23 @@ export interface Round {
 
 interface PackState { pack: Pack | null; load: () => Promise<void> }
 
+/** The desk slug from the URL — /desks/<slug> activates that pack. */
+export function deskSlugFromPath(): string | null {
+  const m = window.location.pathname.match(/^\/desks\/([a-z0-9-]+)/)
+  return m ? m[1] : null
+}
+
 export const usePack = create<PackState>((set) => ({
   pack: null,
   load: async () => {
-    const pack = await api<Pack>('/api/pack')
+    let pack: Pack | null = null
+    const desk = deskSlugFromPath()
+    if (desk) {
+      // Published desk manifests are public — plain fetch, no auth needed.
+      const r = await fetch(`/api/packs/${desk}`)
+      if (r.ok) pack = (await r.json()).pack as Pack
+    }
+    if (!pack) pack = await api<Pack>('/api/pack')
     // Project the pack theme onto the CSS variables + document identity.
     const root = document.documentElement
     const map: Record<string, string> = {
@@ -113,18 +126,19 @@ export const useAuth = create<AuthState>((set) => ({
 
 interface StreamsState {
   streams: Stream[]
-  load: () => Promise<void>
-  create: (title: string) => Promise<Stream>
+  load: (pack?: string) => Promise<void>
+  create: (title: string, pack?: string) => Promise<Stream>
 }
 
 export const useStreams = create<StreamsState>((set) => ({
   streams: [],
-  load: async () => {
-    const data = await api<{ streams: Stream[] }>('/api/streams')
+  load: async (pack?: string) => {
+    const q = pack ? `?pack=${encodeURIComponent(pack)}` : ''
+    const data = await api<{ streams: Stream[] }>(`/api/streams${q}`)
     set({ streams: data.streams })
   },
-  create: async (title: string) => {
-    const s = await post<Stream>('/api/streams', { title })
+  create: async (title: string, pack?: string) => {
+    const s = await post<Stream>('/api/streams', { title, pack: pack ?? '' })
     set((st) => ({ streams: [s, ...st.streams] }))
     return s
   },

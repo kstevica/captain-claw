@@ -28,7 +28,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from lupa_api.db import LupaDB
-from lupa_api.packs import load_pack, pack_quality
+from lupa_api.packs import (
+    active_pack_slug,
+    list_seed_packs,
+    load_pack,
+    pack_quality,
+    row_manifest,
+)
 
 def _fd_url() -> str:
     return os.environ.get("LUPA_FD_URL", "http://127.0.0.1:25080")
@@ -120,6 +126,25 @@ def _fd_error(resp: httpx.Response) -> HTTPException:
 
 class StreamCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
+    pack: str = ""  # the desk this stream belongs to; "" → the default pack
+
+
+class PackCreate(BaseModel):
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,39}$")
+    name: str = Field(min_length=1, max_length=80)
+    tagline: str = ""
+
+
+class PackManifestBody(BaseModel):
+    manifest: dict
+
+
+class GenerateBody(BaseModel):
+    instructions: str = Field(min_length=1)
+
+
+class CreatorAdd(BaseModel):
+    user_id: str = Field(min_length=1)
 
 
 class CommissionCreate(BaseModel):
@@ -247,6 +272,104 @@ async def _brief_loop(state) -> None:
         await asyncio.sleep(tick)
 
 
+# ── Kalup factory: headless Vatra runs for generate/evaluate ─────────
+
+
+def _factory_poll_s() -> float:
+    return float(os.environ.get("LUPA_FACTORY_POLL_SECONDS", "2"))
+
+
+def _factory_timeout() -> float:
+    return float(os.environ.get("LUPA_FACTORY_TIMEOUT_SECONDS", "900"))
+
+
+async def _run_headless_vatra(state, token: str, intent: str,
+                              quality: dict) -> tuple[dict | None, str]:
+    """Start → auto-approve at the gate → poll to a terminal state.
+
+    The Studio's generate/evaluate runs are unattended, so the plan gate is
+    auto-approved (the human gate stays for customer commissions). Returns
+    (session detail, "") or (None, error)."""
+    headers = {"Authorization": f"Bearer {token}"}
+    r = await state.fd.post("/fd/vatra/start",
+                            json={"intent": intent, "quality": quality},
+                            headers=headers)
+    if r.status_code != 200:
+        return None, f"start failed ({r.status_code})"
+    sid = r.json().get("session_id") or ""
+    if not sid:
+        return None, "start returned no session id"
+    deadline = time.monotonic() + _factory_timeout()
+    approved = False
+    while time.monotonic() < deadline:
+        r = await state.fd.get(f"/fd/basna/sessions/{sid}", headers=headers)
+        if r.status_code != 200:
+            return None, f"session poll failed ({r.status_code})"
+        detail = r.json()
+        status = detail.get("status", "")
+        if status == "awaiting_plan" and not approved:
+            ok = await state.fd.post("/fd/vatra/plan/approve",
+                                     json={"session_id": sid, "quality": quality},
+                                     headers=headers)
+            approved = ok.status_code == 200
+        elif status == "done":
+            return detail, ""
+        elif status in ("error", "cancelled", "rejected"):
+            return None, f"run ended with status {status}"
+        await asyncio.sleep(_factory_poll_s())
+    return None, "factory run timed out"
+
+
+def _extract_manifest(text: str) -> dict | None:
+    """The generated pack manifest from a run's conclusion — a fenced ```json
+    block, else the outermost {...}."""
+    m = None
+    fence = text.find("```json")
+    if fence != -1:
+        end = text.find("```", fence + 7)
+        if end != -1:
+            m = text[fence + 7:end]
+    if m is None:
+        start, stop = text.find("{"), text.rfind("}")
+        if start == -1 or stop <= start:
+            return None
+        m = text[start:stop + 1]
+    try:
+        out = json.loads(m)
+    except ValueError:
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def _generate_intent(name: str, instructions: str) -> str:
+    return (
+        "KALUP PACK DRAFT — you are configuring a vertical research desk, not "
+        "writing a report. Produce ONLY a JSON object (in a ```json fence) that "
+        "is the desk's pack manifest, with keys: name, tagline, "
+        "theme {accent, accent_soft, bg, surface, border, text, text_dim}, "
+        "vocabulary {stream, streams, commission, brief, round, report, "
+        "plan_gate_title, plan_gate_hint, composer_placeholder, "
+        "continue_placeholder, empty_streams, new_stream, receipts_title, "
+        "receipts_hint, facts_title, cost_title, brief_title, brief_hint, "
+        "brief_placeholder, inbox_title}, intake {types: [{id, label, "
+        "description, default_max_agents}]}, quality {profile}, "
+        "briefs {presets: [{id, label, hours}]}, roi {analyst_hourly_usd, "
+        "analyst_label}, evals [{brief}], onboarding_md. Ground every string "
+        f"in this vertical:\nDesk name: {name}\n{instructions}"
+    )
+
+
+def _eval_verdict(analysis: dict) -> tuple[str, dict]:
+    """The ship-gate: green iff the golden run's own receipts pass."""
+    metrics = (analysis or {}).get("quality_metrics") or {}
+    verdict = str((analysis or {}).get("quality_verdict")
+                  or metrics.get("quality_verdict") or "")
+    green = (verdict.lower() == "pass"
+             and int(metrics.get("contract_failed_critical", 0) or 0) == 0
+             and int(metrics.get("consistency_critical", 0) or 0) == 0)
+    return ("green" if green else "red"), metrics
+
+
 # ── app ──────────────────────────────────────────────────────────────
 
 
@@ -257,7 +380,12 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         await app.state.db.init()
         app.state.fd = httpx.AsyncClient(
             base_url=_fd_url(), transport=fd_transport, timeout=60.0)
-        app.state.pack = load_pack()
+        # Seed the registry from repo packs, then serve the default pack FROM
+        # the registry — runtime edits win over files from here on.
+        for slug, manifest in list_seed_packs().items():
+            await app.state.db.upsert_seed_pack(slug, manifest)
+        row = await app.state.db.get_pack(active_pack_slug())
+        app.state.pack = row_manifest(row) if row else load_pack()
         scheduler = asyncio.create_task(_brief_loop(app.state))
         yield
         scheduler.cancel()
@@ -295,16 +423,29 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
 
     # ── streams ──────────────────────────────────────────────────────
 
+    async def _pack_by_slug(request: Request, slug: str) -> dict:
+        """A stream's pack manifest from the registry; default pack fallback."""
+        if slug:
+            row = await _db(request).get_pack(slug)
+            if row:
+                return row_manifest(row)
+        return request.app.state.pack
+
     @app.get("/api/streams")
-    async def list_streams(request: Request, user: dict = Depends(require_user)):
-        return {"streams": await _db(request).list_streams(user["id"])}
+    async def list_streams(request: Request, pack: str = "",
+                           user: dict = Depends(require_user)):
+        return {"streams": await _db(request).list_streams(
+            user["id"], pack=pack or None)}
 
     @app.post("/api/streams")
     async def create_stream(body: StreamCreate, request: Request,
                             user: dict = Depends(require_user)):
-        pack = request.app.state.pack
-        return await _db(request).create_stream(user["id"], body.title.strip(),
-                                                pack.get("slug", ""))
+        slug = body.pack.strip() or request.app.state.pack.get("slug", "")
+        if body.pack.strip():
+            row = await _db(request).get_pack(slug)
+            if not row or row["status"] != "published":
+                raise HTTPException(404, "unknown desk")
+        return await _db(request).create_stream(user["id"], body.title.strip(), slug)
 
     @app.get("/api/streams/{stream_id}")
     async def get_stream(stream_id: str, request: Request,
@@ -348,7 +489,8 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             raise HTTPException(404, "stream not found")
         rounds = await db.list_rounds(stream_id)
         settings = _stream_settings(stream)
-        quality = _stream_quality(stream, request.app.state.pack)
+        stream_pack = await _pack_by_slug(request, stream.get("pack") or "")
+        quality = _stream_quality(stream, stream_pack)
         kind = body.kind
         if kind == "auto":
             kind = "initial" if not rounds else "continue"
@@ -517,7 +659,8 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             "conflicts": facts.get("conflicts") or [],
             "contract": contract,
             "cost": cost,
-            "roi": request.app.state.pack.get("roi") or {},
+            "roi": (await _pack_by_slug(request, stream.get("pack") or "")
+                    ).get("roi") or {},
         }
 
     # ── stream workspace files (the report reader's source) ──────────
@@ -541,6 +684,207 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             raise HTTPException(404, "stream not found")
         return await _fd_get(request, "/fd/vfs/read",
                              {"project": stream["vfs_project"], "path": path})
+
+    # ── Kalup pack registry + Studio ─────────────────────────────────
+
+    async def _require_creator(request: Request, user: dict) -> None:
+        if user.get("role") == "admin":
+            return
+        if await _db(request).is_creator(user["id"]):
+            return
+        raise HTTPException(403, "creator access required")
+
+    def _can_touch(row: dict, user: dict) -> bool:
+        return user.get("role") == "admin" or row.get("owner_id") == user["id"]
+
+    def _spawn_bg(state, coro) -> None:
+        task = asyncio.create_task(coro)
+        state.bg_tasks = getattr(state, "bg_tasks", set())
+        state.bg_tasks.add(task)
+        task.add_done_callback(state.bg_tasks.discard)
+
+    def _pack_summary(row: dict) -> dict:
+        m = row_manifest(row)
+        gen = json.loads(row.get("generation") or "{}")
+        ev = json.loads(row.get("eval_state") or "{}")
+        return {"slug": row["slug"], "status": row["status"],
+                "version": row["version"], "owner_id": row["owner_id"],
+                "name": m.get("name", row["slug"]),
+                "tagline": m.get("tagline", ""),
+                "accent": (m.get("theme") or {}).get("accent", ""),
+                "generation": gen.get("status", ""),
+                "eval": ev.get("verdict", "")}
+
+    @app.get("/api/creators/me")
+    async def creators_me(request: Request, user: dict = Depends(require_user)):
+        creator = (user.get("role") == "admin"
+                   or await _db(request).is_creator(user["id"]))
+        return {"creator": creator, "role": user.get("role", "user")}
+
+    @app.post("/api/creators")
+    async def add_creator(body: CreatorAdd, request: Request,
+                          user: dict = Depends(require_user)):
+        if user.get("role") != "admin":
+            raise HTTPException(403, "admin only")
+        await _db(request).add_creator(body.user_id)
+        return {"ok": True}
+
+    @app.get("/api/packs")
+    async def list_packs(request: Request, user: dict = Depends(require_user)):
+        rows = await _db(request).list_packs()
+        out = [
+            _pack_summary(r) for r in rows
+            if r["status"] == "published" or _can_touch(r, user)
+        ]
+        return {"packs": out}
+
+    @app.get("/api/packs/{slug}")
+    async def get_pack_detail(slug: str, request: Request):
+        """Published packs are public branding (the desk must render before
+        login); drafts stay owner/admin-only."""
+        row = await _db(request).get_pack(slug)
+        if not row:
+            raise HTTPException(404, "pack not found")
+        if row["status"] != "published":
+            try:
+                user = await require_user(request)
+            except HTTPException:
+                raise HTTPException(404, "pack not found")
+            if not _can_touch(row, user):
+                raise HTTPException(404, "pack not found")
+        return {"pack": row_manifest(row),
+                "summary": _pack_summary(row),
+                "generation": json.loads(row.get("generation") or "{}"),
+                "eval": json.loads(row.get("eval_state") or "{}")}
+
+    @app.post("/api/packs")
+    async def create_pack(body: PackCreate, request: Request,
+                          user: dict = Depends(require_user)):
+        await _require_creator(request, user)
+        db = _db(request)
+        if await db.get_pack(body.slug):
+            raise HTTPException(409, f"pack '{body.slug}' already exists")
+        # Scaffold from the default pack so a fresh draft renders immediately.
+        base = {k: v for k, v in request.app.state.pack.items()
+                if k not in ("slug", "pack_status", "pack_version", "onboarding_md")}
+        base["name"] = body.name.strip()
+        base["tagline"] = body.tagline.strip()
+        row = await db.create_pack(body.slug, user["id"], base)
+        return {"pack": row_manifest(row), "summary": _pack_summary(row)}
+
+    @app.put("/api/packs/{slug}")
+    async def update_pack(slug: str, body: PackManifestBody, request: Request,
+                          user: dict = Depends(require_user)):
+        db = _db(request)
+        row = await db.get_pack(slug)
+        if not row or not _can_touch(row, user):
+            raise HTTPException(404, "pack not found")
+        manifest = dict(body.manifest)
+        for k in ("slug", "pack_status", "pack_version"):
+            manifest.pop(k, None)
+        await db.update_pack(slug, manifest=manifest)
+        return {"ok": True}
+
+    async def _generate_pack(state, slug: str, name: str, instructions: str,
+                             token: str) -> None:
+        detail, err = await _run_headless_vatra(
+            state, token, _generate_intent(name, instructions),
+            {"profile": "balanced"})
+        if err:
+            await state.db.update_pack(slug, generation={"status": "error",
+                                                         "message": err})
+            return
+        generated = _extract_manifest(str(detail.get("truth") or ""))
+        if not generated:
+            await state.db.update_pack(
+                slug, generation={"status": "error",
+                                  "message": "no manifest in the run's conclusion"})
+            return
+        row = await state.db.get_pack(slug)
+        manifest = row_manifest(row) if row else {}
+        for k in ("slug", "pack_status", "pack_version"):
+            manifest.pop(k, None)
+            generated.pop(k, None)
+        manifest.update(generated)
+        await state.db.update_pack(slug, manifest=manifest,
+                                   generation={"status": "done",
+                                               "session_id": detail.get("id", "")})
+
+    @app.post("/api/packs/{slug}/generate")
+    async def generate_pack(slug: str, body: GenerateBody, request: Request,
+                            user: dict = Depends(require_user)):
+        db = _db(request)
+        row = await db.get_pack(slug)
+        if not row or not _can_touch(row, user):
+            raise HTTPException(404, "pack not found")
+        gen = json.loads(row.get("generation") or "{}")
+        if gen.get("status") == "running":
+            raise HTTPException(409, "a generation is already running")
+        await db.update_pack(slug, generation={"status": "running"})
+        secret = os.environ.get("FD_JWT_SECRET", "")
+        token = _mint_owner_token(user["id"], secret) if secret else _bearer(request)
+        name = row_manifest(row).get("name", slug)
+        _spawn_bg(request.app.state,
+                  _generate_pack(request.app.state, slug, name,
+                                 body.instructions, token))
+        return {"status": "running"}
+
+    async def _evaluate_pack(state, slug: str, token: str) -> None:
+        row = await state.db.get_pack(slug)
+        manifest = row_manifest(row) if row else {}
+        evals = manifest.get("evals") or []
+        brief = str((evals[0] or {}).get("brief") if evals else "") or (
+            f"Golden task: produce a short, source-verified overview of the "
+            f"core question a customer of '{manifest.get('name', slug)}' would ask.")
+        detail, err = await _run_headless_vatra(
+            state, token, brief, pack_quality(manifest) or {"profile": "thorough"})
+        if err:
+            await state.db.update_pack(slug, eval_state={"status": "error",
+                                                         "message": err})
+            return
+        analysis = detail.get("analysis") or {}
+        if isinstance(analysis, str):
+            try:
+                analysis = json.loads(analysis)
+            except ValueError:
+                analysis = {}
+        verdict, metrics = _eval_verdict(analysis)
+        await state.db.update_pack(
+            slug, eval_state={"status": "done", "verdict": verdict,
+                              "metrics": metrics,
+                              "session_id": detail.get("id", "")})
+
+    @app.post("/api/packs/{slug}/evaluate")
+    async def evaluate_pack(slug: str, request: Request,
+                            user: dict = Depends(require_user)):
+        db = _db(request)
+        row = await db.get_pack(slug)
+        if not row or not _can_touch(row, user):
+            raise HTTPException(404, "pack not found")
+        ev = json.loads(row.get("eval_state") or "{}")
+        if ev.get("status") == "running":
+            raise HTTPException(409, "an evaluation is already running")
+        await db.update_pack(slug, eval_state={"status": "running"})
+        secret = os.environ.get("FD_JWT_SECRET", "")
+        token = _mint_owner_token(user["id"], secret) if secret else _bearer(request)
+        _spawn_bg(request.app.state,
+                  _evaluate_pack(request.app.state, slug, token))
+        return {"status": "running"}
+
+    @app.post("/api/packs/{slug}/publish")
+    async def publish_pack(slug: str, request: Request,
+                           user: dict = Depends(require_user)):
+        db = _db(request)
+        row = await db.get_pack(slug)
+        if not row or not _can_touch(row, user):
+            raise HTTPException(404, "pack not found")
+        ev = json.loads(row.get("eval_state") or "{}")
+        if ev.get("verdict") != "green":
+            raise HTTPException(409,
+                                "the ship-gate is closed: run an evaluation and "
+                                "get a green verdict before publishing")
+        await db.update_pack(slug, status="published", bump_version=True)
+        return {"ok": True, "status": "published"}
 
     # ── house style: forge + archetypes ──────────────────────────────
 
@@ -701,6 +1045,14 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
 
     static = Path(__file__).resolve().parent.parent / "static"
     if (static / "index.html").is_file():
+        from fastapi.responses import FileResponse
+
+        @app.get("/desks/{slug}")
+        async def desk_entry(slug: str):
+            # Every published desk is the same SPA; the client reads the slug
+            # from the path and activates that pack (theme, vocabulary, …).
+            return FileResponse(static / "index.html")
+
         app.mount("/", StaticFiles(directory=static, html=True), name="spa")
 
     return app

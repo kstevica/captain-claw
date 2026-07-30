@@ -43,3 +43,31 @@ def load_pack(slug: str | None = None) -> dict:
 def pack_quality(pack: dict) -> dict:
     """The quality dict sent to FD with every commission — the pack's preset."""
     return dict(pack.get("quality") or {})
+
+
+def list_seed_packs() -> dict[str, dict]:
+    """All repo packs (lupa/packs/*/pack.json) — imported into the registry at
+    startup as published system packs. The registry is the runtime authority;
+    seeds only fill gaps, they never overwrite runtime edits."""
+    out: dict[str, dict] = {}
+    root = packs_root()
+    if root.is_dir():
+        for d in sorted(root.iterdir()):
+            if (d / "pack.json").is_file():
+                try:
+                    out[d.name] = load_pack(d.name)
+                except (ValueError, OSError):
+                    continue
+    return out
+
+
+def row_manifest(row: dict) -> dict:
+    """A registry row's manifest, stamped with its registry identity."""
+    try:
+        manifest = json.loads(row.get("manifest") or "{}")
+    except (ValueError, TypeError):
+        manifest = {}
+    manifest["slug"] = row["slug"]
+    manifest["pack_status"] = row.get("status", "")
+    manifest["pack_version"] = row.get("version", 0)
+    return manifest

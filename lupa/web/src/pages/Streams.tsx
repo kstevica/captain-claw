@@ -11,6 +11,10 @@ interface InboxRound {
   round_no: number; created_at: string
 }
 
+interface DeskSummary {
+  slug: string; status: string; name: string; tagline: string; accent: string
+}
+
 export default function Streams({ onOpen }: { onOpen: (id: string) => void }) {
   const { streams, load, create } = useStreams()
   const pack = usePack((s) => s.pack)
@@ -18,18 +22,24 @@ export default function Streams({ onOpen }: { onOpen: (id: string) => void }) {
   const [title, setTitle] = useState('')
   const [creating, setCreating] = useState(false)
   const [inbox, setInbox] = useState<InboxRound[]>([])
+  const [desks, setDesks] = useState<DeskSummary[]>([])
+
+  const activeSlug = pack?.slug ?? ''
 
   useEffect(() => {
-    void load()
+    void load(activeSlug || undefined)
     void api<{ rounds: InboxRound[] }>('/api/inbox').then((d) => setInbox(d.rounds)).catch(() => {})
-  }, [load])
+    void api<{ packs: DeskSummary[] }>('/api/packs')
+      .then((d) => setDesks(d.packs.filter((p) => p.status === 'published')))
+      .catch(() => {})
+  }, [load, activeSlug])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!title.trim()) return
     setCreating(true)
     try {
-      const s = await create(title.trim())
+      const s = await create(title.trim(), activeSlug)
       setTitle('')
       onOpen(s.id)
     } finally { setCreating(false) }
@@ -37,6 +47,28 @@ export default function Streams({ onOpen }: { onOpen: (id: string) => void }) {
 
   return (
     <div className="max-w-3xl mx-auto px-5 py-8 space-y-6">
+      {desks.length > 1 && (
+        <div className="flex flex-wrap gap-2">
+          {desks.map((d) => {
+            const active = d.slug === activeSlug
+            return (
+              <a key={d.slug}
+                 href={d.slug === 'research-desk' ? '/' : `/desks/${d.slug}`}
+                 className={`rounded-xl border px-4 py-2.5 transition-colors ${
+                   active ? 'border-[var(--lp-accent)]'
+                          : 'border-[var(--lp-border)] hover:border-[var(--lp-text-dim)]'}`}>
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full inline-block"
+                        style={{ background: d.accent || 'var(--lp-accent)' }} />
+                  <span className="text-sm font-semibold">{d.name}</span>
+                </div>
+                <div className="text-[11px] text-[var(--lp-text-dim)] mt-0.5">{d.tagline}</div>
+              </a>
+            )
+          })}
+        </div>
+      )}
+
       {inbox.length > 0 && (
         <div className="rounded-xl border border-[var(--lp-border)] bg-[var(--lp-surface)] p-4">
           <div className="flex items-center gap-2 mb-2">
