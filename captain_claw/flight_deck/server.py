@@ -891,13 +891,71 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Flight Deck", lifespan=lifespan)
+
+# FD_CORS_ORIGINS: comma-separated origin allowlist for hosted deployments
+# (e.g. "https://app.example.com"). Unset keeps the historical wide-open
+# default for local/desktop use.
+_cors_origins = [o.strip() for o in
+                 os.environ.get("FD_CORS_ORIGINS", "").split(",") if o.strip()] or ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Deployment hardening (default-off) ──
+# Two independent switches for deployments where FD is reachable beyond the
+# owner's own machine:
+#
+# * Agent-facing routes (/fd/basna/agent/*, /fd/vatra/agent/*) identify their
+#   caller by web_auth/source_port with an owner_id fallback — fine when only
+#   locally spawned agents can reach the port, spoofable otherwise. They now
+#   require loopback or the shared agent secret (X-Agent-Secret).
+# * FD_LOCKDOWN=1 additionally (a) makes the agent secret mandatory even from
+#   loopback (a TLS reverse proxy on the same host would otherwise launder
+#   remote callers into "loopback"), and (b) disables the host-filesystem
+#   surfaces that make no sense off-machine: /fd/vfs/browse-fs, POST
+#   /fd/vfs/links (mounts arbitrary host dirs), and the auth-less
+#   /fd/projects/* router.
+
+
+def _lockdown_enabled() -> bool:
+    return os.environ.get("FD_LOCKDOWN", "").lower() in ("true", "1", "yes")
+
+
+_AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/")
+
+
+def _agent_caller_ok(request: Request) -> bool:
+    provided = request.headers.get("X-Agent-Secret", "")
+    if provided:
+        from captain_claw.flight_deck.agent_secret import get_or_create_agent_secret
+        if secrets.compare_digest(provided, get_or_create_agent_secret()):
+            return True
+    if _lockdown_enabled():
+        return False
+    client_host = request.client.host if request.client else ""
+    return client_host in ("127.0.0.1", "::1", "localhost")
+
+
+@app.middleware("http")
+async def _hardening_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.startswith(_AGENT_GUARD_PREFIXES):
+        if not _agent_caller_ok(request):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "agent routes require loopback or X-Agent-Secret"})
+    elif _lockdown_enabled():
+        if (path == "/fd/projects" or path.startswith("/fd/projects/")
+                or path == "/fd/vfs/browse-fs"
+                or (path == "/fd/vfs/links" and request.method == "POST")):
+            return JSONResponse(
+                status_code=403, content={"detail": "disabled by FD_LOCKDOWN"})
+    return await call_next(request)
 
 
 # Log validation errors with full detail for debugging
@@ -959,6 +1017,7 @@ from captain_claw.flight_deck.delivery_routes import router as delivery_router
 from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
+from captain_claw.flight_deck.costs_routes import router as costs_router
 from captain_claw.flight_deck.being_routes import router as being_router
 from captain_claw.flight_deck.being_public_routes import router as being_public_router
 from captain_claw.flight_deck.being_public_routes import village_router as being_village_router
@@ -1006,6 +1065,7 @@ app.include_router(delivery_router)
 app.include_router(agents_fs_router)
 app.include_router(system_router)
 app.include_router(share_router)
+app.include_router(costs_router)
 app.include_router(being_router)
 app.include_router(being_public_router)
 app.include_router(being_village_router)

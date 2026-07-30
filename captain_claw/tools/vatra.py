@@ -117,9 +117,11 @@ class VatraTool(Tool):
 
     async def _post(self, fd_url: str, path: str, payload: dict, *, timeout: float = 45.0) -> Any:
         import httpx
+        from captain_claw.tools.basna import _agent_secret_headers
         body = {**self._identity(), **payload}
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(f"{fd_url}{path}", json=body)
+            resp = await client.post(f"{fd_url}{path}", json=body,
+                                     headers=_agent_secret_headers())
         if resp.status_code == 403:
             return {"_error": "not authorized for this Vatra session"}
         if resp.status_code == 404:

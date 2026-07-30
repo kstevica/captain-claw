@@ -26,6 +26,21 @@ from captain_claw.tools.registry import Tool, ToolResult
 
 log = structlog.get_logger(__name__)
 
+def _agent_secret_headers() -> dict[str, str]:
+    """The shared agent secret as a request header, when resolvable.
+
+    FD's agent-facing routes accept loopback callers without it, so this is
+    belt-and-suspenders locally — but mandatory under FD_LOCKDOWN, where
+    loopback alone no longer authorizes. Same-host agents read the same
+    secret file (or FD_AGENT_SHARED_SECRET env) the server checks against.
+    """
+    try:
+        from captain_claw.flight_deck.agent_secret import get_or_create_agent_secret
+        return {"X-Agent-Secret": get_or_create_agent_secret()}
+    except Exception:  # noqa: BLE001 — the header is an upgrade, never a blocker
+        return {}
+
+
 # Above this, a fetched file is saved to the workspace instead of inlined.
 _INLINE_FILE_LIMIT = 256 * 1024
 _TEXT_EXTS = {".md", ".markdown", ".txt", ".csv", ".tsv", ".json", ".html",
@@ -157,7 +172,8 @@ class BasnaTool(Tool):
         import httpx
         body = {**self._identity(), **payload}
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{fd_url}{path}", json=body)
+            resp = await client.post(f"{fd_url}{path}", json=body,
+                                     headers=_agent_secret_headers())
         if resp.status_code == 404:
             return {"_error": "not found"}
         if resp.status_code == 403:

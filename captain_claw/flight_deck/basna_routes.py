@@ -604,6 +604,31 @@ async def delete_file(session_id: str, name: str, user: dict = Depends(get_curre
     return {"files": merged}
 
 
+@router.get("/sessions/{session_id}/facts")
+async def session_facts(session_id: str, user: dict = Depends(get_current_user)):
+    """The run's facts ledger as JSON (works for Basna and Vatra sessions).
+
+    The ledger lives in the run's shared VFS folder as a SQLite file
+    (``.facts.db``) — readable in-process by the quality passes but, until now,
+    only downloadable as a binary blob over HTTP. Returns every recorded fact
+    (key, value, unit, status, source, note) plus the conflict log, so clients
+    can render a verification panel without parsing SQLite.
+    """
+    from captain_claw.flight_deck.vfs_routes import _user_root
+    db = get_db()
+    sess, _, owner_id = await _resolve_basna(db, session_id, user["id"])
+    project = _session_vfs_folder(sess)
+    vfs_dir = _user_root(owner_id) / project
+    try:
+        facts = facts_ledger.list_rows(vfs_dir)
+        conflicts = facts_ledger.conflicts(vfs_dir)
+    except Exception as e:  # noqa: BLE001 — a corrupt ledger shouldn't 500 the panel
+        log.warning("facts ledger read failed", session=session_id, error=str(e))
+        facts, conflicts = [], []
+    return {"project": project, "facts": facts, "conflicts": conflicts,
+            "count": len(facts)}
+
+
 # ── Agent-facing internal endpoints ──────────────────────────────────
 # These let a spawned agent read its OWNER's Basna data via the `basna` tool.
 # They carry no user JWT; instead the caller is identified by its web port (the
