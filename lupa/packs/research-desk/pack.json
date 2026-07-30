@@ -23,7 +23,11 @@
     "composer_placeholder": "What should the desk research? Be specific about scope, geography and time frame.",
     "continue_placeholder": "Deepen this stream: what should the next round focus on?",
     "empty_streams": "No streams yet. Commission your first piece of research.",
-    "new_stream": "New stream"
+    "new_stream": "New stream",
+    "receipts_title": "Receipts",
+    "receipts_hint": "How this report was verified, and what it cost.",
+    "facts_title": "Facts ledger",
+    "cost_title": "Cost"
   },
   "intake": {
     "types": [
@@ -37,6 +41,10 @@
   },
   "quality": {
     "profile": "thorough"
+  },
+  "roi": {
+    "analyst_hourly_usd": 60,
+    "analyst_label": "a human analyst"
   },
   "report": {
     "primary_file_hint": "output",

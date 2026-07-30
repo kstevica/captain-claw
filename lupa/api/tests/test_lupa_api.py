@@ -61,7 +61,16 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
             "title": body.get("title", ""), "truth": "",
             "route": {"group0_plan": {"steps": [{"agent": "deep-researcher",
                                                  "does": "scope the market"}]}},
-            "analysis": {}, "config": {"mode": "vatra"}}
+            "analysis": {
+                "quality_verdict": "pass",
+                "blocking": {"rounds": 1, "verdict": "pass"},
+                "quality_metrics": {"claims_checked": 10, "claims_confirmed": 8,
+                                    "claims_refuted": 1, "claims_unverifiable": 1,
+                                    "quality_verdict": "pass"},
+                "consistency": {"values_checked": 12, "critical": 0, "major": 1},
+                "gaps": [{"severity": "major", "text": "Nordics not covered"}],
+            },
+            "config": {"mode": "vatra"}}
         return {"session_id": sid, "title": body.get("title", ""), "status": "planning"}
 
     @fd.post("/fd/vatra/plan/approve")
@@ -134,14 +143,22 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
     @fd.get("/fd/vfs/read")
     async def vfs_read(project: str, path: str,
                        authorization: str | None = Header(default=None)):
+        import json as _json
         _need_auth(authorization)
+        if path == ".contract.json":
+            return {"text": _json.dumps({"constraints": [
+                {"id": "c1", "text": "All values in EUR", "severity": "critical",
+                 "status": "pass"}]}), "binary": False}
         return {"text": f"# Report\nfrom {project}/{path}", "binary": False}
 
     @fd.get("/fd/costs")
     async def costs(authorization: str | None = Header(default=None)):
         _need_auth(authorization)
-        return {"costs": [{"run_kind": "vatra", "usd": 0.12}], "count": 1,
-                "priced": 1, "total_usd": 0.12}
+        return {"costs": [{"run_kind": "vatra", "run_id": "sess-aaaa1111",
+                           "usd": 0.42, "elapsed_seconds": 300.0,
+                           "usage": {"prompt_tokens": 1000},
+                           "at": "2026-07-30T10:00:00+00:00"}],
+                "count": 1, "priced": 1, "total_usd": 0.42}
 
     return fd, log
 
@@ -251,7 +268,7 @@ async def test_full_commission_flow(bff):
 
     # Costs passthrough.
     r = await client.get("/api/costs", headers=h)
-    assert r.json()["total_usd"] == 0.12
+    assert r.json()["total_usd"] == 0.42
 
 
 async def test_commissions_are_owner_scoped(bff):
@@ -268,6 +285,34 @@ async def test_commissions_are_owner_scoped(bff):
     assert (await client.get(f"/api/commissions/{sid}", headers=other)).status_code == 404
     assert (await client.post(f"/api/commissions/{sid}/approve", json={},
                               headers=other)).status_code == 404
+
+
+async def test_receipts_aggregation(bff):
+    """One call assembles verdict + metrics + facts + contract + cost + ROI."""
+    client, _ = bff
+    h = _auth()
+    r = await client.post("/api/streams", json={"title": "s"}, headers=h)
+    stream_id = r.json()["id"]
+    r = await client.post(f"/api/streams/{stream_id}/commissions",
+                          json={"brief": "x"}, headers=h)
+    sid = r.json()["session_id"]
+
+    r = await client.get(f"/api/commissions/{sid}/receipts", headers=h)
+    assert r.status_code == 200
+    rec = r.json()
+    assert rec["verdict"] == "pass"
+    assert rec["metrics"]["claims_confirmed"] == 8
+    assert rec["consistency"]["values_checked"] == 12
+    assert rec["gaps"][0]["severity"] == "major"
+    assert rec["facts"][0]["status"] == "verified"
+    assert rec["contract"]["constraints"][0]["id"] == "c1"
+    # hourly recomputed from usd/elapsed: 0.42 / (300/3600) = 5.04
+    assert rec["cost"]["usd"] == 0.42
+    assert rec["cost"]["hourly_usd"] == pytest.approx(5.04)
+    assert rec["roi"]["analyst_hourly_usd"] == 60
+    # Owner-scoped like everything else.
+    assert (await client.get(f"/api/commissions/{sid}/receipts",
+                             headers=_auth("u2"))).status_code == 404
 
 
 async def test_cancel_at_plan_gate(bff):

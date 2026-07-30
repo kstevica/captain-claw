@@ -297,6 +297,77 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             raise HTTPException(404, "commission not found")
         return await _fd_get(request, f"/fd/basna/sessions/{session_id}/facts")
 
+    async def _fd_try(request: Request, path: str, params: dict | None = None):
+        """Best-effort FD read — a missing artifact must not sink the panel."""
+        try:
+            r = await _fd(request).get(path, params=params,
+                                       headers=_auth_headers(request))
+            return r.json() if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            return None
+
+    @app.get("/api/commissions/{session_id}/receipts")
+    async def commission_receipts(session_id: str, request: Request,
+                                  user: dict = Depends(require_user)):
+        """Everything the verification panel renders, in one call: the run's
+        quality tally + verdict, consistency summary, coverage gaps, facts
+        ledger + conflicts, the constraints contract, and the cost line
+        (ledger row matched by run id; effective $/hr recomputed from
+        usd/elapsed since the ledger doesn't persist it)."""
+        stream = await _db(request).stream_for_session(session_id, user["id"])
+        if not stream:
+            raise HTTPException(404, "commission not found")
+
+        detail = await _fd_get(request, f"/fd/basna/sessions/{session_id}")
+        analysis = detail.get("analysis") or {}
+        if isinstance(analysis, str):
+            try:
+                analysis = json.loads(analysis)
+            except ValueError:
+                analysis = {}
+
+        facts = await _fd_try(request, f"/fd/basna/sessions/{session_id}/facts") or {}
+
+        contract = None
+        if stream.get("vfs_project"):
+            raw = await _fd_try(request, "/fd/vfs/read",
+                                {"project": stream["vfs_project"],
+                                 "path": ".contract.json"})
+            if raw and raw.get("text") and not raw.get("binary"):
+                try:
+                    contract = json.loads(raw["text"])
+                except ValueError:
+                    contract = None
+
+        cost = None
+        rows = await _fd_try(request, "/fd/costs", {"limit": 1000})
+        for r in (rows or {}).get("costs", []):
+            if r.get("run_id") == session_id:
+                usd = r.get("usd")
+                elapsed = r.get("elapsed_seconds")
+                hourly = (round(float(usd) / (float(elapsed) / 3600.0), 2)
+                          if usd is not None and elapsed else None)
+                cost = {"usd": usd, "elapsed_seconds": elapsed,
+                        "hourly_usd": hourly, "tokens": r.get("usage") or {},
+                        "at": r.get("at")}
+                break
+
+        metrics = analysis.get("quality_metrics") or {}
+        return {
+            "status": detail.get("status", ""),
+            "verdict": analysis.get("quality_verdict")
+                       or metrics.get("quality_verdict") or "",
+            "blocking": analysis.get("blocking"),
+            "metrics": metrics,
+            "consistency": analysis.get("consistency"),
+            "gaps": analysis.get("gaps") or [],
+            "facts": facts.get("facts") or [],
+            "conflicts": facts.get("conflicts") or [],
+            "contract": contract,
+            "cost": cost,
+            "roi": request.app.state.pack.get("roi") or {},
+        }
+
     # ── stream workspace files (the report reader's source) ──────────
 
     @app.get("/api/streams/{stream_id}/files")

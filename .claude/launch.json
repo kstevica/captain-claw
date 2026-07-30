@@ -10,6 +10,15 @@
       "port": 4321
     },
     {
+      "name": "lupa-demo",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/kstevica/Dev/captain-claw && (FD_JWT_SECRET=lupa-dev-secret ./.venv/bin/python -m uvicorn --app-dir lupa/api dev.fake_fd:app --host 127.0.0.1 --port 25081 &) && LUPA_DATA_DIR=/tmp/lupa-demo-data FD_JWT_SECRET=lupa-dev-secret LUPA_FD_URL=http://127.0.0.1:25081 ./.venv/bin/python -m uvicorn --app-dir lupa/api lupa_api.server:app --host 127.0.0.1 --port 25180"
+      ],
+      "port": 25180
+    },
+    {
       "name": "lupa",
       "runtimeExecutable": "/bin/bash",
       "runtimeArgs": [

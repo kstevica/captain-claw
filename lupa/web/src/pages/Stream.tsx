@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { ArrowLeft, FileText, Loader2, Send } from 'lucide-react'
 import { api, post } from '../api'
 import { useVocab, type Round, type Stream } from '../stores'
+import ReceiptsPanel from '../components/Receipts'
 
 interface Detail {
   id: string
@@ -24,53 +25,65 @@ const LIVE = new Set(['routing', 'routed', 'planning', 'awaiting_plan', 'running
 export default function StreamView({ streamId, onBack }: { streamId: string; onBack: () => void }) {
   const v = useVocab()
   const [stream, setStream] = useState<(Stream & { rounds: Round[] }) | null>(null)
+  const [selected, setSelected] = useState<string | null>(null)
   const [detail, setDetail] = useState<Detail | null>(null)
   const [events, setEvents] = useState<ProgressEvent[]>([])
   const [error, setError] = useState('')
+  const [tipStatus, setTipStatus] = useState('')
 
-  const activeSid = stream?.rounds?.length
-    ? stream.rounds[stream.rounds.length - 1].session_id : null
+  const rounds = stream?.rounds ?? []
+  const tipSid = rounds.length ? rounds[rounds.length - 1].session_id : null
+  const activeSid = selected ?? tipSid
 
-  const loadStream = useCallback(async () => {
-    setStream(await api(`/api/streams/${streamId}`))
+  const loadStream = useCallback(async (selectTip = false) => {
+    const s = await api<Stream & { rounds: Round[] }>(`/api/streams/${streamId}`)
+    setStream(s)
+    if (selectTip && s.rounds.length) {
+      setSelected(s.rounds[s.rounds.length - 1].session_id)
+    }
   }, [streamId])
 
   useEffect(() => { void loadStream() }, [loadStream])
 
-  // Poll the active commission while it is live.
+  // Poll the selected commission; stop once it reaches a terminal state.
   useEffect(() => {
     if (!activeSid) return
     let stop = false
+    let iv: ReturnType<typeof setInterval> | null = null
+    setDetail(null); setEvents([])
     const tick = async () => {
       try {
         const d = await api<Detail>(`/api/commissions/${activeSid}`)
         if (stop) return
         setDetail(d)
+        if (activeSid === (stream?.rounds?.at(-1)?.session_id ?? activeSid)) {
+          setTipStatus(d.status)
+        }
         if (LIVE.has(d.status)) {
           const p = await api<{ events: ProgressEvent[] }>(`/api/commissions/${activeSid}/progress`)
           if (!stop) setEvents(p.events ?? [])
-        }
+        } else if (iv) { clearInterval(iv); iv = null }
       } catch (e) {
         if (!stop) setError(e instanceof Error ? e.message : 'failed to load')
+        if (iv) { clearInterval(iv); iv = null }
       }
     }
     void tick()
-    const iv = setInterval(() => {
-      void tick()
-    }, 3000)
-    return () => { stop = true; clearInterval(iv) }
-  }, [activeSid])
+    iv = setInterval(() => { void tick() }, 3000)
+    return () => { stop = true; if (iv) clearInterval(iv) }
+  }, [activeSid, stream])
 
   const commission = async (brief: string) => {
     setError('')
     try {
       await post(`/api/streams/${streamId}/commissions`, { brief })
-      await loadStream()
+      await loadStream(true)
     } catch (e) { setError(e instanceof Error ? e.message : 'commission failed') }
   }
 
   const status = detail?.status ?? ''
-  const showComposer = !activeSid || status === 'done'
+  const tipDone = !tipSid || tipStatus === 'done'
+  const showComposer = !tipSid || (tipStatus ? tipDone : false)
 
   return (
     <div className="max-w-4xl mx-auto px-5 py-6 space-y-5">
@@ -79,17 +92,18 @@ export default function StreamView({ streamId, onBack }: { streamId: string; onB
           <ArrowLeft size={17} />
         </button>
         <h1 className="text-xl font-bold">{stream?.title ?? '…'}</h1>
-        {stream?.rounds && stream.rounds.length > 0 && (
-          <div className="flex gap-1.5 ml-2">
-            {stream.rounds.map((r) => (
-              <span key={r.session_id}
-                    title={r.kind}
-                    className={`text-[11px] px-2 py-0.5 rounded-full border ${
-                      r.session_id === activeSid
-                        ? 'border-[var(--lp-accent)] text-[var(--lp-accent)]'
-                        : 'border-[var(--lp-border)] text-[var(--lp-text-dim)]'}`}>
+        {rounds.length > 0 && (
+          <div className="flex gap-1.5 ml-2 flex-wrap">
+            {rounds.map((r) => (
+              <button key={r.session_id}
+                      title={r.kind}
+                      onClick={() => setSelected(r.session_id)}
+                      className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                        r.session_id === activeSid
+                          ? 'border-[var(--lp-accent)] text-[var(--lp-accent)]'
+                          : 'border-[var(--lp-border)] text-[var(--lp-text-dim)] hover:text-[var(--lp-text)]'}`}>
                 {v('round', 'Round')} {r.round_no}
-              </span>
+              </button>
             ))}
           </div>
         )}
@@ -111,7 +125,7 @@ export default function StreamView({ streamId, onBack }: { streamId: string; onB
         <PlanGate
           sid={activeSid}
           plan={detail.route.group0_plan}
-          onDecided={() => void loadStream()}
+          onDecided={() => void loadStream(true)}
         />
       )}
 
@@ -127,13 +141,16 @@ export default function StreamView({ streamId, onBack }: { streamId: string; onB
       )}
 
       {activeSid && status === 'done' && stream && (
-        <Report streamId={streamId} truth={detail?.truth ?? ''} />
+        <>
+          <Report streamId={streamId} truth={detail?.truth ?? ''} />
+          <ReceiptsPanel sid={activeSid} />
+        </>
       )}
 
       {showComposer && (
         <Composer
-          placeholder={activeSid ? v('continue_placeholder') : v('composer_placeholder')}
-          cta={activeSid ? `Next ${v('round', 'Round').toLowerCase()}` : v('commission', 'Commission')}
+          placeholder={tipSid ? v('continue_placeholder') : v('composer_placeholder')}
+          cta={tipSid ? `Next ${v('round', 'Round').toLowerCase()}` : v('commission', 'Commission')}
           onSubmit={commission}
         />
       )}
