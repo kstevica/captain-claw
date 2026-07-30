@@ -117,12 +117,20 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
                    ' "quality": {"profile": "thorough"},'
                    ' "evals": [{"brief": "Analyze a sample RFP"}]}\n```')
 
+    _FAIL_MARKER = "MAKE_IT_FAIL"
+    _FAIL_MSG = "Vatra Lead failed: missing Anthropic API key"
+
     @fd.get("/fd/basna/sessions/{sid}")
     async def session_detail(sid: str, authorization: str | None = Header(default=None)):
         _need_auth(authorization)
         sess = log["sessions"].get(sid)
         if not sess:
             raise HTTPException(404, "session not found")
+        # A run whose intent carries the marker fails at the Lead (like a
+        # missing API key) — status error before it ever reaches the gate.
+        if _FAIL_MARKER in sess.get("intent", ""):
+            sess["status"] = "error"
+            return sess
         # Poll-driven progression so headless (factory) runs can complete:
         # planning → awaiting_plan on first read; running → done after 2 reads.
         if sess["status"] == "planning":
@@ -140,12 +148,19 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
     @fd.get("/fd/basna/sessions/{sid}/progress")
     async def progress(sid: str, authorization: str | None = Header(default=None)):
         _need_auth(authorization)
-        if sid not in log["sessions"]:
+        sess = log["sessions"].get(sid)
+        if sess is None:
             raise HTTPException(404, "session not found")
+        if _FAIL_MARKER in sess.get("intent", ""):
+            return {"events": [
+                {"i": 0, "stage": "phase", "message": "Group 0 · Long Horizon Planner"},
+                {"i": 1, "stage": "route", "message": _FAIL_MSG, "ok": False}],
+                "active": False}
         return {"events": [{"i": 0, "stage": "phase", "message": "Planning"},
-                           {"i": 1, "stage": "cost", "message": "$0.12",
+                           {"i": 1, "stage": "dispatch", "message": "deep-researcher working"},
+                           {"i": 2, "stage": "cost", "message": "$0.12",
                             "usd": 0.12, "hourly_usd": 3.4}],
-                "active": log["sessions"][sid]["status"] == "running"}
+                "active": sess["status"] == "running"}
 
     @fd.get("/fd/basna/sessions/{sid}/facts")
     async def facts(sid: str, authorization: str | None = Header(default=None)):
@@ -694,6 +709,42 @@ async def test_factory_generate_evaluate_publish(bff):
     assert [s["id"] for s in scoped] == [stream_id]
     assert (await client.get("/api/streams", params={"pack": "research-desk"},
                              headers=h)).json()["streams"] == []
+
+
+async def test_factory_streams_progress(bff):
+    """The Studio can read the factory run's live event feed via the pack, and
+    the run's session id is stored so the feed is reachable."""
+    client, _, _ = bff
+    admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+    await client.post("/api/packs", json={"slug": "feed-desk", "name": "Feed"},
+                      headers=admin)
+    await client.post("/api/packs/feed-desk/generate",
+                      json={"instructions": "a monitoring desk"}, headers=admin)
+    await _wait_for(client, "/api/packs/feed-desk", admin,
+                    ["generation", "status"], "done")
+    # The run's session id was recorded, and progress proxies the run's feed.
+    r = await client.get("/api/packs/feed-desk/progress?phase=generation", headers=admin)
+    assert r.status_code == 200
+    events = r.json()["events"]
+    assert any(e["stage"] == "phase" for e in events)
+    assert any("deep-researcher" in e["message"] for e in events)
+    # Owner-scoped like the rest of the registry.
+    assert (await client.get("/api/packs/feed-desk/progress",
+                             headers=_auth("u2"))).status_code == 404
+
+
+async def test_factory_surfaces_specific_error(bff):
+    """A failed run reports its SPECIFIC reason (the Lead's failure line),
+    not just 'run ended with status error'."""
+    client, _, _ = bff
+    admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+    await client.post("/api/packs", json={"slug": "fail-desk", "name": "Fail"},
+                      headers=admin)
+    await client.post("/api/packs/fail-desk/generate",
+                      json={"instructions": "a desk MAKE_IT_FAIL please"}, headers=admin)
+    body = await _wait_for(client, "/api/packs/fail-desk", admin,
+                           ["generation", "status"], "error")
+    assert "missing Anthropic API key" in body["generation"]["message"]
 
 
 def test_eval_verdict_is_strict():

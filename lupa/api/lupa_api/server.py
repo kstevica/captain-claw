@@ -283,13 +283,32 @@ def _factory_timeout() -> float:
     return float(os.environ.get("LUPA_FACTORY_TIMEOUT_SECONDS", "900"))
 
 
-async def _run_headless_vatra(state, token: str, intent: str,
-                              quality: dict) -> tuple[dict | None, str]:
+async def _run_failure_reason(state, headers: dict, sid: str, status: str) -> str:
+    """The SPECIFIC reason a factory run ended badly — pulled from the run's own
+    progress feed (the Lead's failure line carries the real message, e.g. a
+    missing API key), not just the terminal status."""
+    reason = f"run ended with status {status}"
+    try:
+        pr = await state.fd.get(f"/fd/basna/sessions/{sid}/progress", headers=headers)
+        if pr.status_code == 200:
+            bad = [e for e in (pr.json().get("events") or [])
+                   if e.get("ok") is False or "fail" in str(e.get("message", "")).lower()]
+            if bad:
+                reason = str(bad[-1].get("message") or reason)
+    except (httpx.HTTPError, ValueError):
+        pass
+    return reason
+
+
+async def _run_headless_vatra(state, token: str, intent: str, quality: dict,
+                              on_started=None) -> tuple[dict | None, str]:
     """Start → auto-approve at the gate → poll to a terminal state.
 
     The Studio's generate/evaluate runs are unattended, so the plan gate is
-    auto-approved (the human gate stays for customer commissions). Returns
-    (session detail, "") or (None, error)."""
+    auto-approved (the human gate stays for customer commissions). ``on_started``
+    (async) is called with the run's session id as soon as it exists, so the
+    Studio can stream the live progress. Returns (session detail, "") or
+    (None, error) — the error is the run's specific failure line when available."""
     headers = {"Authorization": f"Bearer {token}"}
     r = await state.fd.post("/fd/vatra/start",
                             json={"intent": intent, "quality": quality},
@@ -299,6 +318,8 @@ async def _run_headless_vatra(state, token: str, intent: str,
     sid = r.json().get("session_id") or ""
     if not sid:
         return None, "start returned no session id"
+    if on_started:
+        await on_started(sid)
     deadline = time.monotonic() + _factory_timeout()
     approved = False
     while time.monotonic() < deadline:
@@ -315,7 +336,7 @@ async def _run_headless_vatra(state, token: str, intent: str,
         elif status == "done":
             return detail, ""
         elif status in ("error", "cancelled", "rejected"):
-            return None, f"run ended with status {status}"
+            return None, await _run_failure_reason(state, headers, sid, status)
         await asyncio.sleep(_factory_poll_s())
     return None, "factory run timed out"
 
@@ -787,9 +808,12 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
 
     async def _generate_pack(state, slug: str, name: str, instructions: str,
                              token: str) -> None:
+        async def _started(sid: str) -> None:
+            await state.db.update_pack(
+                slug, generation={"status": "running", "session_id": sid})
         detail, err = await _run_headless_vatra(
             state, token, _generate_intent(name, instructions),
-            {"profile": "balanced"})
+            {"profile": "balanced"}, on_started=_started)
         if err:
             await state.db.update_pack(slug, generation={"status": "error",
                                                          "message": err})
@@ -836,8 +860,13 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         brief = str((evals[0] or {}).get("brief") if evals else "") or (
             f"Golden task: produce a short, source-verified overview of the "
             f"core question a customer of '{manifest.get('name', slug)}' would ask.")
+
+        async def _started(sid: str) -> None:
+            await state.db.update_pack(
+                slug, eval_state={"status": "running", "session_id": sid})
         detail, err = await _run_headless_vatra(
-            state, token, brief, pack_quality(manifest) or {"profile": "thorough"})
+            state, token, brief, pack_quality(manifest) or {"profile": "thorough"},
+            on_started=_started)
         if err:
             await state.db.update_pack(slug, eval_state={"status": "error",
                                                          "message": err})
@@ -885,6 +914,24 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
                                 "get a green verdict before publishing")
         await db.update_pack(slug, status="published", bump_version=True)
         return {"ok": True, "status": "published"}
+
+    @app.get("/api/packs/{slug}/progress")
+    async def pack_progress(slug: str, request: Request, phase: str = "generation",
+                            user: dict = Depends(require_user)):
+        """The live event feed of a factory run (generate or evaluate) — the same
+        team-at-work log a customer sees during a commission. The Studio user owns
+        the run, so their own token reads it."""
+        row = await _db(request).get_pack(slug)
+        if not row or not _can_touch(row, user):
+            raise HTTPException(404, "pack not found")
+        key = "eval_state" if phase == "eval" else "generation"
+        st = json.loads(row.get(key) or "{}")
+        sid = st.get("session_id")
+        active = st.get("status") == "running"
+        if not sid:
+            return {"events": [], "active": active}
+        data = await _fd_try(request, f"/fd/basna/sessions/{sid}/progress")
+        return data or {"events": [], "active": active}
 
     # ── house style: forge + archetypes ──────────────────────────────
 

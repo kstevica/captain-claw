@@ -23,6 +23,26 @@ interface PackDetail {
           metrics?: Record<string, number | string> }
 }
 
+interface ProgressEvent { i: number; stage: string; message: string; ok?: boolean }
+
+/** The live team-at-work feed of a factory run — same shape the customer
+ * commission feed uses. Phase lines are banners; the rest are detail. */
+function RunFeed({ events }: { events: ProgressEvent[] }) {
+  if (events.length === 0) return null
+  return (
+    <div className="mt-2 max-h-56 overflow-y-auto rounded-lg border border-[var(--lp-border)] bg-[var(--lp-bg)] px-3 py-2 space-y-0.5 text-xs font-mono">
+      {events.map((e) => (
+        <div key={e.i} className={
+          e.ok === false ? 'text-red-400'
+          : e.stage === 'phase' ? 'font-bold mt-1.5'
+          : 'text-[var(--lp-text-dim)]'}>
+          {e.stage === 'phase' ? `— ${e.message} —` : `${e.stage}: ${e.message}`}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /** Pack Studio — the in-product factory: draft → generate → review →
  * evaluate (ship-gate) → publish. Creator/admin only (the header hides the
  * entry otherwise; the BFF enforces it regardless). */
@@ -40,6 +60,7 @@ export default function Studio() {
   const [manifest, setManifest] = useState<Manifest | null>(null)
   const [genInstructions, setGenInstructions] = useState('')
   const [busy, setBusy] = useState('')
+  const [events, setEvents] = useState<ProgressEvent[]>([])
 
   const loadList = useCallback(async () => {
     const d = await api<{ packs: PackSummary[] }>('/api/packs')
@@ -63,16 +84,27 @@ export default function Studio() {
     if (selected) void loadDetail(selected)
   }, [selected, loadDetail])
 
-  // Poll while the factory is working on the selected pack.
-  const working = detail?.generation.status === 'running'
-    || detail?.eval.status === 'running'
+  // Poll while the factory is working on the selected pack — refresh the pack
+  // state AND stream the run's live event feed (the team-at-work log).
+  const evalRunning = detail?.eval.status === 'running'
+  const working = detail?.generation.status === 'running' || evalRunning
+  const phase = evalRunning ? 'eval' : 'generation'
   useEffect(() => {
-    if (!selected || !working) return
-    const iv = setInterval(() => {
-      void loadDetail(selected).then(() => void loadList())
-    }, 2500)
+    if (!selected) { setEvents([]); return }
+    if (!working) return
+    const tick = async () => {
+      await loadDetail(selected)
+      await loadList()
+      try {
+        const p = await api<{ events: ProgressEvent[] }>(
+          `/api/packs/${selected}/progress?phase=${phase}`)
+        setEvents(p.events ?? [])
+      } catch { /* best-effort */ }
+    }
+    void tick()
+    const iv = setInterval(() => { void tick() }, 2500)
     return () => clearInterval(iv)
-  }, [selected, working, loadDetail, loadList])
+  }, [selected, working, phase, loadDetail, loadList])
 
   const act = async (action: () => Promise<unknown>, label: string) => {
     setBusy(label); setError('')
@@ -187,6 +219,7 @@ export default function Studio() {
                 <span className="text-xs text-red-400">{detail.generation.message}</span>
               )}
             </div>
+            {detail.generation.status === 'running' && <RunFeed events={events} />}
           </div>
 
           {/* Review */}
@@ -250,6 +283,7 @@ export default function Studio() {
                 </a>
               )}
             </div>
+            {detail.eval.status === 'running' && <RunFeed events={events} />}
           </div>
         </div>
       )}
