@@ -9,6 +9,7 @@ progress → facts → report file — without a running Captain.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import httpx
@@ -827,6 +828,33 @@ async def test_startup_resets_stale_running_packs(bff):
     assert detail["generation"]["status"] == "error"
     assert detail["eval"]["status"] == "error"
     assert "interrupted" in detail["eval"]["message"]
+
+
+async def test_seed_refreshes_unedited_system_pack_only(bff):
+    """Startup re-seed refreshes an UNEDITED system pack from the repo, but
+    preserves a runtime-edited one and never touches a user pack."""
+    client, _, app = bff
+    db = app.state.db
+
+    # A fresh system pack: seeded, then the repo changes → refreshed.
+    await db.upsert_seed_pack("sys-a", {"name": "A", "v": 1})
+    await db.upsert_seed_pack("sys-a", {"name": "A", "v": 2})
+    row = await db.get_pack("sys-a")
+    assert json.loads(row["manifest"])["v"] == 2  # repo change landed
+
+    # A system pack an admin edited in the Studio → NOT clobbered by re-seed.
+    await db.upsert_seed_pack("sys-b", {"name": "B", "v": 1})
+    await db.update_pack("sys-b", manifest={"name": "B edited", "v": 1})
+    await db.upsert_seed_pack("sys-b", {"name": "B", "v": 9})
+    row = await db.get_pack("sys-b")
+    assert json.loads(row["manifest"])["name"] == "B edited"  # runtime wins
+
+    # A user/creator pack is never touched by seeding, even at the same slug.
+    await db.create_pack("mine", "u1", {"name": "Mine", "v": 1})
+    await db.upsert_seed_pack("mine", {"name": "Seed", "v": 9})
+    row = await db.get_pack("mine")
+    assert row["owner_id"] == "u1"
+    assert json.loads(row["manifest"])["name"] == "Mine"
 
 
 def test_eval_verdict_is_strict():

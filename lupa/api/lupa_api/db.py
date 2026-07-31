@@ -91,11 +91,16 @@ class LupaDB:
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(_SCHEMA)
         # Additive migrations — each guarded so re-running is a no-op.
-        try:
-            await self._db.execute(
-                "ALTER TABLE streams ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'")
-        except aiosqlite.OperationalError:
-            pass  # column exists
+        for stmt in (
+            "ALTER TABLE streams ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'",
+            # seed_hash: the hash of the manifest last written by the seeder, so
+            # startup can tell a repo change from a runtime edit on a system pack.
+            "ALTER TABLE packs ADD COLUMN seed_hash TEXT NOT NULL DEFAULT ''",
+        ):
+            try:
+                await self._db.execute(stmt)
+            except aiosqlite.OperationalError:
+                pass  # column exists
         await self._db.commit()
 
     async def close(self) -> None:
@@ -245,17 +250,55 @@ class LupaDB:
 
     # ── pack registry (Kalup: verticals are data, runtime-managed) ───
 
+    @staticmethod
+    def _manifest_hash(manifest: dict) -> str:
+        import hashlib
+        import json
+        return hashlib.sha256(
+            json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+
     async def upsert_seed_pack(self, slug: str, manifest: dict) -> None:
-        """Import a repo pack as a published SYSTEM pack (owner ''). Only
-        inserts — a runtime-edited row is never clobbered by a seed."""
+        """Import a repo pack as a published SYSTEM pack (owner '').
+
+        - New slug → insert.
+        - Existing SYSTEM pack, unedited since last seed → refresh its manifest
+          from the repo (so a change to a built-in desk lands on restart),
+          preserving its status/version.
+        - Existing SYSTEM pack that was runtime-edited (admin changed it in the
+          Studio) → left alone (runtime wins).
+        - Any user/creator pack (owner != '') → never touched.
+
+        "Unedited since last seed" = the stored manifest still hashes to the
+        seed_hash we stamped. Legacy rows (seed_hash '') are treated as unedited
+        so the first startup after this change refreshes them to the repo."""
         import json
         assert self._db is not None
         now = _utcnow()
+        new_json = json.dumps(manifest)
+        new_hash = self._manifest_hash(manifest)
+        row = await self.get_pack(slug)
+        if row is None:
+            await self._db.execute(
+                "INSERT INTO packs (slug, owner_id, status, version, manifest,"
+                " seed_hash, created_at, updated_at)"
+                " VALUES (?, '', 'published', 1, ?, ?, ?, ?)",
+                (slug, new_json, new_hash, now, now))
+            await self._db.commit()
+            return
+        if row.get("owner_id"):
+            return  # user/creator pack — never touch
+        try:
+            cur_hash = self._manifest_hash(json.loads(row.get("manifest") or "{}"))
+        except (ValueError, TypeError):
+            cur_hash = ""
+        seed_hash = row.get("seed_hash") or ""
+        if seed_hash and cur_hash != seed_hash:
+            return  # runtime-edited since last seed — runtime wins
+        if new_hash == seed_hash:
+            return  # repo unchanged and already stamped — nothing to do
         await self._db.execute(
-            "INSERT OR IGNORE INTO packs (slug, owner_id, status, version,"
-            " manifest, created_at, updated_at)"
-            " VALUES (?, '', 'published', 1, ?, ?, ?)",
-            (slug, json.dumps(manifest), now, now))
+            "UPDATE packs SET manifest = ?, seed_hash = ?, updated_at = ? WHERE slug = ?",
+            (new_json, new_hash, now, slug))
         await self._db.commit()
 
     async def create_pack(self, slug: str, owner_id: str, manifest: dict) -> dict:
