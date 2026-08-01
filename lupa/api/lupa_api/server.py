@@ -422,14 +422,31 @@ def _generate_prompt(name: str, instructions: str) -> str:
     return f"Desk name: {name}\n\nVertical:\n{instructions}"
 
 
+_RECEIPT_KEYS = ("consistency_critical", "consistency_major", "contract_checked",
+                 "claims_checked", "gaps_major", "gaps_minor")
+
+
 def _eval_verdict(analysis: dict) -> tuple[str, dict]:
-    """The ship-gate: green iff the golden run's own receipts pass."""
+    """The ship-gate verdict from the golden run's receipts.
+
+    Green requires the run to have PRODUCED verifiable receipts (the quality
+    checks actually ran — a profile that runs none, like 'balanced', can't be
+    verified and is red) with no critical failures. An explicit blocking-gate
+    verdict (block_on_critical, which sets quality_verdict) is honored when
+    present; otherwise the deterministic checks decide — we do NOT require a
+    quality_verdict of 'pass', since no standard profile emits one.
+    """
     metrics = (analysis or {}).get("quality_metrics") or {}
     verdict = str((analysis or {}).get("quality_verdict")
                   or metrics.get("quality_verdict") or "")
-    green = (verdict.lower() == "pass"
-             and int(metrics.get("contract_failed_critical", 0) or 0) == 0
-             and int(metrics.get("consistency_critical", 0) or 0) == 0)
+    crit = (int(metrics.get("contract_failed_critical", 0) or 0)
+            + int(metrics.get("consistency_critical", 0) or 0))
+    refuted = int(metrics.get("claims_refuted", 0) or 0)
+    produced_receipts = any(k in metrics for k in _RECEIPT_KEYS)
+    if verdict:
+        green = verdict.lower() == "pass" and crit == 0
+    else:
+        green = produced_receipts and crit == 0 and refuted == 0
     return ("green" if green else "red"), metrics
 
 

@@ -885,12 +885,26 @@ def test_job_token_outlasts_the_factory_timeout(monkeypatch):
     assert payload["exp"] - payload["iat"] == 1234
 
 
-def test_eval_verdict_is_strict():
+def test_eval_verdict():
     from lupa_api.server import _eval_verdict
-    green, _ = _eval_verdict({"quality_verdict": "pass",
-                              "quality_metrics": {"contract_failed_critical": 0}})
-    assert green == "green"
-    red, _ = _eval_verdict({"quality_verdict": "pass",
-                            "quality_metrics": {"contract_failed_critical": 1}})
-    assert red == "red"
+    # Explicit blocking-gate verdict is honored (+ no criticals).
+    assert _eval_verdict({"quality_verdict": "pass",
+                          "quality_metrics": {"contract_failed_critical": 0}})[0] == "green"
+    assert _eval_verdict({"quality_verdict": "pass",
+                          "quality_metrics": {"contract_failed_critical": 1}})[0] == "red"
+    # No explicit verdict: green iff receipts were produced AND clean — a
+    # standard 'thorough' run (no block_on_critical) must still be able to pass.
+    assert _eval_verdict({"quality_metrics": {
+        "consistency_critical": 0, "consistency_major": 1,
+        "contract_checked": 3, "contract_failed_critical": 0,
+        "claims_checked": 5, "claims_refuted": 0,
+        "gaps_major": 0, "gaps_minor": 2}})[0] == "green"
+    # A critical failure → red.
+    assert _eval_verdict({"quality_metrics": {
+        "contract_checked": 3, "contract_failed_critical": 1}})[0] == "red"
+    # Refuted claims → red.
+    assert _eval_verdict({"quality_metrics": {
+        "claims_checked": 5, "claims_refuted": 2}})[0] == "red"
+    # No receipts at all (e.g. 'balanced' ran no checks) → red, not green.
     assert _eval_verdict({})[0] == "red"
+    assert _eval_verdict({"quality_metrics": {"acted_retries": 1}})[0] == "red"

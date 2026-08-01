@@ -58,9 +58,11 @@ function EvalMetrics({ metrics, green, verdict }:
   if (!metrics || Object.keys(metrics).length === 0) {
     return (
       <div className="mt-2 text-xs text-[var(--lp-text-dim)]">
-        No receipts were recorded — the quality checks likely returned empty
-        output (a reasoning model leaving `content` blank). Point the tier they
-        run on at a non-reasoning model and re-run.
+        No receipts to verify. Set this desk's quality profile to{' '}
+        <span className="text-[var(--lp-text)]">thorough</span> in Run defaults —
+        lighter profiles don't run the consistency/contract/coverage checks a
+        ship-gate needs. (If it's already thorough and receipts are still empty,
+        the checks returned unparseable output — use a non-reasoning tier model.)
       </div>
     )
   }
