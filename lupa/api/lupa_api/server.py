@@ -817,10 +817,11 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         if not row:
             raise HTTPException(404, "pack not found")
         if row["status"] != "published":
-            try:
-                user = await require_user(request)
-            except HTTPException:
-                raise HTTPException(404, "pack not found")
+            # Let a 401 propagate (expired/absent token) so the client silently
+            # refreshes and retries — converting it to 404 here would wedge a
+            # long-running Studio poll once the access token's TTL lapses.
+            # An authenticated-but-unauthorized user gets 404 (no draft leak).
+            user = await require_user(request)
             if not _can_touch(row, user):
                 raise HTTPException(404, "pack not found")
         return {"pack": row_manifest(row),

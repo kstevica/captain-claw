@@ -689,6 +689,22 @@ async def test_registry_seeds_and_permissions(bff):
     assert all(p["slug"] != "x-desk" for p in others)
 
 
+async def test_draft_detail_401_not_404_when_unauthed(bff):
+    """A draft's detail returns 401 (not 404) without a token, so the SPA
+    silently refreshes and retries — a long Studio poll must not wedge when the
+    access token's TTL lapses. Authed-but-unauthorized still gets 404 (no leak);
+    a published pack is public."""
+    client, _, _ = bff
+    admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+    await client.post("/api/packs", json={"slug": "d1", "name": "D"}, headers=admin)
+
+    assert (await client.get("/api/packs/d1")).status_code == 401          # refresh path
+    assert (await client.get("/api/packs/d1", headers=_auth("u2"))).status_code == 404
+    assert (await client.get("/api/packs/d1", headers=admin)).status_code == 200
+    # Published packs render pre-login (public branding).
+    assert (await client.get("/api/packs/research-desk")).status_code == 200
+
+
 async def test_factory_generate_evaluate_publish(bff):
     """The 2-3-day factory line, compressed: draft → generate (Vatra writes the
     manifest) → ship-gate blocks → evaluate (golden run) → green → publish."""
