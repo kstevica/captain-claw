@@ -432,6 +432,55 @@ def _extract_thinking_inner(text: str) -> str:
     return "\n\n".join(m.strip() for m in matches if m.strip())
 
 
+def _extract_json_blob(text: str) -> str | None:
+    """The last complete top-level JSON object/array in ``text``, or None.
+
+    Prefers a ```json fenced block; otherwise scans for opening brackets and
+    returns the last one that fully decodes (skipping brackets nested inside an
+    already-captured value), so a trailing JSON answer wins over an inline
+    example earlier in the text.
+    """
+    if not text:
+        return None
+    dec = json.JSONDecoder()
+    for frag in reversed(re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)):
+        frag = frag.strip()
+        if frag:
+            try:
+                dec.raw_decode(frag)
+                return frag
+            except ValueError:
+                pass
+    best: str | None = None
+    best_end = -1
+    for m in re.finditer(r"[\[{]", text):
+        i = m.start()
+        if i < best_end:  # nested inside a value we already captured
+            continue
+        try:
+            _obj, rel_end = dec.raw_decode(text[i:])
+        except ValueError:
+            continue
+        end = i + rel_end
+        if end > best_end:
+            best, best_end = text[i:end], end
+    return best
+
+
+def _reasoning_content_fallback(reasoning: str) -> str:
+    """Recover a usable answer from ``reasoning_content`` when a model returned
+    empty ``content`` (some reasoning models put everything in the reasoning
+    field). Prefer a JSON object/array — many internal callers ask for STRICT
+    JSON (quality checks, judges, routers) and the model often emitted it inside
+    its reasoning — else the last non-empty paragraph (the conclusion)."""
+    rc = str(reasoning or "")
+    blob = _extract_json_blob(rc)
+    if blob is not None:
+        return blob
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", rc) if p.strip()]
+    return paragraphs[-1] if paragraphs else rc.strip()
+
+
 def _normalize_provider_name(provider: str) -> str:
     """Normalize provider aliases."""
     key = (provider or "").strip().lower()
@@ -1966,12 +2015,12 @@ class OllamaProvider(LLMProvider):
                 _has_tool_calls = bool(_obj_get(msg_obj, "tool_calls", []) or [])
                 if not content.strip() and _rc and not _has_tool_calls:
                     rc_str = str(_rc)
-                    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", rc_str) if p.strip()]
-                    fallback = paragraphs[-1] if paragraphs else rc_str.strip()
+                    fallback = _reasoning_content_fallback(rc_str)
                     log.warning(
-                        "Ollama content empty - surfacing reasoning tail",
+                        "Ollama content empty - recovering answer from reasoning",
                         reasoning_chars=len(rc_str),
                         fallback_chars=len(fallback),
+                        recovered_json=fallback.startswith(("{", "[")),
                     )
                     content = fallback
                 log.info(
@@ -2451,14 +2500,14 @@ class LiteLLMProvider(LLMProvider):
         final_content = _strip_internal_context(_strip_reasoning_artifacts(joined_content))
         joined_reasoning = "".join(reasoning_parts).strip()
         if not final_content.strip() and joined_reasoning and not tc_out:
-            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", joined_reasoning) if p.strip()]
-            fallback = paragraphs[-1] if paragraphs else joined_reasoning
+            fallback = _reasoning_content_fallback(joined_reasoning)
             log.warning(
-                "Streamed content empty — surfacing reasoning tail",
+                "Streamed content empty — recovering answer from reasoning",
                 provider=self.provider,
                 model=self.model,
                 reasoning_chars=len(joined_reasoning),
                 fallback_chars=len(fallback),
+                recovered_json=fallback.startswith(("{", "[")),
             )
             final_content = fallback
         log.info(
@@ -2591,14 +2640,14 @@ class LiteLLMProvider(LLMProvider):
             content = _strip_reasoning_artifacts(content)
             if not content.strip() and reasoning_content:
                 rc_str = str(reasoning_content)
-                paragraphs = [p.strip() for p in re.split(r"\n\s*\n", rc_str) if p.strip()]
-                fallback = paragraphs[-1] if paragraphs else rc_str.strip()
+                fallback = _reasoning_content_fallback(rc_str)
                 log.warning(
-                    "LLM content empty — surfacing reasoning_content tail",
+                    "LLM content empty — recovering answer from reasoning_content",
                     provider=self.provider,
                     model=self.model,
                     reasoning_chars=len(rc_str),
                     fallback_chars=len(fallback),
+                    recovered_json=fallback.startswith(("{", "[")),
                 )
                 content = fallback
             elif reasoning_content:
