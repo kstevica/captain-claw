@@ -297,7 +297,11 @@ def _factory_poll_s() -> float:
 
 
 def _factory_timeout() -> float:
-    return float(os.environ.get("LUPA_FACTORY_TIMEOUT_SECONDS", "900"))
+    # A grouped + thorough golden run has 4 specialists across ordered phases
+    # plus a reporter and several quality passes; on a slow reasoning model each
+    # agent can take many minutes, so 15 min was far too short. Default to 45
+    # min; raise LUPA_FACTORY_TIMEOUT_SECONDS higher for very slow local models.
+    return float(os.environ.get("LUPA_FACTORY_TIMEOUT_SECONDS", "2700"))
 
 
 async def _run_failure_reason(state, headers: dict, sid: str, status: str) -> str:
