@@ -873,6 +873,18 @@ async def test_seed_refreshes_unedited_system_pack_only(bff):
     assert json.loads(row["manifest"])["name"] == "Mine"
 
 
+def test_job_token_outlasts_the_factory_timeout(monkeypatch):
+    """A background job's minted token must not lapse before the run's own
+    timeout — otherwise the FD poll 401s and the run dies at the finish line."""
+    from lupa_api.server import _job_token_ttl, _factory_timeout, _mint_owner_token
+    monkeypatch.setenv("LUPA_FACTORY_TIMEOUT_SECONDS", "2700")
+    assert _job_token_ttl() > _factory_timeout()
+    # The ttl is honored in the token's exp.
+    tok = _mint_owner_token("u1", SECRET, ttl=1234)
+    payload = pyjwt.decode(tok, SECRET, algorithms=["HS256"])
+    assert payload["exp"] - payload["iat"] == 1234
+
+
 def test_eval_verdict_is_strict():
     from lupa_api.server import _eval_verdict
     green, _ = _eval_verdict({"quality_verdict": "pass",

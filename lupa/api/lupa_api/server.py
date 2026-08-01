@@ -214,12 +214,20 @@ def _stream_execution_groups(stream: dict, pack: dict) -> bool:
 #    global /scheduler/*, which has no user scoping) ─────────────────
 
 
-def _mint_owner_token(sub: str, secret: str) -> str:
-    """A short-lived access token for a brief's owner — the BFF shares
-    FD_JWT_SECRET with FD, so scheduled runs authenticate as the user."""
+def _mint_owner_token(sub: str, secret: str, ttl: int = 900) -> str:
+    """An access token for the owner — the BFF shares FD_JWT_SECRET with FD, so
+    background jobs authenticate as the user. ``ttl`` must outlast the job: a
+    factory/second-opinion run can take far longer than FD's usual 15-min
+    access TTL, and a token that lapses mid-run makes the BFF's FD poll 401 and
+    the run fail right at the finish line."""
     now = int(time.time())
     return pyjwt.encode({"sub": sub, "role": "user", "type": "access",
-                         "iat": now, "exp": now + 900}, secret, algorithm="HS256")
+                         "iat": now, "exp": now + ttl}, secret, algorithm="HS256")
+
+
+def _job_token_ttl() -> int:
+    """A token TTL that comfortably outlasts a long background run."""
+    return int(_factory_timeout()) + 300
 
 
 def _brief_instruction(text: str) -> str:
@@ -914,7 +922,7 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         run_id = uuid.uuid4().hex
         await db.update_pack(slug, generation={"status": "running", "run_id": run_id})
         secret = os.environ.get("FD_JWT_SECRET", "")
-        token = _mint_owner_token(user["id"], secret) if secret else _bearer(request)
+        token = _mint_owner_token(user["id"], secret, ttl=_job_token_ttl()) if secret else _bearer(request)
         name = row_manifest(row).get("name", slug)
         _spawn_bg(request.app.state,
                   _generate_pack(request.app.state, slug, name,
@@ -967,7 +975,7 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         run_id = uuid.uuid4().hex
         await db.update_pack(slug, eval_state={"status": "running", "run_id": run_id})
         secret = os.environ.get("FD_JWT_SECRET", "")
-        token = _mint_owner_token(user["id"], secret) if secret else _bearer(request)
+        token = _mint_owner_token(user["id"], secret, ttl=_job_token_ttl()) if secret else _bearer(request)
         _spawn_bg(request.app.state,
                   _evaluate_pack(request.app.state, slug, token, run_id))
         return {"status": "running"}
@@ -1122,7 +1130,7 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         rec = await db.create_second_opinion(session_id, basna_sid, user["id"])
         # Prefer a minted token (survives the 15-min access TTL on long runs).
         secret = os.environ.get("FD_JWT_SECRET", "")
-        token = _mint_owner_token(user["id"], secret) if secret else _bearer(request)
+        token = _mint_owner_token(user["id"], secret, ttl=_job_token_ttl()) if secret else _bearer(request)
         state = request.app.state
         task = asyncio.create_task(
             _run_second_opinion(state, session_id, basna_sid, token))
