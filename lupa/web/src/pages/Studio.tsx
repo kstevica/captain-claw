@@ -43,6 +43,64 @@ function RunFeed({ events }: { events: ProgressEvent[] }) {
   )
 }
 
+function Tile({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
+  return (
+    <div className="rounded-lg bg-[var(--lp-bg)] border border-[var(--lp-border)] px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wide text-[var(--lp-text-dim)]">{label}</div>
+      <div className={`text-sm font-semibold mt-0.5 ${warn ? 'text-amber-400' : ''}`}>{value}</div>
+    </div>
+  )
+}
+
+/** The ship-gate receipts, so a red (or green) verdict shows WHY. */
+function EvalMetrics({ metrics, green, verdict }:
+  { metrics: Record<string, number | string>; green: boolean; verdict?: string }) {
+  if (!metrics || Object.keys(metrics).length === 0) {
+    return (
+      <div className="mt-2 text-xs text-[var(--lp-text-dim)]">
+        No receipts were recorded — the quality checks likely returned empty
+        output (a reasoning model leaving `content` blank). Point the tier they
+        run on at a non-reasoning model and re-run.
+      </div>
+    )
+  }
+  const n = (k: string) => Number(metrics[k] ?? 0)
+  const reasons: string[] = []
+  if ((verdict ?? '').toLowerCase() !== 'pass')
+    reasons.push(`quality verdict is "${verdict || 'not pass'}"`)
+  if (n('contract_failed_critical') > 0)
+    reasons.push(`${n('contract_failed_critical')} critical contract failure(s)`)
+  if (n('consistency_critical') > 0)
+    reasons.push(`${n('consistency_critical')} critical consistency issue(s)`)
+  return (
+    <div className="mt-2 space-y-2">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Tile label="Claims"
+              value={`${n('claims_confirmed')}/${n('claims_checked')} confirmed`}
+              warn={n('claims_refuted') > 0} />
+        <Tile label="Consistency"
+              value={`${n('consistency_critical')} critical · ${n('consistency_major')} major`}
+              warn={n('consistency_critical') > 0} />
+        <Tile label="Contract"
+              value={`${n('contract_checked')} checked · ${n('contract_failed_critical') + n('contract_failed_major')} failed`}
+              warn={n('contract_failed_critical') > 0} />
+        <Tile label="Gaps"
+              value={`${n('gaps_major')} major · ${n('gaps_minor')} minor`}
+              warn={n('gaps_major') > 0} />
+      </div>
+      {!green && (
+        <div className="text-xs text-red-400">
+          {reasons.length
+            ? <>Gate blocked by: {reasons.join('; ')}.</>
+            : <>Red, but no blocking metric was recorded — the quality checks
+                probably couldn't parse the model's output. Try a non-reasoning
+                tier model.</>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Pack Studio — the in-product factory: draft → generate → review →
  * evaluate (ship-gate) → publish. Creator/admin only (the header hides the
  * entry otherwise; the BFF enforces it regardless). */
@@ -291,6 +349,10 @@ export default function Studio() {
               )}
             </div>
             {detail.eval.status === 'running' && <RunFeed events={events} />}
+            {detail.eval.status === 'done' && (
+              <EvalMetrics metrics={detail.eval.metrics ?? {}} green={evalGreen}
+                           verdict={detail.eval.verdict} />
+            )}
           </div>
         </div>
       )}
