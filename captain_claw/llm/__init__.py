@@ -374,7 +374,7 @@ _THINK_OPEN_RE = re.compile(
 )
 
 
-def _strip_reasoning_artifacts(text: str) -> str:
+def _strip_reasoning_artifacts(text: str, *, recover_answer: bool = True) -> str:
     """Remove <think>...</think> style reasoning blocks from model output.
 
     Some providers (notably xAI Grok and certain DeepSeek/Qwen variants)
@@ -386,6 +386,12 @@ def _strip_reasoning_artifacts(text: str) -> str:
     with no answer afterwards. If stripping produces empty output but the
     raw text had content, fall back to the last paragraph inside the
     thinking block — that's usually where the model's conclusion lives.
+
+    ``recover_answer=False`` disables that fallback — pass it when the turn
+    also carries tool calls, where an empty content is correct (the "answer"
+    is the tool call) and surfacing the reasoning as content would both leak
+    the private chain-of-thought into the chat and duplicate what we already
+    keep as ``reasoning_content``.
     """
     if not text:
         return text
@@ -406,7 +412,7 @@ def _strip_reasoning_artifacts(text: str) -> str:
             # Tag at the very end — the "answer" is the pre-tag text.
             cleaned = cleaned[:_orphan.start()]
     cleaned = cleaned.lstrip()
-    if cleaned:
+    if cleaned or not recover_answer:
         return cleaned
     inner = _extract_thinking_inner(text)
     if not inner:
@@ -430,6 +436,44 @@ def _extract_thinking_inner(text: str) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
     return "\n\n".join(m.strip() for m in matches if m.strip())
+
+
+def _recover_inline_reasoning(text: str) -> str:
+    """Recover chain-of-thought a model emitted INLINE in its ``content``
+    (as a ``<think>…</think>`` block) rather than in a separate
+    ``reasoning_content`` field, returning the reasoning inner text (no tags)
+    or ``""`` when there is none.
+
+    This exists so thinking-mode servers that stream reasoning inline but
+    require it echoed back as ``reasoning_content`` on the next turn can be
+    satisfied. Notably NVIDIA Nemotron served via an OpenAI-compatible
+    MLX/vLLM endpoint 400s with "The reasoning_content in the thinking mode
+    must be passed back to the API" when the round-tripped assistant message
+    omits it. We strip the ``<think>`` block from the user-visible content
+    elsewhere; this keeps a copy so :func:`_convert_messages_for_openai_style`
+    can replay it.
+
+    Handles both the paired form (``<think>…</think>answer``) and the
+    orphan-closing-tag form (``…leaked reasoning…</think>answer``) that some
+    chat templates produce when they consume the opening ``<think>``
+    themselves — matching :func:`_strip_reasoning_artifacts`.
+    """
+    if not text:
+        return ""
+    inner = _extract_thinking_inner(text)
+    if inner:
+        return inner
+    # Orphan closing tag with no opener: everything before the last closing
+    # tag is the reasoning.
+    orphan = re.search(
+        r"<\s*/\s*(?:think|thinking|reasoning|reflection)\s*>"
+        r"(?!.*<\s*/\s*(?:think|thinking|reasoning|reflection)\s*>)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if orphan:
+        return text[: orphan.start()].strip()
+    return ""
 
 
 def _extract_json_blob(text: str) -> str | None:
@@ -2497,8 +2541,22 @@ class LiteLLMProvider(LLMProvider):
             else None
         )
         joined_content = "".join(content_parts)
-        final_content = _strip_internal_context(_strip_reasoning_artifacts(joined_content))
+        # On a tool-call turn the visible answer is the tool call itself, so an
+        # empty content is correct — don't let the reasoning-recovery fallback
+        # surface the <think> block as content (it would leak the private chain-
+        # of-thought and duplicate the reasoning_content we keep below).
+        final_content = _strip_internal_context(
+            _strip_reasoning_artifacts(joined_content, recover_answer=not bool(tc_out))
+        )
         joined_reasoning = "".join(reasoning_parts).strip()
+        # When the server streams the chain-of-thought inline in the content
+        # (a <think>…</think> block) instead of as a separate reasoning_content
+        # delta, we've stripped it from final_content above but must still keep
+        # it so thinking-mode servers can round-trip it on the next turn (e.g.
+        # NVIDIA Nemotron via an OpenAI-compatible endpoint, which otherwise
+        # 400s with "reasoning_content ... must be passed back to the API").
+        if not joined_reasoning:
+            joined_reasoning = _recover_inline_reasoning(joined_content)
         if not final_content.strip() and joined_reasoning and not tc_out:
             fallback = _reasoning_content_fallback(joined_reasoning)
             log.warning(
@@ -2637,7 +2695,22 @@ class LiteLLMProvider(LLMProvider):
                 or _obj_get(choice, "thinking", None)
                 or _obj_get(choice, "reasoning", None)
             )
-            content = _strip_reasoning_artifacts(content)
+            _content_before_strip = content
+            # A tool-call turn has no visible answer to recover — keep content
+            # empty rather than surfacing the <think> block (see the streaming
+            # collector for the same guard).
+            _has_tool_calls = bool(_obj_get(choice, "tool_calls", []) or [])
+            content = _strip_reasoning_artifacts(
+                content, recover_answer=not _has_tool_calls
+            )
+            # Preserve inline <think>…</think> reasoning (emitted in the content
+            # field rather than a separate reasoning_content field) so thinking-
+            # mode servers can round-trip it on the next turn. See
+            # _recover_inline_reasoning for the full rationale.
+            if not (reasoning_content and str(reasoning_content).strip()):
+                _inline_reasoning = _recover_inline_reasoning(_content_before_strip)
+                if _inline_reasoning:
+                    reasoning_content = _inline_reasoning
             if not content.strip() and reasoning_content:
                 rc_str = str(reasoning_content)
                 fallback = _reasoning_content_fallback(rc_str)
