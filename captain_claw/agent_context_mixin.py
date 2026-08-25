@@ -3366,15 +3366,22 @@ class AgentContextMixin:
                     # Tool chain was interrupted by an unmatched tool payload.
                     _clear_pending_assistant_tool_calls()
 
-                # Orphan tool messages break OpenAI calls; retain content as assistant context instead.
+                # Orphan tool messages break OpenAI calls; retain the content as
+                # context instead. Use the USER role, not assistant: a tool
+                # result is external data, and minting a reasoning-less
+                # assistant turn here trips thinking-mode servers that require
+                # reasoning_content on every assistant message (DeepSeek V4
+                # thinking via an OpenAI-compatible endpoint 400s with
+                # "reasoning_content ... must be passed back to the API").
                 tool_name = str(msg.get("tool_name", "")).strip() or "tool"
                 content = str(msg.get("content", "")).strip()
                 converted = dict(msg)
-                converted["role"] = "assistant"
+                converted["role"] = "user"
                 converted["content"] = f"[tool_context:{tool_name}] {content}".strip()
                 converted.pop("tool_call_id", None)
                 converted.pop("tool_name", None)
                 converted.pop("tool_calls", None)
+                converted.pop("reasoning_content", None)
                 normalized.append(converted)
                 continue
 

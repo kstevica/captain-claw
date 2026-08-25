@@ -14,8 +14,11 @@ import pytest
 from captain_claw.llm import (
     LiteLLMProvider,
     Message,
+    _REASONING_BACKFILL_PLACEHOLDER,
+    _backfill_reasoning_content,
     _convert_messages_for_openai_style,
     _extract_json_blob,
+    _is_reasoning_content_required_error,
     _recover_inline_reasoning,
     _reasoning_content_fallback,
 )
@@ -160,3 +163,61 @@ async def test_streaming_collect_keeps_separate_reasoning_field():
     message = collected["choices"][0]["message"]
     assert message["reasoning_content"] == "separate field reasoning"
     assert message["content"] == "The answer."
+
+
+# --- Self-heal: reasoning_content required-on-round-trip 400 -----------------
+#
+# DeepSeek V4 thinking (via an OpenAI-compatible endpoint) 400s when an
+# assistant message reaches the payload without reasoning_content — e.g. an
+# orphan tool result normalized into an assistant turn, or a synthesized
+# context/nudge message. _acompletion_tolerant backfills a placeholder on the
+# retry so the turn survives.
+
+
+def test_reasoning_required_error_matches_the_server_message():
+    m = ("litellm.badrequesterror: openaiexception - the `reasoning_content` in "
+         "the thinking mode must be passed back to the api.")
+    assert _is_reasoning_content_required_error(m)
+
+
+def test_reasoning_required_error_ignores_unrelated_400s():
+    assert not _is_reasoning_content_required_error("invalid temperature value")
+    assert not _is_reasoning_content_required_error("context length exceeded")
+    # Merely mentioning the field without the round-trip demand is not a match.
+    assert not _is_reasoning_content_required_error("reasoning_content was truncated")
+
+
+def test_backfill_only_patches_reasoningless_assistant_messages():
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        # assistant with a real reasoning — must be left untouched
+        {"role": "assistant", "content": "", "reasoning_content": "real chain",
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "write", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        # orphan-tool-turned-assistant: no reasoning -> gets the placeholder
+        {"role": "assistant", "content": "[tool_context:memory_semantic_select] …"},
+    ]
+    patched = _backfill_reasoning_content(messages)
+    assert patched is True
+    assert messages[2]["reasoning_content"] == "real chain"          # preserved
+    assert messages[4]["reasoning_content"] == _REASONING_BACKFILL_PLACEHOLDER
+    # Non-assistant roles are never given reasoning_content.
+    assert "reasoning_content" not in messages[0]
+    assert "reasoning_content" not in messages[1]
+    assert "reasoning_content" not in messages[3]
+
+
+def test_backfill_noop_when_all_assistants_have_reasoning():
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "answer", "reasoning_content": "why"},
+    ]
+    assert _backfill_reasoning_content(messages) is False
+
+
+def test_backfill_treats_whitespace_reasoning_as_missing():
+    messages = [{"role": "assistant", "content": "x", "reasoning_content": "   "}]
+    assert _backfill_reasoning_content(messages) is True
+    assert messages[0]["reasoning_content"] == _REASONING_BACKFILL_PLACEHOLDER

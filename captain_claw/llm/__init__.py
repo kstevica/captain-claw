@@ -291,6 +291,46 @@ def _is_temperature_rejected_error(msg: str) -> bool:
     )
 
 
+# Minimal, non-empty stand-in used to satisfy thinking-mode servers that
+# demand a reasoning_content on assistant messages we can't supply a real one
+# for (orphan tool results normalized into assistant turns, synthesized
+# context/nudge messages). Only ever sent on the self-heal retry below, and
+# only to a server that already rejected the request for the missing field.
+_REASONING_BACKFILL_PLACEHOLDER = "(prior reasoning unavailable)"
+
+
+def _is_reasoning_content_required_error(msg: str) -> bool:
+    """True for the thinking-mode 400 that demands reasoning_content be echoed
+    back on assistant messages — e.g. DeepSeek V4 thinking served via an
+    OpenAI-compatible endpoint: "The reasoning_content in the thinking mode
+    must be passed back to the API"."""
+    return "reasoning_content" in msg and (
+        "passed back" in msg or "thinking mode" in msg
+    )
+
+
+def _backfill_reasoning_content(messages: Any) -> bool:
+    """Ensure every assistant message carries a non-empty reasoning_content,
+    injecting :data:`_REASONING_BACKFILL_PLACEHOLDER` where one is missing.
+
+    Returns True if any message was patched. Mutates the list in place with
+    shallow-copied dicts so the caller's originals are untouched.
+    """
+    if not isinstance(messages, list):
+        return False
+    patched = False
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        rc = m.get("reasoning_content")
+        if not (isinstance(rc, str) and rc.strip()):
+            m = dict(m)
+            m["reasoning_content"] = _REASONING_BACKFILL_PLACEHOLDER
+            messages[i] = m
+            patched = True
+    return patched
+
+
 async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) -> Any:
     """Call ``acompletion``; on a parameter-rejection 400, strip the offending
     parameter and retry once.
@@ -347,11 +387,25 @@ async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) ->
             stripped.append("temperature")
             _remember_temperature_unsupported(kwargs.get("model", ""))
 
-        if stripped:
+        # Thinking-mode server demands reasoning_content round-tripped on
+        # assistant messages (DeepSeek V4 thinking via an OpenAI-compatible
+        # endpoint). An assistant message can reach the payload without it —
+        # an orphan tool result normalized into an assistant turn, or a
+        # synthesized context/nudge message. Backfill a placeholder on any
+        # assistant message that lacks reasoning and retry once. Scoped to the
+        # exact 400 so no other provider ever sees the placeholder.
+        reasoning_backfilled = False
+        if _is_reasoning_content_required_error(msg):
+            reasoning_backfilled = _backfill_reasoning_content(
+                retry_kwargs.get("messages")
+            )
+
+        if stripped or reasoning_backfilled:
             log.warning(
-                "Model rejected request parameter(s); retrying without them",
+                "Model rejected request; retrying with fix",
                 model=kwargs.get("model"),
-                stripped=",".join(stripped),
+                stripped=",".join(stripped) or None,
+                reasoning_backfilled=reasoning_backfilled,
             )
             return await acompletion(**retry_kwargs)
         raise
