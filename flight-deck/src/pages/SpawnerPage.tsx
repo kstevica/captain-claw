@@ -336,7 +336,10 @@ export function SpawnerPage() {
 
   useEffect(() => { checkHealth() }, [checkHealth])
 
-  const [systemKeys, setSystemKeys] = useState<ProviderKeys>({})
+  // System keys are never sent to the browser in plaintext — only presence +
+  // a non-usable hint. When a provider has one configured we spawn with the
+  // "@system" sentinel, which the backend swaps for the real key.
+  const [systemKeys, setSystemKeys] = useState<Record<string, { configured: boolean; hint?: string }>>({})
 
   // Load user-level provider keys from server settings on mount
   useEffect(() => {
@@ -383,7 +386,7 @@ export function SpawnerPage() {
     setConfig((prev) => ({
       ...prev,
       provider,
-      providerApiKey: providerKeys[provider] || systemKeys[provider] || prev.providerApiKey,
+      providerApiKey: providerKeys[provider] || (systemKeys[provider]?.configured ? '@system' : prev.providerApiKey),
     }))
   }
 
@@ -418,7 +421,7 @@ export function SpawnerPage() {
     const loaded = { ...defaultConfig, ...preset.config }
     // Auto-fill API key from saved provider keys if preset has none (user keys > system keys)
     if (!loaded.providerApiKey) {
-      loaded.providerApiKey = providerKeys[loaded.provider] || systemKeys[loaded.provider] || ''
+      loaded.providerApiKey = providerKeys[loaded.provider] || (systemKeys[loaded.provider]?.configured ? '@system' : '')
     }
     setConfig(loaded)
     setActivePresetId(preset.id)
@@ -691,8 +694,8 @@ export function SpawnerPage() {
                   />
                 </Field>
               </div>
-              <Field label="API Key" hint={providerKeys[config.provider] ? `Auto-filled from your saved ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key` : systemKeys[config.provider] ? `Auto-filled from system ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key (set by admin)` : 'Save keys in Provider API Keys section below, or ask admin to set system-wide keys.'}>
-                <input type="password" value={config.providerApiKey} onChange={(e) => update('providerApiKey', e.target.value)} placeholder="sk-..." className="input font-mono text-xs" />
+              <Field label="API Key" hint={config.providerApiKey === '@system' ? `Using the system ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key (set by admin) — resolved securely at spawn` : providerKeys[config.provider] ? `Auto-filled from your saved ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key` : systemKeys[config.provider]?.configured ? `A system ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key is available (${systemKeys[config.provider]?.hint || 'set by admin'}) — leave blank to use it` : 'Save keys in Provider API Keys section below, or ask admin to set system-wide keys.'}>
+                <input type="password" value={config.providerApiKey === '@system' ? '' : config.providerApiKey} onChange={(e) => update('providerApiKey', e.target.value)} placeholder={config.providerApiKey === '@system' ? '(using system key)' : 'sk-...'} className="input font-mono text-xs" />
               </Field>
               <Field
                 label="Base URL"

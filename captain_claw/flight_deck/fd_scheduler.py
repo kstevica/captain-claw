@@ -766,9 +766,66 @@ async def scheduler_loop(stop_event: asyncio.Event) -> None:
 # ── REST API ──────────────────────────────────────────────────────────
 
 
+def _require_scheduler_caller(request: Request) -> None:
+    """Authenticate a scheduler API caller.
+
+    Scheduler jobs deliver to the owner's WhatsApp/Telegram, so the routes must
+    never be open. Accept any of:
+      * a valid Flight Deck user JWT (the SchedulerPage UI);
+      * a trusted internal caller — the shared agent secret (X-Agent-Secret),
+        or a loopback request when not in lockdown (intentions.py materializing
+        a job on the same host);
+      * the legacy glasses shared secret when FD_GLASSES_BRIDGE_TOKEN is set.
+    Anything else is rejected. This closes the prior hole where an unset
+    FD_GLASSES_BRIDGE_TOKEN made ``_check_token`` pass every request.
+    """
+    from captain_claw.flight_deck.auth import decode_access_token, _fd_auth_enabled
+
+    # Local/standalone mode (auth disabled) — single trusted user.
+    if not _fd_auth_enabled():
+        return
+
+    # (a) Flight Deck user JWT.
+    auth_hdr = request.headers.get("Authorization", "")
+    tok = auth_hdr[7:].strip() if auth_hdr.lower().startswith("bearer ") else ""
+    if not tok:
+        tok = request.query_params.get("fd_token", "") or ""
+    if tok:
+        try:
+            decode_access_token(tok)
+            return
+        except Exception:
+            pass
+
+    # (b) Trusted internal caller — shared agent secret.
+    provided = request.headers.get("X-Agent-Secret", "")
+    if provided:
+        try:
+            from captain_claw.flight_deck.agent_secret import get_or_create_agent_secret
+            if secrets.compare_digest(provided, get_or_create_agent_secret()):
+                return
+        except Exception:
+            pass
+
+    # (c) Legacy glasses shared secret (only when configured).
+    required = os.environ.get("FD_GLASSES_BRIDGE_TOKEN", "").strip()
+    if required:
+        got = request.query_params.get("t", "") or request.headers.get("x-glasses-token", "")
+        if got and secrets.compare_digest(got, required):
+            return
+
+    # (d) Loopback fallback for same-host internal callers, unless locked down.
+    if os.environ.get("FD_LOCKDOWN", "").lower() not in ("true", "1", "yes"):
+        client_host = request.client.host if request.client else ""
+        if client_host in ("127.0.0.1", "::1", "localhost"):
+            return
+
+    raise HTTPException(status_code=401, detail="scheduler requires authentication")
+
+
 @router.get("/scheduler/jobs")
 async def list_jobs(request: Request) -> JSONResponse:
-    _check_token(request)
+    _require_scheduler_caller(request)
     return JSONResponse(get_store().list(), headers=_NO_CACHE)
 
 
@@ -779,14 +836,14 @@ async def list_recipients(request: Request) -> JSONResponse:
     Currently surfaces Telegram recipients parsed from ``TELEGRAM_RECIPIENTS``.
     WhatsApp uses a single allowlisted number so it doesn't need a picker.
     """
-    _check_token(request)
+    _require_scheduler_caller(request)
     from captain_claw.flight_deck.telegram_out import list_recipients as _tg
     return JSONResponse({"telegram": _tg()}, headers=_NO_CACHE)
 
 
 @router.post("/scheduler/jobs")
 async def create_job(request: Request) -> JSONResponse:
-    _check_token(request)
+    _require_scheduler_caller(request)
     body = await request.json()
     try:
         row = get_store().create(**body)
@@ -797,7 +854,7 @@ async def create_job(request: Request) -> JSONResponse:
 
 @router.get("/scheduler/jobs/{job_id}")
 async def get_job(job_id: str, request: Request) -> JSONResponse:
-    _check_token(request)
+    _require_scheduler_caller(request)
     row = get_store().get(job_id)
     if not row:
         raise HTTPException(status_code=404, detail="job not found")
@@ -806,7 +863,7 @@ async def get_job(job_id: str, request: Request) -> JSONResponse:
 
 @router.patch("/scheduler/jobs/{job_id}")
 async def update_job(job_id: str, request: Request) -> JSONResponse:
-    _check_token(request)
+    _require_scheduler_caller(request)
     body = await request.json()
     try:
         row = get_store().update(job_id, **body)
@@ -819,7 +876,7 @@ async def update_job(job_id: str, request: Request) -> JSONResponse:
 
 @router.delete("/scheduler/jobs/{job_id}")
 async def delete_job(job_id: str, request: Request) -> JSONResponse:
-    _check_token(request)
+    _require_scheduler_caller(request)
     if not get_store().delete(job_id):
         raise HTTPException(status_code=404, detail="job not found")
     return JSONResponse({"ok": True}, headers=_NO_CACHE)
@@ -831,7 +888,7 @@ async def run_job_now(job_id: str, request: Request) -> JSONResponse:
 
     Does NOT change the job's next_run_at — it's an out-of-band test fire.
     """
-    _check_token(request)
+    _require_scheduler_caller(request)
     job = get_store().get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")

@@ -38,7 +38,7 @@ load_dotenv()
 
 import logging
 
-from captain_claw.flight_deck.auth import get_current_user, get_optional_user, get_ws_user, set_auth_db
+from captain_claw.flight_deck.auth import get_current_user, get_optional_user, get_ws_user, set_auth_db, decode_access_token
 from captain_claw.flight_deck.db import FlightDeckDB
 
 
@@ -941,6 +941,43 @@ def _agent_caller_ok(request: Request) -> bool:
     return client_host in ("127.0.0.1", "::1", "localhost")
 
 
+def _agent_proxy_port(path: str) -> int | None:
+    """Return the target agent web-port for a port-addressed proxy path.
+
+    All cross-user agent proxies are shaped ``/fd/agent-<x>/{host}/{port}/...``
+    or ``/fd/orchestrator/{host}/{port}/...`` — host at segment 3, port at
+    segment 4. The ``/fd/agent-config|model|mode/{kind}/{identifier}`` family
+    uses a slug (non-numeric) at segment 4, so keying on a numeric 4th segment
+    cleanly selects only the port-addressed routes.
+    """
+    parts = path.split("/")
+    if len(parts) >= 5 and parts[1] == "fd":
+        seg = parts[2]
+        if (seg.startswith("agent-") or seg == "orchestrator") and parts[4].isdigit():
+            return int(parts[4])
+    return None
+
+
+def _request_jwt_payload(request: Request) -> dict | None:
+    """Decode the caller's access token from Authorization or fd_token/token.
+
+    Runs inside HTTP middleware, before route auth dependencies populate
+    ``request.state``. Returns None on any missing/invalid token.
+    """
+    auth_hdr = request.headers.get("Authorization", "")
+    tok = ""
+    if auth_hdr.lower().startswith("bearer "):
+        tok = auth_hdr[7:].strip()
+    if not tok:
+        tok = request.query_params.get("fd_token") or request.query_params.get("token") or ""
+    if not tok:
+        return None
+    try:
+        return decode_access_token(tok)
+    except HTTPException:
+        return None
+
+
 @app.middleware("http")
 async def _hardening_middleware(request: Request, call_next):
     path = request.url.path
@@ -949,7 +986,23 @@ async def _hardening_middleware(request: Request, call_next):
             return JSONResponse(
                 status_code=403,
                 content={"detail": "agent routes require loopback or X-Agent-Secret"})
-    elif _lockdown_enabled():
+    else:
+        # Ownership guard for port-addressed agent proxies: an authenticated
+        # user may only reach agents they own (admins reach any). Without this,
+        # any logged-in teammate could iterate ports and read another user's
+        # agent data — the FD proxy auto-injects the target agent's own token.
+        _pport = _agent_proxy_port(path)
+        if _pport is not None and AUTH_ENABLED:
+            payload = _request_jwt_payload(request)
+            if not payload:
+                return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+            if payload.get("role", "user") != "admin":
+                owner = _resolve_agent_owner(_pport)
+                if owner and owner != payload.get("sub", ""):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "This agent belongs to another user"})
+    if _lockdown_enabled() and not path.startswith(_AGENT_GUARD_PREFIXES):
         if (path == "/fd/projects" or path.startswith("/fd/projects/")
                 or path == "/fd/vfs/browse-fs"
                 or (path == "/fd/vfs/links" and request.method == "POST")):
@@ -1452,6 +1505,28 @@ def _build_env(c: AgentConfig) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
+async def _resolve_spawn_provider_key(config: AgentConfig) -> None:
+    """Resolve the ``@system`` API-key sentinel to the real org key at spawn time.
+
+    The browser never receives raw org provider keys (GET /fd/settings/
+    provider-keys is masked). When a spawn requests the shared system key it
+    sends the sentinel ``@system``; here — server-side, just before the key is
+    written into the agent's .env — we swap it for the admin-configured key from
+    the ``fd:provider-keys`` system setting. Covers every spawn path because all
+    of them funnel through ``_build_env``.
+    """
+    if (config.provider_api_key or "").strip() != "@system":
+        return
+    config.provider_api_key = ""
+    try:
+        raw = await get_db().get_system_setting("fd:provider-keys")
+        keys = json.loads(raw) if raw else {}
+        if isinstance(keys, dict):
+            config.provider_api_key = str(keys.get(config.provider, "") or "")
+    except Exception as exc:
+        log.warning("system provider-key resolve failed", provider=config.provider, error=str(exc))
+
+
 def _localize_url(url: str) -> str:
     """Rewrite Docker-internal hostnames to localhost for process agents."""
     return url.replace("host.docker.internal", "localhost").replace("host.docker.internal", "127.0.0.1") if url else url
@@ -1688,6 +1763,7 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     # that CC's settings page may have written into ~/.captain-claw/config.yaml
     (agent_dir / "data" / "home-config" / "config.yaml").write_text(config_yaml)
 
+    await _resolve_spawn_provider_key(config)
     env_content = _build_env(config)
     (agent_dir / ".env").write_text(env_content)
 
@@ -2784,15 +2860,37 @@ def _agent_ws_url(host: str, port: int, auth: str = "", lane: str = "") -> str:
 
 
 @app.websocket("/fd/agent-ws/{host}/{port}")
-async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", lane: str = ""):
+async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", lane: str = "", fd_token: str = ""):
     """Proxy WebSocket to a CC agent — avoids browser CORS restrictions.
 
     `lane` selects a parallel context on the agent (docs/queue-lanes-plan.md).
     It is forwarded verbatim; the agent normalizes it, and an absent or
     unknown lane resolves to A — which IS the agent's main context, so every
     caller that never heard of lanes is unaffected.
+
+    `fd_token` carries the caller's Flight Deck JWT. When auth is enabled the
+    socket is refused unless the JWT is valid AND the caller owns the target
+    agent (admins may reach any). HTTP middleware can't guard WebSockets, so
+    the ownership check lives here.
     """
     import websockets
+
+    # Ownership guard (HTTP middleware does not run for WebSockets).
+    if AUTH_ENABLED:
+        payload = None
+        if fd_token:
+            try:
+                payload = decode_access_token(fd_token)
+            except HTTPException:
+                payload = None
+        if not payload:
+            await ws.close(code=4001, reason="Missing or invalid token")
+            return
+        if payload.get("role", "user") != "admin":
+            owner = _resolve_agent_owner(port)
+            if owner and owner != payload.get("sub", ""):
+                await ws.close(code=4403, reason="This agent belongs to another user")
+                return
 
     await ws.accept()
     # Auto-resolve auth token if the caller didn't provide one
@@ -3074,19 +3172,19 @@ def _flow_store():
 
 
 @app.get("/fd/flows")
-async def fd_flows_list(request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_list(request: Request, user: dict | None = _required_user_dep):
     return {"flows": await _flow_store().list_flows()}
 
 
 @app.post("/fd/flows")
-async def fd_flows_create(request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_create(request: Request, user: dict | None = _required_user_dep):
     spec = await request.json()
     fid = await _flow_store().create_flow(spec)
     return {"id": fid}
 
 
 @app.get("/fd/flows/runs/{run_id}")
-async def fd_flows_run_detail(run_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_run_detail(run_id: str, request: Request, user: dict | None = _required_user_dep):
     detail = await _flow_store().get_run(run_id)
     if not detail:
         raise HTTPException(404, "run not found")
@@ -3403,7 +3501,7 @@ async def _ai_compile_flow(text: str, agent: str = "", current: str = "") -> dic
 
 
 @app.post("/fd/flows/compile")
-async def fd_flows_compile(request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_compile(request: Request, user: dict | None = _required_user_dep):
     """Agent-assisted NL/loose-code → validated flow (for the Code view)."""
     body = await request.json()
     return await _ai_compile_flow(
@@ -3412,7 +3510,7 @@ async def fd_flows_compile(request: Request, user: dict | None = _optional_user_
 
 
 @app.post("/fd/flows/synthesize")
-async def fd_flows_synthesize(request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_synthesize(request: Request, user: dict | None = _required_user_dep):
     """Agent synthesis: a natural-language goal → a validated, **call-only**
     flow stored in the SCRATCH space (origin=agent). Dedups by canonical hash
     (retrieve-before-generate), optionally runs it, and returns its handle/name.
@@ -3465,7 +3563,7 @@ async def fd_flows_synthesize(request: Request, user: dict | None = _optional_us
 
 
 @app.get("/fd/flows/scratch")
-async def fd_flows_scratch(request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_scratch(request: Request, user: dict | None = _required_user_dep):
     """List the scratch space (synthesized flows) with provenance + lifecycle.
     Self-maintains: reclassifies states and GCs expired flows on view."""
     store = _flow_store()
@@ -3477,14 +3575,14 @@ async def fd_flows_scratch(request: Request, user: dict | None = _optional_user_
 
 
 @app.post("/fd/flows/scratch/maintain")
-async def fd_flows_scratch_maintain(request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_scratch_maintain(request: Request, user: dict | None = _required_user_dep):
     """Janitor: reclassify every scratch flow (candidate/quarantined) and GC the
     expired ones. Returns a summary. Safe to call on a schedule."""
     return {"ok": True, **(await _flow_store().maintain_scratch())}
 
 
 @app.post("/fd/flows/{flow_id}/promote")
-async def fd_flows_promote(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_promote(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     """Promote a scratch flow into the permanent space (optionally rename)."""
     try:
         body = await request.json()
@@ -3497,7 +3595,7 @@ async def fd_flows_promote(flow_id: str, request: Request, user: dict | None = _
 
 
 @app.get("/fd/flows/{flow_id}")
-async def fd_flows_get(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_get(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     flow = await _flow_store().get_flow(flow_id)
     if not flow:
         raise HTTPException(404, "flow not found")
@@ -3505,7 +3603,7 @@ async def fd_flows_get(flow_id: str, request: Request, user: dict | None = _opti
 
 
 @app.put("/fd/flows/{flow_id}")
-async def fd_flows_update(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_update(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     spec = await request.json()
     ok = await _flow_store().update_flow(flow_id, spec)
     if not ok:
@@ -3514,13 +3612,13 @@ async def fd_flows_update(flow_id: str, request: Request, user: dict | None = _o
 
 
 @app.delete("/fd/flows/{flow_id}")
-async def fd_flows_delete(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_delete(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     ok = await _flow_store().delete_flow(flow_id)
     return {"ok": ok}
 
 
 @app.post("/fd/flows/{flow_id}/enable")
-async def fd_flows_enable(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_enable(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     body = await request.json()
     ok = await _flow_store().set_enabled(flow_id, bool(body.get("enabled", True)))
     if not ok:
@@ -3529,7 +3627,7 @@ async def fd_flows_enable(flow_id: str, request: Request, user: dict | None = _o
 
 
 @app.post("/fd/flows/{flow_id}/run")
-async def fd_flows_run(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_run(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     store = _flow_store()
     flow = await store.get_flow(flow_id)
     if not flow:
@@ -3546,7 +3644,7 @@ async def fd_flows_run(flow_id: str, request: Request, user: dict | None = _opti
 
 
 @app.post("/fd/flows/runs/{run_id}/pause")
-async def fd_flows_run_pause(run_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_run_pause(run_id: str, request: Request, user: dict | None = _required_user_dep):
     from captain_claw.flight_deck import flow_runner
     ok = flow_runner.request_pause(run_id)
     if ok:
@@ -3558,7 +3656,7 @@ async def fd_flows_run_pause(run_id: str, request: Request, user: dict | None = 
 
 
 @app.post("/fd/flows/runs/{run_id}/resume")
-async def fd_flows_run_resume(run_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_run_resume(run_id: str, request: Request, user: dict | None = _required_user_dep):
     from captain_claw.flight_deck import flow_runner
     ok = flow_runner.request_resume(run_id)
     if ok:
@@ -3570,7 +3668,7 @@ async def fd_flows_run_resume(run_id: str, request: Request, user: dict | None =
 
 
 @app.post("/fd/flows/runs/{run_id}/stop")
-async def fd_flows_run_stop(run_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_run_stop(run_id: str, request: Request, user: dict | None = _required_user_dep):
     try:
         body = await request.json()
     except Exception:
@@ -3582,7 +3680,7 @@ async def fd_flows_run_stop(run_id: str, request: Request, user: dict | None = _
 
 
 @app.post("/fd/flows/{flow_id}/test")
-async def fd_flows_test(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_test(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     store = _flow_store()
     flow = await store.get_flow(flow_id)
     if not flow:
@@ -3596,7 +3694,7 @@ async def fd_flows_test(flow_id: str, request: Request, user: dict | None = _opt
 
 
 @app.get("/fd/flows/{flow_id}/runs")
-async def fd_flows_runs(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+async def fd_flows_runs(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     return {"runs": await _flow_store().list_runs(flow_id)}
 
 
@@ -5601,6 +5699,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     (agent_dir / "config.yaml").write_text(config_yaml)
     (agent_dir / "data" / "home-config" / "config.yaml").write_text(config_yaml)
 
+    await _resolve_spawn_provider_key(config)
     env_content = _build_env(config)
     (agent_dir / ".env").write_text(env_content)
 

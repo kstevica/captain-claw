@@ -3,6 +3,8 @@
  * Connects to CC's /ws endpoint on the agent's web port.
  */
 
+import { useAuthStore } from '../stores/authStore'
+
 export interface TokenUsage {
   prompt_tokens?: number
   completion_tokens?: number
@@ -73,6 +75,10 @@ export class AgentChatWS {
     // Route through FD backend proxy to avoid CORS
     const params = new URLSearchParams()
     if (this.auth) params.set('token', this.auth)
+    // The caller's FD JWT — the backend refuses the socket unless the user
+    // owns the target agent (HTTP middleware can't guard WebSockets).
+    const fdToken = useAuthStore.getState().token
+    if (fdToken) params.set('fd_token', fdToken)
     // Lane A is the agent's main context — send nothing, so the URL is
     // byte-identical to what every pre-lane client produced.
     if (this.lane && this.lane !== 'A') params.set('lane', this.lane)

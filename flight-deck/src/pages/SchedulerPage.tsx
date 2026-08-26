@@ -14,6 +14,7 @@ import {
   Radio,
   KeyRound,
 } from 'lucide-react'
+import { useAuthStore } from '../stores/authStore'
 
 // ── Types ──
 
@@ -61,10 +62,15 @@ function withToken(path: string): string {
   return path + (path.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(t)
 }
 async function api<T = unknown>(path: string, init?: RequestInit): Promise<T> {
+  // Scheduler routes now require an authenticated caller. Send the FD JWT so
+  // logged-in team members are authorized directly; the ?t= glasses token
+  // (withToken) still covers glasses/bridge callers.
+  const jwt = useAuthStore.getState().token
+  const authHeader: Record<string, string> = jwt ? { Authorization: `Bearer ${jwt}` } : {}
   const r = await fetch(withToken(path), {
     ...init,
     cache: 'no-store',
-    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+    headers: { 'Content-Type': 'application/json', ...authHeader, ...(init?.headers || {}) },
   })
   if (!r.ok) {
     const detail = await r.text().catch(() => '')

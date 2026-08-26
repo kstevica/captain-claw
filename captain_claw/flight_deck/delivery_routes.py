@@ -18,6 +18,8 @@ persisted metadata rather than an in-memory map.
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -77,11 +79,37 @@ async def deliver_to_origin(origin: dict, text: str) -> tuple[bool, str]:
     return False, f"error:unknown-kind:{kind}"
 
 
+def _deliver_caller_ok(request: Request, user: dict | None) -> bool:
+    """Only a trusted caller may push to the owner's channels.
+
+    Legit callers are agents on localhost finishing a deferred/cron task, so
+    accept a loopback request or the shared agent secret (X-Agent-Secret) — or
+    an authenticated Flight Deck user. Previously this route ignored auth, so
+    any caller could push text to the owner's WhatsApp/Telegram.
+    """
+    if user:
+        return True
+    provided = request.headers.get("X-Agent-Secret", "")
+    if provided:
+        try:
+            from captain_claw.flight_deck.agent_secret import get_or_create_agent_secret
+            if secrets.compare_digest(provided, get_or_create_agent_secret()):
+                return True
+        except Exception:
+            pass
+    if os.environ.get("FD_LOCKDOWN", "").lower() in ("true", "1", "yes"):
+        return False
+    client_host = request.client.host if request.client else ""
+    return client_host in ("127.0.0.1", "::1", "localhost")
+
+
 @router.post("/fd/deliver")
 async def fd_deliver(request: Request, _user: dict | None = Depends(get_optional_user)):
     """Route an async agent result back to its origin. Called by agents (over
     localhost) when a deferred/cron task finishes. Destination safety is
     enforced downstream (WhatsApp allowlist + mute, configured TG recipients)."""
+    if not _deliver_caller_ok(request, _user):
+        raise HTTPException(status_code=403, detail="delivery requires loopback or X-Agent-Secret")
     try:
         body = await request.json()
     except Exception:

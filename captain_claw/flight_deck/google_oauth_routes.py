@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from captain_claw.flight_deck.auth import _LOCAL_USER, get_current_user, get_db, get_optional_user
+from captain_claw.flight_deck.admin_routes import require_admin
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.google_oauth import (
     DEFAULT_SCOPES,
@@ -442,9 +443,14 @@ async def google_scope_catalog(
 @router.post("/config")
 async def google_config_post(
     body: GoogleConfigUpdate,
-    _user: dict = Depends(get_current_user),
+    _admin: dict = Depends(require_admin),
 ) -> dict[str, Any]:
-    """Save Google OAuth credentials.
+    """Save Google OAuth credentials (admin only).
+
+    This writes the deployment-wide OAuth *client* registration and, with
+    ``clear=True``, wipes every user's stored Google tokens — so it is gated to
+    admins. Previously any authenticated user could rotate the client or wipe
+    all connections.
 
     - ``clear=True``: wipe saved credentials AND any stored tokens. The
       Google connection becomes "not configured" until the user enters

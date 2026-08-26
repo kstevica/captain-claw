@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response, Request, status
@@ -56,6 +57,22 @@ class UpdateProfileRequest(BaseModel):
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+def _cookie_secure() -> bool:
+    """Whether the refresh cookie is marked Secure (HTTPS-only).
+
+    ``FD_COOKIE_SECURE`` wins when set. Otherwise default to Secure whenever the
+    deployment is locked down (i.e. reachable beyond the owner's machine, behind
+    a TLS proxy) — so a team deployment gets a Secure cookie automatically while
+    local http development keeps working.
+    """
+    v = os.environ.get("FD_COOKIE_SECURE", "").lower()
+    if v in ("true", "1", "yes"):
+        return True
+    if v in ("false", "0", "no"):
+        return False
+    return os.environ.get("FD_LOCKDOWN", "").lower() in ("true", "1", "yes")
+
+
 def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
     response.set_cookie(
         key=REFRESH_COOKIE,
@@ -64,7 +81,7 @@ def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
         httponly=True,
         samesite="lax",
         path="/fd/auth",
-        secure=False,  # Set True behind TLS reverse proxy
+        secure=_cookie_secure(),
     )
 
 
@@ -86,11 +103,23 @@ async def register(body: RegisterRequest, response: Response):
     if existing:
         raise HTTPException(status_code=409, detail="Email already registered")
 
+    # First user becomes admin (bootstrap). Self-registration of ADDITIONAL
+    # users is closed by default for team deployments — an admin creates
+    # accounts from the Admin page. An operator can re-open it with
+    # FD_REGISTRATION_OPEN=1; FD_REGISTRATION_DISABLED=1 forces it closed.
+    user_count = await db.count_users()
+    if user_count > 0:
+        disabled = os.environ.get("FD_REGISTRATION_DISABLED", "").lower() in ("true", "1", "yes")
+        open_reg = os.environ.get("FD_REGISTRATION_OPEN", "").lower() in ("true", "1", "yes")
+        if disabled or not open_reg:
+            raise HTTPException(
+                status_code=403,
+                detail="Registration is closed. Ask an administrator to create your account.",
+            )
+
     pw_hash = hash_password(body.password)
     display = body.display_name or body.email.split("@")[0]
 
-    # First user becomes admin
-    user_count = await db.count_users()
     role = "admin" if user_count == 0 else "user"
 
     user = await db.create_user(

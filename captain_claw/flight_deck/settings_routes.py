@@ -43,12 +43,27 @@ async def delete_setting(key: str, user: dict = Depends(get_current_user)):
 
 @router.get("/provider-keys")
 async def get_system_provider_keys(user: dict = Depends(get_current_user)):
-    """Get system-level provider API keys (set by admin). Available to all authenticated users."""
+    """Which providers have a system-level key configured (set by admin).
+
+    Returns presence + a non-usable last-4 hint per provider — NEVER the raw
+    secret. Any authenticated user may learn that, say, an Anthropic key exists
+    so the Spawner can offer "use the system key" (which sends the ``@system``
+    sentinel, resolved server-side at spawn time). Previously this returned the
+    admin's plaintext keys to every logged-in user.
+    """
     db = get_db()
     raw = await db.get_system_setting(PROVIDER_KEYS_SETTING)
     if not raw:
         return {"keys": {}}
     try:
-        return {"keys": json.loads(raw)}
+        stored = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {"keys": {}}
+    masked: dict[str, dict] = {}
+    if isinstance(stored, dict):
+        for provider, key in stored.items():
+            if not key:
+                continue
+            s = str(key)
+            masked[provider] = {"configured": True, "hint": f"····{s[-4:]}" if len(s) >= 4 else "····"}
+    return {"keys": masked}
