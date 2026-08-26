@@ -391,15 +391,35 @@ class DriveToggleBody(BaseModel):
     clonemd: bool
 
 
-def _drive_client():
-    """A DriveClient over the deployment's Google connection.
+async def _drive_client(user_id: str):
+    """A DriveClient scoped to *user_id*'s own Google connection.
 
-    Per-user tokens are a later swap (the client is provider-agnostic); today
-    every mount uses the shared connection, which is correct single-operator.
+    Builds a per-user token provider from the user's stored tokens (refreshing
+    when near expiry) and hands it to the auth-agnostic DriveClient — so each
+    teammate browses/mounts THEIR Drive, never the deployment owner's. Raises
+    400 when that user hasn't connected Google.
     """
     from captain_claw.drive_client import make_client
+    from captain_claw.flight_deck.google_oauth_routes import (
+        _token_client, _load_tokens, _refresh_if_needed,
+    )
 
-    return make_client()
+    db = get_db()
+    client_cfg = await _token_client(db)
+    tokens = await _load_tokens(db, user_id)
+    if not client_cfg or not tokens or not tokens.access_token:
+        raise HTTPException(400, "Connect your Google account first (Connections → Google).")
+
+    async def _provider() -> tuple[str, str]:
+        # Reload each call so a refresh persisted mid-operation is picked up.
+        t = await _load_tokens(db, user_id)
+        if t:
+            t = await _refresh_if_needed(db, user_id, client_cfg, t) or t
+        if not t or not t.access_token:
+            return "", ""
+        return t.access_token, (t.scope or "")
+
+    return make_client(_provider)
 
 
 def _stamp_synced(user_id: str, name: str) -> None:
@@ -428,7 +448,7 @@ async def drive_browse(folder_id: str = "root", drive_id: str = "",
     """
     from captain_claw.drive_client import FOLDER_MIME, DriveError
 
-    client = _drive_client()
+    client = await _drive_client(user["id"])
     try:
         files, truncated = await client.list_folder(
             folder_id, drive_id=drive_id, max_files=500
@@ -472,7 +492,7 @@ async def _mount_core(user_id: str, body: "DriveMountBody", progress=None) -> di
         raise HTTPException(409, f"a link named '{name}' already exists")
 
     drive_id = body.drive_id.strip()
-    client = _drive_client()
+    client = await _drive_client(user_id)
     try:
         summary = await vfs_drive.create_mount(
             client, user_id, name, body.folder_id.strip(),
@@ -559,7 +579,7 @@ async def refresh_drive(name: str, user: dict = Depends(get_current_user)):
     ent = read_links_at(_user_root(user["id"])).get(key)
     if not vfs_drive.is_drive_link(ent):
         raise HTTPException(404, "not a Drive mount")
-    client = _drive_client()
+    client = await _drive_client(user["id"])
     try:
         summary = await vfs_drive.sync(client, vfs_drive.mount_root(user["id"], key))
     except (DriveError, ValueError) as exc:
@@ -599,7 +619,7 @@ async def toggle_clonemd(name: str, body: DriveToggleBody,
 
     summary: dict = {}
     if enabled:
-        client = _drive_client()
+        client = await _drive_client(user["id"])
         try:
             summary = await vfs_drive.sync(client, mroot)
         except (DriveError, ValueError) as exc:
@@ -666,7 +686,7 @@ async def read_file(project: str, path: str, owner: str = "",
     try:
         from captain_claw import vfs_drive
 
-        hydrated = await vfs_drive.read_through(target)
+        hydrated = await vfs_drive.read_through(target, client_factory=lambda: _drive_client(oid))
         if hydrated is not None:
             return {"project": project, "path": path, "name": target.name,
                     "size": len(hydrated.encode("utf-8")), "binary": False,
@@ -708,7 +728,7 @@ async def download_file(project: str, path: str, owner: str = "",
         from captain_claw.drive_client import DriveError
 
         try:
-            real = await vfs_drive.materialize(target)
+            real = await vfs_drive.materialize(target, client_factory=lambda: _drive_client(oid))
         except DriveError as exc:
             raise HTTPException(502, f"Could not fetch the original from Google Drive: {exc}")
         if real is not None:
