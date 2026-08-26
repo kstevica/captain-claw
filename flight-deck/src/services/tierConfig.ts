@@ -7,6 +7,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuthStore } from '../stores/authStore'
 import { queueSave, registerHydrator, fetchSettings } from './settingsSync'
+import { fetchSharedTierSets } from './sharedTierSets'
 
 // ── Persistence keys (per-user / multi-tenant via /fd/settings) ──────
 
@@ -313,6 +314,10 @@ export interface TierConfigState {
   duplicateSet: (id: string) => string
   renameSet: (id: string, name: string) => void
   deleteSet: (id: string) => void
+  // Admin-published team defaults (read-only view). Keys are @system sentinels.
+  sharedSets: TierSet[]
+  // Copy a team-default set into the user's own editable sets and activate it.
+  adoptSharedSet: (id: string) => string
 }
 
 /**
@@ -336,6 +341,9 @@ export function useTierConfig(): TierConfigState {
   // slow fetch can't let the seed/persist effects overwrite real saved data.
   const [bootstrapped, setBootstrapped] = useState(() => !useAuthStore.getState().authEnabled)
   const [registry, setRegistry] = useState<ArchetypeRegistry | null>(null)
+  // Admin-published team defaults + which one is the default (read-only view).
+  const [sharedSets, setSharedSets] = useState<TierSet[]>([])
+  const [sharedDefaultId, setSharedDefaultId] = useState<string | null>(null)
 
   // Authoritative load when auth is on, then mark bootstrapped.
   useEffect(() => {
@@ -346,6 +354,17 @@ export function useTierConfig(): TierConfigState {
       const blob = parseSetsBlob(s[TIERS_KEY], s[ENV_VARS_KEY])
       if (blob) { setSets(blob.sets); setActiveSetId(blob.activeSetId) }
     }).catch(() => {}).finally(() => { if (!cancelled) setBootstrapped(true) })
+    return () => { cancelled = true }
+  }, [])
+
+  // Load the admin-published team-default tier sets (keys are @system sentinels).
+  useEffect(() => {
+    let cancelled = false
+    fetchSharedTierSets().then((res) => {
+      if (cancelled) return
+      setSharedSets(res.sets)
+      setSharedDefaultId(res.defaultSetId)
+    }).catch(() => {})
     return () => { cancelled = true }
   }, [])
 
@@ -363,12 +382,21 @@ export function useTierConfig(): TierConfigState {
 
   useEffect(() => { refreshRegistry() }, [refreshRegistry])
 
-  // Seed one "Default" set from registry defaults if the user has none saved.
+  // Seed a set when the user has none saved. Prefer the admin-published team
+  // default (so a teammate who configured nothing runs on the team's models)
+  // over an empty registry seed; fall back to the registry default otherwise.
   useEffect(() => {
-    if (!bootstrapped || !registry || sets.length > 0) return
+    if (!bootstrapped || sets.length > 0) return
+    const teamDefault = sharedSets.find((s) => s.id === sharedDefaultId) || sharedSets[0]
+    if (teamDefault) {
+      const adopted: TierSet = { ...cloneSet(teamDefault), id: newSetId(), name: `${teamDefault.name} (team)` }
+      setSets([adopted]); setActiveSetId(adopted.id)
+      return
+    }
+    if (!registry) return
     const def = freshSet(registry, loadLegacyConfig(), 'Default')
     setSets([def]); setActiveSetId(def.id)
-  }, [bootstrapped, registry, sets])
+  }, [bootstrapped, registry, sets, sharedSets, sharedDefaultId])
 
   // Backfill saved sets with any registry tiers added after they were seeded
   // (e.g. `coding`/`vision`), so existing users get the new tier cards without
@@ -464,9 +492,18 @@ export function useTierConfig(): TierConfigState {
     setSets(next)
     if (activeSetId === id) setActiveSetId(next[0].id)
   }
+  // Copy a team-default set into the user's own editable sets and activate it.
+  const adoptSharedSet = (id: string): string => {
+    const src = sharedSets.find((s) => s.id === id)
+    if (!src) return ''
+    const copy: TierSet = { ...cloneSet(src), id: newSetId(), name: `${src.name} (team)` }
+    setSets((prev) => [...prev, copy]); setActiveSetId(copy.id)
+    return copy.id
+  }
 
   return {
     tiers, setTiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, bootstrapped, updateTier, setupSet,
     sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet,
+    sharedSets, adoptSharedSet,
   }
 }

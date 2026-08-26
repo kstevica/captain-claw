@@ -244,6 +244,62 @@ async def update_provider_keys(body: ProviderKeysRequest, admin: dict = Depends(
     return {"ok": True, "keys": existing}
 
 
+# ── Shared (team-default) tier sets ──
+# An admin publishes one or more of their own tier sets as team defaults. Stored
+# as system_settings 'fd:shared-tier-sets' = {"sets": [...], "defaultSetId": id}.
+# Every tier's api_key is masked to the "@system" sentinel on write, so no raw
+# secret is persisted globally — the real key is resolved at run time from
+# fd:provider-keys by provider (see basna_routes._effective_key). Teammates who
+# configured no tier set of their own fall back to the default set.
+SHARED_TIER_SETS_SETTING = "fd:shared-tier-sets"
+
+
+class SharedTierSetsRequest(BaseModel):
+    sets: list[dict]
+    defaultSetId: str | None = None
+
+
+def _mask_shared_sets(sets: list[dict]) -> list[dict]:
+    """Replace every tier's populated api_key with the @system sentinel."""
+    out: list[dict] = []
+    for s in sets or []:
+        if not isinstance(s, dict):
+            continue
+        tiers: dict = {}
+        for tname, t in (s.get("tiers") or {}).items():
+            if not isinstance(t, dict):
+                continue
+            tt = dict(t)
+            if tt.get("api_key"):
+                tt["api_key"] = "@system"
+            tiers[tname] = tt
+        out.append({**s, "tiers": tiers})
+    return out
+
+
+@router.get("/shared-tier-sets")
+async def get_shared_tier_sets(admin: dict = Depends(require_admin)):
+    """Get the team-default tier sets (admin only)."""
+    db = get_db()
+    raw = await db.get_system_setting(SHARED_TIER_SETS_SETTING)
+    if not raw:
+        return {"sets": [], "defaultSetId": None}
+    try:
+        blob = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"sets": [], "defaultSetId": None}
+    return blob if isinstance(blob, dict) else {"sets": [], "defaultSetId": None}
+
+
+@router.put("/shared-tier-sets")
+async def update_shared_tier_sets(body: SharedTierSetsRequest, admin: dict = Depends(require_admin)):
+    """Publish tier sets as team defaults (admin only). API keys are masked to @system."""
+    db = get_db()
+    payload = {"sets": _mask_shared_sets(body.sets), "defaultSetId": body.defaultSetId}
+    await db.set_system_setting(SHARED_TIER_SETS_SETTING, json.dumps(payload))
+    return {"ok": True, **payload}
+
+
 @router.put("/plans/{plan}")
 async def update_plan(plan: str, body: UpdatePlanRequest, admin: dict = Depends(require_admin)):
     """Update limits for a plan tier (admin only)."""

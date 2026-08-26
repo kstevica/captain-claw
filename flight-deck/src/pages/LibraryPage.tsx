@@ -17,6 +17,8 @@ import {
   type ArchetypeInput,
 } from '../services/archetypes'
 import { ForgeArchetypesModal } from '../components/library/ForgeArchetypesModal'
+import { useAuthStore } from '../stores/authStore'
+import { publishSharedTierSets } from '../services/sharedTierSets'
 
 type SpawnState = 'spawning' | 'done' | 'error'
 
@@ -50,7 +52,10 @@ export function LibraryPage() {
   const {
     tiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, updateTier, setupSet,
     sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet, bootstrapped,
+    sharedSets, adoptSharedSet,
   } = useTierConfig()
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
+  const [publishState, setPublishState] = useState<'idle' | 'publishing' | 'done' | 'error'>('idle')
 
   // Archetype editor: null = closed; otherwise the draft being edited. `editingId`
   // is the existing archetype_id when editing (PUT), or null for a new one (POST).
@@ -307,10 +312,35 @@ export function LibraryPage() {
               </span>
               <span className="text-sm font-semibold text-zinc-200">Tier Sets</span>
               <span className="truncate text-[11px] text-zinc-500">the active set drives Forge, Basna &amp; spawns</span>
+              {isAdmin && activeSet && (
+                <button
+                  onClick={async () => {
+                    setPublishState('publishing')
+                    try {
+                      // Publish the active set as the team default. Keys are
+                      // masked to @system server-side.
+                      await publishSharedTierSets([activeSet], activeSet.id)
+                      setPublishState('done')
+                      setTimeout(() => setPublishState('idle'), 2000)
+                    } catch {
+                      setPublishState('error')
+                      setTimeout(() => setPublishState('idle'), 3000)
+                    }
+                  }}
+                  disabled={publishState === 'publishing'}
+                  title="Publish this set as the team default — teammates who configured no models run on it (API keys are never shared)"
+                  className="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-500/20 disabled:opacity-50 dark:text-emerald-200"
+                >
+                  {publishState === 'publishing' ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    : publishState === 'done' ? <Check className="h-3.5 w-3.5" />
+                    : <Users className="h-3.5 w-3.5" />}
+                  {publishState === 'done' ? 'Published' : publishState === 'error' ? 'Failed' : 'Publish to team'}
+                </button>
+              )}
               <button
                 onClick={openWizard}
                 title="Set up a tier set from one model"
-                className="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-violet-500/40 bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-500/20 dark:text-violet-200"
+                className={`${isAdmin && activeSet ? '' : 'ml-auto '}flex shrink-0 items-center gap-1 rounded-lg border border-violet-500/40 bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-500/20 dark:text-violet-200`}
               >
                 <Wand2 className="h-3.5 w-3.5" /> Setup wizard
               </button>
@@ -360,6 +390,36 @@ export function LibraryPage() {
               </div>
             )}
           </div>
+
+          {/* ── Team sets: admin-published defaults, adopt to customize ── */}
+          {sharedSets.length > 0 && (
+            <div className="rounded-lg border border-zinc-800 border-l-2 border-l-emerald-500/60 bg-emerald-500/[0.04] p-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-400">
+                  <Users className="h-3.5 w-3.5" />
+                </span>
+                <span className="text-sm font-semibold text-zinc-200">Team sets</span>
+                <span className="truncate text-[11px] text-zinc-500">published by an admin · run without configuring keys</span>
+              </div>
+              <div className="space-y-1.5">
+                {sharedSets.map((s) => (
+                  <div key={s.id} className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                    <span className="text-sm text-zinc-200">{s.name}</span>
+                    <span className="truncate text-[11px] text-zinc-500">
+                      {Object.values(s.tiers || {}).map((t) => t.model).filter(Boolean).slice(0, 3).join(', ') || 'team models'}
+                    </span>
+                    <button
+                      onClick={() => adoptSharedSet(s.id)}
+                      title="Copy this team set into your own sets so you can customize it"
+                      className="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-200"
+                    >
+                      <Copy className="h-3.5 w-3.5" /> Duplicate to customize
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Which tier designs the team in Forge */}
           <div>

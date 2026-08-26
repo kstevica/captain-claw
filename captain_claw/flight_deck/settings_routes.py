@@ -67,3 +67,22 @@ async def get_system_provider_keys(user: dict = Depends(get_current_user)):
             s = str(key)
             masked[provider] = {"configured": True, "hint": f"····{s[-4:]}" if len(s) >= 4 else "····"}
     return {"keys": masked}
+
+
+SHARED_TIER_SETS_SETTING = "fd:shared-tier-sets"
+
+
+@router.get("/shared-tier-sets")
+async def get_shared_tier_sets(user: dict = Depends(get_current_user)):
+    """Team-default tier sets published by an admin. Available to every authed
+    user; each tier's api_key is already the ``@system`` sentinel (no secrets
+    leave the box), resolved server-side at run time from the org key store."""
+    db = get_db()
+    raw = await db.get_system_setting(SHARED_TIER_SETS_SETTING)
+    if not raw:
+        return {"sets": [], "defaultSetId": None}
+    try:
+        blob = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"sets": [], "defaultSetId": None}
+    return blob if isinstance(blob, dict) else {"sets": [], "defaultSetId": None}

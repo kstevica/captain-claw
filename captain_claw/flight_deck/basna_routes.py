@@ -800,40 +800,104 @@ class AgentStartReq(_AgentReq):
     source_host: str = "localhost"
 
 
+# ── System provider keys + shared (team-default) tier sets ────────────
+# Org API keys live server-side only (system_settings 'fd:provider-keys') and
+# are never sent to browsers. A tier whose api_key is empty or the "@system"
+# sentinel resolves to the org key for its provider at run time via
+# _effective_key. The sentinel is exactly what the admin-published team-default
+# tier set stores (system_settings 'fd:shared-tier-sets'), so a teammate riding
+# the team default runs real models without ever holding a key.
+_SYSTEM_PROVIDER_KEYS: dict[str, str] = {}
+_SYSTEM_KEYS_TS: float = 0.0
+_SYSTEM_KEYS_TTL = 15.0  # seconds
+
+
+async def _refresh_system_provider_keys(db) -> None:
+    """Refresh the cached org provider keys from system_settings (cheap, TTL'd).
+
+    Called at the top of every run path that loads owner tiers, so the sync
+    _effective_key below always sees fresh keys without threading async DB
+    access through the credential resolvers.
+    """
+    global _SYSTEM_PROVIDER_KEYS, _SYSTEM_KEYS_TS
+    now = time.monotonic()
+    if _SYSTEM_PROVIDER_KEYS and (now - _SYSTEM_KEYS_TS) < _SYSTEM_KEYS_TTL:
+        return
+    try:
+        raw = await db.get_system_setting("fd:provider-keys")
+        keys = json.loads(raw) if raw else {}
+        if isinstance(keys, dict):
+            _SYSTEM_PROVIDER_KEYS = {str(k): str(v) for k, v in keys.items() if v}
+        _SYSTEM_KEYS_TS = now
+    except Exception:
+        pass
+
+
+def _effective_key(provider: str, api_key: str | None) -> str | None:
+    """Swap an empty or "@system" tier key for the org key of its provider."""
+    k = (api_key or "").strip()
+    if k and k != "@system":
+        return api_key
+    return _SYSTEM_PROVIDER_KEYS.get(provider or "", "") or None
+
+
+async def _load_shared_default_tiers(db) -> tuple[dict, list]:
+    """The admin-published team-default tier set (api_keys are @system sentinels)."""
+    try:
+        raw = await db.get_system_setting("fd:shared-tier-sets")
+        blob = json.loads(raw) if raw else None
+    except Exception:
+        return {}, []
+    if not isinstance(blob, dict):
+        return {}, []
+    sets = blob.get("sets")
+    if not (isinstance(sets, list) and sets):
+        return {}, []
+    default_id = blob.get("defaultSetId")
+    chosen = next((s for s in sets if s.get("id") == default_id), sets[0])
+    return chosen.get("tiers") or {}, chosen.get("envVars") or []
+
+
 async def _load_owner_tiers(db, owner_id: str) -> tuple[dict, list]:
     """Return (tiers_map, env_vars) from the owner's saved Library config.
 
     Reads the `fd:forge-tiers` setting (a `{sets, activeSetId}` blob — the active
-    set's `tiers`/`envVars` are what the UI would use). Falls back to the legacy
-    single-set shape, then to ({}, []) so execution uses the registry tiers.
+    set's `tiers`/`envVars` are what the UI would use), then the legacy single-set
+    shape. When the owner has configured NO tier set, falls back to the
+    admin-published team default (`fd:shared-tier-sets`) so a teammate who set up
+    nothing still runs on the team's models. Also refreshes the org provider-key
+    cache so `@system` tier keys resolve.
     """
+    await _refresh_system_provider_keys(db)
     try:
         settings = await db.get_all_settings(owner_id)
     except Exception:
-        return {}, []
-    raw = settings.get("fd:forge-tiers")
-    if not raw:
-        return {}, []
-    try:
-        blob = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}, []
-    sets = blob.get("sets") if isinstance(blob, dict) else None
-    if isinstance(sets, list) and sets:
-        active_id = blob.get("activeSetId")
-        chosen = next((s for s in sets if s.get("id") == active_id), sets[0])
-        return chosen.get("tiers") or {}, chosen.get("envVars") or []
-    # Legacy single-set shape: {tiers, forgeTier} + separate env-vars key.
-    if isinstance(blob, dict) and isinstance(blob.get("tiers"), dict):
-        env: list = []
+        settings = {}
+    raw = settings.get("fd:forge-tiers") if settings else None
+    blob = None
+    if raw:
         try:
-            ev = json.loads(settings.get("fd:forge-env-vars") or "[]")
-            if isinstance(ev, list):
-                env = ev
+            blob = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            pass
-        return blob["tiers"], env
-    return {}, []
+            blob = None
+    if isinstance(blob, dict):
+        sets = blob.get("sets")
+        if isinstance(sets, list) and sets:
+            active_id = blob.get("activeSetId")
+            chosen = next((s for s in sets if s.get("id") == active_id), sets[0])
+            return chosen.get("tiers") or {}, chosen.get("envVars") or []
+        # Legacy single-set shape: {tiers, forgeTier} + separate env-vars key.
+        if isinstance(blob.get("tiers"), dict):
+            env: list = []
+            try:
+                ev = json.loads(settings.get("fd:forge-env-vars") or "[]")
+                if isinstance(ev, list):
+                    env = ev
+            except (json.JSONDecodeError, TypeError):
+                pass
+            return blob["tiers"], env
+    # No personal tier set — ride the admin-published team default.
+    return await _load_shared_default_tiers(db)
 
 
 async def _notify_source_agent(
@@ -1964,8 +2028,10 @@ async def _aggregate(
 
 def _tier_creds(registry: dict, tier: str, api_key: str) -> dict:
     t = (registry.get("tiers") or {}).get(tier, {})
-    return {"provider": t.get("provider", "anthropic"), "model": t.get("model", ""),
-            "base_url": t.get("base_url", "") or None, "api_key": api_key or None,
+    provider = t.get("provider", "anthropic")
+    return {"provider": provider, "model": t.get("model", ""),
+            "base_url": t.get("base_url", "") or None,
+            "api_key": _effective_key(provider, api_key),
             "output_ctx": int(t.get("output_ctx") or 0)}
 
 
@@ -1977,9 +2043,10 @@ def _resolve_merge_creds(body, registry: dict, tier: str) -> dict:
     """
     lt = (body.tiers or {}).get(tier)
     if lt and lt.get("model"):
-        return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
+        provider = lt.get("provider", "anthropic")
+        return {"provider": provider, "model": lt.get("model", ""),
                 "base_url": lt.get("base_url") or None,
-                "api_key": lt.get("api_key") or body.api_key or None,
+                "api_key": _effective_key(provider, lt.get("api_key") or body.api_key),
                 "output_ctx": int(lt.get("output_ctx") or 0)}
     return _tier_creds(registry, tier, body.api_key)
 
