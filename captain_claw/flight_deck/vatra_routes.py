@@ -4408,6 +4408,18 @@ async def _run_and_notify(user: dict, session_id: str, title: str, exec_req,
             runs.discard(session_id)
             if not runs:
                 _active_agent_runs.pop(owner, None)
+    # Persistent bell notification for the owner: web/in-app runs otherwise
+    # finish silently (deliver_to_origin no-ops for kind=web).
+    _okind = str(origin.get("kind") or "").strip().lower()
+    if _okind in ("", "web"):
+        try:
+            await get_db().add_notification(
+                owner, "run" if ok else "run_error",
+                f"Vatra run {'finished' if ok else 'failed'}: {title}",
+                body=summary[:500], ref_type="basna", ref_id=session_id,
+            )
+        except Exception:
+            pass
     kind = str(origin.get("kind") or "").strip().lower()
     address = str(origin.get("address") or "").strip()
     if kind and kind != "web" and address:

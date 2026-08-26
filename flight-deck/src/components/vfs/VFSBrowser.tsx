@@ -21,6 +21,8 @@ import {
   Share2,
   Users,
   Cloud,
+  CloudUpload,
+  Copy,
   Sparkles,
 } from 'lucide-react'
 import { useVFSStore, type VFSEntry, type VFSProject } from '../../stores/vfsStore'
@@ -499,18 +501,31 @@ export function VFSBrowser() {
                       <Download className="h-3.5 w-3.5" />
                     </button>
                     {p.shared ? (
-                      <button
-                        onClick={async () => {
-                          if (confirm(`Remove shared folder "${p.name}" from your view?`)) {
-                            await leaveShare('vfs', p.name, p.owner_id || '')
-                            s.loadProjects()
-                          }
-                        }}
-                        className="hover:text-red-400"
-                        title="Remove from my shared folders"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
+                      <>
+                        <button
+                          onClick={async () => {
+                            const r = await s.copyShared(p.name, p.owner_id || '')
+                            if (r.ok) alert(`Copied to your workspace as "${r.project}". Your agents can now build on it.`)
+                            else alert(`Copy failed: ${r.error || 'unknown error'}`)
+                          }}
+                          className="hover:text-emerald-300"
+                          title="Copy into my workspace so my agents can build on it"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (confirm(`Remove shared folder "${p.name}" from your view?`)) {
+                              await leaveShare('vfs', p.name, p.owner_id || '')
+                              s.loadProjects()
+                            }
+                          }}
+                          className="hover:text-red-400"
+                          title="Remove from my shared folders"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </>
                     ) : (
                       <>
                         {p.kind !== 'link' && (
@@ -768,6 +783,21 @@ function EntryRow({ entry, active }: { entry: VFSEntry; active: boolean }) {
         {entry.type === 'file' && (
           <button onClick={() => s.download(entry)} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="Download">
             <Download className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {entry.type === 'file' && (
+          <button
+            onClick={async () => {
+              const folderId = prompt('Export to Google Drive folder ID (leave blank for My Drive root):', '') ?? undefined
+              if (folderId === undefined) return  // cancelled
+              const r = await s.exportToDrive(entry, folderId)
+              if (r.ok) alert(`Exported "${entry.name}" to your Google Drive.`)
+              else alert(`Export failed: ${r.error || 'connect your Google account first'}`)
+            }}
+            className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-blue-400"
+            title="Export to Google Drive"
+          >
+            <CloudUpload className="h-3.5 w-3.5" />
           </button>
         )}
         <button

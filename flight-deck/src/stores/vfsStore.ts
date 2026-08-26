@@ -133,7 +133,10 @@ interface VFSStore {
   startEdit: () => void
   saveFile: () => Promise<void>
   download: (entry: VFSEntry) => Promise<void>
+  exportToDrive: (entry: VFSEntry, folderId: string) => Promise<{ ok: boolean; link?: string; error?: string }>
   downloadProject: (name: string) => Promise<void>
+  // Copy a folder shared TO me into my own workspace (owner-scoped).
+  copyShared: (project: string, owner: string) => Promise<{ ok: boolean; project?: string; error?: string }>
   deleteEntry: (entry: VFSEntry) => Promise<void>
   newFolder: (name: string) => Promise<void>
   newProject: (name: string) => Promise<void>
@@ -279,6 +282,33 @@ export const useVFSStore = create<VFSStore>((set, get) => ({
     a.click()
     a.remove()
     URL.revokeObjectURL(url)
+  },
+
+  exportToDrive: async (entry, folderId) => {
+    const res = await _authedFetch('/fd/vfs/export-to-drive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project: entry.project, path: entry.path,
+        ...(get().owner ? { owner: get().owner } : {}),
+        folder_id: folderId || '',
+      }),
+    })
+    if (!res.ok) return { ok: false, error: (await res.text().catch(() => '')) || `HTTP ${res.status}` }
+    const data = await res.json()
+    return { ok: true, link: data.link }
+  },
+
+  copyShared: async (project, owner) => {
+    const res = await _authedFetch('/fd/vfs/copy-shared', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project, owner }),
+    })
+    if (!res.ok) return { ok: false, error: (await res.text().catch(() => '')) || `HTTP ${res.status}` }
+    const data = await res.json()
+    await get().loadProjects()
+    return { ok: true, project: data.project }
   },
 
   downloadProject: async (name) => {

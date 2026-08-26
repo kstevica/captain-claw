@@ -155,6 +155,7 @@ function AppContent() {
   const chatFullscreen = useChatStore((s) => s.chatFullscreen)
   const { fetchInstances, fetchStats, fetchConcerns, setWsConnected, upsertInstance, removeInstance, updateInstanceActivity } = useAgentStore()
   const addNotification = useNotificationStore((s) => s.add)
+  const hydrateNotifications = useNotificationStore((s) => s.hydrateFromServer)
 
   // Director panel
   const [directorOpen, setDirectorOpen] = useState(() => loadBool(DIRECTOR_OPEN_KEY, false))
@@ -247,6 +248,15 @@ function AppContent() {
 
     return () => clearInterval(interval)
   }, [fetchInstances, fetchStats, fetchConcerns])
+
+  // Persistent notifications (shares, finished runs) — poll the bell backend.
+  useEffect(() => {
+    const { authEnabled, isAuthenticated } = useAuthStore.getState()
+    if (authEnabled && !isAuthenticated) return  // wait until logged in
+    hydrateNotifications()
+    const interval = setInterval(() => { hydrateNotifications() }, 30000)
+    return () => clearInterval(interval)
+  }, [hydrateNotifications])
 
   // WebSocket connection for real-time updates (only when BotPort configured)
   useEffect(() => {

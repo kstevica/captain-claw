@@ -777,6 +777,115 @@ async def download_zip(project: str, owner: str = "",
     )
 
 
+class CopySharedBody(BaseModel):
+    project: str
+    owner: str
+    dest: str = ""
+
+
+@router.post("/copy-shared")
+async def copy_shared(body: CopySharedBody, user: dict = Depends(get_current_user)):
+    """Copy a folder shared TO me into my own VFS root, so my agents can build on it.
+
+    The agent runtime is single-tenant (``vfs:`` paths resolve only under the
+    caller's own root), so a grantee can browse a shared folder but their agents
+    can't read it as reference material. This one-time server-side copy turns it
+    into the caller's own project. Requires a 'vfs' share to the caller.
+    """
+    caller = user["id"]
+    if not body.owner or body.owner == caller:
+        raise HTTPException(400, "owner is required and must differ from you")
+    # Verifies the share exists (raises 404 otherwise) and returns the owner id.
+    oid = await _eff_owner(caller, body.project, body.owner, write=False)
+    src = _project_root(oid, body.project)
+    if not src.is_dir():
+        raise HTTPException(404, "shared project not found")
+    base = safe_name(body.dest or body.project, fallback="shared")
+    my_root = _user_root(caller)
+    dest = base
+    i = 2
+    while (my_root / dest).exists():
+        dest = f"{base}-{i}"
+        i += 1
+    try:
+        shutil.copytree(src, my_root / dest, ignore=lambda _d, names: [n for n in names if n == ".git"])
+    except OSError as exc:
+        raise HTTPException(500, f"copy failed: {exc}")
+    return {"ok": True, "project": dest}
+
+
+class ExportDriveBody(BaseModel):
+    project: str
+    path: str
+    owner: str = ""
+    folder_id: str = ""
+    name: str = ""
+
+
+@router.post("/export-to-drive")
+async def export_to_drive(body: ExportDriveBody, user: dict = Depends(get_current_user)):
+    """Upload a VFS file to the CALLER's own Google Drive.
+
+    Resolves the file under the caller's VFS view (honouring folder shares), reads
+    its bytes (materialising a Drive-mount placeholder into its original bytes,
+    like /download does), and uploads via the caller's own Google token into
+    ``folder_id`` (blank = My Drive root)."""
+    import io as _io
+    import uuid as _uuid
+    import httpx
+    from captain_claw.flight_deck.google_oauth_routes import get_valid_google_access_token
+
+    oid = await _eff_owner(user["id"], body.project, body.owner, write=False)
+    target = _resolve(oid, body.project, body.path)
+    if not target.is_file():
+        raise HTTPException(404, "file not found")
+
+    data: bytes | None = None
+    try:
+        from captain_claw import vfs_drive
+        real = await vfs_drive.materialize(target, client_factory=lambda: _drive_client(oid))
+        if real is not None:
+            data = real.read_bytes()
+    except Exception as exc:
+        log.debug("export-to-drive materialize skipped: %s", exc)
+    if data is None:
+        data = target.read_bytes()
+
+    token = await get_valid_google_access_token(user["id"])
+    if not token:
+        raise HTTPException(400, "Connect your Google account first (Connections → Google).")
+
+    fname = body.name.strip() or target.name
+    content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+    metadata: dict = {"name": fname}
+    if body.folder_id.strip():
+        metadata["parents"] = [body.folder_id.strip()]
+
+    boundary = f"captain_claw_{_uuid.uuid4().hex[:16]}"
+    buf = _io.BytesIO()
+    buf.write(f"--{boundary}\r\n".encode())
+    buf.write(b"Content-Type: application/json; charset=UTF-8\r\n\r\n")
+    buf.write(json.dumps(metadata).encode("utf-8"))
+    buf.write(f"\r\n--{boundary}\r\n".encode())
+    buf.write(f"Content-Type: {content_type}\r\n\r\n".encode())
+    buf.write(data)
+    buf.write(f"\r\n--{boundary}--\r\n".encode())
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(
+            "https://www.googleapis.com/upload/drive/v3/files",
+            params={"uploadType": "multipart", "supportsAllDrives": "true",
+                    "fields": "id,name,webViewLink"},
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": f"multipart/related; boundary={boundary}"},
+            content=buf.getvalue(),
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(502, f"Drive upload failed: {resp.text[:300]}")
+    j = resp.json()
+    return {"ok": True, "id": j.get("id"), "name": j.get("name"), "link": j.get("webViewLink")}
+
+
 # ── write endpoints ──────────────────────────────────────────────────
 
 class WriteBody(BaseModel):

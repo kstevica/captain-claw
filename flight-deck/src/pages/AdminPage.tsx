@@ -43,6 +43,25 @@ interface PlanLimits {
   spawns_per_hour: number
 }
 
+interface CostUserRow {
+  user_id: string
+  email: string | null
+  display_name: string | null
+  runs: number
+  usd: number
+  priced: number
+}
+interface CostKindRow {
+  run_kind: string
+  runs: number
+  usd: number
+}
+interface CostRollup {
+  by_user: CostUserRow[]
+  by_kind: CostKindRow[]
+  total_usd: number
+}
+
 // ── API helpers ──
 
 function _headers(): Record<string, string> {
@@ -102,6 +121,16 @@ async function fetchUsageLogs(userId?: string, eventType?: string, limit = 50): 
   if (!res.ok) throw new Error('Failed to fetch usage logs')
   const data = await res.json()
   return data.logs
+}
+
+async function fetchCostRollup(since?: string, until?: string): Promise<CostRollup> {
+  const params = new URLSearchParams()
+  if (since) params.set('since', since)
+  if (until) params.set('until', until)
+  const qs = params.toString() ? `?${params}` : ''
+  const res = await fetch(`/fd/admin/costs${qs}`, { headers: _headers(), credentials: 'include' })
+  if (!res.ok) throw new Error('Failed to fetch cost rollup')
+  return res.json()
 }
 
 async function fetchConfig(): Promise<Record<string, boolean>> {
@@ -181,13 +210,17 @@ function UserRow({
     try { return JSON.parse(user.metadata || '{}').plan || 'free' } catch { return 'free' }
   })
   const [role, setRole] = useState(user.role)
+  const [password, setPassword] = useState('')
   const [saving, setSaving] = useState(false)
   const isSelf = user.id === currentUserId
 
   const handleSave = async () => {
     setSaving(true)
     try {
-      await updateUser(user.id, { plan, role })
+      const patch: Record<string, unknown> = { plan, role }
+      if (password.trim()) patch.password = password
+      await updateUser(user.id, patch)
+      setPassword('')
       onUpdate()
     } catch { /* ignore */ }
     setSaving(false)
@@ -238,6 +271,21 @@ function UserRow({
                 <option value="admin">admin</option>
               </select>
             </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-zinc-500 mb-1">Reset password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="New password (leave blank to keep)"
+              autoComplete="new-password"
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+            />
+            {password && password.length < 6 && (
+              <p className="mt-1 text-[11px] text-amber-500/80">At least 6 characters.</p>
+            )}
           </div>
 
           {plans[plan] && (
@@ -347,6 +395,7 @@ export function AdminPage() {
   const [keySaveFlash, setKeySaveFlash] = useState<string | null>(null)
   const [usageSummary, setUsageSummary] = useState<Record<string, number>>({})
   const [usageLogs, setUsageLogs] = useState<UsageLog[]>([])
+  const [costRollup, setCostRollup] = useState<CostRollup | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -367,9 +416,12 @@ export function AdminPage() {
 
   const loadUsage = useCallback(async () => {
     try {
-      const [summary, logs] = await Promise.all([fetchUsageSummary(), fetchUsageLogs()])
+      const [summary, logs, costs] = await Promise.all([
+        fetchUsageSummary(), fetchUsageLogs(), fetchCostRollup().catch(() => null),
+      ])
       setUsageSummary(summary)
       setUsageLogs(logs)
+      setCostRollup(costs)
       setError('')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load usage')
@@ -518,6 +570,45 @@ export function AdminPage() {
                 </div>
               )}
             </div>
+
+            {/* Team spend (cost rollup) */}
+            {costRollup && (
+              <div>
+                <div className="flex items-baseline gap-3 mb-3">
+                  <h3 className="text-sm font-medium text-zinc-300">Team spend</h3>
+                  <span className="text-lg font-semibold text-emerald-400">${costRollup.total_usd.toFixed(2)}</span>
+                  <span className="text-xs text-zinc-500">total across all users</span>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+                    <div className="px-3 py-2 text-xs font-medium text-zinc-400 border-b border-zinc-800">By user</div>
+                    {costRollup.by_user.length === 0 && (
+                      <p className="px-3 py-3 text-xs text-zinc-500">No costs recorded yet</p>
+                    )}
+                    {costRollup.by_user.map((u) => (
+                      <div key={u.user_id} className="flex items-center gap-2 px-3 py-2 text-sm border-b border-zinc-800/50 last:border-0">
+                        <span className="flex-1 truncate text-zinc-300">{u.display_name || u.email || u.user_id.slice(0, 8)}</span>
+                        <span className="text-xs text-zinc-500">{u.runs} run{u.runs === 1 ? '' : 's'}</span>
+                        <span className="w-16 text-right font-mono text-emerald-400">${(u.usd || 0).toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+                    <div className="px-3 py-2 text-xs font-medium text-zinc-400 border-b border-zinc-800">By run kind</div>
+                    {costRollup.by_kind.length === 0 && (
+                      <p className="px-3 py-3 text-xs text-zinc-500">No costs recorded yet</p>
+                    )}
+                    {costRollup.by_kind.map((k) => (
+                      <div key={k.run_kind} className="flex items-center gap-2 px-3 py-2 text-sm border-b border-zinc-800/50 last:border-0">
+                        <span className="flex-1 truncate text-zinc-300 capitalize">{k.run_kind || 'other'}</span>
+                        <span className="text-xs text-zinc-500">{k.runs} run{k.runs === 1 ? '' : 's'}</span>
+                        <span className="w-16 text-right font-mono text-emerald-400">${(k.usd || 0).toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Recent logs */}
             <div>

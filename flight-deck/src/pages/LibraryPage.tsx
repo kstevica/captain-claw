@@ -187,12 +187,46 @@ export function LibraryPage() {
     }
   }
 
+  // Copy a shared/base archetype into the user's own library so they can edit it.
+  const duplicateArchetype = async (a: Archetype) => {
+    const existing = new Set((registry?.archetypes || []).map((x) => x.id))
+    const base = slugify(a.id || a.role || 'archetype')
+    let newId = `${base}-copy`
+    let n = 2
+    while (existing.has(newId)) { newId = `${base}-copy-${n}`; n += 1 }
+    const body: ArchetypeInput = {
+      archetype_id: newId,
+      role: `${a.role} (copy)`,
+      family: a.family || 'Custom',
+      description: a.description || '',
+      cognitive_mode: a.cognitive_mode || 'neutra',
+      tier: a.tier || '',
+      tools: a.tools || [],
+      fleet_instructions: a.fleet_instructions || '',
+      keywords: a.keywords || [],
+      lead: !!a.lead,
+      reliability_seed: a.reliability_seed ?? 0.7,
+      runtime: a.runtime || '',
+    }
+    setDupState((s) => ({ ...s, [a.id]: 'dup' }))
+    try {
+      await createArchetype(body)
+      refreshRegistry()
+      setDupState((s) => ({ ...s, [a.id]: 'done' }))
+      setTimeout(() => setDupState((s) => { const c = { ...s }; delete c[a.id]; return c }), 1500)
+    } catch (e) {
+      setDupState((s) => ({ ...s, [a.id]: 'error' }))
+      alert(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const activeSet = sets.find((s) => s.id === activeSetId) || sets[0]
 
   const { setFleetInstructions, setDescription, setNameOverride, fetchProcesses } = useProcessStore()
 
   const [spawnState, setSpawnState] = useState<Record<string, SpawnState>>({})
   const [spawnMsg, setSpawnMsg] = useState<Record<string, string>>({})
+  const [dupState, setDupState] = useState<Record<string, 'dup' | 'done' | 'error'>>({})
 
   // One-click spawn of a library archetype as a process agent, resolving its
   // tier to a concrete model from the saved tier config.
@@ -639,6 +673,20 @@ export function LibraryPage() {
                                 className="rounded p-1 text-zinc-500 hover:text-red-400 hover:bg-zinc-800"
                               >
                                 <Trash2 className="h-3 w-3" />
+                              </button>
+                            </div>
+                          )}
+                          {!isUser && (
+                            <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                onClick={(e) => { e.stopPropagation(); duplicateArchetype(a) }}
+                                disabled={dupState[a.id] === 'dup'}
+                                title="Duplicate as mine (an editable copy in your library)"
+                                className="rounded p-1 text-zinc-500 hover:text-violet-300 hover:bg-zinc-800 disabled:opacity-50"
+                              >
+                                {dupState[a.id] === 'dup' ? <Loader2 className="h-3 w-3 animate-spin" />
+                                  : dupState[a.id] === 'done' ? <Check className="h-3 w-3 text-emerald-400" />
+                                  : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
                           )}

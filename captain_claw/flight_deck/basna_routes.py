@@ -954,6 +954,18 @@ async def _run_and_notify(
     # the same one cron/scheduled results use — which guarantees delivery to the
     # right address. Web (and any delivery failure) falls back to relaying through
     # the source agent so it still shows up in the web chat.
+    # Persistent bell notification for the owner: web/in-app runs otherwise
+    # finish silently (deliver_to_origin no-ops for kind=web).
+    _okind = str(origin.get("kind") or "").strip().lower()
+    if _okind in ("", "web"):
+        try:
+            await get_db().add_notification(
+                owner, "run" if ok else "run_error",
+                f"Basna run {'finished' if ok else 'failed'}: {title}",
+                body=summary[:500], ref_type="basna", ref_id=session_id,
+            )
+        except Exception:
+            pass
     kind = str(origin.get("kind") or "").strip().lower()
     address = str(origin.get("address") or "").strip()
     if kind and kind != "web" and address:
