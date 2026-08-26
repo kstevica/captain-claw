@@ -58,8 +58,34 @@ These are code changes already in this build; the env vars above turn them on.
 6. Ask each teammate to connect their **own** Google account (Connections) if
    they will use Drive.
 
+## Collaboration features (0.8.x)
+
+- **Shareable tier sets.** Library → configure a tier set → *Publish to team*
+  (admin). Teammates who never set up models automatically run on it, and API
+  keys are never shared — each tier stores a `@system` sentinel resolved
+  server-side from the org key store. Others can *Duplicate to customize*.
+- **Per-user Google Drive.** Each teammate connects their own Google account
+  (Connections → Google) and browses/mounts their own Drive — no shared token.
+  For a shared reference corpus, mount a Shared-Drive folder with `clonemd=true`
+  and share that VFS folder with the team.
+- **Share results, then build on them.** Share a run / folder / archetype from
+  its page. A shared folder shows *Copy to my workspace* — that clones it into
+  the recipient's own VFS root so their agents can build on it.
+- **Export to Drive.** Any VFS file has an *Export to Drive* action that uploads
+  it to the exporter's own Google Drive (optionally into a folder id).
+- **Duplicate-as-mine archetypes.** Shared/base archetype cards have a copy
+  button that forks an editable copy into your own library.
+- **Notifications.** A share you receive or a run that finishes while your tab is
+  closed lands in the bell (persisted server-side, polled every ~30s).
+- **Team cost rollup.** Admin → Usage → *Team spend*: dollars by user and by run
+  kind across the whole team.
+- **Admin password reset.** Admin → Users → expand a user → *Reset password*.
+
 ## Known follow-ups (not blockers)
 
 - Flows and scheduler jobs are authenticated but **not yet per-user isolated**
   (all teammates see the same lists). Owner columns on `flows.db` /
   `scheduler_jobs` are the next step.
+- A grantee's agents still can't read a shared folder in place — they use *Copy
+  to my workspace* first. Owner-qualified VFS addressing is the deeper fix.
+- Continuing someone else's Basna/Vatra run is still owner-only.
