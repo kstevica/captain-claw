@@ -379,6 +379,19 @@ class FlightDeckDB:
             );
             CREATE INDEX IF NOT EXISTS idx_cost_ledger_owner
                 ON cost_ledger(owner_user_id, at);
+            CREATE TABLE IF NOT EXISTS notifications (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                type        TEXT NOT NULL DEFAULT 'info',
+                title       TEXT NOT NULL DEFAULT '',
+                body        TEXT NOT NULL DEFAULT '',
+                ref_type    TEXT NOT NULL DEFAULT '',
+                ref_id      TEXT NOT NULL DEFAULT '',
+                read        INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_notifications_user
+                ON notifications(user_id, read, created_at);
         """)
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
@@ -1749,6 +1762,106 @@ class FlightDeckDB:
         async with self._db.execute(q, args) as cur:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    async def aggregate_run_costs(
+        self, since: str | None = None, until: str | None = None,
+    ) -> dict:
+        """Team-wide cost rollup for the admin: totals by user and by run kind.
+
+        `since`/`until` are ISO timestamps bounding `at` (inclusive/exclusive is
+        loose — string compare on ISO works). Read-only over cost_ledger.
+        """
+        assert self._db is not None
+        where = ""
+        args: list = []
+        if since:
+            where += (" AND" if where else " WHERE") + " at >= ?"
+            args.append(since)
+        if until:
+            where += (" AND" if where else " WHERE") + " at < ?"
+            args.append(until)
+        by_user = await self._db.execute_fetchall(
+            "SELECT c.owner_user_id AS user_id, u.email AS email,"
+            " u.display_name AS display_name, COUNT(*) AS runs,"
+            " COALESCE(SUM(c.usd), 0) AS usd,"
+            " SUM(CASE WHEN c.usd IS NOT NULL THEN 1 ELSE 0 END) AS priced"
+            " FROM cost_ledger c LEFT JOIN users u ON u.id = c.owner_user_id"
+            + where +
+            " GROUP BY c.owner_user_id ORDER BY usd DESC",
+            tuple(args),
+        )
+        by_kind = await self._db.execute_fetchall(
+            "SELECT run_kind, COUNT(*) AS runs, COALESCE(SUM(usd), 0) AS usd"
+            " FROM cost_ledger" + where +
+            " GROUP BY run_kind ORDER BY usd DESC",
+            tuple(args),
+        )
+        total = 0.0
+        for r in by_user:
+            total += float(dict(r).get("usd") or 0)
+        return {
+            "by_user": [dict(r) for r in by_user],
+            "by_kind": [dict(r) for r in by_kind],
+            "total_usd": round(total, 6),
+        }
+
+    # ── Notifications (persistent in-app bell) ─────────────────────────
+
+    async def add_notification(
+        self, user_id: str, type: str, title: str, body: str = "",
+        ref_type: str = "", ref_id: str = "",
+    ) -> str:
+        """Insert one notification for `user_id`; returns its id."""
+        assert self._db is not None
+        nid = _uuid()
+        await self._db.execute(
+            "INSERT INTO notifications (id, user_id, type, title, body,"
+            " ref_type, ref_id, read, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+            (nid, user_id, type, title, body, ref_type, ref_id, _utcnow()),
+        )
+        await self._db.commit()
+        return nid
+
+    async def list_notifications(
+        self, user_id: str, limit: int = 50, unread_only: bool = False,
+    ) -> list[dict]:
+        assert self._db is not None
+        q = "SELECT * FROM notifications WHERE user_id = ?"
+        args: list = [user_id]
+        if unread_only:
+            q += " AND read = 0"
+        q += " ORDER BY created_at DESC LIMIT ?"
+        args.append(limit)
+        rows = await self._db.execute_fetchall(q, tuple(args))
+        return [dict(r) for r in rows]
+
+    async def count_unread_notifications(self, user_id: str) -> int:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read = 0",
+            (user_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+    async def mark_notification_read(self, notif_id: str, user_id: str) -> bool:
+        assert self._db is not None
+        async with self._db.execute(
+            "UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?",
+            (notif_id, user_id),
+        ) as cur:
+            await self._db.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def mark_all_notifications_read(self, user_id: str) -> int:
+        assert self._db is not None
+        async with self._db.execute(
+            "UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0",
+            (user_id,),
+        ) as cur:
+            await self._db.commit()
+            return cur.rowcount or 0
 
     async def list_shares_for_resource(
         self, resource_type: str, resource_id: str, owner_id: str,

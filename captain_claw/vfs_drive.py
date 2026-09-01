@@ -704,7 +704,7 @@ async def hydrate(client: DriveClient, mount: Path, rel: str, *, sleep=None) -> 
     return text
 
 
-async def read_through(abs_path: Path) -> str | None:
+async def read_through(abs_path: Path, *, client_factory=None) -> str | None:
     """Content for a Drive placeholder at *abs_path*, or ``None`` to read normally.
 
     The read tool calls this for any ``vfs:`` path. ``None`` means "not a Drive
@@ -712,6 +712,13 @@ async def read_through(abs_path: Path) -> str | None:
     files whose real bytes are already on disk). Drive errors surface as a
     readable note rather than an exception, so a read never hard-fails on a
     transient outage — it falls back to the marker with the reason.
+
+    ``client_factory`` (async, returns a DriveClient) supplies a per-user client
+    — used by Flight Deck's file routes to hydrate with the MOUNT OWNER's token.
+    Agent-side callers pass nothing and get the global connection, which on the
+    agent already resolves that agent's own Google account. Built lazily, only
+    once the path is confirmed to be a Drive placeholder, so an ordinary read by
+    a user with no Google connection never triggers it.
     """
     found = find_mount(abs_path)
     if not found:
@@ -723,7 +730,7 @@ async def read_through(abs_path: Path) -> str | None:
 
     from captain_claw.drive_client import make_client
 
-    client = make_client()
+    client = await client_factory() if client_factory else make_client()
     try:
         return await hydrate(client, mount, rel)
     except DriveError as exc:
@@ -754,7 +761,7 @@ def _blob_cache_path(mount: Path, file_id: str, ext: str) -> Path:
     return mount / CACHE_DIRNAME / f"{file_id}.blob{safe}"
 
 
-async def materialize(abs_path: Path, *, sleep=None) -> Path | None:
+async def materialize(abs_path: Path, *, sleep=None, client_factory=None) -> Path | None:
     """Ensure a Drive placeholder's real bytes are on disk; return a readable path.
 
     The byte-level sibling of :func:`read_through` (which returns converted
@@ -798,7 +805,7 @@ async def materialize(abs_path: Path, *, sleep=None) -> Path | None:
 
     from captain_claw.drive_client import make_client
 
-    client = make_client()
+    client = await client_factory() if client_factory else make_client()
     try:
         data, got_ext = await client.fetch(f, sleep=sleep or asyncio.sleep)
     finally:

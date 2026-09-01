@@ -391,15 +391,35 @@ class DriveToggleBody(BaseModel):
     clonemd: bool
 
 
-def _drive_client():
-    """A DriveClient over the deployment's Google connection.
+async def _drive_client(user_id: str):
+    """A DriveClient scoped to *user_id*'s own Google connection.
 
-    Per-user tokens are a later swap (the client is provider-agnostic); today
-    every mount uses the shared connection, which is correct single-operator.
+    Builds a per-user token provider from the user's stored tokens (refreshing
+    when near expiry) and hands it to the auth-agnostic DriveClient — so each
+    teammate browses/mounts THEIR Drive, never the deployment owner's. Raises
+    400 when that user hasn't connected Google.
     """
     from captain_claw.drive_client import make_client
+    from captain_claw.flight_deck.google_oauth_routes import (
+        _token_client, _load_tokens, _refresh_if_needed,
+    )
 
-    return make_client()
+    db = get_db()
+    client_cfg = await _token_client(db)
+    tokens = await _load_tokens(db, user_id)
+    if not client_cfg or not tokens or not tokens.access_token:
+        raise HTTPException(400, "Connect your Google account first (Connections → Google).")
+
+    async def _provider() -> tuple[str, str]:
+        # Reload each call so a refresh persisted mid-operation is picked up.
+        t = await _load_tokens(db, user_id)
+        if t:
+            t = await _refresh_if_needed(db, user_id, client_cfg, t) or t
+        if not t or not t.access_token:
+            return "", ""
+        return t.access_token, (t.scope or "")
+
+    return make_client(_provider)
 
 
 def _stamp_synced(user_id: str, name: str) -> None:
@@ -428,7 +448,7 @@ async def drive_browse(folder_id: str = "root", drive_id: str = "",
     """
     from captain_claw.drive_client import FOLDER_MIME, DriveError
 
-    client = _drive_client()
+    client = await _drive_client(user["id"])
     try:
         files, truncated = await client.list_folder(
             folder_id, drive_id=drive_id, max_files=500
@@ -472,7 +492,7 @@ async def _mount_core(user_id: str, body: "DriveMountBody", progress=None) -> di
         raise HTTPException(409, f"a link named '{name}' already exists")
 
     drive_id = body.drive_id.strip()
-    client = _drive_client()
+    client = await _drive_client(user_id)
     try:
         summary = await vfs_drive.create_mount(
             client, user_id, name, body.folder_id.strip(),
@@ -559,7 +579,7 @@ async def refresh_drive(name: str, user: dict = Depends(get_current_user)):
     ent = read_links_at(_user_root(user["id"])).get(key)
     if not vfs_drive.is_drive_link(ent):
         raise HTTPException(404, "not a Drive mount")
-    client = _drive_client()
+    client = await _drive_client(user["id"])
     try:
         summary = await vfs_drive.sync(client, vfs_drive.mount_root(user["id"], key))
     except (DriveError, ValueError) as exc:
@@ -599,7 +619,7 @@ async def toggle_clonemd(name: str, body: DriveToggleBody,
 
     summary: dict = {}
     if enabled:
-        client = _drive_client()
+        client = await _drive_client(user["id"])
         try:
             summary = await vfs_drive.sync(client, mroot)
         except (DriveError, ValueError) as exc:
@@ -666,7 +686,7 @@ async def read_file(project: str, path: str, owner: str = "",
     try:
         from captain_claw import vfs_drive
 
-        hydrated = await vfs_drive.read_through(target)
+        hydrated = await vfs_drive.read_through(target, client_factory=lambda: _drive_client(oid))
         if hydrated is not None:
             return {"project": project, "path": path, "name": target.name,
                     "size": len(hydrated.encode("utf-8")), "binary": False,
@@ -708,7 +728,7 @@ async def download_file(project: str, path: str, owner: str = "",
         from captain_claw.drive_client import DriveError
 
         try:
-            real = await vfs_drive.materialize(target)
+            real = await vfs_drive.materialize(target, client_factory=lambda: _drive_client(oid))
         except DriveError as exc:
             raise HTTPException(502, f"Could not fetch the original from Google Drive: {exc}")
         if real is not None:
@@ -755,6 +775,115 @@ async def download_zip(project: str, owner: str = "",
         buf, media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{name}.zip"'},
     )
+
+
+class CopySharedBody(BaseModel):
+    project: str
+    owner: str
+    dest: str = ""
+
+
+@router.post("/copy-shared")
+async def copy_shared(body: CopySharedBody, user: dict = Depends(get_current_user)):
+    """Copy a folder shared TO me into my own VFS root, so my agents can build on it.
+
+    The agent runtime is single-tenant (``vfs:`` paths resolve only under the
+    caller's own root), so a grantee can browse a shared folder but their agents
+    can't read it as reference material. This one-time server-side copy turns it
+    into the caller's own project. Requires a 'vfs' share to the caller.
+    """
+    caller = user["id"]
+    if not body.owner or body.owner == caller:
+        raise HTTPException(400, "owner is required and must differ from you")
+    # Verifies the share exists (raises 404 otherwise) and returns the owner id.
+    oid = await _eff_owner(caller, body.project, body.owner, write=False)
+    src = _project_root(oid, body.project)
+    if not src.is_dir():
+        raise HTTPException(404, "shared project not found")
+    base = safe_name(body.dest or body.project, fallback="shared")
+    my_root = _user_root(caller)
+    dest = base
+    i = 2
+    while (my_root / dest).exists():
+        dest = f"{base}-{i}"
+        i += 1
+    try:
+        shutil.copytree(src, my_root / dest, ignore=lambda _d, names: [n for n in names if n == ".git"])
+    except OSError as exc:
+        raise HTTPException(500, f"copy failed: {exc}")
+    return {"ok": True, "project": dest}
+
+
+class ExportDriveBody(BaseModel):
+    project: str
+    path: str
+    owner: str = ""
+    folder_id: str = ""
+    name: str = ""
+
+
+@router.post("/export-to-drive")
+async def export_to_drive(body: ExportDriveBody, user: dict = Depends(get_current_user)):
+    """Upload a VFS file to the CALLER's own Google Drive.
+
+    Resolves the file under the caller's VFS view (honouring folder shares), reads
+    its bytes (materialising a Drive-mount placeholder into its original bytes,
+    like /download does), and uploads via the caller's own Google token into
+    ``folder_id`` (blank = My Drive root)."""
+    import io as _io
+    import uuid as _uuid
+    import httpx
+    from captain_claw.flight_deck.google_oauth_routes import get_valid_google_access_token
+
+    oid = await _eff_owner(user["id"], body.project, body.owner, write=False)
+    target = _resolve(oid, body.project, body.path)
+    if not target.is_file():
+        raise HTTPException(404, "file not found")
+
+    data: bytes | None = None
+    try:
+        from captain_claw import vfs_drive
+        real = await vfs_drive.materialize(target, client_factory=lambda: _drive_client(oid))
+        if real is not None:
+            data = real.read_bytes()
+    except Exception as exc:
+        log.debug("export-to-drive materialize skipped: %s", exc)
+    if data is None:
+        data = target.read_bytes()
+
+    token = await get_valid_google_access_token(user["id"])
+    if not token:
+        raise HTTPException(400, "Connect your Google account first (Connections → Google).")
+
+    fname = body.name.strip() or target.name
+    content_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+    metadata: dict = {"name": fname}
+    if body.folder_id.strip():
+        metadata["parents"] = [body.folder_id.strip()]
+
+    boundary = f"captain_claw_{_uuid.uuid4().hex[:16]}"
+    buf = _io.BytesIO()
+    buf.write(f"--{boundary}\r\n".encode())
+    buf.write(b"Content-Type: application/json; charset=UTF-8\r\n\r\n")
+    buf.write(json.dumps(metadata).encode("utf-8"))
+    buf.write(f"\r\n--{boundary}\r\n".encode())
+    buf.write(f"Content-Type: {content_type}\r\n\r\n".encode())
+    buf.write(data)
+    buf.write(f"\r\n--{boundary}--\r\n".encode())
+
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        resp = await client.post(
+            "https://www.googleapis.com/upload/drive/v3/files",
+            params={"uploadType": "multipart", "supportsAllDrives": "true",
+                    "fields": "id,name,webViewLink"},
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": f"multipart/related; boundary={boundary}"},
+            content=buf.getvalue(),
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(502, f"Drive upload failed: {resp.text[:300]}")
+    j = resp.json()
+    return {"ok": True, "id": j.get("id"), "name": j.get("name"), "link": j.get("webViewLink")}
 
 
 # ── write endpoints ──────────────────────────────────────────────────

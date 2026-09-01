@@ -124,6 +124,17 @@ async def create_resource_share(body: ShareCreate, user: dict = Depends(get_curr
     share = await db.create_share(
         body.resource_type, body.resource_id, user["id"], body.grantee_id, perm
     )
+    # Tell the grantee (persistent bell notification).
+    try:
+        sharer = user.get("display_name") or user.get("email") or "A teammate"
+        await db.add_notification(
+            body.grantee_id, "share",
+            f"{sharer} shared a {body.resource_type} with you",
+            body=body.resource_id,
+            ref_type=body.resource_type, ref_id=body.resource_id,
+        )
+    except Exception:
+        pass
     return {"ok": True, "share": share}
 
 

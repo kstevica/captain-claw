@@ -51,12 +51,14 @@ from captain_claw.flight_deck.basna_routes import (
     _build_catalog,
     _closer_on_event,
     _dispatch_one,
+    _effective_key,
     _guess_mime,
     _is_texty,
     _keyword_match,
     _llm_judge,
     _load_owner_tiers,
     _load_registry,
+    _refresh_system_provider_keys,
     _norm_text,
     _notify_source_agent,
     _parse_files,
@@ -504,12 +506,17 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
 
 
 def _resolve_creds(registry: dict, tiers: dict | None, api_key: str, tier: str) -> dict:
-    """Resolve LLM creds for a tier from the Library tiers, else the registry."""
+    """Resolve LLM creds for a tier from the Library tiers, else the registry.
+
+    A tier whose key is empty or the "@system" sentinel (team-default sets) is
+    resolved server-side to the org key for its provider via _effective_key.
+    """
     lt = (tiers or {}).get(tier)
     if lt and lt.get("model"):
-        return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
+        provider = lt.get("provider", "anthropic")
+        return {"provider": provider, "model": lt.get("model", ""),
                 "base_url": lt.get("base_url") or None,
-                "api_key": lt.get("api_key") or api_key or None,
+                "api_key": _effective_key(provider, lt.get("api_key") or api_key),
                 "output_ctx": int(lt.get("output_ctx") or 0)}
     return _tier_creds(registry, tier, api_key or "")
 
@@ -919,6 +926,7 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
     max_agents = int(cfg.get("max_agents") or 6)
     archetypes = await merged_archetypes(db, user["id"])
     arch_by_id = {a["id"]: a for a in archetypes}
+    await _refresh_system_provider_keys(db)  # warm @system key resolution
     registry = _load_registry()
 
     def _creds(tier: str) -> dict:
@@ -1016,6 +1024,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     archetypes = await merged_archetypes(db, user["id"])
     arch_by_id = {a["id"]: a for a in archetypes}
     seeds = {a["id"]: float(a.get("reliability_seed", 0.7)) for a in archetypes}
+    await _refresh_system_provider_keys(db)  # warm @system key resolution
     registry = _load_registry()
 
     def _creds(tier: str) -> dict:
@@ -3694,6 +3703,7 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
                            **({"shared_datastore": True} if body.shared_datastore else {}),
                            **({"horizon": body.horizon} if body.horizon else {})}))
     sid = sess["id"]
+    await _refresh_system_provider_keys(db)  # warm @system key resolution
     registry = _load_registry()
     # The Lead's decomposition is a reasoning task — run it on the user-selected
     # tier (default reasoning), not the fast tier.
@@ -4398,6 +4408,18 @@ async def _run_and_notify(user: dict, session_id: str, title: str, exec_req,
             runs.discard(session_id)
             if not runs:
                 _active_agent_runs.pop(owner, None)
+    # Persistent bell notification for the owner: web/in-app runs otherwise
+    # finish silently (deliver_to_origin no-ops for kind=web).
+    _okind = str(origin.get("kind") or "").strip().lower()
+    if _okind in ("", "web"):
+        try:
+            await get_db().add_notification(
+                owner, "run" if ok else "run_error",
+                f"Vatra run {'finished' if ok else 'failed'}: {title}",
+                body=summary[:500], ref_type="basna", ref_id=session_id,
+            )
+        except Exception:
+            pass
     kind = str(origin.get("kind") or "").strip().lower()
     address = str(origin.get("address") or "").strip()
     if kind and kind != "web" and address:
