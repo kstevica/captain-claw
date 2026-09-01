@@ -19,7 +19,7 @@ from captain_claw.agent_stuck import (
 )
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
-from captain_claw.llm import Message
+from captain_claw.llm import Message, is_reasoning_backfill_placeholder
 from captain_claw.logging import get_logger
 
 
@@ -2862,7 +2862,11 @@ class AgentOrchestrationMixin:
                 self.provider, "last_reasoning_content", ""
             ) or ""
             try:
-                self._pending_reasoning_content = _stream_reasoning
+                # Drop the backfill sentinel so it's never persisted/round-tripped.
+                self._pending_reasoning_content = (
+                    "" if is_reasoning_backfill_placeholder(_stream_reasoning)
+                    else _stream_reasoning
+                )
             except Exception:
                 pass
             self._add_session_message("assistant", full_content)

@@ -7,7 +7,7 @@ from typing import Any
 
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError
-from captain_claw.llm import Message
+from captain_claw.llm import Message, is_reasoning_backfill_placeholder
 from captain_claw.logging import get_logger
 
 
@@ -455,9 +455,9 @@ class AgentGuardMixin:
         # threading the value through every helper signature would
         # be invasive for a thing only DeepSeek currently uses.
         try:
-            self._pending_reasoning_content = str(
-                getattr(response, "reasoning_content", "") or ""
-            )
+            _rc = str(getattr(response, "reasoning_content", "") or "")
+            # Drop the backfill sentinel so it's never persisted or round-tripped.
+            self._pending_reasoning_content = "" if is_reasoning_backfill_placeholder(_rc) else _rc
         except Exception:
             pass
 

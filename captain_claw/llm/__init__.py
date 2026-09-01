@@ -299,6 +299,16 @@ def _is_temperature_rejected_error(msg: str) -> bool:
 _REASONING_BACKFILL_PLACEHOLDER = "(prior reasoning unavailable)"
 
 
+def is_reasoning_backfill_placeholder(value: Any) -> bool:
+    """True if *value* is the internal reasoning-backfill sentinel.
+
+    That sentinel is plumbing injected to satisfy strict thinking-mode servers;
+    it must never be persisted onto a turn or shown to a user. Callers that stash
+    a model's ``reasoning_content`` use this to drop it.
+    """
+    return isinstance(value, str) and value.strip() == _REASONING_BACKFILL_PLACEHOLDER
+
+
 def _is_reasoning_content_required_error(msg: str) -> bool:
     """True for the thinking-mode 400 that demands reasoning_content be echoed
     back on assistant messages — e.g. DeepSeek V4 thinking served via an
@@ -572,11 +582,19 @@ def _reasoning_content_fallback(reasoning: str) -> str:
     JSON (quality checks, judges, routers) and the model often emitted it inside
     its reasoning — else the last non-empty paragraph (the conclusion)."""
     rc = str(reasoning or "")
+    # The reasoning-backfill sentinel is internal plumbing, never an answer. A
+    # thinking model can echo the placeholder we injected into a prior turn's
+    # reasoning_content straight back as its own — surfacing it as content would
+    # print "(prior reasoning unavailable)" to the user. Treat it as empty so the
+    # empty-answer floor re-prompts for a real reply instead.
+    if rc.strip() == _REASONING_BACKFILL_PLACEHOLDER:
+        return ""
     blob = _extract_json_blob(rc)
     if blob is not None:
         return blob
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", rc) if p.strip()]
-    return paragraphs[-1] if paragraphs else rc.strip()
+    result = paragraphs[-1] if paragraphs else rc.strip()
+    return "" if result == _REASONING_BACKFILL_PLACEHOLDER else result
 
 
 def _normalize_provider_name(provider: str) -> str:
@@ -853,7 +871,13 @@ def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str
         # safe to always emit when we have one. Only echo non-empty
         # values to avoid sending a stray ``""`` that some strict
         # gateways might reject.
-        if role == "assistant" and isinstance(reasoning_content, str) and reasoning_content:
+        # Never echo the backfill sentinel back to the model: a thinking model
+        # can adopt it as its own reasoning and hand it back, which then leaks
+        # into visible content. Suppressing it to absent is safe — the next 400
+        # (if any) re-backfills it transiently. This breaks the echo loop.
+        if (role == "assistant" and isinstance(reasoning_content, str)
+                and reasoning_content
+                and reasoning_content.strip() != _REASONING_BACKFILL_PLACEHOLDER):
             entry["reasoning_content"] = reasoning_content
         if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
             normalized_calls: list[dict[str, Any]] = []
