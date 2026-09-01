@@ -472,3 +472,20 @@ async def revoke_mcp_token(token_id: str, user: dict = Depends(get_current_user)
     if not ok:
         raise HTTPException(404, "token not found")
     return {"ok": True}
+
+
+# ── Connected AI apps (OAuth grants — claude.ai custom connectors) ────
+
+@router.get("/oauth-grants")
+async def list_oauth_grants(user: dict = Depends(get_current_user)):
+    """Apps the user connected via the OAuth (claude.ai connector) flow."""
+    db = get_db()
+    return {"grants": await db.list_oauth_grants(user["id"])}
+
+
+@router.delete("/oauth-grants/{client_id}")
+async def revoke_oauth_grant(client_id: str, user: dict = Depends(get_current_user)):
+    """Disconnect an app: revoke all its refresh tokens for this user."""
+    db = get_db()
+    n = await db.revoke_oauth_grant(user["id"], client_id)
+    return {"ok": True, "revoked": n}

@@ -11,6 +11,13 @@ interface PAT {
   last_used_at: string | null
 }
 
+interface Grant {
+  client_id: string
+  client_name: string
+  connected_at: string
+  last_used_at: string | null
+}
+
 function authHeaders(): Record<string, string> {
   const { token, authEnabled } = useAuthStore.getState()
   const h: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -26,28 +33,44 @@ function fmt(ts: string | null): string {
 export default function MCPAgentAccess() {
   const [collapsed, setCollapsed] = useState(true)
   const [tokens, setTokens] = useState<PAT[]>([])
+  const [grants, setGrants] = useState<Grant[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [newName, setNewName] = useState('')
   const [creating, setCreating] = useState(false)
   const [freshToken, setFreshToken] = useState<string | null>(null)
-  const [copied, setCopied] = useState<'token' | 'cmd' | null>(null)
+  const [copied, setCopied] = useState<'token' | 'cmd' | 'url' | null>(null)
 
   const endpoint = `${window.location.origin}/fd/mcp-server`
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const r = await fetch('/fd/mcp-tokens', { headers: authHeaders(), credentials: 'include' })
-      if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      const data = await r.json()
-      setTokens(Array.isArray(data?.tokens) ? data.tokens : [])
+      const [tr, gr] = await Promise.all([
+        fetch('/fd/mcp-tokens', { headers: authHeaders(), credentials: 'include' }),
+        fetch('/fd/oauth-grants', { headers: authHeaders(), credentials: 'include' }),
+      ])
+      if (!tr.ok) throw new Error(`HTTP ${tr.status}`)
+      const td = await tr.json()
+      setTokens(Array.isArray(td?.tokens) ? td.tokens : [])
+      if (gr.ok) {
+        const gd = await gr.json()
+        setGrants(Array.isArray(gd?.grants) ? gd.grants : [])
+      }
       setError('')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load tokens')
     }
     setLoading(false)
   }, [])
+
+  const disconnect = async (clientId: string) => {
+    if (!confirm('Disconnect this app? It will need to sign in again to reconnect.')) return
+    try {
+      await fetch(`/fd/oauth-grants/${clientId}`, { method: 'DELETE', headers: authHeaders(), credentials: 'include' })
+      await load()
+    } catch { /* ignore */ }
+  }
 
   useEffect(() => { if (!collapsed) load() }, [collapsed, load])
 
@@ -77,7 +100,7 @@ export default function MCPAgentAccess() {
     } catch { /* ignore */ }
   }
 
-  const copy = (text: string, which: 'token' | 'cmd') => {
+  const copy = (text: string, which: 'token' | 'cmd' | 'url') => {
     navigator.clipboard?.writeText(text).then(() => {
       setCopied(which)
       setTimeout(() => setCopied(null), 1500)
@@ -117,11 +140,37 @@ export default function MCPAgentAccess() {
             <div className="flex items-center gap-2 text-xs text-red-400"><AlertCircle className="h-3.5 w-3.5" />{error}</div>
           )}
 
-          {/* Setup instructions */}
+          {/* Claude Desktop / claude.ai (custom connector via OAuth) */}
           <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3 space-y-2">
-            <p className="text-xs text-zinc-400">Endpoint (Streamable HTTP):</p>
-            <code className="block text-xs text-zinc-300 font-mono break-all">{endpoint}</code>
-            <p className="text-xs text-zinc-400 pt-1">Add it to Claude Code — create a token below, then run:</p>
+            <p className="text-xs font-medium text-zinc-300">Claude Desktop / claude.ai</p>
+            <p className="text-[11px] text-zinc-500">Add a <span className="text-zinc-400">custom connector</span> and paste this URL — you'll sign in with your Flight Deck account (no token needed):</p>
+            <div className="flex items-center gap-2">
+              <code className="block flex-1 text-xs text-zinc-300 font-mono bg-zinc-900 rounded p-2 break-all">{endpoint}</code>
+              <button onClick={() => copy(endpoint, 'url')} className="shrink-0 rounded p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800" title="Copy URL">
+                {copied === 'url' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+              </button>
+            </div>
+            {grants.length > 0 && (
+              <div className="pt-1 space-y-1">
+                <p className="text-[11px] text-zinc-500">Connected apps:</p>
+                {grants.map((g) => (
+                  <div key={g.client_id} className="flex items-center gap-2 rounded border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5">
+                    <Plug className="h-3 w-3 text-emerald-500/70 shrink-0" />
+                    <span className="text-xs text-zinc-300 truncate">{g.client_name || 'Custom connector'}</span>
+                    <span className="text-[10px] text-zinc-600 ml-auto shrink-0">used {fmt(g.last_used_at)}</span>
+                    <button onClick={() => disconnect(g.client_id)} className="shrink-0 rounded p-0.5 text-zinc-500 hover:text-red-400" title="Disconnect">
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Claude Code CLI (static token) */}
+          <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3 space-y-2">
+            <p className="text-xs font-medium text-zinc-300">Claude Code (CLI)</p>
+            <p className="text-xs text-zinc-400 pt-1">Create a token below, then run:</p>
             <div className="flex items-start gap-2">
               <code className="block flex-1 text-[11px] text-zinc-300 font-mono bg-zinc-900 rounded p-2 break-all">{cmd}</code>
               <button onClick={() => copy(cmd, 'cmd')} className="shrink-0 rounded p-1.5 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800" title="Copy command">

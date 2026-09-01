@@ -404,6 +404,42 @@ class FlightDeckDB:
                 ON personal_access_tokens(token_hash);
             CREATE INDEX IF NOT EXISTS idx_pat_user
                 ON personal_access_tokens(user_id);
+            CREATE TABLE IF NOT EXISTS oauth_clients (
+                id            TEXT PRIMARY KEY,
+                client_name   TEXT NOT NULL DEFAULT '',
+                redirect_uris TEXT NOT NULL DEFAULT '[]',
+                created_at    TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS oauth_codes (
+                id             TEXT PRIMARY KEY,
+                code_hash      TEXT NOT NULL UNIQUE,
+                client_id      TEXT NOT NULL,
+                user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                redirect_uri   TEXT NOT NULL,
+                code_challenge TEXT NOT NULL,
+                scope          TEXT NOT NULL DEFAULT 'mcp',
+                resource       TEXT,
+                created_at     TEXT NOT NULL,
+                expires_at     TEXT NOT NULL,
+                used_at        TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_oauth_codes_hash
+                ON oauth_codes(code_hash);
+            CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+                id           TEXT PRIMARY KEY,
+                token_hash   TEXT NOT NULL UNIQUE,
+                client_id    TEXT NOT NULL,
+                client_name  TEXT NOT NULL DEFAULT '',
+                user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                scope        TEXT NOT NULL DEFAULT 'mcp',
+                created_at   TEXT NOT NULL,
+                last_used_at TEXT,
+                revoked_at   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_oauth_refresh_hash
+                ON oauth_refresh_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_oauth_refresh_user
+                ON oauth_refresh_tokens(user_id, revoked_at);
         """)
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
@@ -561,6 +597,133 @@ class FlightDeckDB:
         ) as cur:
             await self._db.commit()
             return (cur.rowcount or 0) > 0
+
+    # ── OAuth 2.1 (inbound MCP; claude.ai custom connectors) ──────────
+
+    async def create_oauth_client(self, client_id: str, client_name: str, redirect_uris: list[str]) -> None:
+        assert self._db is not None
+        import json as _json
+        await self._db.execute(
+            "INSERT INTO oauth_clients (id, client_name, redirect_uris, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (client_id, client_name, _json.dumps(redirect_uris), _utcnow()),
+        )
+        await self._db.commit()
+
+    async def get_oauth_client(self, client_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM oauth_clients WHERE id = ?", (client_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        import json as _json
+        d = dict(row)
+        try:
+            d["redirect_uris"] = _json.loads(d.get("redirect_uris") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            d["redirect_uris"] = []
+        return d
+
+    async def create_oauth_code(
+        self, code_hash: str, client_id: str, user_id: str, redirect_uri: str,
+        code_challenge: str, scope: str, resource: str | None, expires_at: str,
+    ) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "INSERT INTO oauth_codes (id, code_hash, client_id, user_id, redirect_uri,"
+            " code_challenge, scope, resource, created_at, expires_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (_uuid(), code_hash, client_id, user_id, redirect_uri, code_challenge,
+             scope, resource, _utcnow(), expires_at),
+        )
+        await self._db.commit()
+
+    async def get_oauth_code_by_hash(self, code_hash: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM oauth_codes WHERE code_hash = ?", (code_hash,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def burn_oauth_code(self, code_id: str) -> bool:
+        """Atomically mark a code used; returns True only for the first caller."""
+        assert self._db is not None
+        async with self._db.execute(
+            "UPDATE oauth_codes SET used_at = ? WHERE id = ? AND used_at IS NULL",
+            (_utcnow(), code_id),
+        ) as cur:
+            await self._db.commit()
+            return (cur.rowcount or 0) == 1
+
+    async def create_oauth_refresh(
+        self, token_hash: str, client_id: str, client_name: str, user_id: str, scope: str,
+    ) -> str:
+        assert self._db is not None
+        rid = _uuid()
+        await self._db.execute(
+            "INSERT INTO oauth_refresh_tokens (id, token_hash, client_id, client_name,"
+            " user_id, scope, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (rid, token_hash, client_id, client_name, user_id, scope, _utcnow()),
+        )
+        await self._db.commit()
+        return rid
+
+    async def get_oauth_refresh_by_hash(self, token_hash: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM oauth_refresh_tokens WHERE token_hash = ? AND revoked_at IS NULL",
+            (token_hash,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def rotate_oauth_refresh(self, refresh_id: str) -> bool:
+        """Atomically revoke a refresh token (single-use rotation)."""
+        assert self._db is not None
+        async with self._db.execute(
+            "UPDATE oauth_refresh_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            (_utcnow(), refresh_id),
+        ) as cur:
+            await self._db.commit()
+            return (cur.rowcount or 0) == 1
+
+    async def list_oauth_grants(self, user_id: str) -> list[dict]:
+        """Distinct connected apps for a user (non-revoked refresh tokens)."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT client_id, MAX(client_name) AS client_name,"
+            " MIN(created_at) AS connected_at, MAX(last_used_at) AS last_used_at,"
+            " COUNT(*) AS tokens"
+            " FROM oauth_refresh_tokens WHERE user_id = ? AND revoked_at IS NULL"
+            " GROUP BY client_id ORDER BY connected_at DESC",
+            (user_id,),
+        )
+        return [dict(r) for r in rows]
+
+    async def revoke_oauth_grant(self, user_id: str, client_id: str) -> int:
+        """Revoke every refresh token for one connected app (disconnect it)."""
+        assert self._db is not None
+        async with self._db.execute(
+            "UPDATE oauth_refresh_tokens SET revoked_at = ?"
+            " WHERE user_id = ? AND client_id = ? AND revoked_at IS NULL",
+            (_utcnow(), user_id, client_id),
+        ) as cur:
+            await self._db.commit()
+            return cur.rowcount or 0
+
+    async def prune_oauth(self) -> None:
+        """Best-effort GC: drop expired/used codes."""
+        assert self._db is not None
+        now = _utcnow()
+        try:
+            await self._db.execute(
+                "DELETE FROM oauth_codes WHERE expires_at < ? OR used_at IS NOT NULL", (now,))
+            await self._db.commit()
+        except Exception:
+            pass
 
     # ── User settings ────────────────────────────────────────────────
 
