@@ -81,6 +81,29 @@ These are code changes already in this build; the env vars above turn them on.
   kind across the whole team.
 - **Admin password reset.** Admin → Users → expand a user → *Reset password*.
 
+## Connect Claude to your agents (inbound MCP)
+
+Flight Deck hosts an MCP server so an external MCP client (Claude Code / Claude
+Desktop) can list your active agents, send them tasks, and read back results —
+all scoped to your own agents.
+
+1. In Flight Deck → **Connections → Agent access for Claude (MCP)**, generate a
+   personal access token (copy it — it's shown once).
+2. Add the server to Claude Code:
+
+   ```bash
+   claude mcp add --transport http captain-fleet https://YOUR-FD-HOST/fd/mcp-server --header "Authorization: Bearer cc_pat_…"
+   ```
+
+Tools exposed: `list_agents`, `send_task` (async — returns a `task_id`),
+`get_result` (poll for live progress + the final answer), `cancel_task`.
+
+Notes: the token is a long-lived credential (unlike the 15-minute browser JWT),
+revocable any time from the same panel. The endpoint authenticates by token
+only and each token sees only its owner's agents — no extra env var is needed,
+but it should be served over HTTPS. Backend-only feature; the notifications-style
+`personal_access_tokens` table auto-creates on restart.
+
 ## Known follow-ups (not blockers)
 
 - Flows and scheduler jobs are authenticated but **not yet per-user isolated**

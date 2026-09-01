@@ -392,6 +392,18 @@ class FlightDeckDB:
             );
             CREATE INDEX IF NOT EXISTS idx_notifications_user
                 ON notifications(user_id, read, created_at);
+            CREATE TABLE IF NOT EXISTS personal_access_tokens (
+                id           TEXT PRIMARY KEY,
+                user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                token_hash   TEXT NOT NULL,
+                name         TEXT NOT NULL DEFAULT '',
+                created_at   TEXT NOT NULL,
+                last_used_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_pat_hash
+                ON personal_access_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_pat_user
+                ON personal_access_tokens(user_id);
         """)
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
@@ -500,6 +512,55 @@ class FlightDeckDB:
         now = _utcnow()
         await self._db.execute("DELETE FROM user_sessions WHERE expires_at < ?", (now,))
         await self._db.commit()
+
+    # ── Personal access tokens (long-lived; for MCP clients) ──────────
+    # Only the sha256 hash is stored; the raw token is shown to the user once
+    # at creation. A remote MCP client presents it as a Bearer credential.
+
+    async def create_pat(self, user_id: str, token_hash: str, name: str = "") -> str:
+        assert self._db is not None
+        pid = _uuid()
+        await self._db.execute(
+            "INSERT INTO personal_access_tokens (id, user_id, token_hash, name, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (pid, user_id, token_hash, name, _utcnow()),
+        )
+        await self._db.commit()
+        return pid
+
+    async def get_pat_by_hash(self, token_hash: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM personal_access_tokens WHERE token_hash = ?", (token_hash,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def list_pats(self, user_id: str) -> list[dict]:
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT id, name, created_at, last_used_at FROM personal_access_tokens"
+            " WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+        return [dict(r) for r in rows]
+
+    async def touch_pat(self, pat_id: str) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE personal_access_tokens SET last_used_at = ? WHERE id = ?",
+            (_utcnow(), pat_id),
+        )
+        await self._db.commit()
+
+    async def revoke_pat(self, pat_id: str, user_id: str) -> bool:
+        assert self._db is not None
+        async with self._db.execute(
+            "DELETE FROM personal_access_tokens WHERE id = ? AND user_id = ?",
+            (pat_id, user_id),
+        ) as cur:
+            await self._db.commit()
+            return (cur.rowcount or 0) > 0
 
     # ── User settings ────────────────────────────────────────────────
 

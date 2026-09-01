@@ -179,6 +179,64 @@ async def get_optional_user(
         return None
 
 
+# Personal access tokens for headless clients (MCP). A raw token looks like
+# ``cc_pat_<43 url-safe chars>``; only its sha256 hash is stored.
+PAT_PREFIX = "cc_pat_"
+
+
+def new_pat() -> str:
+    """Mint a new raw personal access token (shown to the user once)."""
+    return PAT_PREFIX + secrets.token_urlsafe(32)
+
+
+async def get_mcp_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> dict:
+    """Authenticate an inbound MCP/API caller.
+
+    Accepts a long-lived Personal Access Token (``cc_pat_…``) as the primary
+    credential — a headless MCP client holds a static string and can't drive the
+    cookie-based JWT refresh. Falls back to a normal access JWT so a browser or
+    short-lived token also works. Returns the user dict or raises 401.
+    """
+    if not _fd_auth_enabled():
+        request.state.user_id = _LOCAL_USER["id"]
+        request.state.user_role = _LOCAL_USER["role"]
+        return dict(_LOCAL_USER)
+    token_str = credentials.credentials if credentials else (
+        request.query_params.get("fd_token") or request.query_params.get("token") or ""
+    )
+    if not token_str:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    db = get_db()
+    if token_str.startswith(PAT_PREFIX):
+        row = await db.get_pat_by_hash(hash_token(token_str))
+        if not row:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token")
+        user = await db.get_user_by_id(row["user_id"])
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        try:
+            await db.touch_pat(row["id"])
+        except Exception:
+            pass
+        request.state.user_id = user["id"]
+        request.state.user_role = user.get("role", "user")
+        return user
+    # Fallback: a normal access JWT.
+    payload = decode_access_token(token_str)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    user = await db.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    request.state.user_id = user_id
+    request.state.user_role = user.get("role", "user")
+    return user
+
+
 async def get_ws_user(websocket: WebSocket) -> dict:
     """Validate JWT from WebSocket query param."""
     token = websocket.query_params.get("token", "")
