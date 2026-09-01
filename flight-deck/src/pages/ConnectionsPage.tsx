@@ -2,6 +2,7 @@ import { Plug } from 'lucide-react'
 import GoogleConnection from '../components/connections/GoogleConnection'
 import CodexConnection from '../components/connections/CodexConnection'
 import MCPConnection from '../components/connections/MCPConnection'
+import MCPAgentAccess from '../components/connections/MCPAgentAccess'
 import TypesenseConnection from '../components/connections/TypesenseConnection'
 
 export default function ConnectionsPage() {
@@ -24,6 +25,7 @@ export default function ConnectionsPage() {
           <GoogleConnection />
           <CodexConnection />
           <MCPConnection />
+          <MCPAgentAccess />
           <TypesenseConnection />
         </div>
       </div>

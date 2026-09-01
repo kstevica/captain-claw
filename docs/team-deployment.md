@@ -81,6 +81,35 @@ These are code changes already in this build; the env vars above turn them on.
   kind across the whole team.
 - **Admin password reset.** Admin → Users → expand a user → *Reset password*.
 
+## Connect Claude to your agents (inbound MCP)
+
+Flight Deck hosts an MCP server so an external MCP client (Claude Code / Claude
+Desktop / claude.ai) can list your active agents, send them tasks, and read back
+results — all scoped to your own agents. Tools exposed: `list_agents`,
+`send_task` (async — returns a `task_id`), `get_result` (poll for live progress
++ the final answer), `cancel_task`. Both entry points are in Flight Deck →
+**Connections → Agent access for Claude (MCP)**.
+
+**Claude Desktop / claude.ai (custom connector — OAuth):** add a custom
+connector and paste `https://YOUR-FD-HOST/fd/mcp-server`. The connector runs a
+standard OAuth 2.1 sign-in (dynamic client registration + PKCE) — the user logs
+in with their Flight Deck account; no token to copy. Connected apps are listed
+in the same panel and can be disconnected there.
+
+**Claude Code (CLI — static token):** generate a personal access token in the
+panel (shown once) and run:
+
+```bash
+claude mcp add --transport http captain-fleet https://YOUR-FD-HOST/fd/mcp-server --header "Authorization: Bearer cc_pat_…"
+```
+
+Requirements: serve FD over **HTTPS** and set **`FD_PUBLIC_URL=https://YOUR-FD-HOST`**
+so the OAuth discovery documents advertise the right URLs (it also honors an
+`X-Forwarded-Proto`/`-Host` reverse proxy, but the explicit env is safest).
+`FD_JWT_SECRET` must be set (a stable secret) — the OAuth access tokens are
+signed with it. Backend-only; the `personal_access_tokens` and `oauth_*` tables
+auto-create on restart.
+
 ## Known follow-ups (not blockers)
 
 - Flows and scheduler jobs are authenticated but **not yet per-user isolated**

@@ -1071,6 +1071,8 @@ from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck.notification_routes import router as notification_router
+from captain_claw.flight_deck.mcp_server_routes import router as mcp_inbound_router
+from captain_claw.flight_deck.mcp_oauth_routes import router as mcp_oauth_router
 from captain_claw.flight_deck.costs_routes import router as costs_router
 from captain_claw.flight_deck.llm_routes import router as llm_router
 from captain_claw.flight_deck.being_routes import router as being_router
@@ -1121,6 +1123,8 @@ app.include_router(agents_fs_router)
 app.include_router(system_router)
 app.include_router(share_router)
 app.include_router(notification_router)
+app.include_router(mcp_inbound_router)
+app.include_router(mcp_oauth_router)
 app.include_router(costs_router)
 app.include_router(llm_router)
 app.include_router(being_router)
@@ -6761,7 +6765,7 @@ if STATIC_DIR.is_dir():
     # like the API returned something nonsensical when really the
     # route just wasn't registered. Fail loudly here so missing /
     # stale routes are obvious.
-    _API_PREFIXES = ("fd/", "api/", "ws/")
+    _API_PREFIXES = ("fd/", "api/", "ws/", ".well-known/", "authorize")
 
     @app.get("/{path:path}")
     async def spa_catch_all(path: str):
