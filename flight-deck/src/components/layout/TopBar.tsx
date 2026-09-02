@@ -1,4 +1,4 @@
-import { RefreshCw, PanelLeft, Pin, FileText, ClipboardList, Sun, Moon, Keyboard, LogOut, MessageSquare, Menu } from 'lucide-react'
+import { RefreshCw, PanelLeft, Pin, FileText, ClipboardList, Sun, Moon, Keyboard, LogOut, MessageSquare, Menu, Columns3 } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
 import { useAuthStore, logoutUser } from '../../stores/authStore'
 import { useThemeStore } from '../../stores/themeStore'
@@ -33,6 +33,7 @@ export function TopBar({
   const { theme, toggle: toggleTheme } = useThemeStore()
   const mobilePanel = useUIStore((s) => s.mobilePanel)
   const toggleMobilePanel = useUIStore((s) => s.toggleMobilePanel)
+  const setLayoutMode = useUIStore((s) => s.setLayoutMode)
   const chatSessions = useChatStore((s) => s.sessions)
 
   const compact = isMobile || isTablet
@@ -141,6 +142,18 @@ export function TopBar({
           </button>
         )}
         <div className="h-4 w-px bg-zinc-800 mx-0.5" />
+
+        {/* Simple view: agents · chat · files. Desktop only — the phone and
+            tablet layouts keep their own arrangement. */}
+        {!compact && (
+          <button
+            onClick={() => setLayoutMode('simple')}
+            className="rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition-colors"
+            title="Simple view — agents, chat, files"
+          >
+            <Columns3 className="h-3.5 w-3.5" />
+          </button>
+        )}
 
         <NotificationBell />
 

@@ -26,7 +26,10 @@ const typeColor: Record<NotificationType, string> = {
   error: 'text-red-400',
 }
 
-export function NotificationBell() {
+// `align` picks which edge of the bell the dropdown hangs from: 'right' (the
+// default — the bell sits at the right end of the top bar) or 'left' (the
+// bell sits in a left-hand column, so the panel must open towards the page).
+export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right' } = {}) {
   const { unreadCount } = useNotificationStore()
   const [open, setOpen] = useState(false)
 
@@ -50,7 +53,7 @@ export function NotificationBell() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="fixed left-2 right-2 top-14 z-50 sm:absolute sm:left-auto sm:top-full sm:right-0 sm:mt-1 sm:w-[360px] rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+          <div className={`fixed left-2 right-2 top-14 z-50 sm:absolute sm:top-full sm:mt-1 sm:w-[360px] rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl ${align === 'left' ? 'sm:right-auto sm:left-0' : 'sm:left-auto sm:right-0'}`}>
             <NotificationDropdown onClose={() => setOpen(false)} />
           </div>
         </>

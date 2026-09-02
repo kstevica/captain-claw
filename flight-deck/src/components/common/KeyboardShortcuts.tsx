@@ -10,8 +10,9 @@ const shortcuts = [
   { keys: ['Cmd/Ctrl', '4'], action: 'Agent Forge' },
   { keys: ['Cmd/Ctrl', '5'], action: 'Workflows' },
   { keys: ['Cmd/Ctrl', 'D'], action: 'Toggle Director' },
-  { keys: ['Cmd/Ctrl', 'J'], action: 'Toggle Chat Panel' },
+  { keys: ['Cmd/Ctrl', 'J'], action: 'Toggle Chat Panel / Queue' },
   { keys: ['Cmd/Ctrl', 'K'], action: 'Toggle Shortcuts Help' },
+  { keys: ['Cmd/Ctrl', '\\'], action: 'Simple / Full view' },
   { keys: ['Cmd/Ctrl', '['], action: 'Previous Chat Tab' },
   { keys: ['Cmd/Ctrl', ']'], action: 'Next Chat Tab' },
   { keys: ['Escape'], action: 'Close Modals / Panels' },
@@ -40,34 +41,52 @@ export function useKeyboardShortcuts(
       return
     }
 
+    // A page shortcut asks for a page, and pages only exist in the full
+    // layout — so leave the simple (chat-first) layout when one fires.
+    const goTo = (v: Parameters<typeof setView>[0]) => {
+      useUIStore.getState().setLayoutMode('full')
+      setView(v)
+    }
+
     switch (e.key) {
       case '1':
-        if (mod) { e.preventDefault(); setView('desktop') }
+        if (mod) { e.preventDefault(); goTo('desktop') }
         break
       case '2':
-        if (mod) { e.preventDefault(); setView('council') }
+        if (mod) { e.preventDefault(); goTo('council') }
         break
       case '3':
-        if (mod) { e.preventDefault(); setView('spawner') }
+        if (mod) { e.preventDefault(); goTo('spawner') }
         break
       case '4':
-        if (mod) { e.preventDefault(); setView('forge') }
+        if (mod) { e.preventDefault(); goTo('forge') }
         break
       case '5':
-        if (mod) { e.preventDefault(); setView('workflow') }
+        if (mod) { e.preventDefault(); goTo('workflow') }
         break
       case 'd':
-        if (mod) { e.preventDefault(); onToggleDirector() }
+        if (mod) {
+          e.preventDefault()
+          // The Director only exists in the full layout; don't flip (and
+          // persist) state that nothing in the simple layout renders.
+          if (useUIStore.getState().layoutMode !== 'simple') onToggleDirector()
+        }
         break
       case 'j':
         if (mod) {
           e.preventDefault()
-          if (chatStore.chatOpen) chatStore.closeChat()
+          const ui = useUIStore.getState()
+          if (ui.layoutMode === 'simple') {
+            ui.setSimpleQueueOpen(!ui.simpleQueueOpen)
+          } else if (chatStore.chatOpen) chatStore.closeChat()
           else if (chatStore.activeChatId) useChatStore.setState({ chatOpen: true })
         }
         break
       case 'k':
         if (mod) { e.preventDefault(); setShortcutsOpen(!shortcutsOpen) }
+        break
+      case '\\':
+        if (mod) { e.preventDefault(); useUIStore.getState().toggleLayoutMode() }
         break
       case '[':
         if (mod) {

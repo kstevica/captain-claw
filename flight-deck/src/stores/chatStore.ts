@@ -814,6 +814,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         existing.ws.connect()
       }
+      if (existing.unread) updateSession(key, { unread: false })
       set({ activeChatId: key, chatOpen: true })
       return
     }
@@ -1712,6 +1713,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   switchChat: (containerId) => {
+    if (get().sessions.get(containerId)?.unread) updateSession(containerId, { unread: false })
     set({ activeChatId: containerId, chatOpen: true })
   },
 
