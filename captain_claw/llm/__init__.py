@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -605,6 +607,18 @@ def _normalize_provider_name(provider: str) -> str:
         "openai": "openai",
         "claude": "anthropic",
         "anthropic": "anthropic",
+        # Anthropic *subscription* (Pro/Max) via the ``claude`` CLI, as
+        # opposed to the pay-per-token ``anthropic`` API path above. Keep
+        # these distinct from ``claude``/``anthropic`` so selecting the
+        # subscription can never silently fall back to metered billing.
+        "claude-cli": "claude-cli",
+        "claude_cli": "claude-cli",
+        "claude-code": "claude-cli",
+        "claude-subscription": "claude-cli",
+        "claude-sub": "claude-cli",
+        "claude-max": "claude-cli",
+        "anthropic-cli": "claude-cli",
+        "anthropic-subscription": "claude-cli",
         "gemini": "gemini",
         "google": "gemini",
         "googleai": "gemini",
@@ -1980,6 +1994,449 @@ def _forced_tool_call_schema(tools: list[ToolDefinition]) -> dict[str, Any] | No
         },
         "required": ["tool", "arguments"],
     }
+
+
+# Captain Claw model ids that need remapping to a ``claude --model`` value.
+# Bare family names (opus/sonnet/haiku/fable) and full dated ids the CLI
+# already accepts pass straight through, so this map stays intentionally
+# small — extend it only when the CLI rejects an id Captain Claw uses.
+_CLAUDE_CLI_MODEL_ALIASES = {
+    "claude": "sonnet",
+}
+
+
+class ClaudeCLIProvider(LLMProvider):
+    """Anthropic **subscription** (Pro/Max) via the ``claude`` CLI.
+
+    Subscription usage is only billable through the Claude Code CLI or the
+    Agent SDK — never ``api.anthropic.com`` with a key (always metered
+    pay-per-token), and never an OAuth-token HTTP client pointed at the
+    Messages API (a ToS-violating spoof). So this provider shells out to
+    ``claude -p`` and reads the subscription-billed result back.
+
+    **Scope: text generation only.** The CLI is an *agent*, not a chat
+    endpoint — it *executes* tools in its own loop instead of returning a
+    tool_call for Captain Claw's loop to run. So tool/function calling is
+    deliberately unimplemented (``supports_tools = False``); route only
+    tool-free work here (council prose, narration, research synthesis,
+    reflections). Tool-using agent turns stay on the ``anthropic`` API
+    provider.
+
+    **Runtime dependency:** a *valid* OAuth login for the standalone
+    ``claude`` binary — ``claude login`` (interactive) or
+    ``claude setup-token`` (a long-lived ``sk-ant-oat01-…`` token; pass it
+    as ``oauth_token`` or the ``CLAUDE_CODE_OAUTH_TOKEN`` env var for
+    headless/daemon use). ``ANTHROPIC_API_KEY`` in the environment silently
+    wins over OAuth and bills the API, so it — and any ``ANTHROPIC_BASE_URL``
+    proxy override that would misroute off the subscription endpoint — is
+    scrubbed from the child environment.
+
+    **Note:** the CLI exposes no ``temperature`` / ``max_tokens`` knobs, so
+    those arguments are accepted for interface parity but ignored. Spawning
+    the CLI also fires the user's Claude Code hooks (e.g. ``SessionStart``);
+    their output is discarded.
+    """
+
+    #: Advertised so orchestration never routes tool-calls to this provider.
+    supports_tools = False
+
+    def __init__(
+        self,
+        model: str = "sonnet",
+        base_url: str | None = None,      # optional explicit ``claude`` binary path
+        temperature: float = 0.7,         # accepted for parity; the CLI has no knob
+        max_tokens: int = 32000,          # accepted for parity; the CLI has no knob
+        tokens_per_minute: int = 0,
+        oauth_token: str | None = None,
+        cli_path: str | None = None,
+        cwd: str | None = None,
+        timeout: float = 600.0,
+        scrub_base_url: bool = True,
+    ):
+        self.provider = "claude-cli"
+        self.model = self._map_model(model)
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.timeout = timeout
+        self.scrub_base_url = scrub_base_url
+        # Long-lived token (``claude setup-token``) for headless use; falls
+        # back to the ambient login in ``~/.claude/.credentials.json``.
+        self.oauth_token = oauth_token or os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or None
+        self.cli_path = self._resolve_cli(cli_path or base_url)
+        # Neutral working dir so the CLI doesn't scrape the project's
+        # CLAUDE.md / files into the generation context.
+        self.cwd = cwd or tempfile.gettempdir()
+        self.rate_limiter = (
+            TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
+        )
+        self._warned_tools = False
+        log.info(
+            "ClaudeCLIProvider ready (Anthropic subscription via claude CLI)",
+            model=self.model,
+            cli_path=self.cli_path,
+            has_oauth_token=bool(self.oauth_token),
+        )
+
+    # ── helpers ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _resolve_cli(explicit: str | None) -> str:
+        for cand in (
+            explicit,
+            os.getenv("CLAUDE_CLI_PATH"),
+            shutil.which("claude"),
+            "~/.local/bin/claude",
+        ):
+            if not cand:
+                continue
+            path = os.path.expanduser(cand)
+            if os.path.exists(path):
+                return path
+        # Last resort: bare name, let PATH resolution fail loudly at spawn.
+        return "claude"
+
+    @staticmethod
+    def _map_model(model: str) -> str:
+        m = (model or "").strip()
+        if "/" in m:  # strip a provider prefix (``anthropic/claude-…``)
+            m = m.split("/", 1)[1]
+        return _CLAUDE_CLI_MODEL_ALIASES.get(m.lower(), m) or "sonnet"
+
+    def _child_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        # The single most common way this path gets mis-billed: an
+        # ANTHROPIC_API_KEY anywhere in the environment silently overrides
+        # OAuth and bills pay-per-token. Drop it (and the token variant).
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("ANTHROPIC_AUTH_TOKEN", None)
+        if self.scrub_base_url:
+            env.pop("ANTHROPIC_BASE_URL", None)
+        if self.oauth_token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = self.oauth_token
+        return env
+
+    @staticmethod
+    def _split_messages(messages: list[Message]) -> tuple[str, str]:
+        """Flatten a conversation into ``(system_prompt, prompt_body)``.
+
+        The CLI takes one system prompt and one prompt body, so system
+        messages are concatenated and the remaining turns are rendered as a
+        labelled transcript. A lone turn is passed through verbatim.
+        """
+        system_parts: list[str] = []
+        turns: list[tuple[str, str]] = []
+        for m in messages:
+            role = str(_obj_get(m, "role", "") or "")
+            content = str(_obj_get(m, "content", "") or "")
+            if role == "system":
+                if content.strip():
+                    system_parts.append(content)
+            elif role == "tool":
+                name = _obj_get(m, "tool_name", None)
+                label = f"Tool result ({name})" if name else "Tool result"
+                turns.append(("tool", f"{label}:\n{content}"))
+            else:
+                turns.append((role or "user", content))
+        system_prompt = "\n\n".join(system_parts).strip()
+        if not turns:
+            return system_prompt, ""
+        if len(turns) == 1:
+            return system_prompt, turns[0][1]
+        lines: list[str] = []
+        for role, content in turns:
+            if role == "assistant":
+                lines.append(f"Assistant: {content}")
+            elif role == "tool":
+                lines.append(content)
+            else:
+                lines.append(f"User: {content}")
+        return system_prompt, "\n\n".join(lines)
+
+    def _build_argv(
+        self, system_prompt: str, sp_file: str | None, streaming: bool
+    ) -> list[str]:
+        argv = [
+            self.cli_path, "-p",
+            "--input-format", "text",
+            "--output-format", "stream-json" if streaming else "json",
+            "--model", self.model,
+            # No tools: this is pure text generation. Print mode cannot
+            # answer a permission prompt, so nothing executes regardless.
+            "--allowedTools", "",
+        ]
+        if streaming:
+            # stream-json in --print mode is rejected without --verbose.
+            argv += ["--verbose", "--include-partial-messages"]
+        if sp_file:
+            argv += ["--system-prompt-file", sp_file,
+                     "--exclude-dynamic-system-prompt-sections"]
+        elif system_prompt:
+            argv += ["--system-prompt", system_prompt,
+                     "--exclude-dynamic-system-prompt-sections"]
+        return argv
+
+    @staticmethod
+    def _maybe_spill_system(system_prompt: str) -> str | None:
+        """Write an oversized system prompt to a temp file (arg-length guard)."""
+        if len(system_prompt) <= 200_000:
+            return None
+        fd, path = tempfile.mkstemp(prefix="claw-sysprompt-", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(system_prompt)
+        except Exception:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            return None
+        return path
+
+    @staticmethod
+    def _text_of(msg: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for block in (msg.get("content") or []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+
+    def _auth_hint(self, text: str) -> str:
+        t = (text or "").strip()
+        low = t.lower()
+        if any(k in low for k in ("authenticate", "oauth", "expired", "log in", "login")):
+            return (
+                "claude CLI is not authenticated for the subscription "
+                f"({t[:200]}). Run `claude setup-token` (headless, long-lived) "
+                "or `claude login`, and make sure ANTHROPIC_API_KEY is unset."
+            )
+        return f"claude CLI error: {t[:300]}"
+
+    @staticmethod
+    def _parse_result_json(raw: str) -> dict[str, Any]:
+        raw = (raw or "").strip()
+        if not raw:
+            raise LLMAPIError("claude CLI returned no output")
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        # Fall back: scan lines for the final ``result`` object.
+        result: dict[str, Any] | None = None
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(o, dict) and (o.get("type") == "result" or "result" in o):
+                result = o
+        if result is None:
+            raise LLMAPIError(f"claude CLI: unparseable output: {raw[:300]}")
+        return result
+
+    async def _spawn_and_read(self, argv: list[str], prompt: str) -> str:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.cwd,
+                env=self._child_env(),
+            )
+        except FileNotFoundError:
+            raise LLMAPIError(
+                f"claude CLI not found at '{self.cli_path}'. Install it "
+                "(`npm i -g @anthropic-ai/claude-code`) or set CLAUDE_CLI_PATH."
+            )
+        try:
+            out, err = await asyncio.wait_for(
+                proc.communicate(prompt.encode("utf-8")), timeout=self.timeout
+            )
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            raise LLMAPIError(f"claude CLI timed out after {self.timeout:.0f}s")
+        text = (out or b"").decode("utf-8", "replace")
+        if proc.returncode not in (0, None) and not text.strip():
+            detail = (err or b"").decode("utf-8", "replace")[:500]
+            raise LLMAPIError(f"claude CLI exited {proc.returncode}: {detail}")
+        return text
+
+    # ── public API ───────────────────────────────────────────────────────
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        if tools and not self._warned_tools:
+            self._warned_tools = True
+            log.warning(
+                "ClaudeCLIProvider ignores tools — it is text-generation only; "
+                "route tool-using turns to the API-backed 'anthropic' provider",
+                tool_count=len(tools),
+            )
+        system_prompt, prompt = self._split_messages(messages)
+        if not prompt.strip():
+            # The CLI needs a non-empty prompt body; fold system into it.
+            prompt, system_prompt = (system_prompt or " "), ""
+        sp_file = self._maybe_spill_system(system_prompt)
+
+        estimated = 0
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
+            await self.rate_limiter.acquire(estimated)
+
+        argv = self._build_argv(system_prompt, sp_file, streaming=False)
+        try:
+            raw = await self._spawn_and_read(argv, prompt)
+        finally:
+            if sp_file:
+                try:
+                    os.unlink(sp_file)
+                except OSError:
+                    pass
+
+        data = self._parse_result_json(raw)
+        result_text = str(data.get("result", "") or "")
+        if data.get("is_error"):
+            raise LLMAPIError(self._auth_hint(result_text))
+
+        u = data.get("usage") or {}
+        prompt_toks = (
+            int(u.get("input_tokens", 0) or 0)
+            + int(u.get("cache_read_input_tokens", 0) or 0)
+            + int(u.get("cache_creation_input_tokens", 0) or 0)
+        )
+        completion_toks = int(u.get("output_tokens", 0) or 0)
+        usage = {
+            "prompt_tokens": prompt_toks,
+            "completion_tokens": completion_toks,
+            "total_tokens": prompt_toks + completion_toks,
+        }
+        cost = data.get("total_cost_usd")
+        log.info(
+            "claude CLI (subscription) call complete",
+            model=self.model,
+            cost_usd=cost,
+            **usage,
+        )
+        if self.rate_limiter:
+            self.rate_limiter.record_actual(usage["total_tokens"], estimated)
+        return LLMResponse(
+            content=result_text,
+            tool_calls=[],
+            model=str(data.get("model") or self.model),
+            usage=usage,
+            finish_reason=str(data.get("stop_reason") or ""),
+        )
+
+    async def complete_streaming(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        if tools and not self._warned_tools:
+            self._warned_tools = True
+            log.warning(
+                "ClaudeCLIProvider ignores tools — text-generation only",
+                tool_count=len(tools),
+            )
+        system_prompt, prompt = self._split_messages(messages)
+        if not prompt.strip():
+            prompt, system_prompt = (system_prompt or " "), ""
+        sp_file = self._maybe_spill_system(system_prompt)
+
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
+            await self.rate_limiter.acquire(estimated)
+
+        argv = self._build_argv(system_prompt, sp_file, streaming=True)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.cwd,
+                env=self._child_env(),
+            )
+        except FileNotFoundError:
+            raise LLMAPIError(
+                f"claude CLI not found at '{self.cli_path}'. Install it "
+                "(`npm i -g @anthropic-ai/claude-code`) or set CLAUDE_CLI_PATH."
+            )
+        assert proc.stdin is not None and proc.stdout is not None
+        try:
+            proc.stdin.write(prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+        streamed = False
+        try:
+            async for raw_line in proc.stdout:
+                line = raw_line.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = ev.get("type")
+                if etype == "stream_event":
+                    inner = ev.get("event") or {}
+                    if inner.get("type") == "content_block_delta":
+                        delta = inner.get("delta") or {}
+                        if delta.get("type") == "text_delta" and delta.get("text"):
+                            streamed = True
+                            yield str(delta["text"])
+                elif etype == "assistant":
+                    msg = ev.get("message") or {}
+                    if ev.get("error") or msg.get("model") == "<synthetic>":
+                        raise LLMAPIError(self._auth_hint(self._text_of(msg)))
+                    # No partial deltas seen (older CLI / non-partial mode):
+                    # emit the whole text block once so callers still get output.
+                    if not streamed:
+                        whole = self._text_of(msg)
+                        if whole:
+                            streamed = True
+                            yield whole
+                elif etype == "result":
+                    if ev.get("is_error"):
+                        raise LLMAPIError(self._auth_hint(str(ev.get("result", ""))))
+                    break
+        finally:
+            if sp_file:
+                try:
+                    os.unlink(sp_file)
+                except OSError:
+                    pass
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except ProcessLookupError:
+                    pass
+
+    def count_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+    async def close(self) -> None:  # symmetry with other providers
+        return None
 
 
 class OllamaProvider(LLMProvider):
@@ -4237,7 +4694,11 @@ def create_provider(
     Supported providers:
     - `ollama`
     - `openai` / `chatgpt`
-    - `anthropic` / `claude`
+    - `anthropic` / `claude` — pay-per-token via the Messages API.
+    - `claude-cli` / `claude-subscription` — Anthropic **subscription**
+      (Pro/Max) billed through the local ``claude`` CLI. Text generation
+      only (no tool calling); requires ``claude login`` /
+      ``claude setup-token``. See :class:`ClaudeCLIProvider`.
     - `gemini` / `google`
     - `grok` / `xai`
     - `openrouter`
@@ -4285,6 +4746,18 @@ def create_provider(
             model=model,
             base_url=base_url or "https://chatgpt.com/backend-api/codex/responses",
             extra_headers=extra_headers,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tokens_per_minute=tokens_per_minute,
+        )
+
+    if normalized == "claude-cli":
+        # Anthropic **subscription** (Pro/Max) via the ``claude`` CLI
+        # subprocess — text generation only, no metered API key. Auth comes
+        # from the ambient ``claude login`` (or CLAUDE_CODE_OAUTH_TOKEN).
+        return ClaudeCLIProvider(
+            model=model,
+            base_url=base_url,          # optional explicit ``claude`` binary path
             temperature=temperature,
             max_tokens=max_tokens,
             tokens_per_minute=tokens_per_minute,
@@ -4341,7 +4814,8 @@ def create_provider(
 
     raise ValueError(
         f"Provider '{provider}' not supported. "
-        "Use one of: ollama, openai/chatgpt, anthropic/claude, gemini/google, "
+        "Use one of: ollama, openai/chatgpt, anthropic/claude, "
+        "claude-cli/claude-subscription, gemini/google, "
         "grok/xai, openrouter, litert."
     )
 
