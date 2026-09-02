@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { Sidebar } from './components/layout/Sidebar'
 import { TopBar } from './components/layout/TopBar'
 import { MobileNav } from './components/layout/MobileNav'
+import { SimpleLayout } from './components/layout/SimpleLayout'
 import { ChatPanel } from './components/agents/ChatPanel'
 import { DirectorPanel } from './components/agents/DirectorPanel'
 import { PinnedMessages } from './components/common/PinnedMessages'
@@ -151,6 +152,7 @@ registerHydrator((settings) => {
 
 function AppContent() {
   const view = useUIStore((s) => s.view)
+  const layoutMode = useUIStore((s) => s.layoutMode)
   const chatOpen = useChatStore((s) => s.chatOpen)
   const chatFullscreen = useChatStore((s) => s.chatFullscreen)
   const { fetchInstances, fetchStats, fetchConcerns, setWsConnected, upsertInstance, removeInstance, updateInstanceActivity } = useAgentStore()
@@ -437,6 +439,20 @@ function AppContent() {
         {mobilePanelOverlay}
         {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
       </div>
+    )
+  }
+
+  // ── Desktop: simple layout ──
+  // Agents on the left, the chat in the middle, the active agent's files and
+  // datastore on the right. Swaps in for everything below (nav, top bar,
+  // director, pages, tool panels) and back out with one click; the full
+  // layout is left exactly as it was.
+  if (layoutMode === 'simple') {
+    return (
+      <>
+        <SimpleLayout onToggleShortcuts={() => setShortcutsOpen(!shortcutsOpen)} />
+        {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
+      </>
     )
   }
 

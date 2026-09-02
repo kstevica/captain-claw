@@ -66,9 +66,9 @@ export function PlanCard({ containerId }: PlanCardProps) {
   const counts = aggregateCounts(plan)
 
   return (
-    <div className="mx-3 my-2 flex max-h-[45vh] shrink-0 flex-col overflow-hidden rounded-lg border border-violet-500/30 bg-gradient-to-b from-violet-950/40 to-zinc-950/60 shadow-lg shadow-violet-950/20 dark:border-violet-500/30">
+    <div className="mx-3 my-2 flex max-h-[45vh] shrink-0 flex-col overflow-hidden rounded-lg border border-violet-500/40 bg-violet-500/5 shadow-lg shadow-violet-500/10 dark:bg-gradient-to-b dark:from-violet-950/40 dark:to-zinc-950/60 dark:shadow-violet-950/20">
       {/* Header */}
-      <div className="flex items-center gap-2 border-b border-violet-500/20 bg-violet-900/20 px-3 py-2">
+      <div className="flex items-center gap-2 border-b border-violet-500/20 bg-violet-500/10 px-3 py-2 dark:bg-violet-900/20">
         <button
           onClick={() => togglePlanCardCollapsed(containerId)}
           className="flex flex-1 items-center gap-2 text-left"
@@ -79,7 +79,7 @@ export function PlanCard({ containerId }: PlanCardProps) {
             <ChevronDown className="h-3.5 w-3.5 text-violet-300" />
           )}
           <ListChecks className="h-4 w-4 text-violet-300" />
-          <span className="text-xs font-semibold text-violet-100">Plan monitor</span>
+          <span className="text-xs font-semibold text-violet-700 dark:text-violet-100">Plan monitor</span>
           <PlanStatusBadge plan={plan} />
         </button>
 
@@ -93,7 +93,7 @@ export function PlanCard({ containerId }: PlanCardProps) {
               cancelTask(containerId)
             }}
             title="Stop plan execution"
-            className="flex items-center gap-1 rounded border border-red-500/40 bg-red-950/30 px-1.5 py-0.5 text-[10px] font-medium text-red-200 hover:bg-red-900/50 hover:text-red-100"
+            className="flex items-center gap-1 rounded border border-red-500/40 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-700 hover:bg-red-500/20 dark:bg-red-500/10 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-900/50 dark:hover:text-red-100"
           >
             <StopCircle className="h-3 w-3" />
             <span>Stop</span>
@@ -107,7 +107,7 @@ export function PlanCard({ containerId }: PlanCardProps) {
               dismissPlan(containerId)
             }}
             title="Dismiss plan card"
-            className="rounded p-1 text-violet-300 hover:bg-violet-800/50 hover:text-violet-100"
+            className="rounded p-1 text-violet-500 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-100"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -122,7 +122,7 @@ export function PlanCard({ containerId }: PlanCardProps) {
           {/* Tab bar — Steps + Files. Files tab loads a since-filtered listing
               of files written under the agent's saved/output dirs after the
               plan started. */}
-          <div className="flex items-center gap-1 border-b border-violet-500/20 bg-violet-950/30 px-2">
+          <div className="flex items-center gap-1 border-b border-violet-500/20 bg-violet-500/5 px-2 dark:bg-violet-950/30">
             <TabButton
               active={activeTab === 'steps'}
               onClick={() => setActiveTab('steps')}
@@ -145,7 +145,7 @@ export function PlanCard({ containerId }: PlanCardProps) {
               {/* Body — internal scroll keeps long step lists from pushing chat off screen */}
               <div className="overflow-y-auto px-3 py-2">
                 {plan.errorMessage && (
-                  <div className="mb-2 flex items-start gap-1.5 rounded border border-red-700/40 bg-red-950/30 px-2 py-1.5 text-[11px] text-red-300">
+                  <div className="mb-2 flex items-start gap-1.5 rounded border border-red-500/40 dark:border-red-700/40 bg-red-500/10 dark:bg-red-950/30 px-2 py-1.5 text-[11px] text-red-700 dark:text-red-300">
                     <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
                     <span className="break-words">{plan.errorMessage}</span>
                   </div>
@@ -164,7 +164,7 @@ export function PlanCard({ containerId }: PlanCardProps) {
                 </ol>
 
                 {plan.verificationNotes && plan.status === 'failed' && (
-                  <div className="mt-2 rounded border border-amber-700/40 bg-amber-950/20 px-2 py-1.5 text-[11px] text-amber-300">
+                  <div className="mt-2 rounded border border-amber-500/40 dark:border-amber-700/40 bg-amber-500/10 dark:bg-amber-950/20 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
                     <span className="font-medium">Verification notes:</span> {plan.verificationNotes}
                   </div>
                 )}
@@ -201,8 +201,8 @@ function TabButton({
       onClick={onClick}
       className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider transition-colors ${
         active
-          ? 'border-b-2 border-violet-400 text-violet-100'
-          : 'border-b-2 border-transparent text-violet-300/60 hover:text-violet-200'
+          ? 'border-b-2 border-violet-400 text-violet-700 dark:text-violet-100'
+          : 'border-b-2 border-transparent text-zinc-500 hover:text-zinc-700 dark:text-violet-300/60 dark:hover:text-violet-200'
       }`}
     >
       {icon}
@@ -259,14 +259,14 @@ function PlanFilesTab({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b border-violet-500/10 px-3 py-1.5 text-[10px] text-violet-300/70">
+      <div className="flex items-center justify-between border-b border-violet-500/10 px-3 py-1.5 text-[10px] text-zinc-500">
         <span>
           {files.length} file{files.length === 1 ? '' : 's'} since plan started
         </span>
         <button
           onClick={fetchFiles}
           disabled={loading}
-          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-violet-300 hover:bg-violet-800/40 disabled:opacity-40"
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-violet-600 hover:bg-violet-500/10 disabled:opacity-40 dark:text-violet-300"
           title="Refresh"
         >
           <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
@@ -276,12 +276,12 @@ function PlanFilesTab({
 
       <div className="flex-1 overflow-y-auto px-2 py-2">
         {error && (
-          <div className="rounded border border-red-700/40 bg-red-950/30 px-2 py-1.5 text-[11px] text-red-300">
+          <div className="rounded border border-red-500/40 dark:border-red-700/40 bg-red-500/10 dark:bg-red-950/30 px-2 py-1.5 text-[11px] text-red-700 dark:text-red-300">
             {error}
           </div>
         )}
         {!error && !loading && files.length === 0 && (
-          <div className="px-2 py-6 text-center text-[11px] text-violet-300/50">
+          <div className="px-2 py-6 text-center text-[11px] text-zinc-500">
             No files written yet. New files will appear here as steps run.
           </div>
         )}
@@ -290,9 +290,9 @@ function PlanFilesTab({
             {files.map((f, idx) => (
               <li
                 key={f.physical}
-                className="group flex items-center gap-2 rounded px-2 py-1 text-[12px] hover:bg-violet-900/20"
+                className="group flex items-center gap-2 rounded px-2 py-1 text-[12px] hover:bg-violet-500/10"
               >
-                <FileText className="h-3.5 w-3.5 shrink-0 text-violet-300/70" />
+                <FileText className="h-3.5 w-3.5 shrink-0 text-violet-500/80 dark:text-violet-300/70" />
                 <span className="flex-1 truncate text-zinc-200" title={f.logical}>
                   {f.filename}
                 </span>
@@ -345,11 +345,11 @@ function PlanFilesTab({
 
 function PlanStatusBadge({ plan }: { plan: PlanState }) {
   const map: Record<PlanState['status'], { label: string; cls: string }> = {
-    running: { label: 'running', cls: 'bg-violet-500/30 text-violet-100 ring-1 ring-violet-400/40' },
-    verified: { label: 'verified', cls: 'bg-emerald-500/30 text-emerald-100 ring-1 ring-emerald-400/40' },
-    completed: { label: 'completed', cls: 'bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-400/30' },
-    failed: { label: 'failed', cls: 'bg-red-500/30 text-red-100 ring-1 ring-red-400/40' },
-    cancelled: { label: 'cancelled', cls: 'bg-zinc-500/30 text-zinc-200 ring-1 ring-zinc-400/40' },
+    running: { label: 'running', cls: 'bg-violet-500/20 text-violet-700 ring-1 ring-violet-400/40 dark:bg-violet-500/30 dark:text-violet-100' },
+    verified: { label: 'verified', cls: 'bg-emerald-500/20 text-emerald-700 ring-1 ring-emerald-400/40 dark:bg-emerald-500/30 dark:text-emerald-100' },
+    completed: { label: 'completed', cls: 'bg-emerald-500/15 text-emerald-700 ring-1 ring-emerald-400/30 dark:bg-emerald-500/20 dark:text-emerald-200' },
+    failed: { label: 'failed', cls: 'bg-red-500/20 text-red-700 ring-1 ring-red-400/40 dark:bg-red-500/30 dark:text-red-100' },
+    cancelled: { label: 'cancelled', cls: 'bg-zinc-500/20 text-zinc-700 ring-1 ring-zinc-400/40 dark:bg-zinc-500/30 dark:text-zinc-200' },
   }
   const m = map[plan.status]
   return (
@@ -362,7 +362,7 @@ function PlanStatusBadge({ plan }: { plan: PlanState }) {
 
 function ProgressCounters({ counts }: { counts: ReturnType<typeof aggregateCounts> }) {
   return (
-    <div className="flex items-center gap-2 text-[10px] font-mono text-violet-200/80">
+    <div className="flex items-center gap-2 text-[10px] font-mono text-zinc-500">
       <span className="flex items-center gap-0.5">
         <CheckCircle2 className="h-3 w-3 text-emerald-400" />
         {counts.verified + counts.completed}
@@ -373,7 +373,7 @@ function ProgressCounters({ counts }: { counts: ReturnType<typeof aggregateCount
           {counts.failed}
         </span>
       )}
-      <span className="text-violet-300/50">/ {counts.total}</span>
+      <span className="text-zinc-500">/ {counts.total}</span>
     </div>
   )
 }
@@ -386,7 +386,7 @@ function ElapsedTimer({ startedAtMs, running }: { startedAtMs: number; running: 
     return () => clearInterval(id)
   }, [running])
   const elapsed = Math.max(0, now - startedAtMs)
-  return <span className="font-mono text-[10px] text-violet-200/70">{formatDuration(elapsed)}</span>
+  return <span className="font-mono text-[10px] text-zinc-500">{formatDuration(elapsed)}</span>
 }
 
 function ProgressBar({
@@ -422,21 +422,21 @@ function ActiveStepSpotlight({ step }: { step: PlanStep }) {
   const PhaseIcon = isToolPhase ? Wrench : phase === 'thinking' ? Sparkles : Activity
 
   return (
-    <div className="mx-3 mt-3 mb-1 rounded-md border border-violet-500/30 bg-violet-950/40 px-3 py-2.5">
+    <div className="mx-3 mt-3 mb-1 rounded-md border border-violet-500/30 bg-violet-500/10 px-3 py-2.5 dark:bg-violet-950/40">
       <div className="flex items-center gap-2">
         <div className="relative">
           <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-300" />
         </div>
         <span className="text-[10px] font-bold uppercase tracking-wider text-violet-300">Now running</span>
-        <span className="text-[11px] font-medium text-violet-50">{step.title || step.id}</span>
+        <span className="text-[11px] font-medium text-violet-700 dark:text-violet-50">{step.title || step.id}</span>
       </div>
 
       {(step.currentText || step.currentTool || phase) && (
-        <div className="mt-1.5 flex items-start gap-1.5 text-[11px] text-violet-100/80">
-          <PhaseIcon className="mt-0.5 h-3 w-3 shrink-0 text-violet-300/80" />
+        <div className="mt-1.5 flex items-start gap-1.5 text-[11px] text-zinc-600 dark:text-violet-100/80">
+          <PhaseIcon className="mt-0.5 h-3 w-3 shrink-0 text-violet-500/80 dark:text-violet-300/80" />
           <span className="flex-1 break-words">
             {step.currentTool && (
-              <span className="font-mono text-violet-200">
+              <span className="font-mono text-violet-600 dark:text-violet-200">
                 {step.currentTool}
                 {step.currentText ? ' · ' : ''}
               </span>
@@ -476,21 +476,21 @@ function PlanStepRow({
     step.tokensOut
 
   return (
-    <li className={`text-[12px] ${isActive ? 'rounded bg-violet-900/20 ring-1 ring-violet-500/30' : ''}`}>
+    <li className={`text-[12px] ${isActive ? 'rounded bg-violet-500/10 ring-1 ring-violet-500/30' : ''}`}>
       <button
         onClick={() => hasDetails && setExpanded(!expanded)}
         className={`flex w-full items-start gap-2 rounded px-1.5 py-1 text-left ${
-          hasDetails ? 'hover:bg-violet-900/20' : 'cursor-default'
+          hasDetails ? 'hover:bg-violet-500/10' : 'cursor-default'
         }`}
       >
-        <span className="mt-0.5 w-4 shrink-0 text-right text-[10px] font-mono text-violet-400/60">{index}</span>
+        <span className="mt-0.5 w-4 shrink-0 text-right text-[10px] font-mono text-zinc-500">{index}</span>
         <StepIcon status={step.status} />
         <span
           className={`flex-1 ${
             step.status === 'failed'
-              ? 'text-red-300'
+              ? 'text-red-700 dark:text-red-300'
               : step.status === 'running'
-                ? 'text-violet-100 font-medium'
+                ? 'text-violet-700 dark:text-violet-100 font-medium'
                 : 'text-zinc-200'
           }`}
         >
@@ -500,7 +500,7 @@ function PlanStepRow({
           <span className="rounded bg-zinc-700/50 px-1 py-0.5 text-[9px] text-zinc-400">orchestrate</span>
         )}
         {step.revisionCount > 0 && (
-          <span className="flex items-center gap-0.5 rounded bg-amber-700/30 px-1 py-0.5 text-[9px] text-amber-300">
+          <span className="flex items-center gap-0.5 rounded bg-amber-500/15 dark:bg-amber-700/30 px-1 py-0.5 text-[9px] text-amber-700 dark:text-amber-300">
             <RotateCw className="h-2.5 w-2.5" />
             {step.revisionCount}
           </span>
@@ -530,7 +530,7 @@ function PlanStepRow({
             </div>
           )}
           {step.error && (
-            <div className="rounded border border-red-800/40 bg-red-950/30 px-1.5 py-1 text-red-300">
+            <div className="rounded border border-red-500/40 dark:border-red-800/40 bg-red-500/10 dark:bg-red-950/30 px-1.5 py-1 text-red-700 dark:text-red-300">
               <span className="font-medium">Error:</span> {step.error}
             </div>
           )}
@@ -544,17 +544,17 @@ function PlanStepRow({
               <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
                 Verification {step.verificationPassed ? '✓' : '✗'}
               </div>
-              <div className={step.verificationPassed ? 'text-emerald-300' : 'text-red-300'}>
+              <div className={step.verificationPassed ? 'text-emerald-700 dark:text-emerald-300' : 'text-red-700 dark:text-red-300'}>
                 {step.verificationNotes}
               </div>
             </div>
           )}
           {stepRevisions.map((r, i) => (
-            <div key={i} className="rounded border border-amber-800/30 bg-amber-950/20 px-1.5 py-1">
-              <div className="text-[10px] font-medium uppercase tracking-wider text-amber-400">
+            <div key={i} className="rounded border border-amber-500/40 dark:border-amber-800/30 bg-amber-500/10 dark:bg-amber-950/20 px-1.5 py-1">
+              <div className="text-[10px] font-medium uppercase tracking-wider text-amber-600 dark:text-amber-400">
                 Revision {r.revision_count}
               </div>
-              {r.rationale && <div className="mt-0.5 text-amber-200">{r.rationale}</div>}
+              {r.rationale && <div className="mt-0.5 text-amber-700 dark:text-amber-200">{r.rationale}</div>}
               {r.revised_description && (
                 <div className="mt-1 text-zinc-300">
                   <span className="text-zinc-500">→ </span>

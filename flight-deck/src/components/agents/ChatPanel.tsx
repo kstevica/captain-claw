@@ -31,6 +31,7 @@ import {
   HelpCircle,
   Wand2,
   Workflow,
+  ListTodo,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -43,6 +44,7 @@ import { useProcessStore } from '../../stores/processStore'
 import { usePinnedStore } from '../../stores/pinnedStore'
 import { useClipboardStore } from '../../stores/clipboardStore'
 import { useTraceStore, selectSpanCount } from '../../stores/traceStore'
+import { useUIStore } from '../../stores/uiStore'
 import { SendContextModal } from './SendContextModal'
 import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
@@ -51,6 +53,7 @@ import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
 import { AgentFilesPanel } from './AgentFilesPanel'
 import { AgentDatastorePanel } from './AgentDatastorePanel'
 import { QueuePlannerModal } from './QueuePlannerModal'
+import { usePersistedSize } from '../../hooks/usePersistedSize'
 import type { ChatMessage, TokenUsage } from '../../services/agentChat'
 
 interface Attachment {
@@ -188,7 +191,18 @@ function useFileAttachments(conn: ReturnType<typeof useAgentConnection>) {
   return { attachments, addFiles, removeAttachment, clearAttachments, handlePasteEvent, pasteFromClipboard }
 }
 
-export function ChatPanel() {
+// `variant`:
+//  - 'default' — the docked/fullscreen chat in the full layout (unchanged).
+//  - 'simple'  — the centre column of the simple layout. The layout itself is
+//                fixed there, so the fullscreen and minimise buttons go away,
+//                and the left column carries only the queue: the agent's files
+//                and datastore live in the layout's own right-hand sidebar.
+export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simple' } = {}) {
+  const simple = variant === 'simple'
+  // Simple layout only: the queue column can be tucked away so the
+  // conversation gets the whole centre. Fullscreen (full layout) is unchanged.
+  const simpleQueueOpen = useUIStore((s) => s.simpleQueueOpen)
+  const setSimpleQueueOpen = useUIStore((s) => s.setSimpleQueueOpen)
   const {
     sessions,
     activeChatId,
@@ -228,7 +242,7 @@ export function ChatPanel() {
 
   const session = activeChatId ? sessions.get(activeChatId) : null
 
-  if (!chatOpen || !session) return null
+  if ((!chatOpen && !simple) || !session) return null
 
   // One tab per AGENT. A lane is a context inside an agent, not another
   // agent, so lane sessions don't get their own top-level tab.
@@ -251,7 +265,7 @@ export function ChatPanel() {
   ]
 
   return (
-    <div className="flex h-full flex-col border-l border-zinc-800 bg-zinc-950/80">
+    <div className={`flex h-full flex-col bg-zinc-950/80 ${simple ? '' : 'border-l border-zinc-800'}`}>
       {/* Tab bar */}
       <div className="flex items-center border-b border-zinc-800 bg-zinc-900/60">
         <div className="flex flex-1 items-center gap-0.5 overflow-x-auto px-1 py-1">
@@ -276,6 +290,19 @@ export function ChatPanel() {
             </button>
           ))}
         </div>
+        {simple && (
+          <button
+            onClick={() => setSimpleQueueOpen(!simpleQueueOpen)}
+            title={simpleQueueOpen ? 'Hide queue' : 'Show queue'}
+            className={`mr-1 rounded p-1 transition-colors ${
+              simpleQueueOpen
+                ? 'bg-violet-600/20 text-violet-400'
+                : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+            }`}
+          >
+            <ListTodo className="h-4 w-4" />
+          </button>
+        )}
         <button
           onClick={() => setShowFlows(true)}
           title="Flows — enable/disable and start a flow"
@@ -395,20 +422,24 @@ export function ChatPanel() {
             </span>
           )}
         </button>
-        <button
-          onClick={toggleChatFullscreen}
-          title={chatFullscreen ? 'Exit fullscreen' : 'Fullscreen chat (hide other panels)'}
-          className={`mr-1 rounded p-1 transition-colors ${
-            chatFullscreen
-              ? 'bg-violet-600/20 text-violet-400'
-              : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
-          }`}
-        >
-          {chatFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-        </button>
-        <button onClick={closeChat} className="mr-2 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300">
-          <Minus className="h-4 w-4" />
-        </button>
+        {!simple && (
+          <button
+            onClick={toggleChatFullscreen}
+            title={chatFullscreen ? 'Exit fullscreen' : 'Fullscreen chat (hide other panels)'}
+            className={`mr-1 rounded p-1 transition-colors ${
+              chatFullscreen
+                ? 'bg-violet-600/20 text-violet-400'
+                : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+            }`}
+          >
+            {chatFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+          </button>
+        )}
+        {!simple && (
+          <button onClick={closeChat} className="mr-2 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300">
+            <Minus className="h-4 w-4" />
+          </button>
+        )}
       </div>
 
       {/* Trace panel (replaces chat when active) */}
@@ -437,12 +468,13 @@ export function ChatPanel() {
       ) : (
         /* Chat content (optionally with queue panel on the left in fullscreen) */
         <div className="flex flex-1 overflow-hidden">
-          {chatFullscreen && (
-            <QueueSidebar sessionKey={session.key} agentId={session.containerId} />
+          {(simple ? simpleQueueOpen : chatFullscreen) && (
+            <QueueSidebar sessionKey={session.key} agentId={session.containerId} queueOnly={simple} />
           )}
           <ChatContent
             session={session}
             sessionKey={session.key}
+            minWidth={simple ? 300 : undefined}
             onSend={(content) => sendMessage(session.key, content)}
             onCancel={() => cancelTask(session.key)}
           />
@@ -496,6 +528,7 @@ function useAgentConnection(containerId: string) {
 function ChatContent({
   session,
   sessionKey,
+  minWidth,
   onSend,
   onCancel,
 }: {
@@ -503,6 +536,8 @@ function ChatContent({
   /** This lane's store key — for anything that reads or writes session state.
    *  The agent id lives on `session.containerId`. */
   sessionKey: string
+  /** Conversation floor (simple layout): the queue column shrinks before this. */
+  minWidth?: number
   onSend: (content: string) => void
   onCancel: () => void
 }) {
@@ -583,6 +618,7 @@ function ChatContent({
   return (
     <div
       className={`flex flex-1 flex-col overflow-hidden ${dragOver ? 'ring-2 ring-inset ring-violet-500/50' : ''}`}
+      style={minWidth ? { minWidth } : undefined}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -713,7 +749,7 @@ function ChatContent({
             placeholder={session.connected ? 'Message, paste image, or drop files...' : 'Connecting...'}
             disabled={!session.connected}
             rows={1}
-            className="max-h-32 min-h-[38px] flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none disabled:opacity-40"
+            className="max-h-32 min-h-[38px] min-w-0 flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none disabled:opacity-40"
             style={{ height: 'auto', overflow: 'hidden' }}
             onInput={(e) => {
               const el = e.currentTarget
@@ -815,37 +851,6 @@ function NextStepsBar({
   )
 }
 
-// Drag-to-resize with localStorage persistence. axis 'x' → width (col-resize),
-// axis 'y' → height (row-resize). The handle is positioned so a positive drag
-// (right / down) grows the tracked size.
-function usePersistedSize(key: string, def: number, min: number, max: number, axis: 'x' | 'y') {
-  const [size, setSize] = useState<number>(() => {
-    const v = Number(localStorage.getItem(key))
-    return v >= min && v <= max ? v : def
-  })
-  const onResizeStart = (e: React.MouseEvent) => {
-    e.preventDefault()
-    const startPos = axis === 'x' ? e.clientX : e.clientY
-    const startSize = size
-    document.body.style.cursor = axis === 'x' ? 'col-resize' : 'row-resize'
-    document.body.style.userSelect = 'none'
-    const onMove = (ev: MouseEvent) => {
-      const pos = axis === 'x' ? ev.clientX : ev.clientY
-      setSize(Math.min(max, Math.max(min, startSize + (pos - startPos))))
-    }
-    const onUp = () => {
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      setSize((s) => { localStorage.setItem(key, String(Math.round(s))); return s })
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-  }
-  return { size, onResizeStart }
-}
-
 // The chat's left sidebar: an agent files view on top, the run queue on the
 // bottom, with a draggable divider between them and a draggable right edge for
 // the whole column. Both sizes persist to localStorage.
@@ -910,36 +915,42 @@ function LaneStrip({ agentId, activeLane, agentName }: {
   )
 }
 
-function QueueSidebar({ sessionKey, agentId }: { sessionKey: string; agentId: string }) {
+// `queueOnly` (simple layout): skip the files + datastore sections — the
+// layout shows them in its own right-hand column — and keep just the queue.
+function QueueSidebar({ sessionKey, agentId, queueOnly = false }: { sessionKey: string; agentId: string; queueOnly?: boolean }) {
   const width = usePersistedSize('fd:queue-sidebar-width', 288, 220, 640, 'x')
   const filesH = usePersistedSize('fd:queue-sidebar-files-height', 260, 96, 900, 'y')
   const dsH = usePersistedSize('fd:queue-sidebar-datastore-height', 200, 96, 900, 'y')
 
   return (
     <aside
-      className="relative flex shrink-0 flex-col border-r border-zinc-800 bg-zinc-950/40"
+      className={`relative flex flex-col border-r border-zinc-800 bg-zinc-950/40 ${queueOnly ? 'min-w-[180px] shrink' : 'shrink-0'}`}
       style={{ width: width.size }}
     >
-      {/* Top: files */}
-      <div className="min-h-0 shrink-0 overflow-hidden" style={{ height: filesH.size }}>
-        <AgentFilesPanel containerId={agentId} />
-      </div>
-      {/* Vertical divider (drag to resize files vs datastore) */}
-      <div
-        onMouseDown={filesH.onResizeStart}
-        title="Drag to resize"
-        className="h-1 shrink-0 cursor-row-resize border-y border-zinc-800 bg-zinc-900 transition-colors hover:bg-violet-500/40"
-      />
-      {/* Middle: datastore tables */}
-      <div className="min-h-0 shrink-0 overflow-hidden" style={{ height: dsH.size }}>
-        <AgentDatastorePanel containerId={agentId} />
-      </div>
-      {/* Vertical divider (drag to resize datastore vs queue) */}
-      <div
-        onMouseDown={dsH.onResizeStart}
-        title="Drag to resize"
-        className="h-1 shrink-0 cursor-row-resize border-y border-zinc-800 bg-zinc-900 transition-colors hover:bg-violet-500/40"
-      />
+      {!queueOnly && (
+        <>
+          {/* Top: files */}
+          <div className="min-h-0 shrink-0 overflow-hidden" style={{ height: filesH.size }}>
+            <AgentFilesPanel containerId={agentId} />
+          </div>
+          {/* Vertical divider (drag to resize files vs datastore) */}
+          <div
+            onMouseDown={filesH.onResizeStart}
+            title="Drag to resize"
+            className="h-1 shrink-0 cursor-row-resize border-y border-zinc-800 bg-zinc-900 transition-colors hover:bg-violet-500/40"
+          />
+          {/* Middle: datastore tables */}
+          <div className="min-h-0 shrink-0 overflow-hidden" style={{ height: dsH.size }}>
+            <AgentDatastorePanel containerId={agentId} />
+          </div>
+          {/* Vertical divider (drag to resize datastore vs queue) */}
+          <div
+            onMouseDown={dsH.onResizeStart}
+            title="Drag to resize"
+            className="h-1 shrink-0 cursor-row-resize border-y border-zinc-800 bg-zinc-900 transition-colors hover:bg-violet-500/40"
+          />
+        </>
+      )}
       {/* Bottom: queue */}
       <div className="min-h-0 flex-1">
         <QueuePanel sessionKey={sessionKey} agentId={agentId} />

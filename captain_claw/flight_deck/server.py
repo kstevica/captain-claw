@@ -6071,6 +6071,34 @@ async def remove_process(slug: str, force: bool = False, request: Request = None
     return ProcessActionResult(ok=True, slug=slug, message=f"Removed '{slug}' from registry")
 
 
+class ProcessIdentityUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+@app.post("/fd/processes/{slug}/identity", response_model=ProcessActionResult)
+async def update_process_identity(
+    slug: str, body: ProcessIdentityUpdate, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Persist a process agent's display name and/or description into the
+    registry. Unlike the FD-side per-user override, this is canonical: it
+    survives a browser wipe, is returned by /fd/processes for every client,
+    and needs no restart."""
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
+    registry = _load_process_registry()
+    entry = registry.get(slug)
+    if entry is None:
+        raise HTTPException(404, f"Process '{slug}' not found")
+    if body.name is not None:
+        entry["name"] = body.name.strip() or entry.get("name", slug)
+    if body.description is not None:
+        entry["description"] = body.description
+    registry[slug] = entry
+    _save_process_registry(registry)
+    return ProcessActionResult(ok=True, slug=slug, message="Saved.")
+
+
 @app.get("/fd/processes/{slug}/logs")
 async def process_logs(slug: str, tail: int = 200, since_byte: int = 0, request: Request = None, user: dict | None = _required_user_dep):
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
