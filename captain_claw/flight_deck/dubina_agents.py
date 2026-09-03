@@ -150,6 +150,11 @@ def _build_agent_config(archetype: dict, tier: str, tcfg: dict, name_suffix: str
         env_vars=list(env_vars or []),
         web_enabled=True, web_port=0,
         workspace_path=workspace_path or "",
+        # Carry deep-memory grid config from a composed function×domain leaf so the
+        # spawned agent's deep-memory writes/reads are tagged/narrowed. Empty for a
+        # normal archetype (pools by owner, unchanged).
+        grid_memory_tags=list(archetype.get("memory_tags") or []),
+        grid_recall_mode=str(archetype.get("recall_mode") or ""),
     )
     model = tcfg.get("model")
     if model:

@@ -754,7 +754,13 @@ async def lifespan(app: FastAPI):
 
         async def _flow_load_archetype(payload: dict, aid: str):
             from captain_claw.flight_deck.archetypes import merged_archetypes
+            from captain_claw.flight_deck.archetype_compose import resolve_pair
             from captain_claw.flight_deck.auth import get_db
+            # Flag-gated function×domain grid: `on archetype:reviewer.legal` composes
+            # a leaf whose `fleet_instructions` the spawned dubina agent then uses.
+            composed = resolve_pair(aid)
+            if composed is not None:
+                return composed
             uid = _flow_owner_id(payload) or None
             for a in await merged_archetypes(get_db(), uid):
                 if a.get("id") == aid:
@@ -1187,6 +1193,15 @@ class AgentConfig(BaseModel):
     # (mirroring dubina's `_build_agent_config`). Explicit fields the caller already
     # set win over the archetype; an unknown id is a non-fatal no-op.
     archetype: str = ""
+    # Deep-memory grid config, populated when `archetype` resolves to a composed
+    # function×domain leaf (see archetype_compose). `grid_memory_tags` are stamped
+    # onto the agent's deep-memory writes; `grid_recall_mode` (pool | domain | self)
+    # narrows its deep-memory reads. Empty for a normal archetype — the agent then
+    # pools by owner with no tag filter, exactly as before. Carried into the
+    # process registry / Docker labels at spawn so the FD deep-memory proxy can
+    # resolve them without the agent asserting anything.
+    grid_memory_tags: list[str] = Field(default_factory=list)
+    grid_recall_mode: str = ""
     # Optional per-session selectable model list (config.model.allowed). Used by
     # the free-OpenRouter "Freebie" spawn so all free models are available to
     # switch between at runtime, with `model` as the default.
@@ -1307,16 +1322,23 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
         uid = config.owner_hint or os.environ.get("FD_OWNER_ID", "")
 
     from captain_claw.flight_deck.archetypes import merged_archetypes
+    from captain_claw.flight_deck.archetype_compose import resolve_pair
     from captain_claw.flight_deck.auth import get_db
-    try:
-        arch = next(
-            (a for a in await merged_archetypes(get_db(), uid or None) if a.get("id") == aid),
-            None,
-        )
-    except Exception as exc:
-        log.warning("Archetype resolution failed; spawning config as-is",
-                    archetype=aid, error=str(exc))
-        return
+    # Function×domain grid (flag-gated): a `function.domain` selector composes a
+    # leaf from the two axis registries. None when the flag is off, the id isn't a
+    # pair, or an axis is unknown — in which case we fall through to the normal
+    # single-id lookup below, so base/user archetypes behave exactly as before.
+    arch = resolve_pair(aid)
+    if arch is None:
+        try:
+            arch = next(
+                (a for a in await merged_archetypes(get_db(), uid or None) if a.get("id") == aid),
+                None,
+            )
+        except Exception as exc:
+            log.warning("Archetype resolution failed; spawning config as-is",
+                        archetype=aid, error=str(exc))
+            return
     if not arch:
         log.warning("Unknown archetype; spawning config as-is", archetype=aid)
         return
@@ -1331,6 +1353,12 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
         config.description = str(arch.get("role") or arch.get("description") or f"archetype:{aid}")
     if not config.runtime and arch.get("runtime") in ("classic", "mrav"):
         config.runtime = str(arch["runtime"])
+    # Composed function×domain leaves carry deep-memory grid config; base/user
+    # archetypes don't, so these stay empty (today's behaviour) for them.
+    if arch.get("memory_tags"):
+        config.grid_memory_tags = [str(t) for t in arch["memory_tags"]]
+    if arch.get("recall_mode"):
+        config.grid_recall_mode = str(arch["recall_mode"])
 
     # Model: the requested tier (`@tier` wins, else the archetype's own default
     # tier) resolved against the OWNER's Library tier config — the same source
@@ -1855,6 +1883,10 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         "flight-deck.image": config.image,
         "flight-deck.web-port": str(config.web_port) if config.web_enabled else "",
         "flight-deck.web-auth": config.web_auth_token or "",
+        # Deep-memory grid config, mirrored from the process registry so a
+        # containerised agent resolves the same tags/recall via its Docker labels.
+        "flight-deck.grid-tags": json.dumps(list(config.grid_memory_tags or [])),
+        "flight-deck.grid-recall": config.grid_recall_mode or "",
     }
 
     # Security options
@@ -3092,6 +3124,61 @@ def _resolve_agent_owner_by_auth(token: str) -> str:
         if entry.get("web_auth") == token and entry.get("owner"):
             return entry["owner"]
     return ""
+
+
+def _parse_grid_labels(labels: dict) -> tuple[list[str], str]:
+    """Grid config from Docker labels: `flight-deck.grid-tags` (JSON list) and
+    `flight-deck.grid-recall`. Malformed → empty (never breaks resolution)."""
+    try:
+        tags = json.loads(labels.get("flight-deck.grid-tags") or "[]")
+    except Exception:
+        tags = []
+    if not isinstance(tags, list):
+        tags = []
+    return [str(t) for t in tags], str(labels.get("flight-deck.grid-recall") or "")
+
+
+def _resolve_agent_grid_by_auth(token: str) -> tuple[list[str], str]:
+    """Resolve an agent's deep-memory grid config (memory tags, recall mode) by
+    its unique web_auth token — the same authority as `_resolve_agent_owner_by_auth`.
+    Returns ([], "") for a non-grid agent, so the proxy pools by owner unchanged."""
+    if not token:
+        return [], ""
+    try:
+        client = get_docker()
+        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            if labels.get("flight-deck.web-auth", "") == token:
+                return _parse_grid_labels(labels)
+    except Exception:
+        pass
+    for slug, entry in _load_process_registry().items():
+        if entry.get("web_auth") == token:
+            return list(entry.get("grid_tags") or []), str(entry.get("grid_recall") or "")
+    return [], ""
+
+
+def _resolve_agent_grid(port: int) -> tuple[list[str], str]:
+    """Port-keyed fallback for `_resolve_agent_grid_by_auth`, mirroring
+    `_resolve_agent_owner`. Prefers a live process over stale same-port entries."""
+    try:
+        client = get_docker()
+        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            wp = labels.get("flight-deck.web-port", "")
+            if wp and int(wp) == port:
+                return _parse_grid_labels(labels)
+    except Exception:
+        pass
+    registry = _load_process_registry()
+    matches = [(slug, e) for slug, e in registry.items() if e.get("web_port") == port]
+    for slug, entry in matches:
+        if _process_is_alive(slug):
+            return list(entry.get("grid_tags") or []), str(entry.get("grid_recall") or "")
+    if matches:
+        e = matches[0][1]
+        return list(e.get("grid_tags") or []), str(e.get("grid_recall") or "")
+    return [], ""
 
 
 # ── Flow engine helpers ────────────────────────────────────────────────
@@ -5800,6 +5887,11 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         "model": config.model,
         "tier": config.tier,
         "owner": owner_id,
+        # Deep-memory grid config (empty for non-grid agents) — the FD deep-memory
+        # proxy reads these to stamp write-tags and narrow reads without the agent
+        # asserting anything (mirrors how `owner` is server-resolved).
+        "grid_tags": list(config.grid_memory_tags or []),
+        "grid_recall": config.grid_recall_mode or "",
     }
     _save_process_registry(registry)
 
