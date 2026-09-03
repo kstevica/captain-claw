@@ -1,0 +1,23 @@
+{
+  "description": "Domain axis for the function×domain archetype grid (PROTOTYPE, flag-gated by FD_ARCHETYPE_GRID). Each entry is the 'what it's about' half of a composed leaf: an instruction `overlay` appended after the function's, optional `tools_add`, an optional `tier_floor` that can only RAISE the composed tier, and an optional `recall_override` (pool | domain | self) that overrides the function's recall breadth. Supplies the `domain:<id>` deep-memory tag. Composed with a function from functions.json. Edit a domain here once and every function's variant of it updates.",
+  "domains": [
+    {
+      "id": "legal",
+      "label": "Legal",
+      "tier_floor": "reason",
+      "tools_add": [],
+      "recall_override": "domain",
+      "keywords": ["contract", "clause", "liability", "compliance", "statute"],
+      "overlay": "## Domain: Legal\nYou operate in a legal context. Ground every substantive statement in a specific statute, regulation, contract clause, or the user's own documents — never assert law from memory alone. Distinguish settled law from interpretation. Flag clearly anything that requires a licensed attorney's judgment, and never present your output as legal advice. Prefer precision and explicit caveats over confident generality."
+    },
+    {
+      "id": "finance",
+      "label": "Finance",
+      "tier_floor": "balanced",
+      "tools_add": [],
+      "recall_override": null,
+      "keywords": ["revenue", "margin", "valuation", "cashflow", "forecast"],
+      "overlay": "## Domain: Finance\nYou operate in a financial context. State the currency, period, and basis (actual vs forecast, gross vs net) for every figure. Keep assumptions explicit and separate from results. Never give personalized investment advice; describe trade-offs and let the user decide. Sanity-check totals and reconcile against any stated source of truth."
+    }
+  ]
+}

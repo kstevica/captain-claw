@@ -88,6 +88,29 @@ def _agent_owner(request: Request) -> str:
     return owner
 
 
+def _agent_grid(request: Request) -> tuple[list[str], str]:
+    """The calling agent's deep-memory grid config — (memory_tags, recall_mode) —
+    resolved from FD's own records the same way :func:`_agent_owner` resolves the
+    owner (web_auth token first, then source port). Returns ``([], "")`` for a
+    non-grid agent, so the proxy writes untagged and reads the whole owner pool
+    exactly as before. Purely a within-tenant refinement: tags never widen access
+    past the server-resolved owner, so this never needs the identity gate.
+    """
+    from captain_claw.flight_deck.server import (
+        _resolve_agent_grid,
+        _resolve_agent_grid_by_auth,
+    )
+
+    token = request.headers.get("X-Agent-Auth", "")
+    if token:
+        return _resolve_agent_grid_by_auth(token)
+    port = getattr(getattr(request, "client", None), "port", 0) or 0
+    try:
+        return _resolve_agent_grid(int(port))
+    except Exception:
+        return [], ""
+
+
 # ---------------------------------------------------------------------------
 # Bodies
 # ---------------------------------------------------------------------------
@@ -333,9 +356,19 @@ def _require_connection() -> None:
 async def agent_search(body: AgentSearchBody, request: Request) -> dict[str, Any]:
     owner = _agent_owner(request)
     _require_connection()
+    # Narrow recall by the agent's grid recall_mode (pool → no narrowing). ANDed
+    # onto any caller-supplied filter; the owner scope is ANDed again inside the
+    # index, so this can only narrow within the tenant, never widen past it.
+    from captain_claw.flight_deck.archetype_compose import recall_filter
+
+    tags, recall = _agent_grid(request)
+    rf = recall_filter(recall, tags)
+    combined = (body.filter_by or "").strip()
+    if rf:
+        combined = f"({combined}) && {rf}" if combined else rf
     return {
         "results": svc.search(
-            owner, body.query, max_results=body.max_results, filter_by=body.filter_by
+            owner, body.query, max_results=body.max_results, filter_by=combined
         )
     }
 
@@ -351,6 +384,9 @@ async def agent_index(body: AgentIndexBody, request: Request) -> dict[str, Any]:
         raise HTTPException(400, "text is required")
     import hashlib
 
+    # Grid agents stamp their axis tags (agent:<fn>, domain:<dm>) so a user's pool
+    # is sliceable by agent/domain on read; a non-grid agent writes untagged.
+    tags, _recall = _agent_grid(request)
     digest = hashlib.sha256(body.text.encode()).hexdigest()
     reference = body.reference or f"agent:{digest[:16]}"
     index.delete_by_reference(reference, owner_id=owner)
@@ -362,6 +398,7 @@ async def agent_index(body: AgentIndexBody, request: Request) -> dict[str, Any]:
         path=reference,
         owner_id=owner,
         content_hash=digest,
+        tags=tags or None,
         summarize=body.summarize,
     )
     return {"ok": True, "reference": reference, "chunks": chunks}
