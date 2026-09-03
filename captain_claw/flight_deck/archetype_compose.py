@@ -43,6 +43,12 @@ _DOMAINS_FILE = _INSTR / "domains.json"
 
 _GRID_FLAG = "FD_ARCHETYPE_GRID"
 
+# Sentinel domain tag marking shared/cross-domain content — content that every
+# domain specialist should see regardless of its own domain (e.g. a non-grid
+# agent's cross-cutting output). Documents (source != "agent") are shared without
+# needing this tag; the ``domain`` recall filter OR-s both in.
+GENERAL_DOMAIN_TAG = "domain:general"
+
 # Tier capability ladder, low → high. A domain's ``tier_floor`` can only RAISE a
 # function's tier, never lower it. Tiers outside this ladder (coding / vision —
 # specialist, not strictly "higher") are treated as no-floor.
@@ -162,22 +168,29 @@ def recall_filter(recall_mode: str, memory_tags: list[str] | None) -> str:
 
     - ``pool`` (or unknown/empty) → ``""`` — read the whole owner pool, no tag
       narrowing (the safe default; the owner scope is ANDed on server-side).
-    - ``domain`` → restrict to the agent's ``domain:<x>`` tag.
-    - ``self`` → restrict to the agent's own ``agent:<x>`` tag.
+    - ``domain`` → the agent's own ``domain:<x>`` rows, PLUS shared context so a
+      specialist still sees the user's documents and cross-cutting notes:
+      ``(tags:=domain:<x> || tags:=domain:general || source:!=agent)``. Documents
+      (``source`` "vfs"/"manual", never "agent") come in via the source clause;
+      shared *agent* output comes in via the ``domain:general`` sentinel; only
+      *other* domains' agent-specific memories are excluded.
+    - ``self`` → strictly the agent's own ``agent:<x>`` tag (the uncontaminated
+      mode — no documents, no sharing).
 
     Degrades to ``""`` (pool) when the mode needs a tag the agent doesn't carry.
-
-    NOTE: a ``domain``/``self`` filter also excludes pool rows that carry *no*
-    tags (e.g. auto-indexed VFS files). That is intended for a specialist that
-    wants high-signal recall; the follow-up to also see shared/general context is
-    to stamp a ``domain:general`` sentinel on untagged writes and OR it in here.
     """
     mode = (recall_mode or "pool").strip().lower()
-    if mode not in ("domain", "self"):
+    if mode == "self":
+        tag = next((t for t in (memory_tags or []) if t.startswith("agent:")), "")
+        return f"tags:=`{tag}`" if tag else ""
+    if mode != "domain":
         return ""
-    prefix = "domain:" if mode == "domain" else "agent:"
-    tag = next((t for t in (memory_tags or []) if t.startswith(prefix)), "")
-    return f"tags:=`{tag}`" if tag else ""
+    tag = next((t for t in (memory_tags or []) if t.startswith("domain:")), "")
+    if not tag:
+        return ""
+    return (
+        f"(tags:=`{tag}` || tags:=`{GENERAL_DOMAIN_TAG}` || source:!=`agent`)"
+    )
 
 
 def resolve_pair(aid: str) -> dict | None:

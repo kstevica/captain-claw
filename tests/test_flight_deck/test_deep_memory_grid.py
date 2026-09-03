@@ -70,11 +70,28 @@ async def test_index_stamps_grid_tags(stub_proxy):
     assert stub_proxy.index.indexed["owner_id"] == "alice"
 
 
-async def test_index_non_grid_agent_writes_no_tags(stub_proxy):
+async def test_index_non_grid_agent_writes_no_tags_when_grid_off(stub_proxy, monkeypatch):
+    monkeypatch.delenv("FD_ARCHETYPE_GRID", raising=False)
     stub_proxy.grid = ([], "")
     body = dr.AgentIndexBody(text="plain note")
     await dr.agent_index(body, _req())
     assert stub_proxy.index.indexed["tags"] is None   # index_document drops falsy tags
+
+
+async def test_index_non_grid_agent_marked_general_when_grid_on(stub_proxy, monkeypatch):
+    # With the grid on, a domainless agent's output is stamped domain:general so a
+    # specialist's narrowed recall still sees it.
+    monkeypatch.setenv("FD_ARCHETYPE_GRID", "1")
+    stub_proxy.grid = ([], "")
+    await dr.agent_index(dr.AgentIndexBody(text="cross-cutting note"), _req())
+    assert stub_proxy.index.indexed["tags"] == ["domain:general"]
+
+
+async def test_index_grid_agent_keeps_its_domain_not_general(stub_proxy, monkeypatch):
+    monkeypatch.setenv("FD_ARCHETYPE_GRID", "1")
+    stub_proxy.grid = (["agent:reviewer", "domain:legal"], "domain")
+    await dr.agent_index(dr.AgentIndexBody(text="a legal finding"), _req())
+    assert stub_proxy.index.indexed["tags"] == ["agent:reviewer", "domain:legal"]
 
 
 # ── /agent/search — recall narrowing ─────────────────────────────────
@@ -85,16 +102,19 @@ async def test_search_pool_leaves_filter_untouched(stub_proxy):
     assert stub_proxy.search_filter == ""
 
 
-async def test_search_domain_ands_domain_tag(stub_proxy):
+_DOMAIN_LEGAL = "(tags:=`domain:legal` || tags:=`domain:general` || source:!=`agent`)"
+
+
+async def test_search_domain_includes_domain_general_and_documents(stub_proxy):
     stub_proxy.grid = (["agent:reviewer", "domain:legal"], "domain")
     await dr.agent_search(dr.AgentSearchBody(query="q"), _req())
-    assert stub_proxy.search_filter == "tags:=`domain:legal`"
+    assert stub_proxy.search_filter == _DOMAIN_LEGAL
 
 
 async def test_search_domain_ands_onto_caller_filter(stub_proxy):
     stub_proxy.grid = (["agent:reviewer", "domain:legal"], "domain")
     await dr.agent_search(dr.AgentSearchBody(query="q", filter_by="source:=agent"), _req())
-    assert stub_proxy.search_filter == "(source:=agent) && tags:=`domain:legal`"
+    assert stub_proxy.search_filter == f"(source:=agent) && {_DOMAIN_LEGAL}"
 
 
 async def test_search_self_ands_agent_tag(stub_proxy):

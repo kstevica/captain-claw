@@ -385,8 +385,17 @@ async def agent_index(body: AgentIndexBody, request: Request) -> dict[str, Any]:
     import hashlib
 
     # Grid agents stamp their axis tags (agent:<fn>, domain:<dm>) so a user's pool
-    # is sliceable by agent/domain on read; a non-grid agent writes untagged.
+    # is sliceable by agent/domain on read. When the grid is on, an agent with no
+    # domain of its own (a non-grid / cross-cutting agent) is marked domain:general
+    # so its output stays visible to every domain specialist's narrowed recall.
+    from captain_claw.flight_deck.archetype_compose import (
+        GENERAL_DOMAIN_TAG,
+        grid_enabled,
+    )
+
     tags, _recall = _agent_grid(request)
+    if grid_enabled() and not any(str(t).startswith("domain:") for t in tags):
+        tags = [*tags, GENERAL_DOMAIN_TAG]
     digest = hashlib.sha256(body.text.encode()).hexdigest()
     reference = body.reference or f"agent:{digest[:16]}"
     index.delete_by_reference(reference, owner_id=owner)

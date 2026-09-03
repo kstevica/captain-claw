@@ -131,11 +131,22 @@ def test_recall_filter_empty_mode_is_pool():
     assert gc.recall_filter(None, ["domain:legal"]) == ""
 
 
-def test_recall_filter_domain_narrows_to_domain_tag():
-    assert gc.recall_filter("domain", ["agent:reviewer", "domain:legal"]) == "tags:=`domain:legal`"
+def test_recall_filter_domain_includes_own_domain_general_and_documents():
+    # domain recall = my domain OR the shared sentinel OR any non-agent (document) row
+    assert gc.recall_filter("domain", ["agent:reviewer", "domain:legal"]) == (
+        "(tags:=`domain:legal` || tags:=`domain:general` || source:!=`agent`)"
+    )
+
+
+def test_recall_filter_domain_excludes_other_domains():
+    # A legal specialist's filter matches domain:legal but not domain:finance —
+    # finance-tagged agent rows fail all three clauses.
+    f = gc.recall_filter("domain", ["agent:reviewer", "domain:legal"])
+    assert "domain:legal" in f and "domain:finance" not in f
 
 
 def test_recall_filter_self_narrows_to_agent_tag():
+    # self stays strict: only the agent's own rows, no documents, no sharing.
     assert gc.recall_filter("self", ["agent:reviewer", "domain:legal"]) == "tags:=`agent:reviewer`"
 
 
