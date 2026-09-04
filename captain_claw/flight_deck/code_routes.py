@@ -1058,9 +1058,12 @@ async def _triage_reviews(reviews: list[dict], intent: str,
             content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
         raw = json.loads(content)
     except Exception as e:  # noqa: BLE001
+        # R1: fail CLOSED. A triage that could not render a verdict is not a clean
+        # verdict — never let an unavailable review pass as done. The caller sees
+        # triage_ok=False and stops honestly (resumable) instead of shipping.
         log.warning("code triage failed", error=str(e))
-        return {"needs_fix": False, "fixer": "code-implementer",
-                "summary": "Review complete (triage unavailable — not auto-fixing).",
+        return {"needs_fix": False, "triage_ok": False, "fixer": "code-implementer",
+                "summary": "Review triage unavailable — build not verified.",
                 "fix_instructions": "", "findings": []}
     # Normalize EVERY field the loop consumes — models sometimes return
     # fix_instructions/summary as a JSON array (or findings as bare strings)
@@ -1074,6 +1077,7 @@ async def _triage_reviews(reviews: list[dict], intent: str,
         return str(v).strip() if v is not None else ""
 
     raw["needs_fix"] = bool(raw.get("needs_fix"))
+    raw["triage_ok"] = True
     if raw.get("fixer") not in ("debugger", "code-implementer"):
         raw["fixer"] = "code-implementer"
     raw["summary"] = _as_text(raw.get("summary")) or "Review complete."
@@ -1751,6 +1755,38 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             prev_det_crit = det_crit
 
             triage = await _triage_reviews(reviews, intent, tiers_map, registry)
+
+            # R1: deterministic ground-truth gates are a HARD precondition, not
+            # advice. det_crit is the armed-critical count for THIS committed state
+            # (failing tests + failing contract criticals + broken imports); it is 0
+            # unless a gate the user armed actually fails. If the LLM triage was
+            # satisfied but a ground-truth check is still red, the run is NOT clean —
+            # a model opinion never overrides a failing test suite. Force the fix
+            # loop to address it, supplying a deterministic directive if triage gave
+            # none.
+            if det_crit > 0 and not triage.get("needs_fix"):
+                triage["needs_fix"] = True
+                triage["fixer"] = triage.get("fixer") or "code-implementer"
+                if not (triage.get("fix_instructions") or "").strip():
+                    bits = []
+                    if test_cmd and not tests_ok:
+                        bits.append(f"the test suite fails (`{test_cmd}`)")
+                    if int(contract_sum.get("failed_critical", 0)):
+                        bits.append(f"{int(contract_sum.get('failed_critical', 0))} "
+                                    "critical acceptance-contract rule(s) fail")
+                    if iface_crit:
+                        bits.append(f"{iface_crit} unresolved broken import(s)")
+                    triage["fix_instructions"] = (
+                        "Deterministic ground-truth checks are still failing and MUST "
+                        "be resolved before this task is done: " + "; ".join(bits)
+                        + ". See the Test Runner / Acceptance Contract / Interface "
+                        "Consistency report(s) above for the exact failures.")
+                triage["summary"] = (triage.get("summary") or "Review complete.").rstrip(". ") \
+                    + " — not clean: deterministic ground-truth checks still failing."
+                _progress(pkey, "note",
+                          "deterministic gate: ground-truth checks still red — "
+                          "not shipping on triage opinion alone")
+
             review_summary = triage.get("summary", "Review complete.")
             _write_report(repo, f"review-r{rnd}-summary", f"# Review summary — r{rnd}\n\n{review_summary}")
             await code_git.git_commit(repo, f"[review r{rnd}] reports + reviewer tests")
@@ -1759,6 +1795,21 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             prior_findings = triage.get("findings", []) or []
             prior_fix_instructions = triage.get("fix_instructions", "") or ""
             last_triage = triage
+
+            # R1: fail closed on an unavailable triage. If the triage LLM could not
+            # render a verdict AND no ground-truth gate forced a fix, do NOT declare
+            # the build clean — absence of a verdict is not a pass. Stop honestly
+            # with a resumable backlog instead.
+            if not triage.get("triage_ok", True) and not triage["needs_fix"]:
+                rel = _write_backlog(repo, {"summary": review_summary,
+                                            "findings": prior_findings, "fix_instructions": ""})
+                quality_verdict = "unverified"
+                _append_chat(sdir, "assistant",
+                             "⚠️ Review triage could not run, so this build was NOT declared "
+                             f"clean (absence of a verdict is not a pass). State saved to `{rel}` — "
+                             "say **continue fixing** to retry once the review model is available.",
+                             kind="note", ok=False)
+                break
 
             if not triage["needs_fix"]:
                 # Clean pass — a stale backlog from an earlier capped run is done.
@@ -2451,18 +2502,38 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
                 else:
                     sha = await code_git.git_commit(repo, f"[edit] {executor}: {route.get('title', intent)[:60]}")
                     await _update_map(repo, tiers_map, registry)   # keep the map fresh
+                # R1: a quick edit has no review loop, so when the test gate is
+                # armed the test result IS its check — a green suite is a
+                # precondition to recording the edit as a win. Default (gate off) →
+                # unchanged behaviour.
+                tests_ok = True
+                if not is_git and sha:
+                    _q = _load_quality(uid, body.project)
+                    if _q.test_gate:
+                        _tcmd = code_verify.detect_test_command(repo, _q.test_command)
+                        if _tcmd:
+                            _tres = await code_verify.run_tests(repo, _tcmd)
+                            tests_ok = bool(_tres.get("ok"))
+                            _progress(pkey, "note",
+                                      ("✓ tests passed" if tests_ok else "✗ tests failing")
+                                      + f" · {_tcmd}")
                 out = (d.get("output") or "").strip() or "(no output)"
                 if not d.get("ok"):
                     out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
+                elif not tests_ok:
+                    out += ("\n\n⚠️ Tests are failing after this edit — not a clean "
+                            "result. Say **continue fixing** or describe the fix.")
                 _u = _usage_summary(pkey)
                 if _u:
                     out += f"\n\n_{_u}._"
                 assistant = _append_chat(sdir, "assistant", out, archetype=executor,
-                                         size="small", ok=bool(d.get("ok")), commit=sha or "", route=route)
-                # C2: the quick-edit archetype's outcome — landed a commit and
-                # didn't error → a win; else a loss. Token-free.
+                                         size="small", ok=bool(d.get("ok")) and tests_ok,
+                                         commit=sha or "", route=route)
+                # C2: the quick-edit archetype's outcome — landed a commit, didn't
+                # error, AND (if the gate is armed) passed the tests → a win; else a
+                # loss. Token-free unless the gate ran a suite.
                 await _record_outcomes(uid, domain,
-                                       {executor: bool(d.get("ok")) and (is_git or bool(sha))})
+                                       {executor: bool(d.get("ok")) and (is_git or bool(sha)) and tests_ok})
                 _write_state(sdir, {"status": "idle", "last_route": route})
                 return {"message": assistant, "route": route, "commit": sha}
 
