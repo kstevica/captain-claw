@@ -136,8 +136,8 @@ mistake until the budget runs out, with a clean log the whole way."*
 There are **two** step systems and they answer the graph question differently:
 
 - **Flows DSL** (`flow_dsl.py`, `flow_runner.py`) is **not a graph** — a linear script
-  executed by index. Independent steps written normally run **in series**; the only
-  parallelism is hand-written `spawn`/`join`. Dependencies are positional, not data
+  executed by index. Independent steps written normally run **in series**; parallelism is
+  opt-in (explicit `spawn`/`join`, or a `foreach … spawn` parallel-map), never inferred. Dependencies are positional, not data
   edges, and a typo'd `{{steps.x.output}}` **silently becomes `""`** (no data-edge
   validation). Its strengths are real determinism (`tool` = no-LLM call; `set` = a
   safe non-`eval` expression evaluator) and true parser validation — but the parser
@@ -151,7 +151,7 @@ The DAG *supports* minimal edges, but **the planner manufactures false ones**:
 
 - `instructions/plan_mode_complete_system_prompt.md:20`: *"Steps `depends_on` the
   **previous step by default** (sequential plan)."* — the thread's exact error.
-- `agent_reasoning_mixin.py:571` accepts `"after"` as a synonym for `depends_on` —
+- `agent_reasoning_mixin.py:572` accepts `"after"` as a synonym for `depends_on` —
   encoding "and then" as a dependency.
 - Nothing checks that a variable actually crosses an edge: `workspace_inputs` /
   `workspace_outputs` exist on a task (`task_graph.py:68-70`) but are **advisory
@@ -160,8 +160,9 @@ The DAG *supports* minimal edges, but **the planner manufactures false ones**:
 **The best-kept secret:** `horizon_plan.py` is a DAG planner that already does it
 right — *"Decompose the task into a DAG … so independent steps can run in parallel and
 **each step only consumes what it actually needs**"* (`:364-370`), and `_dag_context`
-(`:213-221`) **pushes the verified upstream outputs into the downstream step's
-context** (a real output→input edge), runs in dependency waves, and re-plans. It is
+(`:213-221`, the `run_dag_horizon` variant) **pushes each upstream dependency's output
+— best-so-far, verified or not — into the downstream step's context** (a real
+output→input edge), runs in dependency waves, and re-plans. It is
 wired into Basna as an **opt-in** (`basna_routes.py:4356`, `body.dag=True`) and the
 headline modes don't use it by default.
 
@@ -257,7 +258,8 @@ The autonomy loop is a near-verbatim implementation:
 **The catch — it's siloed.** This discipline lives *only* in the Flight Deck autonomy
 loop. The interactive agent guard (`agent_guard_mixin.py`), which sits in front of
 *every* tool call in normal use, is an LLM *"is this suspicious?"* classifier with **no
-notion of reversibility**; the Code studio **auto-approves plans**; shell falls back to
+notion of reversibility**; the *interactive* Code studio requires a human plan approval,
+but **agent-initiated code runs auto-approve the plan**; shell falls back to
 a flat allow/deny/ask list. So the reversibility taxonomy does **not** reach the place
 where big irreversible *code* changes happen. Also, reverse handles are best-effort
 (a single `ID:\s*(\S+)` regex) — a "reversible" action whose id can't be parsed
@@ -327,7 +329,7 @@ Effort/impact are rough (S/M/L). Each reuses machinery already in the repo.
   → *"A step `depends_on` another ONLY if it consumes a named output of that step.
   Default to no dependency. For each edge, name the artifact that crosses."* Drop
   "previous step by default." Deprecate the `"after"` synonym
-  (`agent_reasoning_mixin.py:571`) or require it to name a produced artifact.
+  (`agent_reasoning_mixin.py:572`) or require it to name a produced artifact.
 - Add a **data-edge lint** in `plan_mode`/`task_graph`: validate each `depends_on`
   against `workspace_inputs`/`workspace_outputs` — drop an edge whose consumer reads no
   output the producer emits; error on an input with no producer. This operationalizes
@@ -341,8 +343,11 @@ Effort/impact are rough (S/M/L). Each reuses machinery already in the repo.
 *Principles 3 & 4 — enforced output→input edges.*
 
 - Vatra (grouped mode) already knows the producer→consumer edges (`consumes_from`,
-  enforced for *ordering* in `vatra_groups.py:144-148`). Make it **push** the producer's
-  verified output into the consumer's context — reuse `horizon_plan._dag_context`
+  which **influence wave scheduling** — a producer is pulled into its consumer's group,
+  same wave, not a blocking order — `vatra_groups.py:138-179`; today the consumer must
+  **pull** the producer's output via the `vatra` tool, and only a description is injected,
+  not the artifact). Make it **push** that output into the consumer's context — reuse
+  `horizon_plan._dag_context`
   (`:213-221`) — instead of relying on the consumer to `vatra(action=search/wait)` and
   possibly proceed without it. Keep pull as fallback.
 - Surface the **DAG Plan-Horizon** lever (`horizon_plan.py`) as a first-class default
