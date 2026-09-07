@@ -138,6 +138,39 @@ class FakeMCPServer:
 # ── storage tests ───────────────────────────────────────────────────
 
 
+def test_storage_path_is_per_instance(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The servers file follows the instance's isolation env, so several
+    Flight Decks on one host don't share (and leak) MCP config.
+
+    Precedence: CAPTAIN_CLAW_FD_MCP_PATH > CAPTAIN_CLAW_FD_HOME >
+    FD_DATA_DIR > legacy ~/.captain-claw-fd.
+    """
+    explicit = tmp_path / "explicit.json"
+    home = tmp_path / "home"
+    data = tmp_path / "data"
+
+    # Explicit file wins over everything.
+    monkeypatch.setenv("CAPTAIN_CLAW_FD_MCP_PATH", str(explicit))
+    monkeypatch.setenv("CAPTAIN_CLAW_FD_HOME", str(home))
+    monkeypatch.setenv("FD_DATA_DIR", str(data))
+    assert mcp_storage._storage_path() == explicit  # noqa: SLF001
+
+    # FD_HOME beats FD_DATA_DIR (mcp_servers.json sits beside agent_secret/apps).
+    monkeypatch.delenv("CAPTAIN_CLAW_FD_MCP_PATH", raising=False)
+    assert mcp_storage._storage_path() == home.resolve() / "mcp_servers.json"  # noqa: SLF001
+
+    # FD_DATA_DIR is used when FD_HOME is unset — this is what the user's
+    # isolated decks set, so each gets its own file.
+    monkeypatch.delenv("CAPTAIN_CLAW_FD_HOME", raising=False)
+    assert mcp_storage._storage_path() == data.resolve() / "mcp_servers.json"  # noqa: SLF001
+
+    # With no isolation env, fall back to the shared legacy default.
+    monkeypatch.delenv("FD_DATA_DIR", raising=False)
+    assert mcp_storage._storage_path() == mcp_storage._DEFAULT_PATH  # noqa: SLF001
+
+
 @pytest.mark.asyncio
 async def test_storage_round_trip_with_masking(_isolate_storage: Path) -> None:
     assert mcp_storage.load_servers() == []
