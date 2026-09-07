@@ -1,10 +1,13 @@
 """Persistent storage for Flight-Deck-managed MCP server configurations.
 
-Phase 1 keeps things deliberately simple: a flat JSON file under
-``~/.captain-claw-fd/mcp_servers.json`` containing a list of server
-records. Anything fancier (SQLite, encryption-at-rest, per-tenant
-scoping) is deferred until we have a clearer picture of what users
-actually want.
+A flat JSON file containing a list of server records. Its location is
+per-instance — see :func:`_storage_path` — so a host running several
+Flight Decks does not leak one deck's MCP servers into another; only the
+legacy ``~/.captain-claw-fd/mcp_servers.json`` fallback is shared, used
+when no isolation env (``CAPTAIN_CLAW_FD_MCP_PATH`` / ``CAPTAIN_CLAW_FD_HOME``
+/ ``FD_DATA_DIR``) is set. Anything fancier (SQLite, encryption-at-rest,
+per-tenant scoping within one deck) is deferred until we have a clearer
+picture of what users actually want.
 
 Schema (one element per configured server)::
 
@@ -58,10 +61,61 @@ _DEFAULT_PATH = _DEFAULT_DIR / "mcp_servers.json"
 
 
 def _storage_path() -> Path:
+    """Resolve this instance's MCP servers file.
+
+    Precedence (first match wins) so a host running several Flight Decks
+    isolates MCP config the same way it already isolates the rest of its
+    state — the shared legacy default was the source of cross-instance
+    leaks (one deck's servers showing up in another):
+
+    1. ``CAPTAIN_CLAW_FD_MCP_PATH`` — an explicit file, always wins.
+    2. ``CAPTAIN_CLAW_FD_HOME`` — the FD home dir that also holds
+       ``agent_secret`` / ``apps`` / ``app_data``; keep the file beside them.
+    3. ``FD_DATA_DIR`` — the general per-instance data dir (DB, plans, …).
+    4. the legacy shared ``~/.captain-claw-fd/mcp_servers.json``.
+
+    Only #4 is shared across instances; setting any of #1–#3 (as every
+    isolated deck already does for its data dir) gives this deck its own
+    MCP config, so a new install starts with no servers instead of
+    inheriting whatever another deck configured.
+    """
     override = os.environ.get("CAPTAIN_CLAW_FD_MCP_PATH", "").strip()
     if override:
         return Path(override).expanduser()
+    home = os.environ.get("CAPTAIN_CLAW_FD_HOME", "").strip()
+    if home:
+        return Path(home).expanduser().resolve() / "mcp_servers.json"
+    data_dir = os.environ.get("FD_DATA_DIR", "").strip()
+    if data_dir:
+        return Path(data_dir).expanduser().resolve() / "mcp_servers.json"
     return _DEFAULT_PATH
+
+
+# One-time migration hint: warn (once per resolved path) when an isolated
+# deck finds no MCP file of its own but the legacy shared one exists — so an
+# admin who *wants* those servers here knows to copy the file in, while a
+# deck that should stay clean (e.g. a kiosk) silently gets no servers.
+_migration_warned: set[str] = set()
+
+
+def _maybe_warn_legacy_migration(path: Path) -> None:
+    if path == _DEFAULT_PATH:
+        return
+    key = str(path)
+    if key in _migration_warned:
+        return
+    _migration_warned.add(key)
+    try:
+        if not path.exists() and _DEFAULT_PATH.exists():
+            log.info(
+                "No MCP servers file at %s; the legacy shared file %s exists but "
+                "is no longer read by an isolated instance. Copy it here if this "
+                "deck should keep those servers, or leave it for a clean deck.",
+                path,
+                _DEFAULT_PATH,
+            )
+    except Exception:
+        pass
 
 
 _write_lock = asyncio.Lock()
@@ -147,6 +201,7 @@ def _public_view(record: dict[str, Any]) -> dict[str, Any]:
 def load_servers() -> list[dict[str, Any]]:
     path = _storage_path()
     if not path.exists():
+        _maybe_warn_legacy_migration(path)
         return []
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
