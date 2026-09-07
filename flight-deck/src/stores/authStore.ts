@@ -7,7 +7,7 @@ export interface User {
   role: string
 }
 
-interface AuthStore {
+export interface AuthStore {
   user: User | null
   token: string
   isAuthenticated: boolean
@@ -44,6 +44,20 @@ export const useAuthStore = create<AuthStore>((set) => ({
   setSimpleChatOnly: (v) => set({ simpleChatOnly: v }),
   setToken: (token) => set({ token }),
 }))
+
+/**
+ * Whether the kiosk lock (server `--simple-chat` / FD_SIMPLE_CHAT) is in effect
+ * for the CURRENT viewer. Admins are exempt — an admin keeps full access even
+ * when the deck runs in simple-chat mode, so they can spawn agents, open config,
+ * administer users, and sign out. Everyone else (the shared kiosk account) stays
+ * locked to the chat-only Simple layout.
+ *
+ * Use this instead of reading `simpleChatOnly` directly wherever the lock is
+ * enforced, so the admin exemption stays consistent across the app. Reactive:
+ * it re-derives when the user logs in (role becomes known) or the flag changes.
+ */
+export const selectKioskLocked = (s: AuthStore): boolean =>
+  s.simpleChatOnly && s.user?.role !== 'admin'
 
 // ── Auth API calls ──
 

@@ -45,7 +45,7 @@ import { usePinnedStore } from '../../stores/pinnedStore'
 import { useClipboardStore } from '../../stores/clipboardStore'
 import { useTraceStore, selectSpanCount } from '../../stores/traceStore'
 import { useUIStore } from '../../stores/uiStore'
-import { useAuthStore } from '../../stores/authStore'
+import { useAuthStore, selectKioskLocked } from '../../stores/authStore'
 import { SendContextModal } from './SendContextModal'
 import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
@@ -203,7 +203,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   // Kiosk lock: in the locked simple-chat layout the header keeps only the
   // queue toggle — flows, send-to-another-agent, plan routing and traces are
   // all hidden so shared-account users can't reach the wider system.
-  const kiosk = useAuthStore((s) => s.simpleChatOnly)
+  const kiosk = useAuthStore(selectKioskLocked)  // admins are exempt from the kiosk lock
   // Simple layout only: the queue column can be tucked away so the
   // conversation gets the whole centre. Fullscreen (full layout) is unchanged.
   const simpleQueueOpen = useUIStore((s) => s.simpleQueueOpen)

@@ -45,7 +45,7 @@ import { BeingsPage } from './pages/BeingsPage'
 import { PublicBeingPage } from './pages/PublicBeingPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
-import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
+import { useAuthStore, selectKioskLocked, checkAuthStatus, refreshAccessToken } from './stores/authStore'
 import { useChatStore } from './stores/chatStore'
 import { useContainerStore } from './stores/containerStore'
 import { useLocalAgentStore } from './stores/localAgentStore'
@@ -153,7 +153,7 @@ registerHydrator((settings) => {
 function AppContent() {
   const view = useUIStore((s) => s.view)
   const layoutMode = useUIStore((s) => s.layoutMode)
-  const simpleChatOnly = useAuthStore((s) => s.simpleChatOnly)
+  const kioskLocked = useAuthStore(selectKioskLocked)
   const chatOpen = useChatStore((s) => s.chatOpen)
   const chatFullscreen = useChatStore((s) => s.chatFullscreen)
   const { fetchInstances, fetchStats, fetchConcerns, setWsConnected, upsertInstance, removeInstance, updateInstanceActivity } = useAgentStore()
@@ -396,7 +396,8 @@ function AppContent() {
   // view, spawn, agent config, start/stop, sign-out) so shared-account users
   // can only chat with the agents that are already running — nothing else is
   // reachable. Placed before the mobile/tablet/full branches so it always wins.
-  if (simpleChatOnly) {
+  // Admins are exempt (selectKioskLocked) — they keep full access even here.
+  if (kioskLocked) {
     return (
       <>
         <SimpleLayout locked onToggleShortcuts={() => setShortcutsOpen(!shortcutsOpen)} />

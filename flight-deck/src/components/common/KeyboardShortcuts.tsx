@@ -2,7 +2,7 @@ import { useEffect, useCallback } from 'react'
 import { X, Keyboard } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { useChatStore } from '../../stores/chatStore'
-import { useAuthStore } from '../../stores/authStore'
+import { useAuthStore, selectKioskLocked } from '../../stores/authStore'
 
 const shortcuts = [
   { keys: ['Cmd/Ctrl', 'D'], action: 'Toggle Director' },
@@ -39,7 +39,7 @@ export function useKeyboardShortcuts(
     // Kiosk lock: every shortcut that would reach another page or the full
     // layout is an escape hatch, so ignore them entirely. The harmless ones
     // (chat-tab switching, the shortcuts overlay, the simple queue) stay live.
-    const locked = useAuthStore.getState().simpleChatOnly
+    const locked = selectKioskLocked(useAuthStore.getState())  // admins are exempt
 
     // NOTE: the Cmd/Ctrl+1..5 page-jump shortcuts are intentionally gone —
     // disabled for everyone so a stray keystroke can't yank the user to
