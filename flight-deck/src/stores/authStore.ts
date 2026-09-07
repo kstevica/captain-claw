@@ -14,12 +14,16 @@ interface AuthStore {
   authEnabled: boolean | null  // null = not yet checked
   dockerSpawnEnabled: boolean
   internalFdUrl: string  // Internal URL for agent-to-FD calls (e.g. http://localhost:25080)
+  // Kiosk lock (server `--simple-chat` / FD_SIMPLE_CHAT): force the locked,
+  // chat-only Simple layout and hide every escape hatch.
+  simpleChatOnly: boolean
 
   setAuth: (user: User, token: string) => void
   clearAuth: () => void
   setAuthEnabled: (enabled: boolean) => void
   setDockerSpawnEnabled: (enabled: boolean) => void
   setInternalFdUrl: (url: string) => void
+  setSimpleChatOnly: (v: boolean) => void
   setToken: (token: string) => void
 }
 
@@ -30,12 +34,14 @@ export const useAuthStore = create<AuthStore>((set) => ({
   authEnabled: null,
   dockerSpawnEnabled: true,
   internalFdUrl: '',
+  simpleChatOnly: false,
 
   setAuth: (user, token) => set({ user, token, isAuthenticated: true }),
   clearAuth: () => set({ user: null, token: '', isAuthenticated: false }),
   setAuthEnabled: (enabled) => set({ authEnabled: enabled }),
   setDockerSpawnEnabled: (enabled) => set({ dockerSpawnEnabled: enabled }),
   setInternalFdUrl: (url) => set({ internalFdUrl: url }),
+  setSimpleChatOnly: (v) => set({ simpleChatOnly: v }),
   setToken: (token) => set({ token }),
 }))
 
@@ -51,6 +57,7 @@ export async function checkAuthStatus(): Promise<boolean> {
     useAuthStore.getState().setAuthEnabled(enabled)
     useAuthStore.getState().setDockerSpawnEnabled(data.docker_spawn_enabled !== false)
     if (data.internal_fd_url) useAuthStore.getState().setInternalFdUrl(data.internal_fd_url)
+    useAuthStore.getState().setSimpleChatOnly(data.simple_chat_only === true)
     return enabled
   } catch {
     useAuthStore.getState().setAuthEnabled(false)

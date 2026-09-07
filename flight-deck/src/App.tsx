@@ -153,6 +153,7 @@ registerHydrator((settings) => {
 function AppContent() {
   const view = useUIStore((s) => s.view)
   const layoutMode = useUIStore((s) => s.layoutMode)
+  const simpleChatOnly = useAuthStore((s) => s.simpleChatOnly)
   const chatOpen = useChatStore((s) => s.chatOpen)
   const chatFullscreen = useChatStore((s) => s.chatFullscreen)
   const { fetchInstances, fetchStats, fetchConcerns, setWsConnected, upsertInstance, removeInstance, updateInstanceActivity } = useAgentStore()
@@ -388,6 +389,21 @@ function AppContent() {
       </div>
     </>
   )
+
+  // ── Kiosk lock (server --simple-chat / FD_SIMPLE_CHAT) ──
+  // Force the locked, chat-first Simple layout on every form factor and ignore
+  // the stored layoutMode entirely. `locked` strips the escape hatches (full
+  // view, spawn, agent config, start/stop, sign-out) so shared-account users
+  // can only chat with the agents that are already running — nothing else is
+  // reachable. Placed before the mobile/tablet/full branches so it always wins.
+  if (simpleChatOnly) {
+    return (
+      <>
+        <SimpleLayout locked onToggleShortcuts={() => setShortcutsOpen(!shortcutsOpen)} />
+        {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
+      </>
+    )
+  }
 
   // ── Mobile layout ──
   if (isMobile) {

@@ -89,7 +89,7 @@ function initials(name: string): string {
 
 const iconBtn = 'rounded p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300'
 
-export function SimpleLayout({ onToggleShortcuts }: { onToggleShortcuts: () => void }) {
+export function SimpleLayout({ onToggleShortcuts, locked = false }: { onToggleShortcuts: () => void; locked?: boolean }) {
   const { containers, fetchContainers, checkHealth, startContainer, descriptionOverrides: dockerDesc } = useContainerStore()
   const { processes, fetchProcesses, startProcess, descriptionOverrides: procDesc } = useProcessStore()
   const { agents: localAgents, probeAll, probeAgent } = useLocalAgentStore()
@@ -194,7 +194,12 @@ export function SimpleLayout({ onToggleShortcuts }: { onToggleShortcuts: () => v
 
   const refresh = () => { fetchContainers(); fetchProcesses(); probeAll() }
 
-  const goSpawn = () => { useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('spawner') }
+  // In the kiosk lock, spawning leaves the chat surface (it flips to the full
+  // layout's Spawner) — so it's a no-op there and the triggers are hidden.
+  const goSpawn = () => {
+    if (locked) return
+    useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('spawner')
+  }
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -209,21 +214,22 @@ export function SimpleLayout({ onToggleShortcuts }: { onToggleShortcuts: () => v
         onSpawn={goSpawn}
         onOptions={setOptionsAgent}
         onToggleShortcuts={onToggleShortcuts}
+        locked={locked}
       />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden" style={{ minWidth: 320 }}>
         {session
           ? <ChatPanel variant="simple" />
-          : <EmptyChat hasAgents={agents.length > 0} onSpawn={goSpawn} />}
+          : <EmptyChat hasAgents={agents.length > 0} onSpawn={goSpawn} locked={locked} />}
       </main>
 
       <ContextColumn
         agentId={activeAgentId}
         agentName={session?.containerName ?? ''}
-        onOptions={activeAgent ? () => setOptionsAgent(activeAgent) : undefined}
+        onOptions={!locked && activeAgent ? () => setOptionsAgent(activeAgent) : undefined}
       />
 
-      {optionsAgent && createPortal(
+      {!locked && optionsAgent && createPortal(
         <AgentConfigEditor
           kind={optionsAgent.kind}
           identifier={optionsAgent.startKey}
@@ -239,7 +245,7 @@ export function SimpleLayout({ onToggleShortcuts }: { onToggleShortcuts: () => v
 // ── Left: agents ─────────────────────────────────────────────────────
 
 function AgentsColumn({
-  agents, activeAgentId, sessionInfo, starting, onOpen, onStart, onRefresh, onSpawn, onOptions, onToggleShortcuts,
+  agents, activeAgentId, sessionInfo, starting, onOpen, onStart, onRefresh, onSpawn, onOptions, onToggleShortcuts, locked = false,
 }: {
   agents: SimpleAgent[]
   activeAgentId: string | null
@@ -251,6 +257,7 @@ function AgentsColumn({
   onSpawn: () => void
   onOptions: (a: SimpleAgent) => void
   onToggleShortcuts: () => void
+  locked?: boolean
 }) {
   const open = useUIStore((s) => s.simpleLeftOpen)
   const setOpen = useUIStore((s) => s.setSimpleLeftOpen)
@@ -278,9 +285,11 @@ function AgentsColumn({
           <button onClick={() => setOpen(true)} className={iconBtn} title="Show agents">
             <ChevronRight className="h-4 w-4" />
           </button>
-          <button onClick={() => setLayoutMode('full')} className={iconBtn} title="Full view — all pages and panels">
-            <LayoutDashboard className="h-4 w-4" />
-          </button>
+          {!locked && (
+            <button onClick={() => setLayoutMode('full')} className={iconBtn} title="Full view — all pages and panels">
+              <LayoutDashboard className="h-4 w-4" />
+            </button>
+          )}
           {/* Bell lives at the TOP so its downward dropdown isn't clipped by
               the h-screen overflow-hidden root when the rail is collapsed. */}
           <NotificationBell align="left" />
@@ -292,14 +301,15 @@ function AgentsColumn({
             const hasChat = sessionInfo.has(a.id)
             const openable = a.reachable || hasChat
             const canStart = a.kind === 'local' ? a.state !== 'running' : a.state === 'stopped'
+            const railStart = canStart && !locked
             return (
               <button
                 key={a.id}
-                onClick={() => openable ? onOpen(a) : canStart ? onStart(a) : undefined}
-                aria-disabled={!openable && !canStart}
+                onClick={() => openable ? onOpen(a) : railStart ? onStart(a) : undefined}
+                aria-disabled={!openable && !railStart}
                 title={openable
                   ? `Chat with ${a.name}`
-                  : canStart
+                  : railStart
                     ? `${a.name} — ${stateLabel(a)} · click to ${a.kind === 'local' ? 'check again' : 'start'}`
                     : `${a.name} — ${stateLabel(a)}`}
                 className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold transition-colors ${
@@ -321,9 +331,11 @@ function AgentsColumn({
               </button>
             )
           })}
-          <button onClick={onSpawn} className={`${iconBtn} mt-1`} title="Spawn a new agent">
-            <Plus className="h-4 w-4" />
-          </button>
+          {!locked && (
+            <button onClick={onSpawn} className={`${iconBtn} mt-1`} title="Spawn a new agent">
+              <Plus className="h-4 w-4" />
+            </button>
+          )}
         </div>
         <div className="flex flex-col items-center gap-0.5 border-t border-zinc-800 py-2">
           <button onClick={toggleTheme} className={iconBtn} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
@@ -332,7 +344,7 @@ function AgentsColumn({
           <button onClick={onRefresh} className={iconBtn} title="Refresh agents">
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
-          {authEnabled && authUser && (
+          {!locked && authEnabled && authUser && (
             <button onClick={logoutUser} className={iconBtn} title={`Sign out ${authUser.display_name || authUser.email}`}>
               <LogOut className="h-3.5 w-3.5" />
             </button>
@@ -359,9 +371,11 @@ function AgentsColumn({
         </div>
         <div className="flex items-center gap-0.5">
           <NotificationBell align="left" />
-          <button onClick={() => setLayoutMode('full')} className={iconBtn} title="Full view — all pages and panels">
-            <LayoutDashboard className="h-4 w-4" />
-          </button>
+          {!locked && (
+            <button onClick={() => setLayoutMode('full')} className={iconBtn} title="Full view — all pages and panels">
+              <LayoutDashboard className="h-4 w-4" />
+            </button>
+          )}
           <button onClick={() => setOpen(false)} className={iconBtn} title="Hide agents">
             <ChevronLeft className="h-4 w-4" />
           </button>
@@ -373,9 +387,11 @@ function AgentsColumn({
         <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">
           Agents ({agents.length})
         </span>
-        <button onClick={onSpawn} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300" title="Spawn a new agent">
-          <Plus className="h-3.5 w-3.5" />
-        </button>
+        {!locked && (
+          <button onClick={onSpawn} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300" title="Spawn a new agent">
+            <Plus className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
 
       {/* Search (only once the list is long enough to need it) */}
@@ -440,14 +456,16 @@ function AgentsColumn({
                   </div>
                   <KindIcon className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
                 </button>
-                <button
-                  onClick={() => onOptions(a)}
-                  title={`Options — ${a.name}`}
-                  className="shrink-0 rounded p-1.5 text-zinc-500 opacity-0 transition-colors hover:bg-zinc-800 hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
-                >
-                  <Settings className="h-3.5 w-3.5" />
-                </button>
-                {canStart && (
+                {!locked && (
+                  <button
+                    onClick={() => onOptions(a)}
+                    title={`Options — ${a.name}`}
+                    className="shrink-0 rounded p-1.5 text-zinc-500 opacity-0 transition-colors hover:bg-zinc-800 hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
+                  >
+                    <Settings className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                {!locked && canStart && (
                   <button
                     onClick={() => onStart(a)}
                     disabled={starting.has(a.id)}
@@ -481,9 +499,11 @@ function AgentsColumn({
         {authEnabled && authUser && (
           <div className="flex min-w-0 items-center gap-1">
             <span className="truncate text-xs text-zinc-500">{authUser.display_name || authUser.email}</span>
-            <button onClick={logoutUser} className={iconBtn} title="Sign out">
-              <LogOut className="h-3.5 w-3.5" />
-            </button>
+            {!locked && (
+              <button onClick={logoutUser} className={iconBtn} title="Sign out">
+                <LogOut className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -511,7 +531,7 @@ function StateDot({ agent, className = '' }: { agent: SimpleAgent; className?: s
 
 // ── Centre: nothing open yet ─────────────────────────────────────────
 
-function EmptyChat({ hasAgents, onSpawn }: { hasAgents: boolean; onSpawn: () => void }) {
+function EmptyChat({ hasAgents, onSpawn, locked = false }: { hasAgents: boolean; onSpawn: () => void; locked?: boolean }) {
   return (
     <div className="flex h-full items-center justify-center bg-zinc-950/80 p-6">
       <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900/60 p-8 text-center">
@@ -519,14 +539,16 @@ function EmptyChat({ hasAgents, onSpawn }: { hasAgents: boolean; onSpawn: () => 
           <MessagesSquare className="h-6 w-6" />
         </div>
         <h2 className="mb-1.5 text-lg font-semibold text-zinc-100">
-          {hasAgents ? 'Pick an agent' : 'No agents yet'}
+          {hasAgents ? 'Pick an agent' : 'No agents available'}
         </h2>
         <p className="text-sm text-zinc-400">
           {hasAgents
             ? 'Choose an agent on the left to start a conversation. Its files and data show up on the right.'
-            : 'Spawn your first agent to start chatting.'}
+            : locked
+              ? 'No agents are running yet. Ask an administrator to start one.'
+              : 'Spawn your first agent to start chatting.'}
         </p>
-        {!hasAgents && (
+        {!hasAgents && !locked && (
           <button
             onClick={onSpawn}
             className="mt-6 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500"
