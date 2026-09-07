@@ -153,6 +153,13 @@ class QualityProfile:
     flow_ref_lint: bool = False    # flow compile validates {{steps.<id>}} refs
                                    # resolve to a declared step (typo -> error, not "")
 
+    # ── R7: council decision node (explicit opt-in, no preset) ──
+    council_tally: bool = False    # persist the deterministic majority vote tally
+                                   # as the council's decision datum (a `tally`
+                                   # artifact); the LLM synthesis stays as rationale.
+                                   # Token-free but writes a new artifact, so it is
+                                   # explicit-only — no preset enables it.
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     parallel_build_max_slices: int = 6  # cap on decomposition slices (keeps cost bounded)
@@ -181,7 +188,7 @@ class QualityProfile:
             "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
             "constraints_contract", "block_on_critical", "parallel_build",
             "interface_consistency", "micro_workers",
-            "parallel_edges", "flow_ref_lint",
+            "parallel_edges", "flow_ref_lint", "council_tally",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -222,7 +229,7 @@ class QualityProfile:
         "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
         "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
         "constraints_contract", "block_on_critical", "parallel_build",
-        "interface_consistency", "parallel_edges", "flow_ref_lint",
+        "interface_consistency", "parallel_edges", "flow_ref_lint", "council_tally",
     )
 
     @property
@@ -550,6 +557,62 @@ def build_quality_metrics(
         if budget.stopped_reason:
             out["budget_stopped_reason"] = budget.stopped_reason
     return out
+
+
+# ── R7: deterministic council vote tally (the decision node) ─────────────
+# A council's *verdict* was implicit: the panel's AGREE/DISAGREE/ABSTAIN votes
+# were stored but never counted, and the "decision" was an LLM synthesis over the
+# transcript. This is the deterministic code node at that decision point — a pure,
+# token-free majority count over the recorded votes. It is the verdict; the LLM
+# synthesis stays the rationale. `weights` optionally maps agent_id -> reliability
+# weight (default 1.0 each), so the SAME helper serves a plain head-count today and
+# a reliability-weighted tally once per-agent weights are available. Abstains are
+# reported but never tip the decision; a tie is 'tie'; no votes is 'no_quorum'.
+
+VOTE_VALUES = ("agree", "disagree", "abstain")
+
+
+def tally_votes(votes: list[dict] | None,
+                weights: dict[str, float] | None = None) -> dict:
+    """Deterministic majority tally over council votes. Pure and token-free.
+
+    Each vote is a dict with at least ``vote`` (agree|disagree|abstain; unknown
+    values are treated as abstain) and ``agent_id``. ``weights`` maps agent_id to
+    a reliability weight (missing -> 1.0); with all-1.0 weights this is a plain
+    head-count. The verdict compares the agree vs disagree totals only — abstains
+    are counted and reported but never decide. Returns a JSON-safe dict.
+    """
+    weights = weights or {}
+    counts = {"agree": 0, "disagree": 0, "abstain": 0}
+    wsum = {"agree": 0.0, "disagree": 0.0, "abstain": 0.0}
+    for v in votes or []:
+        val = str(v.get("vote", "abstain")).lower()
+        if val not in counts:
+            val = "abstain"
+        counts[val] += 1
+        wsum[val] += float(weights.get(str(v.get("agent_id", "")), 1.0))
+    total = sum(counts.values())
+    agree_w, disagree_w = wsum["agree"], wsum["disagree"]
+    if total == 0:
+        verdict = "no_quorum"
+    elif agree_w > disagree_w:
+        verdict = "agree"
+    elif disagree_w > agree_w:
+        verdict = "disagree"
+    else:
+        verdict = "tie"
+    decided = agree_w + disagree_w
+    # Signed decisiveness over the votes that actually counted (agree-positive).
+    margin = round((agree_w - disagree_w) / decided, 4) if decided else 0.0
+    return {
+        "verdict": verdict,
+        "counts": counts,
+        "weighted": {k: round(x, 4) for k, x in wsum.items()},
+        "total_votes": total,
+        "weighted_total": round(sum(wsum.values()), 4),
+        "margin": margin,
+        "weighted_used": bool(weights),
+    }
 
 
 # ── R10: source corpus directive (paired with the web_fetch behaviour) ─
