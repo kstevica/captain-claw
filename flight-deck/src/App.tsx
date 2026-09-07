@@ -400,7 +400,7 @@ function AppContent() {
   if (kioskLocked) {
     return (
       <>
-        <SimpleLayout locked onToggleShortcuts={() => setShortcutsOpen(!shortcutsOpen)} />
+        <SimpleLayout locked />
         {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
       </>
     )
@@ -467,7 +467,7 @@ function AppContent() {
   if (layoutMode === 'simple') {
     return (
       <>
-        <SimpleLayout onToggleShortcuts={() => setShortcutsOpen(!shortcutsOpen)} />
+        <SimpleLayout />
         {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
       </>
     )

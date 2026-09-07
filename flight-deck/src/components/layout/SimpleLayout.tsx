@@ -16,7 +16,6 @@ import {
   Moon,
   RefreshCw,
   LogOut,
-  Keyboard,
   MessagesSquare,
   FolderOpen,
   Database,
@@ -89,7 +88,7 @@ function initials(name: string): string {
 
 const iconBtn = 'rounded p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300'
 
-export function SimpleLayout({ onToggleShortcuts, locked = false }: { onToggleShortcuts: () => void; locked?: boolean }) {
+export function SimpleLayout({ locked = false }: { locked?: boolean }) {
   const { containers, fetchContainers, checkHealth, startContainer, descriptionOverrides: dockerDesc } = useContainerStore()
   const { processes, fetchProcesses, startProcess, descriptionOverrides: procDesc } = useProcessStore()
   const { agents: localAgents, probeAll, probeAgent } = useLocalAgentStore()
@@ -213,7 +212,6 @@ export function SimpleLayout({ onToggleShortcuts, locked = false }: { onToggleSh
         onRefresh={refresh}
         onSpawn={goSpawn}
         onOptions={setOptionsAgent}
-        onToggleShortcuts={onToggleShortcuts}
         locked={locked}
       />
 
@@ -245,7 +243,7 @@ export function SimpleLayout({ onToggleShortcuts, locked = false }: { onToggleSh
 // ── Left: agents ─────────────────────────────────────────────────────
 
 function AgentsColumn({
-  agents, activeAgentId, sessionInfo, starting, onOpen, onStart, onRefresh, onSpawn, onOptions, onToggleShortcuts, locked = false,
+  agents, activeAgentId, sessionInfo, starting, onOpen, onStart, onRefresh, onSpawn, onOptions, locked = false,
 }: {
   agents: SimpleAgent[]
   activeAgentId: string | null
@@ -256,7 +254,6 @@ function AgentsColumn({
   onRefresh: () => void
   onSpawn: () => void
   onOptions: (a: SimpleAgent) => void
-  onToggleShortcuts: () => void
   locked?: boolean
 }) {
   const open = useUIStore((s) => s.simpleLeftOpen)
@@ -323,7 +320,7 @@ function AgentsColumn({
                 {starting.has(a.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(a.name)}
                 <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
                 {info?.busy && (
-                  <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-violet-400 ring-2 ring-zinc-900" />
+                  <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" />
                 )}
                 {info?.unread && !active && !info.busy && (
                   <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-sky-400 ring-2 ring-zinc-900" />
@@ -421,6 +418,7 @@ function AgentsColumn({
           {shown.map((a) => {
             const info = sessionInfo.get(a.id)
             const active = a.id === activeAgentId
+            const busy = !!info?.busy
             const KindIcon = a.kind === 'docker' ? Box : a.kind === 'process' ? Cpu : Server
             const hasChat = sessionInfo.has(a.id)
             const openable = a.reachable || hasChat
@@ -434,19 +432,27 @@ function AgentsColumn({
                   className={`flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
                     active
                       ? 'bg-zinc-800 text-zinc-100'
-                      : openable
-                        ? 'text-zinc-300 hover:bg-zinc-800/50 hover:text-zinc-100'
-                        : 'text-zinc-500'
+                      : busy
+                        ? 'bg-amber-500/10 text-zinc-100 hover:bg-amber-500/20'
+                        : openable
+                          ? 'text-zinc-300 hover:bg-zinc-800/50 hover:text-zinc-100'
+                          : 'text-zinc-500'
                   }`}
                 >
                   <StateDot agent={a} className="shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
-                      <span className="truncate font-medium">{a.name}</span>
-                      {info?.busy && (
-                        <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-violet-400" title="Working" />
+                      <span className="min-w-0 truncate font-medium">{a.name}</span>
+                      {busy && (
+                        <span
+                          className="flex shrink-0 items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:text-amber-400"
+                          title="Working"
+                        >
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500 dark:bg-amber-400" />
+                          Busy
+                        </span>
                       )}
-                      {info?.unread && !active && !info.busy && (
+                      {info?.unread && !active && !busy && (
                         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" title="New reply" />
                       )}
                     </div>
@@ -488,9 +494,6 @@ function AgentsColumn({
         <div className="flex items-center gap-0.5">
           <button onClick={toggleTheme} className={iconBtn} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
             {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-          </button>
-          <button onClick={onToggleShortcuts} className={iconBtn} title="Keyboard Shortcuts (Cmd+K)">
-            <Keyboard className="h-3.5 w-3.5" />
           </button>
           <button onClick={onRefresh} className={iconBtn} title="Refresh agents">
             <RefreshCw className="h-3.5 w-3.5" />
