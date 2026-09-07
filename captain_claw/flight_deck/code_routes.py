@@ -2925,20 +2925,47 @@ async def _agent_code_run(owner: str, project: str, session_id: str, intent: str
             _sess, repo, sdir, _pk = _sctx(owner, project, session_id)
             state = _read_state(sdir)
             plan_file = state.get("plan_file") or "plan.md"
-            db = get_db()
-            archetypes = await merged_archetypes(db, owner)
-            by_id = {a["id"]: a for a in archetypes}
-            registry = _load_registry()
-            tiers_map, env_vars = await _load_owner_tiers(db, owner)
-            _append_chat(sdir, "user",
-                         "✓ Plan auto-approved (agent-initiated run) — building.",
-                         kind="approval")
             _route = state.get("route") or {}
-            await _run_build_loop(req, user, pkey, repo, sdir, intent, by_id,
-                                  tiers_map, env_vars, registry, plan_file=plan_file,
-                                  quality=_load_quality(owner, project),
-                                  domain=str(_route.get("domain") or "general"),
-                                  planner_id=str(_route.get("planner") or ""))
+            quality = _load_quality(owner, project)
+            # R5 (opt-in): a high-blast-radius plan is NOT auto-approved — it stays
+            # `awaiting_plan` for a human to approve via the normal /plan/approve
+            # route. Default off → this check is skipped and auto-approve is
+            # byte-identical to before.
+            _held = ""
+            if quality.blast_radius_gate:
+                from captain_claw.flight_deck.blast_radius import classify_plan
+                _plan_text = str(out.get("plan") or "")
+                if not _plan_text:
+                    try:
+                        _pf = repo / plan_file
+                        if _pf.is_file():
+                            _plan_text = _pf.read_text()
+                    except Exception:  # noqa: BLE001
+                        _plan_text = ""
+                _hit, _reason = classify_plan(_plan_text)
+                if _hit:
+                    _held = _reason
+            if _held:
+                _append_chat(sdir, "assistant",
+                             f"⚠️ Held for approval — this plan looks high-impact "
+                             f"({_held}). It was NOT auto-approved; open the Code studio "
+                             f"session to review and approve it before it builds.",
+                             kind="note")
+                # state stays `awaiting_plan` (set by message()); nothing to build.
+            else:
+                db = get_db()
+                archetypes = await merged_archetypes(db, owner)
+                by_id = {a["id"]: a for a in archetypes}
+                registry = _load_registry()
+                tiers_map, env_vars = await _load_owner_tiers(db, owner)
+                _append_chat(sdir, "user",
+                             "✓ Plan auto-approved (agent-initiated run) — building.",
+                             kind="approval")
+                await _run_build_loop(req, user, pkey, repo, sdir, intent, by_id,
+                                      tiers_map, env_vars, registry, plan_file=plan_file,
+                                      quality=quality,
+                                      domain=str(_route.get("domain") or "general"),
+                                      planner_id=str(_route.get("planner") or ""))
         elif out.get("status") == "running":
             # Backlog-continuation branch runs as its own background task —
             # poll the session state until it settles (bounded).

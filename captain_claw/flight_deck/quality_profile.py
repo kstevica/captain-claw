@@ -165,6 +165,14 @@ class QualityProfile:
                                    # Token-free but writes a new artifact, so it is
                                    # explicit-only — no preset enables it.
 
+    # ── R5: blast-radius gate (explicit opt-in, no preset) ──
+    blast_radius_gate: bool = False  # hold a high-blast-radius plan for human
+                                     # approval instead of auto-approving it on an
+                                     # agent-initiated Code run (deterministic,
+                                     # token-free; a hit SKIPS the build). Kept out
+                                     # of _BOOL_FLAGS so a gate-only run never trips
+                                     # in-build quality work via any_enabled.
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     parallel_build_max_slices: int = 6  # cap on decomposition slices (keeps cost bounded)
@@ -194,6 +202,7 @@ class QualityProfile:
             "constraints_contract", "block_on_critical", "parallel_build",
             "interface_consistency", "micro_workers", "push_deps",
             "parallel_edges", "flow_ref_lint", "council_tally",
+            "blast_radius_gate",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
