@@ -74,8 +74,9 @@ def _safe_id(agent_id: str) -> str:
 
 
 def _default_base() -> Path:
-    base = os.environ.get("CAPTAIN_CLAW_FD_HOME") or os.path.expanduser("~/.captain-claw-fd")
-    return Path(base) / "app_files"
+    # Per-instance: CAPTAIN_CLAW_FD_HOME > FD_DATA_DIR > legacy ~/.captain-claw-fd.
+    from captain_claw.flight_deck.fd_home import fd_home
+    return fd_home(Path(os.path.expanduser("~/.captain-claw-fd"))) / "app_files"
 
 
 class LocalFileStore:

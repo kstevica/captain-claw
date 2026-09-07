@@ -71,14 +71,24 @@ def _real_user_home() -> Path:
 
 
 def _secret_path() -> Path:
-    """Path to the secret file.
+    """Path to the secret file — per Flight Deck instance.
 
-    Always under the real user's home so FD and agents (which may
-    have different ``$HOME`` overrides) all read the same file.
-    The directory name matches ``app_runtime._fd_home``'s default
-    so an unsandboxed FD writes it next to its other state.
+    Precedence (see :mod:`fd_home`): ``CAPTAIN_CLAW_FD_HOME`` >
+    ``FD_DATA_DIR`` > the legacy ``<passwd-home>/.captain-claw-fd``.
+    Several decks on one host each isolate via their own ``FD_DATA_DIR``
+    (or FD home), so a deck no longer authenticates against another
+    deck's secret; the file still sits beside that deck's other state
+    (``app_runtime._fd_home`` uses the same resolution).
+
+    The legacy fallback stays anchored to the *passwd* home, not
+    ``$HOME``: FD spawns agents with ``HOME`` redirected to a sandbox,
+    and in the unisolated single-deck case FD and its in-process agents
+    must still converge on one file. When an isolation env is set both
+    FD and the local agents it spawns inherit the same value (agents get
+    FD's full environment), so they converge there too.
     """
-    return _real_user_home() / ".captain-claw-fd" / _SECRET_FILE_NAME
+    from captain_claw.flight_deck.fd_home import fd_home
+    return fd_home(_real_user_home() / ".captain-claw-fd") / _SECRET_FILE_NAME
 
 
 def _read_file() -> str:
