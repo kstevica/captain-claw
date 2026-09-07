@@ -1026,13 +1026,50 @@ def _select_reviewers(rnd: int, prior_findings: list | None, fix_instructions: s
     return [rv for rv in _REVIEWERS if keep_security or rv != "security-reviewer"]
 
 
-def _fix_prompt(intent: str, fix_instructions: str, contract: str = "") -> str:
+def _scope_from_findings(findings: list[dict] | None) -> list[str]:
+    """Distinct, non-empty file paths the triage findings point at — the in-scope
+    set for a correction (R6: return the unit, keep the fix within its files)."""
+    seen: list[str] = []
+    for f in (findings or []):
+        fp = str((f or {}).get("file") or "").strip()
+        if fp and fp not in seen:
+            seen.append(fp)
+    return seen
+
+
+def _fix_prompt(intent: str, fix_instructions: str, contract: str = "",
+                findings: list[dict] | None = None,
+                scope_files: list[str] | None = None) -> str:
+    # R6: hand the fixer the failing units as an explicit, evidenced list plus a
+    # focus scope, so a one-issue correction doesn't grow into an unreviewed
+    # multi-file diff. Empty findings/scope reproduce the pre-R6 prompt exactly.
+    findings = findings or []
+    scope_files = scope_files or []
+    lines = []
+    for f in findings:
+        sev = str((f or {}).get("severity") or "?")
+        fil = str((f or {}).get("file") or "").strip()
+        ttl = str((f or {}).get("title") or "").strip()
+        loc = f" [{fil}]" if fil else ""
+        entry = f"- ({sev}){loc} {ttl}".rstrip()
+        if entry.strip("- ()?"):
+            lines.append(entry)
+    fblock = ("\nFailing units (correct each; stay within its file):\n"
+              + "\n".join(lines) + "\n") if lines else ""
+    sblock = ""
+    if scope_files:
+        sblock = ("\nSCOPE — focus your changes on these files:\n"
+                  + "\n".join(f"- {p}" for p in scope_files)
+                  + "\nIf a fix genuinely needs another file, keep that change minimal and say why. "
+                    "Do not refactor or 'improve' unrelated code — return the failing unit "
+                    "corrected, nothing more.\n")
     return (
         "A code review of THIS repository (your workspace) found issues that must be fixed. "
         "Apply the fixes with relative paths and verify via your shell. Fix ONLY the issues "
         "listed; keep working code intact.\n\n"
-        f"Issues to fix:\n{fix_instructions}\n\n"
-        f"Original request for context:\n{intent}" + _REPORTS_DIRECTIVE + contract
+        f"Issues to fix:\n{fix_instructions}\n"
+        + fblock + sblock
+        + f"\nOriginal request for context:\n{intent}" + _REPORTS_DIRECTIVE + contract
     )
 
 
@@ -1278,6 +1315,26 @@ async def _fix_commit_diff(repo: Path, fsha: str | None, cap: int = 12000) -> st
     if len(patch) > cap:
         patch = patch[:cap] + f"\n… (truncated at {cap} chars — use `git show {fsha[:10]}` for the rest)"
     return patch
+
+
+async def _changed_files(repo: Path, sha: str | None) -> list[str]:
+    """Repo-relative paths changed in commit ``sha`` (parsed from the patch).
+    Deterministic; used to detect a correction that strayed outside its scope (R6)."""
+    if not sha:
+        return []
+    try:
+        patch = await code_git.git_show(repo, sha)
+    except Exception:  # noqa: BLE001
+        return []
+    files: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split(" b/", 1)
+            if len(parts) == 2:
+                p = parts[1].strip()
+                if p and p not in files:
+                    files.append(p)
+    return files
 
 
 _DEEP_BUILD_EST = 20000  # rough per-attempt output-token estimate for budget accounting
@@ -1835,11 +1892,14 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             pre_fix_sha = _head[0]["sha"] if _head else None
             fix_rounds_run += 1
             fixer = triage["fixer"]
+            fix_findings = triage.get("findings", []) or []
+            scope_files = _scope_from_findings(fix_findings)
             fd = None
             fsha = None
             for attempt in range(_FIX_RETRIES + 1):
                 fp = (_no_change_corrective(attempt, _acted(fd)) if attempt else "") \
-                    + _fix_prompt(intent, triage.get("fix_instructions", ""), contract_dir)
+                    + _fix_prompt(intent, triage.get("fix_instructions", ""), contract_dir,
+                                  findings=fix_findings, scope_files=scope_files)
                 fd = await _run_agent(request, user, pkey, repo, fixer,
                                       fp, by_id, tiers_map, env_vars)
                 if _cancelled(pkey):
@@ -1851,6 +1911,17 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                     break
                 _progress(pkey, "note", f"fix r{rnd + 1} produced no file changes (attempt {attempt + 1})")
             last_fix_sha = fsha or last_fix_sha
+            # R6: surface scope creep — a correction that edited files none of the
+            # findings named. Deterministic + non-blocking (a valid fix may touch a
+            # helper); it just makes an un-reviewed spread visible in the log.
+            if fsha and scope_files:
+                _scope = set(scope_files)
+                _stray = [c for c in await _changed_files(repo, fsha) if c not in _scope]
+                if _stray:
+                    _progress(pkey, "note",
+                              f"scope: fix r{rnd + 1} also changed {len(_stray)} file(s) outside the "
+                              f"findings' scope ({', '.join(_stray[:5])}"
+                              + ("…" if len(_stray) > 5 else "") + ")")
             _append_chat(sdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
                          kind="fix", round=rnd + 1, archetype=fixer,
                          ok=bool(fd.get("ok")), commit=fsha or "")

@@ -33,7 +33,11 @@ _BG_TASKS: set[asyncio.Task] = set()
 
 _JUDGE_SYSTEM = (
     "You are a strict evaluator. Given an action the assistant was asked to carry "
-    "out and the result it produced, decide whether the action was accomplished. "
+    "out, the PATH it took, and the result it produced, decide whether the action "
+    "was accomplished. Weigh the path, not only the final text (R8: measure the "
+    "path, not just the answer): a result reached through tool errors, retries, a "
+    "timed-out turn, or one that skipped steps the intent required is weaker than a "
+    "clean one. "
     'Reply with ONLY JSON: {"success": true|false, "why": "one short sentence"}. '
     "Be honest: partial, refused, or error results are failures."
 )
@@ -183,11 +187,51 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
     return False
 
 
+def _trajectory_summary(res: dict[str, Any]) -> str:
+    """A compact, deterministic summary of HOW a dispatch reached its result — the
+    path, not just the answer (R8). Deterministic, no LLM. Empty when nothing to
+    say (a caller that passes "" gets exactly the pre-R8 judge prompt)."""
+    if not isinstance(res, dict):
+        return ""
+    parts: list[str] = []
+    actions = res.get("actions") or []
+    if actions:
+        counts: dict[str, int] = {}
+        errs = 0
+        for a in actions:
+            name = str((a or {}).get("tool") or "?")
+            counts[name] = counts.get(name, 0) + 1
+            if (a or {}).get("error") or (a or {}).get("is_error"):
+                errs += 1
+        tool_str = ", ".join(f"{n}×{c}" if c > 1 else n
+                             for n, c in sorted(counts.items(), key=lambda kv: -kv[1]))
+        parts.append(f"{len(actions)} tool call(s): {tool_str}")
+        if errs:
+            parts.append(f"{errs} tool error(s) along the way")
+    else:
+        parts.append("no tool calls (text-only turn)")
+    lat = res.get("latency_ms")
+    if lat:
+        parts.append(f"{int(lat)}ms")
+    usage = res.get("usage") or {}
+    if isinstance(usage, dict):
+        tot = usage.get("total") or usage.get("total_tokens") or usage.get("output")
+        if isinstance(tot, (int, float)) and tot:
+            parts.append(f"~{int(tot)} tokens")
+    if res.get("timed_out"):
+        parts.append("hit the time budget (partial result)")
+    return "; ".join(parts)
+
+
 async def _judge_outcome(
-    user_id: str, action: dict[str, Any], output: str,
+    user_id: str, action: dict[str, Any], output: str, trajectory: str = "",
 ) -> dict[str, Any]:
     """LLM verdict on whether ``output`` accomplished ``action``. Returns
-    ``{"success": bool, "why": str}``; defaults to failure if unparseable."""
+    ``{"success": bool, "why": str}``; defaults to failure if unparseable.
+
+    ``trajectory`` (R8) is a compact summary of the path taken; when non-empty it
+    is shown to the judge so the verdict weighs how the result was reached, not
+    just the final text. An empty ``trajectory`` reproduces the pre-R8 prompt."""
     agent = _strongest_agent(user_id)
     if not agent:
         return {"success": False, "why": "no agent to judge with"}
@@ -202,7 +246,8 @@ async def _judge_outcome(
         user_prompt = (
             f"Intended action ({action.get('kind')}): {action.get('title')}\n"
             f"Why: {action.get('rationale')}\n\n"
-            f"Result the assistant produced:\n{(output or '(no output)')[:4000]}\n\n"
+            + (f"Path taken: {trajectory}\n\n" if trajectory else "")
+            + f"Result the assistant produced:\n{(output or '(no output)')[:4000]}\n\n"
             "Did it accomplish the intent?"
         )
         resp = await provider.complete(
@@ -281,7 +326,7 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
             if fu_id:
                 _escalate_follow_up(store, user_id, fu_id, cfg)
         elif learn:
-            verdict = await _judge_outcome(user_id, action, output)
+            verdict = await _judge_outcome(user_id, action, output, _trajectory_summary(res))
             success = bool(verdict["success"])
             note = verdict["why"] or output[:300]
         else:
