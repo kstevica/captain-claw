@@ -466,7 +466,8 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
                          force_ids: list[str] | None = None,
                          shared_datastore: bool = False,
                          state_manifest: str = "",
-                         prior_knowledge: str = "") -> dict:
+                         prior_knowledge: str = "",
+                         constraints_block: str = "") -> dict:
     """Ask the Lead to split the task into complementary, owner-assigned subtasks.
 
     Returns a normalized plan. On any LLM/parse failure raises — the caller turns
@@ -512,6 +513,8 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
         user_prompt += state_manifest
     if prior_knowledge:
         user_prompt += prior_knowledge
+    if constraints_block:  # R2 (opt-in): learned constraints for the lead splitter
+        user_prompt += constraints_block
     # The plan now carries shared_context + per-piece briefs + depends_on, so it can
     # be long — a tight cap truncates the JSON and the whole route fails. Give it room.
     prov, mt = _provider_call(creds, temperature=0.2, default_max=8192, cap=16384)
@@ -560,7 +563,7 @@ def _resolve_creds(registry: dict, tiers: dict | None, api_key: str, tier: str) 
 async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dict,
                       force_ids: list[str] | None = None,
                       shared_datastore: bool = False, vfs_project: str = "",
-                      prior_knowledge: str = "") -> dict:
+                      prior_knowledge: str = "", constraints_block: str = "") -> dict:
     """Run the Lead and shape the result into a persistable Vatra route:
     {mode, domain, rationale, subtasks, selected}. `selected` mirrors Basna's
     shape so the read-tool and list UI render the owners. `force_ids` fixes the
@@ -587,7 +590,7 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
     plan = await asyncio.wait_for(
         _llm_decompose(intent, archetypes, reliability, creds, cap, force_ids=forced or None,
                        shared_datastore=shared_datastore, state_manifest=state_manifest,
-                       prior_knowledge=prior_knowledge),
+                       prior_knowledge=prior_knowledge, constraints_block=constraints_block),
         _DECOMPOSE_TIMEOUT)
     subtasks = plan["subtasks"]
     # Guarantee every fixed-team archetype actually got a piece — if the Lead missed
@@ -1284,6 +1287,17 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     _mode_dir = output_mode_directive(quality.output_mode)
     if _mode_dir:
         shared_context = (shared_context + _mode_dir).strip()
+    # R2 learned constraints (opt-in): fold the top domain-scoped rules into
+    # shared_context so every owner AND the reporter build against them.
+    if quality.constraint_learning:
+        try:
+            from captain_claw.flight_deck import constraint_learning as _cl
+            _cblock = _cl.format_constraints_block(
+                await db.get_learned_constraints(user["id"], domain, limit=5))
+            if _cblock and _cblock not in shared_context:
+                shared_context = (shared_context + _cblock).strip()
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra shared-context constraints load failed", error=str(e))
 
     # R1 Research Map (opt-in): index the shared folder so owners AND the reporter
     # can search prior rounds' material instead of re-reading it (and the reporter
@@ -2434,6 +2448,33 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
         except Exception as e:  # noqa: BLE001
             log.warning("Vatra quality metrics persist failed", error=str(e))
+
+    # R2 (opt-in): distill ONE reusable constraint from an accepted run and persist
+    # it domain-scoped for future lead-decompose / owner briefs. Accepted = the
+    # holistic reporter verdict was good, or the run assembled a usable deliverable.
+    if quality.constraint_learning and (truth or "").strip():
+        try:
+            _accepted = any(_l.get("archetype_id") == _REPORTER_PSEUDO and _l.get("success")
+                            for _l in learned) or bool(usable)
+            if _accepted:
+                from captain_claw.flight_deck import constraint_learning as _cl
+                from captain_claw.llm import Message
+                _gaps = [g.get("item") for g in (analysis.get("gaps") or [])
+                         if isinstance(g, dict) and g.get("item")]
+                _signal = _cl.build_signal(truth, _gaps)
+                _prov, _mt = _provider_call(_creds("fast"), temperature=0.2,
+                                            default_max=400, cap=800)
+                _r = await asyncio.wait_for(_prov.complete(
+                    [Message(role="user", content=_cl.distill_prompt(intent, _signal, "accepted"))],
+                    temperature=0.2, max_tokens=_mt), 60)
+                _row = _cl.parse_constraint(_r.content or "")
+                if _row:
+                    await db.add_learned_constraint(
+                        user["id"], _row["domain"] or domain, "vatra",
+                        _row["trigger"], _row["constraint"], _row["severity"], source_id=sid)
+                    _progress(sid, "learn", f"Learned constraint: {_row['constraint'][:80]}")
+        except Exception as e:  # noqa: BLE001 — distillation is best-effort
+            log.warning("Vatra constraint learning failed", error=str(e))
 
     # Run cost: roll the whole run's model spend (owners across all rounds +
     # reporter + ask-helpers + fact-checker) into a dollar cost + effective $/hour,
@@ -3799,10 +3840,21 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
             # Prior runs' folders are read-only reference by default.
             _ref_folders = list(dict.fromkeys(
                 _ref_folders + await knowledge_run_folders(db, user["id"], body.knowledge_session_ids)))
+        # R2 (opt-in): learned constraints for the lead decompose. Domain is still an
+        # unknown output of the decomposition here, so fetch global top-N (domain=None).
+        _constraints_block = ""
+        if quality.constraint_learning:
+            try:
+                from captain_claw.flight_deck import constraint_learning as _cl
+                _constraints_block = _cl.format_constraints_block(
+                    await db.get_learned_constraints(user["id"], None, limit=5))
+            except Exception as e:  # noqa: BLE001
+                log.warning("Vatra lead constraints load failed", error=str(e))
         route = await _build_plan(db, user["id"], task_for_planning, body.max_agents, creds,
                                   force_ids=body.archetype_ids or None,
                                   shared_datastore=body.shared_datastore,
-                                  vfs_project=body.vfs_project, prior_knowledge=_prior)
+                                  vfs_project=body.vfs_project, prior_knowledge=_prior,
+                                  constraints_block=_constraints_block)
         # Fold read-only reference folders into shared_context so every worker checks
         # them before web-searching.
         _ref = _reference_directive(_ref_folders)

@@ -51,7 +51,7 @@ _SCAN_FILE_CAP = 800          # max files a no_pattern scan will open
 
 # ── derive ───────────────────────────────────────────────────────────
 
-def derive_prompt(intent: str, plan_text: str = "") -> str:
+def derive_prompt(intent: str, plan_text: str = "", learned: str = "") -> str:
     plan_block = f"\n\n## Approved plan\n{plan_text[:8000]}" if plan_text.strip() else ""
     return (
         "You are turning a coding task's ACCEPTANCE CRITERIA into checkable "
@@ -76,7 +76,7 @@ def derive_prompt(intent: str, plan_text: str = "") -> str:
         "a serious defect. Keep commands cheap and deterministic (no servers, no "
         'network). If the task states no checkable acceptance rules, return '
         '{"constraints": []}.\n\n'
-        f"## Task\n{intent}{plan_block}"
+        f"## Task\n{intent}{plan_block}{learned}"
     )
 
 

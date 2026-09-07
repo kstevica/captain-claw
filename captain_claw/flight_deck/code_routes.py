@@ -909,7 +909,7 @@ async def _run_cartographer(request: Request, user: dict, pkey: str, repo: Path,
         by_id, tiers_map, env_vars)
 
 
-def _plan_prompt(intent: str, plan_rel: str = "plan.md") -> str:
+def _plan_prompt(intent: str, plan_rel: str = "plan.md", learned: str = "") -> str:
     return (
         "You are planning a coding task in THIS repository — it is your workspace and "
         "current directory. Survey the existing code first (relative paths, your shell), "
@@ -920,7 +920,7 @@ def _plan_prompt(intent: str, plan_rel: str = "plan.md") -> str:
         "In the plan, reference every project file as a plain REPO-RELATIVE path "
         "(`index.html`, `src/game.js`) — never under `saved/` (untracked scratch), "
         "never with a `vfs:` prefix, never absolute.\n\n"
-        f"Task:\n{intent}" + _HOSTING_DIRECTIVE
+        f"Task:\n{intent}" + _HOSTING_DIRECTIVE + learned
     )
 
 
@@ -1221,7 +1221,7 @@ async def _coverage_gaps(repo: Path, plan_file: str, intent: str,
 
 async def _load_or_derive_contract(repo: Path, plan_file: str, intent: str,
                                    tiers_map: dict, registry: dict,
-                                   derive: bool = True) -> list[dict]:
+                                   derive: bool = True, learned_block: str = "") -> list[dict]:
     """The persisted ``.contract.json`` if present (follow-up turns, user edits);
     otherwise derive it once from the approved plan. Returns [] on any failure —
     the contract is opt-in insurance, never a blocker."""
@@ -1242,7 +1242,7 @@ async def _load_or_derive_contract(repo: Path, plan_file: str, intent: str,
         resp = await prov.complete(messages=[
             Message(role="system", content="You extract checkable acceptance criteria. "
                     "Reply with JSON only."),
-            Message(role="user", content=code_contract.derive_prompt(intent, plan_text))],
+            Message(role="user", content=code_contract.derive_prompt(intent, plan_text, learned_block))],
             temperature=0.1, max_tokens=1500)
         constraints = code_contract.parse_contract(resp.content)
     except Exception as e:  # noqa: BLE001 — deriving must never break the build
@@ -1408,7 +1408,8 @@ _CODE_OWNER_POOL = ("code-implementer", "quick-dirty", "debugger")
 
 
 async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
-                          tiers_map: dict, registry: dict, quality: QualityProfile) -> list[dict]:
+                          tiers_map: dict, registry: dict, quality: QualityProfile,
+                          learned_block: str = "") -> list[dict]:
     """Group-0 decomposition: one reason-tier call turns the approved plan into
     build slices (0..N). Returns the parsed slices verbatim — the caller decides
     whether there are enough (>=2) to run a team, so it can explain the fallback.
@@ -1426,7 +1427,7 @@ async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
         resp = await prov.complete(messages=[
             Message(role="system", content="You are a build coordinator. Reply with JSON only."),
             Message(role="user", content=code_plan.decompose_prompt(
-                intent, plan_text, roster, quality.parallel_build_max_slices))],
+                intent, plan_text, roster, quality.parallel_build_max_slices, learned_block))],
             temperature=0.1, max_tokens=2500)
         return code_plan.parse_slices(resp.content, by_id, quality.parallel_build_max_slices)
     except Exception as e:  # noqa: BLE001 — decomposition must never break the build
@@ -1437,7 +1438,7 @@ async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
 async def _run_decomposed_build(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                                 intent: str, by_id: dict, tiers_map: dict, env_vars: list,
                                 registry: dict, plan_file: str, quality: QualityProfile,
-                                contract_dir: str) -> tuple[dict | None, str | None]:
+                                contract_dir: str, learned_block: str = "") -> tuple[dict | None, str | None]:
     """Phase B (opt-in, parallel_build): decompose the approved plan into
     dependency-layered slices and build them layer by layer — a focused
     implementer per slice, sharing the ``facts`` interface ledger so the slices
@@ -1448,7 +1449,7 @@ async def _run_decomposed_build(request: Request, user: dict, pkey: str, repo: P
     Degrades safely: an empty/degenerate decomposition returns ``(None, None)``
     and the caller falls back to the single ``code-implementer`` build."""
     _phase(pkey, "Planning the build (decomposition)")
-    slices = await _decompose_plan(repo, plan_file, intent, by_id, tiers_map, registry, quality)
+    slices = await _decompose_plan(repo, plan_file, intent, by_id, tiers_map, registry, quality, learned_block)
     if len(slices) < 2:
         # A team needs >=2 independent slices. One slice (a single-file or
         # otherwise indivisible plan) or none (the model couldn't split it) means
@@ -1559,6 +1560,19 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         _write_state(sdir, {"status": "idle"})
 
     try:
+        # R2 learned constraints (opt-in): the top domain-scoped rules distilled
+        # from earlier accepted runs, injected into the splitter / contract-derive /
+        # build & fix prompts. Empty string when the flag is off → today's prompts.
+        learned_block = ""
+        if quality.constraint_learning:
+            try:
+                _rows = await get_db().get_learned_constraints(user["id"], domain, limit=5)
+                from captain_claw.flight_deck import constraint_learning as _cl
+                learned_block = _cl.format_constraints_block(_rows)
+                if learned_block:
+                    _progress(pkey, "note", f"{len(_rows)} learned constraint(s) applied")
+            except Exception as e:  # noqa: BLE001 — learning is advisory, never blocks
+                log.warning("code learned-constraints load failed", error=str(e))
         # A1 acceptance contract (opt-in): load or derive the checkable acceptance
         # criteria once, inject them into the build/fix prompts as the target, and
         # validate them after each review round. Empty when the lever is off.
@@ -1566,7 +1580,8 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         contract_sum: dict = {}
         if quality.constraints_contract:
             contract = await _load_or_derive_contract(
-                repo, plan_file, intent, tiers_map, registry, derive=not seed_fix)
+                repo, plan_file, intent, tiers_map, registry,
+                derive=not seed_fix, learned_block=learned_block)
             if contract:
                 _progress(pkey, "note", f"acceptance contract armed: {len(contract)} rule(s)")
         # A2 completion-honesty guard + output mode (opt-in): applied only when a
@@ -1574,7 +1589,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         # today's prompts. Combined with the contract directive into one suffix.
         guard_dir = code_honesty.guard_directive(
             quality.honesty_guard and quality.any_enabled, quality.output_mode)
-        contract_dir = guard_dir + code_contract.contract_directive(contract)
+        contract_dir = guard_dir + code_contract.contract_directive(contract) + learned_block
 
         last_fix_sha: str | None = None
         if seed_fix:
@@ -1639,7 +1654,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             if quality.parallel_build:
                 d, sha = await _run_decomposed_build(
                     request, user, pkey, repo, sdir, intent, by_id, tiers_map,
-                    env_vars, registry, plan_file, quality, contract_dir)
+                    env_vars, registry, plan_file, quality, contract_dir, learned_block)
                 if _cancelled(pkey):
                     _finish_stopped()
                     return
@@ -1976,6 +1991,35 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                                  f"(fix rounds: {fix_rounds_run})._", kind="note")
             except Exception as e:  # noqa: BLE001 — metrics are best-effort
                 log.warning("code quality metrics failed", error=str(e))
+
+        # R2 (opt-in): distill ONE reusable constraint from an accepted build and
+        # persist it domain-scoped for future splitter/planner/contract briefs.
+        # In the try body (not `finally`) so it never runs on the failure path.
+        if quality.constraint_learning and final_clean and not _cancelled(pkey):
+            try:
+                from captain_claw.flight_deck import constraint_learning as _cl
+                from captain_claw.llm import Message, create_provider
+                _plan_abs = repo / plan_file
+                _plan_text = _plan_abs.read_text() if _plan_abs.is_file() else ""
+                _bl = _backlog_path(repo)
+                _fixed = _bl.read_text()[:2000] if _bl.is_file() else ""
+                _signal = _cl.build_signal(_plan_text, [], fixed_notes=_fixed)
+                _tier = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
+                _prov = create_provider(
+                    provider=_tier.get("provider", "anthropic"), model=_tier.get("model", ""),
+                    api_key=_tier.get("api_key") or None, base_url=_tier.get("base_url") or None,
+                    temperature=0.2, max_tokens=400)
+                _resp = await _prov.complete(messages=[Message(role="user", content=_cl.distill_prompt(
+                    intent, _signal, "fixed" if fix_rounds_run else "accepted"))],
+                    temperature=0.2, max_tokens=400)
+                _row = _cl.parse_constraint(_resp.content or "")
+                if _row:
+                    await get_db().add_learned_constraint(
+                        user["id"], _row["domain"] or domain, "code",
+                        _row["trigger"], _row["constraint"], _row["severity"], source_id=pkey)
+                    _progress(pkey, "note", f"Learned constraint: {_row['constraint'][:80]}")
+            except Exception as e:  # noqa: BLE001 — distillation is best-effort
+                log.warning("code constraint learning failed", error=str(e))
 
         # The repo just changed substantially — (re)build the code map so future
         # sessions/tasks can query it instead of re-reading everything.
@@ -2532,6 +2576,15 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         route = await _classify(intent, context, archetypes, tiers_map, registry, reliability)
         _progress(pkey, "route", f"size={route['size']} · {route.get('why', '')}", size=route["size"])
         domain = str(route.get("domain") or "general")
+        # R2 (opt-in): learned constraints for the top-level plan prompt.
+        _plan_learned = ""
+        if _load_quality(uid, body.project).constraint_learning:
+            try:
+                from captain_claw.flight_deck import constraint_learning as _cl
+                _plan_learned = _cl.format_constraints_block(
+                    await db.get_learned_constraints(uid, domain, limit=5))
+            except Exception as e:  # noqa: BLE001
+                log.warning("code plan constraints load failed", error=str(e))
 
         hist = _history_preamble(sdir)
         if route["size"] == "small":
@@ -2613,7 +2666,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         plan_rel = _new_plan_rel(repo, route.get("title", intent))
         _plan_t0 = time.time()
         d = await _run_agent(request, user, pkey, repo, planner,
-                             hist + _plan_prompt(intent, plan_rel), by_id, tiers_map, env_vars)
+                             hist + _plan_prompt(intent, plan_rel, _plan_learned), by_id, tiers_map, env_vars)
         if _cancelled(pkey):
             assistant = _append_chat(sdir, "assistant", "⏹ Stopped by user.", kind="note")
             _write_state(sdir, {"status": "idle"})

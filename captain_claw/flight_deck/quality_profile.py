@@ -173,6 +173,15 @@ class QualityProfile:
                                      # of _BOOL_FLAGS so a gate-only run never trips
                                      # in-build quality work via any_enabled.
 
+    # ── R2: automatic CONSTRAINT edge (explicit opt-in, no preset) ──
+    constraint_learning: bool = False  # distill a short {trigger,constraint,
+                                       # severity,domain} rule from an accepted/
+                                       # fixed run, persist it domain-scoped, and
+                                       # inject the top-N into the splitter/planner/
+                                       # contract briefs that get nothing learned.
+                                       # Costs one fast-tier call per accepted run
+                                       # (like deep_build/claim_check → no preset).
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     parallel_build_max_slices: int = 6  # cap on decomposition slices (keeps cost bounded)
@@ -202,7 +211,7 @@ class QualityProfile:
             "constraints_contract", "block_on_critical", "parallel_build",
             "interface_consistency", "micro_workers", "push_deps",
             "parallel_edges", "flow_ref_lint", "council_tally",
-            "blast_radius_gate",
+            "blast_radius_gate", "constraint_learning",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
