@@ -321,6 +321,19 @@ def _is_reasoning_content_required_error(msg: str) -> bool:
     )
 
 
+def _is_tool_choice_unsupported_error(msg: str) -> bool:
+    """True for the 400 a thinking/reasoning model returns when it won't accept
+    a forced ``tool_choice`` — e.g. a DeepSeek/Kimi thinking mode served over an
+    OpenAI-compatible endpoint: "Thinking mode does not support this tool_choice".
+
+    Recovered the same way everywhere: drop the forced constraint and let the
+    model answer normally, then flag the provider so later calls skip forcing it.
+    Requires the literal ``tool_choice`` token so it never swallows unrelated
+    400s that merely mention support.
+    """
+    return "tool_choice" in msg and ("support" in msg or "not allowed" in msg)
+
+
 def _backfill_reasoning_content(messages: Any) -> bool:
     """Ensure every assistant message carries a non-empty reasoning_content,
     injecting :data:`_REASONING_BACKFILL_PLACEHOLDER` where one is missing.
@@ -378,8 +391,7 @@ async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) ->
         # Model rejects tool_choice (thinking-mode models).
         if (
             kwargs.get("tool_choice") is not None
-            and "tool_choice" in msg
-            and "support" in msg
+            and _is_tool_choice_unsupported_error(msg)
         ):
             retry_kwargs.pop("tool_choice", None)
             stripped.append("tool_choice")
@@ -3060,7 +3072,15 @@ class LiteLLMProvider(LLMProvider):
                 if m:
                     model = m
         except Exception as e:
-            # Preserve whatever we collected so far rather than losing
+            # A forced tool_choice a thinking-mode model rejects surfaces here
+            # (during stream consumption) as a pre-flight 400 — nothing was
+            # streamed, so there's no partial content to preserve. Re-raise it
+            # so the caller (complete_with_callback / complete) can drop the
+            # constraint and retry, instead of silently returning an empty
+            # response.
+            if _is_tool_choice_unsupported_error(str(e).lower()):
+                raise
+            # Otherwise preserve whatever we collected so far rather than losing
             # the entire response.  Log so we can diagnose.
             log.warning(
                 "Stream collection interrupted, returning partial content",
@@ -3349,46 +3369,72 @@ class LiteLLMProvider(LLMProvider):
         _reasoning_parts: list[str] = []
         self.last_reasoning_content = ""
 
+        kwargs = self._request_kwargs(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
         try:
-            stream = await _acompletion_tolerant(
-                self._request_kwargs(
-                    messages=messages,
-                    tools=tools,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stream=True,
-                ),
-                self,
-            )
-            async for chunk in stream:
-                delta_obj = _obj_get(_obj_get(chunk, "choices", [{}])[0], "delta", {})
-                # Accumulate reasoning_content (Grok, DeepSeek, etc.)
-                # without yielding it as user-visible text. Replayed
-                # on the next turn so DeepSeek doesn't 400.
-                _rc = (
-                    _obj_get(delta_obj, "reasoning_content", None)
-                    or _obj_get(delta_obj, "thinking", None)
-                    or _obj_get(delta_obj, "reasoning", None)
-                )
-                if _rc:
-                    _reasoning_parts.append(str(_rc))
-                    continue
-                delta = _obj_get(delta_obj, "content", "")
-                if not delta:
-                    continue
-                if isinstance(delta, str):
-                    yield delta
-                    continue
-                if isinstance(delta, list):
-                    text_parts: list[str] = []
-                    for part in delta:
-                        text = _obj_get(part, "text", "")
-                        if text:
-                            text_parts.append(str(text))
-                    if text_parts:
-                        yield "".join(text_parts)
-                    continue
-                yield str(delta)
+            yielded_any = False
+            # At most two attempts: the second drops a forced tool_choice a
+            # thinking-mode model rejects. That 400 surfaces during iteration
+            # (not on the acompletion() call), so _acompletion_tolerant never
+            # sees it; we retry here, but only before any visible chunk has been
+            # yielded (the 400 is a pre-flight rejection, so nothing streamed).
+            for attempt in range(2):
+                try:
+                    stream = await _acompletion_tolerant(kwargs, self)
+                    async for chunk in stream:
+                        delta_obj = _obj_get(_obj_get(chunk, "choices", [{}])[0], "delta", {})
+                        # Accumulate reasoning_content (Grok, DeepSeek, etc.)
+                        # without yielding it as user-visible text. Replayed
+                        # on the next turn so DeepSeek doesn't 400.
+                        _rc = (
+                            _obj_get(delta_obj, "reasoning_content", None)
+                            or _obj_get(delta_obj, "thinking", None)
+                            or _obj_get(delta_obj, "reasoning", None)
+                        )
+                        if _rc:
+                            _reasoning_parts.append(str(_rc))
+                            continue
+                        delta = _obj_get(delta_obj, "content", "")
+                        if not delta:
+                            continue
+                        if isinstance(delta, str):
+                            yielded_any = True
+                            yield delta
+                            continue
+                        if isinstance(delta, list):
+                            text_parts: list[str] = []
+                            for part in delta:
+                                text = _obj_get(part, "text", "")
+                                if text:
+                                    text_parts.append(str(text))
+                            if text_parts:
+                                yielded_any = True
+                                yield "".join(text_parts)
+                            continue
+                        yielded_any = True
+                        yield str(delta)
+                    break
+                except Exception as stream_err:
+                    if (
+                        attempt == 0
+                        and not yielded_any
+                        and kwargs.get("tool_choice") is not None
+                        and _is_tool_choice_unsupported_error(str(stream_err).lower())
+                    ):
+                        self._tool_choice_unsupported = True
+                        kwargs.pop("tool_choice", None)
+                        _reasoning_parts.clear()
+                        log.warning(
+                            "Streaming model rejected tool_choice; retrying without it",
+                            model=kwargs.get("model"),
+                        )
+                        continue
+                    raise
             # Persist the accumulated reasoning so the caller (e.g.
             # ``stream()`` in the orchestration layer) can stash it
             # on the just-produced assistant message.
@@ -3438,8 +3484,28 @@ class LiteLLMProvider(LLMProvider):
             # Request usage in the final stream chunk.
             kwargs["stream_options"] = {"include_usage": True}
 
-            stream = await _acompletion_tolerant(kwargs, self)
-            collected = await self._collect_streaming_response(stream, on_chunk=on_chunk)
+            try:
+                stream = await _acompletion_tolerant(kwargs, self)
+                collected = await self._collect_streaming_response(stream, on_chunk=on_chunk)
+            except Exception as stream_err:
+                # A forced tool_choice a thinking-mode model rejects surfaces
+                # HERE — during stream iteration — not on the acompletion() call,
+                # so _acompletion_tolerant's own retry never sees it. The 400 is
+                # a pre-flight rejection (no content streamed yet, on_chunk not
+                # called), so dropping the constraint and retrying once is safe.
+                if not (
+                    kwargs.get("tool_choice") is not None
+                    and _is_tool_choice_unsupported_error(str(stream_err).lower())
+                ):
+                    raise
+                self._tool_choice_unsupported = True
+                kwargs.pop("tool_choice", None)
+                log.warning(
+                    "Streaming model rejected tool_choice; retrying without it",
+                    model=kwargs.get("model"),
+                )
+                stream = await _acompletion_tolerant(kwargs, self)
+                collected = await self._collect_streaming_response(stream, on_chunk=on_chunk)
 
             # Parse the collected dict into an LLMResponse (same as complete()).
             choices = _obj_get(collected, "choices", [{}])
