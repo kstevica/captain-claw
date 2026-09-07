@@ -31,8 +31,9 @@ from pydantic import BaseModel, Field, field_validator
 
 
 def _manifests_dir() -> Path:
-    base = os.environ.get("CAPTAIN_CLAW_FD_HOME") or os.path.expanduser("~/.captain-claw-fd")
-    p = Path(base) / "app_manifests"
+    # Per-instance: CAPTAIN_CLAW_FD_HOME > FD_DATA_DIR > legacy ~/.captain-claw-fd.
+    from captain_claw.flight_deck.fd_home import fd_home
+    p = fd_home(Path(os.path.expanduser("~/.captain-claw-fd"))) / "app_manifests"
     p.mkdir(parents=True, exist_ok=True)
     return p
 

@@ -49,8 +49,9 @@ log = logging.getLogger(__name__)
 
 
 def _fd_home() -> Path:
-    base = os.environ.get("CAPTAIN_CLAW_FD_HOME") or os.path.expanduser("~/.captain-claw-fd")
-    return Path(base)
+    # Per-instance: CAPTAIN_CLAW_FD_HOME > FD_DATA_DIR > legacy ~/.captain-claw-fd.
+    from captain_claw.flight_deck.fd_home import fd_home
+    return fd_home(Path(os.path.expanduser("~/.captain-claw-fd")))
 
 
 def apps_root() -> Path:
@@ -571,7 +572,9 @@ def _build_subprocess_env(*, slug: str) -> dict[str, str]:
     """
     keep = {
         "PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV",
-        "CAPTAIN_CLAW_FD_HOME",
+        # Both FD-home isolation envs, so a subprocess that resolves
+        # ``fd_home()`` lands on the same tree this FD uses.
+        "CAPTAIN_CLAW_FD_HOME", "FD_DATA_DIR",
         "LANG", "LC_ALL", "LC_CTYPE",
         "HOME",
         # Some libraries (httpx, anyio) refuse to start without TZ or TMPDIR.
