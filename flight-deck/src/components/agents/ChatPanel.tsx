@@ -45,6 +45,7 @@ import { usePinnedStore } from '../../stores/pinnedStore'
 import { useClipboardStore } from '../../stores/clipboardStore'
 import { useTraceStore, selectSpanCount } from '../../stores/traceStore'
 import { useUIStore } from '../../stores/uiStore'
+import { useAuthStore } from '../../stores/authStore'
 import { SendContextModal } from './SendContextModal'
 import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
@@ -199,6 +200,10 @@ function useFileAttachments(conn: ReturnType<typeof useAgentConnection>) {
 //                and datastore live in the layout's own right-hand sidebar.
 export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simple' } = {}) {
   const simple = variant === 'simple'
+  // Kiosk lock: in the locked simple-chat layout the header keeps only the
+  // queue toggle — flows, send-to-another-agent, plan routing and traces are
+  // all hidden so shared-account users can't reach the wider system.
+  const kiosk = useAuthStore((s) => s.simpleChatOnly)
   // Simple layout only: the queue column can be tucked away so the
   // conversation gets the whole centre. Fullscreen (full layout) is unchanged.
   const simpleQueueOpen = useUIStore((s) => s.simpleQueueOpen)
@@ -303,26 +308,31 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
             <ListTodo className="h-4 w-4" />
           </button>
         )}
-        <button
-          onClick={() => setShowFlows(true)}
-          title="Flows — enable/disable and start a flow"
-          className="mr-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-        >
-          <Workflow className="h-4 w-4" />
-        </button>
-        <button
-          onClick={() => setShowSendContext(true)}
-          title="Send context to another agent"
-          className="mr-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-        >
-          <Forward className="h-4 w-4" />
-        </button>
+        {!kiosk && (
+          <button
+            onClick={() => setShowFlows(true)}
+            title="Flows — enable/disable and start a flow"
+            className="mr-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+          >
+            <Workflow className="h-4 w-4" />
+          </button>
+        )}
+        {!kiosk && (
+          <button
+            onClick={() => setShowSendContext(true)}
+            title="Send context to another agent"
+            className="mr-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+          >
+            <Forward className="h-4 w-4" />
+          </button>
+        )}
         {/* Combined plan toggle + level selector. The button shows the current
             state ("OFF" when planning auto-routing is disabled, otherwise the
             level abbreviation) and opens a 5-row dropdown: Off + the four
             enrichment levels. Picking a level enables planning AND sets the
             level in one click; picking Off disables auto-routing while
             preserving the previously-chosen level. */}
+        {!kiosk && (
         <div className="relative mr-1" ref={planLevelMenuRef}>
           <button
             onClick={() => setPlanLevelMenuOpen((o) => !o)}
@@ -406,22 +416,25 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
             </div>
           )}
         </div>
-        <button
-          onClick={() => setShowTracePanel(!showTracePanel)}
-          title={showTracePanel ? 'Hide traces' : 'Show orchestrator traces'}
-          className={`relative mr-1 rounded p-1 transition-colors ${
-            showTracePanel
-              ? 'bg-violet-600/20 text-violet-400'
-              : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
-          }`}
-        >
-          <Activity className="h-4 w-4" />
-          {traceSpanCount > 0 && (
-            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-violet-600 px-0.5 text-[8px] font-bold text-white">
-              {traceSpanCount > 99 ? '99+' : traceSpanCount}
-            </span>
-          )}
-        </button>
+        )}
+        {!kiosk && (
+          <button
+            onClick={() => setShowTracePanel(!showTracePanel)}
+            title={showTracePanel ? 'Hide traces' : 'Show orchestrator traces'}
+            className={`relative mr-1 rounded p-1 transition-colors ${
+              showTracePanel
+                ? 'bg-violet-600/20 text-violet-400'
+                : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+            }`}
+          >
+            <Activity className="h-4 w-4" />
+            {traceSpanCount > 0 && (
+              <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-violet-600 px-0.5 text-[8px] font-bold text-white">
+                {traceSpanCount > 99 ? '99+' : traceSpanCount}
+              </span>
+            )}
+          </button>
+        )}
         {!simple && (
           <button
             onClick={toggleChatFullscreen}

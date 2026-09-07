@@ -2,13 +2,9 @@ import { useEffect, useCallback } from 'react'
 import { X, Keyboard } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useAuthStore } from '../../stores/authStore'
 
 const shortcuts = [
-  { keys: ['Cmd/Ctrl', '1'], action: 'Agent Desktop' },
-  { keys: ['Cmd/Ctrl', '2'], action: 'Council' },
-  { keys: ['Cmd/Ctrl', '3'], action: 'Spawn Agent' },
-  { keys: ['Cmd/Ctrl', '4'], action: 'Agent Forge' },
-  { keys: ['Cmd/Ctrl', '5'], action: 'Workflows' },
   { keys: ['Cmd/Ctrl', 'D'], action: 'Toggle Director' },
   { keys: ['Cmd/Ctrl', 'J'], action: 'Toggle Chat Panel / Queue' },
   { keys: ['Cmd/Ctrl', 'K'], action: 'Toggle Shortcuts Help' },
@@ -24,7 +20,6 @@ export function useKeyboardShortcuts(
   shortcutsOpen: boolean,
   setShortcutsOpen: (v: boolean) => void,
 ) {
-  const { setView } = useUIStore()
   const chatStore = useChatStore()
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -41,29 +36,15 @@ export function useKeyboardShortcuts(
       return
     }
 
-    // A page shortcut asks for a page, and pages only exist in the full
-    // layout — so leave the simple (chat-first) layout when one fires.
-    const goTo = (v: Parameters<typeof setView>[0]) => {
-      useUIStore.getState().setLayoutMode('full')
-      setView(v)
-    }
+    // Kiosk lock: every shortcut that would reach another page or the full
+    // layout is an escape hatch, so ignore them entirely. The harmless ones
+    // (chat-tab switching, the shortcuts overlay, the simple queue) stay live.
+    const locked = useAuthStore.getState().simpleChatOnly
 
+    // NOTE: the Cmd/Ctrl+1..5 page-jump shortcuts are intentionally gone —
+    // disabled for everyone so a stray keystroke can't yank the user to
+    // another page. Use the sidebar to navigate.
     switch (e.key) {
-      case '1':
-        if (mod) { e.preventDefault(); goTo('desktop') }
-        break
-      case '2':
-        if (mod) { e.preventDefault(); goTo('council') }
-        break
-      case '3':
-        if (mod) { e.preventDefault(); goTo('spawner') }
-        break
-      case '4':
-        if (mod) { e.preventDefault(); goTo('forge') }
-        break
-      case '5':
-        if (mod) { e.preventDefault(); goTo('workflow') }
-        break
       case 'd':
         if (mod) {
           e.preventDefault()
@@ -86,7 +67,7 @@ export function useKeyboardShortcuts(
         if (mod) { e.preventDefault(); setShortcutsOpen(!shortcutsOpen) }
         break
       case '\\':
-        if (mod) { e.preventDefault(); useUIStore.getState().toggleLayoutMode() }
+        if (mod && !locked) { e.preventDefault(); useUIStore.getState().toggleLayoutMode() }
         break
       case '[':
         if (mod) {
@@ -104,7 +85,7 @@ export function useKeyboardShortcuts(
         if (shortcutsOpen) setShortcutsOpen(false)
         break
     }
-  }, [setView, onToggleDirector, shortcutsOpen, setShortcutsOpen, chatStore])
+  }, [onToggleDirector, shortcutsOpen, setShortcutsOpen, chatStore])
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown)

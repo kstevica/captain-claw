@@ -6329,10 +6329,16 @@ async def auth_status():
     internal_fd_url = os.environ.get("FD_INTERNAL_URL", "")
     if not internal_fd_url and os.environ.get("CAPTAIN_CLAW_DOCKER"):
         internal_fd_url = "http://localhost:25080"
+    # Kiosk lock (CLI `--simple-chat` / env FD_SIMPLE_CHAT): the frontend forces
+    # the locked, chat-only Simple layout when this is on.
+    simple_chat_only = os.environ.get("FD_SIMPLE_CHAT", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
     return {
         "auth_enabled": AUTH_ENABLED,
         "docker_spawn_enabled": cfg.get("docker_spawn_enabled", docker_default),
         "internal_fd_url": internal_fd_url,
+        "simple_chat_only": simple_chat_only,
     }
 
 
@@ -6909,7 +6915,26 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=25080, help="Bind port (default: 25080)")
     parser.add_argument("--dev", action="store_true", help="Development mode (no static serving)")
+    parser.add_argument(
+        "--simple-chat",
+        action="store_true",
+        help=(
+            "Kiosk mode: lock the UI to the chat-first Simple layout — agents on "
+            "the left, conversation in the middle, the active agent's files and "
+            "data on the right. Strips the full-view switch, spawn, agent config, "
+            "start/stop and sign-out controls so shared-account users can only "
+            "chat with the agents that are already running. Also settable via the "
+            "FD_SIMPLE_CHAT env var."
+        ),
+    )
     args = parser.parse_args()
+
+    # Kiosk lock. The frontend reads this back from /fd/auth/status and forces
+    # the locked Simple layout; the CLI flag simply seeds the env var so the
+    # HTTP handler (and any reload/worker) sees it. Don't clobber an explicit
+    # FD_SIMPLE_CHAT already in the environment.
+    if args.simple_chat:
+        os.environ["FD_SIMPLE_CHAT"] = "1"
 
     # Record the actual bound port so spawned agents get a correct FD_URL
     # callback. The FD_URL auto-injection (when an agent's env lacks it) reads
