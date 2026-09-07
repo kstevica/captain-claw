@@ -112,6 +112,11 @@ class QualityProfile:
     worker_escalate: bool = False  # R5: worker can flag ESCALATE → higher-tier re-dispatch
     micro_workers: bool = False    # S3 (mrav P4): extract/digest/format-shaped subtasks
                                    # spawn on the mrav micro runtime (micro tier)
+    push_deps: bool = False        # R4: grouped Vatra PUSHES a finished producer's
+                                   # committed output into its consumer's prompt (DAG
+                                   # edges carry data); the `vatra`-tool pull path stays
+                                   # the fallback. Vatra-grouped only; adds input tokens
+                                   # (inlines producer output) so it is never preset-on.
     git_snapshots: bool = False    # R6: git init the research folder + commit each round
     judgment_ledger: bool = False  # R11: force explicit enumeration+resolution of the hard calls
     source_corpus: bool = False    # R10: web_fetch saves full page text to the VFS, returns head+ptr
@@ -187,7 +192,7 @@ class QualityProfile:
             "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
             "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
             "constraints_contract", "block_on_critical", "parallel_build",
-            "interface_consistency", "micro_workers",
+            "interface_consistency", "micro_workers", "push_deps",
             "parallel_edges", "flow_ref_lint", "council_tally",
         }
         kw: dict = {"profile": profile}

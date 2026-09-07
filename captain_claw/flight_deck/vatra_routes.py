@@ -313,6 +313,42 @@ def _plan_slice_block(st: dict, group0_by_subtask: dict, arch_by_id: dict) -> st
     return "\n".join(lines)
 
 
+# R4 — grouped Vatra edges carry DATA, not just prose. Cap the pushed producer
+# output so inlining a dependency can't blow up the consumer's context (below the
+# board's ~30k per-entry cap).
+_DEP_PUSH_CAP = 12_000
+
+
+def _dep_output_block(st: dict, results_by_id: dict, cap: int = _DEP_PUSH_CAP) -> str:
+    """PUSH each finished producer's committed output into its consumer's prompt.
+
+    For every id in the subtask's ``depends_on`` that has already finished (is
+    present in ``results_by_id``), inline that producer's delivered output. Returns
+    "" when nothing has finished (flat mode, or same-wave deps not yet complete),
+    so the default and ungrouped prompts stay byte-identical. The ``vatra``-tool
+    pull path remains the fallback for producers not yet finished.
+    """
+    blocks: list[str] = []
+    for did in (st.get("depends_on") or []):
+        r = (results_by_id or {}).get(did)
+        if not r:
+            continue
+        out = (r.get("output") or "").strip()
+        if not out:
+            continue
+        head = r.get("role") or r.get("owner") or did
+        title = str(r.get("title") or "").strip()
+        head = f"{head} — {title}" if title else str(head)
+        blocks.append(f"### {head}\n{out[:cap]}")
+    if not blocks:
+        return ""
+    return ("\n\n## Your teammates' finished work you build on (already delivered)\n"
+            + "\n\n".join(blocks)
+            + "\n\nThis is your dependencies' ACTUAL delivered output — build on it "
+            "directly; do not re-request it via the `vatra` tool or reproduce their "
+            "work. If you still need something not shown here, search the board first.")
+
+
 def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
     """Run-context env injected into a worker so the `vatra` tool knows where it is."""
     project = _vfs_project(sid)
@@ -1447,6 +1483,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             g = _owner_group.get(subtask_id)
             return {"group": g} if g else {}
 
+        # Grouped mode: subtask id → its finished result, populated as owners
+        # complete (and on re-runs) by the grouped block below; stays empty in flat
+        # mode. Hoisted here so `_dispatch_owner` (used in BOTH modes) can close over
+        # it for the R4 dependency-push without an UnboundLocalError in flat mode.
+        results_by_id: dict[str, dict] = {}
+
         async def _dispatch_owner(sp: dict) -> dict:
             arch, st = sp["arch"], sp["subtask"]
             role = arch.get("role") or arch["id"]
@@ -1475,6 +1517,14 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             # it produces, and which teammates it consumes from. Its *contract*, placed
             # just before the TEAM SCHEDULE (its *timing*). No-op when there's no plan.
             prompt += _plan_slice_block(st, _group0_by_subtask, arch_by_id)
+            # R4 (opt-in): grouped DAG edges carry DATA — PUSH a dependency's
+            # committed output into this consumer's context when that producer has
+            # already finished (earlier phase / pulled-forward owner). No-op unless
+            # push_deps is on AND a dependency is in results_by_id (empty in flat
+            # mode / for same-wave deps), so the default prompt is byte-identical.
+            # The `vatra`-tool pull path (below) stays the fallback.
+            if quality.push_deps:
+                prompt += _dep_output_block(st, results_by_id)
             # Grouped runs: tell the worker who already ran, who runs with it, and
             # who runs AFTER it — so it never waits on output that can't arrive.
             _sched = _group_schedule.get(sid)
@@ -1642,7 +1692,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                     "group": int(owner_group[id(sp)]),
                 } for sp in spawned],
             }
-            results_by_id: dict[str, dict] = {}  # subtask id → its result (updated on re-run)
+            # results_by_id is hoisted above _dispatch_owner (shared with the R4
+            # push); it starts empty and is populated below as owners complete.
 
             async def _redispatch_owner(sp: dict, instruction: str, tag: str) -> dict:
                 arch = sp["arch"]
