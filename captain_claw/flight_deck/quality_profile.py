@@ -145,6 +145,14 @@ class QualityProfile:
                                          # resolve to real definitions (catches
                                          # interface drift between parallel slices)
 
+    # ── R3: parallel-first planning + data-edge lint (explicit opt-in, no preset) ──
+    parallel_edges: bool = False   # planners default to no dep, name the crossing
+                                   # artifact (workspace_inputs/outputs), and the
+                                   # data-edge lint drops depends_on edges that no
+                                   # named variable crosses
+    flow_ref_lint: bool = False    # flow compile validates {{steps.<id>}} refs
+                                   # resolve to a declared step (typo -> error, not "")
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     parallel_build_max_slices: int = 6  # cap on decomposition slices (keeps cost bounded)
@@ -173,6 +181,7 @@ class QualityProfile:
             "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
             "constraints_contract", "block_on_critical", "parallel_build",
             "interface_consistency", "micro_workers",
+            "parallel_edges", "flow_ref_lint",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -213,7 +222,7 @@ class QualityProfile:
         "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
         "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
         "constraints_contract", "block_on_critical", "parallel_build",
-        "interface_consistency",
+        "interface_consistency", "parallel_edges", "flow_ref_lint",
     )
 
     @property
@@ -556,4 +565,26 @@ SOURCE_CORPUS_DIRECTIVE = (
     "piping raw page HTML into the conversation bloats your context fast and can "
     "overflow the model, losing the whole turn. Use `shell` for local files and "
     "commands, not to download web pages."
+)
+
+
+# ── R3: parallel-first planning directive (paired with the parallel_edges flag) ─
+# Appended to the loaded planner system prompt at runtime ONLY when
+# parallel_edges is on; the .md templates (plan_mode_*_system_prompt.md,
+# orchestrator_decompose_system_prompt.md) are NOT edited, so an off flag leaves
+# the shipped prompts — and thus the planner output — byte-for-byte unchanged
+# (the same runtime-append precedent as honesty_guard). It deliberately overrides
+# plan_mode_complete_system_prompt.md's "depends_on the previous step by default
+# (sequential plan)" and the orchestrator prompt's "ordering constraints" framing.
+PARALLEL_EDGES_DIRECTIVE = (
+    "\n\nDEPENDENCIES ARE DATA EDGES, NOT WRITING ORDER: default EVERY step to an "
+    "empty depends_on. Add step B to step A's dependents ONLY when B consumes a "
+    "NAMED output that A produces — a file A writes, a value A returns, an "
+    "artifact A creates. When you add such a dependency you MUST name the artifact "
+    "that crosses it: list the producing step's output key(s) in its "
+    "workspace_outputs and the SAME key(s) in the consuming step's "
+    "workspace_inputs (short snake_case, e.g. pdf_paths, summary_md). If you "
+    "cannot name a concrete artifact that crosses the edge, the steps are "
+    "independent — leave depends_on empty so they run in parallel. Never chain "
+    "steps just because you wrote them in order."
 )

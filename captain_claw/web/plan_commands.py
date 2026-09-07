@@ -58,6 +58,17 @@ async def handle_plan_command(server: "WebServer", request: str) -> str:
     level = normalize_plan_level(getattr(server.agent, "plan_mode_level", DEFAULT_PLAN_LEVEL))
     enrichment = await _build_enrichment(level, request)
 
+    # R3: honor the agent's quality profile (parallel_edges) when one is attached.
+    # No config → None → generate() behaves exactly as before.
+    _quality = None
+    _qcfg = getattr(server.agent, "quality_profile", None) or getattr(server.agent, "quality", None)
+    if _qcfg is not None:
+        try:
+            from captain_claw.flight_deck.quality_profile import QualityProfile
+            _quality = _qcfg if hasattr(_qcfg, "parallel_edges") else QualityProfile.from_dict(_qcfg)
+        except Exception:  # noqa: BLE001 — a bad config must never break /plan
+            _quality = None
+
     plan = await generator.generate(
         request,
         workspace_tree=workspace_tree,
@@ -65,6 +76,7 @@ async def handle_plan_command(server: "WebServer", request: str) -> str:
         insights_block=enrichment["insights_block"],
         personality_block=enrichment["personality_block"],
         system_prompt_name=enrichment["system_prompt_name"],
+        quality=_quality,
     )
     if plan is None:
         return "Plan generation failed — see server logs for details."

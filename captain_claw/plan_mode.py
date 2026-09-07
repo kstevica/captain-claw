@@ -25,6 +25,7 @@ from captain_claw.task_graph import (
     PENDING,
     OrchestratorTask,
     TaskGraph,
+    lint_data_edges,
 )
 
 log = get_logger(__name__)
@@ -136,6 +137,7 @@ class PlanGenerator:
         insights_block: str = "",
         personality_block: str = "",
         system_prompt_name: str = "plan_mode_system_prompt.md",
+        quality: Any = None,
     ) -> Plan | None:
         """Generate a plan for ``user_input``. Returns None on failure.
 
@@ -151,6 +153,12 @@ class PlanGenerator:
             return None
 
         system_prompt = self._instructions.load(system_prompt_name)
+        # R3: append the parallel-first / data-edge directive at runtime when the
+        # caller opted in (quality.parallel_edges). The .md template is untouched,
+        # so an off flag leaves the planner prompt byte-for-byte unchanged.
+        if system_prompt and getattr(quality, "parallel_edges", False):
+            from captain_claw.flight_deck.quality_profile import PARALLEL_EDGES_DIRECTIVE
+            system_prompt += PARALLEL_EDGES_DIRECTIVE
         user_prompt = self._instructions.render(
             "plan_mode_user_prompt.md",
             user_input=user_input,
@@ -193,9 +201,10 @@ class PlanGenerator:
             log.error("Failed to parse planner JSON response", raw_preview=raw[:500])
             return None
 
-        return self._build_plan(user_input, parsed)
+        return self._build_plan(user_input, parsed, quality=quality)
 
-    def _build_plan(self, user_input: str, parsed: dict[str, Any]) -> Plan | None:
+    def _build_plan(self, user_input: str, parsed: dict[str, Any],
+                    *, quality: Any = None) -> Plan | None:
         """Validate the parsed JSON and construct a Plan."""
         raw_tasks = parsed.get("tasks", [])
         if not isinstance(raw_tasks, list) or not raw_tasks:
@@ -230,6 +239,20 @@ class PlanGenerator:
         # Drop dangling dependencies — keep only deps that point to known steps.
         for task in tasks:
             task.depends_on = [d for d in task.depends_on if d in seen_ids]
+
+        # R3 data-edge lint (deterministic, token-free). Always log; only DROP
+        # no-crossing edges when the caller opted in via parallel_edges.
+        findings = lint_data_edges(tasks)
+        if findings:
+            log.debug("plan data-edge lint", findings=findings)
+            if getattr(quality, "parallel_edges", False):
+                drop = {(f["task"], f["depends_on"]) for f in findings
+                        if f.get("kind") == "no_crossing_edge"}
+                if drop:
+                    for task in tasks:
+                        task.depends_on = [d for d in task.depends_on
+                                           if (task.id, d) not in drop]
+                    log.info("plan data-edge lint dropped edges", dropped=sorted(drop))
 
         summary = str(parsed.get("summary", "")).strip()
         return Plan(summary=summary, user_input=user_input, tasks=tasks)

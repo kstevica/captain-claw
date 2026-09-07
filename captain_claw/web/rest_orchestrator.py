@@ -277,6 +277,7 @@ async def prepare_orchestrator(server: WebServer, request: web.Request) -> web.R
     try:
         result = await server._orchestrator.prepare(
             user_input, model=model, auto_select_model=auto_select_model,
+            quality=body.get("quality"),
         )
     except Exception as e:
         log.error("_prepare_orchestrator: prepare() raised exception",

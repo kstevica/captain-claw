@@ -3389,7 +3389,8 @@ async def fd_flows_dsl_compile(request: Request, user: dict | None = _optional_u
     from captain_claw.flight_deck import flow_dsl
     body = await request.json()
     try:
-        flow = flow_dsl.compile_dsl(str(body.get("dsl") or ""))
+        flow = flow_dsl.compile_dsl(str(body.get("dsl") or ""),
+                                    strict_refs=bool(body.get("strict_refs", False)))
         return {"ok": True, "flow": flow}
     except flow_dsl.DSLError as exc:
         return {"ok": False, "error": exc.msg, "line": exc.line}

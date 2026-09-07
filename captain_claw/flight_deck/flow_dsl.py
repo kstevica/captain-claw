@@ -242,8 +242,12 @@ def _rule_to_dsl(rule: str) -> str:
 # ── compile: DSL text → flow dict ──────────────────────────────────────
 
 
-def compile_dsl(text: str) -> dict[str, Any]:
-    """Parse DSL into a flow dict. Raises DSLError(line, msg) on failure."""
+def compile_dsl(text: str, *, strict_refs: bool = False) -> dict[str, Any]:
+    """Parse DSL into a flow dict. Raises DSLError(line, msg) on failure.
+
+    ``strict_refs`` (R3, opt-in) makes a ``{{steps.<typo>}}`` reference that names
+    no declared step a compile error instead of silently resolving to "".
+    """
     raw_lines = (text or "").splitlines()
     flow: dict[str, Any] = {
         "name": "", "description": "", "enabled": True, "priority": 50,
@@ -322,7 +326,7 @@ def compile_dsl(text: str) -> dict[str, Any]:
 
     if not flow["steps"]:
         raise DSLError(0, "a flow needs at least one step")
-    errs = validate_flow(flow)
+    errs = validate_flow(flow, strict_refs=strict_refs)
     if errs:
         raise DSLError(0, "; ".join(errs))
     return flow
@@ -535,8 +539,13 @@ def _norm_target(t: str) -> str:
 # ── validate ───────────────────────────────────────────────────────────
 
 
-def validate_flow(flow: dict[str, Any]) -> list[str]:
-    """Structural validation shared by the DSL and the agent compiler."""
+def validate_flow(flow: dict[str, Any], *, strict_refs: bool = False) -> list[str]:
+    """Structural validation shared by the DSL and the agent compiler.
+
+    ``strict_refs`` (R3, opt-in) additionally rejects ``{{steps.<id>}}`` template
+    references that name no declared step (a typo that would otherwise resolve to
+    "" at run time). Default False → today's behaviour exactly.
+    """
     errs: list[str] = []
     steps = flow.get("steps") or []
     if not isinstance(steps, list) or not steps:
@@ -603,6 +612,34 @@ def validate_flow(flow: dict[str, Any]) -> list[str]:
     out_ch = (flow.get("output") or {}).get("channel", "same")
     if out_ch not in OUTPUT_CHANNELS:
         errs.append(f"output channel '{out_ch}' is invalid")
+    if strict_refs:
+        # R3: a {{steps.<id>}} reference to an undeclared step silently becomes ""
+        # at run time — reject it here when opted in. Only `steps.<id>` refs are
+        # checked; {{input}}, {{vars.x}}, {{trigger.x}} and bare {{steps}} are ignored.
+        _ref_re = re.compile(r"\{\{\s*steps\.([A-Za-z0-9_]+)")
+        _templated = ("prompt", "body", "attach", "value", "expr", "in",
+                      "until", "when", "message")
+        seen_bad: set[tuple] = set()
+        for s in steps:
+            texts: list[str] = []
+            for k in _templated:
+                v = s.get(k)
+                if isinstance(v, str):
+                    texts.append(v)
+            for av in (s.get("args") or {}).values():
+                if isinstance(av, str):
+                    texts.append(av)
+            for c in (s.get("cases") or []):
+                w = c.get("when")
+                if isinstance(w, str):
+                    texts.append(w)
+            for text in texts:
+                for rid in _ref_re.findall(text):
+                    if rid not in idset and (s.get("id"), rid) not in seen_bad:
+                        seen_bad.add((s.get("id"), rid))
+                        errs.append(
+                            f"step '{s.get('id')}': reference "
+                            f"'{{{{steps.{rid}...}}}}' names no step id")
     return errs
 
 

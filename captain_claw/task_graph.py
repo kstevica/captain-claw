@@ -603,3 +603,55 @@ class TaskGraph:
             "is_complete": self.is_complete,
             "has_failures": self.has_failures,
         }
+
+
+def lint_data_edges(tasks: list[OrchestratorTask]) -> list[dict[str, Any]]:
+    """Reconcile ``depends_on`` against ``workspace_inputs``/``workspace_outputs``.
+
+    Pure and token-free (R3): returns findings and mutates nothing — the caller
+    decides whether to log, warn, or drop. Two checks:
+
+    * ``no_crossing_edge`` — a ``depends_on`` edge B->A where no key in A's
+      ``workspace_outputs`` appears in B's ``workspace_inputs`` (a candidate false
+      sequential edge, the "and then" mistake). When neither side names anything
+      the edge is reported with ``reason`` set rather than asserting a mismatch.
+    * ``unproduced_input`` — a key in B's ``workspace_inputs`` that NO task in the
+      set declares in ``workspace_outputs`` (a consumed input nobody produces).
+
+    Returns ``[]`` for the all-empty case (today's LLM-decompose path, where no
+    workspace keys are emitted), so it is provably a no-op unless the planner was
+    told to name crossing artifacts (the ``parallel_edges`` directive).
+    """
+    by_id = {t.id: t for t in tasks if t.id}
+    all_outputs: set[str] = set()
+    for t in tasks:
+        all_outputs |= set(t.workspace_outputs or [])
+    findings: list[dict[str, Any]] = []
+    for t in tasks:
+        consumer_in = set(t.workspace_inputs or [])
+        for dep in t.depends_on:
+            producer = by_id.get(dep)
+            if producer is None:
+                continue  # dangling deps handled by the existing prune pass
+            produced = set(producer.workspace_outputs or [])
+            if produced and consumer_in:
+                if not (produced & consumer_in):
+                    findings.append({
+                        "kind": "no_crossing_edge", "task": t.id, "depends_on": dep,
+                        "producer_outputs": sorted(produced),
+                        "consumer_inputs": sorted(consumer_in),
+                    })
+            else:
+                findings.append({
+                    "kind": "no_crossing_edge", "task": t.id, "depends_on": dep,
+                    "producer_outputs": sorted(produced),
+                    "consumer_inputs": sorted(consumer_in),
+                    "reason": "edge names no crossing artifact",
+                })
+        missing = consumer_in - all_outputs
+        if missing:
+            findings.append({
+                "kind": "unproduced_input", "task": t.id,
+                "missing_inputs": sorted(missing),
+            })
+    return findings
