@@ -618,6 +618,13 @@ class GuardConfig(BaseModel):
     input: GuardTypeConfig = Field(default_factory=GuardTypeConfig)
     output: GuardTypeConfig = Field(default_factory=GuardTypeConfig)
     script_tool: GuardTypeConfig = Field(default_factory=GuardTypeConfig)
+    # R5: deterministic blast-radius gate for tool execution — layered ALONGSIDE
+    # the LLM script_tool guard, never a replacement. Default-disabled → today's
+    # behaviour. When enabled, a high-blast-radius tool call (destruction, DB
+    # migration, prod/infra write, force-push, payment) is blocked
+    # (level="stop_suspicious") or routed to human approval
+    # (level="ask_for_approval"). No LLM call — pure pattern match.
+    blast_radius: GuardTypeConfig = Field(default_factory=GuardTypeConfig)
 
 
 class SessionConfig(BaseModel):

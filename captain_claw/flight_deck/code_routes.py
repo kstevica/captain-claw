@@ -909,7 +909,7 @@ async def _run_cartographer(request: Request, user: dict, pkey: str, repo: Path,
         by_id, tiers_map, env_vars)
 
 
-def _plan_prompt(intent: str, plan_rel: str = "plan.md") -> str:
+def _plan_prompt(intent: str, plan_rel: str = "plan.md", learned: str = "") -> str:
     return (
         "You are planning a coding task in THIS repository — it is your workspace and "
         "current directory. Survey the existing code first (relative paths, your shell), "
@@ -920,7 +920,7 @@ def _plan_prompt(intent: str, plan_rel: str = "plan.md") -> str:
         "In the plan, reference every project file as a plain REPO-RELATIVE path "
         "(`index.html`, `src/game.js`) — never under `saved/` (untracked scratch), "
         "never with a `vfs:` prefix, never absolute.\n\n"
-        f"Task:\n{intent}" + _HOSTING_DIRECTIVE
+        f"Task:\n{intent}" + _HOSTING_DIRECTIVE + learned
     )
 
 
@@ -1026,13 +1026,50 @@ def _select_reviewers(rnd: int, prior_findings: list | None, fix_instructions: s
     return [rv for rv in _REVIEWERS if keep_security or rv != "security-reviewer"]
 
 
-def _fix_prompt(intent: str, fix_instructions: str, contract: str = "") -> str:
+def _scope_from_findings(findings: list[dict] | None) -> list[str]:
+    """Distinct, non-empty file paths the triage findings point at — the in-scope
+    set for a correction (R6: return the unit, keep the fix within its files)."""
+    seen: list[str] = []
+    for f in (findings or []):
+        fp = str((f or {}).get("file") or "").strip()
+        if fp and fp not in seen:
+            seen.append(fp)
+    return seen
+
+
+def _fix_prompt(intent: str, fix_instructions: str, contract: str = "",
+                findings: list[dict] | None = None,
+                scope_files: list[str] | None = None) -> str:
+    # R6: hand the fixer the failing units as an explicit, evidenced list plus a
+    # focus scope, so a one-issue correction doesn't grow into an unreviewed
+    # multi-file diff. Empty findings/scope reproduce the pre-R6 prompt exactly.
+    findings = findings or []
+    scope_files = scope_files or []
+    lines = []
+    for f in findings:
+        sev = str((f or {}).get("severity") or "?")
+        fil = str((f or {}).get("file") or "").strip()
+        ttl = str((f or {}).get("title") or "").strip()
+        loc = f" [{fil}]" if fil else ""
+        entry = f"- ({sev}){loc} {ttl}".rstrip()
+        if entry.strip("- ()?"):
+            lines.append(entry)
+    fblock = ("\nFailing units (correct each; stay within its file):\n"
+              + "\n".join(lines) + "\n") if lines else ""
+    sblock = ""
+    if scope_files:
+        sblock = ("\nSCOPE — focus your changes on these files:\n"
+                  + "\n".join(f"- {p}" for p in scope_files)
+                  + "\nIf a fix genuinely needs another file, keep that change minimal and say why. "
+                    "Do not refactor or 'improve' unrelated code — return the failing unit "
+                    "corrected, nothing more.\n")
     return (
         "A code review of THIS repository (your workspace) found issues that must be fixed. "
         "Apply the fixes with relative paths and verify via your shell. Fix ONLY the issues "
         "listed; keep working code intact.\n\n"
-        f"Issues to fix:\n{fix_instructions}\n\n"
-        f"Original request for context:\n{intent}" + _REPORTS_DIRECTIVE + contract
+        f"Issues to fix:\n{fix_instructions}\n"
+        + fblock + sblock
+        + f"\nOriginal request for context:\n{intent}" + _REPORTS_DIRECTIVE + contract
     )
 
 
@@ -1058,9 +1095,12 @@ async def _triage_reviews(reviews: list[dict], intent: str,
             content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
         raw = json.loads(content)
     except Exception as e:  # noqa: BLE001
+        # R1: fail CLOSED. A triage that could not render a verdict is not a clean
+        # verdict — never let an unavailable review pass as done. The caller sees
+        # triage_ok=False and stops honestly (resumable) instead of shipping.
         log.warning("code triage failed", error=str(e))
-        return {"needs_fix": False, "fixer": "code-implementer",
-                "summary": "Review complete (triage unavailable — not auto-fixing).",
+        return {"needs_fix": False, "triage_ok": False, "fixer": "code-implementer",
+                "summary": "Review triage unavailable — build not verified.",
                 "fix_instructions": "", "findings": []}
     # Normalize EVERY field the loop consumes — models sometimes return
     # fix_instructions/summary as a JSON array (or findings as bare strings)
@@ -1074,6 +1114,7 @@ async def _triage_reviews(reviews: list[dict], intent: str,
         return str(v).strip() if v is not None else ""
 
     raw["needs_fix"] = bool(raw.get("needs_fix"))
+    raw["triage_ok"] = True
     if raw.get("fixer") not in ("debugger", "code-implementer"):
         raw["fixer"] = "code-implementer"
     raw["summary"] = _as_text(raw.get("summary")) or "Review complete."
@@ -1180,7 +1221,7 @@ async def _coverage_gaps(repo: Path, plan_file: str, intent: str,
 
 async def _load_or_derive_contract(repo: Path, plan_file: str, intent: str,
                                    tiers_map: dict, registry: dict,
-                                   derive: bool = True) -> list[dict]:
+                                   derive: bool = True, learned_block: str = "") -> list[dict]:
     """The persisted ``.contract.json`` if present (follow-up turns, user edits);
     otherwise derive it once from the approved plan. Returns [] on any failure —
     the contract is opt-in insurance, never a blocker."""
@@ -1201,7 +1242,7 @@ async def _load_or_derive_contract(repo: Path, plan_file: str, intent: str,
         resp = await prov.complete(messages=[
             Message(role="system", content="You extract checkable acceptance criteria. "
                     "Reply with JSON only."),
-            Message(role="user", content=code_contract.derive_prompt(intent, plan_text))],
+            Message(role="user", content=code_contract.derive_prompt(intent, plan_text, learned_block))],
             temperature=0.1, max_tokens=1500)
         constraints = code_contract.parse_contract(resp.content)
     except Exception as e:  # noqa: BLE001 — deriving must never break the build
@@ -1276,6 +1317,26 @@ async def _fix_commit_diff(repo: Path, fsha: str | None, cap: int = 12000) -> st
     return patch
 
 
+async def _changed_files(repo: Path, sha: str | None) -> list[str]:
+    """Repo-relative paths changed in commit ``sha`` (parsed from the patch).
+    Deterministic; used to detect a correction that strayed outside its scope (R6)."""
+    if not sha:
+        return []
+    try:
+        patch = await code_git.git_show(repo, sha)
+    except Exception:  # noqa: BLE001
+        return []
+    files: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split(" b/", 1)
+            if len(parts) == 2:
+                p = parts[1].strip()
+                if p and p not in files:
+                    files.append(p)
+    return files
+
+
 _DEEP_BUILD_EST = 20000  # rough per-attempt output-token estimate for budget accounting
 
 
@@ -1347,7 +1408,8 @@ _CODE_OWNER_POOL = ("code-implementer", "quick-dirty", "debugger")
 
 
 async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
-                          tiers_map: dict, registry: dict, quality: QualityProfile) -> list[dict]:
+                          tiers_map: dict, registry: dict, quality: QualityProfile,
+                          learned_block: str = "") -> list[dict]:
     """Group-0 decomposition: one reason-tier call turns the approved plan into
     build slices (0..N). Returns the parsed slices verbatim — the caller decides
     whether there are enough (>=2) to run a team, so it can explain the fallback.
@@ -1365,7 +1427,7 @@ async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
         resp = await prov.complete(messages=[
             Message(role="system", content="You are a build coordinator. Reply with JSON only."),
             Message(role="user", content=code_plan.decompose_prompt(
-                intent, plan_text, roster, quality.parallel_build_max_slices))],
+                intent, plan_text, roster, quality.parallel_build_max_slices, learned_block))],
             temperature=0.1, max_tokens=2500)
         return code_plan.parse_slices(resp.content, by_id, quality.parallel_build_max_slices)
     except Exception as e:  # noqa: BLE001 — decomposition must never break the build
@@ -1376,7 +1438,7 @@ async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
 async def _run_decomposed_build(request: Request, user: dict, pkey: str, repo: Path, sdir: Path,
                                 intent: str, by_id: dict, tiers_map: dict, env_vars: list,
                                 registry: dict, plan_file: str, quality: QualityProfile,
-                                contract_dir: str) -> tuple[dict | None, str | None]:
+                                contract_dir: str, learned_block: str = "") -> tuple[dict | None, str | None]:
     """Phase B (opt-in, parallel_build): decompose the approved plan into
     dependency-layered slices and build them layer by layer — a focused
     implementer per slice, sharing the ``facts`` interface ledger so the slices
@@ -1387,7 +1449,7 @@ async def _run_decomposed_build(request: Request, user: dict, pkey: str, repo: P
     Degrades safely: an empty/degenerate decomposition returns ``(None, None)``
     and the caller falls back to the single ``code-implementer`` build."""
     _phase(pkey, "Planning the build (decomposition)")
-    slices = await _decompose_plan(repo, plan_file, intent, by_id, tiers_map, registry, quality)
+    slices = await _decompose_plan(repo, plan_file, intent, by_id, tiers_map, registry, quality, learned_block)
     if len(slices) < 2:
         # A team needs >=2 independent slices. One slice (a single-file or
         # otherwise indivisible plan) or none (the model couldn't split it) means
@@ -1498,6 +1560,19 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         _write_state(sdir, {"status": "idle"})
 
     try:
+        # R2 learned constraints (opt-in): the top domain-scoped rules distilled
+        # from earlier accepted runs, injected into the splitter / contract-derive /
+        # build & fix prompts. Empty string when the flag is off → today's prompts.
+        learned_block = ""
+        if quality.constraint_learning:
+            try:
+                _rows = await get_db().get_learned_constraints(user["id"], domain, limit=5)
+                from captain_claw.flight_deck import constraint_learning as _cl
+                learned_block = _cl.format_constraints_block(_rows)
+                if learned_block:
+                    _progress(pkey, "note", f"{len(_rows)} learned constraint(s) applied")
+            except Exception as e:  # noqa: BLE001 — learning is advisory, never blocks
+                log.warning("code learned-constraints load failed", error=str(e))
         # A1 acceptance contract (opt-in): load or derive the checkable acceptance
         # criteria once, inject them into the build/fix prompts as the target, and
         # validate them after each review round. Empty when the lever is off.
@@ -1505,7 +1580,8 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         contract_sum: dict = {}
         if quality.constraints_contract:
             contract = await _load_or_derive_contract(
-                repo, plan_file, intent, tiers_map, registry, derive=not seed_fix)
+                repo, plan_file, intent, tiers_map, registry,
+                derive=not seed_fix, learned_block=learned_block)
             if contract:
                 _progress(pkey, "note", f"acceptance contract armed: {len(contract)} rule(s)")
         # A2 completion-honesty guard + output mode (opt-in): applied only when a
@@ -1513,7 +1589,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
         # today's prompts. Combined with the contract directive into one suffix.
         guard_dir = code_honesty.guard_directive(
             quality.honesty_guard and quality.any_enabled, quality.output_mode)
-        contract_dir = guard_dir + code_contract.contract_directive(contract)
+        contract_dir = guard_dir + code_contract.contract_directive(contract) + learned_block
 
         last_fix_sha: str | None = None
         if seed_fix:
@@ -1578,7 +1654,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             if quality.parallel_build:
                 d, sha = await _run_decomposed_build(
                     request, user, pkey, repo, sdir, intent, by_id, tiers_map,
-                    env_vars, registry, plan_file, quality, contract_dir)
+                    env_vars, registry, plan_file, quality, contract_dir, learned_block)
                 if _cancelled(pkey):
                     _finish_stopped()
                     return
@@ -1751,6 +1827,38 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             prev_det_crit = det_crit
 
             triage = await _triage_reviews(reviews, intent, tiers_map, registry)
+
+            # R1: deterministic ground-truth gates are a HARD precondition, not
+            # advice. det_crit is the armed-critical count for THIS committed state
+            # (failing tests + failing contract criticals + broken imports); it is 0
+            # unless a gate the user armed actually fails. If the LLM triage was
+            # satisfied but a ground-truth check is still red, the run is NOT clean —
+            # a model opinion never overrides a failing test suite. Force the fix
+            # loop to address it, supplying a deterministic directive if triage gave
+            # none.
+            if det_crit > 0 and not triage.get("needs_fix"):
+                triage["needs_fix"] = True
+                triage["fixer"] = triage.get("fixer") or "code-implementer"
+                if not (triage.get("fix_instructions") or "").strip():
+                    bits = []
+                    if test_cmd and not tests_ok:
+                        bits.append(f"the test suite fails (`{test_cmd}`)")
+                    if int(contract_sum.get("failed_critical", 0)):
+                        bits.append(f"{int(contract_sum.get('failed_critical', 0))} "
+                                    "critical acceptance-contract rule(s) fail")
+                    if iface_crit:
+                        bits.append(f"{iface_crit} unresolved broken import(s)")
+                    triage["fix_instructions"] = (
+                        "Deterministic ground-truth checks are still failing and MUST "
+                        "be resolved before this task is done: " + "; ".join(bits)
+                        + ". See the Test Runner / Acceptance Contract / Interface "
+                        "Consistency report(s) above for the exact failures.")
+                triage["summary"] = (triage.get("summary") or "Review complete.").rstrip(". ") \
+                    + " — not clean: deterministic ground-truth checks still failing."
+                _progress(pkey, "note",
+                          "deterministic gate: ground-truth checks still red — "
+                          "not shipping on triage opinion alone")
+
             review_summary = triage.get("summary", "Review complete.")
             _write_report(repo, f"review-r{rnd}-summary", f"# Review summary — r{rnd}\n\n{review_summary}")
             await code_git.git_commit(repo, f"[review r{rnd}] reports + reviewer tests")
@@ -1759,6 +1867,21 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             prior_findings = triage.get("findings", []) or []
             prior_fix_instructions = triage.get("fix_instructions", "") or ""
             last_triage = triage
+
+            # R1: fail closed on an unavailable triage. If the triage LLM could not
+            # render a verdict AND no ground-truth gate forced a fix, do NOT declare
+            # the build clean — absence of a verdict is not a pass. Stop honestly
+            # with a resumable backlog instead.
+            if not triage.get("triage_ok", True) and not triage["needs_fix"]:
+                rel = _write_backlog(repo, {"summary": review_summary,
+                                            "findings": prior_findings, "fix_instructions": ""})
+                quality_verdict = "unverified"
+                _append_chat(sdir, "assistant",
+                             "⚠️ Review triage could not run, so this build was NOT declared "
+                             f"clean (absence of a verdict is not a pass). State saved to `{rel}` — "
+                             "say **continue fixing** to retry once the review model is available.",
+                             kind="note", ok=False)
+                break
 
             if not triage["needs_fix"]:
                 # Clean pass — a stale backlog from an earlier capped run is done.
@@ -1784,11 +1907,14 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
             pre_fix_sha = _head[0]["sha"] if _head else None
             fix_rounds_run += 1
             fixer = triage["fixer"]
+            fix_findings = triage.get("findings", []) or []
+            scope_files = _scope_from_findings(fix_findings)
             fd = None
             fsha = None
             for attempt in range(_FIX_RETRIES + 1):
                 fp = (_no_change_corrective(attempt, _acted(fd)) if attempt else "") \
-                    + _fix_prompt(intent, triage.get("fix_instructions", ""), contract_dir)
+                    + _fix_prompt(intent, triage.get("fix_instructions", ""), contract_dir,
+                                  findings=fix_findings, scope_files=scope_files)
                 fd = await _run_agent(request, user, pkey, repo, fixer,
                                       fp, by_id, tiers_map, env_vars)
                 if _cancelled(pkey):
@@ -1800,6 +1926,17 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                     break
                 _progress(pkey, "note", f"fix r{rnd + 1} produced no file changes (attempt {attempt + 1})")
             last_fix_sha = fsha or last_fix_sha
+            # R6: surface scope creep — a correction that edited files none of the
+            # findings named. Deterministic + non-blocking (a valid fix may touch a
+            # helper); it just makes an un-reviewed spread visible in the log.
+            if fsha and scope_files:
+                _scope = set(scope_files)
+                _stray = [c for c in await _changed_files(repo, fsha) if c not in _scope]
+                if _stray:
+                    _progress(pkey, "note",
+                              f"scope: fix r{rnd + 1} also changed {len(_stray)} file(s) outside the "
+                              f"findings' scope ({', '.join(_stray[:5])}"
+                              + ("…" if len(_stray) > 5 else "") + ")")
             _append_chat(sdir, "assistant", (fd.get("output") or "(fix produced no summary)").strip(),
                          kind="fix", round=rnd + 1, archetype=fixer,
                          ok=bool(fd.get("ok")), commit=fsha or "")
@@ -1854,6 +1991,35 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                                  f"(fix rounds: {fix_rounds_run})._", kind="note")
             except Exception as e:  # noqa: BLE001 — metrics are best-effort
                 log.warning("code quality metrics failed", error=str(e))
+
+        # R2 (opt-in): distill ONE reusable constraint from an accepted build and
+        # persist it domain-scoped for future splitter/planner/contract briefs.
+        # In the try body (not `finally`) so it never runs on the failure path.
+        if quality.constraint_learning and final_clean and not _cancelled(pkey):
+            try:
+                from captain_claw.flight_deck import constraint_learning as _cl
+                from captain_claw.llm import Message, create_provider
+                _plan_abs = repo / plan_file
+                _plan_text = _plan_abs.read_text() if _plan_abs.is_file() else ""
+                _bl = _backlog_path(repo)
+                _fixed = _bl.read_text()[:2000] if _bl.is_file() else ""
+                _signal = _cl.build_signal(_plan_text, [], fixed_notes=_fixed)
+                _tier = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
+                _prov = create_provider(
+                    provider=_tier.get("provider", "anthropic"), model=_tier.get("model", ""),
+                    api_key=_tier.get("api_key") or None, base_url=_tier.get("base_url") or None,
+                    temperature=0.2, max_tokens=400)
+                _resp = await _prov.complete(messages=[Message(role="user", content=_cl.distill_prompt(
+                    intent, _signal, "fixed" if fix_rounds_run else "accepted"))],
+                    temperature=0.2, max_tokens=400)
+                _row = _cl.parse_constraint(_resp.content or "")
+                if _row:
+                    await get_db().add_learned_constraint(
+                        user["id"], _row["domain"] or domain, "code",
+                        _row["trigger"], _row["constraint"], _row["severity"], source_id=pkey)
+                    _progress(pkey, "note", f"Learned constraint: {_row['constraint'][:80]}")
+            except Exception as e:  # noqa: BLE001 — distillation is best-effort
+                log.warning("code constraint learning failed", error=str(e))
 
         # The repo just changed substantially — (re)build the code map so future
         # sessions/tasks can query it instead of re-reading everything.
@@ -2410,6 +2576,15 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         route = await _classify(intent, context, archetypes, tiers_map, registry, reliability)
         _progress(pkey, "route", f"size={route['size']} · {route.get('why', '')}", size=route["size"])
         domain = str(route.get("domain") or "general")
+        # R2 (opt-in): learned constraints for the top-level plan prompt.
+        _plan_learned = ""
+        if _load_quality(uid, body.project).constraint_learning:
+            try:
+                from captain_claw.flight_deck import constraint_learning as _cl
+                _plan_learned = _cl.format_constraints_block(
+                    await db.get_learned_constraints(uid, domain, limit=5))
+            except Exception as e:  # noqa: BLE001
+                log.warning("code plan constraints load failed", error=str(e))
 
         hist = _history_preamble(sdir)
         if route["size"] == "small":
@@ -2451,18 +2626,38 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
                 else:
                     sha = await code_git.git_commit(repo, f"[edit] {executor}: {route.get('title', intent)[:60]}")
                     await _update_map(repo, tiers_map, registry)   # keep the map fresh
+                # R1: a quick edit has no review loop, so when the test gate is
+                # armed the test result IS its check — a green suite is a
+                # precondition to recording the edit as a win. Default (gate off) →
+                # unchanged behaviour.
+                tests_ok = True
+                if not is_git and sha:
+                    _q = _load_quality(uid, body.project)
+                    if _q.test_gate:
+                        _tcmd = code_verify.detect_test_command(repo, _q.test_command)
+                        if _tcmd:
+                            _tres = await code_verify.run_tests(repo, _tcmd)
+                            tests_ok = bool(_tres.get("ok"))
+                            _progress(pkey, "note",
+                                      ("✓ tests passed" if tests_ok else "✗ tests failing")
+                                      + f" · {_tcmd}")
                 out = (d.get("output") or "").strip() or "(no output)"
                 if not d.get("ok"):
                     out = f"⚠️ {executor} failed: {d.get('error', 'unknown error')}"
+                elif not tests_ok:
+                    out += ("\n\n⚠️ Tests are failing after this edit — not a clean "
+                            "result. Say **continue fixing** or describe the fix.")
                 _u = _usage_summary(pkey)
                 if _u:
                     out += f"\n\n_{_u}._"
                 assistant = _append_chat(sdir, "assistant", out, archetype=executor,
-                                         size="small", ok=bool(d.get("ok")), commit=sha or "", route=route)
-                # C2: the quick-edit archetype's outcome — landed a commit and
-                # didn't error → a win; else a loss. Token-free.
+                                         size="small", ok=bool(d.get("ok")) and tests_ok,
+                                         commit=sha or "", route=route)
+                # C2: the quick-edit archetype's outcome — landed a commit, didn't
+                # error, AND (if the gate is armed) passed the tests → a win; else a
+                # loss. Token-free unless the gate ran a suite.
                 await _record_outcomes(uid, domain,
-                                       {executor: bool(d.get("ok")) and (is_git or bool(sha))})
+                                       {executor: bool(d.get("ok")) and (is_git or bool(sha)) and tests_ok})
                 _write_state(sdir, {"status": "idle", "last_route": route})
                 return {"message": assistant, "route": route, "commit": sha}
 
@@ -2471,7 +2666,7 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         plan_rel = _new_plan_rel(repo, route.get("title", intent))
         _plan_t0 = time.time()
         d = await _run_agent(request, user, pkey, repo, planner,
-                             hist + _plan_prompt(intent, plan_rel), by_id, tiers_map, env_vars)
+                             hist + _plan_prompt(intent, plan_rel, _plan_learned), by_id, tiers_map, env_vars)
         if _cancelled(pkey):
             assistant = _append_chat(sdir, "assistant", "⏹ Stopped by user.", kind="note")
             _write_state(sdir, {"status": "idle"})
@@ -2783,20 +2978,47 @@ async def _agent_code_run(owner: str, project: str, session_id: str, intent: str
             _sess, repo, sdir, _pk = _sctx(owner, project, session_id)
             state = _read_state(sdir)
             plan_file = state.get("plan_file") or "plan.md"
-            db = get_db()
-            archetypes = await merged_archetypes(db, owner)
-            by_id = {a["id"]: a for a in archetypes}
-            registry = _load_registry()
-            tiers_map, env_vars = await _load_owner_tiers(db, owner)
-            _append_chat(sdir, "user",
-                         "✓ Plan auto-approved (agent-initiated run) — building.",
-                         kind="approval")
             _route = state.get("route") or {}
-            await _run_build_loop(req, user, pkey, repo, sdir, intent, by_id,
-                                  tiers_map, env_vars, registry, plan_file=plan_file,
-                                  quality=_load_quality(owner, project),
-                                  domain=str(_route.get("domain") or "general"),
-                                  planner_id=str(_route.get("planner") or ""))
+            quality = _load_quality(owner, project)
+            # R5 (opt-in): a high-blast-radius plan is NOT auto-approved — it stays
+            # `awaiting_plan` for a human to approve via the normal /plan/approve
+            # route. Default off → this check is skipped and auto-approve is
+            # byte-identical to before.
+            _held = ""
+            if quality.blast_radius_gate:
+                from captain_claw.flight_deck.blast_radius import classify_plan
+                _plan_text = str(out.get("plan") or "")
+                if not _plan_text:
+                    try:
+                        _pf = repo / plan_file
+                        if _pf.is_file():
+                            _plan_text = _pf.read_text()
+                    except Exception:  # noqa: BLE001
+                        _plan_text = ""
+                _hit, _reason = classify_plan(_plan_text)
+                if _hit:
+                    _held = _reason
+            if _held:
+                _append_chat(sdir, "assistant",
+                             f"⚠️ Held for approval — this plan looks high-impact "
+                             f"({_held}). It was NOT auto-approved; open the Code studio "
+                             f"session to review and approve it before it builds.",
+                             kind="note")
+                # state stays `awaiting_plan` (set by message()); nothing to build.
+            else:
+                db = get_db()
+                archetypes = await merged_archetypes(db, owner)
+                by_id = {a["id"]: a for a in archetypes}
+                registry = _load_registry()
+                tiers_map, env_vars = await _load_owner_tiers(db, owner)
+                _append_chat(sdir, "user",
+                             "✓ Plan auto-approved (agent-initiated run) — building.",
+                             kind="approval")
+                await _run_build_loop(req, user, pkey, repo, sdir, intent, by_id,
+                                      tiers_map, env_vars, registry, plan_file=plan_file,
+                                      quality=quality,
+                                      domain=str(_route.get("domain") or "general"),
+                                      planner_id=str(_route.get("planner") or ""))
         elif out.get("status") == "running":
             # Backlog-continuation branch runs as its own background task —
             # poll the session state until it settles (bounded).

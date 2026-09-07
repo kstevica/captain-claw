@@ -568,6 +568,7 @@ class SessionOrchestrator:
         user_input: str,
         model: str | None = None,
         auto_select_model: bool = False,
+        quality: Any = None,
     ) -> dict[str, Any]:
         """Decompose a request and build the task graph for preview.
 
@@ -627,8 +628,15 @@ class SessionOrchestrator:
         self._file_registry.workflow_run_dir = workflow_run_dir
 
         # 1. DECOMPOSE
+        # R3: normalize the caller's quality config once (local import avoids any
+        # load-time circularity). Used for the parallel-first decompose directive
+        # and the post-build data-edge lint. None → off → today's behaviour.
+        from captain_claw.flight_deck.quality_profile import QualityProfile
+        _quality = (quality if hasattr(quality, "parallel_edges")
+                    else QualityProfile.from_dict(quality))
         decompose_span = self._trace_start("decompose", "Decompose request")
-        plan = await self._decompose(user_input, auto_select_model=auto_select_model)
+        plan = await self._decompose(user_input, auto_select_model=auto_select_model,
+                                     quality=_quality)
         self._trace_end(decompose_span, "completed" if plan else "failed")
         if plan is None:
             log.error("prepare() failed: _decompose returned None")
@@ -666,6 +674,11 @@ class SessionOrchestrator:
                 max_retries=self._worker_max_retries,
                 output_schema=output_schema,
                 output_schema_name=str(task_data.get("output_schema_name", "")).strip(),
+                # R3: carry the workspace data-edge manifest through the decompose
+                # graph build (was silently dropped here). Empty lists when absent
+                # == prior behaviour; enables the data-edge lint to reconcile them.
+                workspace_outputs=list(task_data.get("workspace_outputs", [])),
+                workspace_inputs=list(task_data.get("workspace_inputs", [])),
             )
             if not task.id:
                 log.warning("Skipping task with empty id",
@@ -686,6 +699,21 @@ class SessionOrchestrator:
                       raw_count=len(tasks_data), skipped=skipped_tasks)
             self._broadcast_event("error", {"message": "Decomposition produced no valid tasks."})
             return {"ok": False, "error": "Decomposition produced no valid tasks."}
+
+        # R3 data-edge lint (deterministic, token-free). Always log; only DROP
+        # no-crossing edges when the caller opted in via parallel_edges.
+        from captain_claw.task_graph import lint_data_edges
+        _lint = lint_data_edges(list(graph.tasks.values()))
+        if _lint:
+            log.debug("decompose data-edge lint", findings=_lint)
+            if getattr(_quality, "parallel_edges", False):
+                _drop = {(f["task"], f["depends_on"]) for f in _lint
+                         if f.get("kind") == "no_crossing_edge"}
+                if _drop:
+                    for _t in graph.tasks.values():
+                        _t.depends_on = [d for d in _t.depends_on
+                                         if (_t.id, d) not in _drop]
+                    log.info("decompose data-edge lint dropped edges", dropped=sorted(_drop))
 
         # Store state for execute().
         self._graph = graph
@@ -1132,6 +1160,7 @@ class SessionOrchestrator:
         self,
         user_input: str,
         auto_select_model: bool = False,
+        quality: Any = None,
     ) -> dict[str, Any] | None:
         """Use LLM to decompose user_input into a task plan (JSON)."""
         log.info("Decompose started", input_len=len(user_input),
@@ -1182,6 +1211,11 @@ class SessionOrchestrator:
                 log.debug("Failed to build model catalog", error=str(e))
 
         system_prompt = self._instructions.load("orchestrator_decompose_system_prompt.md")
+        # R3: append the parallel-first / data-edge directive at runtime when the
+        # caller opted in (quality.parallel_edges). The .md template is untouched.
+        if system_prompt and getattr(quality, "parallel_edges", False):
+            from captain_claw.flight_deck.quality_profile import PARALLEL_EDGES_DIRECTIVE
+            system_prompt += PARALLEL_EDGES_DIRECTIVE
 
         # Append model selection instructions to the system prompt
         # when auto-select is enabled and we have a model catalog.

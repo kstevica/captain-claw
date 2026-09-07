@@ -42,7 +42,7 @@ _CODE_OWNERS_DEFAULT = "code-implementer"
 # ── decomposition prompt ─────────────────────────────────────────────
 
 def decompose_prompt(intent: str, plan_text: str, roster: list[str],
-                     max_slices: int) -> str:
+                     max_slices: int, learned: str = "") -> str:
     roster_str = ", ".join(roster) if roster else _CODE_OWNERS_DEFAULT
     plan_block = f"\n\n## Approved plan\n{plan_text[:9000]}" if plan_text.strip() else ""
     return (
@@ -63,7 +63,7 @@ def decompose_prompt(intent: str, plan_text: str, roster: list[str],
         "cycles; a slice's files should not overlap another's; a foundations slice "
         "has an empty depends_on. If the plan is genuinely one indivisible unit, "
         'return a single slice.\n\n'
-        f"## Task\n{intent}{plan_block}"
+        f"## Task\n{intent}{plan_block}{learned}"
     )
 
 

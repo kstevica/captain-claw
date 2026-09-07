@@ -4354,6 +4354,13 @@ async def _run_plan(sid: str, body: PlanRequest, user: dict) -> None:
             step_p, _ = _provider_call(creds, temperature=0.5, default_max=8192, cap=32768)
             step_runner = make_llm_step_runner(step_p)
         if body.dag:
+            # R4: surface the (opt-in) DAG lever — it is the graph-methodology engine
+            # (real dependency edges, blind per-step contexts, verify-gates), off by
+            # default. This note only runs when dag=True.
+            _progress(sid, "main",
+                      "Plan-Horizon DAG mode — the planner emits a dependency graph; "
+                      "independent steps run concurrently in dependency waves, each "
+                      "seeing only its dependencies' verified outputs")
             res = await run_dag_horizon(
                 body.intent.strip(),
                 planner_dag=make_llm_dag_planner(plan_p, max_steps=body.max_steps),
@@ -4372,6 +4379,7 @@ async def _run_plan(sid: str, body: PlanRequest, user: dict) -> None:
         confidence = round(res.completed / max(1, len(res.steps)), 3)
         analysis = {
             "kind": "plan",
+            "dag": bool(body.dag),  # R4: self-describing — was this a dependency-DAG run?
             "steps": [{"goal": s["goal"], "verified": s["verified"],
                        "confidence": s["confidence"], "attempts": s["attempts"]}
                       for s in res.steps],

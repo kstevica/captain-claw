@@ -282,6 +282,46 @@ class AgentGuardMixin:
         except Exception:
             return False
 
+    def _enforce_blast_radius(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        interaction_label: str,
+    ) -> tuple[bool, str]:
+        """Deterministic blast-radius gate (R5), layered alongside the LLM
+        script_tool guard. Default-disabled → no-op (the classifier is not even
+        called). When on, a high-blast-radius tool call is blocked or routed to
+        human approval per the configured level. No LLM call — pure pattern match."""
+        enabled, level = self._guard_settings("blast_radius")
+        if not enabled:
+            return True, ""
+        from captain_claw.flight_deck.blast_radius import classify_tool
+        hit, reason = classify_tool(name, arguments)
+        if not hit:
+            return True, ""
+        if level == "ask_for_approval":
+            question = (
+                f"Blast-radius gate: '{name}' looks high-impact ({reason}). Allow it?"
+            )
+            approved = self._request_guard_approval(question)
+            self._emit_tool_output(
+                "guard_blast_radius",
+                {"interaction": interaction_label, "tool": name,
+                 "decision": "high_blast_radius", "level": level,
+                 "approved": approved},
+                reason,
+            )
+            if approved:
+                return True, ""
+            return False, f"Blocked by blast_radius guard (approval denied): {reason}"
+        self._emit_tool_output(
+            "guard_blast_radius",
+            {"interaction": interaction_label, "tool": name,
+             "decision": "high_blast_radius", "level": level},
+            reason,
+        )
+        return False, f"Blocked by blast_radius guard: {reason}"
+
     async def _enforce_guard(
         self,
         guard_type: str,
@@ -582,6 +622,12 @@ class AgentGuardMixin:
         )
         if not allowed:
             raise GuardBlockedError("script_tool", guard_error)
+        # R5: deterministic blast-radius gate — layered alongside the LLM guard
+        # above (never replacing it). Default-disabled via config.guards.
+        # blast_radius, so this is a no-op unless a human opts in.
+        br_ok, br_error = self._enforce_blast_radius(name, arguments, interaction_label)
+        if not br_ok:
+            raise GuardBlockedError("blast_radius", br_error)
         # Inject session object and peer-consult approval callback into
         # arguments for tools that need them (e.g. consult_peer).
         _session = getattr(self, "session", None)

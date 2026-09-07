@@ -231,6 +231,27 @@ class FlightDeckDB:
                 PRIMARY KEY (user_id, archetype_id, domain)
             );
 
+            -- R2 automatic CONSTRAINT edge (opt-in `constraint_learning`): short,
+            -- reusable rules distilled from accepted/fixed runs, injected into the
+            -- splitter/planner/contract briefs of later runs. Additive — created on
+            -- demand, IF NOT EXISTS, no migration of existing tables. No users FK
+            -- (mirrors cost_ledger) so it is engine- and test-friendly.
+            CREATE TABLE IF NOT EXISTS learned_constraints (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                domain          TEXT NOT NULL DEFAULT '',
+                engine          TEXT NOT NULL DEFAULT '',   -- 'vatra' | 'code'
+                trigger_text    TEXT NOT NULL DEFAULT '',
+                constraint_text TEXT NOT NULL DEFAULT '',
+                severity        TEXT NOT NULL DEFAULT 'major',
+                source_id       TEXT NOT NULL DEFAULT '',    -- session/project id
+                hits            INTEGER NOT NULL DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_learned_constraints_user
+                ON learned_constraints(user_id, domain);
+
             -- Vatra blackboard: cross-agent "asks" a specialist posts when it needs
             -- something outside its slice. The coordinator routes each to a helper
             -- and writes the answer back; the reporter folds answered asks in.
@@ -1763,6 +1784,74 @@ class FlightDeckDB:
         return {"user_id": user_id, "archetype_id": archetype_id, "domain": domain,
                 "successes": successes, "fails": fails, "runs": runs,
                 "weight": weight, "updated_at": now}
+
+    # ── Learned constraints (R2 automatic CONSTRAINT edge, opt-in) ────
+
+    async def add_learned_constraint(
+        self, user_id: str, domain: str, engine: str,
+        trigger: str, constraint: str, severity: str = "major",
+        source_id: str = "", *, cap_per_domain: int = 50,
+    ) -> dict:
+        """Persist one distilled constraint. Dedups on (user_id, domain, text):
+        an identical rule bumps `hits`/updated_at instead of duplicating. Prunes
+        the oldest rows beyond `cap_per_domain` so storage stays bounded. Additive;
+        never migrates existing tables. Returns {"id", "deduped"}; {} for empty."""
+        assert self._db is not None
+        now = _utcnow()
+        domain = (domain or "").strip()
+        constraint = (constraint or "").strip()
+        if not constraint:
+            return {}
+        if severity not in ("critical", "major", "minor"):
+            severity = "major"
+        async with self._db.execute(
+            "SELECT id, hits FROM learned_constraints"
+            " WHERE user_id = ? AND domain = ? AND lower(constraint_text) = lower(?)",
+            (user_id, domain, constraint),
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            await self._db.execute(
+                "UPDATE learned_constraints SET hits = ?, severity = ?,"
+                " trigger_text = ?, updated_at = ? WHERE id = ?",
+                (int(row["hits"]) + 1, severity, (trigger or "").strip(), now, row["id"]))
+            await self._db.commit()
+            return {"id": row["id"], "deduped": True}
+        cid = _uuid()
+        await self._db.execute(
+            "INSERT INTO learned_constraints"
+            " (id, user_id, domain, engine, trigger_text, constraint_text,"
+            "  severity, source_id, hits, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+            (cid, user_id, domain, (engine or "").strip(), (trigger or "").strip(),
+             constraint, severity, (source_id or "").strip(), now, now))
+        # Bounded storage: keep only the newest `cap_per_domain` per (user, domain).
+        # LIMIT/OFFSET on the SELECT subquery (not the DELETE) is always supported.
+        await self._db.execute(
+            "DELETE FROM learned_constraints WHERE id IN ("
+            " SELECT id FROM learned_constraints WHERE user_id = ? AND domain = ?"
+            " ORDER BY updated_at DESC LIMIT -1 OFFSET ?)",
+            (user_id, domain, max(1, int(cap_per_domain))))
+        await self._db.commit()
+        return {"id": cid, "deduped": False}
+
+    async def get_learned_constraints(
+        self, user_id: str, domain: str | None = None, limit: int = 5,
+    ) -> list[dict]:
+        """Top learned constraints for a user (optionally one domain), most severe
+        then most recent first. `domain=None` returns across all domains (used at
+        the Vatra lead decompose, where the domain is still an unknown output)."""
+        assert self._db is not None
+        query = "SELECT * FROM learned_constraints WHERE user_id = ?"
+        params: list = [user_id]
+        if domain is not None:
+            query += " AND domain = ?"
+            params.append((domain or "").strip())
+        query += (" ORDER BY CASE severity WHEN 'critical' THEN 0"
+                  " WHEN 'major' THEN 1 ELSE 2 END, updated_at DESC LIMIT ?")
+        params.append(max(1, int(limit)))
+        async with self._db.execute(query, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
     # ── Prompts ─────────────────────────────────────────────────────
 

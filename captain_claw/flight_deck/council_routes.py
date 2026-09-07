@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from captain_claw.agent_stuck import STUCK_MARKERS
 from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
+from captain_claw.flight_deck.quality_profile import QualityProfile, tally_votes
 from captain_claw.logging import get_logger
 
 # Reuse Basna's shared archetype spine — catalog rendering, the deterministic
@@ -579,16 +580,42 @@ async def toggle_pin(
 
 # ── Vote endpoints ───────────────────────────────────────────────
 
+async def _maybe_record_tally(db, row: dict, session_id: str, owner_id: str) -> None:
+    """R7 (opt-in): persist the deterministic vote tally as the council's decision
+    datum. Gated on ``quality.council_tally`` in the session config — the default
+    (absent/empty quality config, or the flag off) writes NOTHING, so stored state
+    stays byte-identical to today. When on, upsert a single ``tally`` artifact
+    (retrievable via GET /artifacts?kind=tally). Best-effort: never fail the vote
+    write."""
+    try:
+        cfg = json.loads((row or {}).get("config") or "{}")
+    except Exception:  # noqa: BLE001
+        cfg = {}
+    if not QualityProfile.from_dict(cfg.get("quality")).council_tally:
+        return
+    try:
+        votes = await db.get_council_votes(session_id, owner_id)
+        tally = tally_votes(votes)
+        await db.upsert_council_artifact(
+            session_id, owner_id, kind="tally", agent_id="", agent_name="",
+            content=json.dumps(tally),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("Council tally persist failed", session_id=session_id, error=str(e))
+
+
 @router.post("/sessions/{session_id}/votes")
 async def add_votes(
     session_id: str, body: AddVotesRequest,
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    _, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
+    row, _, owner_id = await _resolve_session(db, session_id, user["id"], need_write=True)
     ids = await db.add_council_votes(session_id, owner_id, body.votes)
     if not ids:
         raise HTTPException(status_code=404, detail="Council session not found")
+    # R7 (opt-in): record the deterministic tally as the council's decision datum.
+    await _maybe_record_tally(db, row, session_id, owner_id)
     return {"ok": True, "ids": ids}
 
 
@@ -600,6 +627,22 @@ async def get_votes(
     db = get_db()
     _, _, owner_id = await _resolve_session(db, session_id, user["id"])
     return await db.get_council_votes(session_id, owner_id, round_num=round)
+
+
+@router.get("/sessions/{session_id}/votes/tally")
+async def get_votes_tally(
+    session_id: str, round: int | None = None,
+    user: dict = Depends(get_current_user),
+):
+    """R7: the deterministic majority tally of the council's votes — the decision
+    node. Additive + read-only: it computes the verdict from the already-recorded
+    votes (no LLM call, no state change), so it runs by default without altering
+    any existing behaviour. The LLM synthesis stays the rationale; this is the
+    counted verdict. ``round`` optionally scopes the tally to one round."""
+    db = get_db()
+    _, _, owner_id = await _resolve_session(db, session_id, user["id"])
+    votes = await db.get_council_votes(session_id, owner_id, round_num=round)
+    return tally_votes(votes)
 
 
 # ── Artifact endpoints ──────────────────────────────────────────

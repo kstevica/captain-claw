@@ -112,6 +112,11 @@ class QualityProfile:
     worker_escalate: bool = False  # R5: worker can flag ESCALATE → higher-tier re-dispatch
     micro_workers: bool = False    # S3 (mrav P4): extract/digest/format-shaped subtasks
                                    # spawn on the mrav micro runtime (micro tier)
+    push_deps: bool = False        # R4: grouped Vatra PUSHES a finished producer's
+                                   # committed output into its consumer's prompt (DAG
+                                   # edges carry data); the `vatra`-tool pull path stays
+                                   # the fallback. Vatra-grouped only; adds input tokens
+                                   # (inlines producer output) so it is never preset-on.
     git_snapshots: bool = False    # R6: git init the research folder + commit each round
     judgment_ledger: bool = False  # R11: force explicit enumeration+resolution of the hard calls
     source_corpus: bool = False    # R10: web_fetch saves full page text to the VFS, returns head+ptr
@@ -145,6 +150,38 @@ class QualityProfile:
                                          # resolve to real definitions (catches
                                          # interface drift between parallel slices)
 
+    # ── R3: parallel-first planning + data-edge lint (explicit opt-in, no preset) ──
+    parallel_edges: bool = False   # planners default to no dep, name the crossing
+                                   # artifact (workspace_inputs/outputs), and the
+                                   # data-edge lint drops depends_on edges that no
+                                   # named variable crosses
+    flow_ref_lint: bool = False    # flow compile validates {{steps.<id>}} refs
+                                   # resolve to a declared step (typo -> error, not "")
+
+    # ── R7: council decision node (explicit opt-in, no preset) ──
+    council_tally: bool = False    # persist the deterministic majority vote tally
+                                   # as the council's decision datum (a `tally`
+                                   # artifact); the LLM synthesis stays as rationale.
+                                   # Token-free but writes a new artifact, so it is
+                                   # explicit-only — no preset enables it.
+
+    # ── R5: blast-radius gate (explicit opt-in, no preset) ──
+    blast_radius_gate: bool = False  # hold a high-blast-radius plan for human
+                                     # approval instead of auto-approving it on an
+                                     # agent-initiated Code run (deterministic,
+                                     # token-free; a hit SKIPS the build). Kept out
+                                     # of _BOOL_FLAGS so a gate-only run never trips
+                                     # in-build quality work via any_enabled.
+
+    # ── R2: automatic CONSTRAINT edge (explicit opt-in, no preset) ──
+    constraint_learning: bool = False  # distill a short {trigger,constraint,
+                                       # severity,domain} rule from an accepted/
+                                       # fixed run, persist it domain-scoped, and
+                                       # inject the top-N into the splitter/planner/
+                                       # contract briefs that get nothing learned.
+                                       # Costs one fast-tier call per accepted run
+                                       # (like deep_build/claim_check → no preset).
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     parallel_build_max_slices: int = 6  # cap on decomposition slices (keeps cost bounded)
@@ -172,7 +209,9 @@ class QualityProfile:
             "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
             "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
             "constraints_contract", "block_on_critical", "parallel_build",
-            "interface_consistency", "micro_workers",
+            "interface_consistency", "micro_workers", "push_deps",
+            "parallel_edges", "flow_ref_lint", "council_tally",
+            "blast_radius_gate", "constraint_learning",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -213,7 +252,7 @@ class QualityProfile:
         "git_snapshots", "judgment_ledger", "source_corpus", "claim_check",
         "rubric_contract", "intent_brief", "consistency_check", "facts_ledger",
         "constraints_contract", "block_on_critical", "parallel_build",
-        "interface_consistency",
+        "interface_consistency", "parallel_edges", "flow_ref_lint", "council_tally",
     )
 
     @property
@@ -543,6 +582,62 @@ def build_quality_metrics(
     return out
 
 
+# ── R7: deterministic council vote tally (the decision node) ─────────────
+# A council's *verdict* was implicit: the panel's AGREE/DISAGREE/ABSTAIN votes
+# were stored but never counted, and the "decision" was an LLM synthesis over the
+# transcript. This is the deterministic code node at that decision point — a pure,
+# token-free majority count over the recorded votes. It is the verdict; the LLM
+# synthesis stays the rationale. `weights` optionally maps agent_id -> reliability
+# weight (default 1.0 each), so the SAME helper serves a plain head-count today and
+# a reliability-weighted tally once per-agent weights are available. Abstains are
+# reported but never tip the decision; a tie is 'tie'; no votes is 'no_quorum'.
+
+VOTE_VALUES = ("agree", "disagree", "abstain")
+
+
+def tally_votes(votes: list[dict] | None,
+                weights: dict[str, float] | None = None) -> dict:
+    """Deterministic majority tally over council votes. Pure and token-free.
+
+    Each vote is a dict with at least ``vote`` (agree|disagree|abstain; unknown
+    values are treated as abstain) and ``agent_id``. ``weights`` maps agent_id to
+    a reliability weight (missing -> 1.0); with all-1.0 weights this is a plain
+    head-count. The verdict compares the agree vs disagree totals only — abstains
+    are counted and reported but never decide. Returns a JSON-safe dict.
+    """
+    weights = weights or {}
+    counts = {"agree": 0, "disagree": 0, "abstain": 0}
+    wsum = {"agree": 0.0, "disagree": 0.0, "abstain": 0.0}
+    for v in votes or []:
+        val = str(v.get("vote", "abstain")).lower()
+        if val not in counts:
+            val = "abstain"
+        counts[val] += 1
+        wsum[val] += float(weights.get(str(v.get("agent_id", "")), 1.0))
+    total = sum(counts.values())
+    agree_w, disagree_w = wsum["agree"], wsum["disagree"]
+    if total == 0:
+        verdict = "no_quorum"
+    elif agree_w > disagree_w:
+        verdict = "agree"
+    elif disagree_w > agree_w:
+        verdict = "disagree"
+    else:
+        verdict = "tie"
+    decided = agree_w + disagree_w
+    # Signed decisiveness over the votes that actually counted (agree-positive).
+    margin = round((agree_w - disagree_w) / decided, 4) if decided else 0.0
+    return {
+        "verdict": verdict,
+        "counts": counts,
+        "weighted": {k: round(x, 4) for k, x in wsum.items()},
+        "total_votes": total,
+        "weighted_total": round(sum(wsum.values()), 4),
+        "margin": margin,
+        "weighted_used": bool(weights),
+    }
+
+
 # ── R10: source corpus directive (paired with the web_fetch behaviour) ─
 SOURCE_CORPUS_DIRECTIVE = (
     "\n\nSOURCES: this run keeps a shared source corpus. When you `web_fetch` a "
@@ -556,4 +651,26 @@ SOURCE_CORPUS_DIRECTIVE = (
     "piping raw page HTML into the conversation bloats your context fast and can "
     "overflow the model, losing the whole turn. Use `shell` for local files and "
     "commands, not to download web pages."
+)
+
+
+# ── R3: parallel-first planning directive (paired with the parallel_edges flag) ─
+# Appended to the loaded planner system prompt at runtime ONLY when
+# parallel_edges is on; the .md templates (plan_mode_*_system_prompt.md,
+# orchestrator_decompose_system_prompt.md) are NOT edited, so an off flag leaves
+# the shipped prompts — and thus the planner output — byte-for-byte unchanged
+# (the same runtime-append precedent as honesty_guard). It deliberately overrides
+# plan_mode_complete_system_prompt.md's "depends_on the previous step by default
+# (sequential plan)" and the orchestrator prompt's "ordering constraints" framing.
+PARALLEL_EDGES_DIRECTIVE = (
+    "\n\nDEPENDENCIES ARE DATA EDGES, NOT WRITING ORDER: default EVERY step to an "
+    "empty depends_on. Add step B to step A's dependents ONLY when B consumes a "
+    "NAMED output that A produces — a file A writes, a value A returns, an "
+    "artifact A creates. When you add such a dependency you MUST name the artifact "
+    "that crosses it: list the producing step's output key(s) in its "
+    "workspace_outputs and the SAME key(s) in the consuming step's "
+    "workspace_inputs (short snake_case, e.g. pdf_paths, summary_md). If you "
+    "cannot name a concrete artifact that crosses the edge, the steps are "
+    "independent — leave depends_on empty so they run in parallel. Never chain "
+    "steps just because you wrote them in order."
 )
