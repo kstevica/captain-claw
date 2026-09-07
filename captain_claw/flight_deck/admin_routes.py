@@ -25,6 +25,13 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
 
 # ── Models ──
 
+class CreateUserRequest(BaseModel):
+    email: str
+    password: str  # min 6 chars
+    display_name: str | None = None
+    role: str = "user"
+
+
 class UpdateUserRequest(BaseModel):
     display_name: str | None = None
     role: str | None = None
@@ -49,6 +56,42 @@ async def list_users(
     users = await db.list_users(limit=limit, offset=offset)
     total = await db.count_users()
     return {"users": users, "total": total}
+
+
+@router.post("/users", status_code=201)
+async def create_user(body: CreateUserRequest, admin: dict = Depends(require_admin)):
+    """Create a new user account (admin only).
+
+    This is the account-provisioning path for team deployments where public
+    self-registration is closed (``FD_REGISTRATION_OPEN`` unset). It bypasses
+    that gate deliberately — only an existing admin can reach it. The new user
+    can change their own password afterward under their profile.
+    """
+    db = get_db()
+    email = (body.email or "").strip().lower()
+    if not email or not body.password:
+        raise HTTPException(400, "Email and password required")
+    if "@" not in email:
+        raise HTTPException(400, "Invalid email address")
+    if len(body.password) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters")
+    if body.role not in ("user", "admin"):
+        raise HTTPException(400, "Role must be 'user' or 'admin'")
+
+    existing = await db.get_user_by_email(email)
+    if existing:
+        raise HTTPException(409, "Email already registered")
+
+    display = (body.display_name or "").strip() or email.split("@")[0]
+    user = await db.create_user(
+        email=email, password_hash=hash_password(body.password),
+        display_name=display, role=body.role,
+    )
+    return {
+        "ok": True,
+        "user": {"id": user["id"], "email": user["email"],
+                 "display_name": display, "role": body.role},
+    }
 
 
 @router.get("/users/{user_id}")

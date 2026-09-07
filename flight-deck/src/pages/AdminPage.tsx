@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import {
   Shield,
   Users,
+  UserPlus,
   BarChart3,
   RefreshCw,
   Trash2,
@@ -78,6 +79,22 @@ async function fetchUsers(limit = 100, offset = 0): Promise<{ users: UserInfo[];
   })
   if (!res.ok) throw new Error('Failed to fetch users')
   return res.json()
+}
+
+async function createUser(payload: {
+  email: string
+  password: string
+  display_name?: string
+  role?: string
+}): Promise<void> {
+  const res = await fetch('/fd/admin/users', {
+    method: 'POST', headers: _headers(), credentials: 'include',
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.detail || 'Failed to create user')
+  }
 }
 
 async function updateUser(userId: string, patch: Record<string, unknown>): Promise<void> {
@@ -195,6 +212,128 @@ async function updatePlan(plan: string, limits: Partial<PlanLimits>): Promise<vo
 }
 
 // ── Components ──
+
+function CreateUserForm({ onCreated }: { onCreated: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [role, setRole] = useState('user')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+
+  const reset = () => {
+    setEmail(''); setPassword(''); setDisplayName(''); setRole('user'); setErr('')
+  }
+
+  const valid = email.trim().includes('@') && password.length >= 6
+
+  const handleCreate = async () => {
+    if (!valid) return
+    setSaving(true); setErr('')
+    try {
+      await createUser({
+        email: email.trim(),
+        password,
+        display_name: displayName.trim() || undefined,
+        role,
+      })
+      reset()
+      setOpen(false)
+      onCreated()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed to create user')
+    }
+    setSaving(false)
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-zinc-700 px-3 py-2.5 text-sm text-zinc-400 hover:border-violet-500/50 hover:text-zinc-200 transition-colors"
+      >
+        <UserPlus className="h-4 w-4" />
+        Add user
+      </button>
+    )
+  }
+
+  return (
+    <div className="rounded-lg border border-violet-800/40 bg-zinc-900/50 p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <UserPlus className="h-4 w-4 text-violet-400" />
+        <h3 className="text-sm font-semibold text-zinc-200">New user</h3>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="col-span-2">
+          <label className="block text-xs font-medium text-zinc-500 mb-1">Email</label>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="teammate@example.com"
+            autoComplete="off"
+            className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+          />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-zinc-500 mb-1">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="At least 6 characters"
+            autoComplete="new-password"
+            className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+          />
+          {password && password.length < 6 && (
+            <p className="mt-1 text-[11px] text-amber-500/80">At least 6 characters.</p>
+          )}
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-zinc-500 mb-1">Role</label>
+          <select
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+          >
+            <option value="user">user</option>
+            <option value="admin">admin</option>
+          </select>
+        </div>
+        <div className="col-span-2">
+          <label className="block text-xs font-medium text-zinc-500 mb-1">
+            Display name <span className="text-zinc-600">(optional)</span>
+          </label>
+          <input
+            type="text"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="Defaults to the email name"
+            className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+          />
+        </div>
+      </div>
+      {err && <p className="text-xs text-red-400">{err}</p>}
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          onClick={handleCreate}
+          disabled={saving || !valid}
+          className="rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
+        >
+          {saving ? 'Creating…' : 'Create user'}
+        </button>
+        <button
+          onClick={() => { reset(); setOpen(false) }}
+          className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
 
 function UserRow({
   user, plans, onUpdate, onDelete, currentUserId,
@@ -537,6 +676,7 @@ export function AdminPage() {
         {/* Users tab */}
         {!loading && tab === 'users' && (
           <div className="space-y-2">
+            <CreateUserForm onCreated={loadUsers} />
             {users.map((u) => (
               <UserRow
                 key={u.id}
