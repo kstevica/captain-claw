@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -114,6 +115,11 @@ from captain_claw.flight_deck.meta_webhook_bridge import (
 )
 
 router = APIRouter()
+
+# Module logger. Every failure path in this bridge logs through ``log`` — it
+# must be a real logger (previously it was referenced but never defined, so any
+# failure branch raised NameError and masked the original error).
+log = logging.getLogger(__name__)
 
 
 # ── Config (env-driven, re-read on every request) ────────────────────
@@ -601,12 +607,15 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
     """Process one inbound WhatsApp message.
 
     Routes text/photos onto the channel bus, then wakes the bound agent.
-    Voice notes and other unsupported types are dropped silently for v1
-    (the user already has a perfect transcription path via the WhatsApp
-    Display app for voice notes they *receive*).
+    Voice notes are transcribed (Soniox); the audio is also persisted and
+    attached to the agent turn so it survives a transcription miss. Location
+    and contacts become FYI text.
     """
     mtype = str(message.get("type") or "")
     text = ""
+    # Files to attach to the agent turn (currently: a persisted voice note, so
+    # the agent has the original recording alongside the transcript).
+    attach_file_paths: list[str] = []
     if mtype == "text":
         text = str((message.get("text") or {}).get("body") or "").strip()
 
@@ -872,22 +881,57 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         try:
             blob = await _download_media(media_id)
         except Exception as exc:
+            log.warning("whatsapp: voice-note download failed (media_id=%s): %s", media_id, exc)
             await _send_whatsapp_text(waid, f"Couldn't fetch voice note: {exc}", mirror=True)
             return
-        transcript = await _transcribe_soniox(blob, mime)
+
+        # Persist the audio instead of transcribing purely in memory. Two copies,
+        # both best-effort:
+        #   • an FD-local file — retry/forensics, survives an agent restart;
+        #   • an agent-side file — so the agent can actually access the recording
+        #     (e.g. when the user later says "check the one I sent") and, on a
+        #     transcription miss, act on a real file rather than a phantom.
+        ext = _AUDIO_MIME_EXT.get((mime or "").split(";")[0].strip(), ".ogg")
+        fd_audio_path = _save_fd_local_audio(blob, ext)
+        if fd_audio_path:
+            log.info("whatsapp: saved inbound voice note → %s (%d bytes)", fd_audio_path, len(blob))
+        agent_audio_path = await _upload_audio_to_agent(
+            blob, agent_host, agent_port, agent_auth, f"whatsapp{ext}"
+        )
+
+        transcript, stt_error = await _transcribe_soniox(blob, mime)
         if not transcript:
-            await _send_whatsapp_text(
-                waid,
-                "Couldn't transcribe that — Soniox returned no text. "
-                "Try sending the message again, or speak more clearly.",
-                mirror=True,
+            # Don't dead-end on a transcription miss: report the real reason and
+            # hand the saved audio to the agent so follow-ups act on a real file.
+            reason = stt_error or "Soniox returned no text"
+            tail = (
+                "I've handed the audio to the agent — ask it to retry or transcribe it."
+                if agent_audio_path
+                else "Try sending the message again, or speak more clearly."
             )
+            await _send_whatsapp_text(
+                waid, f"Couldn't transcribe that — {reason}. {tail}", mirror=True
+            )
+            if agent_audio_path:
+                await _forward_audio_to_agent(
+                    waid,
+                    (
+                        "[FYI: the user sent a WhatsApp voice note that automatic "
+                        f"transcription could not process ({reason}). The audio file is "
+                        f"attached at {agent_audio_path} — you can retry transcription "
+                        "or ask them to resend it.]"
+                    ),
+                    agent_audio_path, ch, agent_host, agent_port, agent_auth,
+                )
             return
         # Send the transcript back to the user clearly marked so they know
         # this is what the agent is seeing.
         await _send_whatsapp_text(waid, f"🎙 Transcription:\n\n\"{transcript}\"", mirror=True)
-        # Forward to the agent as if the user had typed it.
+        # Forward to the agent as if the user had typed it — with the original
+        # recording attached so the agent has both the text and the audio.
         text = transcript
+        if agent_audio_path:
+            attach_file_paths = [agent_audio_path]
 
     # 4. Text only. If empty, nothing to do.
     if not text:
@@ -958,6 +1002,10 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
             # long after this live turn ends (see captain_claw.delivery).
             "origin": {"kind": "whatsapp", "address": waid},
         }
+        # Attach any persisted media (e.g. a transcribed voice note's recording)
+        # so the agent has the original file alongside the text.
+        if attach_file_paths:
+            payload_obj["file_paths"] = attach_file_paths
         try:
             await ch.agent_ws.send(json.dumps(payload_obj))
         except Exception as exc:
@@ -1040,17 +1088,41 @@ _SONIOX_STT_MODEL = "stt-async-v4"
 _SONIOX_STT_POLL_MAX = 60  # 60 × 1 s = up to 60 s per WhatsApp voice note
 
 
-async def _transcribe_soniox(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
-    """Transcribe audio bytes via Soniox async REST. Empty string on any
-    failure — caller decides how to communicate that to the user.
+def _soniox_http_reason(stage: str, status: int) -> str:
+    """A short, user-facing reason for a Soniox HTTP failure at a given stage."""
+    if status in (401, 403):
+        return f"Soniox rejected the request during {stage} (HTTP {status} — the SONIOX_API_KEY looks invalid)"
+    if status == 429:
+        return f"Soniox is rate-limiting {stage} (HTTP 429 — try again shortly)"
+    return f"Soniox {stage} failed (HTTP {status})"
+
+
+async def _transcribe_soniox(audio_bytes: bytes, mime_type: str = "audio/ogg") -> tuple[str, str]:
+    """Transcribe audio bytes via Soniox async REST.
+
+    Returns ``(transcript, error_reason)``:
+      * success              → ``(text, "")``
+      * completed but silent → ``("", "no speech detected …")``
+      * misconfig / failure  → ``("", "<short user-facing reason>")``
+
+    The previous version collapsed *every* failure mode (missing key, auth
+    error, upload/create/poll failure, job error, poll timeout, empty download,
+    genuinely-empty transcript) into a bare ``""`` with **no log line** — which
+    is exactly why a real incident surfaced only as "Soniox returned no text"
+    with nothing to diagnose. Now each failure is logged at WARNING with the
+    real HTTP status/body or job status, and reported back as a distinct reason.
 
     Language hints default to ``WHATSAPP_AUDIO_LANGUAGE`` / ``SONIOX_TTS_LANGUAGE``
     (single language). For multi-language users, set
     ``WHATSAPP_STT_LANGUAGES=en,es,hr`` to bias the model.
     """
     api_key = os.environ.get("SONIOX_API_KEY", "").strip()
-    if not api_key or not audio_bytes:
-        return ""
+    if not api_key:
+        log.warning("soniox STT: SONIOX_API_KEY is not set in the FD process environment")
+        return "", "voice transcription isn't configured on the server (SONIOX_API_KEY missing)"
+    if not audio_bytes:
+        log.warning("soniox STT: nothing to transcribe — audio download returned 0 bytes")
+        return "", "the voice note arrived empty (0 bytes downloaded)"
 
     headers = {"Authorization": f"Bearer {api_key}"}
 
@@ -1068,26 +1140,25 @@ async def _transcribe_soniox(audio_bytes: bytes, mime_type: str = "audio/ogg") -
 
     file_id = ""
     transcription_id = ""
-    transcript_text = ""
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            # 1. Upload file
             try:
+                # 1. Upload file
                 up = await client.post(
                     f"{_SONIOX_API_BASE}/v1/files",
                     headers=headers,
                     files={"file": ("audio", audio_bytes, mime_type or "audio/ogg")},
                 )
-                up.raise_for_status()
-                file_id = str(up.json().get("id") or "")
+                if up.status_code >= 400:
+                    log.warning("soniox STT upload failed: HTTP %s — %s", up.status_code, up.text[:300])
+                    return "", _soniox_http_reason("upload", up.status_code)
+                file_id = str((up.json() or {}).get("id") or "")
                 if not file_id:
-                    return ""
-            except Exception:
-                return ""
+                    log.warning("soniox STT upload: response carried no file id — %s", up.text[:300])
+                    return "", "Soniox upload returned no file id"
 
-            # 2. Create transcription
-            try:
+                # 2. Create transcription
                 cr = await client.post(
                     f"{_SONIOX_API_BASE}/v1/transcriptions",
                     headers={**headers, "Content-Type": "application/json"},
@@ -1098,59 +1169,66 @@ async def _transcribe_soniox(audio_bytes: bytes, mime_type: str = "audio/ogg") -
                         "enable_language_identification": True,
                     },
                 )
-                cr.raise_for_status()
-                transcription_id = str(cr.json().get("id") or "")
+                if cr.status_code >= 400:
+                    log.warning("soniox STT job create failed: HTTP %s — %s", cr.status_code, cr.text[:300])
+                    return "", _soniox_http_reason("job creation", cr.status_code)
+                transcription_id = str((cr.json() or {}).get("id") or "")
                 if not transcription_id:
-                    return ""
-            except Exception:
-                return ""
+                    log.warning("soniox STT job create: response carried no id — %s", cr.text[:300])
+                    return "", "Soniox job creation returned no id"
 
-            # 3. Poll for completion (Soniox example uses 1 s interval)
-            for _ in range(_SONIOX_STT_POLL_MAX):
-                try:
+                # 3. Poll for completion (Soniox example uses 1 s interval)
+                status = ""
+                for _ in range(_SONIOX_STT_POLL_MAX):
                     p = await client.get(
                         f"{_SONIOX_API_BASE}/v1/transcriptions/{transcription_id}",
                         headers=headers,
                     )
-                    p.raise_for_status()
-                    status = str(p.json().get("status") or "")
-                except Exception:
-                    break
-                if status == "completed":
-                    break
-                if status == "error":
-                    break
-                await asyncio.sleep(1)
-            else:
-                # Loop exited without break → polled out without completion.
-                pass
+                    if p.status_code >= 400:
+                        log.warning("soniox STT status poll failed: HTTP %s — %s", p.status_code, p.text[:300])
+                        return "", _soniox_http_reason("status poll", p.status_code)
+                    pj = p.json() or {}
+                    status = str(pj.get("status") or "")
+                    if status == "completed":
+                        break
+                    if status == "error":
+                        err = str(pj.get("error_message") or pj.get("error") or "").strip()
+                        log.warning("soniox STT job errored: %s", err or "(no error_message)")
+                        return "", f"Soniox couldn't process the audio{(': ' + err) if err else ''}"
+                    await asyncio.sleep(1)
+                if status != "completed":
+                    log.warning("soniox STT timed out after %ss (last status=%r)", _SONIOX_STT_POLL_MAX, status)
+                    return "", f"Soniox timed out after {_SONIOX_STT_POLL_MAX}s"
 
-            # 4. Fetch the actual text
-            try:
+                # 4. Fetch the actual text
                 tr = await client.get(
                     f"{_SONIOX_API_BASE}/v1/transcriptions/{transcription_id}/transcript",
                     headers=headers,
                 )
-                if tr.status_code == 200:
-                    transcript_text = str((tr.json() or {}).get("text") or "").strip()
-            except Exception:
-                pass
-
-            # 5. Cleanup — fire-and-forget; failures don't matter to the caller.
-            for path in (
-                f"/v1/transcriptions/{transcription_id}" if transcription_id else "",
-                f"/v1/files/{file_id}" if file_id else "",
-            ):
-                if not path:
-                    continue
-                try:
-                    await client.delete(f"{_SONIOX_API_BASE}{path}", headers=headers)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    return transcript_text
+                if tr.status_code >= 400:
+                    log.warning("soniox STT transcript fetch failed: HTTP %s — %s", tr.status_code, tr.text[:300])
+                    return "", _soniox_http_reason("transcript fetch", tr.status_code)
+                transcript_text = str((tr.json() or {}).get("text") or "").strip()
+                if not transcript_text:
+                    log.info("soniox STT: job completed but transcript was empty (silence / no speech?)")
+                    return "", "no speech detected in the audio"
+                return transcript_text, ""
+            finally:
+                # Cleanup — fire-and-forget; runs on every exit path (incl. the
+                # early returns above) so we never leak Soniox files/jobs.
+                for path in (
+                    f"/v1/transcriptions/{transcription_id}" if transcription_id else "",
+                    f"/v1/files/{file_id}" if file_id else "",
+                ):
+                    if not path:
+                        continue
+                    try:
+                        await client.delete(f"{_SONIOX_API_BASE}{path}", headers=headers)
+                    except Exception:
+                        pass
+    except Exception as exc:
+        log.warning("soniox STT: unexpected error: %s", exc)
+        return "", f"transcription error ({type(exc).__name__})"
 
 
 def _rebind_waid(waid: str, new_channel: str) -> None:
@@ -1744,6 +1822,102 @@ async def _forward_video_to_agent(
             "content": content,
             "whatsapp_waid": waid,
             "file_paths": [path],
+        }
+        try:
+            await ch.agent_ws.send(json.dumps(payload))
+        except Exception as exc:
+            ch.context_sent = False
+            await _send_whatsapp_text(waid, f"Send failed: {exc}")
+
+
+# WhatsApp voice notes arrive as ``audio/ogg; codecs=opus``; other clients may
+# send mp3/m4a/aac/amr/wav. Map the base mime to a sensible extension so the
+# saved file is recognisable.
+_AUDIO_MIME_EXT = {
+    "audio/ogg": ".ogg", "audio/opus": ".opus", "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3", "audio/mp4": ".m4a", "audio/aac": ".aac",
+    "audio/amr": ".amr", "audio/wav": ".wav", "audio/x-wav": ".wav",
+    "audio/webm": ".webm",
+}
+
+
+def _save_fd_local_audio(blob: bytes, suffix: str = ".ogg") -> str:
+    """Write inbound voice-note bytes to an FD-local file and return its path.
+
+    Transcription is otherwise purely in-memory, so a failed transcription used
+    to discard the audio entirely. Keeping a local copy lets a failure be
+    retried and gives forensics something to look at. Mirrors
+    ``_save_fd_local_image``; best-effort — returns "" on failure.
+    """
+    try:
+        import secrets
+        from pathlib import Path
+
+        media_dir = Path("~/.captain-claw/flow_media").expanduser()
+        media_dir.mkdir(parents=True, exist_ok=True)
+        path = media_dir / f"wa-audio-{int(time.time())}-{secrets.token_hex(4)}{suffix}"
+        path.write_bytes(blob)
+        return str(path)
+    except Exception as exc:
+        log.warning("FD-local audio save failed: %s", exc)
+        return ""
+
+
+async def _upload_audio_to_agent(
+    blob: bytes, host: str, port: int, auth: str, filename: str = "whatsapp.ogg"
+) -> str:
+    """POST voice-note bytes to the agent's /api/file/upload; return saved path.
+
+    Same generic data-file endpoint the video path uses. Audio extensions are
+    not in the agent's video set, so the file is simply made available to the
+    turn (surfaced as ``[Attached file: …]``) without triggering any automatic
+    media analysis. Best-effort — returns "" on failure.
+    """
+    params = {"token": auth} if auth else {}
+    files = {"file": (filename, blob, "application/octet-stream")}
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"http://{host}:{port}/api/file/upload", params=params, files=files
+            )
+    except Exception as exc:
+        log.warning("Audio upload to agent failed: %s", exc)
+        return ""
+    if resp.status_code != 200:
+        log.warning("Audio upload rejected (%s): %s", resp.status_code, resp.text[:200])
+        return ""
+    try:
+        return str((resp.json() or {}).get("path") or "")
+    except Exception:
+        return ""
+
+
+async def _forward_audio_to_agent(
+    waid: str, note: str, audio_path: str, ch: Any,
+    agent_host: str, agent_port: int, agent_auth: str,
+) -> None:
+    """Hand a voice note to the agent as an attached file with a context note.
+
+    Used when automatic transcription misses: rather than dead-ending, the
+    saved audio is attached (so the agent — and the user's follow-ups — can act
+    on a real file) with a note explaining that transcription failed. The
+    agent's reply flows back to WhatsApp via the normal channel callback.
+    """
+    for _ in range(50):  # up to ~5s for the agent WS to be ready
+        if ch.agent_ws is not None:
+            break
+        await asyncio.sleep(0.1)
+    if ch.agent_ws is None:
+        return
+    async with ch.send_lock:
+        content = (_GLASSES_SYSTEM_CONTEXT + note) if not ch.context_sent else note
+        ch.context_sent = True
+        payload = {
+            "type": "chat",
+            "content": content,
+            "whatsapp_waid": waid,
+            "file_paths": [audio_path],
+            "origin": {"kind": "whatsapp", "address": waid},
         }
         try:
             await ch.agent_ws.send(json.dumps(payload))
