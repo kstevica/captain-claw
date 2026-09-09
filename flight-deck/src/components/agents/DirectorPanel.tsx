@@ -93,7 +93,9 @@ export function DirectorPanel() {
   const { probeAll } = useLocalAgentStore()
   const processes = useProcessStore((s) => s.processes)
   const chatSessions = useChatStore((s) => s.sessions)
-  const { openChat, sendMessage } = useChatStore()
+  // Individual action selectors instead of a second whole-store subscription.
+  const openChat = useChatStore((s) => s.openChat)
+  const sendMessage = useChatStore((s) => s.sendMessage)
   const hiddenAgentIds = useDesktopPrefsStore((s) => s.hiddenAgentIds)
   const toggleAgentHidden = useDesktopPrefsStore((s) => s.toggleAgentHidden)
 

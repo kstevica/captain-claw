@@ -20,8 +20,11 @@ export function useKeyboardShortcuts(
   shortcutsOpen: boolean,
   setShortcutsOpen: (v: boolean) => void,
 ) {
-  const chatStore = useChatStore()
-
+  // NOTE: deliberately no `useChatStore()` subscription here. This hook runs in
+  // AppContent (the render-tree root), so a whole-store subscription would
+  // re-render the ENTIRE app on every chat event (status/monitor/turn_usage) —
+  // the dominant cause of chat sluggishness. The store is only read inside the
+  // keydown handler, so we read it non-reactively via getState() at event time.
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     const mod = e.metaKey || e.ctrlKey
     if (!mod && e.key !== 'Escape') return
@@ -59,8 +62,11 @@ export function useKeyboardShortcuts(
           const ui = useUIStore.getState()
           if (ui.layoutMode === 'simple') {
             ui.setSimpleQueueOpen(!ui.simpleQueueOpen)
-          } else if (chatStore.chatOpen) chatStore.closeChat()
-          else if (chatStore.activeChatId) useChatStore.setState({ chatOpen: true })
+          } else {
+            const { chatOpen, activeChatId, closeChat } = useChatStore.getState()
+            if (chatOpen) closeChat()
+            else if (activeChatId) useChatStore.setState({ chatOpen: true })
+          }
         }
         break
       case 'k':
@@ -85,7 +91,7 @@ export function useKeyboardShortcuts(
         if (shortcutsOpen) setShortcutsOpen(false)
         break
     }
-  }, [onToggleDirector, shortcutsOpen, setShortcutsOpen, chatStore])
+  }, [onToggleDirector, shortcutsOpen, setShortcutsOpen])
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown)

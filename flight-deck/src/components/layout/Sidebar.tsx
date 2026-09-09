@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import {
   Monitor,
   Plus,
@@ -133,11 +133,22 @@ export function Sidebar() {
   const { instances, wsConnected, selectInstance, selectedInstanceId, fetchInstances, fetchStats, fetchConcerns } = useAgentStore()
   const { authEnabled, user: authUser } = useAuthStore()
   const { botportUrl, setBotportUrl } = useConnectionStore()
-  const { sessions, chatOpen, switchChat } = useChatStore()
+  // Narrow, not `useChatStore()` — a whole-store read would re-render this
+  // always-mounted sidebar on every streaming event. The chat list only needs
+  // each session's id/name/connection, which change rarely; subscribe to a
+  // primitive signature and read the objects non-reactively when it fires.
+  const chatOpen = useChatStore((s) => s.chatOpen)
+  const switchChat = useChatStore((s) => s.switchChat)
+  const chatSessionsSig = useChatStore((s) => {
+    let sig = ''
+    for (const x of s.sessions.values()) sig += `${x.containerId} ${x.connected ? 1 : 0} ${x.containerName}\n`
+    return sig
+  })
   const onboardingCompleted = useOnboardingStore((s) => s.completed)
   const [showSettings, setShowSettings] = useState(false)
   const [urlDraft, setUrlDraft] = useState(botportUrl)
-  const chatSessions = Array.from(sessions.values())
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const chatSessions = useMemo(() => Array.from(useChatStore.getState().sessions.values()), [chatSessionsSig])
 
   const connectedInstances = instances.filter((i) => i.status === 'connected')
 
