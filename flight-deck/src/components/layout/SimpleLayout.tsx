@@ -92,8 +92,19 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
   const { containers, fetchContainers, checkHealth, startContainer, descriptionOverrides: dockerDesc } = useContainerStore()
   const { processes, fetchProcesses, startProcess, descriptionOverrides: procDesc } = useProcessStore()
   const { agents: localAgents, probeAll, probeAgent } = useLocalAgentStore()
-  const sessions = useChatStore((s) => s.sessions)
+  // Do NOT subscribe to the whole `sessions` Map — its identity churns on every
+  // streaming event, which would re-render this always-mounted layout (and the
+  // ChatPanel it hosts) on every token. Subscribe instead to a PRIMITIVE
+  // signature that changes only when a per-agent busy/unread flag flips, and to
+  // whether the active session exists; read the Map non-reactively where needed.
   const activeChatId = useChatStore((s) => s.activeChatId)
+  const hasActiveSession = useChatStore((s) => (s.activeChatId ? s.sessions.has(s.activeChatId) : false))
+  const activeSessionName = useChatStore((s) => (s.activeChatId ? s.sessions.get(s.activeChatId)?.containerName ?? '' : ''))
+  const sessionSig = useChatStore((s) => {
+    let sig = ''
+    for (const x of s.sessions.values()) sig += `${x.containerId} ${x.busy ? 1 : 0} ${x.unread ? 1 : 0}\n`
+    return sig
+  })
   const openChat = useChatStore((s) => s.openChat)
   const setLayoutMode = useUIStore((s) => s.setLayoutMode)
   const setView = useUIStore((s) => s.setView)
@@ -158,23 +169,23 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
   // any lane finished something while the user looked elsewhere.
   const sessionInfo = useMemo(() => {
     const m = new Map<string, { busy: boolean; unread: boolean }>()
-    for (const s of sessions.values()) {
+    for (const s of useChatStore.getState().sessions.values()) {
       const cur = m.get(s.containerId) ?? { busy: false, unread: false }
       cur.busy = cur.busy || s.busy
       cur.unread = cur.unread || !!s.unread
       m.set(s.containerId, cur)
     }
     return m
-  }, [sessions])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionSig])
 
-  const session = activeChatId ? sessions.get(activeChatId) : undefined
-  const activeAgentId = session ? parseLaneKey(activeChatId!).containerId : null
+  const activeAgentId = hasActiveSession ? parseLaneKey(activeChatId!).containerId : null
   const activeAgent = activeAgentId ? agents.find((a) => a.id === activeAgentId) ?? null : null
 
   const handleOpen = (a: SimpleAgent) => {
     // An existing session survives the agent stopping; openChat just
     // re-activates it (stale host/port are ignored for a known key).
-    if (!a.reachable && !sessions.has(a.id)) return
+    if (!a.reachable && !useChatStore.getState().sessions.has(a.id)) return
     openChat(a.id, a.name, a.host, a.port, a.auth)
   }
 
@@ -216,14 +227,14 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
       />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden" style={{ minWidth: 320 }}>
-        {session
+        {hasActiveSession
           ? <ChatPanel variant="simple" />
           : <EmptyChat hasAgents={agents.length > 0} onSpawn={goSpawn} locked={locked} />}
       </main>
 
       <ContextColumn
         agentId={activeAgentId}
-        agentName={session?.containerName ?? ''}
+        agentName={activeSessionName}
         onOptions={!locked && activeAgent ? () => setOptionsAgent(activeAgent) : undefined}
       />
 

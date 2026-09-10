@@ -96,7 +96,8 @@ export function PromptBuilderPage() {
   // Agent targets for "Send to agent"
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
-  const { openChat, sendMessage } = useChatStore()
+  const openChat = useChatStore((s) => s.openChat)
+  const sendMessage = useChatStore((s) => s.sendMessage)
   const clearTraces = useTraceStore((s) => s.clearTraces)
 
   const agents: AgentTarget[] = [

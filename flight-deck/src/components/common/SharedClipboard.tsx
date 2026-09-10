@@ -23,7 +23,11 @@ export function SharedClipboard({ onClose }: { onClose: () => void }) {
   const [sendingTo, setSendingTo] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const { sessions, openChat, sendMessage } = useChatStore()
+  // Narrow selectors — `sessions` is only read inside handleSendToAgent, so it
+  // is read non-reactively there instead of subscribing this panel to the
+  // whole (per-token-churning) store.
+  const openChat = useChatStore((s) => s.openChat)
+  const sendMessage = useChatStore((s) => s.sendMessage)
   const containers = useContainerStore((s) => s.containers)
   const localAgents = useLocalAgentStore((s) => s.agents)
 
@@ -46,7 +50,7 @@ export function SharedClipboard({ onClose }: { onClose: () => void }) {
   const handleSendToAgent = (entryContent: string, agentId: string) => {
     const agent = allAgents.find((a) => a.id === agentId)
     if (!agent) return
-    const session = sessions.get(agentId)
+    const session = useChatStore.getState().sessions.get(agentId)
     if (!session) {
       openChat(agentId, agent.name, agent.host, agent.port, agent.auth)
       setTimeout(() => sendMessage(agentId, entryContent), 500)

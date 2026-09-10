@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
 import {
   X,
   Send,
@@ -37,6 +37,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
+import { useShallow } from 'zustand/react/shallow'
 import { useChatStore, PLAN_LEVELS, LANE_MAIN, LANES, laneKey, type PlanLevel, type NextStepOption, type QueuedMessage } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
@@ -56,6 +57,23 @@ import { AgentDatastorePanel } from './AgentDatastorePanel'
 import { QueuePlannerModal } from './QueuePlannerModal'
 import { usePersistedSize } from '../../hooks/usePersistedSize'
 import type { ChatMessage, TokenUsage } from '../../services/agentChat'
+
+// Plugin arrays hoisted to module scope so they keep a stable identity across
+// renders (react-markdown otherwise sees "new" plugins every render).
+const REMARK_PLUGINS = [remarkGfm, remarkMath]
+const REHYPE_PLUGINS = [rehypeKatex]
+
+// Memoized markdown renderer. Parsing markdown + KaTeX is the single most
+// expensive thing the chat does, and the transcript re-renders on every
+// streaming event (status/monitor/turn_usage fire many times per turn). Keying
+// the memo on the already-transformed `content` string means a finished message
+// never re-parses while a later turn streams — the core fix for heavy-chat lag.
+// IMPORTANT: callers must pass the FINAL transformed string (after
+// processImagePaths/stripSuggestions), not raw message.content, or those
+// transforms won't invalidate the memo.
+const MarkdownMessage = memo(function MarkdownMessage({ content }: { content: string }) {
+  return <Markdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>{content}</Markdown>
+})
 
 interface Attachment {
   id: string
@@ -208,11 +226,16 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   // conversation gets the whole centre. Fullscreen (full layout) is unchanged.
   const simpleQueueOpen = useUIStore((s) => s.simpleQueueOpen)
   const setSimpleQueueOpen = useUIStore((s) => s.setSimpleQueueOpen)
+  // Narrow subscriptions instead of `useChatStore()` (whole store). A bare
+  // whole-store read re-renders ChatPanel on EVERY event of EVERY agent/lane,
+  // including background agents the user isn't looking at. Actions are stable
+  // refs (grouped via useShallow, so they never trigger a render); the booleans
+  // and the ACTIVE session are read individually so a background agent's token
+  // churn no longer re-renders this pane.
+  const activeChatId = useChatStore((s) => s.activeChatId)
+  const chatOpen = useChatStore((s) => s.chatOpen)
+  const chatFullscreen = useChatStore((s) => s.chatFullscreen)
   const {
-    sessions,
-    activeChatId,
-    chatOpen,
-    chatFullscreen,
     closeChat,
     switchChat,
     disconnectChat,
@@ -221,7 +244,18 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
     setPlanningEnabled,
     setPlanLevel,
     toggleChatFullscreen,
-  } = useChatStore()
+  } = useChatStore(
+    useShallow((s) => ({
+      closeChat: s.closeChat,
+      switchChat: s.switchChat,
+      disconnectChat: s.disconnectChat,
+      sendMessage: s.sendMessage,
+      cancelTask: s.cancelTask,
+      setPlanningEnabled: s.setPlanningEnabled,
+      setPlanLevel: s.setPlanLevel,
+      toggleChatFullscreen: s.toggleChatFullscreen,
+    })),
+  )
   const localAgents = useLocalAgentStore((s) => s.agents)
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
@@ -245,13 +279,28 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   const activeId = activeChatId || ''
   const traceSpanCount = useTraceStore((s) => selectSpanCount(s, activeId))
 
-  const session = activeChatId ? sessions.get(activeChatId) : null
+  // The active session, keyed — its object identity changes only when THIS
+  // session mutates, so other agents' events don't re-render the transcript.
+  const session = useChatStore((s) => (s.activeChatId ? s.sessions.get(s.activeChatId) ?? null : null))
+
+  // One tab per AGENT. A lane is a context inside an agent, not another agent,
+  // so lane sessions don't get their own top-level tab. Subscribe to a PRIMITIVE
+  // signature (key + connection + name) so the tab strip re-renders only when
+  // membership/labels actually change — not on every streaming tick — then read
+  // the current session objects non-reactively when the signature fires.
+  const tabsSignature = useChatStore((s) => {
+    let sig = ''
+    for (const x of s.sessions.values()) {
+      if (x.lane === LANE_MAIN) sig += `${x.key} ${x.connected ? 1 : 0} ${x.containerName}\n`
+    }
+    return sig
+  })
+  const chatTabs = useMemo(
+    () => Array.from(useChatStore.getState().sessions.values()).filter((s) => s.lane === LANE_MAIN),
+    [tabsSignature],
+  )
 
   if ((!chatOpen && !simple) || !session) return null
-
-  // One tab per AGENT. A lane is a context inside an agent, not another
-  // agent, so lane sessions don't get their own top-level tab.
-  const chatTabs = Array.from(sessions.values()).filter((s) => s.lane === LANE_MAIN)
 
   // Build target list for context transfer (all reachable agents except the
   // current one). Compare against the AGENT id — `activeChatId` is a lane key,
@@ -561,10 +610,13 @@ function ChatContent({
   const conn = useAgentConnection(session.containerId)
   const { attachments, addFiles, removeAttachment, clearAttachments, handlePasteEvent, pasteFromClipboard } = useFileAttachments(conn)
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive. Deliberately keyed only on
+  // message COUNT — not statusText, which changes many times per turn and would
+  // fire a fresh smooth-scroll animation on every phase blip ("Working…",
+  // "Using X"), a real source of jank during heavy turns.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [session.messages.length, session.statusText])
+  }, [session.messages.length])
 
   // Focus input when panel opens
   useEffect(() => {
@@ -623,7 +675,17 @@ function ChatContent({
   // activity (tools + narration) is grouped into a collapsible panel that
   // streams while the turn runs and collapses to a tools-history summary once
   // it finishes, so showing the whole process doesn't clutter the conversation.
-  const visibleMessages = session.messages.filter((m) => m.role !== 'tool' || m.tool_name)
+  //
+  // Memoized on session.messages: updateSession spreads the session without
+  // replacing the messages array, so the many non-message ticks (status,
+  // turn_usage) reuse the SAME visibleMessages/groups arrays. That stable
+  // identity is what lets the memoized MessageBubble/ActivityGroup children
+  // skip re-rendering when only status/usage changed.
+  const visibleMessages = useMemo(
+    () => session.messages.filter((m) => m.role !== 'tool' || m.tool_name),
+    [session.messages],
+  )
+  const groups = useMemo(() => groupActivity(visibleMessages), [visibleMessages])
 
   const pendingUploads = attachments.filter((a) => a.status === 'uploading').length
   const hasErrors = attachments.some((a) => a.status === 'error')
@@ -668,21 +730,18 @@ function ChatContent({
           </div>
         )}
 
-        {(() => {
-          const groups = groupActivity(visibleMessages)
-          return groups.map((grp, gi) =>
-            grp.kind === 'activity' ? (
-              <ActivityGroup
-                key={`act-${grp.items[0].id}`}
-                items={grp.items}
-                live={gi === groups.length - 1 && session.busy}
-                liveTurnUsage={gi === groups.length - 1 && session.busy ? session.liveTurnUsage ?? null : null}
-              />
-            ) : (
-              <MessageBubble key={grp.items[0].id} message={grp.items[0]} sourceName={session.containerName} agentId={session.containerId} />
-            )
+        {groups.map((grp, gi) =>
+          grp.kind === 'activity' ? (
+            <ActivityGroup
+              key={`act-${grp.items[0].id}`}
+              items={grp.items}
+              live={gi === groups.length - 1 && session.busy}
+              liveTurnUsage={gi === groups.length - 1 && session.busy ? session.liveTurnUsage ?? null : null}
+            />
+          ) : (
+            <MessageBubble key={grp.items[0].id} message={grp.items[0]} sourceName={session.containerName} agentId={session.containerId} />
           )
-        })()}
+        )}
 
         {/* Busy indicator */}
         {session.busy && (
@@ -1404,7 +1463,12 @@ function processImagePaths(content: string, agentHost?: string, agentPort?: numb
   return out
 }
 
-function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage; sourceName?: string; agentId?: string }) {
+// memo: finished messages keep a stable object identity in the store (addMessage
+// appends, updateSession spreads without touching the messages array, approval
+// resolution replaces the one message with a new object), so a default shallow
+// compare on {message, sourceName, agentId} skips every unchanged bubble when a
+// later turn streams — no markdown re-parse. This is the heavy-chat fix.
+const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage; sourceName?: string; agentId?: string }) {
   const [toolExpanded, setToolExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
   const [showForward, setShowForward] = useState(false)
@@ -1552,7 +1616,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
       <div className="group mb-3 flex flex-col items-end gap-0.5">
         <div className="max-w-[85%] rounded-xl rounded-br-sm bg-violet-600/20 px-3.5 py-2.5">
           <div className="fd-markdown text-sm text-zinc-200">
-            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{processImagePaths(message.content, agentConn?.host, agentConn?.port, agentConn?.auth)}</Markdown>
+            <MarkdownMessage content={processImagePaths(message.content, agentConn?.host, agentConn?.port, agentConn?.auth)} />
           </div>
           <span className="mt-1 block text-right text-[10px] text-zinc-500">
             {formatTime(message.timestamp)}
@@ -1594,7 +1658,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
         <div className="mb-1.5 flex items-start gap-1.5 pl-1 pr-6 text-xs italic text-zinc-500">
           <CircleDot className="mt-0.5 h-3 w-3 shrink-0 text-zinc-600" />
           <div className="fd-markdown min-w-0 flex-1">
-            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
+            <MarkdownMessage content={message.content} />
           </div>
         </div>
       )
@@ -1630,7 +1694,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
         <div className="mb-3 flex justify-center">
           <div className="max-w-[85%] rounded-lg border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700/50 dark:bg-zinc-800/40">
             <div className="fd-markdown text-xs">
-              <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
+              <MarkdownMessage content={message.content} />
             </div>
             <span className="text-[10px] text-zinc-400 dark:text-zinc-600 italic">Responded</span>
           </div>
@@ -1641,7 +1705,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
       <div className="mb-3 flex justify-center">
         <div className="max-w-[95%] rounded-lg border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700/50 dark:bg-zinc-800/40">
           <div className="fd-markdown text-xs">
-            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
+            <MarkdownMessage content={message.content} />
           </div>
         </div>
       </div>
@@ -1655,7 +1719,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
     <div className="group mb-3 flex flex-col items-start gap-0.5">
       <div className={`max-w-[85%] rounded-xl rounded-bl-sm bg-zinc-800/60 px-3.5 py-2.5 ${message.replay ? 'opacity-60' : ''}`}>
         <div className="fd-markdown text-sm text-zinc-300">
-          <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{processImagePaths(cleanContent, agentConn?.host, agentConn?.port, agentConn?.auth)}</Markdown>
+          <MarkdownMessage content={processImagePaths(cleanContent, agentConn?.host, agentConn?.port, agentConn?.auth)} />
         </div>
         <div className="mt-1 flex items-center gap-2 text-[10px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>
@@ -1666,7 +1730,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
       {actionButtons('left')}
     </div>
   )
-}
+})
 
 // ── Intermediary "activity" stream (tool calls + between-step narration) ──
 //
@@ -1699,7 +1763,10 @@ function fmtTokens(n?: number): string {
   return String(v)
 }
 
-function ActivityGroup({ items, live, liveTurnUsage }: { items: ChatMessage[]; live: boolean; liveTurnUsage?: TokenUsage | null }) {
+// memo: `items` is a stable array as long as the message list is unchanged
+// (see the useMemo'd groups in ChatContent), so non-message ticks skip every
+// group except the live/last one, whose `live`/`liveTurnUsage` props change.
+const ActivityGroup = memo(function ActivityGroup({ items, live, liveTurnUsage }: { items: ChatMessage[]; live: boolean; liveTurnUsage?: TokenUsage | null }) {
   // Expanded & streaming while the turn runs; auto-collapses to a tools-history
   // summary once it finishes. The user can still toggle it open afterwards.
   const [collapsed, setCollapsed] = useState(!live)
@@ -1738,9 +1805,9 @@ function ActivityGroup({ items, live, liveTurnUsage }: { items: ChatMessage[]; l
       )}
     </div>
   )
-}
+})
 
-function ActivityToolRow({ message }: { message: ChatMessage }) {
+const ActivityToolRow = memo(function ActivityToolRow({ message }: { message: ChatMessage }) {
   const [expanded, setExpanded] = useState(false)
   return (
     <div>
@@ -1761,18 +1828,18 @@ function ActivityToolRow({ message }: { message: ChatMessage }) {
       )}
     </div>
   )
-}
+})
 
-function ActivityNarration({ message }: { message: ChatMessage }) {
+const ActivityNarration = memo(function ActivityNarration({ message }: { message: ChatMessage }) {
   return (
     <div className="flex items-start gap-1.5 px-1.5 py-0.5 text-xs italic text-zinc-500">
       <CircleDot className="mt-0.5 h-3 w-3 shrink-0 text-zinc-600" />
       <div className="fd-markdown min-w-0 flex-1">
-        <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
+        <MarkdownMessage content={message.content} />
       </div>
     </div>
   )
-}
+})
 
 /** Strip trailing suggestion prompts and rating requests from CC responses. */
 function stripSuggestions(text: string): string {
