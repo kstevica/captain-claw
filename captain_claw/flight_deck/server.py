@@ -920,6 +920,13 @@ app.add_middleware(
 #   caller by web_auth/source_port with an owner_id fallback — fine when only
 #   locally spawned agents can reach the port, spoofable otherwise. They now
 #   require loopback or the shared agent secret (X-Agent-Secret).
+# * The code- and hosting-studio agent routes (/fd/code/agent/*,
+#   /fd/hosting/agent/*) use the same web_auth/source_port/owner_id fallback but
+#   ALSO make a verified bearer authoritative in-handler (the caller acts only
+#   as itself). They require a valid bearer OR loopback OR the shared secret —
+#   so a bearer client (e.g. Captain Spark) and locally-spawned agents pass,
+#   while an off-machine caller with none of the three cannot impersonate an
+#   owner via a forged owner_id / source_port.
 # * FD_LOCKDOWN=1 additionally (a) makes the agent secret mandatory even from
 #   loopback (a TLS reverse proxy on the same host would otherwise launder
 #   remote callers into "loopback"), and (b) disables the host-filesystem
@@ -933,6 +940,14 @@ def _lockdown_enabled() -> bool:
 
 
 _AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/")
+
+# Agent routes whose handlers treat a verified bearer as authoritative (caller
+# may act only as itself). A valid bearer is an accepted caller here in
+# addition to loopback / the shared agent secret; without any of the three the
+# owner_id/source_port fallback would be spoofable off-machine, so the same
+# transport guard applies. (Basna/Vatra do not consult a bearer, so they stay
+# loopback-or-secret only, above.)
+_BEARER_OR_AGENT_GUARD_PREFIXES = ("/fd/code/agent/", "/fd/hosting/agent/")
 
 
 def _agent_caller_ok(request: Request) -> bool:
@@ -992,6 +1007,16 @@ async def _hardening_middleware(request: Request, call_next):
             return JSONResponse(
                 status_code=403,
                 content={"detail": "agent routes require loopback or X-Agent-Secret"})
+    elif path.startswith(_BEARER_OR_AGENT_GUARD_PREFIXES):
+        # A valid bearer (e.g. Captain Spark's service account) is authoritative
+        # in the handler, so accept it here; otherwise require loopback or the
+        # shared secret, exactly as for the guarded prefixes above. This closes
+        # the unauthenticated owner_id/source_port impersonation vector while
+        # leaving bearer callers and locally-spawned agents unaffected.
+        if _request_jwt_payload(request) is None and not _agent_caller_ok(request):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "agent routes require a bearer token, loopback, or X-Agent-Secret"})
     else:
         # Ownership guard for port-addressed agent proxies: an authenticated
         # user may only reach agents they own (admins reach any). Without this,

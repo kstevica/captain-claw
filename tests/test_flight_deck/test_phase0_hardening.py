@@ -22,7 +22,7 @@ from fastapi import FastAPI
 
 from captain_claw.flight_deck import facts_ledger
 from captain_claw.flight_deck import server as fd_server
-from captain_claw.flight_deck.auth import get_current_user, set_auth_db
+from captain_claw.flight_deck.auth import create_access_token, get_current_user, set_auth_db
 from captain_claw.flight_deck.db import FlightDeckDB
 
 LOOPBACK = ("127.0.0.1", 40001)
@@ -101,6 +101,106 @@ async def test_lockdown_requires_secret_even_from_loopback(fd_db, monkeypatch):
         allowed = await c.post("/fd/basna/agent/sessions", json={"owner_id": "x"},
                                headers={"X-Agent-Secret": "shh"})
     assert denied.status_code == 403
+    assert allowed.status_code == 200
+
+
+# ── 0a: code / hosting agent guard — verified bearer OR loopback/secret ──
+#
+# The /fd/code/agent/* and /fd/hosting/agent/* routes run real shell/git or
+# host apps as the resolved owner, so they carry the same transport guard as
+# basna/vatra — but they ALSO accept a verified bearer (e.g. Captain Spark),
+# which the handler binds to the caller's own identity (a mismatched owner_id
+# → 403). Without a bearer they still require loopback or the shared secret,
+# closing the unauthenticated owner_id/source_port impersonation vector.
+
+
+async def test_code_hosting_agent_remote_denied_without_bearer_or_secret(fd_db, monkeypatch):
+    """A remote caller with no bearer and no secret can no longer act as an
+    arbitrary owner on the code/hosting agent routes."""
+    monkeypatch.delenv("FD_AGENT_SHARED_SECRET", raising=False)
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    async with _client(fd_server.app, REMOTE) as c:
+        for path in ("/fd/code/agent/list", "/fd/hosting/agent/list"):
+            r = await c.post(path, json={"owner_id": "victim"})
+            assert r.status_code == 403, path
+            assert "bearer token" in r.json()["detail"], path
+
+
+async def test_code_agent_remote_allowed_with_bearer(fd_db, monkeypatch):
+    """Captain Spark's service-account bearer passes the transport guard and
+    the handler resolves the caller to its own verified identity."""
+    monkeypatch.delenv("FD_AGENT_SHARED_SECRET", raising=False)
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    u = await fd_db.create_user("spark@svc.local", "x")
+    tok = create_access_token(u["id"])
+    async with _client(fd_server.app, REMOTE) as c:
+        r = await c.post("/fd/code/agent/list", json={},
+                         headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 200
+    assert "projects" in r.json()
+
+
+async def test_code_agent_bearer_cannot_impersonate_other_owner(fd_db, monkeypatch):
+    """A valid bearer + a mismatched owner_id is rejected — the caller may act
+    only as itself (the core of the code_routes fix)."""
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    u = await fd_db.create_user("spark2@svc.local", "x")
+    tok = create_access_token(u["id"])
+    async with _client(fd_server.app, REMOTE) as c:
+        r = await c.post("/fd/code/agent/list", json={"owner_id": "someone-else"},
+                         headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 403
+    assert "does not match" in r.json()["detail"]
+
+
+async def test_hosting_agent_bearer_cannot_impersonate_other_owner(fd_db, monkeypatch):
+    """Hosting now benefits from the same bearer authority (previously the
+    resolver was called without auth_user, so this branch never ran)."""
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    u = await fd_db.create_user("spark3@svc.local", "x")
+    tok = create_access_token(u["id"])
+    async with _client(fd_server.app, REMOTE) as c:
+        r = await c.post("/fd/hosting/agent/list", json={"owner_id": "someone-else"},
+                         headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 403
+    assert "does not match" in r.json()["detail"]
+
+
+async def test_code_agent_loopback_unchanged(fd_db, monkeypatch):
+    """Locally spawned agents (loopback, owner_id hint, no bearer) still work."""
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    async with _client(fd_server.app, LOOPBACK) as c:
+        r = await c.post("/fd/code/agent/list", json={"owner_id": "u-loop"})
+    assert r.status_code == 200
+    assert "projects" in r.json()
+
+
+async def test_code_agent_secret_authorizes_remote(fd_db, monkeypatch):
+    """A remote secret-holder (e.g. an agent behind a same-host proxy) is
+    admitted; a wrong secret is blocked at the guard."""
+    monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    async with _client(fd_server.app, REMOTE) as c:
+        ok = await c.post("/fd/hosting/agent/list", json={"owner_id": "u-r"},
+                          headers={"X-Agent-Secret": "shh"})
+        bad = await c.post("/fd/hosting/agent/list", json={"owner_id": "u-r"},
+                           headers={"X-Agent-Secret": "nope"})
+    assert ok.status_code == 200
+    assert bad.status_code == 403
+    assert "bearer token" in bad.json()["detail"]
+
+
+async def test_code_agent_lockdown_requires_secret_even_from_loopback(fd_db, monkeypatch):
+    """Under FD_LOCKDOWN, bare loopback is not enough — a bearer or the secret
+    is required, matching the basna/vatra lockdown semantics."""
+    monkeypatch.setenv("FD_LOCKDOWN", "1")
+    monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
+    async with _client(fd_server.app, LOOPBACK) as c:
+        denied = await c.post("/fd/code/agent/list", json={"owner_id": "x"})
+        allowed = await c.post("/fd/code/agent/list", json={"owner_id": "x"},
+                               headers={"X-Agent-Secret": "shh"})
+    assert denied.status_code == 403
+    assert "bearer token" in denied.json()["detail"]
     assert allowed.status_code == 200
 
 

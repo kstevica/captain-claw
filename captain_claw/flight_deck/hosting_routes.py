@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.responses import Response
 
-from captain_claw.flight_deck.auth import get_current_user
+from captain_claw.flight_deck.auth import get_current_user, get_optional_user
 from captain_claw.flight_deck import vfs_hosting as vh
 
 router = APIRouter(tags=["hosting"])
@@ -243,9 +243,9 @@ class AgentNameReq(_AgentReq):
     name: str
 
 
-def _agent_owner(body: _AgentReq) -> str:
+def _agent_owner(body: _AgentReq, auth_user: dict | None = None) -> str:
     from captain_claw.flight_deck.code_routes import _resolve_agent_caller
-    return _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+    return _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id, auth_user)
 
 
 def _agent_owned(name: str, owner: str) -> dict:
@@ -264,13 +264,14 @@ def _abs_url(request: Request, path: str) -> str:
 
 
 @router.post("/fd/hosting/agent/publish")
-async def agent_publish(body: AgentPublishReq, request: Request):
+async def agent_publish(body: AgentPublishReq, request: Request,
+                        auth_user: dict | None = Depends(get_optional_user)):
     """Publish (or, if the caller already owns the name, re-publish) a VFS folder.
 
     Static → served at /vfs/<name>/. App → reverse-proxied at /vfs-apps/<name>/;
     started immediately when ``auto_start`` (the default).
     """
-    owner = _agent_owner(body)
+    owner = _agent_owner(body, auth_user)
     name = (body.name or "").strip().lower()
     if not vh.valid_name(name):
         raise HTTPException(400, "Name must be 1–63 chars: lowercase letters, digits, dashes.")
@@ -317,8 +318,9 @@ async def agent_publish(body: AgentPublishReq, request: Request):
 
 
 @router.post("/fd/hosting/agent/list")
-async def agent_list(body: _AgentReq):
-    owner = _agent_owner(body)
+async def agent_list(body: _AgentReq,
+                     auth_user: dict | None = Depends(get_optional_user)):
+    owner = _agent_owner(body, auth_user)
     reg = vh.load_registry()
     mine = [_view(n, e) for n, e in reg.items() if e.get("owner") == owner]
     mine.sort(key=lambda x: x["name"])
@@ -326,8 +328,9 @@ async def agent_list(body: _AgentReq):
 
 
 @router.post("/fd/hosting/agent/start")
-async def agent_start(body: AgentNameReq, request: Request):
-    owner = _agent_owner(body)
+async def agent_start(body: AgentNameReq, request: Request,
+                      auth_user: dict | None = Depends(get_optional_user)):
+    owner = _agent_owner(body, auth_user)
     ent = _agent_owned(body.name, owner)
     if ent.get("kind") != "app":
         raise HTTPException(400, f"'{body.name}' is a static site — nothing to start.")
@@ -340,16 +343,18 @@ async def agent_start(body: AgentNameReq, request: Request):
 
 
 @router.post("/fd/hosting/agent/stop")
-async def agent_stop(body: AgentNameReq):
-    owner = _agent_owner(body)
+async def agent_stop(body: AgentNameReq,
+                     auth_user: dict | None = Depends(get_optional_user)):
+    owner = _agent_owner(body, auth_user)
     _agent_owned(body.name, owner)
     ok, msg = vh.stop_app(body.name)
     return {"ok": ok, "message": msg}
 
 
 @router.post("/fd/hosting/agent/unpublish")
-async def agent_unpublish(body: AgentNameReq):
-    owner = _agent_owner(body)
+async def agent_unpublish(body: AgentNameReq,
+                          auth_user: dict | None = Depends(get_optional_user)):
+    owner = _agent_owner(body, auth_user)
     ent = _agent_owned(body.name, owner)
     if ent.get("kind") == "app":
         vh.stop_app(body.name)
@@ -360,8 +365,9 @@ async def agent_unpublish(body: AgentNameReq):
 
 
 @router.post("/fd/hosting/agent/status")
-async def agent_status(body: AgentNameReq, request: Request):
-    owner = _agent_owner(body)
+async def agent_status(body: AgentNameReq, request: Request,
+                       auth_user: dict | None = Depends(get_optional_user)):
+    owner = _agent_owner(body, auth_user)
     ent = _agent_owned(body.name, owner)
     view = _view(body.name, ent)
     view["url_abs"] = _abs_url(request, view["url"])
