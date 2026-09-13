@@ -649,25 +649,41 @@ class _AgentReq(BaseModel):
 
 
 def _resolve_owner(body: _AgentReq) -> str:
-    """Authoritative owner for an agent request.
+    """Authoritative owner for an agent request — resolved from FD's OWN spawn
+    records, never from a raw caller-asserted ``owner_id``.
 
-    Tries the agent's unique web_auth token first (most reliable — survives a
-    spawn-time port reassignment), then its source port, then the FD_OWNER_ID
-    hint it sent.
+    The agent's unique ``web_auth`` token is tried first (most reliable — it
+    survives a spawn-time port reassignment), then its source port; both map to
+    the owner FD recorded at spawn. A body ``owner_id`` is only a consistency
+    hint: it must match the resolved owner. It is honored as a *sole* signal
+    ONLY when auth is disabled (single-user local mode, where there is no
+    cross-owner boundary). In a multi-tenant deployment an otherwise-unresolved
+    request is refused — the shared ``X-Agent-Secret`` and loopback prove the
+    caller is *an* FD agent but cannot bind it to a specific owner, so a
+    secret-holding / loopback caller must not be able to act as an arbitrary
+    ``owner_id`` (mirrors deep_memory_routes._agent_owner). See the guard on the
+    ``/fd/{basna,vatra}/agent/*`` prefixes in server._hardening_middleware.
     """
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
     from captain_claw.flight_deck.server import (
         _resolve_agent_owner,
         _resolve_agent_owner_by_auth,
     )
+    hint = (body.owner_id or "").strip()
     owner = ""
     if body.web_auth:
         owner = _resolve_agent_owner_by_auth(body.web_auth) or ""
     if not owner and body.source_port:
         owner = _resolve_agent_owner(int(body.source_port)) or ""
-    owner = owner or (body.owner_id or "").strip()
-    if not owner:
-        raise HTTPException(403, "could not resolve calling agent's owner")
-    return owner
+    if owner:
+        if hint and hint != owner:
+            raise HTTPException(403, "owner_id does not match the calling agent")
+        return owner
+    # No verifiable identity from FD's records. Honor the owner_id hint only in
+    # single-user local mode; refuse it in a multi-tenant deployment.
+    if hint and not _fd_auth_enabled():
+        return hint
+    raise HTTPException(403, "could not resolve calling agent's owner")
 
 
 def _session_summary(r: dict) -> dict:

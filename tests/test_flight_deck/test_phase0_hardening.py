@@ -65,8 +65,10 @@ async def test_agent_route_remote_denied_without_secret(fd_db, monkeypatch):
 
 
 async def test_agent_route_loopback_unchanged(fd_db, monkeypatch):
-    """Default behavior for locally spawned agents is byte-identical."""
+    """Single-user local mode: a loopback agent's owner_id hint still resolves
+    (the transport guard lets loopback through unchanged)."""
     monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    monkeypatch.setenv("FD_AUTH_ENABLED", "false")
     async with _client(fd_server.app, LOOPBACK) as c:
         r = await c.post("/fd/basna/agent/sessions", json={"owner_id": "u-loop"})
     assert r.status_code == 200
@@ -74,8 +76,12 @@ async def test_agent_route_loopback_unchanged(fd_db, monkeypatch):
 
 
 async def test_agent_route_secret_authorizes_remote(fd_db, monkeypatch):
+    """The shared secret lets a remote caller past the transport guard; in
+    single-user mode its owner_id hint then resolves. A wrong secret is blocked
+    at the guard."""
     monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
     monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    monkeypatch.setenv("FD_AUTH_ENABLED", "false")
     async with _client(fd_server.app, REMOTE) as c:
         ok = await c.post("/fd/basna/agent/sessions", json={"owner_id": "u-r"},
                           headers={"X-Agent-Secret": "shh"})
@@ -83,6 +89,44 @@ async def test_agent_route_secret_authorizes_remote(fd_db, monkeypatch):
                            headers={"X-Agent-Secret": "nope"})
     assert ok.status_code == 200
     assert bad.status_code == 403
+
+
+async def test_agent_route_secret_holder_cannot_forge_owner_in_multitenant(fd_db, monkeypatch):
+    """Residual closed: in a multi-tenant (auth-on) deployment a remote
+    shared-secret holder passes the transport guard but can NOT act as an
+    arbitrary owner_id — the owner comes from FD's spawn records, not the body."""
+    monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    async with _client(fd_server.app, REMOTE) as c:
+        r = await c.post("/fd/basna/agent/sessions", json={"owner_id": "victim"},
+                         headers={"X-Agent-Secret": "shh"})
+    assert r.status_code == 403
+    assert "could not resolve" in r.json()["detail"]
+
+
+async def test_agent_route_loopback_cannot_forge_owner_in_multitenant(fd_db, monkeypatch):
+    """A loopback caller (e.g. one FD-spawned agent) likewise cannot claim
+    another owner_id when auth is enabled — closes the loopback path too."""
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    async with _client(fd_server.app, LOOPBACK) as c:
+        r = await c.post("/fd/basna/agent/sessions", json={"owner_id": "victim"})
+    assert r.status_code == 403
+    assert "could not resolve" in r.json()["detail"]
+
+
+async def test_vatra_agent_route_owner_forgery_also_closed(fd_db, monkeypatch):
+    """Vatra shares basna's _resolve_owner, so the same protection applies to
+    /fd/vatra/agent/*."""
+    monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    async with _client(fd_server.app, REMOTE) as c:
+        r = await c.post("/fd/vatra/agent/blackboard", json={"owner_id": "victim"},
+                         headers={"X-Agent-Secret": "shh"})
+    assert r.status_code == 403
+    assert "could not resolve" in r.json()["detail"]
 
 
 async def test_agent_route_vatra_prefix_also_guarded(fd_db, monkeypatch):
@@ -96,6 +140,7 @@ async def test_lockdown_requires_secret_even_from_loopback(fd_db, monkeypatch):
     """A same-host TLS proxy must not launder remote callers into 'loopback'."""
     monkeypatch.setenv("FD_LOCKDOWN", "1")
     monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
+    monkeypatch.setenv("FD_AUTH_ENABLED", "false")
     async with _client(fd_server.app, LOOPBACK) as c:
         denied = await c.post("/fd/basna/agent/sessions", json={"owner_id": "x"})
         allowed = await c.post("/fd/basna/agent/sessions", json={"owner_id": "x"},
