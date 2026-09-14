@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from pydantic import BaseModel
 
 from captain_claw.flight_deck.archetypes import merged_archetypes
-from captain_claw.flight_deck.auth import get_current_user, get_db
+from captain_claw.flight_deck.auth import get_current_user, get_db, get_optional_user
 from captain_claw.flight_deck import code_consistency
 from captain_claw.flight_deck import code_contract
 from captain_claw.flight_deck import code_honesty
@@ -2865,8 +2865,20 @@ _AGENT_CODE_WINDOW_SECONDS = 1800.0
 _MAX_AGENT_CODE_PER_WINDOW = 6
 
 
-def _resolve_agent_caller(web_auth: str, source_port: int, owner_hint: str) -> str:
-    """Owner for an agent-tool request: auth token → port → env hint (or 403)."""
+def _resolve_agent_caller(web_auth: str, source_port: int, owner_hint: str,
+                          auth_user: dict | None = None) -> str:
+    """Owner for an agent-tool request. A verified bearer identity is
+    authoritative — the caller may act ONLY as itself; an owner_id hint is
+    honored only when it matches (or is absent). Spawned-agent (web_auth /
+    source_port) and auth-disabled local mode keep the existing fallback."""
+    if auth_user and auth_user.get("id"):
+        uid = auth_user["id"]
+        hint = (owner_hint or "").strip()
+        if hint and hint != uid:
+            raise HTTPException(403, "owner_id does not match the authenticated user")
+        return uid
+    # --- existing fallback (unchanged): spawned agents (web_auth / port) and
+    # auth-disabled local mode, where get_optional_user returns None ---
     from captain_claw.flight_deck.server import (
         _resolve_agent_owner,
         _resolve_agent_owner_by_auth,
@@ -3051,9 +3063,10 @@ async def _agent_code_run(owner: str, project: str, session_id: str, intent: str
 
 
 @router.post("/agent/start")
-async def agent_code_start(body: CodeAgentStartReq):
+async def agent_code_start(body: CodeAgentStartReq,
+                           auth_user: dict | None = Depends(get_optional_user)):
     """Start (or continue) a coding session on behalf of the calling agent's owner."""
-    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id, auth_user)
     task = (body.task or "").strip()
     if not task:
         raise HTTPException(400, "task is required")
@@ -3110,9 +3123,10 @@ async def agent_code_start(body: CodeAgentStartReq):
 
 
 @router.post("/agent/list")
-async def agent_code_list(body: CodeAgentReq):
+async def agent_code_list(body: CodeAgentReq,
+                          auth_user: dict | None = Depends(get_optional_user)):
     """The owner's coding projects/folders/sessions — for finding what to continue."""
-    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id, auth_user)
     _ensure_links_project(owner)
     out = []
     for name in _discover_projects(owner):
@@ -3130,9 +3144,10 @@ async def agent_code_list(body: CodeAgentReq):
 
 
 @router.post("/agent/status")
-async def agent_code_status(body: CodeAgentSessionReq):
+async def agent_code_status(body: CodeAgentSessionReq,
+                            auth_user: dict | None = Depends(get_optional_user)):
     """Live state of one session: status + recent progress + last commits."""
-    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id, auth_user)
     _sess, repo, sdir, _pk = _sctx(owner, body.project, body.session_id)
     state = _read_state(sdir)
     commits = await code_git.git_log(repo, limit=5)
@@ -3145,9 +3160,10 @@ async def agent_code_status(body: CodeAgentSessionReq):
 
 
 @router.post("/agent/result")
-async def agent_code_result(body: CodeAgentSessionReq):
+async def agent_code_result(body: CodeAgentSessionReq,
+                            auth_user: dict | None = Depends(get_optional_user)):
     """Final outcome of a session: last assistant message + commit list."""
-    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id)
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id, auth_user)
     _sess, repo, sdir, _pk = _sctx(owner, body.project, body.session_id)
     msgs = [m for m in _read_chat(sdir) if m.get("role") == "assistant"]
     commits = await code_git.git_log(repo, limit=10)
@@ -3155,3 +3171,33 @@ async def agent_code_result(body: CodeAgentSessionReq):
             "title": _sess.get("title", ""),
             "result": (msgs[-1].get("content", "") if msgs else ""),
             "commits": commits}
+
+
+@router.post("/agent/cancel")
+async def agent_code_cancel(body: CodeAgentSessionReq,
+                            auth_user: dict | None = Depends(get_optional_user)):
+    """Stop a running coding session on behalf of the calling agent's owner.
+
+    Mirrors the user-facing stop (POST /projects/{p}/sessions/{s}/stop): flag the
+    session cancelled and kill its live agents; the build loop winds down at the
+    next phase boundary. This lets a caller's stall/timeout watchdog (e.g.
+    Captain Spark) actually free host compute for a runaway run instead of only
+    failing it on their side."""
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id, auth_user)
+    _sess, _repo, _sdir, pkey = _sctx(owner, body.project, body.session_id)
+    was_active = (pkey in _agent_code_active.get(owner, set())) or bool(_ACTIVE_SLUGS.get(pkey))
+    _CANCELLED.add(pkey)
+    killed = []
+    for slug in list(_ACTIVE_SLUGS.get(pkey, ())):
+        try:
+            await stop_archetype_agent(slug)
+            killed.append(slug)
+        except Exception as e:  # noqa: BLE001
+            log.warning("agent cancel: failed to kill agent", slug=slug, error=str(e))
+    # Free the owner's run slot so a stuck loop doesn't keep blocking new runs;
+    # the run task's own finally also discards this (idempotent).
+    _agent_code_active.get(owner, set()).discard(pkey)
+    _progress(pkey, "note", "⏹ Cancel requested — winding down.")
+    return {"status": "stopping" if was_active else "idle",
+            "project": body.project, "session_id": body.session_id,
+            "killed": killed}
