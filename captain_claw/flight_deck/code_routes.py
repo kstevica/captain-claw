@@ -3171,3 +3171,33 @@ async def agent_code_result(body: CodeAgentSessionReq,
             "title": _sess.get("title", ""),
             "result": (msgs[-1].get("content", "") if msgs else ""),
             "commits": commits}
+
+
+@router.post("/agent/cancel")
+async def agent_code_cancel(body: CodeAgentSessionReq,
+                            auth_user: dict | None = Depends(get_optional_user)):
+    """Stop a running coding session on behalf of the calling agent's owner.
+
+    Mirrors the user-facing stop (POST /projects/{p}/sessions/{s}/stop): flag the
+    session cancelled and kill its live agents; the build loop winds down at the
+    next phase boundary. This lets a caller's stall/timeout watchdog (e.g.
+    Captain Spark) actually free host compute for a runaway run instead of only
+    failing it on their side."""
+    owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id, auth_user)
+    _sess, _repo, _sdir, pkey = _sctx(owner, body.project, body.session_id)
+    was_active = (pkey in _agent_code_active.get(owner, set())) or bool(_ACTIVE_SLUGS.get(pkey))
+    _CANCELLED.add(pkey)
+    killed = []
+    for slug in list(_ACTIVE_SLUGS.get(pkey, ())):
+        try:
+            await stop_archetype_agent(slug)
+            killed.append(slug)
+        except Exception as e:  # noqa: BLE001
+            log.warning("agent cancel: failed to kill agent", slug=slug, error=str(e))
+    # Free the owner's run slot so a stuck loop doesn't keep blocking new runs;
+    # the run task's own finally also discards this (idempotent).
+    _agent_code_active.get(owner, set()).discard(pkey)
+    _progress(pkey, "note", "⏹ Cancel requested — winding down.")
+    return {"status": "stopping" if was_active else "idle",
+            "project": body.project, "session_id": body.session_id,
+            "killed": killed}

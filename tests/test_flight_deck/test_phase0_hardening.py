@@ -249,6 +249,33 @@ async def test_code_agent_lockdown_requires_secret_even_from_loopback(fd_db, mon
     assert allowed.status_code == 200
 
 
+async def test_code_agent_cancel_remote_denied_without_bearer(fd_db, monkeypatch):
+    """The cancel endpoint (Spark's stall/timeout stop) is behind the same
+    transport guard as the rest of /fd/code/agent/*."""
+    monkeypatch.delenv("FD_AGENT_SHARED_SECRET", raising=False)
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    async with _client(fd_server.app, REMOTE) as c:
+        r = await c.post("/fd/code/agent/cancel",
+                         json={"owner_id": "victim", "project": "p", "session_id": "s"})
+    assert r.status_code == 403
+    assert "bearer token" in r.json()["detail"]
+
+
+async def test_code_agent_cancel_bearer_cannot_impersonate(fd_db, monkeypatch):
+    """Cancel resolves the owner the same way as the other agent routes: a valid
+    bearer + a mismatched owner_id is rejected before any session lookup (proves
+    the route is wired with the authoritative-bearer resolver)."""
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    u = await fd_db.create_user("spark-cancel@svc.local", "x")
+    tok = create_access_token(u["id"])
+    async with _client(fd_server.app, REMOTE) as c:
+        r = await c.post("/fd/code/agent/cancel",
+                         json={"owner_id": "someone-else", "project": "p", "session_id": "s"},
+                         headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 403
+    assert "does not match" in r.json()["detail"]
+
+
 # ── 0a: FD_LOCKDOWN host-filesystem surfaces ─────────────────────────
 
 
