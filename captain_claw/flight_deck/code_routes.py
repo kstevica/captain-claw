@@ -399,6 +399,184 @@ def _write_report(repo: Path, name: str, content: str) -> str:
     return f"{_REPORTS_DIRNAME}/{safe}"
 
 
+# ── session handoff doc (root HANDOFF.md — what changed, how to run & use) ──
+#
+# At the end of EVERY coding session we append a short, developer-facing handoff
+# section — what changed, how to run it, how to use it — then commit it so it
+# ships with the code. We never clobber a HANDOFF.md we didn't author: our file
+# carries a marker; a foreign HANDOFF.md is left untouched and we fall back to
+# our own HANDOFF.captain-claw.md instead.
+
+_HANDOFF_MARKER = "<!-- captain-claw:handoff -->"
+_HANDOFF_MANIFESTS = (
+    "package.json", "requirements.txt", "pyproject.toml", "setup.py", "Pipfile",
+    "Makefile", "Dockerfile", "docker-compose.yml", "compose.yaml", "go.mod",
+    "Cargo.toml", "pom.xml", "build.gradle", "Gemfile", "README.md", "README",
+    ".env.example", "index.html", "vite.config.ts", "vite.config.js", "next.config.js",
+)
+
+
+def _handoff_target(repo: Path) -> Path:
+    """The root handoff file to write, never clobbering a foreign HANDOFF.md.
+
+    Prefer HANDOFF.md; if it exists and is ours (carries the marker) append to
+    it, else fall back to our own HANDOFF.captain-claw.md. Only if BOTH names are
+    taken by files we didn't write do we make a unique timestamped file."""
+    for name in ("HANDOFF.md", "HANDOFF.captain-claw.md"):
+        p = repo / name
+        if not p.exists():
+            return p
+        try:
+            if _HANDOFF_MARKER in p.read_text(errors="ignore"):
+                return p
+        except OSError:
+            continue
+    return repo / f"HANDOFF.captain-claw-{time.strftime('%Y%m%d-%H%M%S')}.md"
+
+
+def _append_handoff(repo: Path, section: str) -> str:
+    """Create-or-append the handoff doc; return its repo-relative path."""
+    target = _handoff_target(repo)
+    body = section.strip() + "\n"
+    if target.exists():
+        prev = target.read_text(errors="ignore").rstrip()
+        target.write_text(f"{prev}\n\n---\n\n{body}")
+    else:
+        target.write_text(
+            f"{_HANDOFF_MARKER}\n# Handoff — how to run & use this project\n\n"
+            "_Auto-written at the end of each Captain Claw coding session; "
+            "newest session at the bottom._\n\n" + body)
+    return str(target.relative_to(repo))
+
+
+async def _commits_since(repo: Path, base_sha: str, cap: int = 60) -> list[dict]:
+    """This session's commits (newest-first): everything after ``base_sha``."""
+    rows: list[dict] = []
+    for c in await code_git.git_log(repo, cap):
+        if base_sha and c.get("sha") == base_sha:
+            break
+        rows.append(c)
+    return rows
+
+
+def _manifest_digest(repo: Path, cap: int = 700, total_cap: int = 4000) -> str:
+    """Short heads of any build/run manifests present — grounds the run/use steps."""
+    parts: list[str] = []
+    used = 0
+    for name in _HANDOFF_MANIFESTS:
+        p = repo / name
+        if not p.is_file():
+            continue
+        try:
+            txt = p.read_text(errors="ignore").strip()
+        except OSError:
+            continue
+        if not txt:
+            continue
+        head = txt[:cap] + ("\n… (truncated)" if len(txt) > cap else "")
+        block = f"### {name}\n{head}"
+        if used + len(block) > total_cap:
+            break
+        parts.append(block)
+        used += len(block)
+    return "\n\n".join(parts)
+
+
+def _handoff_prompt(today: str, intent: str, plan_head: str, commits: list[dict],
+                    changed: list[str], manifests: str, build_notes: str) -> str:
+    commit_lines = "\n".join(f"- {c.get('short', '')} {c.get('message', '')}"
+                             for c in commits) or "- (none)"
+    file_lines = "\n".join(f"- {f}" for f in changed[:40]) or "- (none recorded)"
+    more = f"\n- … and {len(changed) - 40} more" if len(changed) > 40 else ""
+    return (
+        "You are writing a concise HANDOFF section for a software project a coding "
+        "fleet just worked on. Output GitHub-flavoured Markdown with NO H1. Start "
+        f'with the heading "## Session {today} — <short title>", then exactly these '
+        "subsections in order:\n"
+        "### What changed\n### How to run\n### How to use\n### Notes\n\n"
+        "Be concrete and specific to THIS project. Derive the run and use "
+        "instructions (install, build, and start commands, ports, env vars, entry "
+        "points) from the manifests below. If something isn't determinable from the "
+        "material, say so in one short line — do NOT invent commands, URLs, or "
+        "endpoints. Keep every section tight; a developer should be able to run and "
+        "use the result from this alone. No preamble, no closing remarks.\n\n"
+        f"## Task\n{intent}\n\n"
+        f"## Plan (excerpt)\n{plan_head or '(no plan file)'}\n\n"
+        f"## Commits this session\n{commit_lines}\n\n"
+        f"## Files changed\n{file_lines}{more}\n\n"
+        f"## Build / verification notes\n{build_notes or '(none)'}\n\n"
+        f"## Manifests present in the repo\n{manifests or '(none detected)'}\n"
+    )
+
+
+async def _write_session_handoff(repo: Path, sdir: Path, intent: str, plan_file: str,
+                                 base_sha: str, tiers_map: dict, registry: dict) -> str | None:
+    """Synthesize + append this session's handoff section. Best-effort.
+    Returns the repo-relative path written, or None when nothing changed."""
+    commits = await _commits_since(repo, base_sha)
+    substantive = [c for c in commits
+                   if not str(c.get("message", "")).startswith("[handoff]")]
+    if not substantive:
+        return None
+    changed: list[str] = []
+    for c in substantive[:20]:
+        for f in await _changed_files(repo, c.get("sha")):
+            if f not in changed and not f.startswith((_REPORTS_DIRNAME + "/", _PLANS_DIRNAME + "/")):
+                changed.append(f)
+    plan_head = ""
+    if plan_file:
+        pa = repo / plan_file
+        if pa.is_file():
+            try:
+                plan_head = pa.read_text(errors="ignore")[:1200]
+            except OSError:
+                plan_head = ""
+    build_notes = ""
+    for m in reversed(_read_chat(sdir)):
+        if m.get("kind") in ("build", "fix", "review") and (m.get("text") or "").strip():
+            build_notes = m["text"].strip()[:1200]
+            break
+    today = time.strftime("%Y-%m-%d")
+    section = ""
+    try:
+        from captain_claw.llm import Message, create_provider
+        tcfg = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
+        prov = create_provider(
+            provider=tcfg.get("provider", "anthropic"), model=tcfg.get("model", ""),
+            api_key=tcfg.get("api_key") or None, base_url=tcfg.get("base_url") or None,
+            temperature=0.2, max_tokens=1100)
+        resp = await asyncio.wait_for(
+            prov.complete(messages=[Message(role="user", content=_handoff_prompt(
+                today, intent, plan_head, substantive, changed,
+                _manifest_digest(repo), build_notes))], temperature=0.2, max_tokens=1100),
+            timeout=60)
+        section = (resp.content or "").strip()
+    except Exception as e:  # noqa: BLE001 — synthesis is best-effort
+        log.warning("code handoff synthesis failed", error=str(e))
+    if not section:  # deterministic fallback → a session ALWAYS yields a record
+        section = (f"## Session {today}\n### What changed\n{intent}\n\n"
+                   "### How to run\n_Not auto-derived — see the project's manifests / README._\n\n"
+                   "### How to use\n_See “What changed”._\n\n### Notes\nCommits:\n"
+                   + "\n".join(f"- {c.get('short', '')} {c.get('message', '')}" for c in substantive))
+    return _append_handoff(repo, section)
+
+
+async def _finalize_handoff(repo: Path, sdir: Path, intent: str, plan_file: str,
+                            base_sha: str, tiers_map: dict, registry: dict) -> None:
+    """Write + commit + announce the session handoff doc. Never raises."""
+    try:
+        rel = await _write_session_handoff(repo, sdir, intent, plan_file, base_sha,
+                                           tiers_map, registry)
+        if not rel:
+            return
+        await code_git.git_commit(repo, "[handoff] session wrap-up doc")
+        _append_chat(sdir, "assistant",
+                     f"📄 Handoff appended to `{rel}` — what changed, how to run, "
+                     "and how to use the result.", kind="note")
+    except Exception as e:  # noqa: BLE001 — handoff is best-effort, never blocks
+        log.warning("code handoff finalize failed", error=str(e))
+
+
 _PLANS_DIRNAME = ".plans"
 
 
@@ -1552,6 +1730,9 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
     _usage_reset(pkey)
     _cancel_clear(pkey)
     _write_state(sdir, {"status": "running"})
+    # HEAD before this run — the handoff doc summarises the commits after it.
+    _head0 = await code_git.git_log(repo, 1)
+    base_sha = _head0[0]["sha"] if _head0 else ""
 
     def _finish_stopped() -> None:
         _u = _usage_summary(pkey)
@@ -2028,6 +2209,12 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                 await _run_cartographer(request, user, pkey, repo, by_id, tiers_map, env_vars, registry)
             except Exception as e:  # noqa: BLE001
                 log.warning("cartographer after build failed", error=str(e))
+        # Always: a root handoff doc — what changed, how to run, how to use —
+        # appended for this session and committed so it ships with the code.
+        # (Also sweeps the trailing .reports/ artifacts into the same commit.)
+        if not _cancelled(pkey):
+            await _finalize_handoff(repo, sdir, intent, plan_file, base_sha,
+                                    tiers_map, registry)
         _u = _usage_summary(pkey)
         if _u:
             _append_chat(sdir, "assistant", f"_Run total: {_u}._", kind="note")
@@ -2590,6 +2777,8 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
         if route["size"] == "small":
             executor = route["small_archetype"]
             is_git = executor == _GIT
+            _head0 = await code_git.git_log(repo, 1)  # HEAD before this edit (handoff base)
+            base_sha = _head0[0]["sha"] if _head0 else ""
             prompt = hist + (_git_prompt(intent) if is_git else _exec_prompt(intent))
             d = await _run_agent(request, user, pkey, repo, executor, prompt,
                                  by_id, tiers_map, env_vars)
@@ -2658,6 +2847,11 @@ async def message(body: MessageReq, request: Request, user: dict = Depends(get_c
                 # loss. Token-free unless the gate ran a suite.
                 await _record_outcomes(uid, domain,
                                        {executor: bool(d.get("ok")) and (is_git or bool(sha)) and tests_ok})
+                # Handoff doc for the edit (skip pure git plumbing) — off the
+                # response path so the interactive edit loop stays snappy.
+                if sha and not is_git:
+                    asyncio.create_task(_finalize_handoff(
+                        repo, sdir, intent, "", base_sha, tiers_map, registry))
                 _write_state(sdir, {"status": "idle", "last_route": route})
                 return {"message": assistant, "route": route, "commit": sha}
 
@@ -3041,10 +3235,13 @@ async def _agent_code_run(owner: str, project: str, session_id: str, intent: str
                 if _read_state(sdir).get("status") != "running":
                     break
 
-        # Outcome = the session's last assistant message.
+        # Outcome = the session's last SUBSTANTIVE assistant message (chat stores
+        # text under "text"; skip trailing bookkeeping notes like the run-total /
+        # handoff pointer so the relayed summary is the real build/edit result).
         _sess, _repo, sdir, _pk = _sctx(owner, project, session_id)
         msgs = [m for m in _read_chat(sdir) if m.get("role") == "assistant"]
-        summary = (msgs[-1].get("content", "") if msgs else "").strip() or "(no output)"
+        _pick = [m for m in msgs if m.get("kind") not in ("note", "approval")] or msgs
+        summary = (_pick[-1].get("text", "") if _pick else "").strip() or "(no output)"
         ok = _read_state(sdir).get("status") != "error"
     except Exception as exc:  # noqa: BLE001 — deliver the failure to the agent
         log.warning("agent code run failed", project=project, session=session_id, error=str(exc))
@@ -3166,10 +3363,11 @@ async def agent_code_result(body: CodeAgentSessionReq,
     owner = _resolve_agent_caller(body.web_auth, body.source_port, body.owner_id, auth_user)
     _sess, repo, sdir, _pk = _sctx(owner, body.project, body.session_id)
     msgs = [m for m in _read_chat(sdir) if m.get("role") == "assistant"]
+    _pick = [m for m in msgs if m.get("kind") not in ("note", "approval")] or msgs
     commits = await code_git.git_log(repo, limit=10)
     return {"status": _read_state(sdir).get("status", "idle"),
             "title": _sess.get("title", ""),
-            "result": (msgs[-1].get("content", "") if msgs else ""),
+            "result": (_pick[-1].get("text", "") if _pick else ""),
             "commits": commits}
 
 
