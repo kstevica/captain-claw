@@ -4395,6 +4395,7 @@ async def _fill_gaps_run(owner: str, parent_session_id: str, user: dict, *,
 
 class VatraFillGapsRequest(BaseModel):
     instruction: str = ""  # optional extra guidance appended to the coverage gaps
+    tiers: dict | None = None   # optional caller override of the owner's saved tier set
 
 
 @router.post("/sessions/{session_id}/fill-gaps")
@@ -4402,7 +4403,8 @@ async def fill_gaps(session_id: str, body: VatraFillGapsRequest | None = None,
                     user: dict = Depends(get_current_user)):
     """UI 'Fill the gaps' — spawn a follow-up Vatra on this run's coverage gaps,
     seeded with its final report. Returns immediately; the UI polls the new run."""
-    tiers, env_vars = await _load_owner_tiers(get_db(), user["id"])
+    _owner_tiers, env_vars = await _load_owner_tiers(get_db(), user["id"])
+    tiers = (body.tiers if body else None) or _owner_tiers
     res = await _fill_gaps_run(user["id"], session_id, user,
                                tiers=tiers, env_vars=env_vars, api_key="",
                                instruction=(body.instruction if body else "").strip())
@@ -4413,13 +4415,15 @@ class VatraContinueRequest(BaseModel):
     instruction: str = ""
     kind: str = "continue"  # continue | fill_gaps | revise
     same_cast: bool = True
+    tiers: dict | None = None   # optional caller override of the owner's saved tier set
 
 
 @router.post("/sessions/{session_id}/continue")
 async def continue_session(session_id: str, body: VatraContinueRequest,
                            user: dict = Depends(get_current_user)):
     """Carry a finished Vatra run forward into a new round — same folder + report."""
-    tiers, env_vars = await _load_owner_tiers(get_db(), user["id"])
+    _owner_tiers, env_vars = await _load_owner_tiers(get_db(), user["id"])
+    tiers = body.tiers or _owner_tiers
     res = await _continue_run(
         user["id"], session_id, user,
         instruction=body.instruction, kind=body.kind, same_cast=body.same_cast,
