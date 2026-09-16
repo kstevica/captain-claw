@@ -207,11 +207,14 @@ def _parse(output) -> list[dict]:
 
 
 async def run_model_pass(pass_id: str, draft: str, store_json: str,
-                         model_fn: CompleteFn) -> list[dict]:
-    """Run one model pass; return findings tagged + severity-clamped."""
+                         model_fn: CompleteFn) -> list[dict] | None:
+    """Run one model pass; return findings tagged + severity-clamped, or ``None`` if the
+    pass could not run (unknown pass id, or the model call raised). ``None`` is distinct
+    from ``[]`` (ran, found nothing): the caller uses it so a dimension whose passes never
+    executed scores ``null`` instead of a hollow 100."""
     spec = PASSES.get(pass_id)
     if not spec:
-        return []
+        return None
     name, ceiling, prompt_fn = spec
     windowed, truncated = _window(draft)
     body = prompt_fn(windowed, store_json[:STORE_CAP])
@@ -233,13 +236,15 @@ async def run_model_pass(pass_id: str, draft: str, store_json: str,
         parsed = _parse(out)
     except Exception as e:  # noqa: BLE001 — a pass must never crash the run
         log.warning("story model pass failed", pass_id=pass_id, error=str(e))
-        return []
+        return None
     findings = []
     for f in parsed:
         sev = _clamp(f.get("severity", "major"), ceil)
         findings.append({
             "pass": pass_id, "kind": str(f.get("kind") or name.replace(" ", "_")),
-            "severity": sev, "source": "story_integrity",
+            # origin="model": a weak-model judgment. Surfaced + drives revision, but never
+            # gates `done` on its own (only deterministic hard findings block).
+            "severity": sev, "source": "story_integrity", "origin": "model",
             "reason": str(f.get("reason") or "")[:400],
             "scene": str(f.get("scene") or ""),
             "detail": str(f.get("reason") or "")[:400],
@@ -251,8 +256,12 @@ async def run_model_pass(pass_id: str, draft: str, store_json: str,
 
 async def run_model_passes(draft: str, store_json: str, model_fn: CompleteFn, *,
                            passes: tuple = ALL_PASSES,
-                           on_progress: Callable[[str], None] | None = None) -> list[dict]:
-    """Run the enabled model passes concurrently; return the merged findings."""
+                           on_progress: Callable[[str], None] | None = None
+                           ) -> tuple[list[dict], set[str]]:
+    """Run the enabled model passes concurrently. Returns ``(findings, ran)`` where
+    ``ran`` is the set of pass ids that ACTUALLY executed (the model call completed) — a
+    pass whose call raised/timed out is absent, so its quality dimension can score ``null``
+    rather than a fabricated 100 on a provider outage."""
     def _note(m: str) -> None:
         if on_progress:
             try:
@@ -262,13 +271,15 @@ async def run_model_passes(draft: str, store_json: str, model_fn: CompleteFn, *,
 
     enabled = [p for p in passes if p in PASSES]
     if not (draft or "").strip() or not enabled:
-        return []
+        return [], set()
     _note(f"Integrity model passes: {', '.join(PASSES[p][0] for p in enabled)}…")
     results = await asyncio.gather(
         *[run_model_pass(p, draft, store_json, model_fn) for p in enabled],
         return_exceptions=True)
     out: list[dict] = []
-    for r in results:
-        if isinstance(r, list):
+    ran: set[str] = set()
+    for pid, r in zip(enabled, results):
+        if isinstance(r, list):   # ran (None = failed, Exception = unexpected raise)
+            ran.add(pid)
             out.extend(r)
-    return out
+    return out, ran

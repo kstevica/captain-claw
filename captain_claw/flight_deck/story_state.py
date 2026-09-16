@@ -214,7 +214,12 @@ def _truthy(v) -> bool:
 
 def _finding(pass_: str, kind: str, severity: str, reason: str,
              scene: str = "", quotes=None) -> dict:
+    # origin="deterministic": produced by a pure-code pass over the store, so it is
+    # FAIL-SAFE (fires only on a contradiction clearly present in the state). Only these
+    # gate `done`. Model-pass findings (story_passes.run_model_pass) carry origin="model"
+    # and never block on their own — see blocking_findings().
     return {"pass": pass_, "kind": kind, "severity": severity, "source": "story_integrity",
+            "origin": "deterministic",
             "reason": reason, "scene": scene, "detail": reason, "quotes": quotes or []}
 
 
@@ -527,6 +532,91 @@ def bucket(findings: list[dict]) -> dict:
     }
 
 
+# ── deterministic vs model, and the blocking (gating) set ─────────────
+
+# The six pure-code passes over the store. These are fail-safe by construction, so ONLY
+# their hard findings gate `done`. Everything else (C/F/I/J/CA/PR in story_passes) is a
+# weak-model judgment — surfaced and used to drive revision, but never a blocker on its
+# own, because a single hallucinated model objection must not false-fail a good draft.
+_DETERMINISTIC_PASSES = frozenset({"A", "B", "D", "E", "G", "H"})
+
+
+def is_deterministic(f: dict) -> bool:
+    """Was this finding produced by a fail-safe pure-code pass? Prefers the explicit
+    `origin` tag; falls back to the pass id so older/foreign findings still classify."""
+    origin = f.get("origin")
+    if origin == "deterministic":
+        return True
+    if origin == "model":
+        return False
+    return str(f.get("pass", "")) in _DETERMINISTIC_PASSES
+
+
+def blocking_findings(findings: list[dict]) -> list[dict]:
+    """The hard findings that GATE `done`: deterministic (fail-safe) hard only. Model-pass
+    hard findings surface + drive revision but never block a finished draft on their own."""
+    return [f for f in findings
+            if f.get("severity") == "hard" and is_deterministic(f)]
+
+
+# ── quality scores (advisory; they never gate) ────────────────────────
+
+# Each pass rolls up into one quality dimension. continuity is the deterministic backbone
+# (the trustworthy signal); plausibility/grounding/craft are model-judged and noisier.
+_DIMENSION = {
+    "A": "continuity", "B": "continuity", "D": "continuity",
+    "E": "continuity", "G": "continuity", "H": "continuity",
+    "C": "plausibility", "PR": "plausibility",
+    "F": "grounding", "CA": "grounding",
+    "I": "craft", "J": "craft",
+}
+_DIMENSIONS = ("continuity", "plausibility", "grounding", "craft")
+_SEV_PENALTY = {"hard": 25, "major": 10, "soft": 3}
+
+
+def _grade(s: int) -> str:
+    return "clean" if s >= 85 else "sound" if s >= 70 else "caution" if s >= 50 else "weak"
+
+
+def score(findings: list[dict], *, passes_run=None) -> dict:
+    """0–100 quality scores derived from the surviving findings (higher = cleaner).
+
+    Per-dimension: 100 minus a severity-weighted penalty for that dimension's findings,
+    floored at 0. `integrity` is the headline composite, weighted heavily toward the
+    deterministic `continuity` backbone (0.7) with the three model dimensions at 0.1 each,
+    so a story whose objective backbone is airtight cannot be dragged low by noisy weak-
+    model quibbles alone. These are ADVISORY — nothing here gates `done`.
+
+    `passes_run` (pass ids that actually executed) lets a dimension whose passes never ran
+    report `null` ("not checked") instead of a perfect 100 we can't stand behind. A
+    dimension that ran and found nothing scores 100. Omit it to treat all as checked."""
+    per = {d: 100 for d in _DIMENSIONS}
+    for f in findings:
+        dim = _DIMENSION.get(str(f.get("pass", "")))
+        if not dim:
+            continue
+        per[dim] -= _SEV_PENALTY.get(f.get("severity"), _SEV_PENALTY["soft"])
+    per = {d: max(0, v) for d, v in per.items()}
+    if passes_run is None:
+        checked = set(_DIMENSIONS)
+    else:
+        run = set(passes_run)
+        checked = {dd for pid, dd in _DIMENSION.items() if pid in run}
+    # Composite over ONLY the dimensions that were actually checked, with the weights
+    # renormalized over that subset — so a dimension reported as null (never ran / provider
+    # outage) does NOT sneak its default 100 into the headline. A deterministic-only run
+    # thus yields integrity == continuity, not an inflated blend.
+    weights = {"continuity": 0.7, "plausibility": 0.1, "grounding": 0.1, "craft": 0.1}
+    wsum = sum(weights[d] for d in _DIMENSIONS if d in checked)
+    if wsum > 0:
+        integrity = round(sum(per[d] * weights[d] for d in _DIMENSIONS if d in checked) / wsum)
+    else:
+        integrity = None
+    dims = {d: (per[d] if d in checked else None) for d in _DIMENSIONS}
+    return {"integrity": integrity,
+            "grade": (_grade(integrity) if integrity is not None else None), **dims}
+
+
 # ── patch-mode revision ───────────────────────────────────────────────
 
 def patch_prompt(text: str, findings: list[dict], simplify: bool = False) -> str:
@@ -622,28 +712,38 @@ async def run_validator(text: str, *, extract_fn: CompleteFn,
             parts.append(parse_store(await extract_fn(extract_prompt(ch, max_items)) or ""))
         return merge(parts)
 
-    async def _all_findings(t: str) -> tuple[dict, list[dict]]:
+    async def _all_findings(t: str) -> tuple[dict, list[dict], set]:
+        # passes_run: which passes ACTUALLY executed, so score() can tell a dimension that
+        # ran clean (100) from one whose passes never ran / failed (null). The six
+        # deterministic passes always run in pure code; model passes run only when a model
+        # is wired AND the call completes (a provider outage drops them from the set).
         st = await _extract(t)
         fs = verify(st)  # deterministic passes (A/B/D/E/G/H)
+        passes_run = set(_DETERMINISTIC_PASSES)
         if model_fn is not None and model_passes:
             from captain_claw.flight_deck import story_passes
             try:
-                fs = fs + await story_passes.run_model_passes(
+                mp, ran = await story_passes.run_model_passes(
                     t, json.dumps(st, ensure_ascii=True), model_fn,
                     passes=model_passes, on_progress=on_progress)
+                fs = fs + mp
+                passes_run |= ran
             except Exception as e:  # noqa: BLE001 — model passes are best-effort
                 log.warning("story model passes failed", error=str(e))
-        return st, fs
+        return st, fs, passes_run
 
-    store, findings = await _all_findings(text)
+    store, findings, passes_run = await _all_findings(text)
     result = {"text": text, "store": store, "revised": False, "findings": findings,
               "initial_findings": findings, "rounds": 0, "patched": 0,
+              "blocking": blocking_findings(findings),
+              "scores": score(findings, passes_run=passes_run),
               **bucket(findings)}
     if revise_fn is None:
         return result
 
     cur_text = text
     cur_findings = findings
+    cur_passes_run = passes_run
     rounds = 0
     while rounds < max_rounds:
         blockers = [f for f in cur_findings if f.get("severity") in ("hard", "major")]
@@ -661,21 +761,24 @@ async def run_validator(text: str, *, extract_fn: CompleteFn,
         if collapsed or applied == 0:
             _note("Integrity: patches did not apply cleanly — kept the draft")
             break
-        new_store, new_findings = await _all_findings(revised)
+        new_store, new_findings, new_passes_run = await _all_findings(revised)
         new_block = [f for f in new_findings if f.get("severity") in ("hard", "major")]
-        # The done-gate is HARD-only, so a revision that trades majors for a NEW hard
-        # (a simplification the non-deterministic model passes can provoke) would flip a
-        # done-eligible draft to error. Never accept an increase in the HARD count, and
-        # otherwise require the total hard+major to strictly drop.
-        old_hard = sum(1 for f in blockers if f.get("severity") == "hard")
-        new_hard = sum(1 for f in new_block if f.get("severity") == "hard")
-        if new_hard > old_hard or len(new_block) >= len(blockers):
+        # The done-gate blocks only on the DETERMINISTIC hard set (blocking_findings), so
+        # the invariant to protect is that count: never accept a revision that grows it (a
+        # simplification could introduce a real deterministic contradiction). Otherwise
+        # require the total hard+major to strictly drop, so the loop makes progress.
+        old_block = len(blocking_findings(cur_findings))
+        new_block_hard = len(blocking_findings(new_findings))
+        if new_block_hard > old_block or len(new_block) >= len(blockers):
             _note("Integrity: revision did not reduce hard/major errors — kept the draft")
             break
-        cur_text, cur_findings, store = revised, new_findings, new_store
+        cur_text, cur_findings, store, cur_passes_run = (
+            revised, new_findings, new_store, new_passes_run)
         result["patched"] += applied
         result.update(text=cur_text, store=store, revised=True, findings=cur_findings,
-                      rounds=rounds, **bucket(cur_findings))
+                      rounds=rounds, blocking=blocking_findings(cur_findings),
+                      scores=score(cur_findings, passes_run=cur_passes_run),
+                      **bucket(cur_findings))
     result["rounds"] = rounds
     return result
 
@@ -689,15 +792,23 @@ def summarize(result: dict) -> dict:
                                   if f.get("severity") == "hard"]) - len(result.get("hard") or [])),
         "remaining": len(result.get("hard") or []) + len(result.get("major") or []),
         "hard": len(result.get("hard") or []),
+        # `blocking` = the deterministic hard errors that actually gate `done`; a run can
+        # have hard > 0 (a model-pass objection) yet blocking == 0 and still finish.
+        "blocking": len(result.get("blocking") or []),
         "major": len(result.get("major") or []),
         "soft": len(result.get("soft") or []),
+        "scores": result.get("scores"),
         "passes": sorted({f["pass"] for f in (result.get("findings") or [])}),
     }
 
 
 def summary_line(result: dict) -> str:
     s = summarize(result)
-    line = (f"{s['hard']} hard · {s['major']} major · {s['soft']} soft"
+    sc = s.get("scores") or {}
+    head = (f"integrity {sc['integrity']} ({sc.get('grade', '')}) · "
+            if sc.get("integrity") is not None else "")
+    line = (head
+            + f"{s['blocking']} blocking · {s['hard']} hard · {s['major']} major · {s['soft']} soft"
             + (f" (after {s['rounds']} round(s), {result.get('patched', 0)} patch(es))"
                if s["rounds"] else ""))
     return line

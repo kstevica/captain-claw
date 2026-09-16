@@ -2762,8 +2762,10 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
     canon_findings: list[dict] = []
     integrity_summary = None
     integrity_hard: list[dict] = []
+    integrity_all_hard: list[dict] = []
     integrity_major: list[dict] = []
     integrity_blocking: dict | None = None
+    integrity_scores: dict | None = None
     # validation == "story_integrity" is the umbrella that DEEPENS canon_pass into the
     # story-state store + the deterministic passes; it supersedes canon_pass. Absent
     # validation, canon_pass alone stays the lighter continuity check.
@@ -2818,9 +2820,16 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
                 if idoc:
                     generated_files.append(idoc)
                 integrity_summary = story_state.summarize(ires)
-                integrity_hard = ires.get("hard") or []
+                # The done-gate blocks ONLY on the DETERMINISTIC hard set (fail-safe).
+                # Model-pass hard findings (C/F/I/J/CA/PR) are weak-model judgments — kept
+                # for reporting + revision, but a single hallucinated objection must not
+                # false-fail a good draft.
+                integrity_hard = ires.get("blocking") or []      # gating set (deterministic)
+                integrity_all_hard = ires.get("hard") or []      # every hard, for reporting
                 integrity_major = ires.get("major") or []
-                integrity_blocking = story_state.blocking_analysis(ires)
+                integrity_scores = ires.get("scores")
+                integrity_blocking = story_state.blocking_analysis(
+                    {"hard": integrity_hard, "major": integrity_major})
                 _progress(sid, "verify", f"Story integrity: {story_state.summary_line(ires)}")
             except Exception as e:  # noqa: BLE001 — validator is best-effort
                 log.warning("Vatra story-integrity validator failed", error=str(e))
@@ -2978,6 +2987,8 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
                 _analysis_blocked["canon"] = canon_summary
             if integrity_summary is not None:
                 _analysis_blocked["integrity"] = integrity_summary
+            if integrity_scores is not None:
+                _analysis_blocked["scores"] = integrity_scores
             return await _finish_blocked(
                 db, sid, user, reason=_reason, truth=truth,
                 files=list(_fb_files.values()),
@@ -3094,13 +3105,21 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
         analysis["canon"] = canon_summary
     if integrity_summary is not None:
         analysis["integrity"] = integrity_summary
+    if integrity_scores is not None:
+        analysis["scores"] = integrity_scores
     if integrity_major:
         # majors don't block `done`; surface them for the client to show with the draft
         analysis.setdefault("blocking", {})["major"] = story_state.blocking_analysis(
             {"hard": [], "major": integrity_major})["major"]
+    _advisory_hard = [f for f in integrity_all_hard if not story_state.is_deterministic(f)]
+    if _advisory_hard:
+        # Model-pass hard findings that did NOT gate `done` (weak-model judgments) —
+        # surfaced as advisory so the client can show them with the kept draft.
+        analysis.setdefault("blocking", {})["advisory"] = story_state.blocking_analysis(
+            {"hard": _advisory_hard, "major": []})["hard"]
     if integrity_hard:
-        # reached the done path only when gate_blocks_done is OFF — surface the surviving
-        # hard rows so the client can show them with the kept draft, not just the count.
+        # reached the done path with a deterministic hard only when gate_blocks_done is
+        # OFF — surface the surviving hard rows with the kept draft, not just the count.
         analysis.setdefault("blocking", {})["hard"] = story_state.blocking_analysis(
             {"hard": integrity_hard, "major": []})["hard"]
     if _role_tiers_map:
