@@ -30,6 +30,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from captain_claw import write_guard
 from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
 
@@ -105,6 +106,7 @@ from captain_claw.flight_deck.quality_profile import (
     worker_produced_nothing,
 )
 from captain_claw.logging import get_logger
+from captain_claw.vfs import is_vfs_path as _vfs_is_path
 from captain_claw.vfs import resolve_under as _vfs_resolve_under
 
 log = get_logger(__name__)
@@ -883,6 +885,113 @@ def _capture_generated(slug: str, exclude: set[str], dest_dir: Path,
     return files, "\n\n".join(t.strip() for t in texts if t.strip()).strip()
 
 
+# ── Increment 4: synthesis-emits-the-artifact helpers ─────────────────
+
+_POINTER_RE = re.compile(r"(?:vfs:|saved/)[^\s`'\"\)\]]+", re.IGNORECASE)
+_POINTER_PHRASES = (
+    "assembled and complete", "is complete", "see the file", "saved to",
+    "written to", "deliverable_file:", "the full document", "find the file",
+    "available at", "you can find", "has been saved", "is available in",
+)
+
+
+def _pointer_paths(text: str) -> list[str]:
+    """vfs:/saved: paths mentioned in *text* (a reporter reply pointing at a file)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _POINTER_RE.finditer(text or ""):
+        p = m.group(0).rstrip(".,;")
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _looks_like_pointer(out: str, inputs_len: int) -> bool:
+    """True when a reporter reply is a note ABOUT the deliverable, not the deliverable.
+
+    Short relative to the material it assembled, OR a pointer phrase + a vfs:/saved:
+    path as the payload, OR the runtime's own placeholder marker.
+    """
+    body = (out or "").strip()
+    if not body:
+        return True
+    if write_guard.is_placeholder_content(body):
+        return True
+    low = body.lower()
+    if len(body) < max(800, int(0.25 * inputs_len)):
+        # short — but a genuinely tiny task can be short; only call it a pointer
+        # when it also names a file or uses a pointer phrase.
+        if _pointer_paths(body) or any(ph in low for ph in _POINTER_PHRASES):
+            return True
+    return False
+
+
+def _resolve_deliverable(user_id: str, project: str, candidates: list[str],
+                         min_chars: int = 0) -> tuple[str, str]:
+    """Read the largest resolvable, non-placeholder candidate file → (text, path).
+
+    ``candidates`` are vfs:/saved: paths or bare basenames. Returns ('','') if none
+    resolves to real content. Used to recover a deliverable the reporter wrote to the
+    VFS folder but only POINTED at in its reply.
+    """
+    best_text = ""
+    best_path = ""
+    for cand in candidates:
+        if not cand:
+            continue
+        path = cand if _vfs_is_path(cand) else f"vfs:{project}/{cand}"
+        try:
+            fp = _vfs_resolve_under(user_id, project, path)
+        except Exception:
+            fp = None
+        if not fp or not Path(fp).is_file():
+            continue
+        try:
+            data = Path(fp).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not data.strip() or write_guard.is_placeholder_content(data):
+            continue
+        if len(data) > len(best_text):
+            best_text, best_path = data, path
+    if min_chars and len(best_text) < min_chars:
+        return "", ""
+    return best_text, best_path
+
+
+async def _finish_blocked(db, sid: str, user: dict, *, reason: str, truth: str,
+                          files: list, analysis: dict, confidence: float = 0.0,
+                          domain: str = "") -> dict:
+    """Persist a run that failed its deliverable gate as status='error' with the best
+    truth + files + verdict KEPT — continuable via /continue and resumable — instead of
+    flipping 'done' on a broken deliverable. Returns the result dict the caller returns."""
+    _progress(sid, "done", f"Deliverable gate FAILED: {reason}", ok=False)
+    try:
+        await db.update_basna_session(
+            sid, user["id"], status="error", truth=truth or "", confidence=confidence,
+            files=json.dumps(files), analysis=json.dumps(analysis),
+            progress=json.dumps((_PROGRESS.get(sid) or {}).get("events", [])))
+    except Exception as e:  # noqa: BLE001
+        log.warning("Vatra _finish_blocked persist failed", error=str(e))
+    _RUN_USAGE.pop(sid, None)
+    _progress_done(sid)
+    return {"session_id": sid, "domain": domain, "mode": "vatra", "status": "error",
+            "truth": truth, "confidence": confidence, "analysis": analysis,
+            "subtasks": [], "learned": [], "cost": None, "blocked": reason}
+
+
+# The reporter smooths seams in an ALREADY-assembled file; it never rewrites it.
+REPORTER_SMOOTH_DIRECTIVE = (
+    "The deliverable is ALREADY assembled at `{path}` ({bytes} bytes) in your shared "
+    "project folder. Read it. Your ONLY job is to smooth the SEAMS between parts with "
+    "the `edit` tool — fix abrupt transitions, a sentence duplicated across a seam, and "
+    "obvious tense/name drift where two parts meet. Do NOT rewrite chapters, do NOT "
+    "summarise, do NOT shorten, do NOT write any other file. Make only small `edit` "
+    "changes in place. When done, reply with the single word DONE.{seams}"
+)
+
+
 # ── Group 0 pre-phase: plan → gate ───────────────────────────────────
 
 async def _ensure_route(db, user_id: str, sess: dict, sid: str, *, intent: str,
@@ -1136,6 +1245,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         cfg = json.loads(sess.get("config") or "{}")
     except json.JSONDecodeError:
         cfg = {}
+    # Per-role tier NAMES (Increment 8): lead/planner/clarify/reporter/qa → a Library
+    # tier, so a caller can put those slots on a stronger model than the specialists.
+    # None → each role uses its hard-coded default tier (today).
+    _role_tiers_map = (getattr(body, "role_tiers", None)
+                       if getattr(body, "role_tiers", None) is not None
+                       else cfg.get("role_tiers")) or {}
+
+    def _role_tier(role: str, default: str = "") -> str:
+        return str((_role_tiers_map or {}).get(role) or default or "")
+
     max_agents = int(cfg.get("max_agents") or 6)
     # Resume mode: restore already-finished owners from their durable checkpoints
     # (no re-run, no re-spend) and re-dispatch only the missing ones. Checkpoints are
@@ -2256,6 +2375,40 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                           f"facts ledger: {len(facts_ledger.list_rows(vfs_dir))} value(s) recorded")
         except Exception as e:  # noqa: BLE001
             log.warning("Vatra facts ledger dump failed", error=str(e))
+    # ── Increment 4: deterministic assembly (concat_then_smooth) ──
+    # For a piece-based deliverable with a manifest, concatenate the declared parts
+    # in order (code, not a from-memory LLM rewrite) into the deliverable file, then
+    # let the reporter only SMOOTH the seams (guarded against collapse). Assembly seam
+    # findings (duplicate/missing chapter, placeholder part) feed the done gate + QA.
+    _manifest_obj = _run_manifest.get(sid)
+    _producer_done = {r["owner"]: bool(r.get("ok") or r.get("produced_file")) for r in results}
+    _smooth_arg = None
+    _assembly_findings: list[dict] = []
+    if (quality.synthesis_emit == "concat_then_smooth" and _manifest_obj is not None
+            and vfs_dir is not None):
+        try:
+            _asm = deliverable_manifest.assemble(vfs_dir, _manifest_obj, _producer_done)
+            _assembly_findings = _asm["findings"]
+            if _asm["text"].strip():
+                _dfile = vfs_dir / _manifest_obj.basename()
+                _dfile.write_text(_asm["text"], encoding="utf-8")
+                (dest_dir / f"{_manifest_obj.basename()}.pre-smooth").write_text(
+                    _asm["text"], encoding="utf-8")
+                _abytes = len(_asm["text"].encode("utf-8"))
+                generated_files.append({
+                    "name": _manifest_obj.basename(), "mime": "text/markdown",
+                    "size": _abytes, "kind": "generated", "agent": "assembly",
+                    "vfs": _manifest_obj.path})
+                _progress(sid, "report",
+                          f"Assembled {len(_manifest_obj.parts)} part(s) → "
+                          f"{_manifest_obj.basename()} ({_abytes} bytes, "
+                          f"{deliverable_manifest.count_sections(_asm['text'])} sections)")
+                _smooth_arg = {"file": str(_dfile), "path": _manifest_obj.path,
+                               "text": _asm["text"], "findings": _assembly_findings,
+                               "bytes": _abytes}
+        except OSError as e:  # noqa: BLE001 — assembly is best-effort; reporter falls back
+            log.warning("Vatra deterministic assembly failed", error=str(e))
+
     truth, reporter_files = await _run_reporter(
         request, user, sid, sid8, run_tag, intent, usable, cfg, arch_by_id,
         tiers=body.tiers, api_key=body.api_key, env_vars=body.env_vars,
@@ -2265,6 +2418,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         corpus=quality.source_corpus,  # R10
         honesty=quality.honesty_guard,
         facts=quality.facts_ledger, facts_block=facts_dump,
+        reporter_tier=_role_tier("reporter", ""),
+        deliverable_kind=quality.deliverable_kind,
+        resolve_pointer=quality.resolve_pointer_truth,
+        can_retry=_budget.can_afford(_retry_est),
+        user_id=user["id"], project=vfs_project,
+        smooth=_smooth_arg,
     )
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
@@ -2444,6 +2603,44 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         "latency_ms": r["latency_ms"], "success": None,
     } for r in results])
 
+    # ── Increment 4: deliverable done-gate ──────────────────────────────
+    # Never flip `done` on a missing / undersized / placeholder deliverable, or one
+    # whose declared parts collided or left a gap. Persist status='error' with the
+    # best truth + files + verdict kept (continuable/resumable), rather than shipping
+    # a pointer note as the result. No-op when there is no manifest and the caller did
+    # not ask for the file gate.
+    _deliverable_analysis = None
+    if _manifest_obj is not None or quality.require_deliverable_file:
+        _dg = deliverable_manifest.gate(
+            _manifest_obj, truth,
+            min_chars_fallback=quality.deliverable_min_chars,
+            min_sections_fallback=quality.deliverable_min_sections)
+        _crit = [f for f in _assembly_findings
+                 if f.get("kind") in ("part_missing", "placeholder_part",
+                                      "duplicate_chapter", "missing_chapter")]
+        _deliverable_analysis = (deliverable_manifest.to_analysis(_manifest_obj)
+                                 if _manifest_obj else {})
+        _deliverable_analysis.update({
+            "verdict": "ok" if (_dg["ok"] and not _crit) else "failed",
+            "reasons": _dg["reasons"], "bytes": _dg["bytes"],
+            "sections": _dg["sections"], "assembly_findings": _crit})
+        if (not _dg["ok"] or _crit) and (quality.require_deliverable_file or _crit):
+            _fb_files = {f["name"]: f for f in session_files}
+            for g in generated_files:
+                _fb_files[g["name"]] = g
+            _reason = "; ".join(_dg["reasons"]
+                                + [f["detail"] for f in _crit]) or "deliverable gate failed"
+            return await _finish_blocked(
+                db, sid, user, reason=_reason, truth=truth,
+                files=list(_fb_files.values()),
+                analysis={"deliverable": _deliverable_analysis,
+                          "quality_verdict": "deliverable_missing"},
+                confidence=confidence, domain=domain)
+        _progress(sid, "verify",
+                  f"Deliverable gate: {_deliverable_analysis['verdict']} "
+                  f"({_dg['bytes']} bytes, {_dg['sections']} sections)",
+                  ok=_deliverable_analysis["verdict"] == "ok")
+
     # 6b) Persist the assembled deliverable NOW — status=done + truth + files — BEFORE
     # the best-effort learning/coverage steps. So if the process is killed during
     # scoring, the run is already complete and the report is saved (no run left stuck
@@ -2478,12 +2675,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # 8) Coverage gaps (best-effort) — judge the assembled deliverable against what the
     # task asked for; persisted as a follow-up update so the run is already done.
     analysis: dict = {}
+    if _deliverable_analysis is not None:
+        analysis["deliverable"] = _deliverable_analysis
     _progress(sid, "learn", "Checking coverage…")
     try:
         cov = await asyncio.wait_for(
             _llm_coverage_gaps(intent, subtasks, truth, _creds("reason")), 120)
         if cov:
             analysis = cov
+            if _deliverable_analysis is not None:
+                analysis["deliverable"] = _deliverable_analysis
             await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
             _progress(sid, "learn", f"Coverage: {len(cov.get('gaps') or [])} gap(s)")
     except Exception as e:
@@ -2559,7 +2760,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     if qm:
         analysis["quality_metrics"] = qm
     if consistency_summary is not None or contract_summary is not None \
-            or gate_summary is not None or qm:
+            or gate_summary is not None or qm or _deliverable_analysis is not None:
         try:
             await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
         except Exception as e:  # noqa: BLE001
@@ -3173,10 +3374,25 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                         corpus: bool = False,
                         honesty: bool = False,
                         facts: bool = False,
-                        facts_block: str = "") -> tuple[str, list[dict]]:
+                        facts_block: str = "",
+                        reporter_tier: str = "",
+                        deliverable_kind: str = "",
+                        resolve_pointer: bool = False,
+                        can_retry: bool = False,
+                        user_id: str = "",
+                        project: str = "",
+                        smooth: dict | None = None) -> tuple[str, list[dict]]:
     """Spawn a dedicated reporter, feed it the slices (plus any answered cross-agent
     asks), and capture the assembled deliverable. Falls back to a labeled
-    concatenation if the reporter fails."""
+    concatenation if the reporter fails.
+
+    Increment 4: ``smooth`` (a dict {file, path, findings, min_sections}) switches to
+    smooth mode — the deliverable is already assembled on disk and the reporter only
+    fixes seams in place, guarded by a length/section collapse check. In rewrite mode,
+    ``resolve_pointer`` recovers a deliverable the reporter wrote to the VFS folder but
+    only POINTED at, with one bounded corrective re-dispatch. ``deliverable_kind ==
+    'fiction'`` suppresses the in-prose honesty ledger; ``reporter_tier`` overrides the
+    reporter's model tier."""
     from captain_claw.flight_deck.server import DATA_DIR
 
     reporter_id = str(cfg.get("reporter_archetype") or _DEFAULT_REPORTER)
@@ -3206,7 +3422,7 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         description=f"Vatra reporter · {role}",
         cognitive_mode=arch.get("cognitive_mode", "neutra"),
         tools=_augment_tools(arch.get("tools") or [], research_dir, facts=facts),
-        tier=arch.get("tier", "reason"),
+        tier=(reporter_tier or arch.get("tier", "reason")),
         tiers=tiers, api_key=api_key, env_vars=env_vars,
         # Bind the reporter to the same shared VFS project so it reads the
         # team's files from (and writes the assembled deliverable to) one folder.
@@ -3235,30 +3451,42 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
             except OSError:
                 pass
         big = len(slices_full) > _SLICES_INLINE_CHARS
-        inline = slices_full[:_SLICES_INLINE_CHARS] + ("\n\n…(full text in vatra-slices.md)" if big else "")
-        template = (_INSTRUCTIONS_DIR / "vatra" / "reporter.md").read_text()
-        prompt = template.replace("{intent}", intent).replace("{slices}", inline)
-        # R1: when the Research Map is armed, tell the reporter it can search the
-        # WHOLE folder (not just the inlined slice) so a big blackboard that
-        # doesn't fit its context is still fully covered.
-        if research_dir is not None and big:
-            prompt = research_map.preamble(research_dir) + prompt
-        if shared_context.strip():
-            prompt += ("\n\n## Shared conventions the pieces were built against\n"
-                       "Keep the final deliverable fully consistent with these (the pieces should "
-                       "already follow them; enforce it if any drifted):\n"
-                       f"{shared_context.strip()}\n")
-        # Honesty overlay: the exception clause to reporter.md's "resolve it and
-        # don't narrate the disagreement" — genuinely unresolved conflicts and
-        # assumptions surface in one labeled section instead of being absorbed.
-        # Appended at runtime so honesty_guard:false keeps reporter.md verbatim.
-        if honesty:
-            prompt += REPORTER_HONESTY_DIRECTIVE
-        # Facts ledger: the canonical values every figure in the deliverable
-        # must match — inlined (it's small and structured), not searched-for.
-        if facts_block.strip():
-            prompt += REPORTER_FACTS_DIRECTIVE + facts_block.strip() + "\n"
-        prompt += _vfs_directive(_vfs_project(sid))
+        if smooth is not None:
+            # ── Smooth mode: the deliverable is already assembled on disk ──
+            _seams = ""
+            _findings = smooth.get("findings") or []
+            if _findings:
+                _seams = "\n\nSeams to check:\n" + "\n".join(
+                    f"- {f.get('detail', f.get('kind', ''))}" for f in _findings[:12])
+            prompt = REPORTER_SMOOTH_DIRECTIVE.format(
+                path=smooth.get("path", ""), bytes=smooth.get("bytes", 0), seams=_seams)
+        else:
+            inline = slices_full[:_SLICES_INLINE_CHARS] + ("\n\n…(full text in vatra-slices.md)" if big else "")
+            template = (_INSTRUCTIONS_DIR / "vatra" / "reporter.md").read_text()
+            prompt = template.replace("{intent}", intent).replace("{slices}", inline)
+            # R1: when the Research Map is armed, tell the reporter it can search the
+            # WHOLE folder (not just the inlined slice) so a big blackboard that
+            # doesn't fit its context is still fully covered.
+            if research_dir is not None and big:
+                prompt = research_map.preamble(research_dir) + prompt
+            if shared_context.strip():
+                prompt += ("\n\n## Shared conventions the pieces were built against\n"
+                           "Keep the final deliverable fully consistent with these (the pieces should "
+                           "already follow them; enforce it if any drifted):\n"
+                           f"{shared_context.strip()}\n")
+            # Honesty overlay: the exception clause to reporter.md's "resolve it and
+            # don't narrate the disagreement" — genuinely unresolved conflicts and
+            # assumptions surface in one labeled section instead of being absorbed.
+            # Appended at runtime so honesty_guard:false keeps reporter.md verbatim.
+            # Suppressed for a fiction deliverable — an in-prose ledger reads as
+            # compliance clutter in a narrative (Increment 7 keeps it in analysis).
+            if honesty and deliverable_kind != "fiction":
+                prompt += REPORTER_HONESTY_DIRECTIVE
+            # Facts ledger: the canonical values every figure in the deliverable
+            # must match — inlined (it's small and structured), not searched-for.
+            if facts_block.strip():
+                prompt += REPORTER_FACTS_DIRECTIVE + facts_block.strip() + "\n"
+            prompt += _vfs_directive(_vfs_project(sid))
 
         def _on_action(act: dict) -> None:
             detail = act.get("detail", "")
@@ -3275,11 +3503,79 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
                                 on_action=_on_action, fleet_instructions=arch.get("fleet_instructions", ""),
                                 agent_name=role, on_usage=_on_usage)
+
+        # ── Smooth mode: truth is the file's bytes; a shrink restores the concat ──
+        if smooth is not None:
+            sfile = Path(smooth["file"])
+            pre = smooth.get("text", "")
+            final = pre
+            try:
+                if sfile.is_file():
+                    final = sfile.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                final = pre
+            collapsed = (
+                write_guard.is_placeholder_content(final)
+                or len(final) < 0.9 * max(1, len(pre))
+                or deliverable_manifest.count_sections(final)
+                < deliverable_manifest.count_sections(pre)
+            )
+            if collapsed and pre:
+                try:
+                    sfile.write_text(pre, encoding="utf-8")
+                except OSError:
+                    pass
+                final = pre
+                _progress(sid, "report", "Reporter smooth collapsed the file — restored the assembly", ok=False)
+            else:
+                _progress(sid, "report", f"Reporter smoothed seams ({d['latency_ms'] / 1000:.1f}s)")
+            return final, []
+
         out = (d.get("output") or "").strip()
         files, text = _capture_generated(sp["slug"], input_names | {"vatra-slices.md"},
                                          dest_dir, role, seen_gen)
         if not out and text:
             out = text
+
+        # ── Reject description-as-deliverable (opt-in) ──
+        # A reporter reply that merely POINTS at a file (or is short + names one) is a
+        # failed synthesis. Resolve the referenced file; if that fails, re-dispatch
+        # the SAME reporter once with a blunt corrective; else fall back to the raw
+        # assembly rather than shipping the note.
+        if resolve_pointer and _looks_like_pointer(out, len(slices_full)):
+            _dpath = (smooth or {}).get("path", "")  # unused in rewrite mode
+            _cands = _pointer_paths(out)
+            rtext, rpath = _resolve_deliverable(user_id, project, _cands)
+            if rtext and len(rtext) > len(out) and not write_guard.is_placeholder_content(rtext):
+                out = rtext
+                files.append({"name": write_guard.basename_of(rpath),
+                              "mime": "text/markdown", "size": len(rtext.encode("utf-8")),
+                              "kind": "generated", "agent": role, "vfs": rpath})
+                _progress(sid, "report", f"Resolved reporter pointer → {write_guard.basename_of(rpath)}")
+            elif can_retry:
+                _corr = (
+                    "Your reply was a note ABOUT the deliverable, not the deliverable. "
+                    "Output the COMPLETE document as your reply now — the whole assembled "
+                    "work, start to finish, no summary and no file pointer."
+                )
+                d2 = await _dispatch_one(sp["port"], sp["auth"], _corr, dispatch_timeout,
+                                         on_action=_on_action,
+                                         fleet_instructions=arch.get("fleet_instructions", ""),
+                                         agent_name=role, on_usage=_on_usage)
+                out2 = (d2.get("output") or "").strip()
+                f2, t2 = _capture_generated(sp["slug"], input_names | {"vatra-slices.md"},
+                                            dest_dir, role, seen_gen)
+                files.extend(f2)
+                if out2 and not _looks_like_pointer(out2, len(slices_full)):
+                    out = out2
+                else:
+                    rtext2, rpath2 = _resolve_deliverable(user_id, project, _pointer_paths(out2))
+                    if rtext2 and not write_guard.is_placeholder_content(rtext2):
+                        out = rtext2
+                    else:
+                        _progress(sid, "report", "Reporter still returned a pointer — using raw assembly", ok=False)
+                        out = fallback
+
         mark = "✓" if d["ok"] and out else "✗"
         _progress(sid, "report", f"Reporter {mark} ({d['latency_ms'] / 1000:.1f}s)", ok=bool(out))
         return (out or fallback), files

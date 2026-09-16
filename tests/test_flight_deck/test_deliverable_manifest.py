@@ -138,3 +138,77 @@ def test_to_analysis():
     assert a["path"] == "vfs:proj/book.md"
     assert a["kind"] == "document"
     assert a["parts"][0]["owner"] == "s4"
+
+
+# ── Increment 4: part_status, assemble, gate ─────────────────────────
+
+def _write(tmp_path, name, body):
+    (tmp_path / name).write_text(body, encoding="utf-8")
+
+
+def test_part_status_landed_and_placeholder(tmp_path):
+    m = dm.parse({"path": "book.md", "kind": "fiction", "parts": [
+        {"path": "part-one.md", "owner": "s4", "range": "ch1-2", "min_bytes": 10},
+    ]}, _SUBTASKS, "proj")
+    p = m.parts[0]
+    # missing file
+    assert dm.part_status(tmp_path, p)["landed"] is False
+    # real content
+    _write(tmp_path, "part-one.md", "# Chapter One\n\nx\n\n# Chapter Two\n\ny\n" * 3)
+    st = dm.part_status(tmp_path, p, producer_done=True)
+    assert st["exists"] and st["landed"] and st["bytes"] >= 10
+    assert set(st["chapters"]) == {1, 2}
+    # sequential + producer not done → not landed
+    assert dm.part_status(tmp_path, p, producer_done=False)["landed"] is False
+    # placeholder body
+    _write(tmp_path, "part-one.md", "[written to disk: part-one.md, 1 lines, 0.0KB — use read tool to view]")
+    stp = dm.part_status(tmp_path, p)
+    assert stp["placeholder"] is True and stp["landed"] is False
+
+
+def test_assemble_orders_and_flags_seams(tmp_path):
+    m = dm.parse({"path": "book.md", "kind": "fiction", "parts": [
+        {"path": "p2.md", "owner": "s5", "order": 2, "range": "ch6-7"},
+        {"path": "p1.md", "owner": "s4", "order": 1, "range": "ch1-2"},
+    ]}, _SUBTASKS, "proj")
+    _write(tmp_path, "p1.md", "# Chapter One\n\na\n\n# Chapter Two\n\nb\n")
+    _write(tmp_path, "p2.md", "# Chapter Six\n\nc\n")  # missing chapter 7
+    res = dm.assemble(tmp_path, m)
+    # ordered p1 then p2
+    assert res["text"].index("Chapter One") < res["text"].index("Chapter Six")
+    kinds = {f["kind"] for f in res["findings"]}
+    assert "missing_chapter" in kinds
+
+
+def test_assemble_duplicate_and_placeholder(tmp_path):
+    m = dm.parse({"path": "book.md", "parts": [
+        {"path": "p1.md", "owner": "s4", "order": 1},
+        {"path": "p2.md", "owner": "s5", "order": 2},
+    ]}, _SUBTASKS, "proj")
+    _write(tmp_path, "p1.md", "# Chapter One\n\na\n")
+    _write(tmp_path, "p2.md", "# Chapter One\n\nduplicate\n")  # dup chapter 1
+    res = dm.assemble(tmp_path, m)
+    assert any(f["kind"] == "duplicate_chapter" for f in res["findings"])
+    # placeholder part
+    _write(tmp_path, "p2.md", "[written to disk: p2.md, 1 lines, 0.0KB — use read tool to view]")
+    res2 = dm.assemble(tmp_path, m)
+    assert any(f["kind"] == "placeholder_part" for f in res2["findings"])
+
+
+def test_assemble_part_missing(tmp_path):
+    m = dm.parse({"path": "book.md", "parts": [{"path": "p1.md", "owner": "s4"}]}, _SUBTASKS, "proj")
+    res = dm.assemble(tmp_path, m)
+    assert any(f["kind"] == "part_missing" for f in res["findings"])
+
+
+def test_gate_reasons():
+    m = dm.parse({"path": "book.md", "min_bytes": 100, "min_sections": 2}, _SUBTASKS, "proj")
+    assert dm.gate(m, "")["reasons"] == ["deliverable_missing"]
+    assert dm.gate(m, "[written to disk: x — use read tool to view]")["reasons"] == ["deliverable_placeholder"]
+    r = dm.gate(m, "short")
+    assert any("below_min_bytes" in x for x in r["reasons"])
+    big = "# Chapter One\n\n" + "x" * 200
+    r2 = dm.gate(m, big)
+    assert any("too_few_sections" in x for x in r2["reasons"])
+    ok = "# Chapter One\n\n" + "x" * 100 + "\n\n# Chapter Two\n\n" + "y" * 100
+    assert dm.gate(m, ok)["ok"] is True

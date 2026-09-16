@@ -18,8 +18,10 @@ deterministic synthesis and the completion gate.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from captain_claw import write_guard
@@ -356,6 +358,114 @@ def inputs_for(manifest: Manifest | None, subtask_id: str, subtasks: list[dict])
         if p:
             out.append(p)
     return out
+
+
+# ── Increment 4: part status, deterministic assembly, done gate ───────
+
+def _sha8(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:8]
+
+
+def part_status(vfs_dir, part: Part, producer_done: bool = True) -> dict:
+    """On-disk status of a part: exists / bytes / placeholder / sections / chapters / landed.
+
+    ``landed`` (ready for a consumer) = exists ∧ non-empty ∧ ≥ its byte floor ∧ not a
+    placeholder marker ∧ (its producer has finished OR the part is not sequential).
+    """
+    fp = Path(vfs_dir) / part.basename()
+    exists = fp.is_file()
+    raw = b""
+    if exists:
+        try:
+            raw = fp.read_bytes()
+        except Exception:
+            exists = False
+    data = raw.decode("utf-8", errors="replace") if raw else ""
+    b = len(raw)
+    placeholder = bool(data) and write_guard.is_placeholder_content(data)
+    landed = (
+        exists and b > 0 and (b >= (part.min_bytes or 0))
+        and not placeholder and (producer_done or not part.sequential)
+    )
+    return {
+        "exists": exists, "bytes": b, "placeholder": placeholder,
+        "sections": count_sections(data), "chapters": chapters_in(data),
+        "landed": landed, "sha8": _sha8(raw) if raw else "",
+    }
+
+
+def assemble(vfs_dir, manifest: Manifest | None,
+             producer_done: dict[str, bool] | None = None) -> dict:
+    """Concatenate the manifest's parts in order and report deterministic seam findings.
+
+    Returns ``{text, parts, seams, findings}``. Findings use the ``quality_findings``
+    shape (kind/source/severity/detail): ``part_missing``, ``placeholder_part``,
+    ``missing_chapter``, ``duplicate_chapter``.
+    """
+    if manifest is None:
+        return {"text": "", "parts": [], "seams": [], "findings": []}
+    done = producer_done or {}
+    texts: list[str] = []
+    part_infos: list[dict] = []
+    findings: list[dict] = []
+    seen_chapter: dict[int, str] = {}
+    for p in sorted(manifest.parts, key=lambda x: x.order):
+        st = part_status(vfs_dir, p, done.get(p.owner, True))
+        part_infos.append({"path": p.path, "owner": p.owner, **st})
+        if not st["exists"]:
+            findings.append({"kind": "part_missing", "source": "assembly",
+                             "severity": "critical",
+                             "detail": f"{p.basename()} was never written"})
+            continue
+        if st["placeholder"]:
+            findings.append({"kind": "placeholder_part", "source": "assembly",
+                             "severity": "critical",
+                             "detail": f"{p.basename()} is a placeholder marker, not content"})
+            continue
+        data = (Path(vfs_dir) / p.basename()).read_text(encoding="utf-8", errors="replace")
+        if p.range and st["chapters"]:
+            lo, hi = p.range
+            present = set(st["chapters"])
+            missing = [n for n in range(lo, hi + 1) if n not in present]
+            if missing:
+                findings.append({"kind": "missing_chapter", "source": "assembly",
+                                 "severity": "critical",
+                                 "detail": f"{p.basename()} declares chapters {lo}-{hi} "
+                                           f"but is missing {missing}"})
+        for n in st["chapters"]:
+            if n in seen_chapter and seen_chapter[n] != p.path:
+                findings.append({"kind": "duplicate_chapter", "source": "assembly",
+                                 "severity": "critical",
+                                 "detail": f"chapter {n} appears in both "
+                                           f"{write_guard.basename_of(seen_chapter[n])} "
+                                           f"and {p.basename()}"})
+            else:
+                seen_chapter[n] = p.path
+        texts.append(data.strip())
+    return {"text": "\n\n".join(texts), "parts": part_infos, "seams": [], "findings": findings}
+
+
+def gate(manifest: Manifest | None, text: str,
+         min_chars_fallback: int = 0, min_sections_fallback: int = 0) -> dict:
+    """Is *text* an acceptable deliverable? Returns ``{ok, reasons, bytes, sections, chapters}``."""
+    body = text or ""
+    b = len(body.encode("utf-8", errors="replace"))
+    sec_regex = manifest.section_regex if manifest else ""
+    secs = count_sections(body, sec_regex)
+    chaps = chapters_in(body)
+    min_b = (manifest.min_bytes if manifest else 0) or min_chars_fallback or 0
+    min_s = (manifest.min_sections if manifest else 0) or min_sections_fallback or 0
+    reasons: list[str] = []
+    if not body.strip():
+        reasons.append("deliverable_missing")
+    elif write_guard.is_placeholder_content(body):
+        reasons.append("deliverable_placeholder")
+    else:
+        if min_b and b < min_b:
+            reasons.append(f"below_min_bytes ({b} < {min_b})")
+        if min_s and secs < min_s:
+            reasons.append(f"too_few_sections ({secs} < {min_s})")
+    return {"ok": not reasons, "reasons": reasons, "bytes": b, "sections": secs, "chapters": chaps}
 
 
 def to_analysis(manifest: Manifest | None, statuses: dict | None = None) -> dict:
