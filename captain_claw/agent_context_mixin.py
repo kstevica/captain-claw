@@ -3091,7 +3091,11 @@ class AgentContextMixin:
                 f"Write every file you produce to `vfs:{_vfs_project}/<filename>` (or the equivalent "
                 f"`vfs:/<filename>`, which resolves to the same place), and read teammates' files from "
                 f"there too. Do NOT invent a different project folder or derive one from the task or "
-                f"session id — files outside `vfs:{_vfs_project}/` won't be seen by your teammates."
+                f"session id — files outside `vfs:{_vfs_project}/` won't be seen by your teammates.\n"
+                "After a successful write the system may compact the content in your history to "
+                "`[written to disk: …]`. This is NORMAL — the file IS saved; never re-issue a write "
+                "with that marker as its content, and never rewrite a file just because you see it. "
+                "Always give a file a full name WITH an extension (e.g. `.md`)."
             )
 
         skills_section = ""
