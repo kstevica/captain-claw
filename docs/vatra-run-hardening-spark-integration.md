@@ -42,25 +42,38 @@ turns the default-on write guard off. Leave it on.
 
 ---
 
-## 2. The ONE decision to make first: which entry path
+## 2. Which entry path — you are already on the right one
 
-Captain Claw exposes two ways to start a Vatra run. **The new fields are honoured
-on only one of them today.**
+Captain Claw exposes two ways to start a Vatra run. The new fields are honoured
+on only one of them today, and **you already use that one.**
 
-| Path | Honours `deliverable` / `role_tiers` / `quality` / `dispatch_timeout`? |
-|---|---|
-| **`POST /fd/vatra/start` → poll → `POST /fd/vatra/plan/approve`** (interactive/BFF) | **Yes** — use this. |
-| `POST /fd/vatra/agent/start` (headless one-shot) | **No** — these fields are silently dropped; tiers fall back to the owner's saved Library set. Do NOT use it for long-form until its request model is extended. |
+`backend/app/fd_client.py` drives the two-step JWT flow (its own header comment
+spells it out): `POST /fd/vatra/start` → upload files → poll to `awaiting_plan` →
+`POST /fd/vatra/plan/approve {plan: null}` → poll to `done`/`error`. That path
+honours `deliverable`, `role_tiers`, `quality`, and `dispatch_timeout`. Good — no
+migration off `/fd/vatra/agent/start` is needed (that headless path drops the new
+fields, but you don't use it).
 
-**Action:** drive the two-step `start` → `plan/approve` flow (the same one the
-Lupa BFF uses). If you currently use `/fd/vatra/agent/start`, switch, or ask the
-Captain Claw side to mirror the fields onto `AgentStartReq` first.
+**One consequence that makes this easy:** your `approve()` sends only
+`{session_id, plan, execution_groups}` — it does NOT resend `tiers`/`quality`.
+That's fine, because **everything you send on `/fd/vatra/start` is now persisted
+to the session config and inherited at approve.** So you add the new fields to
+your `start()` call and leave `approve()` almost untouched.
 
 ---
 
 ## 3. The request recipe (fiction / long-form)
 
-### 3a. `POST /fd/vatra/start`
+> **Where to change your code.** Your `FlightDeckClient.start(...)` in
+> `backend/app/fd_client.py` already forwards `quality`, `tiers`, and `env_vars`
+> into the `/fd/vatra/start` body. Add three optional params —
+> `deliverable`, `role_tiers`, `dispatch_timeout` — and drop them into `body` the
+> same way (`if deliverable: body["deliverable"] = deliverable`, etc.). Thread
+> them from `runs.py` where you already build `quality`/`tiers`. Your `approve()`
+> needs no change for these (they're inherited from config), but see §3c for the
+> fiction owner-mapping option, and make sure `execution_groups` is on (§3d).
+
+### 3a. `POST /fd/vatra/start` — the body to build
 
 ```json
 {
@@ -102,46 +115,65 @@ Captain Claw side to mirror the fields onto `AgentStartReq` first.
 
 Response: `{"session_id": "...", "status": "planning"}`.
 
-### 3b. Poll to the plan gate
+### 3b. `parts` and the concat model — read this before choosing fiction
 
-`GET /fd/basna/sessions/{session_id}` until `status == "awaiting_plan"`. The row's
-`route.subtasks` now lists the Lead's subtasks with their ids and
-`owner_archetype_id`.
+Captain Claw assembles the deliverable by **concatenating the declared parts in
+order**. A part's `owner` is a **subtask id**, which does not exist until the Lead
+decomposes (after `/start`). Two ways to fill parts:
 
-### 3c. `POST /fd/vatra/plan/approve` — bind part owners
+- **Derived (`quality.derive_manifest`, already on in `long_form`).** Captain Claw
+  makes **one part per subtask** and concatenates them. This is exactly right for a
+  **research report or multi-section document**, where every subtask produces a
+  section of the whole. For those, send only `deliverable: {path, kind, min_bytes,
+  min_sections}` (no `parts`) and change nothing in `approve()`. Done.
+- **Explicit parts.** You declare the parts and map each `owner` to a subtask id.
+  Needed for **fiction**, because a fiction run's subtasks are NOT all prose — a
+  story-bible / research / fact-check subtask must not be concatenated into the
+  novella. Derive would over-include them. See §3c.
 
-The `owner` of each part is a **subtask id**, which you don't know until the plan
-exists. Two options:
+### 3c. Fiction: map the writer subtasks (an `approve()` change)
 
-- **Explicit (recommended for fiction):** map each `part` to the subtask that will
-  write it (match on the subtask's role/title in `route.subtasks`) and **resend
-  the full `deliverable` with `owner` set on every part** on `/plan/approve`. This
-  guarantees the writer sequencing and the seam owner.
-- **Derived:** omit `parts` (or omit `owner`s) and set
-  `quality.derive_manifest: true` (it is already on inside the `long_form`
-  preset). Captain Claw derives one part per subtask, names the files, and adds
-  the producer→consumer ordering itself. Simpler, but you don't control which
-  subtask owns which range.
+Two options, cheapest first:
 
-```json
-{
-  "session_id": "…",
-  "execution_groups": true,
-  "tiers": { "…resend — tiers are never persisted (secrets)…" },
-  "deliverable": { "…resend WITH owners mapped to subtask ids…" },
-  "role_tiers": {"lead": "reason", "reporter": "reason", "qa": "reason"},
-  "quality": { "…resend the same quality block…" }
-}
-```
+- **Single writer (simplest).** Have the Lead produce ONE writer subtask for the
+  whole manuscript (Captain Claw's `lead.md` now nudges "one continuous artifact,
+  one writer"). Then you don't need parts at all: send `deliverable: {path,
+  kind: "fiction", min_bytes, min_sections}` with `derive_manifest` on — but to
+  avoid concatenating the non-prose subtasks, prefer the explicit form below even
+  here, declaring the single writer's file as the only part.
+- **Explicit parts, mapped at approve (robust).** Your `_poll_loop` already fetches
+  the plan (`get_plan(session_id)` / `route.subtasks`) at `awaiting_plan`. Before
+  approving, pick the writer subtasks from `route.subtasks` (match
+  `owner_archetype_id == "editor-writer"`, or your writer archetype), build
+  `deliverable.parts` mapping each to its `range`/`order`, set `seam_owner`, and
+  **resend `deliverable` on `approve()`**. Your `approve()` currently sends
+  `{session_id, plan, execution_groups}`; add `deliverable` (and, if you want to
+  change them, `role_tiers`/`quality`) to that body:
 
-Response: `{"session_id": "...", "status": "running"}`. Then poll
-`GET /fd/basna/sessions/{session_id}` until `status in ("done", "error")`.
+  ```python
+  # in FlightDeckClient.approve(...), when you have a fiction deliverable:
+  body = {"session_id": session_id, "plan": plan, "execution_groups": eg,
+          "deliverable": deliverable_with_owners}   # owners = writer subtask ids
+  ```
 
-> **Resend tiers on approve.** Tiers/env carry secrets and are never persisted;
-> if you omit them on approve the run falls back to the owner's saved Library
-> tiers. `quality`, `deliverable`, `role_tiers`, and `dispatch_timeout` ARE
-> persisted at `/start`, so on approve you only resend them if you're changing
-> them (e.g. binding part owners).
+Response of approve: `{"session_id": "...", "status": "running"}`, then your poll
+loop continues as today.
+
+### 3d. `execution_groups` must be on
+
+`strict_deps` (writer-before-writer sequencing) and the deterministic
+gap-closing clarify grant only apply in **grouped** mode. You already pass
+`execution_groups` on `approve()` from `self._execution_groups`
+(`settings.vatra_execution_groups`) — make sure that setting is `true` for
+long-form runs.
+
+> **Tiers are request-scoped (secrets), never persisted.** Your `approve()` omits
+> `tiers`, so the RUN uses the **service account's saved Library tier set**, not
+> the per-run `tiers` you sent on `start()` (those were only used by the Group-0
+> planner). If you want a specific per-run tier map (and the `weak` flag) on the
+> actual owners, either configure the service account's active tier set to match,
+> or start resending `tiers` on `approve()`. `quality`/`deliverable`/`role_tiers`/
+> `dispatch_timeout` do NOT have this problem — they persist at `start()`.
 
 ---
 
@@ -204,7 +236,11 @@ append write isn't cut off.
 
 Poll `GET /fd/basna/sessions/{session_id}`. Terminal states:
 
-- **`status == "done"`** — the deliverable is good. Read it from:
+- **`status == "done"`** — the deliverable is good. Your existing `_poll_loop`
+  already stores `session.get("truth")` on `done`; with the hardening, `truth` on
+  a `done` run is now the REAL assembled deliverable bytes (never a pointer note),
+  so the incident's core failure is fixed with **no change to your done path**.
+  Read it from:
   - `truth` (the assembled deliverable text), OR
   - `GET /fd/vfs/read?project=<config.vfs_project>&path=<config.deliverable_resolved.path>`
     (use this for a very large deliverable; `truth` may be capped). `config` is the
@@ -220,6 +256,22 @@ Poll `GET /fd/basna/sessions/{session_id}`. Terminal states:
     parts collided/gapped. `analysis.deliverable.reasons` says which.
   - `"critical_findings_remain"` — the canon gate found unresolved contradictions.
     `analysis.blocking.canon` lists them.
+
+> **Behaviour change to plan for in `runs.py`.** Your `_poll_loop` today does, on
+> `status == "error"`: `db.finish_run(run_id, "error", None, "Flight Deck
+> reported an error")` and emails failure — it DISCARDS `truth`. With the gates on
+> (`require_deliverable_file`, `gate_blocks_done`), `error` becomes the signal for
+> "assembled but a gate blocked it", and those errors carry a usable `truth` +
+> `analysis.quality_verdict`. So a nearly-complete manuscript that failed the
+> canon gate would currently be reported to your user as a bare failure with no
+> content. Decide which you want:
+> - **Safe (no change):** keep discarding — you never ship a gate-failed
+>   deliverable, but you lose the partial.
+> - **Better (small change):** on `error`, if `session["truth"]` is non-empty and
+>   `analysis.quality_verdict` is set, store `truth` as a **draft** and surface the
+>   verdict/reasons, or auto-fire a `continue`/`fill-gaps` round (which inherits
+>   your `deliverable`/`quality`) to fix it. This turns a hard failure into a
+>   "needs one more pass".
 
 `analysis` JSON keys you can rely on: `deliverable` (verdict, reasons, bytes,
 sections, parts[]), `canon` (chunks, initial/remaining findings), `consistency`,
