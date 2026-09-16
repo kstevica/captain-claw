@@ -77,6 +77,7 @@ from captain_claw.flight_deck.basna_routes import (
     _tier_creds,
     _vfs_manifest,
 )
+from captain_claw.flight_deck import deliverable_manifest
 from captain_claw.flight_deck import facts_ledger
 from captain_claw.flight_deck import quality_findings
 from captain_claw.flight_deck import research_brief
@@ -172,6 +173,12 @@ _run_vfs_project: dict[str, str] = {}
 # datastore (vfs:<project>/.datastore). Populated at the top of execute_vatra,
 # cleared in teardown — mirrors _run_vfs_project.
 _run_shared_datastore: dict[str, bool] = {}
+
+# Per-run deliverable Manifest (Increment 3) and quality flags the agent-facing
+# endpoints (_vatra_env, agent_wait) read back without re-parsing config. Populated
+# in execute_vatra, cleared in teardown alongside _run_vfs_project.
+_run_manifest: dict[str, Any] = {}
+_run_flags: dict[str, dict] = {}
 
 
 def _vfs_project(sid: str) -> str:
@@ -284,14 +291,43 @@ def _group_instr_block(st: dict, arch: dict, group_instructions: dict) -> str:
 _GROUP0_PLANNER_ID = "long-horizon-planner"
 
 
-def _plan_slice_block(st: dict, group0_by_subtask: dict, arch_by_id: dict) -> str:
+def _manifest_slice_block(st: dict, manifest) -> str:
+    """This owner's deliverable FILE + range instructions from the manifest.
+
+    Returns '' when there is no manifest or this subtask owns no part, so
+    non-manifest runs emit byte-identical prompts (Increment 3)."""
+    if manifest is None:
+        return ""
+    part = manifest.part_for(st["id"])
+    if part is None:
+        return ""
+    lines = ["\n\n## Your deliverable file (write it with EXACTLY this name)"]
+    lines.append(f"Write your part to `{part.path}` — that exact filename, in the "
+                 "shared project folder. Never a summary, never a pointer, never a "
+                 "different name.")
+    if part.range:
+        lo, hi = part.range
+        span = f"chapter {lo}" if lo == hi else f"chapters {lo}–{hi}"
+        lines.append(f"Your range: {span} — write EVERY chapter in it and nothing "
+                     "outside it. Write chapter-by-chapter: first `write` the file, "
+                     "then `write` with append=true for each further chapter. Never "
+                     "one giant write; never a summary or an outline.")
+    if manifest.seam_owner and manifest.seam_owner == st["id"] and part.range:
+        lines.append(f"You own the seam: finish chapter {part.range[1]} completely — "
+                     "the next part begins from your frozen file.")
+    return "\n".join(lines)
+
+
+def _plan_slice_block(st: dict, group0_by_subtask: dict, arch_by_id: dict, manifest=None) -> str:
     """This owner's slice of the Group 0 coordination plan: its mandate, the artifact
     it produces, which named teammates it consumes from, and hand-off notes. Returns
     '' when there is no plan or no entry for this subtask — so resume/legacy runs (no
-    ``group0_plan``) emit byte-identical prompts."""
+    ``group0_plan``) emit byte-identical prompts. When a deliverable manifest is
+    present, the owner's declared file + range are appended (Increment 3)."""
     e = (group0_by_subtask or {}).get(st["id"])
+    _mblock = _manifest_slice_block(st, manifest)
     if not e:
-        return ""
+        return _mblock
     lines = ["\n\n## Your coordination plan (Group 0)"]
     if e.get("mandate"):
         lines.append(f"Your mandate: {e['mandate']}")
@@ -310,7 +346,7 @@ def _plan_slice_block(st: dict, group0_by_subtask: dict, arch_by_id: dict) -> st
                      "you start, via the `vatra` tool): " + "; ".join(parts))
     if e.get("hand_off_notes"):
         lines.append(f"Hand-off notes for downstream teammates: {e['hand_off_notes']}")
-    return "\n".join(lines)
+    return "\n".join(lines) + _mblock
 
 
 # R4 — grouped Vatra edges carry DATA, not just prose. Cap the pushed producer
@@ -364,6 +400,22 @@ def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
     # Opt-in: bind workers to the run's folder-scoped shared datastore too.
     if _run_shared_datastore.get(sid):
         env.append({"key": "CLAW_DATASTORE_VFS", "value": project})
+    # Long-form hardening (Increment 3): under quality.write_guard, bind the worker
+    # to the strict write tier — require an extension, repair a shortened name
+    # against the declared set, and enforce a byte floor on its declared part.
+    flags = _run_flags.get(sid) or {}
+    manifest = _run_manifest.get(sid)
+    if flags.get("write_guard") and manifest is not None:
+        import json as _json
+        env.append({"key": "CLAW_WRITE_STRICT", "value": "1"})
+        env.append({"key": "CLAW_DECLARED_FILES",
+                    "value": _json.dumps(manifest.declared_basenames())})
+        part = manifest.part_for(subtask) if subtask else None
+        if part is not None:
+            env.append({"key": "CLAW_MY_ARTIFACT", "value": part.basename()})
+            floor = part.min_bytes or manifest.min_bytes or 0
+            if floor:
+                env.append({"key": "CLAW_WRITE_MIN_BYTES", "value": str(floor)})
     return env
 
 
@@ -443,6 +495,10 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
             # Optional Lead-assigned execution group ('A'..'D'); clamped to the
             # archetype's preset floor at run time (grouped mode only).
             "group": s.get("group"),
+            # Optional chapter/section range for a split continuous artifact
+            # (Increment 3) — tolerated so a derived manifest can pick it up. The
+            # code assigns the artifact filename; the Lead only hints the range.
+            **({"range": s.get("range")} if s.get("range") else {}),
         })
     # Keep only dependency refs that point at a real sibling (drop self + danglers).
     valid_ids = {s["id"] for s in subtasks}
@@ -1104,6 +1160,14 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _knob_updates["grouped_review"] = True
     if int(cfg.get("max_parallel") or 0) != int(getattr(body, "max_parallel", 0) or 0):
         _knob_updates["max_parallel"] = int(getattr(body, "max_parallel", 0) or 0)
+    # Long-form hardening (Increment 3): persist the deliverable manifest + role tiers
+    # so a continuation round inherits them (tier NAMES only — never secrets).
+    _body_deliverable = getattr(body, "deliverable", None)
+    if _body_deliverable is not None and cfg.get("deliverable") != _body_deliverable:
+        _knob_updates["deliverable"] = _body_deliverable
+    _body_role_tiers = getattr(body, "role_tiers", None)
+    if _body_role_tiers is not None and cfg.get("role_tiers") != _body_role_tiers:
+        _knob_updates["role_tiers"] = _body_role_tiers
     if _knob_updates:
         cfg.update(_knob_updates)
         try:
@@ -1193,6 +1257,48 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # ({"A": "...", "B": "..."}), injected into every owner that runs in that group.
     _group_instructions = route.get("group_instructions") or {}
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
+
+    # ── Deliverable manifest (Increment 3) ──────────────────────────────
+    # Build the declared shape of the deliverable — target file, ordered parts,
+    # one owner per part, ranges, seam owner — from the caller's `deliverable`
+    # field, or derive one from the plan when quality.derive_manifest is on. Stamp
+    # each subtask's artifact filename and publish run flags the agent-facing
+    # endpoints read back. Absent config → _manifest is None and everything below
+    # is byte-identical to today.
+    _deliverable_req = getattr(body, "deliverable", None)
+    if _deliverable_req is None:
+        _deliverable_req = cfg.get("deliverable")
+    _manifest = deliverable_manifest.parse(_deliverable_req, subtasks, vfs_project)
+    # Fall back to deriving when there is no manifest, or when a caller/continuation
+    # manifest resolved to zero parts (e.g. its owners are stale after a re-decompose).
+    if (_manifest is None or not _manifest.parts) and quality.derive_manifest:
+        _derived = deliverable_manifest.derive(
+            _group0_by_subtask, subtasks, vfs_project,
+            kind_hint=quality.deliverable_kind or (_manifest.kind if _manifest else ""),
+            deliverable_name=((_manifest.basename() if _manifest else "")
+                              or (f"{deliverable_manifest.slugify(intent)}.md" if intent else "")))
+        _manifest = _derived or _manifest
+    if _manifest is not None:
+        deliverable_manifest.assign_artifacts(subtasks, _manifest)
+        _run_manifest[sid] = _manifest
+        cfg["deliverable_resolved"] = deliverable_manifest.to_analysis(_manifest)
+        try:
+            await db.update_basna_session(body.session_id, user["id"], config=json.dumps(cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra deliverable_resolved persist failed", error=str(e))
+        _progress(sid, "note",
+                  f"Deliverable manifest: {_manifest.basename()} ← {len(_manifest.parts)} part(s)")
+    # Run flags the agent-facing endpoints (_vatra_env, agent_wait) read without
+    # re-parsing config. Quality is authoritative; the manifest gates strict writes.
+    _run_flags[sid] = {
+        "write_guard": bool(quality.write_guard),
+        "wait_heartbeat": bool(quality.wait_heartbeat),
+        "wait_max_total_s": int(quality.wait_max_total_s or 0),
+        "require_inputs": bool(quality.require_inputs),
+        "strict_deps": bool(quality.strict_deps),
+        "clarify_dep_grant": bool(quality.clarify_dep_grant),
+        "deliverable_kind": quality.deliverable_kind,
+    }
     # Resume: load the per-owner checkpoints written by the stalled run. Owners with
     # a `done` checkpoint are restored in _dispatch_owner (skipped, no re-spend); the
     # rest re-dispatch normally and re-checkpoint as they finish.
@@ -1537,7 +1643,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             # Group 0: this owner's slice of the coordination plan — its mandate, what
             # it produces, and which teammates it consumes from. Its *contract*, placed
             # just before the TEAM SCHEDULE (its *timing*). No-op when there's no plan.
-            prompt += _plan_slice_block(st, _group0_by_subtask, arch_by_id)
+            prompt += _plan_slice_block(st, _group0_by_subtask, arch_by_id,
+                                        manifest=_run_manifest.get(sid))
             # R4 (opt-in): grouped DAG edges carry DATA — PUSH a dependency's
             # committed output into this consumer's context when that producer has
             # already finished (earlier phase / pulled-forward owner). No-op unless
@@ -2076,6 +2183,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _run_workers.pop(sid, None)
         _run_vfs_project.pop(sid, None)
         _run_shared_datastore.pop(sid, None)
+        _run_manifest.pop(sid, None)
+        _run_flags.pop(sid, None)
         _skip_agents.pop(sid, None)
         _wait_ledger.pop(sid, None)
         # An aborted run may leave a called-forward dispatch in flight — cancel
@@ -2880,6 +2989,10 @@ def _coerce_group0_entries(entries: Any, subtasks: list[dict], *, trust_group: b
             "produces": str(e.get("produces") or s.get("title") or "").strip(),
             "consumes_from": cons if cons else list(s.get("depends_on") or []),
             "hand_off_notes": str(e.get("hand_off_notes") or "").strip(),
+            # Long-form hardening (Increment 3): optional author-chosen part filename +
+            # chapter/section range a derived manifest picks up. "" when absent.
+            "produces_file": str(e.get("produces_file") or "").strip(),
+            "range": str(e.get("range") or s.get("range") or "").strip(),
         }
     for s in subtasks:
         if s["id"] not in seen:
@@ -3770,6 +3883,18 @@ class VatraStartRequest(BaseModel):
     # Project bundle this run belongs to (empty = Unfiled). The project's theme is
     # folded into the plan/shared_context and its folder added as a reference.
     project_id: str = ""
+    # Long-form deliverable manifest (docs/vatra-run-hardening-plan.md, Increment 3):
+    # {path, kind, min_bytes, min_sections, section_regex, parts:[{path, order, owner,
+    # range, min_bytes, sequential}], seam_owner}. None → none (or derived when
+    # quality.derive_manifest). owners may be omitted on /start and supplied on
+    # /plan/approve once subtasks are known.
+    deliverable: dict | None = None
+    # Per-role tier NAMES: {lead, planner, clarify, reporter, qa} → a Library tier
+    # name, so a caller can put the Lead/Reporter/QA on a stronger tier than the
+    # specialists without a per-slot map. None → today (role → hard-coded tier).
+    role_tiers: dict | None = None
+    # Per-dispatch wall (seconds) threaded into the run's ExecuteRequest. None → 600.
+    dispatch_timeout: float | None = None
 
 
 class VatraExecuteRequest(BaseModel):
@@ -3929,6 +4054,11 @@ class VatraPlanApproveRequest(BaseModel):
     execution_groups: bool | None = None
     grouped_review: bool = False
     quality: dict | None = None
+    # Long-form hardening (Increment 3): resend with owners mapped to subtasks now
+    # that the plan is known; falls back to the value persisted at plan time.
+    deliverable: dict | None = None
+    role_tiers: dict | None = None
+    dispatch_timeout: float | None = None
 
 
 class VatraPlanCancelRequest(BaseModel):
@@ -3980,7 +4110,13 @@ async def approve_vatra_plan(body: VatraPlanApproveRequest, request: Request,
         grouped_review=bool(body.grouped_review or cfg.get("grouped_review")),
         shared_datastore=bool(cfg.get("shared_datastore")),
         vfs_project=cfg.get("vfs_project") or "",
-        quality=body.quality if body.quality is not None else (cfg.get("quality") or None))
+        quality=body.quality if body.quality is not None else (cfg.get("quality") or None),
+        # Long-form hardening (Increment 3): resend with owners mapped to subtasks,
+        # else inherit what /start persisted.
+        deliverable=body.deliverable if body.deliverable is not None else (cfg.get("deliverable") or None),
+        role_tiers=body.role_tiers if body.role_tiers is not None else (cfg.get("role_tiers") or None),
+        dispatch_timeout=(body.dispatch_timeout if body.dispatch_timeout is not None
+                          else float(cfg.get("dispatch_timeout") or 600.0)))
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)
@@ -4206,13 +4342,23 @@ async def start_vatra(body: VatraStartRequest, request: Request,
         user["id"], intent, title=title,
         config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents,
                            **({"shared_datastore": True} if body.shared_datastore else {}),
-                           **({"horizon": body.horizon} if body.horizon else {})}))
+                           **({"horizon": body.horizon} if body.horizon else {}),
+                           # Long-form hardening (Increment 3): persist so /plan/approve
+                           # inherits them. quality was previously dropped here.
+                           **({"quality": body.quality} if body.quality else {}),
+                           **({"deliverable": body.deliverable} if body.deliverable else {}),
+                           **({"role_tiers": body.role_tiers} if body.role_tiers else {}),
+                           **({"dispatch_timeout": body.dispatch_timeout}
+                              if body.dispatch_timeout else {})}))
     sid = sess["id"]
     exec_req = ExecuteRequest(
         session_id=sid, tiers=_tiers or None,
         env_vars=_env or None, api_key=body.api_key or "",
         horizon=body.horizon or None, shared_datastore=body.shared_datastore,
-        vfs_project=body.vfs_project or "")
+        vfs_project=body.vfs_project or "",
+        quality=body.quality or None, deliverable=body.deliverable or None,
+        role_tiers=body.role_tiers or None,
+        dispatch_timeout=body.dispatch_timeout or 600.0)
     # Background task with a stub request carrying the owner (spawn_process reads
     # request.state.user_id) — the real request object isn't safe to use post-response.
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
@@ -4346,6 +4492,15 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
     }
     if parent_cfg.get("quality"):
         cfg["quality"] = parent_cfg["quality"]
+    # Long-form hardening (Increment 3): carry the deliverable manifest + role tiers
+    # into the chain. The manifest's part owners are re-mapped/derived per round
+    # (execute_vatra falls back to derive when the inherited owners are stale).
+    if parent_cfg.get("deliverable"):
+        cfg["deliverable"] = parent_cfg["deliverable"]
+    if parent_cfg.get("role_tiers"):
+        cfg["role_tiers"] = parent_cfg["role_tiers"]
+    if parent_cfg.get("dispatch_timeout"):
+        cfg["dispatch_timeout"] = parent_cfg["dispatch_timeout"]
     if parent_cfg.get("execution_groups"):
         cfg["execution_groups"] = True
     if parent_cfg.get("grouped_review"):
@@ -4381,7 +4536,10 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
                               grouped_review=bool(parent_cfg.get("grouped_review")),
                               max_parallel=int(parent_cfg.get("max_parallel") or 0),
                               horizon=parent_cfg.get("horizon") or None,
-                              quality=parent_cfg.get("quality") or None)
+                              quality=parent_cfg.get("quality") or None,
+                              deliverable=parent_cfg.get("deliverable") or None,
+                              role_tiers=parent_cfg.get("role_tiers") or None,
+                              dispatch_timeout=float(parent_cfg.get("dispatch_timeout") or 600.0))
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     # Headless continuation: draft a Group 0 plan then auto-approve (no human pause).
     t = asyncio.create_task(plan_vatra_group0(exec_req, stub, user, gate=False))

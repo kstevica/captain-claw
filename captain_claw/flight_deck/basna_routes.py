@@ -2780,6 +2780,10 @@ class ExecuteRequest(BaseModel):
     # durable checkpoints (no re-run, no re-spend) and re-dispatch only the missing
     # ones, then synthesize. Set by the /resume endpoints; false for a normal run.
     resume: bool = False
+    # Long-form deliverable manifest + per-role tier map (docs/vatra-run-hardening-plan.md,
+    # Vatra only). None → none / today. See VatraStartRequest for the shapes.
+    deliverable: dict | None = None
+    role_tiers: dict | None = None
 
 
 def _shared_ds_env(vfs_project: str, on: bool) -> list[dict]:
