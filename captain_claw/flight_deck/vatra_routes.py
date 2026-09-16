@@ -2801,7 +2801,11 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
         if _run_integrity:
             _progress(sid, "verify", "Story integrity: extracting the state store…")
             try:
-                from captain_claw.flight_deck import story_passes
+                # NOTE: `story_passes` is imported at module scope (top of file). Do NOT
+                # re-import it here — a function-local `import story_passes` would make the
+                # name function-local for the WHOLE of _execute_vatra_inner and turn the
+                # earlier `len(story_passes.ALL_PASSES)` in `_val_est` into an
+                # UnboundLocalError on every story_integrity run.
                 ires = await story_state.run_validator(
                     truth, extract_fn=_qa_extract, revise_fn=_qa_revise,
                     model_fn=_qa_revise, model_passes=story_passes.ALL_PASSES,
