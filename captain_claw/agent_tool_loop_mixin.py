@@ -749,6 +749,80 @@ class AgentToolLoopMixin:
     # Main tool call handler & execution engine
     # ------------------------------------------------------------------
 
+    # Tool errors from the write-boundary guards (Increment 1) that a corrected
+    # re-issue can fix — a forced retry is warranted, not a dead-end error.
+    _GUARD_RETRYABLE_ERRORS = frozenset({
+        "placeholder_content_rejected", "empty_content_rejected",
+        "path_missing_extension", "content_below_floor", "write_verify_failed",
+    })
+
+    def _malformed_retries_allowed(self) -> int:
+        """How many malformed / cut-off / guard-refused tool calls to auto-correct.
+
+        0 (default) = today's behaviour: the model must notice the error itself.
+        Vatra workers get 2 via CLAW_MALFORMED_CALL_RETRIES; a caller can also set
+        tools.malformed_call_retries in config.
+        """
+        env = 0
+        try:
+            env = int(os.environ.get("CLAW_MALFORMED_CALL_RETRIES", "0") or 0)
+        except Exception:
+            env = 0
+        cfg = 0
+        try:
+            cfg = int(get_config().tools.malformed_call_retries)
+        except Exception:
+            cfg = 0
+        return max(0, env, cfg)
+
+    def _force_tool_choice_next(self) -> None:
+        """Force the next provider call to actually emit a tool call (not prose)."""
+        try:
+            setattr(self.provider, "_tool_choice_override", "required")
+        except Exception:
+            pass
+
+    def _length_truncation_corrective(self, response) -> str | None:
+        """Corrective for a response that hit the output cap mid write/edit call.
+
+        Returns the corrective text (and bumps the counter + forces the next tool
+        call) when malformed retries are enabled, the response's finish_reason is
+        "length", it carries a write/edit tool call, and the retry budget is not
+        spent. Returns None otherwise (the call proceeds normally). Extracted so
+        the decision is unit-testable without the full agent loop.
+        """
+        mret = self._malformed_retries_allowed()
+        if mret <= 0:
+            return None
+        if str(getattr(response, "finish_reason", "") or "").lower() != "length":
+            return None
+        if getattr(self, "_malformed_retry_count", 0) >= mret:
+            return None
+        tcs = getattr(response, "tool_calls", None) or []
+        if not any(str(getattr(c, "name", "")).lower()
+                   in ("write", "edit", "file_write", "file_edit") for c in tcs):
+            return None
+        self._malformed_retry_count = getattr(self, "_malformed_retry_count", 0) + 1
+        self._force_tool_choice_next()
+        return (
+            "Your last tool call was cut off by the output limit before its "
+            "arguments finished, so it was NOT executed. Do not try to write a "
+            "whole large file in one call. Write the FIRST part now with `write`, "
+            "then call `write` again with append=true for each remaining part."
+        )
+
+    def _tool_required_params(self, name: str) -> list[str]:
+        """Required parameter names for a registered tool (empty if unknown)."""
+        try:
+            tool = getattr(self, "tools", None)
+            reg = getattr(tool, "_tools", {}) if tool is not None else {}
+            t = reg.get(name)
+            if t is not None:
+                return list((getattr(t, "parameters", {}) or {}).get("required", []))
+        except Exception:
+            pass
+        return []
+
     async def _handle_tool_calls(
         self,
         tool_calls: list[ToolCall],
@@ -783,11 +857,52 @@ class AgentToolLoopMixin:
 
             # Parse arguments (could be string or dict)
             arguments = tc.arguments
+            _malformed_json = False
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
+                    _malformed_json = True
                     arguments = {"raw": arguments}
+
+            # ── Malformed / truncated tool-call arguments (opt-in) ─────
+            # A fast/weak model often emits a `write` whose JSON is cut off
+            # mid-`content`; the provider hands us an unparseable string, which
+            # becomes {"raw": …} and then a plain "Missing required argument"
+            # error the model may ignore. When malformed retries are enabled
+            # (Vatra workers), do NOT execute a partial call — inject a
+            # corrective and force the next call to be a real, complete tool
+            # call. Bounded so a persistently-broken turn still terminates.
+            _mret = self._malformed_retries_allowed()
+            _required = self._tool_required_params(tc.name) if _malformed_json else []
+            if (
+                _malformed_json
+                and _mret > 0
+                and _required
+                and self._malformed_retry_count < _mret
+            ):
+                self._malformed_retry_count += 1
+                _rawstr = str(arguments.get("raw", ""))
+                _mp = re.search(r'"(?:path|file_path)"\s*:\s*"([^"]{1,200})', _rawstr)
+                _pathhint = f' (the path looked like "{_mp.group(1)}")' if _mp else ""
+                corrective = (
+                    f"Your `{tc.name}` call arrived with truncated or invalid JSON"
+                    f"{_pathhint}. Required arguments: {', '.join(_required)}. "
+                    "Re-issue the SAME call in full with valid JSON. For a large "
+                    "`write`, write the first part now, then call `write` again "
+                    "with append=true for each subsequent part — never one giant "
+                    "call that gets cut off."
+                )
+                log.warning("Malformed tool-call args — corrective retry",
+                            tool=tc.name, call_id=tc.id, attempt=self._malformed_retry_count)
+                self._add_session_message(
+                    role="tool", content=corrective,
+                    tool_call_id=tc.id, tool_name=tc.name, tool_arguments=None,
+                )
+                self._emit_tool_output(tc.name, {}, corrective)
+                results.append({"tool_call_id": tc.id, "role": "tool", "content": corrective})
+                self._force_tool_choice_next()
+                continue
 
             # ── Scale guard: hard redirect for off-track calls ─────
             # Must run before dup detection and execution. When the guard
@@ -1072,6 +1187,32 @@ class AgentToolLoopMixin:
 
                 # Add result to session
                 _result_content = result.content if result.success else f"Error: {result.error}"
+
+                # ── Guard-refused write: show the guidance, force a retry ──
+                # Increment-1 write guards return a helpful ❌ message in
+                # `content` and a short code in `error`. Surface the guidance
+                # (not just the code) so the model knows how to fix it, un-block
+                # a corrected re-issue to the same path, and — when malformed
+                # retries are enabled (Vatra workers) — force the next call to be
+                # the corrected re-issue instead of prose. Scoped to the new
+                # guard codes, so every other tool's failure is byte-identical.
+                if (not result.success
+                        and result.error in self._GUARD_RETRYABLE_ERRORS):
+                    if result.content:
+                        _result_content = result.content
+                    if isinstance(arguments, dict):
+                        _gp = str(arguments.get("path", "")).strip()
+                        if _gp:
+                            try:
+                                self._blind_write_paths.discard(os.path.abspath(_gp))
+                            except Exception:
+                                pass
+                    if self._malformed_retries_allowed() > self._malformed_retry_count:
+                        self._malformed_retry_count += 1
+                        self._force_tool_choice_next()
+                        log.info("Guard-refused write — corrective retry armed",
+                                 tool=tc.name, error=result.error,
+                                 attempt=self._malformed_retry_count)
 
                 # ── Chunked processing: reduce oversized tool results ──
                 # When a content-extraction tool returns more text than

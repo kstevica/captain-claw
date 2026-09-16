@@ -680,11 +680,18 @@ async def _spawn_worker(request: Request, user: dict, *, name: str, description:
             max_context = int(mt.get("input_ctx") or 0) or 8192
 
     worker_tools = [t for t in (tools or AgentConfig().tools) if t != "basna"]
+    # Every Vatra worker (specialists AND reporter) runs on a caller-chosen tier
+    # that is often a fast/weak model, so default the tool-loop's malformed /
+    # cut-off / guard-refused corrective retries on (Increment 2). Don't clobber
+    # a value a caller already threaded through env_vars.
+    _worker_env = (env_vars or []) + (extra_env or [])
+    if not any(str(e.get("key")) == "CLAW_MALFORMED_CALL_RETRIES" for e in _worker_env):
+        _worker_env = _worker_env + [{"key": "CLAW_MALFORMED_CALL_RETRIES", "value": "2"}]
     base = dict(
         name=name, description=description,
         cognitive_mode=cognitive_mode or "neutra", tools=worker_tools,
         runtime=runtime,
-        env_vars=(env_vars or []) + (extra_env or []) + [{"key": _WORKER_MARKER, "value": "1"}]
+        env_vars=_worker_env + [{"key": _WORKER_MARKER, "value": "1"}]
         + ([{"key": "CLAW_SOURCE_CORPUS", "value": "1"}] if corpus else []),  # R10
         web_enabled=True, web_port=0,
     )
