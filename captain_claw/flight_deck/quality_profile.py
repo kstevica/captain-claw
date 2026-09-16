@@ -222,6 +222,12 @@ class QualityProfile:
     gate_blocks_done: bool = False     # Inc 7: a critical QA verdict blocks `done` (paid)
     qa_tier: str = ""                  # Inc 7/8: tier name for the QA extractor/reviser
     deliverable_kind: str = ""         # Inc 3/7: "" | "document" | "fiction"
+    # Story Integrity Protocol (docs/story-integrity-protocol.md). "" = off;
+    # "story_integrity" = the umbrella opt-in that deepens canon_pass into the
+    # story-state store + the deterministic passes (A/B/D/E/G/H) + severity gate.
+    # Supersedes canon_pass when set; canon_pass alone stays the lighter check.
+    validation: str = ""               # "" | "story_integrity"
+    validation_max_rounds: int = 2     # bounded revise rounds for the validator
 
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
@@ -285,6 +291,11 @@ class QualityProfile:
             kind = ""
         kw["deliverable_kind"] = kind
         kw["qa_tier"] = str(d.get("qa_tier") or "")
+        validation = str(d.get("validation") or "").lower()
+        if validation not in ("", "story_integrity"):
+            log.warning("unknown validation; ignoring", validation=validation)
+            validation = ""
+        kw["validation"] = validation
 
         def _int(key: str, default: int) -> int:
             # Use the default only when the key is ABSENT — an explicit 0/-1 must
@@ -307,6 +318,7 @@ class QualityProfile:
         kw["deliverable_min_sections"] = max(0, _int("deliverable_min_sections", 0))
         kw["wait_max_total_s"] = max(0, _int("wait_max_total_s", 0))
         kw["clarify_cap"] = max(1, _int("clarify_cap", 2))
+        kw["validation_max_rounds"] = max(1, _int("validation_max_rounds", 2))
         return cls(**kw)
 
     _BOOL_FLAGS = (
