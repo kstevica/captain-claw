@@ -766,6 +766,12 @@ async def _spawn_worker(request: Request, user: dict, *, name: str, description:
     _worker_env = (env_vars or []) + (extra_env or [])
     if not any(str(e.get("key")) == "CLAW_MALFORMED_CALL_RETRIES" for e in _worker_env):
         _worker_env = _worker_env + [{"key": "CLAW_MALFORMED_CALL_RETRIES", "value": "2"}]
+    # Weak-tier signal (Increment 8): a caller can mark a tier `weak: true` to say
+    # "this slot is a fast/weak model" — surfaced to the worker as CLAW_MODEL_WEAK so
+    # its runtime can lean on the deterministic backstops. An explicit signal, not a
+    # name-based classifier (which would mis-rank a hosted DeepSeek as frontier).
+    if lt.get("weak") and not any(str(e.get("key")) == "CLAW_MODEL_WEAK" for e in _worker_env):
+        _worker_env = _worker_env + [{"key": "CLAW_MODEL_WEAK", "value": "1"}]
     base = dict(
         name=name, description=description,
         cognitive_mode=cognitive_mode or "neutra", tools=worker_tools,
@@ -1067,7 +1073,8 @@ async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent:
                               shared_context: str, file_names: list[str],
                               subtasks: list[dict], arch_by_id: dict, tiers: dict | None,
                               api_key: str, env_vars: list[dict] | None,
-                              timeout: float, clarifications: str = "") -> dict:
+                              timeout: float, clarifications: str = "",
+                              tier: str = "") -> dict:
     """Spawn the Long Horizon Planner, dispatch it to draft the per-agent coordination
     plan, and return the parsed structured plan. Best-effort: any spawn/dispatch/parse
     failure yields the pass-through plan so a dead planner never blocks the run. Emits
@@ -1104,7 +1111,7 @@ async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent:
         request, user, name=f"vatra-{sid[:8]}-planner",
         description="Draft the team coordination plan",
         cognitive_mode=planner_arch.get("cognitive_mode") or "neutra",
-        tools=["read", "glob"], tier=planner_arch.get("tier") or "reason",
+        tools=["read", "glob"], tier=(tier or planner_arch.get("tier") or "reason"),
         tiers=tiers, api_key=api_key, env_vars=env_vars)
     if not sp.get("ok"):
         _progress(sid, "note", "Planner unavailable — using a pass-through coordination plan",
@@ -1164,6 +1171,13 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
     def _creds(tier: str) -> dict:
         return _resolve_creds(registry, body.tiers, body.api_key, tier)
 
+    # Per-role tier NAMES (Increment 8): the Lead/planner can run on a stronger tier.
+    _rtiers = (getattr(body, "role_tiers", None) if getattr(body, "role_tiers", None) is not None
+               else cfg.get("role_tiers")) or {}
+
+    def _role_tier(role: str, default: str = "") -> str:
+        return str((_rtiers or {}).get(role) or default or "")
+
     # Persist the run's knobs onto the session config so /plan/approve (and any resume)
     # reconstruct the same run without the UI having to resend them.
     _knobs: dict[str, Any] = {
@@ -1174,6 +1188,12 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
         _knobs["grouped_review"] = True
     if body.quality is not None:
         _knobs["quality"] = body.quality
+    if getattr(body, "deliverable", None) is not None:
+        _knobs["deliverable"] = body.deliverable
+    if getattr(body, "role_tiers", None) is not None:
+        _knobs["role_tiers"] = body.role_tiers
+    if getattr(body, "dispatch_timeout", None):
+        _knobs["dispatch_timeout"] = body.dispatch_timeout
     _changed = {k: v for k, v in _knobs.items() if cfg.get(k) != v}
     if _changed:
         cfg.update(_changed)
@@ -1196,7 +1216,7 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
     _phase(sid, "Group 0 · Long Horizon Planner")
 
     route = await _ensure_route(db, user["id"], sess, sid, intent=intent,
-                                max_agents=max_agents, creds=_creds("reason"), cfg=cfg,
+                                max_agents=max_agents, creds=_creds(_role_tier("lead", "reason")), cfg=cfg,
                                 shared_datastore=_shared_ds, vfs_project=_vfs_project(sid))
     subtasks = route.get("subtasks") or []
     # Re-resolve execution groups from the user's team-plan edits BEFORE the plan is
@@ -1217,7 +1237,7 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
         request, user, sid, intent=intent, shared_context=route.get("shared_context", ""),
         file_names=file_names, subtasks=subtasks, arch_by_id=arch_by_id,
         tiers=body.tiers, api_key=body.api_key, env_vars=body.env_vars,
-        timeout=body.dispatch_timeout)
+        timeout=body.dispatch_timeout, tier=_role_tier("planner", ""))
     route["group0_plan"] = plan
     try:
         await db.update_basna_session(sid, user["id"], route=json.dumps(route))
@@ -1353,7 +1373,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # if present; otherwise decompose now (resume path). Shared with the pre-phase via
     # _ensure_route so both decompose identically.
     route = await _ensure_route(db, user["id"], sess, sid, intent=intent,
-                                max_agents=max_agents, creds=_creds("reason"), cfg=cfg,
+                                max_agents=max_agents, creds=_creds(_role_tier("lead", "reason")), cfg=cfg,
                                 shared_datastore=_shared_ds, vfs_project=_vfs_project(sid))
     domain = route["domain"]
     subtasks = route["subtasks"]
@@ -2903,6 +2923,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         analysis["consistency"] = consistency_summary
     if canon_summary is not None:
         analysis["canon"] = canon_summary
+    if _role_tiers_map:
+        analysis["tiers_used"] = dict(_role_tiers_map)  # Increment 8: which roles got a tier
     if gate_summary is not None:
         analysis["quality_verdict"] = gate_summary["verdict"]
         analysis["blocking"] = gate_summary
@@ -2916,7 +2938,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         analysis["quality_metrics"] = qm
     if consistency_summary is not None or contract_summary is not None \
             or gate_summary is not None or qm or _deliverable_analysis is not None \
-            or canon_summary is not None:
+            or canon_summary is not None or _role_tiers_map:
         try:
             await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
         except Exception as e:  # noqa: BLE001

@@ -128,3 +128,26 @@ async def test_explicit_micro_tier_always_means_mrav(spawn_capture):
     cfg = spawn_capture["cfg"]
     assert cfg.runtime == "mrav"
     assert cfg.model == "qwen3.5:4b"
+
+
+# ── Increment 8: weak-tier signal + default malformed retries ─────────
+
+@pytest.mark.asyncio
+async def test_weak_tier_sets_env_signal(spawn_capture):
+    tiers = {"fast": {**TIERS["fast"], "weak": True}}
+    out = await _spawn(micro=False, tier="fast", tiers=tiers)
+    assert out["ok"]
+    cfg = spawn_capture["cfg"]
+    keys = {e["key"]: e["value"] for e in cfg.env_vars}
+    assert keys.get("CLAW_MODEL_WEAK") == "1"
+    # every Vatra worker gets malformed-call retries on by default (Increment 2)
+    assert keys.get("CLAW_MALFORMED_CALL_RETRIES") == "2"
+
+
+@pytest.mark.asyncio
+async def test_no_weak_flag_no_signal(spawn_capture):
+    out = await _spawn(micro=False, tier="fast")
+    cfg = spawn_capture["cfg"]
+    keys = {e["key"] for e in cfg.env_vars}
+    assert "CLAW_MODEL_WEAK" not in keys
+    assert "CLAW_MALFORMED_CALL_RETRIES" in keys  # still on for workers
