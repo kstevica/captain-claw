@@ -38,6 +38,10 @@ export interface TierConfig {
   base_url: string
   input_ctx: number   // max input context window
   output_ctx: number  // max output (completion) tokens
+  // Marks this slot as a fast/weak model so a Vatra run leans on the deterministic
+  // backstops (surfaced to the worker as CLAW_MODEL_WEAK). Optional; omitted =
+  // not weak. An explicit signal — never inferred from the model name.
+  weak?: boolean
 }
 export type TierMap = Record<string, TierConfig>
 
