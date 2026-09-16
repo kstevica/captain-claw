@@ -538,6 +538,23 @@ export function LibraryPage() {
                       </div>
                     </div>
 
+                    {/* Capability — mark a fast/weak model so runs lean on the guards */}
+                    <label className="flex cursor-pointer items-start gap-2 text-xs text-zinc-400">
+                      <input
+                        type="checkbox"
+                        checked={!!tc.weak}
+                        onChange={(e) => updateTier(t, { weak: e.target.checked })}
+                        className="mt-0.5 h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-950 text-violet-500 focus:ring-violet-500/40"
+                      />
+                      <span>
+                        <span className="font-medium text-zinc-300">Weak / fast model</span>
+                        <span className="ml-1 text-zinc-500">
+                          — a small or fast model (e.g. a Flash tier). A multi-agent run leans on
+                          the deterministic backstops for this slot. Leave off for a strong model.
+                        </span>
+                      </span>
+                    </label>
+
                     {/* Connection — credentials (usually server-provided) */}
                     <div className="grid grid-cols-1 gap-3 border-t border-zinc-800/70 pt-3 sm:grid-cols-2">
                       <div>
