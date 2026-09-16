@@ -1,24 +1,36 @@
 # Captain Claw — Story Integrity & Finalization Protocol
 
-> Status: **P0 IMPLEMENTED** (2026-09-16) on branch `feat/story-integrity-p0`.
+> Status: **P0 + P1 + P2 IMPLEMENTED** (2026-09-16) on branch `feat/story-integrity-p0`.
 > Extends `docs/vatra-run-hardening-*.md`. From the reviewer's "Story Integrity and
-> Finalization Protocol" + the Captain Spark test-run feedback.
+> Finalization Protocol" + the Captain Spark test-run feedback. Opt in with
+> `quality.validation == "story_integrity"`.
 >
-> **What P0 ships (this build):** the story-state store, the six DETERMINISTIC
-> passes (A chronology, B knowledge, D provenance, E hypothesis scope, G
-> quantities/identity, H clue payoff) as a gated post-draft validator that reads a
-> store EXTRACTED from the merged draft, with a bounded patch-revise loop and a
-> severity→done-gate. Opt in with `quality.validation == "story_integrity"`.
-> This is the deterministic 80/20: it kills age drift, paid>attempted, future-dated
-> data, two-places-at-once, "the pool is one", cross-role elimination, and unpaid
-> clues — cheaply, on a weak model, with no trust in the model to self-audit.
+> **P0 — deterministic passes (`story_state.py`).** The story-state store + the six
+> DETERMINISTIC passes (A chronology, B knowledge, D provenance, E hypothesis scope,
+> G quantities/identity, H clue payoff) over a store EXTRACTED from the merged draft,
+> a bounded patch-revise loop, and a severity→done-gate. Kills age drift,
+> paid>attempted, future-dated data, two-places-at-once, "the pool is one",
+> cross-role elimination, and unpaid clues — cheaply, no trust in the model.
 >
-> **Deferred to P1/P2** (see §11): the pre-draft Group-A/B pipeline (constraints,
-> ledgers, causal outline, physical-simulation gate), the model passes (C physical
-> replay on final prose, F research-claims, I narrative economy, J emotional
-> fairness), and the §9 claim-attacker research gate + professional-procedure pass +
-> full plot-simplification authority. P0 runs the validator POST-draft over the
-> assembled file; P1 moves state-building before the draft.
+> **P1 — model passes (`story_passes.py`).** C physical mechanism, F research
+> claims, I narrative economy, J emotional-fairness/seeding — reason-tier judgment
+> over the merged draft + store, run in and across the revise loop, feeding the same
+> severity gate (I is clamped to soft; C/F/J may block). Plus the pre-draft
+> `STORY_INTEGRITY_DIRECTIVE` folded into the team's shared context (build the causal
+> outline + scene plan, simulate the mechanism, one continuous artifact — riding the
+> shipped strict_deps/require_inputs/single-writer machinery).
+>
+> **P2 — CA claim-attacker + PR professional-procedure passes** (`story_passes.py`),
+> plus a plot-simplification escalation in the revise loop (round 2+ is told to
+> simplify: a time range, a simpler mechanism, a changed action, a seeded-or-cut
+> twist). The shipped CA pass is a **knowledge-only** adversarial judgment pass (no
+> tool research, no ledger write); a tool-using research gate that writes a
+> constraint ledger (§9's fuller form) remains future work.
+>
+> **Fail-safe design (verified):** every check must fire only on a contradiction
+> clearly present in the state; sparse/absent extraction must not false-block a good
+> story. Two adversarial-verification workflows (one per phase) found and fixed 5
+> P0 + 4 P1/P2 fail-safe/correctness bugs before merge.
 
 ## How P0 maps onto the hardening build
 
@@ -91,13 +103,20 @@ Locate the earliest scene, repair the CAUSE (redesign mechanism / fix state), up
 
 ## 9. Research-reality gate (P2)
 
+> Shipped as a **knowledge-only** adversarial judgment pass (`story_passes.py`, pass
+> CA): a reason-tier agent attacks each material claim from its own knowledge and
+> emits findings. The fuller form below — a claim-attacker that RESEARCHES with tools
+> and writes a persisted constraint ledger downstream agents read — remains future
+> work (the existing `claim_check` R8 web-fact-checker is the nearest tool-using lever).
+
 An internal "claim-attacker" agent (reason tier) adversarially researches each material story claim with Vatra's existing tools and writes the result into the constraint ledger. Never turn "possible" into "established", "not found" into "proved absent", or a current finding into a historical one without a bridge. If research can't support the plot timing, change the plot — don't compress a multi-day process into minutes or cherry-pick a weaker source.
 
 ## 11. Phased plan
 
 - **P0 (done)** — story-state store + deterministic passes A/B/D/E/G/H as a gated post-draft validator with rewrite authority + severity→done-gate.
-- **P1** — Group-B physical-simulation gate + model passes C/F/I/J on the reason tier + the causal outline as a Group-A artifact + the seeding check (Pass J).
-- **P2** — the §9 claim-attacker research gate + the professional-procedure pass + full plot-simplification authority in the revise loop.
+- **P1 (done)** — model passes C/F/I/J on the reason tier (post-draft, in the revise loop) + the pre-draft causal-outline/simulation staging as a shared-context directive riding strict_deps/require_inputs + the seeding check (Pass J, downgraded to non-blocking when the draft is windowed).
+- **P2 (done)** — the claim-attacker pass (CA, knowledge-only) + the professional-procedure pass (PR) + plot-simplification escalation in the revise loop.
+- **Remaining future work** — a true pre-draft physical-simulation GATE as a distinct dispatch-loop stage (P1 delivers it as a post-draft blocking pass + pre-draft guidance) and the tool-using claim-attacker research gate that writes a persisted constraint ledger (§9's fuller form; the shipped CA pass is knowledge-only).
 
 ## 12. Acceptance test
 

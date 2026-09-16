@@ -529,21 +529,31 @@ def bucket(findings: list[dict]) -> dict:
 
 # ── patch-mode revision ───────────────────────────────────────────────
 
-def patch_prompt(text: str, findings: list[dict]) -> str:
+def patch_prompt(text: str, findings: list[dict], simplify: bool = False) -> str:
     lines = []
     for f in findings[:20]:
         q = "; ".join(x for x in (f.get("quotes") or []) if x)
+        fix = f.get("fix")
         lines.append(f"- [{f['pass']}/{f['kind']} · {f['severity']}] {f['reason']}"
+                     + (f" — suggested fix: {fix}" if fix else "")
                      + (f" (quotes: {q})" if q else ""))
+    escalate = (
+        "An earlier narrow fix did NOT clear these — now SIMPLIFY the plot as needed: "
+        "replace an exact time with a range, replace an unreliable mechanism with a "
+        "simpler one that works, change a professional action that would invalidate the "
+        "case, or seed an unsupported twist earlier or cut it. A simpler true story beats "
+        "a complex impossible one. "
+    ) if simplify else (
+        "You MAY simplify the plot — a time range instead of an exact time, a simpler "
+        "mechanism, a changed action, a seeded-or-cut twist. "
+    )
     return (
         "A continuity check found these HARD/MAJOR integrity errors in a narrative. "
         "REPAIR THE CAUSE, not the wording: fix the chronology, the state, the "
-        "mechanism, or the logic. You MAY simplify the plot — use a time range instead "
-        "of an exact time, simplify an impossible mechanism, change an action that "
-        "would invalidate the case, or seed/cut an unsupported twist. Do NOT paper over "
-        "an impossible sequence with one explanatory sentence, and do NOT rewrite the "
-        "whole story. Output ONLY a JSON array of anchored find/replace patches — the "
-        "`find` must be an EXACT substring of the text:\n"
+        "mechanism, or the logic. " + escalate +
+        "Do NOT paper over an impossible sequence with one explanatory sentence, and do "
+        "NOT rewrite the whole story. Output ONLY a JSON array of anchored find/replace "
+        "patches — the `find` must be an EXACT substring of the text:\n"
         '[{"find": "<exact text to replace>", "replace": "<corrected text>"}]\n\n'
         "Errors:\n" + "\n".join(lines) + "\n\nTEXT:\n" + text[:FULL_REEMIT_MAX]
     )
@@ -581,15 +591,21 @@ def apply_patches(text: str, patches: list[dict]) -> tuple[str, int, list[dict]]
 
 async def run_validator(text: str, *, extract_fn: CompleteFn,
                         revise_fn: CompleteFn | None = None,
+                        model_fn: CompleteFn | None = None,
+                        model_passes: tuple = (),
                         max_rounds: int = 2, max_items: int = 80,
                         on_progress: Callable[[str], None] | None = None) -> dict:
-    """Extract the store → deterministic verify → bounded patch-revise loop.
+    """Extract the store → deterministic verify (+ optional MODEL passes) → bounded
+    patch-revise loop.
 
     Returns ``{text, store, revised, findings, initial_findings, rounds, hard,
     major, soft}``. Each round: extract the store from the current text, run the
-    six passes; if hard/major findings remain and a reviser is available, patch by
-    anchored find/replace (repair the cause, may simplify), re-extract, re-verify,
-    and keep the revision only if it reduces the hard+major count.
+    deterministic passes AND (when ``model_fn``/``model_passes`` are given) the
+    reason-tier model passes (C/F/I/J physical/research/economy/fairness, CA/PR
+    claim-attacker/procedure); if hard/major findings remain and a reviser is
+    available, patch by anchored find/replace (repair the cause, may simplify),
+    re-extract, re-verify, and keep the revision only if it reduces the hard+major
+    count. Later rounds escalate to allow structural simplification.
     """
     def _note(m: str) -> None:
         if on_progress:
@@ -606,8 +622,20 @@ async def run_validator(text: str, *, extract_fn: CompleteFn,
             parts.append(parse_store(await extract_fn(extract_prompt(ch, max_items)) or ""))
         return merge(parts)
 
-    store = await _extract(text)
-    findings = verify(store)
+    async def _all_findings(t: str) -> tuple[dict, list[dict]]:
+        st = await _extract(t)
+        fs = verify(st)  # deterministic passes (A/B/D/E/G/H)
+        if model_fn is not None and model_passes:
+            from captain_claw.flight_deck import story_passes
+            try:
+                fs = fs + await story_passes.run_model_passes(
+                    t, json.dumps(st, ensure_ascii=True), model_fn,
+                    passes=model_passes, on_progress=on_progress)
+            except Exception as e:  # noqa: BLE001 — model passes are best-effort
+                log.warning("story model passes failed", error=str(e))
+        return st, fs
+
+    store, findings = await _all_findings(text)
     result = {"text": text, "store": store, "revised": False, "findings": findings,
               "initial_findings": findings, "rounds": 0, "patched": 0,
               **bucket(findings)}
@@ -623,7 +651,9 @@ async def run_validator(text: str, *, extract_fn: CompleteFn,
             break
         rounds += 1
         _note(f"Integrity round {rounds}: {len(blockers)} hard/major error(s) — revising…")
-        patches = parse_patches((await revise_fn(patch_prompt(cur_text, blockers))) or "")
+        # Escalate to structural simplification once a first round didn't clear it.
+        patches = parse_patches((await revise_fn(
+            patch_prompt(cur_text, blockers, simplify=rounds > 1)) or ""))
         if not patches:
             break
         revised, applied, _un = apply_patches(cur_text, patches)
@@ -631,10 +661,15 @@ async def run_validator(text: str, *, extract_fn: CompleteFn,
         if collapsed or applied == 0:
             _note("Integrity: patches did not apply cleanly — kept the draft")
             break
-        new_store = await _extract(revised)
-        new_findings = verify(new_store)
+        new_store, new_findings = await _all_findings(revised)
         new_block = [f for f in new_findings if f.get("severity") in ("hard", "major")]
-        if len(new_block) >= len(blockers):
+        # The done-gate is HARD-only, so a revision that trades majors for a NEW hard
+        # (a simplification the non-deterministic model passes can provoke) would flip a
+        # done-eligible draft to error. Never accept an increase in the HARD count, and
+        # otherwise require the total hard+major to strictly drop.
+        old_hard = sum(1 for f in blockers if f.get("severity") == "hard")
+        new_hard = sum(1 for f in new_block if f.get("severity") == "hard")
+        if new_hard > old_hard or len(new_block) >= len(blockers):
             _note("Integrity: revision did not reduce hard/major errors — kept the draft")
             break
         cur_text, cur_findings, store = revised, new_findings, new_store

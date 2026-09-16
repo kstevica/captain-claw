@@ -87,6 +87,7 @@ from captain_claw.flight_deck import research_consistency
 from captain_claw.flight_deck import research_contract
 from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck import research_rubric
+from captain_claw.flight_deck import story_passes
 from captain_claw.flight_deck import story_state
 from captain_claw.flight_deck import vatra_groups
 from captain_claw.flight_deck.horizon_worker import HorizonConfig, run_horizon_closer
@@ -1009,6 +1010,31 @@ async def _finish_blocked(db, sid: str, user: dict, *, reason: str, truth: str,
             "subtasks": [], "learned": [], "cost": None, "blocked": reason}
 
 
+# Story Integrity Protocol (P1): pre-draft staging guidance folded into the team's
+# shared context when quality.validation == "story_integrity". Leans on the shipped
+# strict_deps / require_inputs / single-writer machinery; the validator is the gate.
+STORY_INTEGRITY_DIRECTIVE = (
+    "\n\n## Story integrity (this run is validated for continuity)\n"
+    "Before any prose is written, establish the STATE and the plan, in this order:\n"
+    "1. Constraints & causal outline — the antagonist's chain: want → what they knew and "
+    "WHEN they learned it → trigger → preparation → access/tools → execution → exit → "
+    "traces left/removed → why it isn't obvious → what exposes them. Fix character ages "
+    "(derived from dates), the timeline, evidence provenance, and per-role suspect pools.\n"
+    "2. Physical simulation — replay the crime minute-by-minute: can the victim do every "
+    "action, WHY does the victim enter the dangerous place (it must be caused and shown, "
+    "not convenient), can they escape via any safety mechanism, can the antagonist finish "
+    "in the available time, is anyone in two places at once, does the mechanism work on a "
+    "realistic timescale. If it cannot work, SIMPLIFY the mechanism BEFORE drafting — do "
+    "not write a scene the physics forbids.\n"
+    "3. Draft — ONE continuous artifact, one writer, binding every exact figure, name, age, "
+    "date, time, sum and count to the established state; a present result never proves a "
+    "past state; 'not found' is never 'proved absent'; an elimination clears ONE role only.\n"
+    "A separate validator then checks all of this and can send it back; a simpler true "
+    "story always beats a complex impossible one. Demonstrate consistency through the "
+    "story — never announce that it is consistent."
+)
+
+
 # The reporter smooths seams in an ALREADY-assembled file; it never rewrites it.
 REPORTER_SMOOTH_DIRECTIVE = (
     "The deliverable is ALREADY assembled at `{path}` ({bytes} bytes) in your shared "
@@ -1456,6 +1482,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     if quality.strict_deps and subtasks:
         for _n in vatra_groups.resolve_groups(subtasks, arch_by_id, strict_deps=True):
             log.info("Vatra strict_deps repair", note=_n)
+
+    # Story-integrity pre-draft staging (P1): when the protocol is on, fold a directive
+    # into every worker's shared context so the team builds the causal outline + scene
+    # plan first, simulates the mechanism BEFORE drafting (and simplifies it if it can't
+    # work), keeps one continuous artifact, and binds every exact figure to the state.
+    # The deterministic + model validator is still the hard backstop; this raises the
+    # odds the draft passes it. It rides the existing strict_deps/require_inputs so a
+    # simulator/outline subtask sequences before the writer.
+    if quality.validation == "story_integrity" and STORY_INTEGRITY_DIRECTIVE not in shared_context:
+        shared_context = (shared_context + STORY_INTEGRITY_DIRECTIVE).strip()
 
     # Run flags the agent-facing endpoints (_vatra_env, agent_wait) read without
     # re-parsing config. Quality is authoritative; the manifest gates strict writes.
@@ -2654,8 +2690,13 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # validation, canon_pass alone stays the lighter continuity check.
     _run_integrity = (quality.validation == "story_integrity")
     _run_canon = quality.canon_pass and not _run_integrity
-    if (_run_integrity or _run_canon) and (truth or "").strip() and _budget.can_afford(2 * _retry_est):
-        _budget.add(2 * _retry_est)
+    # Story-integrity runs 6 reason-tier model passes up to (validation_max_rounds+1)
+    # times, so book that against the budget — the flat 2×_retry_est is only right for
+    # the deterministic-only canon path.
+    _val_est = (len(story_passes.ALL_PASSES) * (quality.validation_max_rounds + 1) * _retry_est
+                if _run_integrity else 2 * _retry_est)
+    if (_run_integrity or _run_canon) and (truth or "").strip() and _budget.can_afford(_val_est):
+        _budget.add(_val_est)
         _qa_ex_creds = _creds(_role_tier("qa", quality.qa_tier or "fast"))
         _qa_rv_creds = _creds(_role_tier("qa", quality.qa_tier or "reason"))
 
@@ -2681,8 +2722,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         if _run_integrity:
             _progress(sid, "verify", "Story integrity: extracting the state store…")
             try:
+                from captain_claw.flight_deck import story_passes
                 ires = await story_state.run_validator(
                     truth, extract_fn=_qa_extract, revise_fn=_qa_revise,
+                    model_fn=_qa_revise, model_passes=story_passes.ALL_PASSES,
                     max_rounds=quality.validation_max_rounds,
                     on_progress=lambda m: _progress(sid, "verify", m))
                 if ires["revised"]:
@@ -2972,6 +3015,11 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         # majors don't block `done`; surface them for the client to show with the draft
         analysis.setdefault("blocking", {})["major"] = story_state.blocking_analysis(
             {"hard": [], "major": integrity_major})["major"]
+    if integrity_hard:
+        # reached the done path only when gate_blocks_done is OFF — surface the surviving
+        # hard rows so the client can show them with the kept draft, not just the count.
+        analysis.setdefault("blocking", {})["hard"] = story_state.blocking_analysis(
+            {"hard": integrity_hard, "major": []})["hard"]
     if _role_tiers_map:
         analysis["tiers_used"] = dict(_role_tiers_map)  # Increment 8: which roles got a tier
     if gate_summary is not None:
