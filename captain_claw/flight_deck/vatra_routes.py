@@ -1427,6 +1427,14 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             log.warning("Vatra deliverable_resolved persist failed", error=str(e))
         _progress(sid, "note",
                   f"Deliverable manifest: {_manifest.basename()} ← {len(_manifest.parts)} part(s)")
+    # Strict dependency sequencing (Increment 6): re-resolve execution groups so a
+    # dependent runs in a LATER phase than its producer (the phase barrier then
+    # guarantees producer-before-consumer). Runs after the group_lock loop so user
+    # locks are honoured; only affects group_resolved, which grouped mode reads.
+    if quality.strict_deps and subtasks:
+        for _n in vatra_groups.resolve_groups(subtasks, arch_by_id, strict_deps=True):
+            log.info("Vatra strict_deps repair", note=_n)
+
     # Run flags the agent-facing endpoints (_vatra_env, agent_wait) read without
     # re-parsing config. Quality is authoritative; the manifest gates strict writes.
     _run_flags[sid] = {
@@ -2007,18 +2015,26 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             async def _lead_clarify(requester_role: str, request_text: str, roster: list,
                                     board_digest: str = "") -> dict:
                 try:
-                    prov, mt = _provider_call(_creds("reason"), temperature=0.2, default_max=400, cap=1024)
+                    # A weak Lead needs room to emit valid JSON, and its tier is
+                    # overridable (Increment 6/8) so the decision isn't Flash-only.
+                    prov, mt = _provider_call(_creds(_role_tier("clarify", "reason")),
+                                              temperature=0.2, default_max=800, cap=1024)
                     from captain_claw.llm import Message
                     resp = await prov.complete(
                         [Message(role="user",
                                  content=vatra_groups.clarify_prompt(
                                      requester_role, request_text, roster, board_digest))],
                         temperature=0.2, max_tokens=mt)
-                    return vatra_groups.parse_clarify(resp.content or "")
+                    dec = vatra_groups.parse_clarify(resp.content or "")
+                    if dec.get("parse_failed"):
+                        # Distinguish "Lead denied" from "Lead reply unparseable".
+                        log.warning("Vatra clarify unparseable reply",
+                                    raw=str(resp.content or "")[:300])
+                    return dec
                 except Exception as e:  # noqa: BLE001 — clarify is best-effort; default deny
                     log.warning("Vatra clarify decision failed", error=str(e))
                     return {"approve": False, "already_available": False, "pointer": "",
-                            "provider": "", "instruction": ""}
+                            "provider": "", "instruction": "", "parse_failed": True}
 
             _phase(sid, "Grouped run")
             _progress(sid, "main",
@@ -2166,6 +2182,26 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                                 for e in _recent)
                         except Exception as e:  # noqa: BLE001 — digest is best-effort
                             log.debug("Vatra clarify board digest failed", error=str(e))
+                        # Deterministic gap-closing grant (Increment 6): a request that
+                        # names a declared range/part of a provider the requester
+                        # depends on is APPROVED by code — never left to a weak Lead
+                        # whose parser defaults to deny. This is the "supply Chapters
+                        # Six and Seven" request the incident's Lead refused.
+                        _manifest_c = _run_manifest.get(sid)
+                        if _run_flags.get(sid, {}).get("clarify_dep_grant") and _manifest_c is not None:
+                            _gap = deliverable_manifest.gap_request(
+                                req, _manifest_c, sp["subtask"]["id"], subtasks)
+                            if _gap:
+                                _gp = next((s for s in providers
+                                            if s["subtask"]["id"] == _gap["provider"]), None)
+                                if _gp:
+                                    loop_backs += 1
+                                    _progress(sid, "clarify",
+                                              f"Lead (auto): dependency-declared request granted "
+                                              f"→ {_owner_label(_gp)} (loop-back {loop_backs}/{cap})",
+                                              agent=_owner_label(_gp))
+                                    await _redispatch_owner(_gp, _gap["instruction"], "clarify")
+                                    continue
                         decision = await _lead_clarify(sp["arch"].get("role", ""), req,
                                                        roster, digest)
                         if decision.get("already_available"):

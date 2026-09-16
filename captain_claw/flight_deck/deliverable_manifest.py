@@ -468,6 +468,49 @@ def gate(manifest: Manifest | None, text: str,
     return {"ok": not reasons, "reasons": reasons, "bytes": b, "sections": secs, "chapters": chaps}
 
 
+def gap_request(request_text: str, manifest: Manifest | None,
+                requester_subtask: str, subtasks: list[dict]) -> dict | None:
+    """Recognise a gap-closing request that names a declared range/part of a provider.
+
+    Returns ``{provider, range, instruction}`` when the request text mentions a
+    chapter/section range (or a declared part filename) owned by a provider the
+    requester depends on — so the clarify loop can grant it deterministically
+    instead of asking a weak Lead (whose parser defaults to deny). ``None`` for a
+    vague ask. Increment 6.
+    """
+    if manifest is None or not request_text:
+        return None
+    by_id = {str(s.get("id")): s for s in (subtasks or [])}
+    req = by_id.get(str(requester_subtask)) or {}
+    deps = set(d for d in (req.get("depends_on") or []))
+    low = request_text.lower()
+    # 1) a declared part filename named directly
+    for p in manifest.parts:
+        if p.owner and p.owner != requester_subtask and p.basename().lower() in low:
+            if not deps or p.owner in deps:
+                return {"provider": p.owner, "range": p.range,
+                        "instruction": (f"Append the missing content of your declared file "
+                                        f"{p.basename()} (append=true), keep the existing text "
+                                        "untouched, then reply DONE.")}
+    # 2) a chapter/section range that falls inside a provider part's declared range
+    rng = parse_range(request_text)
+    if rng:
+        for p in manifest.parts:
+            if not p.owner or p.owner == requester_subtask or not p.range:
+                continue
+            if deps and p.owner not in deps:
+                continue
+            lo, hi = p.range
+            if rng[0] >= lo and rng[1] <= hi:
+                span = (f"chapter {rng[0]}" if rng[0] == rng[1]
+                        else f"chapters {rng[0]}–{rng[1]}")
+                return {"provider": p.owner, "range": rng,
+                        "instruction": (f"Append {span} to your declared file "
+                                        f"{p.basename()} (append=true), keep the existing text "
+                                        "untouched, then reply DONE.")}
+    return None
+
+
 def to_analysis(manifest: Manifest | None, statuses: dict | None = None) -> dict:
     """A JSON-safe summary of the manifest for the run's ``analysis`` block."""
     if not manifest:
