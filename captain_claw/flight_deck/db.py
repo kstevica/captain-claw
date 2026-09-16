@@ -644,7 +644,7 @@ class FlightDeckDB:
         d = dict(row)
         try:
             d["redirect_uris"] = _json.loads(d.get("redirect_uris") or "[]")
-        except (json.JSONDecodeError, TypeError):
+        except (_json.JSONDecodeError, TypeError):
             d["redirect_uris"] = []
         return d
 

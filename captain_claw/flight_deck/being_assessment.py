@@ -18,6 +18,9 @@ from collections import Counter
 from datetime import datetime, timezone
 
 from captain_claw.flight_deck import being_constitution as constitution
+from captain_claw.logging import get_logger
+
+log = get_logger(__name__)
 
 # Friendly gloss for the capabilities the NEXT stage unlocks (shown as "what
 # advancing gives her"). Keys mirror being_constitution._STAGE_GRANTS.
