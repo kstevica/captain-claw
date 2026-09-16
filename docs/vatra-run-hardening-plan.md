@@ -1,6 +1,8 @@
 # Vatra — Run Hardening Plan (long-form deliverables on weak models)
 
-> Status: **PLAN — not started** (2026-09-15). Synthesised from the Captain Spark
+> Status: **IMPLEMENTED** on branch `feat/vatra-run-hardening` (2026-09-16) — all
+> eight increments landed, one commit each, flight_deck failure set unchanged from
+> baseline throughout. Original plan (2026-09-15) below. Synthesised from the Captain Spark
 > incident report (`docs/vatra-run-hardening-incident.md`, "story run 3",
 > DeepSeek v4.1 Flash on every slot), eight subsystem code maps, three independently
 > drafted plans scored by three judges, and a claim-by-claim verification pass
