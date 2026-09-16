@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1591,7 +1592,7 @@ class FlightDeckDB:
 
     async def list_vatra_board(
         self, session_id: str, kinds: list[str] | None = None, limit: int = 100,
-        exclude_owner: str | None = None,
+        exclude_owner: str | None = None, exclude_subtask: str | None = None,
     ) -> list[dict]:
         assert self._db is not None
         query = "SELECT * FROM vatra_board WHERE session_id = ?"
@@ -1599,7 +1600,12 @@ class FlightDeckDB:
         if kinds:
             query += " AND kind IN (%s)" % ",".join("?" * len(kinds))
             params.extend(kinds)
-        if exclude_owner:
+        # Prefer per-subtask exclusion (two owners can share an archetype id, so
+        # excluding by owner hides a same-archetype teammate's posts too).
+        if exclude_subtask:
+            query += " AND from_subtask != ?"
+            params.append(exclude_subtask)
+        elif exclude_owner:
             query += " AND from_owner != ?"
             params.append(exclude_owner)
         query += " ORDER BY id DESC LIMIT ?"
@@ -1609,16 +1615,47 @@ class FlightDeckDB:
         rows.reverse()  # oldest-first for readability
         return rows
 
+    _BOARD_STOPWORDS = frozenset({
+        "the", "and", "for", "with", "from", "that", "this", "into", "your",
+        "their", "are", "was", "has", "have", "will", "not", "but", "its",
+    })
+
     async def search_vatra_board(
         self, session_id: str, query: str, limit: int = 20,
-        exclude_owner: str | None = None,
+        exclude_owner: str | None = None, exclude_subtask: str | None = None,
     ) -> list[dict]:
+        """Board search that a multi-word 'keyword' wait can actually satisfy.
+
+        Matches the exact whole phrase in any row (legacy behaviour, first attempt),
+        OR — for a produced artifact — every content token (≥ 3 chars, minus
+        stopwords) appearing in an ``output``/``note``/``file`` row (so a narration
+        row can't spuriously satisfy a wait). ``exclude_subtask`` hides only the
+        caller's own posts, keeping a same-archetype teammate's visible.
+        """
         assert self._db is not None
-        like = f"%{query.strip()}%"
-        sql = ("SELECT * FROM vatra_board WHERE session_id = ?"
-               " AND (content LIKE ? OR title LIKE ?)")
-        params: list = [session_id, like, like]
-        if exclude_owner:
+        q = (query or "").strip()
+        like = f"%{q}%"
+        tokens = [t for t in re.findall(r"[a-z0-9]{3,}", q.lower())
+                  if t not in self._BOARD_STOPWORDS]
+        base = "SELECT * FROM vatra_board WHERE session_id = ?"
+        params: list = [session_id]
+        if tokens:
+            tok_parts = []
+            tok_params: list = []
+            for t in tokens:
+                tok_parts.append("(content LIKE ? OR title LIKE ?)")
+                tok_params.extend([f"%{t}%", f"%{t}%"])
+            tok_clause = ("(kind IN ('output','note','file') AND "
+                          + " AND ".join(tok_parts) + ")")
+            sql = base + " AND ((content LIKE ? OR title LIKE ?) OR " + tok_clause + ")"
+            params += [like, like] + tok_params
+        else:
+            sql = base + " AND (content LIKE ? OR title LIKE ?)"
+            params += [like, like]
+        if exclude_subtask:
+            sql += " AND from_subtask != ?"
+            params.append(exclude_subtask)
+        elif exclude_owner:
             sql += " AND from_owner != ?"
             params.append(exclude_owner)
         sql += " ORDER BY id DESC LIMIT ?"

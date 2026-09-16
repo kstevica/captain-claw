@@ -156,6 +156,26 @@ _wait_ledger: dict[str, dict[str, dict[str, float]]] = {}
 # sid → {"current": ordinal, "done": set[subtask_id], "owners": [...]}
 _group_schedule: dict[str, dict] = {}
 
+# Per-subtask liveness (Increment 5): the run loop stamps each owner's state and
+# last-activity time so `agent_wait` can tell a SLOW producer (still working, keep
+# waiting) from a STALLED one (give up). sid → subtask_id → {state, started,
+# finished, last_seen, role, arch, artifact}. Populated in _dispatch_owner (flat AND
+# grouped), cleared in teardown. A separate dict from _group_schedule so it never
+# perturbs the grouped-schedule truthiness checks.
+_owner_activity: dict[str, dict[str, dict]] = {}
+# A producer that emitted activity within this window is "alive"; a waiter on it
+# extends (heartbeat) instead of expiring. Matches basna_routes._EXTEND_ACTIVITY_S.
+_ALIVE_WINDOW_S = 180.0
+
+
+def _owner_stamp(sid: str, subtask: str, **fields) -> None:
+    """Update this owner's liveness record (best-effort; no-op if the run is gone)."""
+    if not sid or not subtask:
+        return
+    rec = _owner_activity.setdefault(sid, {}).setdefault(subtask, {})
+    rec.update(fields)
+    rec["last_seen"] = time.monotonic()
+
 
 def _phase(sid: str, label: str, **extra) -> None:
     """Emit one high-level phase banner (Planning / Intro / Main / Synthesizing …)
@@ -1684,6 +1704,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         def _owner_callbacks(label: str, owner: str, subtask: str):
             gx = _gx(subtask)  # grouped mode: tag this owner's events with its phase letter
             def _on_action(act: dict) -> None:
+                _owner_stamp(sid, subtask)  # liveness heartbeat (Increment 5)
                 detail = act.get("detail", "")
                 if act["tool"] == "narration":
                     _progress(sid, "narration", f"{label}: {detail}", agent=label,
@@ -1697,10 +1718,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                               agent=label, tool=act["tool"], detail=detail, **gx)
 
             def _on_usage(pt: int, ct: int, tt: int) -> None:
+                _owner_stamp(sid, subtask)  # liveness heartbeat (Increment 5)
                 _progress(sid, "usage", f"{label} · {pt:,}→{ct:,} tok",
                           agent=label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt, **gx)
 
             def _on_status(text: str) -> None:
+                _owner_stamp(sid, subtask)  # liveness heartbeat (Increment 5)
                 # The model call is in flight — surface it so a slow call isn't mistaken
                 # for a stall. Tagged agent= so the live card shows "working".
                 _progress(sid, "llm", f"{label} · {text}", agent=label,
@@ -1739,6 +1762,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             arch, st = sp["arch"], sp["subtask"]
             role = arch.get("role") or arch["id"]
             label = _owner_label(sp)
+            # Liveness (Increment 5): mark this owner running so a waiter on its
+            # artifact can tell it is alive; _result_of flips it to done/failed.
+            _owner_stamp(sid, st["id"], state="running", role=role, arch=arch["id"],
+                         artifact=st.get("artifact", ""), started=time.monotonic())
             # Resume: this owner already finished in the stalled run — restore its
             # slice from the checkpoint instead of spending tokens to redo it.
             if _resume:
@@ -1754,10 +1781,17 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
+            # Increment 5: under require_inputs, tell an owner with declared inputs to
+            # BLOCK (not fabricate) if a dependency never lands.
+            _blocked_inputs = None
+            if (_run_flags.get(sid, {}).get("require_inputs")
+                    and _run_manifest.get(sid) is not None):
+                _ins = deliverable_manifest.inputs_for(_run_manifest[sid], st["id"], subtasks)
+                _blocked_inputs = [p.basename() for p in _ins] or None
             prompt = research_pre + _build_subtask_prompt(
                 role, effective_intent, st, [f["name"] for f in input_files],
                 subtasks, shared_context, team_prep=intro_digest,
-                vfs_project=vfs_project)
+                vfs_project=vfs_project, blocked_inputs=_blocked_inputs)
             prompt += _group_instr_block(st, arch, _group_instructions)
             # Group 0: this owner's slice of the coordination plan — its mandate, what
             # it produces, and which teammates it consumes from. Its *contract*, placed
@@ -1898,10 +1932,20 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
 
         # 3) Main round — each owner produces its full piece.
         def _result_of(sp: dict, d: dict) -> dict:
+            _owner_stamp(sid, sp["subtask"]["id"],
+                         state="done" if d.get("ok") else "failed",
+                         finished=time.monotonic())
+            # Increment 5: an owner that BLOCKED on a missing declared input (instead
+            # of fabricating one) is not a usable slice; record the gap.
+            _blocked = bool(re.match(r"^\s*BLOCKED:", d.get("output") or "", re.IGNORECASE))
+            if _blocked:
+                _progress(sid, "dispatch",
+                          f"⛔ {_owner_label(sp)} blocked on a missing input",
+                          ok=False, agent=_owner_label(sp), **_gx(sp["subtask"]["id"]))
             return {
                 "id": sp["subtask"]["id"], "owner": sp["arch"]["id"],
                 "role": sp["arch"].get("role", ""), "title": sp["subtask"]["title"],
-                "output": d["output"], "ok": d["ok"],
+                "output": d["output"], "ok": d["ok"], "blocked": _blocked,
                 "latency_ms": d["latency_ms"], "actions": d.get("actions", []),
             }
 
@@ -2304,6 +2348,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _run_shared_datastore.pop(sid, None)
         _run_manifest.pop(sid, None)
         _run_flags.pop(sid, None)
+        _owner_activity.pop(sid, None)
         _skip_agents.pop(sid, None)
         _wait_ledger.pop(sid, None)
         # An aborted run may leave a called-forward dispatch in flight — cancel
@@ -2314,7 +2359,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 if not _t.done():
                     _t.cancel()
 
-    usable = [r for r in results if (r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip()]
+    usable = [r for r in results if (r.get("ok") or r.get("produced_file"))
+              and (r.get("output") or "").strip() and not r.get("blocked")]
     if not usable:
         _RUN_USAGE.pop(sid, None)  # release the per-run accumulator on early exit
         await db.update_basna_session(sid, user["id"], status="error")
@@ -2988,9 +3034,14 @@ def _build_intro_prompt(role: str, st: dict, shared_context: str = "", vfs_proje
 
 def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str],
                           all_subtasks: list[dict], shared_context: str = "",
-                          team_prep: str = "", vfs_project: str = "") -> str:
+                          team_prep: str = "", vfs_project: str = "",
+                          blocked_inputs: list[str] | None = None) -> str:
     """Frame one subtask for its owner — with the team contract everyone must
-    follow, awareness of the whole team, and a nudge to delegate cross-slice needs."""
+    follow, awareness of the whole team, and a nudge to delegate cross-slice needs.
+
+    When ``blocked_inputs`` is given (Increment 5, require_inputs), the owner is told
+    that if a DECLARED input never lands it must reply ``BLOCKED: <artifact>`` and
+    stop — never reconstruct a substitute (the QA-audits-a-hallucination failure)."""
     files_block = ""
     if file_names:
         listed = "\n".join(f"- {n}" for n in file_names)
@@ -3057,10 +3108,19 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"work, don't busy-poll — proceed with your part and the final review round lets you revise "
         f"once everyone's work is visible. Only when your part is genuinely BLOCKED on a specific "
         f"artifact should you `wait` for it (once) rather than guessing.\n\n"
-        f"You are AUTONOMOUS: never ask the user a question, never refuse, and never stop to say "
-        f"you're missing teammate input — produce your best version of your part with what you "
-        f"have; the review round and reporter reconcile the rest.\n\n"
-        f"Return only your finished part — no preamble, no meta-commentary about the team."
+        + (
+            f"You are AUTONOMOUS: never ask the user a question and never refuse. Your part "
+            f"DEPENDS on these teammate artifact(s): {', '.join(blocked_inputs)}. Wait for them "
+            f"(via the `vatra` tool — it tells you whether the producer is still working). If a "
+            f"declared input NEVER arrives (the tool says the producer stalled or your wait "
+            f"budget is spent), reply with exactly `BLOCKED: <artifact name>` and stop — do NOT "
+            f"reconstruct, invent, or audit a substitute for it.\n\n"
+            if blocked_inputs else
+            f"You are AUTONOMOUS: never ask the user a question, never refuse, and never stop to say "
+            f"you're missing teammate input — produce your best version of your part with what you "
+            f"have; the review round and reporter reconcile the rest.\n\n"
+        )
+        + f"Return only your finished part — no preamble, no meta-commentary about the team."
     )
 
 
@@ -3878,9 +3938,32 @@ async def agent_inbox(body: _VatraInboxReq):
 
 class _VatraWaitReq(_AgentReq):
     owner: str = ""
+    subtask_id: str = ""
     path: str = ""
     query: str = ""
     wait: int = 0
+
+
+def _resolve_producer(sid: str, path: str, query: str) -> dict | None:
+    """Best-effort: the liveness record of the owner that produces this path/query.
+
+    A ``path`` resolves via the manifest (basename → part owner); a ``query`` falls
+    back to any owner still running. Returns the ``_owner_activity`` record or None.
+    """
+    activity = _owner_activity.get(sid) or {}
+    if path:
+        manifest = _run_manifest.get(sid)
+        if manifest is not None:
+            base = write_guard.basename_of(path)
+            for p in manifest.parts:
+                if p.basename() == base and p.owner in activity:
+                    return activity[p.owner]
+    if query:
+        # No owner→topic map; treat any still-running owner as a plausible producer.
+        for rec in activity.values():
+            if rec.get("state") == "running":
+                return rec
+    return None
 
 
 @router.post("/agent/wait")
@@ -3970,7 +4053,11 @@ async def agent_wait(body: _VatraWaitReq):
     # budget or attempt cap, stop waiting entirely and tell it to proceed. Enforced
     # here (not left to the agent), so even a stubborn retry can't loop.
     ledger = _wait_ledger.setdefault(body.session_id, {})
-    rec = ledger.setdefault(body.owner or "agent", {"waited": 0.0, "attempts": 0})
+    # Key the ledger by SUBTASK, not owner — two owners can share an archetype id and
+    # would otherwise share (and exhaust) one wait budget (Increment 5).
+    _ledger_key = body.subtask_id or body.owner or "agent"
+    rec = ledger.setdefault(_ledger_key, {"waited": 0.0, "attempts": 0, "alive_waited": 0.0})
+    rec.setdefault("alive_waited", 0.0)
     remaining = _WAIT_TOTAL_BUDGET_S - rec["waited"]
     if rec["attempts"] >= _WAIT_MAX_ATTEMPTS or remaining <= 1:
         recent = await db.list_vatra_board(
@@ -4003,19 +4090,52 @@ async def agent_wait(body: _VatraWaitReq):
                     data = real.read_text(errors="replace")
                 except Exception:
                     data = ""
-                if data.strip():
+                # A placeholder stub (or empty file) is NOT ready — an 88-byte marker
+                # must not satisfy a wait (Increment 5).
+                if data.strip() and not write_guard.is_placeholder_content(data):
                     _progress(body.session_id, "wait", f"✓ {who} got {path}", agent=who)
                     return {"ready": True, "kind": "file", "path": path,
                             "content": data[:_WAIT_CONTENT_CAP],
                             "truncated": len(data) > _WAIT_CONTENT_CAP}
+                if data.strip() and write_guard.is_placeholder_content(data):
+                    # Present but junk — tell the waiter, don't hand it back as ready.
+                    if time.monotonic() >= deadline:
+                        return {"ready": False, "present_but_placeholder": True,
+                                "path": path,
+                                "note": (f"{path} exists but is a placeholder marker, not "
+                                         "content. Its producer must re-write it in full.")}
         if query:
             rows = await db.search_vatra_board(
-                body.session_id, query, limit=20, exclude_owner=body.owner or None)
+                body.session_id, query, limit=20,
+                exclude_subtask=body.subtask_id or None,
+                exclude_owner=body.owner or None)
             if rows:
                 _progress(body.session_id, "wait", f"✓ {who} got a board match for {query!r}", agent=who)
                 return {"ready": True, "kind": "board",
                         "entries": [_board_entry(e) for e in rows]}
         if time.monotonic() >= deadline:
+            # Heartbeat (Increment 5): if the producer of this artifact is still
+            # running AND recently active, the wait EXTENDS instead of expiring —
+            # charge a separate `alive_waited` (bounded), not the give-up budget. So
+            # a 5-minute producer no longer times out a 90-second waiter.
+            _flags = _run_flags.get(body.session_id) or {}
+            if _flags.get("wait_heartbeat"):
+                prod = _resolve_producer(body.session_id, path, query)
+                if prod is not None and prod.get("state") == "running":
+                    idle = time.monotonic() - float(prod.get("last_seen", 0) or 0)
+                    alive_cap = float(_flags.get("wait_max_total_s") or 0) or 1800.0
+                    if idle <= _ALIVE_WINDOW_S and rec["alive_waited"] < alive_cap:
+                        rec["alive_waited"] += time.monotonic() - started
+                        _prole = prod.get("role") or "the teammate"
+                        _progress(body.session_id, "wait",
+                                  f"⏳ {who} still waiting on {target} — {_prole} is "
+                                  f"working (last activity {int(idle)}s ago)", agent=who)
+                        return {"ready": False, "producer_alive": True, "can_retry": True,
+                                "producer": {"role": _prole, "state": "running",
+                                             "last_seen_s": int(idle)},
+                                "note": (f"{_prole} is STILL WORKING on it (last activity "
+                                         f"{int(idle)}s ago). Wait again with the same target "
+                                         "— do NOT proceed without it.")}
             # Charge the actual elapsed time against this owner's total budget.
             rec["waited"] += time.monotonic() - started
             rec["attempts"] += 1
@@ -4085,12 +4205,14 @@ class _VatraBoardPostReq(_AgentReq):
 
 class _VatraBoardReadReq(_AgentReq):
     owner: str = ""
+    subtask_id: str = ""
     kind: str = ""
     limit: int = 40
 
 
 class _VatraBoardSearchReq(_AgentReq):
     owner: str = ""
+    subtask_id: str = ""
     query: str = ""
     limit: int = 20
 
@@ -4124,7 +4246,8 @@ async def agent_board_read(body: _VatraBoardReadReq):
     await _board_session(body)
     kinds = [body.kind] if body.kind else None
     rows = await get_db().list_vatra_board(
-        body.session_id, kinds=kinds, limit=body.limit, exclude_owner=body.owner or None)
+        body.session_id, kinds=kinds, limit=body.limit,
+        exclude_subtask=body.subtask_id or None, exclude_owner=body.owner or None)
     return {"entries": [_board_entry(e) for e in rows], "count": len(rows)}
 
 
@@ -4136,7 +4259,8 @@ async def agent_board_search(body: _VatraBoardSearchReq):
     if not q:
         raise HTTPException(400, "query is required")
     rows = await get_db().search_vatra_board(
-        body.session_id, q, limit=body.limit, exclude_owner=body.owner or None)
+        body.session_id, q, limit=body.limit,
+        exclude_subtask=body.subtask_id or None, exclude_owner=body.owner or None)
     return {"entries": [_board_entry(e) for e in rows], "count": len(rows)}
 
 
