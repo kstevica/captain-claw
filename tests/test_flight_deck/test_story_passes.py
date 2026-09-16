@@ -61,11 +61,13 @@ async def test_economy_pass_clamped_to_soft():
 async def test_run_model_pass_tolerant_of_junk():
     async def model_fn(prompt):
         return "sorry, I could not analyze this"
+    # junk that parses to no findings = the pass RAN and found nothing → []
     assert await sp.run_model_pass("F", "draft", "{}", model_fn) == []
 
     async def boom(prompt):
         raise RuntimeError("model down")
-    assert await sp.run_model_pass("F", "draft", "{}", boom) == []
+    # a model crash = the pass did NOT run → None (distinct from ran-clean [])
+    assert await sp.run_model_pass("F", "draft", "{}", boom) is None
 
 
 @pytest.mark.asyncio
@@ -79,17 +81,19 @@ async def test_run_model_passes_merges_all(monkeypatch):
         if "NARRATIVE-ECONOMY" in prompt:
             return '{"findings":[{"kind":"y","severity":"hard","reason":"econ"}]}'
         return '{"findings":[]}'
-    out = await sp.run_model_passes("draft", "{}", model_fn, passes=("C", "I"))
+    out, ran = await sp.run_model_passes("draft", "{}", model_fn, passes=("C", "I"))
     kinds = {(f["pass"], f["severity"]) for f in out}
     assert ("C", "hard") in kinds
     assert ("I", "soft") in kinds  # clamped
+    assert ran == {"C", "I"}       # both passes actually executed
 
 
 @pytest.mark.asyncio
 async def test_run_model_passes_empty_when_no_draft():
     async def model_fn(prompt):
         return '{"findings":[{"kind":"x","severity":"hard"}]}'
-    assert await sp.run_model_passes("", "{}", model_fn, passes=("C",)) == []
+    out, ran = await sp.run_model_passes("", "{}", model_fn, passes=("C",))
+    assert out == [] and ran == set()
 
 
 @pytest.mark.asyncio
@@ -166,16 +170,35 @@ async def test_pass_J_downgraded_to_major_on_truncation():
 
 
 @pytest.mark.asyncio
-async def test_validator_rejects_major_to_hard_trade():
-    # initial: 0 hard + 2 major (both deterministic, from a store the extractor gives).
-    # The revision clears them but a model pass then reports a NEW hard → must be REJECTED
-    # (keep the original done-eligible draft), not accepted.
-    state = {"n": 0}
-
+async def test_validator_rejects_major_to_deterministic_hard_trade():
+    # initial: 0 hard + 2 major (deterministic custody). The revision clears them but the
+    # revised store yields a DETERMINISTIC hard (age mismatch) → must be REJECTED, because
+    # a deterministic hard is exactly what gates `done`.
     async def extract_fn(prompt):
-        # store with two custody_broken majors initially, clean after revise
         if "REVISED" in prompt:
-            return '{"evidence": []}'
+            # revised store: an age mismatch (deterministic G hard), no majors
+            return '{"characters": [{"name": "Ana", "age": "34"}, {"name": "Ana", "age": "41"}]}'
+        return ('{"evidence": [{"id": "a", "custody_gap": true, "key_proof": true},'
+                '{"id": "b", "custody_gap": true, "key_proof": true}]}')
+
+    async def revise_fn(prompt):
+        return '[{"find": "orig", "replace": "REVISED and much longer body ' + "x" * 50 + '"}]'
+
+    text = "orig " * 300
+    res = await ss.run_validator(text, extract_fn=extract_fn, revise_fn=revise_fn, max_rounds=2)
+    # the loop must NOT have kept a revision that introduced a deterministic (gating) hard
+    assert res["blocking"] == [], "a major→deterministic-hard trade must be rejected"
+    assert res["revised"] is False
+
+
+@pytest.mark.asyncio
+async def test_validator_accepts_major_to_model_hard_trade():
+    # A revision that clears 2 deterministic majors but provokes a MODEL-pass hard is
+    # ACCEPTED: the model hard is advisory (never gates), the deterministic state improved,
+    # and the total finding count dropped. The gating set stays empty either way.
+    async def extract_fn(prompt):
+        if "REVISED" in prompt:
+            return '{"evidence": []}'   # revised store: clean of deterministic findings
         return ('{"evidence": [{"id": "a", "custody_gap": true, "key_proof": true},'
                 '{"id": "b", "custody_gap": true, "key_proof": true}]}')
 
@@ -183,7 +206,6 @@ async def test_validator_rejects_major_to_hard_trade():
         return '[{"find": "orig", "replace": "REVISED and much longer body ' + "x" * 50 + '"}]'
 
     async def model_fn(prompt):
-        # after the revision the physical pass finds a fresh hard
         if "REVISED" in prompt and "PHYSICAL-MECHANISM" in prompt:
             return '{"findings":[{"kind":"impossible","severity":"hard","reason":"new"}]}'
         return '{"findings":[]}'
@@ -191,5 +213,5 @@ async def test_validator_rejects_major_to_hard_trade():
     text = "orig " * 300
     res = await ss.run_validator(text, extract_fn=extract_fn, revise_fn=revise_fn,
                                  model_fn=model_fn, model_passes=("C",), max_rounds=2)
-    # the loop must NOT have kept a revision that introduced a hard error
-    assert res["hard"] == [], "a major→hard trade must be rejected"
+    # the model hard is present but does NOT gate; the run remains done-eligible
+    assert res["blocking"] == [], "a model-pass hard must never gate"

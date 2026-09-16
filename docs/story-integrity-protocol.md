@@ -63,11 +63,17 @@ Opt in on `/fd/vatra/start` (inherited at approve):
 "dispatch_timeout": 1200
 ```
 
-Result (`analysis`): `quality_verdict` may be `"story_integrity_failed"`;
-`analysis.integrity` = `{rounds, hard_fixed, remaining, hard, major, soft, passes}`;
-`analysis.blocking.hard[]`/`.major[]` = `{pass, scene, reason}` (client shows these
-with the kept draft on a `status:"error"` run). A `deliverable.integrity.md` audit
-file is written but never merged into the story.
+Result (`analysis`): `quality_verdict` may be `"story_integrity_failed"` (only when a
+**deterministic** hard survives); `analysis.integrity` = `{rounds, hard_fixed, remaining,
+hard, blocking, major, soft, scores, passes}` where `blocking` is the count of gating
+(deterministic) hard errors — `hard` can exceed `blocking` when a model pass raised a
+hard that doesn't gate; `analysis.scores` = `{integrity, grade, continuity, plausibility,
+grounding, craft}`; `analysis.blocking.hard[]`/`.major[]`/`.advisory[]` = `{pass, scene,
+reason}` (`.advisory[]` carries surviving model-pass hards that did not gate; client shows
+these with the kept draft). A `deliverable.integrity.md` audit file is written but never
+merged into the story. **Client rule:** treat `status:"error"` + `quality_verdict:
+"story_integrity_failed"` as do-not-export; a `done` run with a low `scores.grade` or
+`analysis.blocking.advisory[]` is exportable but worth a human look.
 
 ---
 
@@ -96,6 +102,38 @@ Deterministic (P0, code over the store): A chronology, B knowledge, D provenance
 ## 5. Severity gate
 
 Hard → blocks finalization (`status:"error"`, draft kept, verdict `story_integrity_failed`, `analysis.blocking.hard[]`). Major → revise in the loop; if unresolved, `analysis.blocking.major[]` (allows `done`). Soft → fix if cheap; never block.
+
+> **Gate refinement (2026-09-16, "Story run 7"):** only **deterministic** hard findings
+> (A/B/D/E/G/H — fail-safe by construction) gate `done`. **Model-pass** hard findings
+> (C/F/I/J/CA/PR) are weak-model judgments: they surface, drive revision, and lower the
+> quality scores, but **never block on their own** — a single hallucinated model objection
+> must not false-fail a good draft (a real run's excellent story was blocked by one PR-pass
+> hard whose premise the text contradicted). Findings carry `origin: "deterministic" | "model"`
+> (`story_state.is_deterministic()`, pass-id fallback); `story_state.blocking_findings()` is the
+> gating set. `run_validator` returns `result["blocking"]` (deterministic hard, drives the
+> gate) alongside `result["hard"]` (every hard, for reporting). Surviving model hards appear
+> as `analysis.blocking.advisory[]`. The revise-loop keep-guard protects the **blocking**
+> count (never grow the deterministic-hard set), not all-hard.
+
+### Quality scores (advisory; never gate)
+
+`story_state.score()` emits 0–100 scores from the surviving findings (`analysis.scores`,
+also in `analysis.integrity.scores`):
+
+| Score | From | Meaning |
+|---|---|---|
+| `continuity` | A,B,D,E,G,H (deterministic) | internal consistency — the trustworthy backbone |
+| `plausibility` | C, PR (model) | physical + procedural realism |
+| `grounding` | F, CA (model) | research / claim discipline (no overclaiming) |
+| `craft` | I, J (model) | narrative economy + fair-play seeding |
+| `integrity` | composite | `0.7·continuity + 0.1·(each model dim)` → headline |
+
+Each dimension = 100 − severity-weighted penalties (hard 25 / major 10 / soft 3), floored at
+0; a dimension whose passes never ran reports `null` (not a hollow 100). `grade` = clean ≥85 /
+sound ≥70 / caution ≥50 / weak. The continuity weight (0.7) keeps a deterministically-airtight
+story's headline high even when the weak model quibbles. Future scores (not yet built):
+`coverage` (manifest parts/sections satisfied), `hedge_discipline` (deterministic scan for
+overclaim phrases), `source_diversity` / `recency` (research runs), `readability`.
 
 ## 6. Revision loop
 
