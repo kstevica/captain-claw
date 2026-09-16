@@ -815,15 +815,19 @@ def _teardown(slugs: list[str]) -> None:
             log.warning("Vatra teardown stop failed", slug=slug, error=str(e))
     if not slugs:
         return
-    reg = _load_process_registry()
-    for slug in slugs:
-        reg.pop(slug, None)
-        _processes.pop(slug, None)
-        try:
-            shutil.rmtree(DATA_DIR / slug, ignore_errors=True)
-        except Exception:
-            pass
-    _save_process_registry(reg)
+    try:
+        reg = _load_process_registry()
+        for slug in slugs:
+            reg.pop(slug, None)
+            _processes.pop(slug, None)
+            try:
+                shutil.rmtree(DATA_DIR / slug, ignore_errors=True)
+            except Exception:
+                pass
+        _save_process_registry(reg)
+    except Exception as e:  # noqa: BLE001 — teardown is best-effort; it must never
+        # propagate and kill the run (a run raised here would sit stuck on 'running').
+        log.warning("Vatra teardown registry update failed", error=str(e))
 
 
 def _save_inputs_to_vfs(user_id: str, vfs_project: str, src_dir: Path,
@@ -1008,6 +1012,66 @@ async def _finish_blocked(db, sid: str, user: dict, *, reason: str, truth: str,
     return {"session_id": sid, "domain": domain, "mode": "vatra", "status": "error",
             "truth": truth, "confidence": confidence, "analysis": analysis,
             "subtasks": [], "learned": [], "cost": None, "blocked": reason}
+
+
+async def _persist_run_crash(body: "ExecuteRequest", user: dict, exc: Exception) -> dict:
+    """A run raised an UNHANDLED exception: log the full traceback and flip the session
+    to status='error' (continuable via /continue, resumable via /resume) so it can NEVER
+    stick on 'running' forever behind a fire-and-forget task whose exception is otherwise
+    dropped on GC. The reporter's VFS deliverable, if any, is already on disk; the DB
+    `truth` column is left untouched so a resume still sees the best draft."""
+    import traceback as _traceback
+    sid = getattr(body, "session_id", "") or ""
+    tb = _traceback.format_exc()
+    log.error("Vatra run crashed — persisting status=error", session_id=sid,
+              error=str(exc), error_type=type(exc).__name__, traceback=tb)
+    try:
+        _progress(sid, "done", f"Run failed: {type(exc).__name__}: {str(exc)[:200]}", ok=False)
+    except Exception:  # noqa: BLE001
+        pass
+    analysis: dict = {}
+    try:
+        db = get_db()
+        sess = await db.get_basna_session(sid, user["id"])
+        if sess and sess.get("analysis"):
+            try:
+                analysis = json.loads(sess["analysis"]) or {}
+            except Exception:  # noqa: BLE001
+                analysis = {}
+        analysis["error"] = {"type": type(exc).__name__, "message": str(exc)[:500],
+                             "traceback": tb[-4000:]}
+        await db.update_basna_session(
+            sid, user["id"], status="error", analysis=json.dumps(analysis),
+            progress=json.dumps((_PROGRESS.get(sid) or {}).get("events", [])))
+    except Exception as persist_exc:  # noqa: BLE001
+        log.error("Vatra crash-persist ALSO failed", session_id=sid, error=str(persist_exc))
+    try:
+        _RUN_USAGE.pop(sid, None)
+        _progress_done(sid)
+    except Exception:  # noqa: BLE001
+        pass
+    return {"session_id": sid, "mode": "vatra", "status": "error",
+            "error": {"type": type(exc).__name__, "message": str(exc)[:500]},
+            "truth": "", "confidence": 0.0, "analysis": analysis,
+            "subtasks": [], "learned": [], "cost": None}
+
+
+def _bg_task_done(task: "asyncio.Task") -> None:
+    """Done-callback for fire-and-forget run tasks: drop the retained reference AND
+    surface any exception the task swallowed (otherwise it is dropped silently on GC,
+    which is exactly how a crashed run went invisible while the session sat on
+    'running'). execute_vatra self-persists status=error via _persist_run_crash; this is
+    defence-in-depth for the group-0 planner / replan tasks that do not."""
+    _basna_agent_tasks.discard(task)
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    except Exception:  # noqa: BLE001
+        return
+    if exc is not None:
+        log.error("Vatra background task crashed (unretrieved)", error=repr(exc),
+                  error_type=type(exc).__name__)
 
 
 # Story Integrity Protocol (P1): pre-draft staging guidance folded into the team's
@@ -1283,6 +1347,21 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
 # ── Orchestrator ─────────────────────────────────────────────────────
 
 async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> dict:
+    """Guard wrapper around the run body: a Vatra run must ALWAYS reach a terminal
+    status. Any unhandled exception in the body is logged with a traceback and persisted
+    as status='error' (continuable/resumable) instead of leaving the session stuck on
+    'running' forever — the failure mode where a fire-and-forget task crashes and its
+    exception is dropped on GC, so the UI spins with no error and no agent running.
+    HTTPException (request-path 4xx/5xx) and CancelledError propagate unchanged."""
+    try:
+        return await _execute_vatra_inner(body, request, user)
+    except (HTTPException, asyncio.CancelledError):
+        raise
+    except Exception as exc:  # noqa: BLE001 — a crash must never leave the run 'running'
+        return await _persist_run_crash(body, user, exc)
+
+
+async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dict) -> dict:
     """Run one Vatra session: Lead decompose → parallel subtasks → reporter assemble.
 
     Mirrors Basna's spawn/dispatch/teardown but replaces the weighted merge with a
@@ -4415,7 +4494,7 @@ def _board_post_bg(sid: str, owner: str, subtask: str, kind: str, title: str, co
     try:
         t = asyncio.create_task(_w())
         _basna_agent_tasks.add(t)
-        t.add_done_callback(_basna_agent_tasks.discard)
+        t.add_done_callback(_bg_task_done)
     except RuntimeError:
         pass
 
@@ -4688,7 +4767,7 @@ async def execute_vatra_ui(body: VatraExecuteRequest, request: Request,
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(plan_vatra_group0(exec_req, stub, user, gate=True))
     _basna_agent_tasks.add(t)
-    t.add_done_callback(_basna_agent_tasks.discard)
+    t.add_done_callback(_bg_task_done)
     return {"session_id": body.session_id, "status": "planning"}
 
 
@@ -4771,7 +4850,7 @@ async def approve_vatra_plan(body: VatraPlanApproveRequest, request: Request,
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)
-    t.add_done_callback(_basna_agent_tasks.discard)
+    t.add_done_callback(_bg_task_done)
     return {"session_id": body.session_id, "status": "running"}
 
 
@@ -4897,7 +4976,7 @@ async def replan_vatra_plan(body: VatraPlanReplanRequest, request: Request,
         body.session_id, stub, user, new_groups=new_groups, clarifications=clarifications,
         tiers=body.tiers, env_vars=body.env_vars, api_key=body.api_key or ""))
     _basna_agent_tasks.add(t)
-    t.add_done_callback(_basna_agent_tasks.discard)
+    t.add_done_callback(_bg_task_done)
     return {"session_id": body.session_id, "status": "planning"}
 
 
@@ -5015,7 +5094,7 @@ async def start_vatra(body: VatraStartRequest, request: Request,
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(plan_vatra_group0(exec_req, stub, user, gate=True))
     _basna_agent_tasks.add(t)
-    t.add_done_callback(_basna_agent_tasks.discard)
+    t.add_done_callback(_bg_task_done)
     return {"session_id": sid, "title": title, "status": "planning"}
 
 
@@ -5195,7 +5274,7 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
     # Headless continuation: draft a Group 0 plan then auto-approve (no human pause).
     t = asyncio.create_task(plan_vatra_group0(exec_req, stub, user, gate=False))
     _basna_agent_tasks.add(t)
-    t.add_done_callback(_basna_agent_tasks.discard)
+    t.add_done_callback(_bg_task_done)
     return {"session_id": sid, "title": title, "round": round_no, "kind": kind}
 
 
