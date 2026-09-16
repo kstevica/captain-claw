@@ -82,6 +82,7 @@ from captain_claw.flight_deck import deliverable_manifest
 from captain_claw.flight_deck import facts_ledger
 from captain_claw.flight_deck import quality_findings
 from captain_claw.flight_deck import research_brief
+from captain_claw.flight_deck import research_canon
 from captain_claw.flight_deck import research_consistency
 from captain_claw.flight_deck import research_contract
 from captain_claw.flight_deck import research_map
@@ -2614,6 +2615,54 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         except Exception as e:  # noqa: BLE001 — consistency check is best-effort
             log.warning("Vatra consistency check failed", error=str(e))
 
+    # 5b3) Canon continuity check (Increment 7, opt-in, paid): a deterministic
+    # continuity verifier over the ASSEMBLED draft (which after Increment 4 IS the
+    # merged file, not a note) — character ages/fixed details, whereabouts per scene,
+    # alibis, sums (paid ≤ attempted), tallies, chronology, and duplicate scenes
+    # across the seam. Fixes by quote-anchored patches; the audit is a separate file,
+    # never folded into the prose. Under gate_blocks_done a surviving critical blocks
+    # `done`.
+    canon_summary = None
+    canon_findings: list[dict] = []
+    if quality.canon_pass and (truth or "").strip() and _budget.can_afford(2 * _retry_est):
+        _budget.add(2 * _retry_est)
+        _progress(sid, "verify", "Canon check: reading the assembled draft…")
+        try:
+            _qa_ex_creds = _creds(_role_tier("qa", quality.qa_tier or "fast"))
+            _qa_rv_creds = _creds(_role_tier("qa", quality.qa_tier or "reason"))
+
+            async def _qa_extract(p: str) -> str:
+                prov, mt = _provider_call(_qa_ex_creds, temperature=0.0, default_max=4096, cap=8192)
+                r = await asyncio.wait_for(prov.complete(
+                    [_Msg(role="user", content=p)], temperature=0.0, max_tokens=mt), 180)
+                return r.content or ""
+
+            async def _qa_revise(p: str) -> str:
+                prov, mt = _provider_call(_qa_rv_creds, temperature=0.1, default_max=8192, cap=32768)
+                r = await asyncio.wait_for(prov.complete(
+                    [_Msg(role="user", content=p)], temperature=0.1, max_tokens=mt), 300)
+                return r.content or ""
+
+            canon_res = await research_canon.run_check(
+                truth, extract_fn=_qa_extract, revise_fn=_qa_revise,
+                on_progress=lambda m: _progress(sid, "verify", m))
+            if canon_res["revised"]:
+                truth = canon_res["text"]
+                # write the corrected deliverable back to its file
+                if _manifest_obj is not None and vfs_dir is not None:
+                    try:
+                        (vfs_dir / _manifest_obj.basename()).write_text(truth, encoding="utf-8")
+                    except OSError as e:  # noqa: BLE001
+                        log.warning("Vatra canon rewrite failed", error=str(e))
+            cdoc = research_canon.write_audit(dest_dir, canon_res, question=intent)
+            if cdoc:
+                generated_files.append(cdoc)
+            canon_summary = research_canon.summarize(canon_res)
+            canon_findings = canon_res["findings"]
+            _progress(sid, "verify", f"Canon: {research_canon.summary_line(canon_res)}")
+        except Exception as e:  # noqa: BLE001 — canon check is best-effort
+            log.warning("Vatra canon check failed", error=str(e))
+
     # 5c) R8 grounded claim verification (opt-in, paid): a web-tool fact-checker
     # verifies the deliverable's load-bearing claims against real sources and
     # corrects the ones that are verified wrong — the ground-truth back-edge the
@@ -2723,6 +2772,28 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                   f"({_dg['bytes']} bytes, {_dg['sections']} sections)",
                   ok=_deliverable_analysis["verdict"] == "ok")
 
+    # ── Increment 7: canon gate ──
+    # A surviving canon contradiction blocks `done` when gate_blocks_done is on, so a
+    # narrative with an age/whereabouts/alibi/sum/tally/chronology error is not shipped
+    # as complete. Work is kept (status='error'), so a follow-up round can fix it.
+    if quality.gate_blocks_done and canon_findings:
+        _crit_canon = [f for f in canon_findings if f.get("severity") == "critical"]
+        if _crit_canon:
+            _fb_files = {f["name"]: f for f in session_files}
+            for g in generated_files:
+                _fb_files[g["name"]] = g
+            _analysis_blocked = {"quality_verdict": "critical_findings_remain",
+                                 "blocking": {"canon": [f["detail"] for f in _crit_canon][:10]}}
+            if _deliverable_analysis is not None:
+                _analysis_blocked["deliverable"] = _deliverable_analysis
+            if canon_summary is not None:
+                _analysis_blocked["canon"] = canon_summary
+            return await _finish_blocked(
+                db, sid, user,
+                reason=f"{len(_crit_canon)} unresolved canon contradiction(s)",
+                truth=truth, files=list(_fb_files.values()),
+                analysis=_analysis_blocked, confidence=confidence, domain=domain)
+
     # 6b) Persist the assembled deliverable NOW — status=done + truth + files — BEFORE
     # the best-effort learning/coverage steps. So if the process is killed during
     # scoring, the run is already complete and the report is saved (no run left stuck
@@ -2830,6 +2901,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # and what (if anything) remains. Only levers that ran contribute keys.
     if consistency_summary is not None:
         analysis["consistency"] = consistency_summary
+    if canon_summary is not None:
+        analysis["canon"] = canon_summary
     if gate_summary is not None:
         analysis["quality_verdict"] = gate_summary["verdict"]
         analysis["blocking"] = gate_summary
@@ -2842,7 +2915,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     if qm:
         analysis["quality_metrics"] = qm
     if consistency_summary is not None or contract_summary is not None \
-            or gate_summary is not None or qm or _deliverable_analysis is not None:
+            or gate_summary is not None or qm or _deliverable_analysis is not None \
+            or canon_summary is not None:
         try:
             await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
         except Exception as e:  # noqa: BLE001
