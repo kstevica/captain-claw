@@ -1578,6 +1578,7 @@ async def _resolve_spawn_provider_key(config: AgentConfig) -> None:
         return
     config.provider_api_key = ""
     try:
+        from captain_claw.flight_deck.auth import get_db
         raw = await get_db().get_system_setting("fd:provider-keys")
         keys = json.loads(raw) if raw else {}
         if isinstance(keys, dict):

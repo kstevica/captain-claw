@@ -8,6 +8,9 @@ from typing import Any
 
 from captain_claw.config import get_config
 from captain_claw.llm import Message
+from captain_claw.logging import get_logger
+
+log = get_logger(__name__)
 
 
 # An agent spawned by one of the Flight Deck multi-agent modes stamps a marker in
