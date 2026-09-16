@@ -135,8 +135,45 @@ def effective_group(subtask: dict, arch: dict) -> int:
     return max(floor, lead) if lead is not None else floor
 
 
-def resolve_groups(subtasks: list[dict], arch_by_id: dict) -> list[str]:
+def dep_layers(subtasks: list[dict]) -> list[list[str]]:
+    """Dependency layers over subtask ids (Kahn); a cycle collapses into one layer."""
+    ids = [str(s.get("id")) for s in (subtasks or [])]
+    idset = set(ids)
+    deps = {str(s.get("id")): [d for d in (s.get("depends_on") or [])
+                               if d in idset and d != str(s.get("id"))]
+            for s in (subtasks or [])}
+    placed: set[str] = set()
+    layers: list[list[str]] = []
+    while len(placed) < len(ids):
+        ready = [i for i in ids if i not in placed and all(d in placed for d in deps[i])]
+        if not ready:
+            ready = [i for i in ids if i not in placed]  # cycle
+        layers.append(ready)
+        placed.update(ready)
+    return layers
+
+
+def match_owner_phrase(text: str, owners: list[dict]) -> dict | None:
+    """The first owner whose role/title appears in *text* (for a gap-closing request)."""
+    low = (text or "").lower()
+    for o in owners or []:
+        for key in ("role", "title"):
+            v = str(o.get(key) or "").strip().lower()
+            if v and v in low:
+                return o
+    return None
+
+
+def resolve_groups(subtasks: list[dict], arch_by_id: dict,
+                   strict_deps: bool = False) -> list[str]:
     """Pin every subtask's final execution group, repairing dependency inversions.
+
+    ``strict_deps`` (Increment 6): instead of pulling a violated dependency DOWN
+    into the dependent's wave (where both run concurrently and only the live board
+    bridges the hand-off), push the DEPENDENT to a LATER phase than its producer —
+    so the phase barrier guarantees the producer finishes first. A single
+    continuous artifact split into ordered ranges is then written strictly in
+    order. A user `group_lock` on the dependent still wins.
 
     The observed failure: the Lead pushes a piece to a late group (fact-checker
     → D) while an EARLIER piece records ``depends_on`` it — the dependent then
@@ -161,7 +198,23 @@ def resolve_groups(subtasks: list[dict], arch_by_id: dict) -> list[str]:
         moved = False
         for s in subtasks or []:
             for dep in s.get("depends_on") or []:
-                if dep in eff and eff[dep] > eff[s["id"]]:
+                if dep not in eff:
+                    continue
+                if strict_deps:
+                    # Sequence producer-before-consumer: the dependent must run in a
+                    # LATER phase than its producer. A user lock on the DEPENDENT wins.
+                    if eff[s["id"]] <= eff[dep]:
+                        if _parse_group(by_id[s["id"]].get("group_lock")) is not None:
+                            continue
+                        new = min(eff[dep] + 1, _MAX_ORD)
+                        if new > eff[s["id"]]:
+                            notes.append(
+                                f"{s['id']} pushed {group_label(eff[s['id']])}→"
+                                f"{group_label(new)} — sequenced after {dep} (strict_deps)")
+                            eff[s["id"]] = new
+                            moved = True
+                    continue
+                if eff[dep] > eff[s["id"]]:
                     # A user-locked dependency is absolute — the user chose to run it
                     # later than a dependent; honor it (the board/wait bridges the gap)
                     # instead of pulling it back.
@@ -333,9 +386,13 @@ def clarify_prompt(requester_role: str, request_text: str, roster: list[dict],
 
 
 def parse_clarify(output: str | None) -> dict:
-    """Parse the Lead's decision. Defaults to DENY on any parse trouble."""
+    """Parse the Lead's decision. Defaults to DENY on any parse trouble.
+
+    ``parse_failed`` distinguishes a real model DENY from unparseable output (a weak
+    Lead that answered in prose, a broken code fence, truncated JSON) — the caller
+    logs the raw reply so "Lead denied" and "Lead reply unparseable" are told apart."""
     deny = {"approve": False, "already_available": False, "pointer": "",
-            "provider": "", "instruction": ""}
+            "provider": "", "instruction": "", "parse_failed": True}
     if not output:
         return deny
     text = output.strip()
@@ -354,4 +411,5 @@ def parse_clarify(output: str | None) -> dict:
         "pointer": str(raw.get("pointer") or "").strip()[:300],
         "provider": str(raw.get("provider") or "").strip(),
         "instruction": str(raw.get("instruction") or "").strip()[:600],
+        "parse_failed": False,
     }

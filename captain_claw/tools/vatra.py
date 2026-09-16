@@ -46,7 +46,7 @@ class VatraTool(Tool):
         "Prefer search/read/post — the board is always there; only 'ask' when new work is needed, "
         "and only 'wait' when you're genuinely blocked on a specific piece."
     )
-    timeout_seconds = 120.0
+    timeout_seconds = 150.0
 
     parameters = {
         "type": "object",
@@ -68,7 +68,7 @@ class VatraTool(Tool):
             "title": {"type": "string", "description": "For 'post' — optional short label."},
             "kind": {"type": "string", "description": "For 'read' — filter to note|output|narration|file."},
             "path": {"type": "string", "description": "For 'wait' — a teammate's vfs:<proj>/<file> to block on until it exists."},
-            "wait": {"type": "integer", "description": "Seconds to block: 'inbox' 0–30, 'wait' 0–90 (default 90)."},
+            "wait": {"type": "integer", "description": "Seconds to block: 'inbox' 0–30, 'wait' 0–120 (default 120)."},
         },
         "required": ["action"],
     }
@@ -176,7 +176,8 @@ class VatraTool(Tool):
         if not q:
             return ToolResult(success=False, error="Provide `query` keywords to search the board.")
         r = await self._post(fd_url, "/fd/vatra/agent/board/search", {
-            "session_id": ctx["session_id"], "owner": ctx["owner"], "query": q, "limit": 20,
+            "session_id": ctx["session_id"], "owner": ctx["owner"],
+            "subtask_id": ctx["subtask_id"], "query": q, "limit": 20,
         })
         if isinstance(r, dict) and r.get("_error"):
             return ToolResult(success=False, error=r["_error"])
@@ -190,6 +191,7 @@ class VatraTool(Tool):
     async def _read(self, fd_url: str, ctx: dict, **kwargs: Any) -> ToolResult:
         r = await self._post(fd_url, "/fd/vatra/agent/board/read", {
             "session_id": ctx["session_id"], "owner": ctx["owner"],
+            "subtask_id": ctx["subtask_id"],
             "kind": (kwargs.get("kind") or "").strip(), "limit": 40,
         })
         if isinstance(r, dict) and r.get("_error"):
@@ -261,12 +263,13 @@ class VatraTool(Tool):
             return ToolResult(success=False, error=(
                 "Provide `path` (a teammate's vfs:<proj>/<file> to wait on) or `query` "
                 "(keywords for a teammate's board post) to wait for."))
-        # Default to the full 90s when blocked — the agent asked to wait, so wait.
-        wait = max(0, min(90, int(kwargs.get("wait") or 90)))
+        # Default to the full window when blocked — the agent asked to wait, so wait.
+        wait = max(0, min(120, int(kwargs.get("wait") or 120)))
         r = await self._post(fd_url, "/fd/vatra/agent/wait", {
             "session_id": ctx["session_id"], "owner": ctx["owner"],
+            "subtask_id": ctx["subtask_id"],
             "path": path, "query": query, "wait": wait,
-        }, timeout=wait + 15.0)
+        }, timeout=wait + 20.0)
         if isinstance(r, dict) and r.get("_error"):
             return ToolResult(success=False, error=r["_error"])
         data = r.json()
@@ -277,10 +280,31 @@ class VatraTool(Tool):
                     f"Ready — {data.get('path')}{tail}:\n\n{data.get('content', '')}"))
             return ToolResult(success=True, content=(
                 "Ready — teammate posts now match:\n\n" + self._fmt_entries(data.get("entries") or [])))
+        target = path or f"posts matching {query!r}"
+        # Relay the server's actual verdict instead of always saying "proceed" — that
+        # blanket message is what licensed a QA agent to audit a hallucinated
+        # reconstruction while the producer was still alive.
+        if data.get("producer_alive"):
+            prod = data.get("producer") or {}
+            who = prod.get("role") or "the teammate who owns it"
+            secs = prod.get("last_seen_s")
+            when = f" (last active {secs}s ago)" if secs is not None else ""
+            return ToolResult(success=True, content=(
+                f"{target} isn't ready yet, but {who} is STILL WORKING on it{when}. "
+                f"Call `vatra` action='wait' again with the SAME target — do NOT proceed "
+                f"without it and do NOT reconstruct a substitute."))
+        if data.get("present_but_placeholder"):
+            return ToolResult(success=True, content=(
+                f"{target} exists but is a placeholder, not real content — its producer "
+                f"must re-write it. Wait again shortly; do not use the placeholder."))
+        # A relayed server note (pulled-forward / not-scheduled / exhausted) is more
+        # specific than any generic text — prefer it.
+        note = (data.get("note") or "").strip()
         board = data.get("board") or []
         digest = self._fmt_entries(board) if board else "(the board is still empty)"
-        target = path or f"posts matching {query!r}"
+        if note:
+            return ToolResult(success=True, content=f"{target}: {note}\n\nBoard so far:\n\n{digest}")
         return ToolResult(success=True, content=(
-            f"Not ready after {data.get('waited', wait)}s — {target} hasn't appeared. The teammate "
-            f"who owns it may be delayed or may have failed. Proceed with your best alternative and "
-            f"note the gap; the review round and reporter reconcile the rest. Board so far:\n\n{digest}"))
+            f"Not ready after {data.get('waited', wait)}s — {target} hasn't appeared. "
+            f"If you may wait again (check the note), do so; otherwise proceed with your "
+            f"best alternative and note the gap. Board so far:\n\n{digest}"))

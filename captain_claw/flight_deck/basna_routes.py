@@ -2338,11 +2338,22 @@ async def _score_runs(results: list[dict], agg: dict, merge_kind: str, *, judge_
 
 
 def _summarize_tool_args(args) -> str:
-    """Concise one-line summary of a tool call's arguments for the action log."""
+    """Concise one-line summary of a tool call's arguments for the action log.
+
+    Identifier-shaped values (path/file/url/pattern/name) keep enough characters
+    to survive intact — a 40-char cut turned ``vfs:vatra-<sid8>/eppo-authenticity-pack.md``
+    into ``…/eppo-authenticity-pac`` in the action feed and made it look like the
+    write tool had truncated the filename. Other values stay short.
+    """
+    _WIDE = ("path", "file", "url", "pattern", "name")
     if isinstance(args, dict) and args:
-        return ", ".join(f"{k}={str(v)[:40]}" for k, v in list(args.items())[:2])[:120]
+        parts = []
+        for k, v in list(args.items())[:2]:
+            cap = 200 if k in _WIDE else 40
+            parts.append(f"{k}={str(v)[:cap]}")
+        return ", ".join(parts)[:260]
     if args:
-        return str(args)[:120]
+        return str(args)[:260]
     return ""
 
 
@@ -2769,6 +2780,10 @@ class ExecuteRequest(BaseModel):
     # durable checkpoints (no re-run, no re-spend) and re-dispatch only the missing
     # ones, then synthesize. Set by the /resume endpoints; false for a normal run.
     resume: bool = False
+    # Long-form deliverable manifest + per-role tier map (docs/vatra-run-hardening-plan.md,
+    # Vatra only). None → none / today. See VatraStartRequest for the shapes.
+    deliverable: dict | None = None
+    role_tiers: dict | None = None
 
 
 def _shared_ds_env(vfs_project: str, on: bool) -> list[dict]:

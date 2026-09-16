@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from captain_claw import write_guard
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, project_is_readonly, resolve_vfs_path, split_scheme
@@ -177,6 +178,45 @@ class WriteTool(Tool):
             ToolResult with status
         """
         try:
+            _guard = write_guard.guard_config()
+
+            # ── Tier 1 (default-on) — refuse junk content at the boundary ──
+            # A weak model that re-issues a write from its own compacted history
+            # sends the acknowledgement marker ("[written to disk: …]") AS the
+            # file body; an empty body is almost always a dropped argument. Refuse
+            # both loudly so the model re-issues real content, rather than
+            # silently persisting an 88-byte stub. (CLAW_WRITE_GUARD=0 disables.)
+            if _guard.reject_placeholder:
+                if write_guard.is_placeholder_content(content):
+                    return ToolResult(
+                        success=False,
+                        error="placeholder_content_rejected",
+                        content=(
+                            "❌ Refused: the content is a tool acknowledgement/"
+                            "compaction marker (e.g. '[written to disk: …]'), not "
+                            "file text. Your history may show a past write that "
+                            "way — that is a display marker, NOT the file's "
+                            "content. Re-issue `write` with the FULL text; for a "
+                            "long file write the first part, then call `write` "
+                            "again with append=true for the rest."
+                        ),
+                    )
+                if write_guard.is_empty_content(content):
+                    _bn = write_guard.basename_of(path)
+                    if _bn not in write_guard.EMPTY_ALLOW:
+                        return ToolResult(
+                            success=False,
+                            error="empty_content_rejected",
+                            content=(
+                                "❌ Refused: no content to write. If you meant to "
+                                "create an intentionally empty file, that is only "
+                                "allowed for conventional empties (e.g. "
+                                "__init__.py). Otherwise re-issue `write` with the "
+                                "file's full text."
+                            ),
+                        )
+
+            _repair_note = ""
             # Shared VFS write (vfs:<project>/...) — real file in the
             # cross-agent tree, bypassing per-session saved/ scoping.
             if is_vfs_path(path):
@@ -188,6 +228,54 @@ class WriteTool(Tool):
                             "(e.g. a Google Drive mount) — it cannot be written to."
                         ),
                     )
+
+                # ── Tier 2 (worker-only, CLAW_WRITE_STRICT) — deliverable name/size ──
+                # In a Vatra run each part has a code-assigned filename. Repair a
+                # model-shortened basename against the declared set, require an
+                # extension so an extensionless stub can't be created silently, and
+                # enforce a byte floor so a "summary as the deliverable" fails at
+                # write time instead of at the run gate.
+                if _guard.require_extension_vfs and write_guard.strict_worker():
+                    _declared = write_guard.declared_files()
+                    if write_guard.requires_extension(path):
+                        _fixed = write_guard.repair_declared_name(
+                            write_guard.basename_of(path), _declared)
+                        if _fixed:
+                            _given = write_guard.basename_of(path)
+                            path = path[: len(path) - len(_given)] + _fixed
+                            _repair_note = f" (repaired from {_given})"
+                        else:
+                            return ToolResult(
+                                success=False,
+                                error="path_missing_extension",
+                                content=(
+                                    f"❌ Refused: '{write_guard.basename_of(path)}' "
+                                    "has no file extension. Write the deliverable "
+                                    "with its full declared name, e.g. "
+                                    "vfs:<project>/<name>.md."
+                                ),
+                            )
+                    _floor = write_guard.min_bytes_floor()
+                    if (
+                        _floor
+                        and not append
+                        and write_guard.basename_of(path) in
+                        [write_guard.basename_of(d) for d in _declared]
+                        and len(content.encode("utf-8", errors="replace")) < _floor
+                    ):
+                        return ToolResult(
+                            success=False,
+                            error="content_below_floor",
+                            content=(
+                                f"❌ Refused: '{write_guard.basename_of(path)}' is a "
+                                f"declared deliverable part but the content is only "
+                                f"{len(content.encode('utf-8', errors='replace'))} "
+                                f"bytes (floor {_floor}). A summary or outline is "
+                                "not acceptable — write the part IN FULL "
+                                "(chapter-by-chapter with append=true if long)."
+                            ),
+                        )
+
                 file_path = resolve_vfs_path(path, create_parents=True)
                 if file_path is None:
                     return ToolResult(
@@ -391,14 +479,66 @@ class WriteTool(Tool):
 
             # Write file
             mode = "a" if append else "w"
-            with open(file_path, mode, encoding="utf-8") as f:
-                f.write(content)
+
+            def _write_once() -> None:
+                with open(file_path, mode, encoding="utf-8") as f:
+                    f.write(content)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass  # fsync best-effort (some filesystems/pipes reject it)
+
+            # Byte count already on disk when appending, so readback can verify
+            # prev + new rather than re-hashing the prior content.
+            _append_prev = 0
+            if append:
+                try:
+                    _append_prev = file_path.stat().st_size if file_path.exists() else 0
+                except Exception:
+                    _append_prev = 0
+
+            _write_once()
+
+            # ── Write-then-readback verify (default-on) ──
+            # Re-open the file and confirm it holds what was sent, so a silently
+            # truncated or dropped write becomes an error the caller must act on
+            # instead of a reported success. Overwrites re-write on mismatch;
+            # appends verify once (a blind re-append would double the content).
+            _verify_receipt = ""
+            if _guard.verify_readback:
+                rb = write_guard.verify_readback(file_path, content, append, _append_prev)
+                _retries = 0 if append else _guard.verify_retries
+                while not rb["ok"] and _retries > 0:
+                    log.warning("Write readback mismatch — retrying",
+                                path=str(file_path), reason=rb.get("reason"))
+                    _write_once()
+                    rb = write_guard.verify_readback(file_path, content, append, _append_prev)
+                    _retries -= 1
+                if not rb["ok"]:
+                    log.error("Write verify failed", path=str(file_path), reason=rb.get("reason"))
+                    return ToolResult(
+                        success=False,
+                        error="write_verify_failed",
+                        content=(
+                            f"❌ The write to {path} could not be verified on disk "
+                            f"({rb.get('reason', 'unknown')}). The file may be "
+                            "truncated or missing — re-issue the write."
+                        ),
+                    )
+                _verify_receipt = f" · verified {rb['bytes']} bytes"
+                if rb.get("sha8"):
+                    _verify_receipt += f" sha={rb['sha8']}"
 
             # Record who authored this shared file (best-effort, VFS writes only).
             if is_vfs_path(path):
                 from captain_claw.vfs import record_author
                 record_author(file_path)
 
+            # result_msg stays byte-identical in shape (path then an optional
+            # "(requested: …)" the tool-output parser strips) — the repair note
+            # and verify receipt ride in system_hint so they never leak into
+            # _parse_written_path_from_tool_output's captured path.
             redirect_note = ""
             requested = Path(path).expanduser()
             if str(requested) != str(file_path):
@@ -425,19 +565,30 @@ class WriteTool(Tool):
             # back a file it just wrote, wasting an iteration) and
             # second-guess rewrites (regenerating the whole file from
             # scratch right after a successful write).
+            _saved = f"Saved and verified ({rb['bytes']} bytes" + (
+                f", sha {rb['sha8']})" if rb.get("sha8") else ")"
+            ) if (_guard.verify_readback and _verify_receipt) else "Saved."
+            _compaction_note = (
+                " Your history may later show this write as '[written to disk: "
+                "…]' — that is a compaction marker, NOT file content; never pass "
+                "it back as `content`, and never rewrite the file because you see "
+                "it."
+            )
             if append:
                 _hint = (
-                    "Do NOT read this file back — you already know its "
-                    "contents. Proceed to the next item."
+                    f"{_saved} Do NOT read this file back — you already know its "
+                    "contents. Proceed to the next item." + _compaction_note
                 )
             else:
                 _hint = (
-                    "Do NOT read this file back — you already know its "
+                    f"{_saved} Do NOT read this file back — you already know its "
                     "contents. The file is saved and complete; do NOT "
                     "rewrite it from scratch. If it needs changes, use the "
                     "edit tool for targeted modifications. If you are done, "
-                    "provide your final text response."
+                    "provide your final text response." + _compaction_note
                 )
+            if _repair_note:
+                _hint = f"Wrote the declared name{_repair_note}. {_hint}"
             return ToolResult(
                 success=True,
                 content=result_msg,

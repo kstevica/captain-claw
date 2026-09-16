@@ -30,6 +30,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from captain_claw import write_guard
 from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
 
@@ -77,9 +78,11 @@ from captain_claw.flight_deck.basna_routes import (
     _tier_creds,
     _vfs_manifest,
 )
+from captain_claw.flight_deck import deliverable_manifest
 from captain_claw.flight_deck import facts_ledger
 from captain_claw.flight_deck import quality_findings
 from captain_claw.flight_deck import research_brief
+from captain_claw.flight_deck import research_canon
 from captain_claw.flight_deck import research_consistency
 from captain_claw.flight_deck import research_contract
 from captain_claw.flight_deck import research_map
@@ -104,6 +107,7 @@ from captain_claw.flight_deck.quality_profile import (
     worker_produced_nothing,
 )
 from captain_claw.logging import get_logger
+from captain_claw.vfs import is_vfs_path as _vfs_is_path
 from captain_claw.vfs import resolve_under as _vfs_resolve_under
 
 log = get_logger(__name__)
@@ -153,6 +157,26 @@ _wait_ledger: dict[str, dict[str, dict[str, float]]] = {}
 # sid → {"current": ordinal, "done": set[subtask_id], "owners": [...]}
 _group_schedule: dict[str, dict] = {}
 
+# Per-subtask liveness (Increment 5): the run loop stamps each owner's state and
+# last-activity time so `agent_wait` can tell a SLOW producer (still working, keep
+# waiting) from a STALLED one (give up). sid → subtask_id → {state, started,
+# finished, last_seen, role, arch, artifact}. Populated in _dispatch_owner (flat AND
+# grouped), cleared in teardown. A separate dict from _group_schedule so it never
+# perturbs the grouped-schedule truthiness checks.
+_owner_activity: dict[str, dict[str, dict]] = {}
+# A producer that emitted activity within this window is "alive"; a waiter on it
+# extends (heartbeat) instead of expiring. Matches basna_routes._EXTEND_ACTIVITY_S.
+_ALIVE_WINDOW_S = 180.0
+
+
+def _owner_stamp(sid: str, subtask: str, **fields) -> None:
+    """Update this owner's liveness record (best-effort; no-op if the run is gone)."""
+    if not sid or not subtask:
+        return
+    rec = _owner_activity.setdefault(sid, {}).setdefault(subtask, {})
+    rec.update(fields)
+    rec["last_seen"] = time.monotonic()
+
 
 def _phase(sid: str, label: str, **extra) -> None:
     """Emit one high-level phase banner (Planning / Intro / Main / Synthesizing …)
@@ -172,6 +196,12 @@ _run_vfs_project: dict[str, str] = {}
 # datastore (vfs:<project>/.datastore). Populated at the top of execute_vatra,
 # cleared in teardown — mirrors _run_vfs_project.
 _run_shared_datastore: dict[str, bool] = {}
+
+# Per-run deliverable Manifest (Increment 3) and quality flags the agent-facing
+# endpoints (_vatra_env, agent_wait) read back without re-parsing config. Populated
+# in execute_vatra, cleared in teardown alongside _run_vfs_project.
+_run_manifest: dict[str, Any] = {}
+_run_flags: dict[str, dict] = {}
 
 
 def _vfs_project(sid: str) -> str:
@@ -284,14 +314,43 @@ def _group_instr_block(st: dict, arch: dict, group_instructions: dict) -> str:
 _GROUP0_PLANNER_ID = "long-horizon-planner"
 
 
-def _plan_slice_block(st: dict, group0_by_subtask: dict, arch_by_id: dict) -> str:
+def _manifest_slice_block(st: dict, manifest) -> str:
+    """This owner's deliverable FILE + range instructions from the manifest.
+
+    Returns '' when there is no manifest or this subtask owns no part, so
+    non-manifest runs emit byte-identical prompts (Increment 3)."""
+    if manifest is None:
+        return ""
+    part = manifest.part_for(st["id"])
+    if part is None:
+        return ""
+    lines = ["\n\n## Your deliverable file (write it with EXACTLY this name)"]
+    lines.append(f"Write your part to `{part.path}` — that exact filename, in the "
+                 "shared project folder. Never a summary, never a pointer, never a "
+                 "different name.")
+    if part.range:
+        lo, hi = part.range
+        span = f"chapter {lo}" if lo == hi else f"chapters {lo}–{hi}"
+        lines.append(f"Your range: {span} — write EVERY chapter in it and nothing "
+                     "outside it. Write chapter-by-chapter: first `write` the file, "
+                     "then `write` with append=true for each further chapter. Never "
+                     "one giant write; never a summary or an outline.")
+    if manifest.seam_owner and manifest.seam_owner == st["id"] and part.range:
+        lines.append(f"You own the seam: finish chapter {part.range[1]} completely — "
+                     "the next part begins from your frozen file.")
+    return "\n".join(lines)
+
+
+def _plan_slice_block(st: dict, group0_by_subtask: dict, arch_by_id: dict, manifest=None) -> str:
     """This owner's slice of the Group 0 coordination plan: its mandate, the artifact
     it produces, which named teammates it consumes from, and hand-off notes. Returns
     '' when there is no plan or no entry for this subtask — so resume/legacy runs (no
-    ``group0_plan``) emit byte-identical prompts."""
+    ``group0_plan``) emit byte-identical prompts. When a deliverable manifest is
+    present, the owner's declared file + range are appended (Increment 3)."""
     e = (group0_by_subtask or {}).get(st["id"])
+    _mblock = _manifest_slice_block(st, manifest)
     if not e:
-        return ""
+        return _mblock
     lines = ["\n\n## Your coordination plan (Group 0)"]
     if e.get("mandate"):
         lines.append(f"Your mandate: {e['mandate']}")
@@ -310,7 +369,7 @@ def _plan_slice_block(st: dict, group0_by_subtask: dict, arch_by_id: dict) -> st
                      "you start, via the `vatra` tool): " + "; ".join(parts))
     if e.get("hand_off_notes"):
         lines.append(f"Hand-off notes for downstream teammates: {e['hand_off_notes']}")
-    return "\n".join(lines)
+    return "\n".join(lines) + _mblock
 
 
 # R4 — grouped Vatra edges carry DATA, not just prose. Cap the pushed producer
@@ -364,6 +423,22 @@ def _vatra_env(sid: str, subtask: str, owner: str, depth: int) -> list[dict]:
     # Opt-in: bind workers to the run's folder-scoped shared datastore too.
     if _run_shared_datastore.get(sid):
         env.append({"key": "CLAW_DATASTORE_VFS", "value": project})
+    # Long-form hardening (Increment 3): under quality.write_guard, bind the worker
+    # to the strict write tier — require an extension, repair a shortened name
+    # against the declared set, and enforce a byte floor on its declared part.
+    flags = _run_flags.get(sid) or {}
+    manifest = _run_manifest.get(sid)
+    if flags.get("write_guard") and manifest is not None:
+        import json as _json
+        env.append({"key": "CLAW_WRITE_STRICT", "value": "1"})
+        env.append({"key": "CLAW_DECLARED_FILES",
+                    "value": _json.dumps(manifest.declared_basenames())})
+        part = manifest.part_for(subtask) if subtask else None
+        if part is not None:
+            env.append({"key": "CLAW_MY_ARTIFACT", "value": part.basename()})
+            floor = part.min_bytes or manifest.min_bytes or 0
+            if floor:
+                env.append({"key": "CLAW_WRITE_MIN_BYTES", "value": str(floor)})
     return env
 
 
@@ -443,6 +518,10 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
             # Optional Lead-assigned execution group ('A'..'D'); clamped to the
             # archetype's preset floor at run time (grouped mode only).
             "group": s.get("group"),
+            # Optional chapter/section range for a split continuous artifact
+            # (Increment 3) — tolerated so a derived manifest can pick it up. The
+            # code assigns the artifact filename; the Lead only hints the range.
+            **({"range": s.get("range")} if s.get("range") else {}),
         })
     # Keep only dependency refs that point at a real sibling (drop self + danglers).
     valid_ids = {s["id"] for s in subtasks}
@@ -680,11 +759,24 @@ async def _spawn_worker(request: Request, user: dict, *, name: str, description:
             max_context = int(mt.get("input_ctx") or 0) or 8192
 
     worker_tools = [t for t in (tools or AgentConfig().tools) if t != "basna"]
+    # Every Vatra worker (specialists AND reporter) runs on a caller-chosen tier
+    # that is often a fast/weak model, so default the tool-loop's malformed /
+    # cut-off / guard-refused corrective retries on (Increment 2). Don't clobber
+    # a value a caller already threaded through env_vars.
+    _worker_env = (env_vars or []) + (extra_env or [])
+    if not any(str(e.get("key")) == "CLAW_MALFORMED_CALL_RETRIES" for e in _worker_env):
+        _worker_env = _worker_env + [{"key": "CLAW_MALFORMED_CALL_RETRIES", "value": "2"}]
+    # Weak-tier signal (Increment 8): a caller can mark a tier `weak: true` to say
+    # "this slot is a fast/weak model" — surfaced to the worker as CLAW_MODEL_WEAK so
+    # its runtime can lean on the deterministic backstops. An explicit signal, not a
+    # name-based classifier (which would mis-rank a hosted DeepSeek as frontier).
+    if lt.get("weak") and not any(str(e.get("key")) == "CLAW_MODEL_WEAK" for e in _worker_env):
+        _worker_env = _worker_env + [{"key": "CLAW_MODEL_WEAK", "value": "1"}]
     base = dict(
         name=name, description=description,
         cognitive_mode=cognitive_mode or "neutra", tools=worker_tools,
         runtime=runtime,
-        env_vars=(env_vars or []) + (extra_env or []) + [{"key": _WORKER_MARKER, "value": "1"}]
+        env_vars=_worker_env + [{"key": _WORKER_MARKER, "value": "1"}]
         + ([{"key": "CLAW_SOURCE_CORPUS", "value": "1"}] if corpus else []),  # R10
         web_enabled=True, web_port=0,
     )
@@ -820,6 +912,113 @@ def _capture_generated(slug: str, exclude: set[str], dest_dir: Path,
     return files, "\n\n".join(t.strip() for t in texts if t.strip()).strip()
 
 
+# ── Increment 4: synthesis-emits-the-artifact helpers ─────────────────
+
+_POINTER_RE = re.compile(r"(?:vfs:|saved/)[^\s`'\"\)\]]+", re.IGNORECASE)
+_POINTER_PHRASES = (
+    "assembled and complete", "is complete", "see the file", "saved to",
+    "written to", "deliverable_file:", "the full document", "find the file",
+    "available at", "you can find", "has been saved", "is available in",
+)
+
+
+def _pointer_paths(text: str) -> list[str]:
+    """vfs:/saved: paths mentioned in *text* (a reporter reply pointing at a file)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _POINTER_RE.finditer(text or ""):
+        p = m.group(0).rstrip(".,;")
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _looks_like_pointer(out: str, inputs_len: int) -> bool:
+    """True when a reporter reply is a note ABOUT the deliverable, not the deliverable.
+
+    Short relative to the material it assembled, OR a pointer phrase + a vfs:/saved:
+    path as the payload, OR the runtime's own placeholder marker.
+    """
+    body = (out or "").strip()
+    if not body:
+        return True
+    if write_guard.is_placeholder_content(body):
+        return True
+    low = body.lower()
+    if len(body) < max(800, int(0.25 * inputs_len)):
+        # short — but a genuinely tiny task can be short; only call it a pointer
+        # when it also names a file or uses a pointer phrase.
+        if _pointer_paths(body) or any(ph in low for ph in _POINTER_PHRASES):
+            return True
+    return False
+
+
+def _resolve_deliverable(user_id: str, project: str, candidates: list[str],
+                         min_chars: int = 0) -> tuple[str, str]:
+    """Read the largest resolvable, non-placeholder candidate file → (text, path).
+
+    ``candidates`` are vfs:/saved: paths or bare basenames. Returns ('','') if none
+    resolves to real content. Used to recover a deliverable the reporter wrote to the
+    VFS folder but only POINTED at in its reply.
+    """
+    best_text = ""
+    best_path = ""
+    for cand in candidates:
+        if not cand:
+            continue
+        path = cand if _vfs_is_path(cand) else f"vfs:{project}/{cand}"
+        try:
+            fp = _vfs_resolve_under(user_id, project, path)
+        except Exception:
+            fp = None
+        if not fp or not Path(fp).is_file():
+            continue
+        try:
+            data = Path(fp).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not data.strip() or write_guard.is_placeholder_content(data):
+            continue
+        if len(data) > len(best_text):
+            best_text, best_path = data, path
+    if min_chars and len(best_text) < min_chars:
+        return "", ""
+    return best_text, best_path
+
+
+async def _finish_blocked(db, sid: str, user: dict, *, reason: str, truth: str,
+                          files: list, analysis: dict, confidence: float = 0.0,
+                          domain: str = "") -> dict:
+    """Persist a run that failed its deliverable gate as status='error' with the best
+    truth + files + verdict KEPT — continuable via /continue and resumable — instead of
+    flipping 'done' on a broken deliverable. Returns the result dict the caller returns."""
+    _progress(sid, "done", f"Deliverable gate FAILED: {reason}", ok=False)
+    try:
+        await db.update_basna_session(
+            sid, user["id"], status="error", truth=truth or "", confidence=confidence,
+            files=json.dumps(files), analysis=json.dumps(analysis),
+            progress=json.dumps((_PROGRESS.get(sid) or {}).get("events", [])))
+    except Exception as e:  # noqa: BLE001
+        log.warning("Vatra _finish_blocked persist failed", error=str(e))
+    _RUN_USAGE.pop(sid, None)
+    _progress_done(sid)
+    return {"session_id": sid, "domain": domain, "mode": "vatra", "status": "error",
+            "truth": truth, "confidence": confidence, "analysis": analysis,
+            "subtasks": [], "learned": [], "cost": None, "blocked": reason}
+
+
+# The reporter smooths seams in an ALREADY-assembled file; it never rewrites it.
+REPORTER_SMOOTH_DIRECTIVE = (
+    "The deliverable is ALREADY assembled at `{path}` ({bytes} bytes) in your shared "
+    "project folder. Read it. Your ONLY job is to smooth the SEAMS between parts with "
+    "the `edit` tool — fix abrupt transitions, a sentence duplicated across a seam, and "
+    "obvious tense/name drift where two parts meet. Do NOT rewrite chapters, do NOT "
+    "summarise, do NOT shorten, do NOT write any other file. Make only small `edit` "
+    "changes in place. When done, reply with the single word DONE.{seams}"
+)
+
+
 # ── Group 0 pre-phase: plan → gate ───────────────────────────────────
 
 async def _ensure_route(db, user_id: str, sess: dict, sid: str, *, intent: str,
@@ -874,7 +1073,8 @@ async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent:
                               shared_context: str, file_names: list[str],
                               subtasks: list[dict], arch_by_id: dict, tiers: dict | None,
                               api_key: str, env_vars: list[dict] | None,
-                              timeout: float, clarifications: str = "") -> dict:
+                              timeout: float, clarifications: str = "",
+                              tier: str = "") -> dict:
     """Spawn the Long Horizon Planner, dispatch it to draft the per-agent coordination
     plan, and return the parsed structured plan. Best-effort: any spawn/dispatch/parse
     failure yields the pass-through plan so a dead planner never blocks the run. Emits
@@ -911,7 +1111,7 @@ async def _run_group0_planner(request: Request, user: dict, sid: str, *, intent:
         request, user, name=f"vatra-{sid[:8]}-planner",
         description="Draft the team coordination plan",
         cognitive_mode=planner_arch.get("cognitive_mode") or "neutra",
-        tools=["read", "glob"], tier=planner_arch.get("tier") or "reason",
+        tools=["read", "glob"], tier=(tier or planner_arch.get("tier") or "reason"),
         tiers=tiers, api_key=api_key, env_vars=env_vars)
     if not sp.get("ok"):
         _progress(sid, "note", "Planner unavailable — using a pass-through coordination plan",
@@ -971,6 +1171,13 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
     def _creds(tier: str) -> dict:
         return _resolve_creds(registry, body.tiers, body.api_key, tier)
 
+    # Per-role tier NAMES (Increment 8): the Lead/planner can run on a stronger tier.
+    _rtiers = (getattr(body, "role_tiers", None) if getattr(body, "role_tiers", None) is not None
+               else cfg.get("role_tiers")) or {}
+
+    def _role_tier(role: str, default: str = "") -> str:
+        return str((_rtiers or {}).get(role) or default or "")
+
     # Persist the run's knobs onto the session config so /plan/approve (and any resume)
     # reconstruct the same run without the UI having to resend them.
     _knobs: dict[str, Any] = {
@@ -981,6 +1188,12 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
         _knobs["grouped_review"] = True
     if body.quality is not None:
         _knobs["quality"] = body.quality
+    if getattr(body, "deliverable", None) is not None:
+        _knobs["deliverable"] = body.deliverable
+    if getattr(body, "role_tiers", None) is not None:
+        _knobs["role_tiers"] = body.role_tiers
+    if getattr(body, "dispatch_timeout", None):
+        _knobs["dispatch_timeout"] = body.dispatch_timeout
     _changed = {k: v for k, v in _knobs.items() if cfg.get(k) != v}
     if _changed:
         cfg.update(_changed)
@@ -1003,7 +1216,7 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
     _phase(sid, "Group 0 · Long Horizon Planner")
 
     route = await _ensure_route(db, user["id"], sess, sid, intent=intent,
-                                max_agents=max_agents, creds=_creds("reason"), cfg=cfg,
+                                max_agents=max_agents, creds=_creds(_role_tier("lead", "reason")), cfg=cfg,
                                 shared_datastore=_shared_ds, vfs_project=_vfs_project(sid))
     subtasks = route.get("subtasks") or []
     # Re-resolve execution groups from the user's team-plan edits BEFORE the plan is
@@ -1024,7 +1237,7 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
         request, user, sid, intent=intent, shared_context=route.get("shared_context", ""),
         file_names=file_names, subtasks=subtasks, arch_by_id=arch_by_id,
         tiers=body.tiers, api_key=body.api_key, env_vars=body.env_vars,
-        timeout=body.dispatch_timeout)
+        timeout=body.dispatch_timeout, tier=_role_tier("planner", ""))
     route["group0_plan"] = plan
     try:
         await db.update_basna_session(sid, user["id"], route=json.dumps(route))
@@ -1073,6 +1286,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         cfg = json.loads(sess.get("config") or "{}")
     except json.JSONDecodeError:
         cfg = {}
+    # Per-role tier NAMES (Increment 8): lead/planner/clarify/reporter/qa → a Library
+    # tier, so a caller can put those slots on a stronger model than the specialists.
+    # None → each role uses its hard-coded default tier (today).
+    _role_tiers_map = (getattr(body, "role_tiers", None)
+                       if getattr(body, "role_tiers", None) is not None
+                       else cfg.get("role_tiers")) or {}
+
+    def _role_tier(role: str, default: str = "") -> str:
+        return str((_role_tiers_map or {}).get(role) or default or "")
+
     max_agents = int(cfg.get("max_agents") or 6)
     # Resume mode: restore already-finished owners from their durable checkpoints
     # (no re-run, no re-spend) and re-dispatch only the missing ones. Checkpoints are
@@ -1097,6 +1320,14 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _knob_updates["grouped_review"] = True
     if int(cfg.get("max_parallel") or 0) != int(getattr(body, "max_parallel", 0) or 0):
         _knob_updates["max_parallel"] = int(getattr(body, "max_parallel", 0) or 0)
+    # Long-form hardening (Increment 3): persist the deliverable manifest + role tiers
+    # so a continuation round inherits them (tier NAMES only — never secrets).
+    _body_deliverable = getattr(body, "deliverable", None)
+    if _body_deliverable is not None and cfg.get("deliverable") != _body_deliverable:
+        _knob_updates["deliverable"] = _body_deliverable
+    _body_role_tiers = getattr(body, "role_tiers", None)
+    if _body_role_tiers is not None and cfg.get("role_tiers") != _body_role_tiers:
+        _knob_updates["role_tiers"] = _body_role_tiers
     if _knob_updates:
         cfg.update(_knob_updates)
         try:
@@ -1142,7 +1373,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # if present; otherwise decompose now (resume path). Shared with the pre-phase via
     # _ensure_route so both decompose identically.
     route = await _ensure_route(db, user["id"], sess, sid, intent=intent,
-                                max_agents=max_agents, creds=_creds("reason"), cfg=cfg,
+                                max_agents=max_agents, creds=_creds(_role_tier("lead", "reason")), cfg=cfg,
                                 shared_datastore=_shared_ds, vfs_project=_vfs_project(sid))
     domain = route["domain"]
     subtasks = route["subtasks"]
@@ -1186,6 +1417,56 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # ({"A": "...", "B": "..."}), injected into every owner that runs in that group.
     _group_instructions = route.get("group_instructions") or {}
     vfs_project = _vfs_project(sid)  # the one folder every worker must write to
+
+    # ── Deliverable manifest (Increment 3) ──────────────────────────────
+    # Build the declared shape of the deliverable — target file, ordered parts,
+    # one owner per part, ranges, seam owner — from the caller's `deliverable`
+    # field, or derive one from the plan when quality.derive_manifest is on. Stamp
+    # each subtask's artifact filename and publish run flags the agent-facing
+    # endpoints read back. Absent config → _manifest is None and everything below
+    # is byte-identical to today.
+    _deliverable_req = getattr(body, "deliverable", None)
+    if _deliverable_req is None:
+        _deliverable_req = cfg.get("deliverable")
+    _manifest = deliverable_manifest.parse(_deliverable_req, subtasks, vfs_project)
+    # Fall back to deriving when there is no manifest, or when a caller/continuation
+    # manifest resolved to zero parts (e.g. its owners are stale after a re-decompose).
+    if (_manifest is None or not _manifest.parts) and quality.derive_manifest:
+        _derived = deliverable_manifest.derive(
+            _group0_by_subtask, subtasks, vfs_project,
+            kind_hint=quality.deliverable_kind or (_manifest.kind if _manifest else ""),
+            deliverable_name=((_manifest.basename() if _manifest else "")
+                              or (f"{deliverable_manifest.slugify(intent)}.md" if intent else "")))
+        _manifest = _derived or _manifest
+    if _manifest is not None:
+        deliverable_manifest.assign_artifacts(subtasks, _manifest)
+        _run_manifest[sid] = _manifest
+        cfg["deliverable_resolved"] = deliverable_manifest.to_analysis(_manifest)
+        try:
+            await db.update_basna_session(body.session_id, user["id"], config=json.dumps(cfg))
+        except Exception as e:  # noqa: BLE001
+            log.warning("Vatra deliverable_resolved persist failed", error=str(e))
+        _progress(sid, "note",
+                  f"Deliverable manifest: {_manifest.basename()} ← {len(_manifest.parts)} part(s)")
+    # Strict dependency sequencing (Increment 6): re-resolve execution groups so a
+    # dependent runs in a LATER phase than its producer (the phase barrier then
+    # guarantees producer-before-consumer). Runs after the group_lock loop so user
+    # locks are honoured; only affects group_resolved, which grouped mode reads.
+    if quality.strict_deps and subtasks:
+        for _n in vatra_groups.resolve_groups(subtasks, arch_by_id, strict_deps=True):
+            log.info("Vatra strict_deps repair", note=_n)
+
+    # Run flags the agent-facing endpoints (_vatra_env, agent_wait) read without
+    # re-parsing config. Quality is authoritative; the manifest gates strict writes.
+    _run_flags[sid] = {
+        "write_guard": bool(quality.write_guard),
+        "wait_heartbeat": bool(quality.wait_heartbeat),
+        "wait_max_total_s": int(quality.wait_max_total_s or 0),
+        "require_inputs": bool(quality.require_inputs),
+        "strict_deps": bool(quality.strict_deps),
+        "clarify_dep_grant": bool(quality.clarify_dep_grant),
+        "deliverable_kind": quality.deliverable_kind,
+    }
     # Resume: load the per-owner checkpoints written by the stalled run. Owners with
     # a `done` checkpoint are restored in _dispatch_owner (skipped, no re-spend); the
     # rest re-dispatch normally and re-checkpoint as they finish.
@@ -1452,6 +1733,7 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         def _owner_callbacks(label: str, owner: str, subtask: str):
             gx = _gx(subtask)  # grouped mode: tag this owner's events with its phase letter
             def _on_action(act: dict) -> None:
+                _owner_stamp(sid, subtask)  # liveness heartbeat (Increment 5)
                 detail = act.get("detail", "")
                 if act["tool"] == "narration":
                     _progress(sid, "narration", f"{label}: {detail}", agent=label,
@@ -1465,10 +1747,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                               agent=label, tool=act["tool"], detail=detail, **gx)
 
             def _on_usage(pt: int, ct: int, tt: int) -> None:
+                _owner_stamp(sid, subtask)  # liveness heartbeat (Increment 5)
                 _progress(sid, "usage", f"{label} · {pt:,}→{ct:,} tok",
                           agent=label, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt, **gx)
 
             def _on_status(text: str) -> None:
+                _owner_stamp(sid, subtask)  # liveness heartbeat (Increment 5)
                 # The model call is in flight — surface it so a slow call isn't mistaken
                 # for a stall. Tagged agent= so the live card shows "working".
                 _progress(sid, "llm", f"{label} · {text}", agent=label,
@@ -1507,6 +1791,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             arch, st = sp["arch"], sp["subtask"]
             role = arch.get("role") or arch["id"]
             label = _owner_label(sp)
+            # Liveness (Increment 5): mark this owner running so a waiter on its
+            # artifact can tell it is alive; _result_of flips it to done/failed.
+            _owner_stamp(sid, st["id"], state="running", role=role, arch=arch["id"],
+                         artifact=st.get("artifact", ""), started=time.monotonic())
             # Resume: this owner already finished in the stalled run — restore its
             # slice from the checkpoint instead of spending tokens to redo it.
             if _resume:
@@ -1522,15 +1810,23 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img = [str(ws / f["name"]) for f in input_files if str(f.get("mime", "")).startswith("image/")]
             doc = [str(ws / f["name"]) for f in input_files if not str(f.get("mime", "")).startswith("image/")]
+            # Increment 5: under require_inputs, tell an owner with declared inputs to
+            # BLOCK (not fabricate) if a dependency never lands.
+            _blocked_inputs = None
+            if (_run_flags.get(sid, {}).get("require_inputs")
+                    and _run_manifest.get(sid) is not None):
+                _ins = deliverable_manifest.inputs_for(_run_manifest[sid], st["id"], subtasks)
+                _blocked_inputs = [p.basename() for p in _ins] or None
             prompt = research_pre + _build_subtask_prompt(
                 role, effective_intent, st, [f["name"] for f in input_files],
                 subtasks, shared_context, team_prep=intro_digest,
-                vfs_project=vfs_project)
+                vfs_project=vfs_project, blocked_inputs=_blocked_inputs)
             prompt += _group_instr_block(st, arch, _group_instructions)
             # Group 0: this owner's slice of the coordination plan — its mandate, what
             # it produces, and which teammates it consumes from. Its *contract*, placed
             # just before the TEAM SCHEDULE (its *timing*). No-op when there's no plan.
-            prompt += _plan_slice_block(st, _group0_by_subtask, arch_by_id)
+            prompt += _plan_slice_block(st, _group0_by_subtask, arch_by_id,
+                                        manifest=_run_manifest.get(sid))
             # R4 (opt-in): grouped DAG edges carry DATA — PUSH a dependency's
             # committed output into this consumer's context when that producer has
             # already finished (earlier phase / pulled-forward owner). No-op unless
@@ -1665,10 +1961,20 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
 
         # 3) Main round — each owner produces its full piece.
         def _result_of(sp: dict, d: dict) -> dict:
+            _owner_stamp(sid, sp["subtask"]["id"],
+                         state="done" if d.get("ok") else "failed",
+                         finished=time.monotonic())
+            # Increment 5: an owner that BLOCKED on a missing declared input (instead
+            # of fabricating one) is not a usable slice; record the gap.
+            _blocked = bool(re.match(r"^\s*BLOCKED:", d.get("output") or "", re.IGNORECASE))
+            if _blocked:
+                _progress(sid, "dispatch",
+                          f"⛔ {_owner_label(sp)} blocked on a missing input",
+                          ok=False, agent=_owner_label(sp), **_gx(sp["subtask"]["id"]))
             return {
                 "id": sp["subtask"]["id"], "owner": sp["arch"]["id"],
                 "role": sp["arch"].get("role", ""), "title": sp["subtask"]["title"],
-                "output": d["output"], "ok": d["ok"],
+                "output": d["output"], "ok": d["ok"], "blocked": _blocked,
                 "latency_ms": d["latency_ms"], "actions": d.get("actions", []),
             }
 
@@ -1730,18 +2036,26 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
             async def _lead_clarify(requester_role: str, request_text: str, roster: list,
                                     board_digest: str = "") -> dict:
                 try:
-                    prov, mt = _provider_call(_creds("reason"), temperature=0.2, default_max=400, cap=1024)
+                    # A weak Lead needs room to emit valid JSON, and its tier is
+                    # overridable (Increment 6/8) so the decision isn't Flash-only.
+                    prov, mt = _provider_call(_creds(_role_tier("clarify", "reason")),
+                                              temperature=0.2, default_max=800, cap=1024)
                     from captain_claw.llm import Message
                     resp = await prov.complete(
                         [Message(role="user",
                                  content=vatra_groups.clarify_prompt(
                                      requester_role, request_text, roster, board_digest))],
                         temperature=0.2, max_tokens=mt)
-                    return vatra_groups.parse_clarify(resp.content or "")
+                    dec = vatra_groups.parse_clarify(resp.content or "")
+                    if dec.get("parse_failed"):
+                        # Distinguish "Lead denied" from "Lead reply unparseable".
+                        log.warning("Vatra clarify unparseable reply",
+                                    raw=str(resp.content or "")[:300])
+                    return dec
                 except Exception as e:  # noqa: BLE001 — clarify is best-effort; default deny
                     log.warning("Vatra clarify decision failed", error=str(e))
                     return {"approve": False, "already_available": False, "pointer": "",
-                            "provider": "", "instruction": ""}
+                            "provider": "", "instruction": "", "parse_failed": True}
 
             _phase(sid, "Grouped run")
             _progress(sid, "main",
@@ -1889,6 +2203,26 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                                 for e in _recent)
                         except Exception as e:  # noqa: BLE001 — digest is best-effort
                             log.debug("Vatra clarify board digest failed", error=str(e))
+                        # Deterministic gap-closing grant (Increment 6): a request that
+                        # names a declared range/part of a provider the requester
+                        # depends on is APPROVED by code — never left to a weak Lead
+                        # whose parser defaults to deny. This is the "supply Chapters
+                        # Six and Seven" request the incident's Lead refused.
+                        _manifest_c = _run_manifest.get(sid)
+                        if _run_flags.get(sid, {}).get("clarify_dep_grant") and _manifest_c is not None:
+                            _gap = deliverable_manifest.gap_request(
+                                req, _manifest_c, sp["subtask"]["id"], subtasks)
+                            if _gap:
+                                _gp = next((s for s in providers
+                                            if s["subtask"]["id"] == _gap["provider"]), None)
+                                if _gp:
+                                    loop_backs += 1
+                                    _progress(sid, "clarify",
+                                              f"Lead (auto): dependency-declared request granted "
+                                              f"→ {_owner_label(_gp)} (loop-back {loop_backs}/{cap})",
+                                              agent=_owner_label(_gp))
+                                    await _redispatch_owner(_gp, _gap["instruction"], "clarify")
+                                    continue
                         decision = await _lead_clarify(sp["arch"].get("role", ""), req,
                                                        roster, digest)
                         if decision.get("already_available"):
@@ -2069,6 +2403,9 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         _run_workers.pop(sid, None)
         _run_vfs_project.pop(sid, None)
         _run_shared_datastore.pop(sid, None)
+        _run_manifest.pop(sid, None)
+        _run_flags.pop(sid, None)
+        _owner_activity.pop(sid, None)
         _skip_agents.pop(sid, None)
         _wait_ledger.pop(sid, None)
         # An aborted run may leave a called-forward dispatch in flight — cancel
@@ -2079,7 +2416,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                 if not _t.done():
                     _t.cancel()
 
-    usable = [r for r in results if (r.get("ok") or r.get("produced_file")) and (r.get("output") or "").strip()]
+    usable = [r for r in results if (r.get("ok") or r.get("produced_file"))
+              and (r.get("output") or "").strip() and not r.get("blocked")]
     if not usable:
         _RUN_USAGE.pop(sid, None)  # release the per-run accumulator on early exit
         await db.update_basna_session(sid, user["id"], status="error")
@@ -2140,6 +2478,40 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
                           f"facts ledger: {len(facts_ledger.list_rows(vfs_dir))} value(s) recorded")
         except Exception as e:  # noqa: BLE001
             log.warning("Vatra facts ledger dump failed", error=str(e))
+    # ── Increment 4: deterministic assembly (concat_then_smooth) ──
+    # For a piece-based deliverable with a manifest, concatenate the declared parts
+    # in order (code, not a from-memory LLM rewrite) into the deliverable file, then
+    # let the reporter only SMOOTH the seams (guarded against collapse). Assembly seam
+    # findings (duplicate/missing chapter, placeholder part) feed the done gate + QA.
+    _manifest_obj = _run_manifest.get(sid)
+    _producer_done = {r["owner"]: bool(r.get("ok") or r.get("produced_file")) for r in results}
+    _smooth_arg = None
+    _assembly_findings: list[dict] = []
+    if (quality.synthesis_emit == "concat_then_smooth" and _manifest_obj is not None
+            and vfs_dir is not None):
+        try:
+            _asm = deliverable_manifest.assemble(vfs_dir, _manifest_obj, _producer_done)
+            _assembly_findings = _asm["findings"]
+            if _asm["text"].strip():
+                _dfile = vfs_dir / _manifest_obj.basename()
+                _dfile.write_text(_asm["text"], encoding="utf-8")
+                (dest_dir / f"{_manifest_obj.basename()}.pre-smooth").write_text(
+                    _asm["text"], encoding="utf-8")
+                _abytes = len(_asm["text"].encode("utf-8"))
+                generated_files.append({
+                    "name": _manifest_obj.basename(), "mime": "text/markdown",
+                    "size": _abytes, "kind": "generated", "agent": "assembly",
+                    "vfs": _manifest_obj.path})
+                _progress(sid, "report",
+                          f"Assembled {len(_manifest_obj.parts)} part(s) → "
+                          f"{_manifest_obj.basename()} ({_abytes} bytes, "
+                          f"{deliverable_manifest.count_sections(_asm['text'])} sections)")
+                _smooth_arg = {"file": str(_dfile), "path": _manifest_obj.path,
+                               "text": _asm["text"], "findings": _assembly_findings,
+                               "bytes": _abytes}
+        except OSError as e:  # noqa: BLE001 — assembly is best-effort; reporter falls back
+            log.warning("Vatra deterministic assembly failed", error=str(e))
+
     truth, reporter_files = await _run_reporter(
         request, user, sid, sid8, run_tag, intent, usable, cfg, arch_by_id,
         tiers=body.tiers, api_key=body.api_key, env_vars=body.env_vars,
@@ -2149,6 +2521,12 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         corpus=quality.source_corpus,  # R10
         honesty=quality.honesty_guard,
         facts=quality.facts_ledger, facts_block=facts_dump,
+        reporter_tier=_role_tier("reporter", ""),
+        deliverable_kind=quality.deliverable_kind,
+        resolve_pointer=quality.resolve_pointer_truth,
+        can_retry=_budget.can_afford(_retry_est),
+        user_id=user["id"], project=vfs_project,
+        smooth=_smooth_arg,
     )
     generated_files.extend(reporter_files)
     confidence = round(len(usable) / max(1, len(results)), 3)
@@ -2257,6 +2635,54 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         except Exception as e:  # noqa: BLE001 — consistency check is best-effort
             log.warning("Vatra consistency check failed", error=str(e))
 
+    # 5b3) Canon continuity check (Increment 7, opt-in, paid): a deterministic
+    # continuity verifier over the ASSEMBLED draft (which after Increment 4 IS the
+    # merged file, not a note) — character ages/fixed details, whereabouts per scene,
+    # alibis, sums (paid ≤ attempted), tallies, chronology, and duplicate scenes
+    # across the seam. Fixes by quote-anchored patches; the audit is a separate file,
+    # never folded into the prose. Under gate_blocks_done a surviving critical blocks
+    # `done`.
+    canon_summary = None
+    canon_findings: list[dict] = []
+    if quality.canon_pass and (truth or "").strip() and _budget.can_afford(2 * _retry_est):
+        _budget.add(2 * _retry_est)
+        _progress(sid, "verify", "Canon check: reading the assembled draft…")
+        try:
+            _qa_ex_creds = _creds(_role_tier("qa", quality.qa_tier or "fast"))
+            _qa_rv_creds = _creds(_role_tier("qa", quality.qa_tier or "reason"))
+
+            async def _qa_extract(p: str) -> str:
+                prov, mt = _provider_call(_qa_ex_creds, temperature=0.0, default_max=4096, cap=8192)
+                r = await asyncio.wait_for(prov.complete(
+                    [_Msg(role="user", content=p)], temperature=0.0, max_tokens=mt), 180)
+                return r.content or ""
+
+            async def _qa_revise(p: str) -> str:
+                prov, mt = _provider_call(_qa_rv_creds, temperature=0.1, default_max=8192, cap=32768)
+                r = await asyncio.wait_for(prov.complete(
+                    [_Msg(role="user", content=p)], temperature=0.1, max_tokens=mt), 300)
+                return r.content or ""
+
+            canon_res = await research_canon.run_check(
+                truth, extract_fn=_qa_extract, revise_fn=_qa_revise,
+                on_progress=lambda m: _progress(sid, "verify", m))
+            if canon_res["revised"]:
+                truth = canon_res["text"]
+                # write the corrected deliverable back to its file
+                if _manifest_obj is not None and vfs_dir is not None:
+                    try:
+                        (vfs_dir / _manifest_obj.basename()).write_text(truth, encoding="utf-8")
+                    except OSError as e:  # noqa: BLE001
+                        log.warning("Vatra canon rewrite failed", error=str(e))
+            cdoc = research_canon.write_audit(dest_dir, canon_res, question=intent)
+            if cdoc:
+                generated_files.append(cdoc)
+            canon_summary = research_canon.summarize(canon_res)
+            canon_findings = canon_res["findings"]
+            _progress(sid, "verify", f"Canon: {research_canon.summary_line(canon_res)}")
+        except Exception as e:  # noqa: BLE001 — canon check is best-effort
+            log.warning("Vatra canon check failed", error=str(e))
+
     # 5c) R8 grounded claim verification (opt-in, paid): a web-tool fact-checker
     # verifies the deliverable's load-bearing claims against real sources and
     # corrects the ones that are verified wrong — the ground-truth back-edge the
@@ -2328,6 +2754,66 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
         "latency_ms": r["latency_ms"], "success": None,
     } for r in results])
 
+    # ── Increment 4: deliverable done-gate ──────────────────────────────
+    # Never flip `done` on a missing / undersized / placeholder deliverable, or one
+    # whose declared parts collided or left a gap. Persist status='error' with the
+    # best truth + files + verdict kept (continuable/resumable), rather than shipping
+    # a pointer note as the result. No-op when there is no manifest and the caller did
+    # not ask for the file gate.
+    _deliverable_analysis = None
+    if _manifest_obj is not None or quality.require_deliverable_file:
+        _dg = deliverable_manifest.gate(
+            _manifest_obj, truth,
+            min_chars_fallback=quality.deliverable_min_chars,
+            min_sections_fallback=quality.deliverable_min_sections)
+        _crit = [f for f in _assembly_findings
+                 if f.get("kind") in ("part_missing", "placeholder_part",
+                                      "duplicate_chapter", "missing_chapter")]
+        _deliverable_analysis = (deliverable_manifest.to_analysis(_manifest_obj)
+                                 if _manifest_obj else {})
+        _deliverable_analysis.update({
+            "verdict": "ok" if (_dg["ok"] and not _crit) else "failed",
+            "reasons": _dg["reasons"], "bytes": _dg["bytes"],
+            "sections": _dg["sections"], "assembly_findings": _crit})
+        if (not _dg["ok"] or _crit) and (quality.require_deliverable_file or _crit):
+            _fb_files = {f["name"]: f for f in session_files}
+            for g in generated_files:
+                _fb_files[g["name"]] = g
+            _reason = "; ".join(_dg["reasons"]
+                                + [f["detail"] for f in _crit]) or "deliverable gate failed"
+            return await _finish_blocked(
+                db, sid, user, reason=_reason, truth=truth,
+                files=list(_fb_files.values()),
+                analysis={"deliverable": _deliverable_analysis,
+                          "quality_verdict": "deliverable_missing"},
+                confidence=confidence, domain=domain)
+        _progress(sid, "verify",
+                  f"Deliverable gate: {_deliverable_analysis['verdict']} "
+                  f"({_dg['bytes']} bytes, {_dg['sections']} sections)",
+                  ok=_deliverable_analysis["verdict"] == "ok")
+
+    # ── Increment 7: canon gate ──
+    # A surviving canon contradiction blocks `done` when gate_blocks_done is on, so a
+    # narrative with an age/whereabouts/alibi/sum/tally/chronology error is not shipped
+    # as complete. Work is kept (status='error'), so a follow-up round can fix it.
+    if quality.gate_blocks_done and canon_findings:
+        _crit_canon = [f for f in canon_findings if f.get("severity") == "critical"]
+        if _crit_canon:
+            _fb_files = {f["name"]: f for f in session_files}
+            for g in generated_files:
+                _fb_files[g["name"]] = g
+            _analysis_blocked = {"quality_verdict": "critical_findings_remain",
+                                 "blocking": {"canon": [f["detail"] for f in _crit_canon][:10]}}
+            if _deliverable_analysis is not None:
+                _analysis_blocked["deliverable"] = _deliverable_analysis
+            if canon_summary is not None:
+                _analysis_blocked["canon"] = canon_summary
+            return await _finish_blocked(
+                db, sid, user,
+                reason=f"{len(_crit_canon)} unresolved canon contradiction(s)",
+                truth=truth, files=list(_fb_files.values()),
+                analysis=_analysis_blocked, confidence=confidence, domain=domain)
+
     # 6b) Persist the assembled deliverable NOW — status=done + truth + files — BEFORE
     # the best-effort learning/coverage steps. So if the process is killed during
     # scoring, the run is already complete and the report is saved (no run left stuck
@@ -2362,12 +2848,16 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # 8) Coverage gaps (best-effort) — judge the assembled deliverable against what the
     # task asked for; persisted as a follow-up update so the run is already done.
     analysis: dict = {}
+    if _deliverable_analysis is not None:
+        analysis["deliverable"] = _deliverable_analysis
     _progress(sid, "learn", "Checking coverage…")
     try:
         cov = await asyncio.wait_for(
             _llm_coverage_gaps(intent, subtasks, truth, _creds("reason")), 120)
         if cov:
             analysis = cov
+            if _deliverable_analysis is not None:
+                analysis["deliverable"] = _deliverable_analysis
             await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
             _progress(sid, "learn", f"Coverage: {len(cov.get('gaps') or [])} gap(s)")
     except Exception as e:
@@ -2431,6 +2921,10 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     # and what (if anything) remains. Only levers that ran contribute keys.
     if consistency_summary is not None:
         analysis["consistency"] = consistency_summary
+    if canon_summary is not None:
+        analysis["canon"] = canon_summary
+    if _role_tiers_map:
+        analysis["tiers_used"] = dict(_role_tiers_map)  # Increment 8: which roles got a tier
     if gate_summary is not None:
         analysis["quality_verdict"] = gate_summary["verdict"]
         analysis["blocking"] = gate_summary
@@ -2443,7 +2937,8 @@ async def execute_vatra(body: ExecuteRequest, request: Request, user: dict) -> d
     if qm:
         analysis["quality_metrics"] = qm
     if consistency_summary is not None or contract_summary is not None \
-            or gate_summary is not None or qm:
+            or gate_summary is not None or qm or _deliverable_analysis is not None \
+            or canon_summary is not None or _role_tiers_map:
         try:
             await db.update_basna_session(sid, user["id"], analysis=json.dumps(analysis))
         except Exception as e:  # noqa: BLE001
@@ -2671,9 +3166,14 @@ def _build_intro_prompt(role: str, st: dict, shared_context: str = "", vfs_proje
 
 def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str],
                           all_subtasks: list[dict], shared_context: str = "",
-                          team_prep: str = "", vfs_project: str = "") -> str:
+                          team_prep: str = "", vfs_project: str = "",
+                          blocked_inputs: list[str] | None = None) -> str:
     """Frame one subtask for its owner — with the team contract everyone must
-    follow, awareness of the whole team, and a nudge to delegate cross-slice needs."""
+    follow, awareness of the whole team, and a nudge to delegate cross-slice needs.
+
+    When ``blocked_inputs`` is given (Increment 5, require_inputs), the owner is told
+    that if a DECLARED input never lands it must reply ``BLOCKED: <artifact>`` and
+    stop — never reconstruct a substitute (the QA-audits-a-hallucination failure)."""
     files_block = ""
     if file_names:
         listed = "\n".join(f"- {n}" for n in file_names)
@@ -2740,10 +3240,19 @@ def _build_subtask_prompt(role: str, intent: str, st: dict, file_names: list[str
         f"work, don't busy-poll — proceed with your part and the final review round lets you revise "
         f"once everyone's work is visible. Only when your part is genuinely BLOCKED on a specific "
         f"artifact should you `wait` for it (once) rather than guessing.\n\n"
-        f"You are AUTONOMOUS: never ask the user a question, never refuse, and never stop to say "
-        f"you're missing teammate input — produce your best version of your part with what you "
-        f"have; the review round and reporter reconcile the rest.\n\n"
-        f"Return only your finished part — no preamble, no meta-commentary about the team."
+        + (
+            f"You are AUTONOMOUS: never ask the user a question and never refuse. Your part "
+            f"DEPENDS on these teammate artifact(s): {', '.join(blocked_inputs)}. Wait for them "
+            f"(via the `vatra` tool — it tells you whether the producer is still working). If a "
+            f"declared input NEVER arrives (the tool says the producer stalled or your wait "
+            f"budget is spent), reply with exactly `BLOCKED: <artifact name>` and stop — do NOT "
+            f"reconstruct, invent, or audit a substitute for it.\n\n"
+            if blocked_inputs else
+            f"You are AUTONOMOUS: never ask the user a question, never refuse, and never stop to say "
+            f"you're missing teammate input — produce your best version of your part with what you "
+            f"have; the review round and reporter reconcile the rest.\n\n"
+        )
+        + f"Return only your finished part — no preamble, no meta-commentary about the team."
     )
 
 
@@ -2873,6 +3382,10 @@ def _coerce_group0_entries(entries: Any, subtasks: list[dict], *, trust_group: b
             "produces": str(e.get("produces") or s.get("title") or "").strip(),
             "consumes_from": cons if cons else list(s.get("depends_on") or []),
             "hand_off_notes": str(e.get("hand_off_notes") or "").strip(),
+            # Long-form hardening (Increment 3): optional author-chosen part filename +
+            # chapter/section range a derived manifest picks up. "" when absent.
+            "produces_file": str(e.get("produces_file") or "").strip(),
+            "range": str(e.get("range") or s.get("range") or "").strip(),
         }
     for s in subtasks:
         if s["id"] not in seen:
@@ -3053,10 +3566,25 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
                         corpus: bool = False,
                         honesty: bool = False,
                         facts: bool = False,
-                        facts_block: str = "") -> tuple[str, list[dict]]:
+                        facts_block: str = "",
+                        reporter_tier: str = "",
+                        deliverable_kind: str = "",
+                        resolve_pointer: bool = False,
+                        can_retry: bool = False,
+                        user_id: str = "",
+                        project: str = "",
+                        smooth: dict | None = None) -> tuple[str, list[dict]]:
     """Spawn a dedicated reporter, feed it the slices (plus any answered cross-agent
     asks), and capture the assembled deliverable. Falls back to a labeled
-    concatenation if the reporter fails."""
+    concatenation if the reporter fails.
+
+    Increment 4: ``smooth`` (a dict {file, path, findings, min_sections}) switches to
+    smooth mode — the deliverable is already assembled on disk and the reporter only
+    fixes seams in place, guarded by a length/section collapse check. In rewrite mode,
+    ``resolve_pointer`` recovers a deliverable the reporter wrote to the VFS folder but
+    only POINTED at, with one bounded corrective re-dispatch. ``deliverable_kind ==
+    'fiction'`` suppresses the in-prose honesty ledger; ``reporter_tier`` overrides the
+    reporter's model tier."""
     from captain_claw.flight_deck.server import DATA_DIR
 
     reporter_id = str(cfg.get("reporter_archetype") or _DEFAULT_REPORTER)
@@ -3086,7 +3614,7 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         description=f"Vatra reporter · {role}",
         cognitive_mode=arch.get("cognitive_mode", "neutra"),
         tools=_augment_tools(arch.get("tools") or [], research_dir, facts=facts),
-        tier=arch.get("tier", "reason"),
+        tier=(reporter_tier or arch.get("tier", "reason")),
         tiers=tiers, api_key=api_key, env_vars=env_vars,
         # Bind the reporter to the same shared VFS project so it reads the
         # team's files from (and writes the assembled deliverable to) one folder.
@@ -3115,30 +3643,42 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
             except OSError:
                 pass
         big = len(slices_full) > _SLICES_INLINE_CHARS
-        inline = slices_full[:_SLICES_INLINE_CHARS] + ("\n\n…(full text in vatra-slices.md)" if big else "")
-        template = (_INSTRUCTIONS_DIR / "vatra" / "reporter.md").read_text()
-        prompt = template.replace("{intent}", intent).replace("{slices}", inline)
-        # R1: when the Research Map is armed, tell the reporter it can search the
-        # WHOLE folder (not just the inlined slice) so a big blackboard that
-        # doesn't fit its context is still fully covered.
-        if research_dir is not None and big:
-            prompt = research_map.preamble(research_dir) + prompt
-        if shared_context.strip():
-            prompt += ("\n\n## Shared conventions the pieces were built against\n"
-                       "Keep the final deliverable fully consistent with these (the pieces should "
-                       "already follow them; enforce it if any drifted):\n"
-                       f"{shared_context.strip()}\n")
-        # Honesty overlay: the exception clause to reporter.md's "resolve it and
-        # don't narrate the disagreement" — genuinely unresolved conflicts and
-        # assumptions surface in one labeled section instead of being absorbed.
-        # Appended at runtime so honesty_guard:false keeps reporter.md verbatim.
-        if honesty:
-            prompt += REPORTER_HONESTY_DIRECTIVE
-        # Facts ledger: the canonical values every figure in the deliverable
-        # must match — inlined (it's small and structured), not searched-for.
-        if facts_block.strip():
-            prompt += REPORTER_FACTS_DIRECTIVE + facts_block.strip() + "\n"
-        prompt += _vfs_directive(_vfs_project(sid))
+        if smooth is not None:
+            # ── Smooth mode: the deliverable is already assembled on disk ──
+            _seams = ""
+            _findings = smooth.get("findings") or []
+            if _findings:
+                _seams = "\n\nSeams to check:\n" + "\n".join(
+                    f"- {f.get('detail', f.get('kind', ''))}" for f in _findings[:12])
+            prompt = REPORTER_SMOOTH_DIRECTIVE.format(
+                path=smooth.get("path", ""), bytes=smooth.get("bytes", 0), seams=_seams)
+        else:
+            inline = slices_full[:_SLICES_INLINE_CHARS] + ("\n\n…(full text in vatra-slices.md)" if big else "")
+            template = (_INSTRUCTIONS_DIR / "vatra" / "reporter.md").read_text()
+            prompt = template.replace("{intent}", intent).replace("{slices}", inline)
+            # R1: when the Research Map is armed, tell the reporter it can search the
+            # WHOLE folder (not just the inlined slice) so a big blackboard that
+            # doesn't fit its context is still fully covered.
+            if research_dir is not None and big:
+                prompt = research_map.preamble(research_dir) + prompt
+            if shared_context.strip():
+                prompt += ("\n\n## Shared conventions the pieces were built against\n"
+                           "Keep the final deliverable fully consistent with these (the pieces should "
+                           "already follow them; enforce it if any drifted):\n"
+                           f"{shared_context.strip()}\n")
+            # Honesty overlay: the exception clause to reporter.md's "resolve it and
+            # don't narrate the disagreement" — genuinely unresolved conflicts and
+            # assumptions surface in one labeled section instead of being absorbed.
+            # Appended at runtime so honesty_guard:false keeps reporter.md verbatim.
+            # Suppressed for a fiction deliverable — an in-prose ledger reads as
+            # compliance clutter in a narrative (Increment 7 keeps it in analysis).
+            if honesty and deliverable_kind != "fiction":
+                prompt += REPORTER_HONESTY_DIRECTIVE
+            # Facts ledger: the canonical values every figure in the deliverable
+            # must match — inlined (it's small and structured), not searched-for.
+            if facts_block.strip():
+                prompt += REPORTER_FACTS_DIRECTIVE + facts_block.strip() + "\n"
+            prompt += _vfs_directive(_vfs_project(sid))
 
         def _on_action(act: dict) -> None:
             detail = act.get("detail", "")
@@ -3155,11 +3695,79 @@ async def _run_reporter(request: Request, user: dict, sid: str, sid8: str, run_t
         d = await _dispatch_one(sp["port"], sp["auth"], prompt, dispatch_timeout,
                                 on_action=_on_action, fleet_instructions=arch.get("fleet_instructions", ""),
                                 agent_name=role, on_usage=_on_usage)
+
+        # ── Smooth mode: truth is the file's bytes; a shrink restores the concat ──
+        if smooth is not None:
+            sfile = Path(smooth["file"])
+            pre = smooth.get("text", "")
+            final = pre
+            try:
+                if sfile.is_file():
+                    final = sfile.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                final = pre
+            collapsed = (
+                write_guard.is_placeholder_content(final)
+                or len(final) < 0.9 * max(1, len(pre))
+                or deliverable_manifest.count_sections(final)
+                < deliverable_manifest.count_sections(pre)
+            )
+            if collapsed and pre:
+                try:
+                    sfile.write_text(pre, encoding="utf-8")
+                except OSError:
+                    pass
+                final = pre
+                _progress(sid, "report", "Reporter smooth collapsed the file — restored the assembly", ok=False)
+            else:
+                _progress(sid, "report", f"Reporter smoothed seams ({d['latency_ms'] / 1000:.1f}s)")
+            return final, []
+
         out = (d.get("output") or "").strip()
         files, text = _capture_generated(sp["slug"], input_names | {"vatra-slices.md"},
                                          dest_dir, role, seen_gen)
         if not out and text:
             out = text
+
+        # ── Reject description-as-deliverable (opt-in) ──
+        # A reporter reply that merely POINTS at a file (or is short + names one) is a
+        # failed synthesis. Resolve the referenced file; if that fails, re-dispatch
+        # the SAME reporter once with a blunt corrective; else fall back to the raw
+        # assembly rather than shipping the note.
+        if resolve_pointer and _looks_like_pointer(out, len(slices_full)):
+            _dpath = (smooth or {}).get("path", "")  # unused in rewrite mode
+            _cands = _pointer_paths(out)
+            rtext, rpath = _resolve_deliverable(user_id, project, _cands)
+            if rtext and len(rtext) > len(out) and not write_guard.is_placeholder_content(rtext):
+                out = rtext
+                files.append({"name": write_guard.basename_of(rpath),
+                              "mime": "text/markdown", "size": len(rtext.encode("utf-8")),
+                              "kind": "generated", "agent": role, "vfs": rpath})
+                _progress(sid, "report", f"Resolved reporter pointer → {write_guard.basename_of(rpath)}")
+            elif can_retry:
+                _corr = (
+                    "Your reply was a note ABOUT the deliverable, not the deliverable. "
+                    "Output the COMPLETE document as your reply now — the whole assembled "
+                    "work, start to finish, no summary and no file pointer."
+                )
+                d2 = await _dispatch_one(sp["port"], sp["auth"], _corr, dispatch_timeout,
+                                         on_action=_on_action,
+                                         fleet_instructions=arch.get("fleet_instructions", ""),
+                                         agent_name=role, on_usage=_on_usage)
+                out2 = (d2.get("output") or "").strip()
+                f2, t2 = _capture_generated(sp["slug"], input_names | {"vatra-slices.md"},
+                                            dest_dir, role, seen_gen)
+                files.extend(f2)
+                if out2 and not _looks_like_pointer(out2, len(slices_full)):
+                    out = out2
+                else:
+                    rtext2, rpath2 = _resolve_deliverable(user_id, project, _pointer_paths(out2))
+                    if rtext2 and not write_guard.is_placeholder_content(rtext2):
+                        out = rtext2
+                    else:
+                        _progress(sid, "report", "Reporter still returned a pointer — using raw assembly", ok=False)
+                        out = fallback
+
         mark = "✓" if d["ok"] and out else "✗"
         _progress(sid, "report", f"Reporter {mark} ({d['latency_ms'] / 1000:.1f}s)", ok=bool(out))
         return (out or fallback), files
@@ -3462,9 +4070,32 @@ async def agent_inbox(body: _VatraInboxReq):
 
 class _VatraWaitReq(_AgentReq):
     owner: str = ""
+    subtask_id: str = ""
     path: str = ""
     query: str = ""
     wait: int = 0
+
+
+def _resolve_producer(sid: str, path: str, query: str) -> dict | None:
+    """Best-effort: the liveness record of the owner that produces this path/query.
+
+    A ``path`` resolves via the manifest (basename → part owner); a ``query`` falls
+    back to any owner still running. Returns the ``_owner_activity`` record or None.
+    """
+    activity = _owner_activity.get(sid) or {}
+    if path:
+        manifest = _run_manifest.get(sid)
+        if manifest is not None:
+            base = write_guard.basename_of(path)
+            for p in manifest.parts:
+                if p.basename() == base and p.owner in activity:
+                    return activity[p.owner]
+    if query:
+        # No owner→topic map; treat any still-running owner as a plausible producer.
+        for rec in activity.values():
+            if rec.get("state") == "running":
+                return rec
+    return None
 
 
 @router.post("/agent/wait")
@@ -3554,7 +4185,11 @@ async def agent_wait(body: _VatraWaitReq):
     # budget or attempt cap, stop waiting entirely and tell it to proceed. Enforced
     # here (not left to the agent), so even a stubborn retry can't loop.
     ledger = _wait_ledger.setdefault(body.session_id, {})
-    rec = ledger.setdefault(body.owner or "agent", {"waited": 0.0, "attempts": 0})
+    # Key the ledger by SUBTASK, not owner — two owners can share an archetype id and
+    # would otherwise share (and exhaust) one wait budget (Increment 5).
+    _ledger_key = body.subtask_id or body.owner or "agent"
+    rec = ledger.setdefault(_ledger_key, {"waited": 0.0, "attempts": 0, "alive_waited": 0.0})
+    rec.setdefault("alive_waited", 0.0)
     remaining = _WAIT_TOTAL_BUDGET_S - rec["waited"]
     if rec["attempts"] >= _WAIT_MAX_ATTEMPTS or remaining <= 1:
         recent = await db.list_vatra_board(
@@ -3587,19 +4222,52 @@ async def agent_wait(body: _VatraWaitReq):
                     data = real.read_text(errors="replace")
                 except Exception:
                     data = ""
-                if data.strip():
+                # A placeholder stub (or empty file) is NOT ready — an 88-byte marker
+                # must not satisfy a wait (Increment 5).
+                if data.strip() and not write_guard.is_placeholder_content(data):
                     _progress(body.session_id, "wait", f"✓ {who} got {path}", agent=who)
                     return {"ready": True, "kind": "file", "path": path,
                             "content": data[:_WAIT_CONTENT_CAP],
                             "truncated": len(data) > _WAIT_CONTENT_CAP}
+                if data.strip() and write_guard.is_placeholder_content(data):
+                    # Present but junk — tell the waiter, don't hand it back as ready.
+                    if time.monotonic() >= deadline:
+                        return {"ready": False, "present_but_placeholder": True,
+                                "path": path,
+                                "note": (f"{path} exists but is a placeholder marker, not "
+                                         "content. Its producer must re-write it in full.")}
         if query:
             rows = await db.search_vatra_board(
-                body.session_id, query, limit=20, exclude_owner=body.owner or None)
+                body.session_id, query, limit=20,
+                exclude_subtask=body.subtask_id or None,
+                exclude_owner=body.owner or None)
             if rows:
                 _progress(body.session_id, "wait", f"✓ {who} got a board match for {query!r}", agent=who)
                 return {"ready": True, "kind": "board",
                         "entries": [_board_entry(e) for e in rows]}
         if time.monotonic() >= deadline:
+            # Heartbeat (Increment 5): if the producer of this artifact is still
+            # running AND recently active, the wait EXTENDS instead of expiring —
+            # charge a separate `alive_waited` (bounded), not the give-up budget. So
+            # a 5-minute producer no longer times out a 90-second waiter.
+            _flags = _run_flags.get(body.session_id) or {}
+            if _flags.get("wait_heartbeat"):
+                prod = _resolve_producer(body.session_id, path, query)
+                if prod is not None and prod.get("state") == "running":
+                    idle = time.monotonic() - float(prod.get("last_seen", 0) or 0)
+                    alive_cap = float(_flags.get("wait_max_total_s") or 0) or 1800.0
+                    if idle <= _ALIVE_WINDOW_S and rec["alive_waited"] < alive_cap:
+                        rec["alive_waited"] += time.monotonic() - started
+                        _prole = prod.get("role") or "the teammate"
+                        _progress(body.session_id, "wait",
+                                  f"⏳ {who} still waiting on {target} — {_prole} is "
+                                  f"working (last activity {int(idle)}s ago)", agent=who)
+                        return {"ready": False, "producer_alive": True, "can_retry": True,
+                                "producer": {"role": _prole, "state": "running",
+                                             "last_seen_s": int(idle)},
+                                "note": (f"{_prole} is STILL WORKING on it (last activity "
+                                         f"{int(idle)}s ago). Wait again with the same target "
+                                         "— do NOT proceed without it.")}
             # Charge the actual elapsed time against this owner's total budget.
             rec["waited"] += time.monotonic() - started
             rec["attempts"] += 1
@@ -3669,12 +4337,14 @@ class _VatraBoardPostReq(_AgentReq):
 
 class _VatraBoardReadReq(_AgentReq):
     owner: str = ""
+    subtask_id: str = ""
     kind: str = ""
     limit: int = 40
 
 
 class _VatraBoardSearchReq(_AgentReq):
     owner: str = ""
+    subtask_id: str = ""
     query: str = ""
     limit: int = 20
 
@@ -3708,7 +4378,8 @@ async def agent_board_read(body: _VatraBoardReadReq):
     await _board_session(body)
     kinds = [body.kind] if body.kind else None
     rows = await get_db().list_vatra_board(
-        body.session_id, kinds=kinds, limit=body.limit, exclude_owner=body.owner or None)
+        body.session_id, kinds=kinds, limit=body.limit,
+        exclude_subtask=body.subtask_id or None, exclude_owner=body.owner or None)
     return {"entries": [_board_entry(e) for e in rows], "count": len(rows)}
 
 
@@ -3720,7 +4391,8 @@ async def agent_board_search(body: _VatraBoardSearchReq):
     if not q:
         raise HTTPException(400, "query is required")
     rows = await get_db().search_vatra_board(
-        body.session_id, q, limit=body.limit, exclude_owner=body.owner or None)
+        body.session_id, q, limit=body.limit,
+        exclude_subtask=body.subtask_id or None, exclude_owner=body.owner or None)
     return {"entries": [_board_entry(e) for e in rows], "count": len(rows)}
 
 
@@ -3763,6 +4435,18 @@ class VatraStartRequest(BaseModel):
     # Project bundle this run belongs to (empty = Unfiled). The project's theme is
     # folded into the plan/shared_context and its folder added as a reference.
     project_id: str = ""
+    # Long-form deliverable manifest (docs/vatra-run-hardening-plan.md, Increment 3):
+    # {path, kind, min_bytes, min_sections, section_regex, parts:[{path, order, owner,
+    # range, min_bytes, sequential}], seam_owner}. None → none (or derived when
+    # quality.derive_manifest). owners may be omitted on /start and supplied on
+    # /plan/approve once subtasks are known.
+    deliverable: dict | None = None
+    # Per-role tier NAMES: {lead, planner, clarify, reporter, qa} → a Library tier
+    # name, so a caller can put the Lead/Reporter/QA on a stronger tier than the
+    # specialists without a per-slot map. None → today (role → hard-coded tier).
+    role_tiers: dict | None = None
+    # Per-dispatch wall (seconds) threaded into the run's ExecuteRequest. None → 600.
+    dispatch_timeout: float | None = None
 
 
 class VatraExecuteRequest(BaseModel):
@@ -3922,6 +4606,11 @@ class VatraPlanApproveRequest(BaseModel):
     execution_groups: bool | None = None
     grouped_review: bool = False
     quality: dict | None = None
+    # Long-form hardening (Increment 3): resend with owners mapped to subtasks now
+    # that the plan is known; falls back to the value persisted at plan time.
+    deliverable: dict | None = None
+    role_tiers: dict | None = None
+    dispatch_timeout: float | None = None
 
 
 class VatraPlanCancelRequest(BaseModel):
@@ -3973,7 +4662,13 @@ async def approve_vatra_plan(body: VatraPlanApproveRequest, request: Request,
         grouped_review=bool(body.grouped_review or cfg.get("grouped_review")),
         shared_datastore=bool(cfg.get("shared_datastore")),
         vfs_project=cfg.get("vfs_project") or "",
-        quality=body.quality if body.quality is not None else (cfg.get("quality") or None))
+        quality=body.quality if body.quality is not None else (cfg.get("quality") or None),
+        # Long-form hardening (Increment 3): resend with owners mapped to subtasks,
+        # else inherit what /start persisted.
+        deliverable=body.deliverable if body.deliverable is not None else (cfg.get("deliverable") or None),
+        role_tiers=body.role_tiers if body.role_tiers is not None else (cfg.get("role_tiers") or None),
+        dispatch_timeout=(body.dispatch_timeout if body.dispatch_timeout is not None
+                          else float(cfg.get("dispatch_timeout") or 600.0)))
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
     t = asyncio.create_task(execute_vatra(exec_req, stub, user))
     _basna_agent_tasks.add(t)
@@ -4199,13 +4894,23 @@ async def start_vatra(body: VatraStartRequest, request: Request,
         user["id"], intent, title=title,
         config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents,
                            **({"shared_datastore": True} if body.shared_datastore else {}),
-                           **({"horizon": body.horizon} if body.horizon else {})}))
+                           **({"horizon": body.horizon} if body.horizon else {}),
+                           # Long-form hardening (Increment 3): persist so /plan/approve
+                           # inherits them. quality was previously dropped here.
+                           **({"quality": body.quality} if body.quality else {}),
+                           **({"deliverable": body.deliverable} if body.deliverable else {}),
+                           **({"role_tiers": body.role_tiers} if body.role_tiers else {}),
+                           **({"dispatch_timeout": body.dispatch_timeout}
+                              if body.dispatch_timeout else {})}))
     sid = sess["id"]
     exec_req = ExecuteRequest(
         session_id=sid, tiers=_tiers or None,
         env_vars=_env or None, api_key=body.api_key or "",
         horizon=body.horizon or None, shared_datastore=body.shared_datastore,
-        vfs_project=body.vfs_project or "")
+        vfs_project=body.vfs_project or "",
+        quality=body.quality or None, deliverable=body.deliverable or None,
+        role_tiers=body.role_tiers or None,
+        dispatch_timeout=body.dispatch_timeout or 600.0)
     # Background task with a stub request carrying the owner (spawn_process reads
     # request.state.user_id) — the real request object isn't safe to use post-response.
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
@@ -4339,6 +5044,15 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
     }
     if parent_cfg.get("quality"):
         cfg["quality"] = parent_cfg["quality"]
+    # Long-form hardening (Increment 3): carry the deliverable manifest + role tiers
+    # into the chain. The manifest's part owners are re-mapped/derived per round
+    # (execute_vatra falls back to derive when the inherited owners are stale).
+    if parent_cfg.get("deliverable"):
+        cfg["deliverable"] = parent_cfg["deliverable"]
+    if parent_cfg.get("role_tiers"):
+        cfg["role_tiers"] = parent_cfg["role_tiers"]
+    if parent_cfg.get("dispatch_timeout"):
+        cfg["dispatch_timeout"] = parent_cfg["dispatch_timeout"]
     if parent_cfg.get("execution_groups"):
         cfg["execution_groups"] = True
     if parent_cfg.get("grouped_review"):
@@ -4374,7 +5088,10 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
                               grouped_review=bool(parent_cfg.get("grouped_review")),
                               max_parallel=int(parent_cfg.get("max_parallel") or 0),
                               horizon=parent_cfg.get("horizon") or None,
-                              quality=parent_cfg.get("quality") or None)
+                              quality=parent_cfg.get("quality") or None,
+                              deliverable=parent_cfg.get("deliverable") or None,
+                              role_tiers=parent_cfg.get("role_tiers") or None,
+                              dispatch_timeout=float(parent_cfg.get("dispatch_timeout") or 600.0))
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     # Headless continuation: draft a Group 0 plan then auto-approve (no human pause).
     t = asyncio.create_task(plan_vatra_group0(exec_req, stub, user, gate=False))

@@ -733,6 +733,13 @@ class AgentOrchestrationMixin:
         # stall ("Let me…", "I'll fetch…").  Capped by MAX_STALL_RETRIES
         # so a genuinely-stuck turn still terminates.
         self._stall_retry_count: int = 0
+        # Reset per-turn malformed / cut-off tool-call retry counter. Bumped
+        # each time a truncated-JSON, length-truncated, or guard-refused tool
+        # call is turned into a forced corrective re-issue. Off (0) unless the
+        # process sets tools.malformed_call_retries / CLAW_MALFORMED_CALL_RETRIES
+        # (Vatra workers default to 2), so existing single-agent runs are
+        # byte-identical.
+        self._malformed_retry_count: int = 0
         # Reset per-turn empty-answer retry counter. Bumped each time the
         # completion gate refuses to finalize a zero-length reply. Capped by
         # MAX_EMPTY_ANSWER_RETRIES: without a cap, a model that returns empty
@@ -1846,6 +1853,22 @@ class AgentOrchestrationMixin:
 
             # ── Explicit tool calls ───────────────────────────────
             if response.tool_calls:
+                # ── Length-truncated write/edit (opt-in) ──────────
+                # When the response hit the output cap mid-tool-call, the
+                # write/edit arguments are cut off; executing the partial
+                # persists a fragment (the chapter-sized write in the incident).
+                # With malformed retries enabled, skip execution and steer the
+                # model to write-then-append in bounded pieces. Not persisting
+                # the truncated tool_calls avoids an orphaned-tool-call error.
+                _lt_corrective = self._length_truncation_corrective(response)
+                if _lt_corrective is not None:
+                    _partial = str(response.content or "").strip()
+                    if _partial:
+                        self._add_session_message(role="assistant", content=_partial)
+                    self._add_session_message(role="user", content=_lt_corrective)
+                    log.warning("Length-truncated tool call — split corrective",
+                                attempt=self._malformed_retry_count)
+                    continue
                 log.info("Tool calls detected", count=len(response.tool_calls), calls=response.tool_calls)
                 # Capture intermediate text emitted alongside tool calls.
                 _tc_text = str(response.content or "").strip()

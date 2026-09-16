@@ -87,6 +87,24 @@ _PRESETS: dict[str, set[str]] = {
     # block_on_critical is the enforcement lever (bounded revise-until-clean loop
     # over the deterministic checks' critical findings) — it multiplies paid
     # passes, so no preset enables it either; pair it with a token_budget.
+    #
+    # long_form (docs/vatra-run-hardening-plan.md): a multi-part long-form run on a
+    # weak model. Balanced ∪ the FREE/structural deliverable levers. The PAID QA
+    # levers (canon_pass, gate_blocks_done, block_on_critical) stay explicit, like
+    # claim_check — a preset never surprise-spends. `judgment_ledger` is dropped
+    # (its in-prose ledger reads as compliance clutter in a narrative deliverable).
+    "long_form": {
+        "acted_gate", "test_gate", "research_map", "delta_rounds", "critic_triage",
+        "worker_escalate",
+        "write_guard", "derive_manifest", "resolve_pointer_truth",
+        "require_deliverable_file", "require_inputs", "wait_heartbeat",
+        "strict_deps", "clarify_dep_grant", "push_deps",
+    },
+}
+
+# Non-bool preset values (strings/ints), applied before explicit keys override.
+_PRESET_VALUES: dict[str, dict[str, object]] = {
+    "long_form": {"synthesis_emit": "concat_then_smooth"},
 }
 
 _VALID_PROFILES = frozenset(_PRESETS)
@@ -182,6 +200,29 @@ class QualityProfile:
                                        # Costs one fast-tier call per accepted run
                                        # (like deep_build/claim_check → no preset).
 
+    # ── Long-form deliverable hardening (docs/vatra-run-hardening-plan.md) ──
+    # Structural levers that make a multi-part long-form run correct on a weak
+    # model. All default off/"" → today's behaviour; the `long_form` preset turns
+    # the free/structural ones on. Kept OUT of _BOOL_FLAGS (like push_deps) so a
+    # manifest/wait flag alone does not trip the quality machinery via any_enabled.
+    write_guard: bool = False          # Inc 1/3: workers run under CLAW_WRITE_STRICT
+    derive_manifest: bool = False      # Inc 3: derive a deliverable manifest when none is given
+    synthesis_emit: str = ""           # Inc 4: "" | "rewrite" | "concat_then_smooth"
+    resolve_pointer_truth: bool = False  # Inc 4: resolve/retry a pointer-shaped reporter reply
+    require_deliverable_file: bool = False  # Inc 4: gate `done` on the deliverable existing
+    deliverable_min_chars: int = 0     # Inc 4: size floor for the assembled deliverable
+    deliverable_min_sections: int = 0  # Inc 4: section-count floor for the deliverable
+    require_inputs: bool = False       # Inc 5: gate a consumer's dispatch on its inputs landing
+    wait_heartbeat: bool = False       # Inc 5: extend `vatra wait` while the producer is alive
+    wait_max_total_s: int = 0          # Inc 5: alive-wait ceiling (0 → the run's dispatch_timeout)
+    strict_deps: bool = False          # Inc 6: sequence a same-group dependency start-after-finish
+    clarify_dep_grant: bool = False    # Inc 6: auto-grant a gap-closing declared-range request
+    clarify_cap: int = 2               # Inc 6: max clarify grants/loop-backs per run
+    canon_pass: bool = False           # Inc 7: continuity/canon QA over the assembled draft (paid)
+    gate_blocks_done: bool = False     # Inc 7: a critical QA verdict blocks `done` (paid)
+    qa_tier: str = ""                  # Inc 7/8: tier name for the QA extractor/reviser
+    deliverable_kind: str = ""         # Inc 3/7: "" | "document" | "fiction"
+
     # ── Cost discipline (shared) ──
     token_budget: int = 0          # <= 0 → unbounded (i.e. current behaviour)
     parallel_build_max_slices: int = 6  # cap on decomposition slices (keeps cost bounded)
@@ -212,6 +253,10 @@ class QualityProfile:
             "interface_consistency", "micro_workers", "push_deps",
             "parallel_edges", "flow_ref_lint", "council_tally",
             "blast_radius_gate", "constraint_learning",
+            # long-form deliverable hardening (kept OUT of _BOOL_FLAGS below)
+            "write_guard", "derive_manifest", "resolve_pointer_truth",
+            "require_deliverable_file", "require_inputs", "wait_heartbeat",
+            "strict_deps", "clarify_dep_grant", "canon_pass", "gate_blocks_done",
         }
         kw: dict = {"profile": profile}
         for name in bool_flags:
@@ -226,6 +271,20 @@ class QualityProfile:
             log.warning("unknown output_mode; ignoring", output_mode=mode)
             mode = ""
         kw["output_mode"] = mode
+
+        # ── Long-form string/int members (preset value → explicit key override) ──
+        _pv = _PRESET_VALUES.get(profile, {})
+        emit = str(d.get("synthesis_emit", _pv.get("synthesis_emit", "")) or "").lower()
+        if emit not in ("", "rewrite", "concat_then_smooth"):
+            log.warning("unknown synthesis_emit; ignoring", synthesis_emit=emit)
+            emit = ""
+        kw["synthesis_emit"] = emit
+        kind = str(d.get("deliverable_kind") or _pv.get("deliverable_kind", "") or "").lower()
+        if kind not in ("", "document", "fiction"):
+            log.warning("unknown deliverable_kind; ignoring", deliverable_kind=kind)
+            kind = ""
+        kw["deliverable_kind"] = kind
+        kw["qa_tier"] = str(d.get("qa_tier") or "")
 
         def _int(key: str, default: int) -> int:
             # Use the default only when the key is ABSENT — an explicit 0/-1 must
@@ -244,6 +303,10 @@ class QualityProfile:
         kw["claim_check_max"] = max(1, _int("claim_check_max", 8))
         kw["consistency_max_values"] = max(1, _int("consistency_max_values", 40))
         kw["block_max_rounds"] = max(1, _int("block_max_rounds", 2))
+        kw["deliverable_min_chars"] = max(0, _int("deliverable_min_chars", 0))
+        kw["deliverable_min_sections"] = max(0, _int("deliverable_min_sections", 0))
+        kw["wait_max_total_s"] = max(0, _int("wait_max_total_s", 0))
+        kw["clarify_cap"] = max(1, _int("clarify_cap", 2))
         return cls(**kw)
 
     _BOOL_FLAGS = (

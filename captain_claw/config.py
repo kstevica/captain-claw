@@ -450,6 +450,41 @@ class MCPServerConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+class WriteGuardConfig(BaseModel):
+    """Deterministic guards at the `write` tool boundary.
+
+    Master kill-switch is the CLAW_WRITE_GUARD env var (unset/1 = on); these
+    fields tune individual guards when the env allows them.
+    """
+
+    reject_placeholder: bool = Field(
+        default=True,
+        description=(
+            "Refuse a write whose content is empty or is a tool "
+            "acknowledgement/compaction marker (e.g. '[written to disk: …]') "
+            "rather than file text."
+        ),
+    )
+    verify_readback: bool = Field(
+        default=True,
+        description="Re-read every write and confirm the on-disk bytes match what was sent.",
+    )
+    verify_retries: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description="How many times to re-write an overwrite whose readback failed.",
+    )
+    require_extension_vfs: bool = Field(
+        default=True,
+        description=(
+            "Under a strict deliverable tier (CLAW_WRITE_STRICT), require a vfs "
+            "deliverable path to carry a file extension (repairing a shortened "
+            "name against the declared set when possible)."
+        ),
+    )
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -506,6 +541,7 @@ class ToolsConfig(BaseModel):
     typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
     gws: GwsToolConfig = Field(default_factory=GwsToolConfig)
     edit: EditToolConfig = Field(default_factory=EditToolConfig)
+    write: WriteGuardConfig = Field(default_factory=WriteGuardConfig)
     browser: BrowserToolConfig = Field(default_factory=BrowserToolConfig)
     pinchtab: PinchTabConfig = Field(default_factory=PinchTabConfig)
     clipboard: ClipboardToolConfig = Field(default_factory=ClipboardToolConfig)
@@ -546,6 +582,18 @@ class ToolsConfig(BaseModel):
             "Maximum times a tool may be called on the same target "
             "(path/URL/pattern) per turn before the call is blocked. "
             "Set to 1 to block on the first repeat; 2 to allow one retry."
+        ),
+    )
+    malformed_call_retries: int = Field(
+        default=0,
+        ge=0,
+        le=5,
+        description=(
+            "How many times a tool call with truncated/invalid JSON arguments, "
+            "a length-truncated write, or a guard-refused write is turned into a "
+            "forced corrective re-issue instead of a plain error. 0 = today's "
+            "behaviour (the model must notice the error itself). Vatra workers "
+            "default to 2 via CLAW_MALFORMED_CALL_RETRIES."
         ),
     )
 
