@@ -40,6 +40,15 @@ def test_none_suffix_sends_reasoning_effort_none():
     assert p.model.endswith("gpt-6-luna")
     kw = p._request_kwargs(_MSGS, tools=_TOOLS)
     assert kw["reasoning_effort"] == "none"
+    # LiteLLM refuses reasoning_effort for models missing from its registry
+    # (gpt-6-luna) unless it's explicitly allowed through.
+    assert kw["allowed_openai_params"] == ["reasoning_effort"]
+
+
+def test_no_reasoning_effort_no_allowlist():
+    p = LiteLLMProvider(provider="openai", model="gpt-6-luna", api_key="x")
+    kw = p._request_kwargs(_MSGS, tools=_TOOLS)
+    assert "reasoning_effort" not in kw and "allowed_openai_params" not in kw
 
 
 def test_deepseek_none_keeps_thinking_off():
@@ -72,6 +81,7 @@ async def test_tolerant_turns_reasoning_off_and_remembers(monkeypatch):
     )
     assert out == "ok" and len(seen) == 2
     assert seen[1]["tools"] == [{"type": "function"}]
+    assert seen[1]["allowed_openai_params"] == ["reasoning_effort"]
     # Learned: the next tool-carrying request goes out with reasoning off.
     p = LiteLLMProvider(provider="openai", model="gpt-6-luna", api_key="x")
     assert p._request_kwargs(_MSGS, tools=_TOOLS)["reasoning_effort"] == "none"

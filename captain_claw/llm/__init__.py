@@ -398,6 +398,21 @@ async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) ->
         raise
 
 
+def _allow_reasoning_effort(kwargs: dict[str, Any]) -> None:
+    """Let ``reasoning_effort`` through LiteLLM's client-side param check.
+
+    LiteLLM refuses ``reasoning_effort`` for models missing from its registry
+    ("UnsupportedParamsError: openai does not support parameters:
+    ['reasoning_effort'], for model=gpt-6-luna") before any request is made.
+    ``allowed_openai_params`` forwards it anyway; harmless for known models.
+    """
+    if "reasoning_effort" not in kwargs:
+        return
+    allowed = list(kwargs.get("allowed_openai_params") or [])
+    if "reasoning_effort" not in allowed:
+        kwargs["allowed_openai_params"] = allowed + ["reasoning_effort"]
+
+
 def _is_healable_request_error(msg: str) -> bool:
     """Whether *msg* (lowercased) is a 400 :func:`_heal_request_kwargs` can fix."""
     return (
@@ -460,6 +475,7 @@ def _heal_request_kwargs(
     # remember the model so later tool calls send "none" up front.
     if kwargs.get("tools") and _is_reasoning_with_tools_rejected_error(msg):
         retry_kwargs["reasoning_effort"] = "none"
+        _allow_reasoning_effort(retry_kwargs)
         stripped.append("reasoning_effort")
         base = str(kwargs.get("model", "")).split("/")[-1].lower()
         if base:
@@ -3055,6 +3071,7 @@ class LiteLLMProvider(LLMProvider):
             str(self.model).split("/")[-1].lower() in _REASONING_OFF_WITH_TOOLS_MODELS
         ):
             kwargs["reasoning_effort"] = "none"
+        _allow_reasoning_effort(kwargs)
 
         # DeepSeek thinking-mode opt-in. Only the dedicated reasoning
         # models actually honor it (``deepseek-reasoner``,
