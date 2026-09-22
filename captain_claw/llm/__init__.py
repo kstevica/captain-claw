@@ -384,56 +384,9 @@ async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) ->
     try:
         return await acompletion(**kwargs)
     except Exception as e:
-        msg = str(e).lower()
-        retry_kwargs = dict(kwargs)
-        stripped: list[str] = []
-
-        # Model rejects tool_choice (thinking-mode models).
-        if (
-            kwargs.get("tool_choice") is not None
-            and _is_tool_choice_unsupported_error(msg)
-        ):
-            retry_kwargs.pop("tool_choice", None)
-            stripped.append("tool_choice")
-            if provider is not None:
-                try:
-                    provider._tool_choice_unsupported = True
-                except Exception:
-                    pass
-
-        # Model rejects the temperature VALUE — either deprecated outright
-        # (Anthropic Opus 4.8 / Sonnet 5 / Fable) or pinned to 1 by an
-        # OpenAI-compatible endpoint (e.g. kimi-k3: "only 1 is allowed for this
-        # model"). Dropping it lets the model use its default; remembering the
-        # model omits it up front on every later call.
-        if kwargs.get("temperature") is not None and _is_temperature_rejected_error(msg):
-            retry_kwargs.pop("temperature", None)
-            stripped.append("temperature")
-            _remember_temperature_unsupported(kwargs.get("model", ""))
-
-        # Model rejects max_tokens and wants max_completion_tokens (OpenAI
-        # reasoning models LiteLLM doesn't know yet, e.g. the gpt-6 family).
-        # Rename the key and remember the model so later calls send it right.
-        if "max_tokens" in kwargs and _is_max_tokens_rejected_error(msg):
-            retry_kwargs["max_completion_tokens"] = retry_kwargs.pop("max_tokens")
-            stripped.append("max_tokens")
-            base = str(kwargs.get("model", "")).split("/")[-1].lower()
-            if base:
-                _MAX_COMPLETION_TOKENS_MODELS.add(base)
-
-        # Thinking-mode server demands reasoning_content round-tripped on
-        # assistant messages (DeepSeek V4 thinking via an OpenAI-compatible
-        # endpoint). An assistant message can reach the payload without it —
-        # an orphan tool result normalized into an assistant turn, or a
-        # synthesized context/nudge message. Backfill a placeholder on any
-        # assistant message that lacks reasoning and retry once. Scoped to the
-        # exact 400 so no other provider ever sees the placeholder.
-        reasoning_backfilled = False
-        if _is_reasoning_content_required_error(msg):
-            reasoning_backfilled = _backfill_reasoning_content(
-                retry_kwargs.get("messages")
-            )
-
+        retry_kwargs, stripped, reasoning_backfilled = _heal_request_kwargs(
+            kwargs, str(e).lower(), provider
+        )
         if stripped or reasoning_backfilled:
             log.warning(
                 "Model rejected request; retrying with fix",
@@ -443,6 +396,88 @@ async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) ->
             )
             return await acompletion(**retry_kwargs)
         raise
+
+
+def _is_healable_request_error(msg: str) -> bool:
+    """Whether *msg* (lowercased) is a 400 :func:`_heal_request_kwargs` can fix."""
+    return (
+        _is_tool_choice_unsupported_error(msg)
+        or _is_temperature_rejected_error(msg)
+        or _is_max_tokens_rejected_error(msg)
+        or _is_reasoning_with_tools_rejected_error(msg)
+        or _is_reasoning_content_required_error(msg)
+    )
+
+
+def _heal_request_kwargs(
+    kwargs: dict[str, Any], msg: str, provider: Any = None
+) -> tuple[dict[str, Any], list[str], bool]:
+    """Fix *kwargs* for a parameter-rejection 400 whose lowercased text is *msg*.
+
+    Returns ``(retry_kwargs, stripped, reasoning_backfilled)``; when *stripped*
+    is empty and nothing was backfilled, the error is not one we can heal and
+    the caller should re-raise. Shared by :func:`_acompletion_tolerant` and the
+    streaming paths, where some 400s surface only while the stream is read.
+    """
+    retry_kwargs = dict(kwargs)
+    stripped: list[str] = []
+
+    # Model rejects tool_choice (thinking-mode models).
+    if (
+        kwargs.get("tool_choice") is not None
+        and _is_tool_choice_unsupported_error(msg)
+    ):
+        retry_kwargs.pop("tool_choice", None)
+        stripped.append("tool_choice")
+        if provider is not None:
+            try:
+                provider._tool_choice_unsupported = True
+            except Exception:
+                pass
+
+    # Model rejects the temperature VALUE — either deprecated outright
+    # (Anthropic Opus 4.8 / Sonnet 5 / Fable) or pinned to 1 by an
+    # OpenAI-compatible endpoint (e.g. kimi-k3: "only 1 is allowed for this
+    # model"). Dropping it lets the model use its default; remembering the
+    # model omits it up front on every later call.
+    if kwargs.get("temperature") is not None and _is_temperature_rejected_error(msg):
+        retry_kwargs.pop("temperature", None)
+        stripped.append("temperature")
+        _remember_temperature_unsupported(kwargs.get("model", ""))
+
+    # Model rejects max_tokens and wants max_completion_tokens (OpenAI
+    # reasoning models LiteLLM doesn't know yet, e.g. the gpt-6 family).
+    # Rename the key and remember the model so later calls send it right.
+    if "max_tokens" in kwargs and _is_max_tokens_rejected_error(msg):
+        retry_kwargs["max_completion_tokens"] = retry_kwargs.pop("max_tokens")
+        stripped.append("max_tokens")
+        base = str(kwargs.get("model", "")).split("/")[-1].lower()
+        if base:
+            _MAX_COMPLETION_TOKENS_MODELS.add(base)
+
+    # Model refuses function tools unless reasoning is off (gpt-6-luna on
+    # /v1/chat/completions). Keep the tools, turn reasoning off, and
+    # remember the model so later tool calls send "none" up front.
+    if kwargs.get("tools") and _is_reasoning_with_tools_rejected_error(msg):
+        retry_kwargs["reasoning_effort"] = "none"
+        stripped.append("reasoning_effort")
+        base = str(kwargs.get("model", "")).split("/")[-1].lower()
+        if base:
+            _REASONING_OFF_WITH_TOOLS_MODELS.add(base)
+
+    # Thinking-mode server demands reasoning_content round-tripped on
+    # assistant messages (DeepSeek V4 thinking via an OpenAI-compatible
+    # endpoint). An assistant message can reach the payload without it —
+    # an orphan tool result normalized into an assistant turn, or a
+    # synthesized context/nudge message. Backfill a placeholder on any
+    # assistant message that lacks reasoning and retry once. Scoped to the
+    # exact 400 so no other provider ever sees the placeholder.
+    reasoning_backfilled = False
+    if _is_reasoning_content_required_error(msg):
+        reasoning_backfilled = _backfill_reasoning_content(
+            retry_kwargs.get("messages")
+        )
+    return retry_kwargs, stripped, reasoning_backfilled
 
 
 # Matches <think>...</think> blocks (and common variants like <thinking>,
@@ -724,6 +759,21 @@ def _uses_max_completion_tokens(provider: str, model: str) -> bool:
     if _normalize_provider_name(provider) != "openai":
         return False
     return bool(_OPENAI_GPT5_PLUS_RE.match(base) or _OPENAI_O_SERIES_RE.match(base))
+
+
+# Model base-names discovered at runtime to refuse function tools unless
+# reasoning is off ("Function tools with reasoning_effort are not supported for
+# gpt-6-luna in /v1/chat/completions … set reasoning_effort to 'none'").
+# Populated by _acompletion_tolerant; consulted by the request builder so later
+# tool-carrying calls send reasoning_effort="none" up front.
+_REASONING_OFF_WITH_TOOLS_MODELS: set[str] = set()
+
+
+def _is_reasoning_with_tools_rejected_error(msg: str) -> bool:
+    """Whether *msg* (lowercased) is a 400 refusing tools unless reasoning is off."""
+    return "reasoning_effort" in msg and (
+        "function tools" in msg or "reasoning_effort to 'none'" in msg
+    )
 
 
 def _is_max_tokens_rejected_error(msg: str) -> bool:
@@ -1177,7 +1227,9 @@ _CODEX_BACKEND_SUPPORTED_MODELS: frozenset[str] = frozenset({
 })
 
 
-_REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
+# "none" turns reasoning off — required on OpenAI models (e.g. gpt-6-luna) that
+# refuse function tools alongside any other effort on /v1/chat/completions.
+_REASONING_EFFORT_VALUES: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh")
 
 
 def _extract_reasoning_effort(name: str) -> tuple[str, str | None]:
@@ -2998,6 +3050,11 @@ class LiteLLMProvider(LLMProvider):
         # ``reasoning.effort`` and to DeepSeek as the same field.
         if self.reasoning_effort and self.provider in ("openai", "deepseek"):
             kwargs["reasoning_effort"] = self.reasoning_effort
+        # Models learned to refuse tools unless reasoning is off.
+        if kwargs.get("tools") and (
+            str(self.model).split("/")[-1].lower() in _REASONING_OFF_WITH_TOOLS_MODELS
+        ):
+            kwargs["reasoning_effort"] = "none"
 
         # DeepSeek thinking-mode opt-in. Only the dedicated reasoning
         # models actually honor it (``deepseek-reasoner``,
@@ -3008,7 +3065,9 @@ class LiteLLMProvider(LLMProvider):
         # via ``FD_DEEPSEEK_THINKING=off`` disables this if it ever
         # causes trouble.
         if self.provider == "deepseek":
-            thinking_on = self.reasoning_effort is not None
+            thinking_on = self.reasoning_effort not in (None, "none")
+            if self.reasoning_effort == "none":
+                kwargs.pop("reasoning_effort", None)
             if os.environ.get("FD_DEEPSEEK_THINKING", "").strip().lower() in ("off", "0", "false"):
                 thinking_on = False
             if thinking_on:
@@ -3122,13 +3181,13 @@ class LiteLLMProvider(LLMProvider):
                 if m:
                     model = m
         except Exception as e:
-            # A forced tool_choice a thinking-mode model rejects surfaces here
-            # (during stream consumption) as a pre-flight 400 — nothing was
-            # streamed, so there's no partial content to preserve. Re-raise it
-            # so the caller (complete_with_callback / complete) can drop the
-            # constraint and retry, instead of silently returning an empty
-            # response.
-            if _is_tool_choice_unsupported_error(str(e).lower()):
+            # A request-shape 400 (forced tool_choice on a thinking-mode model,
+            # max_tokens / reasoning_effort on newer OpenAI models, …) surfaces
+            # here during stream consumption as a pre-flight rejection — nothing
+            # was streamed, so there's no partial content to preserve. Re-raise
+            # it so the caller (complete_with_callback / complete) can fix the
+            # request and retry, instead of silently returning an empty response.
+            if _is_healable_request_error(str(e).lower()):
                 raise
             # Otherwise preserve whatever we collected so far rather than losing
             # the entire response.  Log so we can diagnose.
@@ -3470,20 +3529,20 @@ class LiteLLMProvider(LLMProvider):
                         yield str(delta)
                     break
                 except Exception as stream_err:
-                    if (
-                        attempt == 0
-                        and not yielded_any
-                        and kwargs.get("tool_choice") is not None
-                        and _is_tool_choice_unsupported_error(str(stream_err).lower())
-                    ):
-                        self._tool_choice_unsupported = True
-                        kwargs.pop("tool_choice", None)
-                        _reasoning_parts.clear()
-                        log.warning(
-                            "Streaming model rejected tool_choice; retrying without it",
-                            model=kwargs.get("model"),
+                    if attempt == 0 and not yielded_any:
+                        healed, stripped, backfilled = _heal_request_kwargs(
+                            kwargs, str(stream_err).lower(), self
                         )
-                        continue
+                        if stripped or backfilled:
+                            kwargs = healed
+                            _reasoning_parts.clear()
+                            log.warning(
+                                "Streaming model rejected request; retrying with fix",
+                                model=kwargs.get("model"),
+                                stripped=",".join(stripped) or None,
+                                reasoning_backfilled=backfilled,
+                            )
+                            continue
                     raise
             # Persist the accumulated reasoning so the caller (e.g.
             # ``stream()`` in the orchestration layer) can stash it
@@ -3538,21 +3597,23 @@ class LiteLLMProvider(LLMProvider):
                 stream = await _acompletion_tolerant(kwargs, self)
                 collected = await self._collect_streaming_response(stream, on_chunk=on_chunk)
             except Exception as stream_err:
-                # A forced tool_choice a thinking-mode model rejects surfaces
-                # HERE — during stream iteration — not on the acompletion() call,
-                # so _acompletion_tolerant's own retry never sees it. The 400 is
-                # a pre-flight rejection (no content streamed yet, on_chunk not
-                # called), so dropping the constraint and retrying once is safe.
-                if not (
-                    kwargs.get("tool_choice") is not None
-                    and _is_tool_choice_unsupported_error(str(stream_err).lower())
-                ):
+                # Some parameter-rejection 400s (a forced tool_choice on a
+                # thinking-mode model, max_tokens / reasoning_effort on newer
+                # OpenAI models) surface HERE — during stream iteration — not on
+                # the acompletion() call, so _acompletion_tolerant's own retry
+                # never sees them. The 400 is a pre-flight rejection (no content
+                # streamed yet, on_chunk not called), so fixing the request and
+                # retrying once is safe.
+                kwargs, stripped, backfilled = _heal_request_kwargs(
+                    kwargs, str(stream_err).lower(), self
+                )
+                if not (stripped or backfilled):
                     raise
-                self._tool_choice_unsupported = True
-                kwargs.pop("tool_choice", None)
                 log.warning(
-                    "Streaming model rejected tool_choice; retrying without it",
+                    "Streaming model rejected request; retrying with fix",
                     model=kwargs.get("model"),
+                    stripped=",".join(stripped) or None,
+                    reasoning_backfilled=backfilled,
                 )
                 stream = await _acompletion_tolerant(kwargs, self)
                 collected = await self._collect_streaming_response(stream, on_chunk=on_chunk)

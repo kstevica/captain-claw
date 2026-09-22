@@ -124,6 +124,33 @@ export function fmtCtxTokens(n: number): string {
   return String(n)
 }
 
+// Reasoning effort is carried as a model-name suffix (`gpt-6-luna-none`,
+// `gpt-5-high`) — the backend strips it and sends `reasoning_effort`, so every
+// spawn path honors it with no extra field. Mirrors _REASONING_EFFORT_VALUES in
+// captain_claw/llm/__init__.py. Only OpenAI and DeepSeek models use it; 'none'
+// turns reasoning off (required by gpt-6-luna to call tools).
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const
+export const REASONING_EFFORT_PROVIDERS = ['openai', 'deepseek']
+
+export function splitReasoningEffort(model: string): { base: string; effort: string } {
+  const m = model.trim()
+  const lower = m.toLowerCase()
+  for (const sep of ['-', '_']) {
+    for (const effort of REASONING_EFFORTS) {
+      if (lower.endsWith(`${sep}${effort}`)) {
+        return { base: m.slice(0, -(effort.length + 1)), effort }
+      }
+    }
+  }
+  return { base: m, effort: '' }
+}
+
+// '' effort = the model's own default (no suffix).
+export function withReasoningEffort(model: string, effort: string): string {
+  const { base } = splitReasoningEffort(model)
+  return effort ? `${base}-${effort}` : base
+}
+
 export const TIER_ORDER = ['reason', 'balanced', 'fast', 'longctx', 'coding', 'vision', 'micro']
 
 export const DEFAULT_TOOLS = [

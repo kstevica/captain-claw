@@ -10,6 +10,7 @@ import { spawnProcess, type SpawnConfig } from '../services/docker'
 import {
   useTierConfig, PROVIDERS, TIER_ORDER, isSetUnconfigured,
   INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS, fmtCtxTokens, type Archetype,
+  REASONING_EFFORTS, REASONING_EFFORT_PROVIDERS, splitReasoningEffort, withReasoningEffort,
 } from '../services/tierConfig'
 import { CtxSelect } from '../components/common/CtxSelect'
 import {
@@ -503,7 +504,7 @@ export function LibraryPage() {
                           {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
                         </select>
                       </div>
-                      <div className="sm:col-span-8">
+                      <div className={REASONING_EFFORT_PROVIDERS.includes(tc.provider) ? 'sm:col-span-5' : 'sm:col-span-8'}>
                         <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Model</label>
                         <input
                           value={tc.model}
@@ -512,6 +513,20 @@ export function LibraryPage() {
                           placeholder="model id"
                         />
                       </div>
+                      {REASONING_EFFORT_PROVIDERS.includes(tc.provider) && (
+                        <div className="sm:col-span-3">
+                          <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Reasoning</label>
+                          <select
+                            value={splitReasoningEffort(tc.model).effort}
+                            onChange={(e) => updateTier(t, { model: withReasoningEffort(tc.model, e.target.value) })}
+                            title="Reasoning effort, stored as a model-name suffix. 'none' turns reasoning off (needed by e.g. gpt-6-luna to call tools)."
+                            className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                          >
+                            <option value="">default</option>
+                            {REASONING_EFFORTS.map((r) => <option key={r} value={r}>{r}</option>)}
+                          </select>
+                        </div>
+                      )}
                     </div>
 
                     {/* Capacity — context window */}
