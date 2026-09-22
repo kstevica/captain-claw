@@ -411,6 +411,16 @@ async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) ->
             stripped.append("temperature")
             _remember_temperature_unsupported(kwargs.get("model", ""))
 
+        # Model rejects max_tokens and wants max_completion_tokens (OpenAI
+        # reasoning models LiteLLM doesn't know yet, e.g. the gpt-6 family).
+        # Rename the key and remember the model so later calls send it right.
+        if "max_tokens" in kwargs and _is_max_tokens_rejected_error(msg):
+            retry_kwargs["max_completion_tokens"] = retry_kwargs.pop("max_tokens")
+            stripped.append("max_tokens")
+            base = str(kwargs.get("model", "")).split("/")[-1].lower()
+            if base:
+                _MAX_COMPLETION_TOKENS_MODELS.add(base)
+
         # Thinking-mode server demands reasoning_content round-tripped on
         # assistant messages (DeepSeek V4 thinking via an OpenAI-compatible
         # endpoint). An assistant message can reach the payload without it —
@@ -678,13 +688,47 @@ def _base_model_name(model: str) -> str:
     return cleaned
 
 
+# gpt-5, gpt-5.2, gpt-6, gpt-6-mini, gpt-10 … — every GPT generation from 5 on.
+_OPENAI_GPT5_PLUS_RE = re.compile(r"^gpt-?(?:[5-9]|\d{2,})(?:$|[.\-_])")
+# o1, o3-mini, o4-mini … — OpenAI's o-series reasoning models.
+_OPENAI_O_SERIES_RE = re.compile(r"^o\d+(?:$|[.\-_])")
+
+
 def _is_openai_gpt5_family(provider: str, model: str) -> bool:
-    """Whether model is in OpenAI GPT-5 family."""
+    """Whether model is an OpenAI GPT-5-or-later model (gpt-5*, gpt-6*, …)."""
     normalized_provider = _normalize_provider_name(provider)
     if normalized_provider != "openai":
         return False
     base = _base_model_name(model).lower()
-    return base.startswith("gpt-5")
+    return bool(_OPENAI_GPT5_PLUS_RE.match(base))
+
+
+# Model base-names discovered at runtime to reject ``max_tokens`` in favor of
+# ``max_completion_tokens``. Populated by _acompletion_tolerant on the 400
+# "Unsupported parameter: 'max_tokens' … Use 'max_completion_tokens' instead";
+# consulted by _uses_max_completion_tokens so later calls send the right key.
+_MAX_COMPLETION_TOKENS_MODELS: set[str] = set()
+
+
+def _uses_max_completion_tokens(provider: str, model: str) -> bool:
+    """Whether the request must carry ``max_completion_tokens`` not ``max_tokens``.
+
+    OpenAI's reasoning models (GPT-5 and later, o-series) reject ``max_tokens``.
+    LiteLLM only translates it for models in its own registry, so a model newer
+    than the installed LiteLLM (e.g. the gpt-6 family) gets ``max_tokens``
+    forwarded verbatim and 400s. Models learned at runtime are included too.
+    """
+    base = str(model or "").split("/")[-1].lower()
+    if base in _MAX_COMPLETION_TOKENS_MODELS:
+        return True
+    if _normalize_provider_name(provider) != "openai":
+        return False
+    return bool(_OPENAI_GPT5_PLUS_RE.match(base) or _OPENAI_O_SERIES_RE.match(base))
+
+
+def _is_max_tokens_rejected_error(msg: str) -> bool:
+    """Whether *msg* (lowercased) is a 400 demanding ``max_completion_tokens``."""
+    return "max_tokens" in msg and "max_completion_tokens" in msg
 
 
 # Model base-names discovered at runtime to reject the ``temperature`` value.
@@ -2887,10 +2931,16 @@ class LiteLLMProvider(LLMProvider):
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": _convert_messages_for_openai_style(messages),
-            "max_tokens": max_tokens or self.max_tokens,
             "stream": stream,
             "timeout": 180,
         }
+        # OpenAI reasoning models (gpt-5+, gpt-6, o-series) reject max_tokens.
+        token_key = (
+            "max_completion_tokens"
+            if _uses_max_completion_tokens(self.provider, self.model)
+            else "max_tokens"
+        )
+        kwargs[token_key] = max_tokens or self.max_tokens
         # Omit temperature when the model doesn't accept it (e.g. Anthropic
         # Fable/Opus 4.8/Sonnet 5 reject it with a 400 — some known up front,
         # others learned at runtime via _remember_temperature_unsupported).
