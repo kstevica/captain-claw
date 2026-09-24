@@ -408,7 +408,7 @@ def _build_schema() -> list[dict[str, Any]]:
                     "title": "Web Search",
                     "fields": [
                         _field("tools.web_search.provider", "Provider", type="select",
-                               options=["brave"]),
+                               options=["brave", "tavily", "youcom"]),
                         _field("tools.web_search.api_key", "API Key"),
                         _field("tools.web_search.base_url", "Base URL", type="text"),
                         _field("tools.web_search.max_results", "Max results", type="number",
