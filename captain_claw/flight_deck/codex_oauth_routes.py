@@ -11,10 +11,10 @@ Flight Deck's role here is just the *distribution* side:
 1. Read ``~/.codex/auth.json`` from the FD host when asked.
 2. Expose a pretty status view (email, plan, expiry) to the
    Connections page.
-3. Expose ``/fd/codex/access_token`` so any captain-claw agent
-   (possibly spawned on another host) can pull fresh tokens over
-   loopback or via a shared secret — matching the Google OAuth
-   auth model.
+3. Expose ``/fd/codex/access_token`` so the captain-claw agents this
+   deck spawned (possibly on another host) can pull fresh tokens —
+   over loopback or with the shared secret, AND identified by their
+   own ``X-Agent-Auth`` token (never to a browser).
 
 There is no persistent storage: every call re-reads the file, so
 whatever the Codex CLI most recently wrote is what clients see.
@@ -23,8 +23,6 @@ whatever the Codex CLI most recently wrote is what clients see.
 from __future__ import annotations
 
 import json
-import os
-import secrets
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +33,7 @@ from captain_claw.codex_auth_manager import (
     _CODEX_AUTH_PATH,
     load_tokens_from_disk,
 )
+from captain_claw.flight_deck.agent_identity import require_agent_caller
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.logging import get_logger
 
@@ -43,24 +42,14 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/fd/codex", tags=["codex-oauth"])
 
 
-# ── agent auth (matches google_oauth_routes) ────────────────────────
-
-
-def _agent_shared_secret() -> str:
-    return os.environ.get("FD_AGENT_SHARED_SECRET", "").strip()
+# ── agent auth ──────────────────────────────────────────────────────
 
 
 def _authorize_agent_call(request: Request) -> None:
-    """Gate ``/access_token`` for captain-claw agents."""
-    secret = _agent_shared_secret()
-    if secret:
-        provided = request.headers.get("X-Agent-Secret", "")
-        if provided and secrets.compare_digest(provided, secret):
-            return
-    client_host = request.client.host if request.client else ""
-    if client_host in ("127.0.0.1", "::1", "localhost"):
-        return
-    raise HTTPException(status_code=401, detail="Unauthorized agent call")
+    """Gate ``/access_token``: one of THIS deck's agents, identified by its
+    ``X-Agent-Auth`` token — loopback alone isn't enough, a web page in the
+    user's browser is on loopback too (see :mod:`agent_identity`)."""
+    require_agent_caller(request, what="the ChatGPT/Codex token endpoint")
 
 
 # ── status endpoint (UI) ────────────────────────────────────────────
@@ -138,8 +127,8 @@ async def codex_access_token(request: Request) -> dict[str, Any]:
 
     Agents call this instead of reading ``~/.codex/auth.json`` directly
     so that a single FD instance can serve many sub-agents — including
-    ones running on different hosts. Gated the same way the Google
-    equivalent is (loopback OR ``X-Agent-Secret`` header).
+    ones running on different hosts. Gated by :func:`_authorize_agent_call`
+    (loopback OR ``X-Agent-Secret``, plus the agent's own ``X-Agent-Auth``).
     """
     _authorize_agent_call(request)
     tokens = load_tokens_from_disk()

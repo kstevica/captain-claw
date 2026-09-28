@@ -11,6 +11,7 @@ from pydantic import BaseModel, EmailStr
 from captain_claw.flight_deck.auth import (
     REFRESH_COOKIE,
     REFRESH_TOKEN_TTL,
+    _fd_auth_enabled,
     create_access_token,
     create_refresh_token,
     get_current_user,
@@ -93,6 +94,15 @@ def _clear_refresh_cookie(response: Response) -> None:
 
 @router.post("/register", response_model=TokenResponse)
 async def register(body: RegisterRequest, response: Response):
+    # An auth-disabled deck (desktop build) has no accounts, but it does open
+    # its DB for connector settings. Registering there would let whoever
+    # reaches the port first plant the first — admin — account, which silently
+    # becomes real the day FD_AUTH_ENABLED is switched on.
+    if not _fd_auth_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="Registration is disabled: this Flight Deck runs without accounts (FD_AUTH_ENABLED=false).",
+        )
     db = get_db()
     if not body.email or not body.password:
         raise HTTPException(status_code=400, detail="Email and password required")

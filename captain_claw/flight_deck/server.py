@@ -17,7 +17,6 @@ from typing import Any
 import docker
 import yaml
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -40,6 +39,7 @@ import logging
 
 from captain_claw.flight_deck.auth import get_current_user, get_optional_user, get_ws_user, set_auth_db, decode_access_token
 from captain_claw.flight_deck.db import FlightDeckDB
+from captain_claw.flight_deck import origin_guard
 
 
 # ── Console logging: timestamps + ANSI colors ──────────────────────────
@@ -589,6 +589,32 @@ async def _resolve_primary_owner(db) -> str:
         return ""
 
 
+async def _init_fd_db() -> FlightDeckDB:
+    """Open this deck's settings/auth DB and make it the auth module's DB.
+
+    Always, not only with auth on: the connector routers (Google / Codex / MCP
+    / Typesense) deliberately run under the synthetic local user when auth is
+    disabled (desktop build) and keep their client + tokens in this DB —
+    without it every call trips get_db()'s "not initialized" assert and
+    Connections is dead on that deck type. Safe on an auth-disabled deck only
+    because origin_guard keeps other websites and DNS-rebinding pages off the
+    API, and /fd/auth/register refuses there (no web page can plant an admin
+    that would become real if auth is switched on later).
+    """
+    db = FlightDeckDB(DATA_DIR / "flight-deck.db")
+    await db.init()
+    set_auth_db(db)
+    # Prime the Typesense connection (Connections → Typesense) before any
+    # request lands — an agent's proxied search may well be the first one.
+    try:
+        from captain_claw.flight_deck.deep_memory_routes import load_connection
+
+        await load_connection()
+    except Exception as _exc:
+        log.debug("Deep memory connection not primed", error=str(_exc))
+    return db
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -617,20 +643,11 @@ async def lifespan(app: FastAPI):
         await asyncio.sleep(1.0)
         await asyncio.to_thread(_reattach_processes)
     asyncio.create_task(_deferred_reattach())
-    # Initialize database for auth & settings
+    print(f"Flight Deck: {origin_guard.describe_policy()}")
+    # Initialize database for auth & settings — always, see _init_fd_db.
+    _fd_db = await _init_fd_db()
     if AUTH_ENABLED:
-        _fd_db = FlightDeckDB(DATA_DIR / "flight-deck.db")
-        await _fd_db.init()
-        set_auth_db(_fd_db)
         app.state.fd_db = _fd_db
-        # Prime the Typesense connection (Connections → Typesense) before any
-        # request lands — an agent's proxied search may well be the first one.
-        try:
-            from captain_claw.flight_deck.deep_memory_routes import load_connection
-
-            await load_connection()
-        except Exception as _exc:
-            log.debug("Deep memory connection not primed", error=str(_exc))
         # Persist the owning user id into the project-local .env so the
         # standalone main agent resolves the SAME VFS user as the dashboard
         # (otherwise it falls back to "local" and its vfs:<project>/ files
@@ -891,22 +908,22 @@ async def lifespan(app: FastAPI):
             print(f"Flight Deck: app_runtime shutdown error: {_exc}")
     if hasattr(app.state, "vastai_manager"):
         await app.state.vastai_manager.shutdown()
-    if AUTH_ENABLED and hasattr(app.state, "fd_db"):
-        await app.state.fd_db.close()
+    await _fd_db.close()
     if _client:
         _client.close()
 
 
 app = FastAPI(title="Flight Deck", lifespan=lifespan)
 
-# FD_CORS_ORIGINS: comma-separated origin allowlist for hosted deployments
-# (e.g. "https://app.example.com"). Unset keeps the historical wide-open
-# default for local/desktop use.
-_cors_origins = [o.strip() for o in
-                 os.environ.get("FD_CORS_ORIGINS", "").split(",") if o.strip()] or ["*"]
+# CORS: this deck's own origins only (FD_PUBLIC_URL, FD_ALLOWED_HOSTS names,
+# the Vite dev server) plus FD_CORS_ORIGINS — a comma-separated allowlist for
+# a frontend served from another origin (e.g. "https://app.example.com").
+# The old unset default was '*' with credentials, which Starlette answers by
+# mirroring ANY origin: every website the user visited could read (and, on an
+# auth-disabled deck, drive) the whole API. FD_CORS_ORIGINS=* restores that,
+# explicitly. The browser guard below enforces the same origin set.
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
+    origin_guard.FDCORSMiddleware,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1046,6 +1063,13 @@ async def _hardening_middleware(request: Request, call_next):
             return JSONResponse(
                 status_code=403, content={"detail": "disabled by FD_LOCKDOWN"})
     return await call_next(request)
+
+
+# Host allowlist + cross-site browser guard for every HTTP and WebSocket route
+# (see origin_guard). Added last so it runs outermost — before CORS and the
+# hardening middleware — and WebSockets, which neither of those covers, pass
+# through it too.
+app.add_middleware(origin_guard.BrowserGuardMiddleware)
 
 
 # Log validation errors with full detail for debugging
@@ -1739,7 +1763,11 @@ async def list_containers(request: Request, user: dict | None = _required_user_d
     user_id = getattr(request.state, "user_id", "")
     if AUTH_ENABLED and user_id:
         containers = [c for c in containers if (c.labels or {}).get(OWNER_LABEL, "") == user_id]
-    return [_container_info(c) for c in containers]
+    infos = [_container_info(c) for c in containers]
+    if not origin_guard.may_expose_agent_secrets(request.headers):
+        for info in infos:
+            info.web_auth = ""
+    return infos
 
 
 def _is_port_available(port: int) -> bool:
@@ -2901,11 +2929,17 @@ async def list_cognitive_modes():
 async def get_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     info = _container_info(c)
+    labels = dict(c.labels or {})
+    env = c.attrs.get("Config", {}).get("Env", [])
+    if not origin_guard.may_expose_agent_secrets(request.headers):
+        info.web_auth = ""
+        labels.pop("flight-deck.web-auth", None)
+        env = []  # provider keys live here
     # Add extra details
     return {
         **info.model_dump(),
-        "labels": c.labels,
-        "env": c.attrs.get("Config", {}).get("Env", []),
+        "labels": labels,
+        "env": env,
         "mounts": [
             {"source": m.get("Source", ""), "destination": m.get("Destination", ""), "mode": m.get("Mode", "")}
             for m in c.attrs.get("Mounts", [])
@@ -3135,27 +3169,70 @@ def _resolve_agent_owner(port: int) -> str:
     return ""
 
 
-def _resolve_agent_owner_by_auth(token: str) -> str:
-    """Resolve an agent's owning user_id by its unique web_auth token.
+def _token_eq(a: str, b: str) -> bool:
+    """Constant-time token compare that can't raise on non-ASCII header junk."""
+    return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+def _find_agent_by_auth(token: str) -> tuple[bool, str, str]:
+    """``(matched, owner, slug)`` of the agent THIS deck issued web_auth ``token``
+    to — a process-registry entry or a running managed container — else
+    ``(False, "", "")``, including for an empty token.
+
+    ``owner`` is the owner recorded at spawn ("" when none was); ``slug`` is the
+    FD_AGENT_SLUG the agent was spawned with (registry key / container slug).
+    When legacy duplicates exist (old clones copied their source's token), a
+    match with a recorded owner wins over an ownerless one. Uses a constant-time
+    compare: callers hand this whatever arrived in an X-Agent-Auth header.
+    """
+    if not token:
+        return False, "", ""
+    found: tuple[bool, str, str] = (False, "", "")
+    for slug, entry in _load_process_registry().items():
+        wa = str(entry.get("web_auth") or "")
+        if wa and _token_eq(wa, token):
+            if entry.get("owner"):
+                return True, str(entry["owner"]), slug
+            if not found[0]:
+                found = (True, "", slug)
+    try:
+        for c in get_docker().containers.list(filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            wa = str(labels.get("flight-deck.web-auth", "") or "")
+            if wa and _token_eq(wa, token):
+                slug = _slug(labels.get("flight-deck.agent-name", "") or c.name)
+                owner = labels.get(OWNER_LABEL, "") or ""
+                if owner:
+                    return True, owner, slug
+                if not found[0]:
+                    found = (True, "", slug)
+    except Exception:
+        pass
+    return found
+
+
+def _resolve_agent_identity_by_auth(token: str) -> tuple[bool, str]:
+    """Is ``token`` a web_auth THIS deck issued — and to which owner?
+
+    ``(True, owner)`` for one of this deck's agents (``owner`` "" when none was
+    recorded), ``(False, "")`` otherwise. Agent-facing connector endpoints use
+    this to tell "an FD-spawned agent" (the transport gate: loopback / shared
+    secret) apart from "which one": a browser page, or another deck's agent on
+    this host, presents no token this deck issued.
 
     More reliable than port-based lookup (a spawn-time port reassignment can make
     an agent's configured port differ from its registry entry): the auth token is
     unique per agent and stored in both its config and the registry/Docker label.
     """
-    if not token:
-        return ""
-    try:
-        client = get_docker()
-        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
-            labels = c.labels or {}
-            if labels.get("flight-deck.web-auth", "") == token:
-                return labels.get(OWNER_LABEL, "") or ""
-    except Exception:
-        pass
-    for slug, entry in _load_process_registry().items():
-        if entry.get("web_auth") == token and entry.get("owner"):
-            return entry["owner"]
-    return ""
+    matched, owner, _slug_ = _find_agent_by_auth(token)
+    return matched, owner
+
+
+def _resolve_agent_owner_by_auth(token: str) -> str:
+    """The owning user_id of this deck's agent holding web_auth ``token``, or ""
+    (unknown token, or an agent recorded without an owner). See
+    `_resolve_agent_identity_by_auth`, which also tells those two apart."""
+    return _resolve_agent_identity_by_auth(token)[1]
 
 
 def _parse_grid_labels(labels: dict) -> tuple[list[str], str]:
@@ -5973,9 +6050,16 @@ class ProcessActionResult(BaseModel):
 
 @app.get("/fd/processes", response_model=list[ProcessInfo])
 async def list_processes(request: Request, user: dict | None = _required_user_dep):
-    """List all Flight Deck managed process agents."""
+    """List all Flight Deck managed process agents.
+
+    ``web_auth`` (the token that drives an agent directly) is only returned to
+    FD's own pages and non-browser callers — see
+    ``origin_guard.may_expose_agent_secrets``; FD's /fd/agent-* proxies inject
+    it server-side for everyone else.
+    """
     registry = _load_process_registry()
     user_id = getattr(request.state, "user_id", "")
+    expose_auth = origin_guard.may_expose_agent_secrets(request.headers)
     result = []
     for slug, entry in registry.items():
         if AUTH_ENABLED and user_id and entry.get("owner", "") != user_id:
@@ -5987,7 +6071,7 @@ async def list_processes(request: Request, user: dict | None = _required_user_de
             description=entry.get("description", ""),
             status="running" if alive else "stopped",
             web_port=entry.get("web_port", 0),
-            web_auth=entry.get("web_auth", ""),
+            web_auth=entry.get("web_auth", "") if expose_auth else "",
             pid=entry.get("pid") if alive else None,
             provider=entry.get("provider", ""),
             model=entry.get("model", ""),

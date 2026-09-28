@@ -33,7 +33,8 @@ _LOCKDOWN_DETAIL = "disabled by FD_LOCKDOWN"
 def _client(app, client_addr) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app, client=client_addr),
-        base_url="http://fd.test")
+        # A host FD answers to by default (origin_guard's Host allowlist).
+        base_url="http://localhost:25080")
 
 
 @pytest.fixture
