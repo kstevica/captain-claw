@@ -1,4 +1,4 @@
-"""Web search tool powered by Brave Search API or Tavily."""
+"""Web search tool powered by Brave Search API, Tavily, or You.com."""
 
 import os
 import re
@@ -25,7 +25,7 @@ _BRAVE_COUNTRIES = frozenset({
 
 
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API or Tavily."""
+    """Search the web using Brave Search API, Tavily, or You.com."""
 
     name = "web_search"
     description = "Search the web and return ranked results with titles, links, and snippets."
@@ -107,6 +107,18 @@ class WebSearchTool(Tool):
             if any([offset, country.strip(), freshness.strip(), safesearch.strip()]):
                 log.debug("Tavily provider ignores offset/country/freshness/safesearch parameters")
             return await self._execute_tavily(q, search_cfg, count=count)
+
+        if provider == "youcom":
+            if offset:
+                log.debug("You.com provider ignores the offset parameter")
+            return await self._execute_youcom(
+                q,
+                search_cfg,
+                count=count,
+                country=country,
+                freshness=freshness,
+                safesearch=safesearch,
+            )
 
         if provider != "brave":
             return ToolResult(success=False, error=f"Unsupported web_search provider: {provider}")
@@ -295,6 +307,119 @@ class WebSearchTool(Tool):
             if body:
                 detail = f"{detail}: {self._clean_text(body, max_chars=300)}"
             log.error("Tavily web search failed", query=query, error=detail)
+            return ToolResult(success=False, error=detail)
+        except Exception as e:
+            log.error("Web search failed", query=query, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+    async def _execute_youcom(
+        self,
+        query: str,
+        search_cfg: Any,
+        count: int | None = None,
+        country: str = "",
+        freshness: str = "",
+        safesearch: str = "",
+    ) -> ToolResult:
+        """Execute a You.com web search (Web Search API)."""
+        api_key = (
+            str(getattr(search_cfg, "youcom_api_key", "") or "").strip()
+            or str(os.environ.get("YDC_API_KEY", "")).strip()
+        )
+        if not api_key:
+            return ToolResult(
+                success=False,
+                error=(
+                    "Missing You.com API key. Set tools.web_search.youcom_api_key in config "
+                    "or YDC_API_KEY environment variable."
+                ),
+            )
+
+        timeout = float(getattr(search_cfg, "timeout", 20) or 20)
+        default_count = int(getattr(search_cfg, "max_results", 5) or 5)
+        effective_count = default_count if count is None else int(count)
+        effective_count = min(max(effective_count, 1), 20)
+
+        payload: dict[str, Any] = {
+            "query": query,
+            "count": effective_count,
+        }
+        # You.com uses off/moderate/strict (moderate is the API default).
+        safe_value = (safesearch or str(getattr(search_cfg, "safesearch", "moderate") or "moderate")).strip().lower()
+        if safe_value not in {"off", "moderate", "strict"}:
+            safe_value = "moderate"
+        payload["safesearch"] = safe_value
+        if country.strip():
+            payload["country"] = country.strip().upper()
+        if freshness.strip():
+            # Tool accepts pd/pw/pm/py; the API wants day/week/month/year words.
+            payload["freshness"] = {
+                "pd": "day", "pw": "week", "pm": "month", "py": "year",
+            }.get(freshness.strip().lower(), freshness.strip())
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+        }
+
+        try:
+            response = await self.client.post(
+                "https://ydc-index.io/v1/search",
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # The response contains a `results` object with `web` (and, for
+            # news-intent queries, `news`) arrays.
+            sections = data.get("results", {}) if isinstance(data, dict) else {}
+            results: list[Any] = []
+            if isinstance(sections, dict):
+                results = [*sections.get("web", []), *sections.get("news", [])]
+            elif isinstance(sections, list):
+                results = sections
+            if not isinstance(results, list):
+                results = []
+
+            lines = [
+                "[SEARCH ENGINE: You.com]",
+                f"[QUERY: {query}]",
+                f"[RESULTS: {len(results)}]",
+                "",
+            ]
+
+            if not results:
+                lines.append("No results found.")
+            else:
+                for idx, item in enumerate(results, start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    title = self._clean_text(str(item.get("title", "") or "Untitled"), max_chars=180)
+                    link = str(item.get("url", "") or "").strip()
+                    snippets = item.get("snippets")
+                    if isinstance(snippets, list) and snippets:
+                        desc = str(snippets[0] or "")
+                    else:
+                        desc = str(item.get("description", "") or "")
+                    desc = self._clean_text(desc)
+                    lines.append(f"{idx}. {title}")
+                    lines.append(f"   URL: {link or '-'}")
+                    lines.append(f"   Snippet: {desc or '-'}")
+                    lines.append("")
+
+            return ToolResult(success=True, content="\n".join(lines).strip())
+        except httpx.HTTPStatusError as e:
+            body = ""
+            try:
+                body = (e.response.text or "").strip()
+            except Exception:
+                body = ""
+            detail = f"HTTP {e.response.status_code}" if e.response is not None else str(e)
+            if body:
+                detail = f"{detail}: {self._clean_text(body, max_chars=300)}"
+            log.error("You.com web search failed", query=query, error=detail)
             return ToolResult(success=False, error=detail)
         except Exception as e:
             log.error("Web search failed", query=query, error=str(e))
