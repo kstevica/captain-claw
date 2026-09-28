@@ -54,12 +54,20 @@ class ConsultPeerTool(Tool):
         except ImportError:
             return ToolResult(success=False, error="httpx is required for peer consultation")
 
+        from captain_claw.fd_client import (
+            agent_identity_headers,
+            pinned_flight_deck_url,
+            refusal_detail,
+        )
+
         # Look up peer info from session metadata, with agent-level fallback
         session = kwargs.get("_session")
         agent = kwargs.get("_agent")
         metadata = getattr(session, "metadata", {}) or {} if session else {}
         peers = metadata.get("peer_agents", [])
-        fd_url = metadata.get("fd_url", "")
+        # The FD URL pinned in our environment first: this agent's identity goes
+        # only there, never to the session fd_url a websocket client supplied.
+        fd_url = pinned_flight_deck_url() or metadata.get("fd_url", "")
 
         # Fallback: check agent-level attributes (set by ws_handler even
         # when session wasn't ready at welcome time)
@@ -67,9 +75,6 @@ class ConsultPeerTool(Tool):
             peers = getattr(agent, "_peer_agents", []) or []
         if not fd_url and agent:
             fd_url = getattr(agent, "_fd_url", "") or ""
-        if not fd_url:
-            import os
-            fd_url = os.environ.get("FD_URL", "") or os.environ.get("FD_INTERNAL_URL", "")
 
         if not fd_url:
             return ToolResult(
@@ -110,7 +115,6 @@ class ConsultPeerTool(Tool):
 
         host = target.get("host", "localhost")
         port = target.get("port")
-        auth = target.get("auth", "")
         require_approval = target.get("requireApproval", False)
 
         if not port:
@@ -176,23 +180,21 @@ class ConsultPeerTool(Tool):
 
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
+                # FD reaches the peer at the host/token it recorded for this
+                # port, and only if it belongs to our owner (X-Agent-Auth).
                 async with client.stream(
                     "POST",
                     f"{fd_url}/fd/consult-peer",
+                    headers=agent_identity_headers(fd_url),
                     json={
-                        "host": host,
                         "port": port,
-                        "auth": auth,
                         "message": message,
                         "source_name": source_name,
                         "timeout": 480.0,
                     },
                 ) as resp:
                     if resp.status_code != 200:
-                        return ToolResult(
-                            success=False,
-                            error=f"Flight Deck returned HTTP {resp.status_code}",
-                        )
+                        return ToolResult(success=False, error=await refusal_detail(resp))
 
                     final_response = ""
                     async for line in resp.aiter_lines():

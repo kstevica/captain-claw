@@ -95,6 +95,84 @@ def is_under_flight_deck() -> bool:
     return bool(flight_deck_base())
 
 
+def _norm_url(url: str | None) -> str:
+    base = str(url or "").strip().rstrip("/")
+    if base.endswith("/fd"):
+        base = base[:-3].rstrip("/")
+    return base
+
+
+def pinned_flight_deck_url() -> str:
+    """The FD base URL this agent was configured with — ``FD_URL`` (FD pins it
+    to itself at spawn), else ``FD_INTERNAL_URL`` — or ``""``."""
+    return _norm_url(os.environ.get("FD_URL") or os.environ.get("FD_INTERNAL_URL"))
+
+
+def _pinned_flight_deck_urls() -> set[str]:
+    """Every FD base URL from this agent's environment or config
+    (``google_oauth.flight_deck_url``) — never one a websocket client supplied
+    (the session ``fd_url`` a ``peer_agents`` message sets)."""
+    urls = {os.environ.get("FD_URL", ""), os.environ.get("FD_INTERNAL_URL", "")}
+    try:
+        from captain_claw.config import get_config
+
+        urls.add(str(get_config().google_oauth.flight_deck_url or ""))
+    except Exception:
+        pass
+    return {u.lower() for u in map(_norm_url, urls) if u}
+
+
+def agent_identity_headers(fd_url: str) -> dict[str, str]:
+    """This agent's identity for FD's peer routes (/fd/consult-peer,
+    /fd/delegate-peer) at ``fd_url`` — ``{}`` unless that is a pinned FD URL.
+
+    * ``X-Agent-Auth`` — the agent's own web_auth; FD maps it to the owner it
+      recorded at spawn and lets the agent drive only that owner's agents.
+    * ``X-Agent-Secret`` — the deck's agent secret (config
+      ``google_oauth.flight_deck_secret``, else ``FD_AGENT_SHARED_SECRET`` /
+      the per-deck file); needed off-loopback and under FD_LOCKDOWN.
+
+    Both are credentials, so they never go to a URL a websocket client chose.
+    Best-effort: a header that can't be resolved is left out.
+    """
+    if not fd_url or _norm_url(fd_url).lower() not in _pinned_flight_deck_urls():
+        return {}
+    try:
+        from captain_claw.config import get_config
+
+        cfg = get_config()
+    except Exception:
+        cfg = None
+    headers: dict[str, str] = {}
+    secret = str(getattr(getattr(cfg, "google_oauth", None), "flight_deck_secret", "") or "").strip()
+    if not secret:
+        try:
+            from captain_claw.flight_deck.agent_secret import get_or_create_agent_secret
+
+            secret = get_or_create_agent_secret()
+        except Exception:
+            secret = ""
+    if secret:
+        headers["X-Agent-Secret"] = secret
+    token = str(getattr(getattr(cfg, "web", None), "auth_token", "") or "").strip()
+    if token:
+        headers["X-Agent-Auth"] = token
+    return headers
+
+
+async def refusal_detail(resp: httpx.Response) -> str:
+    """``"Flight Deck returned HTTP <code>"`` plus FD's reason (a 4xx
+    ``detail``), for surfacing a refusal to the model. Works on streamed
+    responses too (reads the body first)."""
+    detail = ""
+    try:
+        await resp.aread()
+        detail = str((resp.json() or {}).get("detail") or "")
+    except Exception:
+        pass
+    return f"Flight Deck returned HTTP {resp.status_code}" + (f": {detail}" if detail else "")
+
+
 class FDClient:
     """Lazy async HTTP client for Flight Deck-internal endpoints.
 

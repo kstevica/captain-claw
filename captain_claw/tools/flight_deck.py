@@ -117,16 +117,21 @@ class FlightDeckTool(Tool):
     }
 
     def _get_fd_url(self, **kwargs: Any) -> str:
-        """Resolve the Flight Deck URL from session metadata, agent attributes, or env."""
-        import os
+        """Resolve the Flight Deck URL: the one pinned in the environment (FD
+        pins FD_URL to itself at spawn) first, else session metadata / agent
+        attributes — a URL a websocket client supplied, which therefore never
+        gets this agent's identity (see fd_client.agent_identity_headers)."""
+        from captain_claw.fd_client import pinned_flight_deck_url
+
+        fd_url = pinned_flight_deck_url()
+        if fd_url:
+            return fd_url
         session = kwargs.get("_session")
         agent = kwargs.get("_agent")
         metadata = getattr(session, "metadata", {}) or {} if session else {}
         fd_url = metadata.get("fd_url", "")
         if not fd_url and agent:
             fd_url = getattr(agent, "_fd_url", "") or ""
-        if not fd_url:
-            fd_url = os.environ.get("FD_URL", "") or os.environ.get("FD_INTERNAL_URL", "")
         return fd_url
 
     async def _list_agents(self, fd_url: str, **kwargs: Any) -> ToolResult:
@@ -196,6 +201,7 @@ class FlightDeckTool(Tool):
             import httpx
         except ImportError:
             return ToolResult(success=False, error="httpx is required")
+        from captain_claw.fd_client import agent_identity_headers, refusal_detail
 
         target, agents, error = await self._resolve_target(fd_url, agent_name, **kwargs)
         if error:
@@ -247,6 +253,7 @@ class FlightDeckTool(Tool):
                 async with client.stream(
                     "POST",
                     f"{fd_url}/fd/consult-peer",
+                    headers=agent_identity_headers(fd_url),
                     json={
                         "host": host,
                         "port": port,
@@ -258,10 +265,7 @@ class FlightDeckTool(Tool):
                     },
                 ) as resp:
                     if resp.status_code != 200:
-                        return ToolResult(
-                            success=False,
-                            error=f"Flight Deck returned HTTP {resp.status_code}",
-                        )
+                        return ToolResult(success=False, error=await refusal_detail(resp))
 
                     final_response = ""
                     async for line in resp.aiter_lines():
@@ -361,6 +365,7 @@ class FlightDeckTool(Tool):
             import httpx
         except ImportError:
             return ToolResult(success=False, error="httpx is required")
+        from captain_claw.fd_client import agent_identity_headers, refusal_detail
 
         target, agents, error = await self._resolve_target(fd_url, agent_name, **kwargs)
         if error:
@@ -438,6 +443,7 @@ class FlightDeckTool(Tool):
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     f"{fd_url}/fd/delegate-peer",
+                    headers=agent_identity_headers(fd_url),
                     json={
                         "target_host": target.get("host", "localhost"),
                         "target_port": target.get("port"),
@@ -454,7 +460,7 @@ class FlightDeckTool(Tool):
                     },
                 )
                 if resp.status_code != 200:
-                    return ToolResult(success=False, error=f"Flight Deck returned HTTP {resp.status_code}")
+                    return ToolResult(success=False, error=await refusal_detail(resp))
                 result = resp.json()
         except Exception as e:
             return ToolResult(success=False, error=f"Failed to delegate: {e}")
