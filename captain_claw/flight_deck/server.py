@@ -840,6 +840,7 @@ async def lifespan(app: FastAPI):
             fd_tools=_fd_internal_tools(),
             whatsapp_send=_flow_whatsapp_send,
             transfer_file=_transfer_file_to_agent,
+            consult_peer=_consult_peer_events,
             load_archetype=_flow_load_archetype,
             spawn_archetype=_flow_spawn_archetype,
             stop_archetype=_flow_stop_archetype,
@@ -927,6 +928,10 @@ app.add_middleware(
 #   so a bearer client (e.g. Captain Spark) and locally-spawned agents pass,
 #   while an off-machine caller with none of the three cannot impersonate an
 #   owner via a forged owner_id / source_port.
+# * The peer routes (/fd/consult-peer, /fd/delegate-peer) sit behind the same
+#   bearer-or-agent guard; in-handler they additionally require the caller's
+#   identity (bearer, or the agent's own X-Agent-Auth) to own the target — see
+#   `_resolve_peer_caller`.
 # * FD_LOCKDOWN=1 additionally (a) makes the agent secret mandatory even from
 #   loopback (a TLS reverse proxy on the same host would otherwise launder
 #   remote callers into "loopback"), and (b) disables the host-filesystem
@@ -947,7 +952,8 @@ _AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/")
 # owner_id/source_port fallback would be spoofable off-machine, so the same
 # transport guard applies. (Basna/Vatra do not consult a bearer, so they stay
 # loopback-or-secret only, above.)
-_BEARER_OR_AGENT_GUARD_PREFIXES = ("/fd/code/agent/", "/fd/hosting/agent/")
+_BEARER_OR_AGENT_GUARD_PREFIXES = ("/fd/code/agent/", "/fd/hosting/agent/",
+                                   "/fd/consult-peer", "/fd/delegate-peer")
 
 
 def _agent_caller_ok(request: Request) -> bool:
@@ -3906,30 +3912,22 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
 _IMAGE_EXTS_TRANSFER = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 
-async def _transfer_file_to_agent(host: str, port: int, abs_path: str) -> tuple[list[str], list[str]]:
-    """Upload a sender-local file to the TARGET agent on the operator's behalf.
-
-    Flight Deck holds every agent's web-auth token (``_resolve_agent_auth``), so
-    it can authenticate the upload even though the sending agent can't. Reads the
-    file from disk (same-host fleet) and uploads to the target's
-    /api/image|file/upload. Returns (image_paths, file_paths) on the TARGET.
-    """
+async def _upload_to_agent(host: str, port: int, auth: str, filename: str,
+                           blob: bytes) -> tuple[list[str], list[str]]:
+    """Upload ``blob`` to the TARGET agent's /api/image|file/upload,
+    authenticated with ``auth`` (its web_auth — FD holds every agent's, which
+    is why it uploads on the sender's behalf). Returns (image_paths,
+    file_paths) ON THE TARGET; ([], []) when the upload fails."""
     import httpx
-    from pathlib import Path
 
-    p = Path(abs_path)
-    if not abs_path or not p.is_file():
-        return [], []
-    is_img = p.suffix.lower() in _IMAGE_EXTS_TRANSFER
+    is_img = Path(filename).suffix.lower() in _IMAGE_EXTS_TRANSFER
     endpoint = "/api/image/upload" if is_img else "/api/file/upload"
-    auth = _resolve_agent_auth(port)
     params = {"token": auth} if auth else {}
     try:
-        blob = p.read_bytes()
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
                 f"http://{host}:{port}{endpoint}", params=params,
-                files={"file": (p.name, blob)},
+                files={"file": (filename, blob)},
             )
         if resp.status_code == 200:
             tgt = str((resp.json() or {}).get("path") or "")
@@ -3942,18 +3940,214 @@ async def _transfer_file_to_agent(host: str, port: int, abs_path: str) -> tuple[
     return [], []
 
 
+async def _transfer_file_to_agent(host: str, port: int, abs_path: str) -> tuple[list[str], list[str]]:
+    """Upload a file FD can read to the TARGET agent — the flow engine's seam.
+
+    Reads ``abs_path`` from FD's own disk UNCONFINED, so it is for in-process
+    callers only. The HTTP peer routes never use it: they read through
+    `_read_agent_attachment`, which confines the read to the calling agent's
+    own workspace. Returns (image_paths, file_paths) on the TARGET.
+    """
+    p = Path(abs_path)
+    if not abs_path or not p.is_file():
+        return [], []
+    try:
+        blob = p.read_bytes()
+    except Exception as exc:
+        log.warning("agent file transfer failed: %s", exc)
+        return [], []
+    return await _upload_to_agent(host, port, _resolve_agent_auth(port), p.name, blob)
+
+
+# ── Peer consult / delegate: who may drive which agent ──
+#
+# /fd/consult-peer and /fd/delegate-peer make FD open a WebSocket to an agent
+# with that agent's own web_auth, instruct it (it then acts with its owner's
+# accounts), and optionally upload a file on the caller's behalf. So:
+#
+# * The target's host, port and token come ONLY from FD's own records — a
+#   token FD resolved is never sent to a host the caller named.
+# * The caller proves who it is and may drive only its owner's agents: a
+#   verified bearer (the target's owner, or an admin), or an FD-spawned agent —
+#   loopback or X-Agent-Secret (the transport guard in _hardening_middleware)
+#   PLUS its own web_auth in X-Agent-Auth, whose recorded owner must be the
+#   target's. With auth disabled (single-user local mode) there is no tenant
+#   boundary, so any agent this deck spawned may drive any other.
+# * An attachment is read only from the calling agent's own workspace.
+
+# Every agent FD records is reachable from FD at localhost (what /fd/fleet reports).
+_PEER_AGENT_HOST = "localhost"
+# Where a Docker agent sees its workspace (bind-mounted from DATA_DIR/<name>/data/workspace).
+_AGENT_WORKSPACE_IN_CONTAINER = "/data/workspace"
+
+
+def _agent_record_by_auth(token: str) -> dict | None:
+    """This deck's agent holding web_auth ``token`` — ``{kind, slug, port,
+    auth, owner}`` — or None (unknown or empty token). Same records as
+    `_resolve_agent_owner_by_auth` (process registry, labelled containers);
+    when legacy clones share a token, a match with a recorded owner wins."""
+    if not token:
+        return None
+    found: dict | None = None
+    for slug, entry in _load_process_registry().items():
+        if entry.get("web_auth") == token:
+            rec = {"kind": "process", "slug": slug, "port": int(entry.get("web_port") or 0),
+                   "auth": token, "owner": str(entry.get("owner") or "")}
+            if rec["owner"]:
+                return rec
+            found = found or rec
+    try:
+        client = get_docker()
+        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            if labels.get("flight-deck.web-auth", "") == token:
+                wp = str(labels.get("flight-deck.web-port", ""))
+                rec = {"kind": "docker", "slug": c.name, "port": int(wp) if wp.isdigit() else 0,
+                       "auth": token, "owner": str(labels.get(OWNER_LABEL, "") or "")}
+                if rec["owner"]:
+                    return rec
+                found = found or rec
+    except Exception:
+        pass
+    return found
+
+
+def _resolve_peer_caller(request: Request, user: dict | None) -> tuple[str, bool, dict | None]:
+    """``(owner, is_admin, calling_agent)`` for a peer-route request, else 403.
+
+    A verified bearer is authoritative: the caller acts only as that user, and
+    an X-Agent-Auth it also sends must name one of that user's agents (it is
+    what an attachment is read from). Otherwise the caller must pass the
+    transport guard (loopback or X-Agent-Secret) AND name itself with its own
+    web_auth in X-Agent-Auth; its owner is the one FD recorded at spawn. A body
+    field never identifies anyone.
+    """
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    agent = _agent_record_by_auth(request.headers.get("X-Agent-Auth", "").strip())
+    if user and user.get("id"):
+        uid = str(user["id"])
+        is_admin = user.get("role") == "admin"
+        if agent is not None and agent["owner"] != uid and not is_admin:
+            raise HTTPException(403, "X-Agent-Auth names another user's agent")
+        return uid, is_admin, agent
+    if not _agent_caller_ok(request):
+        raise HTTPException(403, "peer routes require a bearer token, or loopback / "
+                                 "X-Agent-Secret plus the calling agent's X-Agent-Auth")
+    if agent is None:
+        raise HTTPException(403, "could not identify the calling agent (X-Agent-Auth)")
+    if _fd_auth_enabled() and not agent["owner"]:
+        raise HTTPException(403, "calling agent has no recorded owner on this deck")
+    return agent["owner"], False, agent
+
+
+def _resolve_peer_target(port: int, owner: str, is_admin: bool) -> str:
+    """The web_auth FD recorded for its agent on web port ``port`` — once the
+    caller (``owner``) is allowed to drive it: 404 when FD has no agent there,
+    403 when it belongs to someone else (auth enabled; admins reach any)."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    auth = _resolve_agent_auth(int(port)) if port else ""
+    if not auth:
+        raise HTTPException(404, f"no Flight Deck agent on port {port}")
+    if _fd_auth_enabled() and not is_admin:
+        target_owner = _resolve_agent_owner(int(port))
+        if not target_owner or target_owner != owner:
+            raise HTTPException(403, "This agent belongs to another user")
+    return auth
+
+
+def _workspace_relative_parts(agent: dict, attach_path: str) -> tuple[str, ...]:
+    """``attach_path``'s components below the calling agent's workspace, or 403.
+
+    The path is taken as the agent names it: a process agent's host path under
+    DATA_DIR/<slug>/data/workspace, a Docker agent's /data/workspace/... . It is
+    normalised lexically ('..' collapsed) before the prefix check; symlinks are
+    dealt with by the read itself (`_read_regular_file_under`)."""
+    import posixpath
+
+    host_root = DATA_DIR / agent["slug"] / "data" / "workspace"
+    if agent["kind"] == "docker":
+        prefixes = [_AGENT_WORKSPACE_IN_CONTAINER]
+    else:
+        prefixes = list(dict.fromkeys([str(host_root), str(host_root.resolve())]))
+    path = posixpath.normpath(str(attach_path or "").strip()) if attach_path else ""
+    if path.startswith("/"):
+        for prefix in prefixes:
+            prefix = prefix.rstrip("/")
+            if path.startswith(prefix + "/"):
+                parts = tuple(p for p in path[len(prefix):].split("/") if p)
+                if parts and ".." not in parts:
+                    return parts
+    raise HTTPException(403, "attach_path must be an absolute path to a file inside the "
+                             "calling agent's own workspace")
+
+
+def _read_regular_file_under(root: Path, parts: tuple[str, ...]) -> bytes:
+    """Read ``root/parts...`` without following a symlink at ANY component and
+    only if it is a regular file. The agent owns its workspace (a Docker agent
+    through the bind mount), so it could plant a symlink — or swap one in
+    between a check and the read — to point FD at, say, its database; and a
+    FIFO would hang the read. Raises OSError otherwise."""
+    import stat
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    o_dir = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or os.open not in os.supports_dir_fd:
+        # No openat()/O_NOFOLLOW (Windows): resolve, then re-check containment.
+        target = root.joinpath(*parts).resolve(strict=True)
+        try:
+            target.relative_to(root.resolve(strict=True))
+        except ValueError:
+            raise PermissionError("attachment resolves outside the workspace") from None
+        if not target.is_file():
+            raise IsADirectoryError("attachment is not a regular file")
+        return target.read_bytes()
+    fd = os.open(root, os.O_RDONLY | o_dir | nofollow)
+    try:
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | o_dir | nofollow, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        ffd = os.open(parts[-1], os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0), dir_fd=fd)
+    finally:
+        os.close(fd)
+    with os.fdopen(ffd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise IsADirectoryError("attachment is not a regular file")
+        return fh.read()
+
+
+async def _read_agent_attachment(agent: dict | None, attach_path: str) -> tuple[str, bytes]:
+    """``(filename, bytes)`` of a peer-route ``attach_path`` — read ONLY from the
+    calling agent's own workspace (never anywhere else FD's OS user can read)."""
+    if agent is None:
+        raise HTTPException(400, "attach_path needs the calling agent's identity (X-Agent-Auth); "
+                                 "pass image_paths/file_paths already on the target instead")
+    parts = _workspace_relative_parts(agent, attach_path)
+    root = DATA_DIR / agent["slug"] / "data" / "workspace"
+    try:
+        blob = await asyncio.to_thread(_read_regular_file_under, root, parts)
+    except OSError:
+        raise HTTPException(404, f"attach_path is not a readable file in the calling agent's "
+                                 f"workspace: {attach_path}") from None
+    return parts[-1], blob
+
+
 class ConsultPeerRequest(BaseModel):
+    # ``host`` and ``auth`` are accepted from older callers but IGNORED: FD
+    # talks to its own agent on ``port`` at the host and token IT recorded.
     host: str = "localhost"
     port: int
     auth: str = ""
     message: str
     source_name: str = "another agent"
     timeout: float = Field(default=480.0, le=600.0)
-    # Agent-to-agent file transfer. The sender passes a sender-local absolute
-    # path in ``attach_path``; Flight Deck uploads it to the target (with the
-    # target's resolved auth token) and forwards the resulting target-local
-    # path into the chat payload. image_paths/file_paths may also be passed
-    # directly when already uploaded.
+    # Agent-to-agent file transfer. The sender passes an absolute path inside
+    # its OWN workspace in ``attach_path``; Flight Deck uploads it to the
+    # target (with the target's recorded auth token) and forwards the resulting
+    # target-local path into the chat payload. image_paths/file_paths may also
+    # be passed directly when already uploaded.
     attach_path: str = ""
     image_paths: list[str] = Field(default_factory=list)
     file_paths: list[str] = Field(default_factory=list)
@@ -3975,164 +4169,194 @@ _active_consults: dict[int, str] = {}  # target_port -> source_name
 _active_delegates: set[tuple[int, int]] = set()  # (source_port, target_port) in-flight
 
 
-@app.post("/fd/consult-peer")
-async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | None = _optional_user_dep):
-    """Send a message to a peer agent and stream back intermediate events + final response as ndjson."""
+async def _consult_peer_events(
+    host: str, port: int, auth: str, message: str, *,
+    source_name: str = "another agent", timeout: float = 480.0,
+    image_paths: list[str] | None = None, file_paths: list[str] | None = None,
+    no_flow: bool = False, deny_tools: list[str] | None = None, no_broadcast: bool = False,
+):
+    """Consult the agent at ``host:port`` (authenticated with ``auth``) and yield
+    its intermediate events, then a final ``{"ok": True, "done": True, ...}`` or
+    ``{"ok": False, "error": ...}`` dict.
+
+    No authorization here: the caller vouches for the target. /fd/consult-peer
+    resolves host/port/auth from FD's records after `_resolve_peer_caller`; the
+    flow engine calls it in-process with agents from its own pool."""
     import websockets
-    import json
 
     # NB: a peer serves one consult at a time. Rather than reject when it's
-    # busy (which made flows/agents fail or loop), we QUEUE: _event_stream waits
-    # for the in-flight consult to finish, then acquires the lock.
+    # busy (which made flows/agents fail or loop), we QUEUE: wait for the
+    # in-flight consult to finish, then acquire the lock.
 
     # Event types we forward as peer activity so the caller can show progress
     _FORWARD_TYPES = {"status", "thinking", "monitor", "tool_stream"}
 
-    # Resolve auth token from Fleet Deck records if not provided by caller.
-    auth = req.auth
-    if not auth:
-        auth = _resolve_agent_auth(req.port)
-
     params = f"?token={auth}" if auth else ""
-    agent_url = f"ws://{req.host}:{req.port}/ws{params}"
+    agent_url = f"ws://{host}:{port}/ws{params}"
 
-    async def _event_stream():
-        # Queue behind any in-flight consult to this agent (it serves one at a
-        # time). Bounded by the request timeout. The check-then-set has no await
-        # between, so only one waiter acquires per loop tick (no race).
-        _waited = 0.0
-        _cap = min(float(req.timeout), 180.0)
-        while _active_consults.get(req.port) and _waited < _cap:
-            if _waited == 0.0:
-                yield json.dumps({"event": "status", "data": {"status": f"Agent on port {req.port} busy — queuing…"}}) + "\n"
-            await asyncio.sleep(1.0)
-            _waited += 1.0
-        if _active_consults.get(req.port):
-            yield json.dumps({"ok": False, "error": f"Agent on port {req.port} still busy after {int(_waited)}s — try again."}) + "\n"
-            return
-        _active_consults[req.port] = req.source_name
-        try:
-            async with websockets.connect(agent_url, max_size=4 * 1024 * 1024) as ws:
-                # Wait for welcome
-                welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                if welcome.get("type") != "welcome":
-                    yield json.dumps({"ok": False, "error": "Unexpected handshake"}) + "\n"
+    # Queue behind any in-flight consult to this agent (it serves one at a
+    # time). Bounded by the request timeout. The check-then-set has no await
+    # between, so only one waiter acquires per loop tick (no race).
+    _waited = 0.0
+    _cap = min(float(timeout), 180.0)
+    while _active_consults.get(port) and _waited < _cap:
+        if _waited == 0.0:
+            yield {"event": "status", "data": {"status": f"Agent on port {port} busy — queuing…"}}
+        await asyncio.sleep(1.0)
+        _waited += 1.0
+    if _active_consults.get(port):
+        yield {"ok": False, "error": f"Agent on port {port} still busy after {int(_waited)}s — try again."}
+        return
+    _active_consults[port] = source_name
+    try:
+        async with websockets.connect(agent_url, max_size=4 * 1024 * 1024) as ws:
+            # Wait for welcome
+            welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            if welcome.get("type") != "welcome":
+                yield {"ok": False, "error": "Unexpected handshake"}
+                return
+
+            # Skip replay messages
+            while True:
+                raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                msg = json.loads(raw)
+                if msg.get("type") == "replay_done":
+                    break
+                if msg.get("type") not in ("chat_message",) or not msg.get("replay"):
+                    break
+
+            _chat_payload: dict[str, Any] = {"type": "chat", "content": message}
+            if image_paths:
+                _chat_payload["image_paths"] = list(image_paths)
+            if file_paths:
+                _chat_payload["file_paths"] = list(file_paths)
+            if no_flow:
+                _chat_payload["no_flow"] = True
+            if deny_tools:
+                _chat_payload["deny_tools"] = list(deny_tools)
+            if no_broadcast:
+                _chat_payload["no_broadcast"] = True
+            await ws.send(json.dumps(_chat_payload))
+
+            # Stream events until we get the final assistant response
+            response_parts: list[str] = []
+            final_usage: dict | None = None  # trailing LLM-usage summary
+            deadline = asyncio.get_event_loop().time() + timeout
+            recv_interval = 15.0  # heartbeat every 15s of silence
+            _busy_retries = 0     # peer is single-threaded; wait it out
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    if not response_parts:
+                        yield {"ok": False, "error": "Timed out waiting for response"}
+                        return
+                    break
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, recv_interval))
+                except asyncio.TimeoutError:
+                    # No message in recv_interval — send heartbeat and keep waiting
+                    elapsed = int(timeout - remaining)
+                    yield {"event": "heartbeat", "data": {"elapsed": elapsed, "timeout": int(timeout)}}
+                    continue
+                msg = json.loads(raw)
+                msg_type = msg.get("type", "")
+
+                # Forward interesting intermediate events
+                if msg_type in _FORWARD_TYPES:
+                    yield {"event": msg_type, "data": msg}
+
+                if msg_type == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
+                    content = msg.get("content", "")
+                    if content:
+                        response_parts.append(content)
+                    # The agent emits a `usage` summary (model + token counts)
+                    # right AFTER the final reply. Drain briefly to capture it
+                    # so the done payload can carry per-turn LLM usage; bail the
+                    # moment it arrives (usually within ms) so we add no latency.
+                    try:
+                        for _ in range(4):
+                            raw2 = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                            m2 = json.loads(raw2)
+                            if m2.get("type") == "usage":
+                                final_usage = m2
+                                break
+                            if m2.get("type") in _FORWARD_TYPES:
+                                yield {"event": m2.get("type"), "data": m2}
+                    except Exception:
+                        pass
+                    break
+                elif msg_type == "error":
+                    _err = str(msg.get("message", "Agent error"))
+                    # Transient "busy" → wait and re-send on the same socket.
+                    if _busy_retries < 8 and ("busy processing" in _err.lower() or "session is busy" in _err.lower()):
+                        _busy_retries += 1
+                        _wait = min(2 + _busy_retries * 2, 12)
+                        yield {"event": "status", "data": {"status": f"Peer busy, retrying ({_busy_retries})…"}}
+                        await asyncio.sleep(_wait)
+                        try:
+                            await ws.send(json.dumps(_chat_payload))
+                        except Exception:
+                            yield {"ok": False, "error": _err}
+                            return
+                        continue
+                    yield {"ok": False, "error": _err}
                     return
 
-                # Skip replay messages
-                while True:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=10)
-                    msg = json.loads(raw)
-                    if msg.get("type") == "replay_done":
-                        break
-                    if msg.get("type") not in ("chat_message",) or not msg.get("replay"):
-                        break
+        _done: dict[str, Any] = {
+            "ok": True,
+            "done": True,
+            "response": "\n".join(response_parts) if response_parts else "(no response)",
+        }
+        if final_usage is not None:
+            _done["usage"] = final_usage  # per-turn LLM token usage for the caller
+        yield _done
+    except Exception as exc:
+        yield {"ok": False, "error": f"Connection failed: {exc}"}
+    finally:
+        _active_consults.pop(port, None)
 
-                # Transfer any attached file to the target (FD resolves its auth).
-                _img, _fil = list(req.image_paths), list(req.file_paths)
-                if req.attach_path:
-                    _ti, _tf = await _transfer_file_to_agent(req.host, req.port, req.attach_path)
-                    _img += _ti
-                    _fil += _tf
-                _chat_payload: dict[str, Any] = {"type": "chat", "content": req.message}
-                if _img:
-                    _chat_payload["image_paths"] = _img
-                if _fil:
-                    _chat_payload["file_paths"] = _fil
-                if req.no_flow:
-                    _chat_payload["no_flow"] = True
-                if req.deny_tools:
-                    _chat_payload["deny_tools"] = list(req.deny_tools)
-                if req.no_broadcast:
-                    _chat_payload["no_broadcast"] = True
-                await ws.send(json.dumps(_chat_payload))
 
-                # Stream events until we get the final assistant response
-                response_parts: list[str] = []
-                final_usage: dict | None = None  # trailing LLM-usage summary
-                deadline = asyncio.get_event_loop().time() + req.timeout
-                recv_interval = 15.0  # heartbeat every 15s of silence
-                _busy_retries = 0     # peer is single-threaded; wait it out
-                while True:
-                    remaining = deadline - asyncio.get_event_loop().time()
-                    if remaining <= 0:
-                        if not response_parts:
-                            yield json.dumps({"ok": False, "error": "Timed out waiting for response"}) + "\n"
-                            return
-                        break
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, recv_interval))
-                    except asyncio.TimeoutError:
-                        # No message in recv_interval — send heartbeat and keep waiting
-                        elapsed = int(req.timeout - remaining)
-                        yield json.dumps({"event": "heartbeat", "data": {"elapsed": elapsed, "timeout": int(req.timeout)}}) + "\n"
-                        continue
-                    msg = json.loads(raw)
-                    msg_type = msg.get("type", "")
+@app.post("/fd/consult-peer")
+async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | None = _optional_user_dep):
+    """Send a message to a peer agent and stream back intermediate events + final response as ndjson.
 
-                    # Forward interesting intermediate events
-                    if msg_type in _FORWARD_TYPES:
-                        yield json.dumps({"event": msg_type, "data": msg}) + "\n"
+    The caller must be allowed to drive the target (`_resolve_peer_caller`);
+    FD reaches it at the host and token it recorded, never a caller-named one."""
+    import contextlib
 
-                    if msg_type == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
-                        content = msg.get("content", "")
-                        if content:
-                            response_parts.append(content)
-                        # The agent emits a `usage` summary (model + token counts)
-                        # right AFTER the final reply. Drain briefly to capture it
-                        # so the done payload can carry per-turn LLM usage; bail the
-                        # moment it arrives (usually within ms) so we add no latency.
-                        try:
-                            for _ in range(4):
-                                raw2 = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                                m2 = json.loads(raw2)
-                                if m2.get("type") == "usage":
-                                    final_usage = m2
-                                    break
-                                if m2.get("type") in _FORWARD_TYPES:
-                                    yield json.dumps({"event": m2.get("type"), "data": m2}) + "\n"
-                        except Exception:
-                            pass
-                        break
-                    elif msg_type == "error":
-                        _err = str(msg.get("message", "Agent error"))
-                        # Transient "busy" → wait and re-send on the same socket.
-                        if _busy_retries < 8 and ("busy processing" in _err.lower() or "session is busy" in _err.lower()):
-                            _busy_retries += 1
-                            _wait = min(2 + _busy_retries * 2, 12)
-                            yield json.dumps({"event": "status", "data": {"status": f"Peer busy, retrying ({_busy_retries})…"}}) + "\n"
-                            await asyncio.sleep(_wait)
-                            try:
-                                await ws.send(json.dumps(_chat_payload))
-                            except Exception:
-                                yield json.dumps({"ok": False, "error": _err}) + "\n"
-                                return
-                            continue
-                        yield json.dumps({"ok": False, "error": _err}) + "\n"
-                        return
+    owner, is_admin, caller_agent = _resolve_peer_caller(request, user)
+    auth = _resolve_peer_target(req.port, owner, is_admin)
+    attachment = await _read_agent_attachment(caller_agent, req.attach_path) if req.attach_path else None
 
-            _done: dict[str, Any] = {
-                "ok": True,
-                "done": True,
-                "response": "\n".join(response_parts) if response_parts else "(no response)",
-            }
-            if final_usage is not None:
-                _done["usage"] = final_usage  # per-turn LLM token usage for the caller
-            yield json.dumps(_done) + "\n"
-        except Exception as exc:
-            yield json.dumps({"ok": False, "error": f"Connection failed: {exc}"}) + "\n"
-        finally:
-            _active_consults.pop(req.port, None)
+    async def _event_stream():
+        # Transfer the attached file to the target (FD holds its auth).
+        _img, _fil = list(req.image_paths), list(req.file_paths)
+        if attachment is not None:
+            _ti, _tf = await _upload_to_agent(_PEER_AGENT_HOST, req.port, auth, *attachment)
+            _img += _ti
+            _fil += _tf
+        async with contextlib.aclosing(_consult_peer_events(
+            _PEER_AGENT_HOST, req.port, auth, req.message,
+            source_name=req.source_name, timeout=req.timeout,
+            image_paths=_img, file_paths=_fil, no_flow=req.no_flow,
+            deny_tools=req.deny_tools, no_broadcast=req.no_broadcast,
+        )) as events:
+            async for evt in events:
+                yield json.dumps(evt) + "\n"
 
     return StreamingResponse(_event_stream(), media_type="application/x-ndjson")
 
 
 class DelegatePeerRequest(BaseModel):
+    # ``target_host`` / ``source_host`` are accepted from older callers but
+    # IGNORED (FD reaches its agents at the host it recorded). The result goes
+    # back to the CALLING agent (X-Agent-Auth); ``source_port`` only names the
+    # recipient for a bearer caller, which has no agent of its own.
     target_host: str = "localhost"
     target_port: int
     target_name: str = ""
     source_host: str = "localhost"
-    source_port: int
+    source_port: int = 0
     source_name: str = "another agent"
     message: str
     timeout: float = Field(default=600.0, le=1800.0)
@@ -4140,7 +4364,8 @@ class DelegatePeerRequest(BaseModel):
     origin_platform: str = "web"       # "web" or "telegram"
     origin_user_id: str = ""           # telegram user id
     origin_chat_id: int = 0            # telegram chat id
-    # Agent-to-agent file transfer (FD uploads attach_path to the target).
+    # Agent-to-agent file transfer (FD uploads attach_path — a file in the
+    # calling agent's own workspace — to the target).
     attach_path: str = ""
     image_paths: list[str] = Field(default_factory=list)
     file_paths: list[str] = Field(default_factory=list)
@@ -4150,18 +4375,22 @@ class DelegatePeerRequest(BaseModel):
 async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict | None = _optional_user_dep):
     """Fire-and-forget: send a task to a peer agent. When the peer finishes, deliver the result back to the source agent as a chat message."""
     import websockets
-    import json
 
-    _FORWARD_TYPES = {"status", "thinking", "monitor", "tool_stream"}
+    owner, is_admin, caller_agent = _resolve_peer_caller(request, user)
+    target_port = int(req.target_port)
+    target_auth = _resolve_peer_target(target_port, owner, is_admin)
+    # The result goes back to the calling agent, at the port FD recorded for it.
+    if caller_agent is not None and caller_agent["port"]:
+        source_port, source_auth = caller_agent["port"], caller_agent["auth"]
+    else:
+        source_port = int(req.source_port or 0)
+        source_auth = _resolve_peer_target(source_port, owner, is_admin)
 
-    target_auth = _resolve_agent_auth(req.target_port)
-    source_auth = _resolve_agent_auth(req.source_port)
-
-    peer_display = req.target_name or f"agent@{req.target_port}"
+    peer_display = req.target_name or f"agent@{target_port}"
 
     # Guard: an agent must not delegate to itself (e.g. a vision agent that
     # tried image_vision, failed, then "delegated" the image to its own name).
-    if req.source_port and req.target_port and int(req.source_port) == int(req.target_port):
+    if source_port == target_port:
         return {
             "ok": False,
             "message": f"{peer_display} is the requesting agent itself — handle the task directly, do not delegate to yourself.",
@@ -4170,7 +4399,7 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
     # Guard: if this source already has a delegation in flight to this target,
     # don't pile on another (the model sometimes re-delegates the same task with
     # a reworded message, which dodges arg-based dedup and storms the peer).
-    _deleg_key = (req.source_port, req.target_port)
+    _deleg_key = (source_port, target_port)
     if _deleg_key in _active_delegates:
         return {
             "ok": True,
@@ -4180,13 +4409,15 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
             ),
         }
 
+    attachment = await _read_agent_attachment(caller_agent, req.attach_path) if req.attach_path else None
+
     async def _background():
         log.info("delegate_background: started", target=peer_display, source=req.source_name,
-                 target_port=req.target_port, source_port=req.source_port)
+                 target_port=target_port, source_port=source_port)
 
         # Phase 1: send task to target agent and wait for response
         t_params = f"?token={target_auth}" if target_auth else ""
-        target_url = f"ws://{req.target_host}:{req.target_port}/ws{t_params}"
+        target_url = f"ws://{_PEER_AGENT_HOST}:{target_port}/ws{t_params}"
         response_text = ""
         try:
             async with websockets.connect(target_url, max_size=4 * 1024 * 1024) as ws:
@@ -4205,8 +4436,8 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
                             break
 
                     _img, _fil = list(req.image_paths), list(req.file_paths)
-                    if req.attach_path:
-                        _ti, _tf = await _transfer_file_to_agent(req.target_host, req.target_port, req.attach_path)
+                    if attachment is not None:
+                        _ti, _tf = await _upload_to_agent(_PEER_AGENT_HOST, target_port, target_auth, *attachment)
                         _img += _ti
                         _fil += _tf
                     _payload: dict[str, Any] = {"type": "chat", "content": req.message}
@@ -4268,7 +4499,7 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
 
         # Phase 2: deliver the result back to the source agent
         s_params = f"?token={source_auth}" if source_auth else ""
-        source_url = f"ws://{req.source_host}:{req.source_port}/ws{s_params}"
+        source_url = f"ws://{_PEER_AGENT_HOST}:{source_port}/ws{s_params}"
         callback_msg = (
             f"[Delegated result from {peer_display}] This is the ANSWER you were "
             f"waiting for. Relay it to the user now, concisely, in their language. "
@@ -4276,7 +4507,7 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
             f"still waiting — you already have the result below:\n\n{response_text}"
         )
         log.info("delegate_background: delivering result to source",
-                 source=req.source_name, source_port=req.source_port, result_len=len(response_text))
+                 source=req.source_name, source_port=source_port, result_len=len(response_text))
         try:
             async with websockets.connect(source_url, open_timeout=10, close_timeout=5) as ws:
                 welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))

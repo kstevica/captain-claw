@@ -3,7 +3,8 @@
 Deterministic loop owned by FD; the work happens on pooled agents:
   * ``tool``  step → direct RPC to an agent's ``/api/tool`` (no LLM), or an
                      FD-internal tool (e.g. face_identify) when ``on: fd``.
-  * ``agent`` step → ``/fd/consult-peer`` (scoped prompt; reuses busy-retry).
+  * ``agent`` step → the server's in-process consult (what ``/fd/consult-peer``
+    streams; scoped prompt; reuses busy-retry).
   * ``branch``     → conditional jump (deterministic).
   * ``emit``       → push to a channel (WhatsApp / log).
 
@@ -13,12 +14,13 @@ Dependencies are injected by the FD server to avoid import cycles.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
 import time
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from captain_claw.logging import get_logger
 from captain_claw.flight_deck.flows_store import FlowStore
@@ -500,6 +502,7 @@ class FlowRunner:
         fd_tools: dict[str, Callable[[dict[str, Any]], Awaitable[str]]] | None = None,
         whatsapp_send: Callable[[str, str], Awaitable[Any]] | None = None,
         transfer_file: Callable[[str, int, str], Awaitable[tuple[list[str], list[str]]]] | None = None,
+        consult_peer: Callable[..., AsyncIterator[dict[str, Any]]] | None = None,
         load_archetype: Callable[[dict[str, Any], str], Awaitable[dict[str, Any] | None]] | None = None,
         spawn_archetype: Callable[..., Awaitable[tuple[int, str, str]]] | None = None,
         stop_archetype: Callable[[str], Awaitable[None]] | None = None,
@@ -514,6 +517,11 @@ class FlowRunner:
         # Uploads a file to a target agent, returning (image_paths, file_paths)
         # ON THE TARGET. Lets the runner verify delivery + use the target's path.
         self.transfer_file = transfer_file
+        # Consults a pool agent in-process and yields its events (the server's
+        # `_consult_peer_events`): the runner already holds each agent's host,
+        # port and token, so it doesn't go through /fd/consult-peer, which only
+        # serves callers that can prove who they are.
+        self.consult_peer = consult_peer
         # ── archetype selector seams (`agent on archetype:<id>`) ──
         # All optional: if any is None the selector is unavailable and a step
         # using it fails cleanly with a clear message (never a crash). Injected
@@ -799,17 +807,8 @@ class FlowRunner:
                 f"Constraints: do NOT use these tools this turn: {', '.join(deny)}. "
                 f"Do not write or run scripts. Answer directly.\n\n{prompt}"
             )
-        import httpx
-        body = {
-            "host": agent["host"], "port": int(agent["port"]),
-            "auth": str(agent.get("auth") or ""),  # token from the same entry as the port
-            "message": prompt, "source_name": "FlowEngine", "timeout": 480.0,
-            "no_flow": True,         # loop guard
-            "no_broadcast": True,    # FlowRunner is the sole deliverer (no channel leak)
-            "deny_tools": _deny,
-            "image_paths": target_images,   # already on the TARGET (verified)
-            "file_paths": target_files,
-        }
+        if self.consult_peer is None:
+            return "(agent step unavailable: no consult seam)", agent.get("name", "")
         # Progress breadcrumb: name the specialist working this step so a long /
         # multi-stage flow isn't a silent "thinking" spinner in the origin UI.
         who = self._who(agent)
@@ -818,55 +817,55 @@ class FlowRunner:
         final, err = "", ""
         _last_note = ""  # de-dupe identical consecutive progress lines
         try:
-            async with httpx.AsyncClient(timeout=600.0) as client:
-                async with client.stream("POST", f"{self.fd_self_base}/fd/consult-peer", json=body) as resp:
-                    if resp.status_code != 200:
-                        return f"(agent step failed: HTTP {resp.status_code})", agent.get("name", "")
-                    async for line in resp.aiter_lines():
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            evt = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if evt.get("done") and evt.get("ok"):
-                            final = str(evt.get("response") or "")
-                            # Surface the peer's LLM token usage as an activity
-                            # entry, attributed to the specialist (no clobbering of
-                            # the origin agent's own context meter).
-                            _usage = evt.get("usage")
-                            if isinstance(_usage, dict):
-                                _udet = self._usage_detail(_usage)
-                                if _udet:
-                                    await self._push_progress(payload, "monitor", {
-                                        "tool_name": f"{who}:llm",
-                                        "arguments": {},
-                                        "output": _udet,
-                                    })
-                            break
-                        if evt.get("ok") is False:
-                            err = str(evt.get("error") or "agent error")
-                            break
-                        # Forward the peer's intermediate activity to the origin UI
-                        # as TRANSIENT events (no chat-bubble spam): its narration /
-                        # status update the activity line, its tool calls land in the
-                        # monitor panel. The final answer still returns below.
-                        ev = str(evt.get("event") or "")
-                        data = evt.get("data") or {}
-                        if ev in ("narration", "status", "thinking"):
-                            note = str(data.get("text") or data.get("status") or "").strip()
-                            if note and note != _last_note:
-                                _last_note = note
-                                await self._push_progress(payload, "thinking", {"text": f"{who}: {note[:200]}"})
-                        elif ev == "monitor":
-                            tool = str(data.get("tool_name") or data.get("tool") or "").strip()
-                            if tool:
+            events = self.consult_peer(
+                agent["host"], int(agent["port"]),
+                str(agent.get("auth") or ""),  # token from the same entry as the port
+                prompt, source_name="FlowEngine", timeout=480.0,
+                no_flow=True,         # loop guard
+                no_broadcast=True,    # FlowRunner is the sole deliverer (no channel leak)
+                deny_tools=_deny,
+                image_paths=target_images,   # already on the TARGET (verified)
+                file_paths=target_files,
+            )
+            async with contextlib.aclosing(events):
+                async for evt in events:
+                    if evt.get("done") and evt.get("ok"):
+                        final = str(evt.get("response") or "")
+                        # Surface the peer's LLM token usage as an activity
+                        # entry, attributed to the specialist (no clobbering of
+                        # the origin agent's own context meter).
+                        _usage = evt.get("usage")
+                        if isinstance(_usage, dict):
+                            _udet = self._usage_detail(_usage)
+                            if _udet:
                                 await self._push_progress(payload, "monitor", {
-                                    "tool_name": f"{who}:{tool}",
-                                    "arguments": data.get("arguments") or {},
-                                    "output": str(data.get("output") or "")[:400],
+                                    "tool_name": f"{who}:llm",
+                                    "arguments": {},
+                                    "output": _udet,
                                 })
+                        break
+                    if evt.get("ok") is False:
+                        err = str(evt.get("error") or "agent error")
+                        break
+                    # Forward the peer's intermediate activity to the origin UI
+                    # as TRANSIENT events (no chat-bubble spam): its narration /
+                    # status update the activity line, its tool calls land in the
+                    # monitor panel. The final answer still returns below.
+                    ev = str(evt.get("event") or "")
+                    data = evt.get("data") or {}
+                    if ev in ("narration", "status", "thinking"):
+                        note = str(data.get("text") or data.get("status") or "").strip()
+                        if note and note != _last_note:
+                            _last_note = note
+                            await self._push_progress(payload, "thinking", {"text": f"{who}: {note[:200]}"})
+                    elif ev == "monitor":
+                        tool = str(data.get("tool_name") or data.get("tool") or "").strip()
+                        if tool:
+                            await self._push_progress(payload, "monitor", {
+                                "tool_name": f"{who}:{tool}",
+                                "arguments": data.get("arguments") or {},
+                                "output": str(data.get("output") or "")[:400],
+                            })
         except Exception as exc:
             err = str(exc)
         return (final or f"(no result: {err})"), agent.get("name", "")
