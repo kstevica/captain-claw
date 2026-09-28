@@ -7,10 +7,11 @@ Two audiences hit these endpoints:
    user auth. Returns secrets in masked form only.
 
 2. **Captain-claw agents** (``/fd/mcp/<server>/tools``,
-   ``/fd/mcp/<server>/call``) — gated by the same loopback / shared-secret
-   pattern Codex / Google OAuth use. Agents proxy here instead of dialing
-   the upstream MCP server themselves; that gives FD a single chokepoint
-   for OAuth, rate-limiting and observability.
+   ``/fd/mcp/<server>/call``) — gated like the Codex token endpoint:
+   loopback / shared secret AND the agent's own ``X-Agent-Auth`` token.
+   Agents proxy here instead of dialing the upstream MCP server
+   themselves; that gives FD a single chokepoint for OAuth,
+   rate-limiting and observability.
 
 Phase 1 keeps the schema flat: name + URL + optional OAuth client
 credentials + optional headers. Anything more (per-tenant scoping,
@@ -21,14 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-import secrets
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from captain_claw.flight_deck import mcp_events, mcp_storage
+from captain_claw.flight_deck.agent_identity import require_agent_caller
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.mcp_manager import MCPServerError, get_manager
 from captain_claw.logging import get_logger
@@ -38,37 +38,22 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/fd/mcp", tags=["mcp"])
 
 
-# ── agent auth (mirrors codex_oauth_routes) ─────────────────────────
-
-
-def _agent_shared_secret() -> str:
-    return os.environ.get("FD_AGENT_SHARED_SECRET", "").strip()
+# ── agent auth (same gate as codex_oauth_routes) ────────────────────
 
 
 def _authorize_agent_call(request: Request) -> str:
-    """Allow the call if the request comes from loopback OR carries the
-    matching ``X-Agent-Secret`` header. Used for the proxy endpoints
-    captain-claw agents call.
+    """Gate the proxy endpoints captain-claw agents call: one of THIS deck's
+    agents, identified by its ``X-Agent-Auth`` token on top of the loopback /
+    ``X-Agent-Secret`` transport gate (see :mod:`agent_identity`) — a web page
+    in the user's browser is on loopback too, and must not drive the fleet's
+    MCP connections.
 
-    Returns the calling agent's slug (from ``X-Agent-Slug``) when
-    provided, or ``""`` when the caller didn't identify itself. The
-    slug is used for per-agent ACL filtering downstream — an empty
-    slug means "anonymous" and is only allowed access to servers with
-    no allowlist configured.
+    Returns the calling agent's slug as FD recorded it at spawn — not the
+    self-declared ``X-Agent-Slug`` — for per-agent ACL filtering downstream.
+    An empty slug (an agent FD knows but has no slug for) is only allowed
+    servers with no allowlist configured.
     """
-    secret = _agent_shared_secret()
-    authorized = False
-    if secret:
-        provided = request.headers.get("X-Agent-Secret", "")
-        if provided and secrets.compare_digest(provided, secret):
-            authorized = True
-    if not authorized:
-        client_host = request.client.host if request.client else ""
-        if client_host in ("127.0.0.1", "::1", "localhost"):
-            authorized = True
-    if not authorized:
-        raise HTTPException(status_code=401, detail="Unauthorized agent call")
-    return (request.headers.get("X-Agent-Slug") or "").strip()
+    return require_agent_caller(request, what="the MCP proxy").slug
 
 
 # ── admin: list / add / remove servers ──────────────────────────────

@@ -416,10 +416,21 @@ def test_routes_agent_facing_endpoints(
     app = _make_app(monkeypatch, fake)
     client = TestClient(app)
 
-    # Agent endpoints accept either loopback OR matching X-Agent-Secret.
-    # TestClient doesn't show as loopback, so set the secret instead.
+    # Agent endpoints need the transport gate (loopback OR matching
+    # X-Agent-Secret — TestClient doesn't show as loopback, so set the secret)
+    # AND the agent's own X-Agent-Auth token, resolved from FD's records.
+    from captain_claw.flight_deck import server as fd_server
+
+    monkeypatch.setattr(fd_server, "_load_process_registry", lambda: {
+        "alpha": {"web_auth": "tok-alpha", "owner": "u1", "web_port": 24001},
+    })
+
+    def _no_docker():
+        raise RuntimeError("docker unavailable in tests")
+
+    monkeypatch.setattr(fd_server, "get_docker", _no_docker)
     monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
-    agent_headers = {"X-Agent-Secret": "shh"}
+    agent_headers = {"X-Agent-Secret": "shh", "X-Agent-Auth": "tok-alpha"}
 
     client.post(
         "/fd/mcp/servers",
@@ -436,10 +447,22 @@ def test_routes_agent_facing_endpoints(
     assert resp.json() == {"servers": [{"name": "fake"}]}
 
     # Missing/wrong secret -> 401
-    resp = client.get("/fd/mcp/agent/servers")
+    resp = client.get("/fd/mcp/agent/servers", headers={"X-Agent-Auth": "tok-alpha"})
     assert resp.status_code == 401
-    resp = client.get("/fd/mcp/agent/servers", headers={"X-Agent-Secret": "nope"})
+    resp = client.get(
+        "/fd/mcp/agent/servers",
+        headers={"X-Agent-Secret": "nope", "X-Agent-Auth": "tok-alpha"},
+    )
     assert resp.status_code == 401
+
+    # Secret alone proves "an agent", not which one -> 403.
+    resp = client.get("/fd/mcp/agent/servers", headers={"X-Agent-Secret": "shh"})
+    assert resp.status_code == 403
+    resp = client.get(
+        "/fd/mcp/agent/servers",
+        headers={"X-Agent-Secret": "shh", "X-Agent-Auth": "not-ours"},
+    )
+    assert resp.status_code == 403
 
     # Tools list passthrough.
     resp = client.get("/fd/mcp/fake/tools", headers=agent_headers)

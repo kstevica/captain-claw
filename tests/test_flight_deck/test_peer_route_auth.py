@@ -39,7 +39,8 @@ _REAL_CONSULT_EVENTS = fd_server._consult_peer_events
 def _client(client_addr) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=fd_server.app, client=client_addr),
-        base_url="http://fd.test")
+        # A host FD answers to by default (origin_guard's Host allowlist).
+        base_url="http://localhost:25080")
 
 
 @pytest.fixture

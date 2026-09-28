@@ -7,6 +7,9 @@ When captain-claw is launched as a subprocess by Flight Deck, FD injects:
 * ``FD_AGENT_SHARED_SECRET`` — a per-process secret used for the
   ``X-Agent-Secret`` header on FD-internal endpoints
 
+and writes the agent's ``web.auth_token`` into its config; that token goes
+out as ``X-Agent-Auth`` so FD can tell which of its agents is calling.
+
 This module is the single source of truth for those env vars. Anything
 that needs to call back into Flight Deck — Codex token resolution, MCP
 proxying, etc. — should import the helpers here rather than re-reading
@@ -67,9 +70,13 @@ def flight_deck_headers() -> dict[str, str]:
 
     Includes ``X-Agent-Secret`` when ``FD_AGENT_SHARED_SECRET`` is set;
     that header is what gates FD's agent-facing endpoints when the
-    request doesn't come from loopback. When neither env var is set
-    this returns an empty dict — callers should treat that as "FD auth
-    not available" and fall back to local behaviour.
+    request doesn't come from loopback. Includes ``X-Agent-Auth`` — this
+    agent's own ``web.auth_token``, which FD minted at spawn — so FD can
+    resolve *which* of its agents is calling from its own records; the
+    Codex token and MCP proxy endpoints refuse callers without it. When
+    none of these is available this returns an empty dict — callers
+    should treat that as "FD auth not available" and fall back to local
+    behaviour.
     """
     out: dict[str, str] = {}
     secret = (os.environ.get("FD_AGENT_SHARED_SECRET") or "").strip()
@@ -78,7 +85,20 @@ def flight_deck_headers() -> dict[str, str]:
     slug = (os.environ.get("FD_AGENT_SLUG") or "").strip()
     if slug:
         out["X-Agent-Slug"] = slug
+    token = _agent_web_auth_token()
+    if token:
+        out["X-Agent-Auth"] = token
     return out
+
+
+def _agent_web_auth_token() -> str:
+    """This agent's ``web.auth_token`` ("" outside a configured agent)."""
+    try:
+        from captain_claw.config import get_config
+
+        return str(getattr(getattr(get_config(), "web", None), "auth_token", "") or "").strip()
+    except Exception:
+        return ""
 
 
 def flight_deck_slug() -> str:
