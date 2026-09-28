@@ -604,9 +604,9 @@ def _resolve_fleet_ports() -> dict[str, int]:
     port_map: dict[str, int] = {}
 
     try:
-        from captain_claw.flight_deck.server import get_docker, CONTAINER_LABEL
-        client = get_docker()
-        for c in client.containers.list(all=False, filters={"label": CONTAINER_LABEL}):
+        # THIS deck's containers only (another deck on the host has its own).
+        from captain_claw.flight_deck.server import _deck_containers
+        for c in _deck_containers():
             labels = c.labels or {}
             wp = labels.get("flight-deck.web-port", "")
             name = labels.get("flight-deck.agent-name", c.name)

@@ -14,6 +14,7 @@ import {
   ChevronDown,
 } from 'lucide-react'
 import { useGoogleAuthStore } from '../../stores/googleAuthStore'
+import { useAuthStore } from '../../stores/authStore'
 
 export default function GoogleConnection() {
   const {
@@ -30,6 +31,17 @@ export default function GoogleConnection() {
     startMessageListener,
   } = useGoogleAuthStore()
 
+  // One OAuth *client* per deck (admin-managed: POST /fd/google/config is
+  // require_admin), one Google *account* per FD user (Connect binds the
+  // signed-in user). With auth off the single local user is the admin.
+  const authEnabled = useAuthStore((s) => s.authEnabled)
+  const fdUser = useAuthStore((s) => s.user)
+  const canManageClient = !authEnabled || fdUser?.role === 'admin'
+  const fdUserLabel = authEnabled && fdUser ? (fdUser.display_name || fdUser.email) : ''
+  // A Google connection belongs to a Flight Deck user, so it needs FD sign-in:
+  // a deck with auth off (the desktop app runs one) has no Google via FD.
+  const unavailable = authEnabled === false
+
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
   const [projectId, setProjectId] = useState('')
@@ -40,10 +52,11 @@ export default function GoogleConnection() {
   const [collapsed, setCollapsed] = useState(false)
 
   useEffect(() => {
+    if (unavailable) return
     refresh()
     const unsub = startMessageListener()
     return unsub
-  }, [refresh, startMessageListener])
+  }, [unavailable, refresh, startMessageListener])
 
   useEffect(() => {
     if (config) {
@@ -60,7 +73,6 @@ export default function GoogleConnection() {
   const user = status?.user
 
   const handleSave = async () => {
-    setSaving(true)
     const patch: Record<string, string | string[]> = {}
     if (clientId !== (config?.client_id || '')) patch.client_id = clientId
     if (clientSecret) patch.client_secret = clientSecret
@@ -72,10 +84,18 @@ export default function GoogleConnection() {
       prevScopes.size !== nextScopes.size ||
       [...nextScopes].some((s) => !prevScopes.has(s))
     if (scopesChanged) patch.scopes = scopes
-    if (Object.keys(patch).length > 0) {
-      await saveConfig(patch)
-      setClientSecret('')
-    }
+    if (Object.keys(patch).length === 0) return
+    // The backend wipes EVERY user's stored Google tokens when the client or
+    // the scope set changes (the refresh tokens are bound to both).
+    if (configured && (patch.client_id !== undefined || scopesChanged) && !confirm(
+      'Change the Google OAuth client / scopes?\n\n' +
+      'This disconnects the Google account of EVERY user on this deck, not ' +
+      'just yours. Their agents lose Google access until each user connects ' +
+      'again (and re-consents).',
+    )) return
+    setSaving(true)
+    await saveConfig(patch)
+    setClientSecret('')
     setSaving(false)
   }
 
@@ -87,10 +107,11 @@ export default function GoogleConnection() {
 
   const handleClear = async () => {
     if (!confirm(
-      'Remove saved Google OAuth credentials?\n\n' +
-      'This clears your stored client_id, client_secret, and disconnects ' +
-      'the current session. You will need to re-enter credentials before ' +
-      'you can connect again.',
+      'Remove this deck\'s Google OAuth credentials?\n\n' +
+      'This clears the stored client_id and client_secret and disconnects ' +
+      'the Google account of EVERY user on this deck, not just yours. Their ' +
+      'agents lose Google access until an admin re-enters credentials and ' +
+      'each user connects again.',
     )) return
     setSaving(true)
     await clearCredentials()
@@ -118,6 +139,34 @@ export default function GoogleConnection() {
     (projectId.trim() !== (config?.project_id || '').trim()) ||
     (location.trim() !== (config?.location || '').trim()) ||
     scopesDirty
+
+  if (unavailable) {
+    return (
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden">
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-zinc-800">
+          <div className="h-10 w-10 rounded-md bg-gradient-to-br from-blue-500/20 to-red-500/20 border border-zinc-800 flex items-center justify-center">
+            <Mail className="h-5 w-5 text-zinc-200" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-sm font-semibold text-zinc-100">Google</h3>
+              <span className={`${pill} bg-zinc-800 text-zinc-400 border-zinc-700`}>
+                Not available
+              </span>
+            </div>
+            <div className="text-xs text-zinc-500 mt-0.5">Gmail, Drive, Calendar</div>
+          </div>
+        </div>
+        <div className="px-5 py-4 text-xs text-zinc-400 leading-relaxed">
+          Google isn't available on this deck: Flight Deck sign-in is turned off
+          (the desktop app always runs it that way), and each Google connection
+          belongs to a signed-in Flight Deck user. To connect Google, run Flight
+          Deck with sign-in on (<code className="text-zinc-300">FD_AUTH_ENABLED=true</code>,
+          the default) and connect from your account.
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden">
@@ -152,10 +201,10 @@ export default function GoogleConnection() {
             )}
             <span
               className={`${pillTiny} bg-blue-500/15 text-blue-500 border-blue-500/30`}
-              title="Uses your own Google Cloud OAuth client."
+              title="This deck uses its own Google Cloud OAuth client — one for all users, managed by an admin. Each Flight Deck user connects their own Google account through it."
             >
               <KeyRound className="h-2.5 w-2.5" />
-              your credentials
+              own OAuth client
             </span>
           </div>
           <div className="text-xs text-zinc-500 mt-0.5">
@@ -188,7 +237,16 @@ export default function GoogleConnection() {
         )}
 
         {/* Not-configured informational banner */}
-        {!configured && (
+        {!configured && !canManageClient && (
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-zinc-300">
+            <div className="font-medium text-amber-600 mb-0.5">Google isn't set up on this deck yet</div>
+            <div className="text-zinc-400">
+              Ask an admin to configure Google OAuth. Once they have, you can connect
+              your own Google account here.
+            </div>
+          </div>
+        )}
+        {!configured && canManageClient && (
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-zinc-300">
             <div className="font-medium text-amber-600 mb-0.5">Bring your own OAuth client</div>
             <div className="text-zinc-400">
@@ -204,13 +262,18 @@ export default function GoogleConnection() {
               </a>{' '}
               (type <span className="text-zinc-200 font-medium">Web application</span>), add the
               redirect URI shown below, then paste your Client ID and Client Secret here.
+              The client is shared by every user on this deck; each user then connects
+              their own Google account.
             </div>
           </div>
         )}
 
         {/* Connected-user summary */}
         {connected && user && (
-          <div className="flex items-center gap-3 rounded-md border border-zinc-800 bg-zinc-950/50 px-3 py-2.5">
+          <div
+            className="flex items-center gap-3 rounded-md border border-zinc-800 bg-zinc-950/50 px-3 py-2.5"
+            title={fdUserLabel ? `Google account linked to ${fdUserLabel}` : undefined}
+          >
             {user.picture && (
               <img src={user.picture} alt="" className="h-8 w-8 rounded-full" />
             )}
@@ -248,7 +311,11 @@ export default function GoogleConnection() {
               onClick={connect}
               disabled={!configured}
               className="inline-flex items-center gap-2 rounded-md bg-violet-600 hover:bg-violet-500 px-3.5 py-2 text-sm text-white shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              title={configured ? 'Start the Google OAuth flow' : 'Save credentials first'}
+              title={
+                configured
+                  ? 'Link a Google account to your own Flight Deck user'
+                  : canManageClient ? 'Save credentials first' : 'An admin has to configure Google first'
+              }
             >
               <ExternalLink className="h-4 w-4" />
               Connect Google
@@ -264,14 +331,23 @@ export default function GoogleConnection() {
               Disconnect
             </button>
           )}
+          {configured && fdUserLabel && (
+            <span className="text-xs text-zinc-500">
+              {connected ? 'Linked to' : 'Links a Google account to'} your Flight Deck user,{' '}
+              <span className="text-zinc-300">{fdUserLabel}</span>. Your agents use it — every
+              other user connects their own.
+            </span>
+          )}
         </div>
 
-        {/* Credentials form — always visible */}
+        {/* Credentials form — deck-wide OAuth client, admins only (the save
+            endpoint is require_admin; non-admins would only get 403s). */}
+        {canManageClient && (
         <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-950/50 p-3">
           <div className="text-xs text-zinc-500">
             Redirect URI (add this to your OAuth client in Google Cloud Console):
             <code className="block mt-1 text-[11px] text-zinc-200 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 break-all">
-              {config?.redirect_uri || 'http://localhost:25080/fd/google/callback'}
+              {config?.redirect_uri || `${window.location.origin}/fd/google/callback`}
             </code>
           </div>
 
@@ -404,8 +480,9 @@ export default function GoogleConnection() {
                 you add your Google account as a{' '}
                 <span className="text-zinc-300">Test user</span> on your OAuth
                 consent screen (Google Cloud Console → OAuth consent screen →
-                Test users). Changing scopes will disconnect and require you
-                to re-consent.
+                Test users) — every user who will connect needs to be one.
+                Changing scopes disconnects every user's Google account; each
+                has to reconnect and re-consent.
               </div>
             </div>
           )}
@@ -436,6 +513,7 @@ export default function GoogleConnection() {
             )}
           </div>
         </div>
+        )}
       </div>
       )}
     </div>

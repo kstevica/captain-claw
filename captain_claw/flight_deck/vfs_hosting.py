@@ -149,10 +149,13 @@ def start_app(name: str) -> tuple[bool, str]:
     if folder is None:
         return False, "app folder not found"
 
-    from captain_claw.flight_deck.server import _find_available_port
+    from captain_claw.flight_deck.server import _FD_ONLY_ENV_VARS, _find_available_port
     port = _find_available_port(int(os.environ.get("VFS_APPS_PORT_BASE", "26100")))
 
-    env = dict(os.environ)
+    # FD's environment minus its own secrets (the list agents are spawned
+    # without): the start command is a tenant's code, and FD_JWT_SECRET alone
+    # would let it mint a session for any user of this deck, admins included.
+    env = {k: v for k, v in os.environ.items() if k not in _FD_ONLY_ENV_VARS}
     # The app must bind the port we assign, on localhost. We set several common
     # conventions so most frameworks pick it up without extra config.
     env["PORT"] = str(port)

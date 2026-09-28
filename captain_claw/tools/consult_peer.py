@@ -56,8 +56,8 @@ class ConsultPeerTool(Tool):
 
         from captain_claw.fd_client import (
             agent_identity_headers,
-            pinned_flight_deck_url,
             refusal_detail,
+            resolve_flight_deck_url,
         )
 
         # Look up peer info from session metadata, with agent-level fallback
@@ -65,9 +65,11 @@ class ConsultPeerTool(Tool):
         agent = kwargs.get("_agent")
         metadata = getattr(session, "metadata", {}) or {} if session else {}
         peers = metadata.get("peer_agents", [])
-        # The FD URL pinned in our environment first: this agent's identity goes
-        # only there, never to the session fd_url a websocket client supplied.
-        fd_url = pinned_flight_deck_url() or metadata.get("fd_url", "")
+        # As the flight_deck tool resolves it: the pinned FD, unless the
+        # session URL names the same deck by another local-host alias (a
+        # Docker agent's reachable host.docker.internal). A websocket-supplied
+        # fd_url never redirects the consult, nor gets this agent's identity.
+        fd_url = metadata.get("fd_url", "")
 
         # Fallback: check agent-level attributes (set by ws_handler even
         # when session wasn't ready at welcome time)
@@ -75,6 +77,7 @@ class ConsultPeerTool(Tool):
             peers = getattr(agent, "_peer_agents", []) or []
         if not fd_url and agent:
             fd_url = getattr(agent, "_fd_url", "") or ""
+        fd_url = resolve_flight_deck_url(fd_url)
 
         if not fd_url:
             return ToolResult(

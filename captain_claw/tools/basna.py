@@ -26,19 +26,36 @@ from captain_claw.tools.registry import Tool, ToolResult
 
 log = structlog.get_logger(__name__)
 
-def _agent_secret_headers() -> dict[str, str]:
+def _agent_secret_headers(fd_url: str | None = None) -> dict[str, str]:
     """The shared agent secret as a request header, when resolvable.
 
     FD's agent-facing routes accept loopback callers without it, so this is
     belt-and-suspenders locally — but mandatory under FD_LOCKDOWN, where
     loopback alone no longer authorizes. Same-host agents read the same
     secret file (or FD_AGENT_SHARED_SECRET env) the server checks against.
+
+    With ``fd_url`` (the request's target), nothing unless that is a pinned FD
+    URL (``tools.flight_deck._is_pinned_fd_url``): never to a URL a websocket
+    client put in session metadata. Without it (legacy callers), as before.
     """
+    if fd_url is not None and not _fd_url_pinned(fd_url):
+        return {}
     try:
         from captain_claw.flight_deck.agent_secret import get_or_create_agent_secret
         return {"X-Agent-Secret": get_or_create_agent_secret()}
     except Exception:  # noqa: BLE001 — the header is an upgrade, never a blocker
         return {}
+
+
+def _fd_url_pinned(fd_url: str) -> bool:
+    """Is ``fd_url`` a Flight Deck URL this agent was configured with (env /
+    config) rather than one a websocket client supplied? Logs once if not."""
+    from captain_claw.tools.flight_deck import _is_pinned_fd_url, _log_unpinned_fd_url_once
+
+    if _is_pinned_fd_url(fd_url):
+        return True
+    _log_unpinned_fd_url_once(fd_url, "basna")
+    return False
 
 
 # Above this, a fetched file is saved to the workspace instead of inlined.
@@ -136,15 +153,18 @@ class BasnaTool(Tool):
     # ── identity / transport ─────────────────────────────────────────
 
     def _get_fd_url(self, **kwargs: Any) -> str:
+        """As the flight_deck tool resolves it (``fd_client.
+        resolve_flight_deck_url``). Only a pinned URL gets this agent's
+        identity (`_identity`)."""
+        from captain_claw.fd_client import resolve_flight_deck_url
+
         session = kwargs.get("_session")
         agent = kwargs.get("_agent")
         metadata = getattr(session, "metadata", {}) or {} if session else {}
         fd_url = metadata.get("fd_url", "")
         if not fd_url and agent:
             fd_url = getattr(agent, "_fd_url", "") or ""
-        if not fd_url:
-            fd_url = os.environ.get("FD_URL", "") or os.environ.get("FD_INTERNAL_URL", "")
-        return fd_url
+        return resolve_flight_deck_url(fd_url)
 
     def _own_port(self) -> int:
         try:
@@ -160,20 +180,21 @@ class BasnaTool(Tool):
         except Exception:
             return ""
 
-    def _identity(self) -> dict:
-        """Identity FD uses to resolve this agent's owner (auth token is primary)."""
+    def _identity(self, fd_url: str) -> dict:
+        """Identity FD uses to resolve this agent's owner (auth token is primary).
+        The web_auth — the agent's own credential — only for a pinned FD URL."""
         return {
-            "web_auth": self._own_auth(),
+            "web_auth": self._own_auth() if _fd_url_pinned(fd_url) else "",
             "source_port": self._own_port(),
             "owner_id": os.environ.get("FD_OWNER_ID", ""),
         }
 
     async def _post(self, fd_url: str, path: str, payload: dict) -> Any:
         import httpx
-        body = {**self._identity(), **payload}
+        body = {**self._identity(fd_url), **payload}
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(f"{fd_url}{path}", json=body,
-                                     headers=_agent_secret_headers())
+                                     headers=_agent_secret_headers(fd_url))
         if resp.status_code == 404:
             return {"_error": "not found"}
         if resp.status_code == 403:
@@ -576,7 +597,7 @@ class BasnaTool(Tool):
         if not sid or not name:
             return ToolResult(success=False, error="session_id and name are required.")
         import httpx
-        body = {**self._identity(), "session_id": sid, "name": name}
+        body = {**self._identity(fd_url), "session_id": sid, "name": name}
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(f"{fd_url}/fd/basna/agent/file", json=body)
         if resp.status_code == 404:

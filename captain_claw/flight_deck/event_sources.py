@@ -48,10 +48,14 @@ def register(adapter: Adapter) -> None:
     _ADAPTERS.append(adapter)
 
 
-def _google_connected() -> bool:
+async def _google_connected(user_id: str) -> bool:
+    """Has *user_id* connected their OWN Google account on this deck? Read from
+    FD's per-user token store — not the agent-side process-global cache, which
+    nothing in the FD process ever sets (so gated sources never polled) and
+    which is one bit for the whole deck, not per user."""
     try:
-        from captain_claw.google_oauth_manager import is_google_connected_cached
-        return is_google_connected_cached()
+        from captain_claw.flight_deck.google_oauth_routes import is_google_connected
+        return await is_google_connected(user_id)
     except Exception:
         return False
 
@@ -70,10 +74,10 @@ async def poll_user(user_id: str) -> int:
         try:
             if not ad.enabled(user_id):
                 continue
-            if ad.requires_google and not _google_connected():
-                continue
             st = store.get_poll_state(user_id, ad.name)
             if now - float(st.get("last_poll_at") or 0.0) < ad.interval_seconds:
+                continue
+            if ad.requires_google and not await _google_connected(user_id):
                 continue
             events, new_cursor = await ad.poll(user_id, st.get("cursor") or "")
             for ev in events or []:
@@ -157,11 +161,11 @@ async def _poll_custom_sources(user_id: str, now: float, store: Any) -> int:
             name, tool = str(src.get("name") or "").strip(), str(src.get("tool") or "").strip()
             if not name or not tool:
                 continue
-            if src.get("requires_google") and not _google_connected():
-                continue
             st = store.get_poll_state(user_id, name)
             interval = max(60.0, float(src.get("interval_seconds") or 600))  # floor: never hammer a tool
             if now - float(st.get("last_poll_at") or 0.0) < interval:
+                continue
+            if src.get("requires_google") and not await _google_connected(user_id):
                 continue
             if agent is None:
                 agent = _strongest_agent(user_id)

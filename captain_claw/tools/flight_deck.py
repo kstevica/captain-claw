@@ -16,6 +16,59 @@ from captain_claw.tools.registry import Tool, ToolResult
 log = structlog.get_logger(__name__)
 
 
+def _norm_fd_url(url: str | None) -> str:
+    return str(url or "").strip().rstrip("/")
+
+
+def _is_pinned_fd_url(url: str | None) -> bool:
+    """See ``fd_client.is_pinned_flight_deck_url`` (local-host aliases fold)."""
+    from captain_claw.fd_client import is_pinned_flight_deck_url
+
+    return is_pinned_flight_deck_url(url)
+
+
+_UNPINNED_LOGGED: set[str] = set()
+
+
+def _log_unpinned_fd_url_once(url: str | None, tool: str) -> None:
+    n = _norm_fd_url(url)
+    if n in _UNPINNED_LOGGED:
+        return
+    _UNPINNED_LOGGED.add(n)
+    log.warning(
+        "Not sending this agent's Flight Deck identity to an unpinned URL",
+        tool=tool, fd_url=n,
+    )
+
+
+def _fd_agent_headers(fd_url: str) -> dict[str, str]:
+    """This agent's credentials for Flight Deck's agent-facing routes at
+    ``fd_url`` — none unless that is a pinned FD URL (`_is_pinned_fd_url`);
+    built by ``fd_client.agent_identity_headers``.
+
+    * ``X-Agent-Auth`` — the agent's own web_auth token. FD maps it to the
+      owner it recorded at spawn, which is how a child spawned by this agent
+      belongs to the same user (an unauthenticated spawn is refused otherwise).
+    * ``X-Agent-Secret`` — the per-deck agent secret; mandatory under
+      FD_LOCKDOWN, where loopback alone no longer authorizes. The configured
+      ``google_oauth.flight_deck_secret`` first (as google_oauth_manager
+      sends), else the deck secret (FD_AGENT_SHARED_SECRET env, then the
+      per-deck file — as tools.basna sends).
+
+    Together they pass FD's agent gates and fetch the owner's Google token, so
+    they never go to a URL a websocket client chose (``peer_agents.fd_url``
+    lands in session metadata from any socket, public-run ones included).
+
+    Best-effort: a header that can't be resolved is simply left out.
+    """
+    if not _is_pinned_fd_url(fd_url):
+        _log_unpinned_fd_url_once(fd_url, "flight_deck")
+        return {}
+    from captain_claw.fd_client import agent_identity_headers
+
+    return agent_identity_headers(fd_url)
+
+
 def _resolve_local_file(kwargs: dict[str, Any], path_arg: str):
     """Resolve a sender-local file path (saved/ workspace or absolute)."""
     from pathlib import Path
@@ -117,22 +170,19 @@ class FlightDeckTool(Tool):
     }
 
     def _get_fd_url(self, **kwargs: Any) -> str:
-        """Resolve the Flight Deck URL: the one pinned in the environment (FD
-        pins FD_URL to itself at spawn) first, else session metadata / agent
-        attributes — a URL a websocket client supplied, which therefore never
-        gets this agent's identity (see fd_client.agent_identity_headers)."""
-        from captain_claw.fd_client import pinned_flight_deck_url
+        """Resolve the Flight Deck URL: the pinned one (a session / agent
+        ``fd_url`` a websocket client supplied only wins when it names the same
+        deck — see ``fd_client.resolve_flight_deck_url``). Only a pinned URL
+        gets this agent's identity (see _fd_agent_headers)."""
+        from captain_claw.fd_client import resolve_flight_deck_url
 
-        fd_url = pinned_flight_deck_url()
-        if fd_url:
-            return fd_url
         session = kwargs.get("_session")
         agent = kwargs.get("_agent")
         metadata = getattr(session, "metadata", {}) or {} if session else {}
         fd_url = metadata.get("fd_url", "")
         if not fd_url and agent:
             fd_url = getattr(agent, "_fd_url", "") or ""
-        return fd_url
+        return resolve_flight_deck_url(fd_url)
 
     async def _list_agents(self, fd_url: str, **kwargs: Any) -> ToolResult:
         """Query /fd/fleet for live agent list."""
@@ -143,7 +193,7 @@ class FlightDeckTool(Tool):
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{fd_url}/fd/fleet")
+                resp = await client.get(f"{fd_url}/fd/fleet", headers=_fd_agent_headers(fd_url))
                 if resp.status_code != 200:
                     return ToolResult(
                         success=False,
@@ -201,7 +251,7 @@ class FlightDeckTool(Tool):
             import httpx
         except ImportError:
             return ToolResult(success=False, error="httpx is required")
-        from captain_claw.fd_client import agent_identity_headers, refusal_detail
+        from captain_claw.fd_client import refusal_detail
 
         target, agents, error = await self._resolve_target(fd_url, agent_name, **kwargs)
         if error:
@@ -253,7 +303,7 @@ class FlightDeckTool(Tool):
                 async with client.stream(
                     "POST",
                     f"{fd_url}/fd/consult-peer",
-                    headers=agent_identity_headers(fd_url),
+                    headers=_fd_agent_headers(fd_url),
                     json={
                         "host": host,
                         "port": port,
@@ -327,7 +377,7 @@ class FlightDeckTool(Tool):
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{fd_url}/fd/fleet")
+                resp = await client.get(f"{fd_url}/fd/fleet", headers=_fd_agent_headers(fd_url))
                 if resp.status_code != 200:
                     return None, None, f"Fleet query failed: HTTP {resp.status_code}"
                 agents = resp.json()
@@ -365,7 +415,7 @@ class FlightDeckTool(Tool):
             import httpx
         except ImportError:
             return ToolResult(success=False, error="httpx is required")
-        from captain_claw.fd_client import agent_identity_headers, refusal_detail
+        from captain_claw.fd_client import refusal_detail
 
         target, agents, error = await self._resolve_target(fd_url, agent_name, **kwargs)
         if error:
@@ -443,7 +493,7 @@ class FlightDeckTool(Tool):
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     f"{fd_url}/fd/delegate-peer",
-                    headers=agent_identity_headers(fd_url),
+                    headers=_fd_agent_headers(fd_url),
                     json={
                         "target_host": target.get("host", "localhost"),
                         "target_port": target.get("port"),
@@ -484,8 +534,10 @@ class FlightDeckTool(Tool):
         The *message* field can optionally contain a JSON object with overrides:
         ``{"provider": "...", "model": "...", "api_key": "...", "base_url": "...",
         "description": "...", "tools": [...], "env": {"BRAVE_API_KEY": "..."}}``.
-        The new agent inherits the Flight Deck server's environment; use ``env``
-        (or ``env_vars``) to hand it credentials the server doesn't already hold.
+        The new agent inherits the Flight Deck server's environment (minus FD's
+        own secrets); use ``env`` (or ``env_vars``) to hand it credentials the
+        server doesn't already hold. It belongs to this agent's owner — FD
+        resolves that from this agent's own identity (see _fd_agent_headers).
         """
         try:
             import httpx
@@ -511,7 +563,9 @@ class FlightDeckTool(Tool):
             except json.JSONDecodeError:
                 pass
 
-        # Propagate owner so the spawned agent belongs to the same user.
+        # The child belongs to THIS agent's owner: FD resolves it from our
+        # X-Agent-Auth (see _fd_agent_headers). The hint only has to agree with
+        # it — FD never takes an owner from the body.
         import os
         owner_hint = os.environ.get("FD_OWNER_ID", "")
 
@@ -568,11 +622,12 @@ class FlightDeckTool(Tool):
             ])
 
         # Try process spawn first (no Docker needed), fall back to docker.
+        headers = _fd_agent_headers(fd_url)
         last_error = ""
         for endpoint in ["/fd/spawn-process", "/fd/spawn"]:
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(f"{fd_url}{endpoint}", json=spawn_body)
+                    resp = await client.post(f"{fd_url}{endpoint}", json=spawn_body, headers=headers)
                     if resp.status_code == 200:
                         result = resp.json()
                         if result.get("ok"):
@@ -593,6 +648,20 @@ class FlightDeckTool(Tool):
                     elif resp.status_code == 400:
                         detail = resp.json().get("detail", "")
                         return ToolResult(success=False, error=f"Spawn failed: {detail}")
+                    # FD couldn't attribute this agent (identity / owner), which
+                    # the Docker endpoint would refuse the same way.
+                    elif resp.status_code in (401, 403) and endpoint == "/fd/spawn-process":
+                        try:
+                            detail = resp.json().get("detail", "")
+                        except Exception:
+                            detail = resp.text[:300]
+                        return ToolResult(
+                            success=False,
+                            error=(
+                                f"Flight Deck refused the spawn (HTTP {resp.status_code}: {detail}). "
+                                "It could not verify which user this agent belongs to."
+                            ),
+                        )
                     else:
                         last_error = f"{endpoint} returned {resp.status_code}: {resp.text[:300]}"
             except Exception as exc:

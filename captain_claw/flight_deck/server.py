@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import hashlib
 import secrets
 import signal
 import asyncio
@@ -226,6 +227,10 @@ def _default_data_dir() -> str:
 DATA_DIR = Path(os.environ.get("FD_DATA_DIR", _default_data_dir())).resolve()
 CONTAINER_LABEL = "flight-deck.managed"
 OWNER_LABEL = "flight-deck.owner"
+# Which deck spawned a container. Docker (and so every label) is host-global,
+# but several decks can share a host, each with its own FD_DATA_DIR — see
+# `_deck_containers`.
+DECK_LABEL = "flight-deck.deck"
 CC_IMAGE_DEFAULT = "kstevica/captain-claw:latest"
 AUTH_ENABLED = os.environ.get("FD_AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
 
@@ -240,6 +245,32 @@ def get_docker() -> docker.DockerClient:
     if _client is None:
         _client = docker.from_env()
     return _client
+
+
+def _deck_id() -> str:
+    """Stable short id of THIS deck: a hash of its resolved DATA_DIR (decks on
+    one host are told apart by their data dirs)."""
+    return hashlib.sha256(str(DATA_DIR).encode("utf-8")).hexdigest()[:16]
+
+
+def _is_this_decks_container(c) -> bool:
+    """A container this deck may treat as its own: stamped with this deck's
+    label, or with no deck label at all (spawned before the label existed —
+    legacy, accepted as before). Another deck's container never is: its labels
+    — owner, web-auth — are that deck's business, and on an auth-disabled deck
+    whoever spawns it chooses them."""
+    deck = (c.labels or {}).get(DECK_LABEL, "")
+    return not deck or deck == _deck_id()
+
+
+def _deck_containers(*, all: bool = False, client=None) -> list:
+    """This deck's managed containers (see `_is_this_decks_container`). Every
+    label-based ownership / identity / authorization lookup goes through this
+    rather than listing CONTAINER_LABEL host-wide. Raises when Docker is
+    unavailable, like the list call it wraps."""
+    client = client or get_docker()
+    return [c for c in client.containers.list(all=all, filters={"label": CONTAINER_LABEL})
+            if _is_this_decks_container(c)]
 
 
 # ── Process registry ──
@@ -423,6 +454,71 @@ def _resolve_cc_web_bin() -> str:
     return "captain-claw-web"
 
 
+def _fd_self_url() -> str:
+    """Base URL THIS deck's process agents use to call back into Flight Deck.
+
+    ``FD_INTERNAL_URL`` is the explicit operator override (the same variable
+    app subprocesses use); otherwise loopback on the port ``main()`` records
+    as ``FD_PORT`` — the port this deck actually bound.
+    """
+    explicit = os.environ.get("FD_INTERNAL_URL", "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    return f"http://localhost:{os.environ.get('FD_PORT', '25080')}"
+
+
+def _pin_fd_url(environment: dict[str, str]) -> None:
+    """Point a process agent's FD callbacks at THIS deck, overriding anything
+    inherited. Several decks can share a host (each with its own FD_DATA_DIR);
+    an FD_URL leaking in from the shell, a CWD ``.env``, the agent's own
+    ``.env`` or a spawn's env_vars would send this deck's agents to ANOTHER
+    deck, which then answers their Google / VFS / memory calls for a tenant
+    that isn't theirs. The agent-side ``google_oauth.flight_deck_url`` config
+    key outranks FD_URL, so an inherited env override of it is dropped too.
+    """
+    environment["FD_URL"] = _fd_self_url()
+    environment.pop("CLAW_GOOGLE_OAUTH__FLIGHT_DECK_URL", None)
+
+
+# FD's own secrets, never handed to a process agent. Agents inherit FD's
+# environment and every one of them can run shell, so anything left here is
+# readable by every tenant on the deck:
+# * FD_JWT_SECRET — mints a session JWT for ANY user of this deck (agents
+#   never verify FD JWTs; only FD and the Lupa BFF, which FD doesn't spawn).
+# * FD_EVENTS_WEBHOOK_TOKEN — posts events into any user's event spine.
+# * GOOGLE_WORKSPACE_CLI_TOKEN / _CREDENTIALS_FILE — an operator's ambient gws
+#   identity; every tenant's `gws` would act as that one Google account. Under
+#   FD the gws tool injects the agent OWNER's token itself.
+# FD_AGENT_SHARED_SECRET stays: agents send it as X-Agent-Secret. So does
+# GOOGLE_APPLICATION_CREDENTIALS (operators point non-Workspace Google client
+# libraries at it; the gws paths scrub it on their own).
+_FD_ONLY_ENV_VARS = (
+    "FD_JWT_SECRET",
+    "FD_EVENTS_WEBHOOK_TOKEN",
+    "GOOGLE_WORKSPACE_CLI_TOKEN",
+    "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE",
+)
+
+
+def _agent_base_env() -> dict[str, str]:
+    """FD's environment as a process agent should inherit it: minus the FD-only
+    secrets above. The agent's own .env / env_vars are layered on top by the
+    caller, so a user can still hand THEIR agent a credential deliberately.
+
+    Per-deck path vars are made absolute: the agent runs with cwd = its own dir,
+    so a relative FD_DATA_DIR would resolve somewhere else there — a different
+    agent_secret file (X-Agent-Secret then never matches, which FD_LOCKDOWN
+    turns into a refused call) and a different VFS root.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in _FD_ONLY_ENV_VARS}
+    if env.get("FD_DATA_DIR", "").strip():
+        env["FD_DATA_DIR"] = str(DATA_DIR)
+    home = env.get("CAPTAIN_CLAW_FD_HOME", "").strip()
+    if home:
+        env["CAPTAIN_CLAW_FD_HOME"] = str(Path(home).expanduser().resolve())
+    return env
+
+
 def _start_registered_process(slug: str, entry: dict) -> bool:
     """Start a single process agent from its registry entry. Returns True on success."""
     agent_dir = DATA_DIR / slug
@@ -431,8 +527,8 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
 
     web_port = entry.get("web_port", 24080)
 
-    # Rebuild environment from .env file
-    environment = dict(os.environ)
+    # Rebuild environment from .env file (on FD's env minus its own secrets)
+    environment = _agent_base_env()
     env_file = agent_dir / ".env"
     if env_file.is_file():
         content = env_file.read_text().strip()
@@ -458,11 +554,19 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
     environment["HOME"] = str(agent_dir / "data" / "home-config-parent")
     # Slug + URL for port-fallback callbacks. Without FD_URL the agent can't
     # announce a drifted port back to Flight Deck and the registry goes stale
-    # (chat panel then 401s because FD proxies to the old port).
+    # (chat panel then 401s because FD proxies to the old port). Always THIS
+    # deck — a stale FD_URL frozen into the agent's .env must not win.
     environment["FD_AGENT_SLUG"] = slug
-    if "FD_URL" not in environment:
-        fd_port = os.environ.get("FD_PORT", "25080")
-        environment["FD_URL"] = f"http://localhost:{fd_port}"
+    _pin_fd_url(environment)
+    # Re-pin the recorded owner exactly as spawn does. A restart otherwise
+    # drops FD_OWNER_ID (its own spawns lose their owner) and inherits FD's own
+    # CLAW_VFS_USER (the primary owner, written by lifespan), so every
+    # restarted agent would silently work in the primary owner's VFS instead
+    # of its own tenant's.
+    _owner = str(entry.get("owner") or "")
+    if _owner:
+        environment["FD_OWNER_ID"] = _owner
+        environment["CLAW_VFS_USER"] = _owner
 
     log_file = agent_dir / "process.log"
     try:
@@ -573,18 +677,32 @@ def _upsert_dotenv_var(env_path: Path, key: str, value: str) -> bool:
 async def _resolve_primary_owner(db) -> str:
     """The owning user id to bind the standalone main agent's VFS to.
 
-    Single-user deployments → that user. Multi-user → the oldest admin.
+    Single-user deployments → that user. Multi-user → the oldest admin (the
+    oldest user when there is no admin at all). Google's legacy-token and
+    fallback identity hang off this too, so it must be the genuinely oldest
+    admin however many users exist — not the oldest of whichever page of
+    users happened to be fetched.
     """
     try:
-        users = await db.list_users(limit=100)
-        if not users:
+        total = await db.count_users()
+        if not total:
             return ""
-        if len(users) == 1:
-            return str(users[0].get("id", ""))
-        admins = [u for u in users if u.get("role") == "admin"]
-        pool = admins or users
-        # list_users is ordered created_at DESC → the last item is the oldest.
-        return str(pool[-1].get("id", ""))
+        # list_users is ordered created_at DESC, so the oldest users sit at the
+        # END. Walk pages from the oldest end backwards: the first page holding
+        # an admin holds the oldest admin (its last admin, pages being DESC).
+        page = 200
+        offset = max(0, total - page)
+        oldest_user = ""
+        while True:
+            users = await db.list_users(limit=page, offset=offset)
+            if users and not oldest_user:
+                oldest_user = str(users[-1].get("id", ""))
+            admins = [u for u in users if u.get("role") == "admin"]
+            if admins:
+                return str(admins[-1].get("id", ""))
+            if offset == 0:
+                return oldest_user
+            offset = max(0, offset - page)
     except Exception:
         return ""
 
@@ -592,11 +710,12 @@ async def _resolve_primary_owner(db) -> str:
 async def _init_fd_db() -> FlightDeckDB:
     """Open this deck's settings/auth DB and make it the auth module's DB.
 
-    Always, not only with auth on: the connector routers (Google / Codex / MCP
-    / Typesense) deliberately run under the synthetic local user when auth is
+    Always, not only with auth on: the connector routers (Codex / MCP /
+    Typesense) deliberately run under the synthetic local user when auth is
     disabled (desktop build) and keep their client + tokens in this DB —
     without it every call trips get_db()'s "not initialized" assert and
-    Connections is dead on that deck type. Safe on an auth-disabled deck only
+    Connections is dead on that deck type. (Google via FD still refuses on
+    such decks — see google_oauth_routes._require_auth_deck.) Safe on an auth-disabled deck only
     because origin_guard keeps other websites and DNS-rebinding pages off the
     API, and /fd/auth/register refuses there (no web page can plant an admin
     that would become real if auth is switched on later).
@@ -717,7 +836,6 @@ async def lifespan(app: FastAPI):
         from captain_claw.flight_deck.flow_runner import FlowRunner
         from captain_claw.flight_deck import flow_router
         _flow_store = FlowStore(DATA_DIR / "flows.db")
-        _fd_port = os.environ.get("FD_PORT", "25080")
 
         # ── `agent on archetype:<id>` seams ──
         # A flow step can run on a freshly spawned ephemeral archetype agent. The
@@ -853,7 +971,7 @@ async def lifespan(app: FastAPI):
             _flow_store,
             get_agents=_running_agents,
             resolve_auth=_resolve_agent_auth,
-            fd_self_base=f"http://localhost:{_fd_port}",
+            fd_self_base=_fd_self_url(),
             fd_tools=_fd_internal_tools(),
             whatsapp_send=_flow_whatsapp_send,
             transfer_file=_transfer_file_to_agent,
@@ -1307,6 +1425,7 @@ class AgentConfig(BaseModel):
 
     # Ownership hint — used by internal callers (e.g. Old Man) that cannot
     # authenticate via JWT but need the spawned agent to inherit the owner.
+    # Never authoritative from an HTTP body: see _resolve_spawn_owner.
     owner_hint: str = ""
 
     # Workspace override — absolute path the agent's tools (read/write/edit/glob/
@@ -1468,6 +1587,9 @@ class ContainerActionResult(BaseModel):
     container_id: str
     message: str = ""
     old_container_id: str = ""
+    # Set by a spawn only when FD replaced the requested web_auth_token (it was
+    # another agent's): the token the new agent actually got.
+    web_auth: str = ""
 
 
 # ── Helpers ──
@@ -1739,9 +1861,10 @@ def _container_info(c: docker.models.containers.Container) -> ContainerInfo:
 
 
 def _find_container(container_id: str, owner_id: str = "") -> docker.models.containers.Container:
-    client = get_docker()
-    # Try by short ID, full ID, or name
-    for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
+    # Try by short ID, full ID, or name — among THIS deck's containers only: a
+    # container another deck on this host spawned is not ours to stop, rebuild,
+    # clone or read (with auth off there is no owner check to stop it).
+    for c in _deck_containers(all=True):
         if c.short_id == container_id or c.id == container_id or c.name == container_id:
             if AUTH_ENABLED and owner_id:
                 if (c.labels or {}).get(OWNER_LABEL, "") != owner_id:
@@ -1754,10 +1877,14 @@ def _find_container(container_id: str, owner_id: str = "") -> docker.models.cont
 
 @app.get("/fd/containers", response_model=list[ContainerInfo])
 async def list_containers(request: Request, user: dict | None = _required_user_dep):
-    """List all Flight Deck managed containers (filtered by owner when auth enabled)."""
+    """List this deck's managed containers (filtered by owner when auth enabled).
+
+    Never another deck's: each entry carries the container's web_auth — its
+    identity token to the deck that spawned it (X-Agent-Auth → that deck's
+    user's Google etc.).
+    """
     try:
-        client = get_docker()
-        containers = client.containers.list(all=True, filters={"label": CONTAINER_LABEL})
+        containers = _deck_containers(all=True)
     except Exception:
         return []  # Docker not available (e.g. running inside a container)
     user_id = getattr(request.state, "user_id", "")
@@ -1797,9 +1924,201 @@ def _schedule_fleet_notify(name: str, port: int, event: str = "joined", owner_id
         pass  # Best-effort
 
 
+# ── Spawn ownership ──
+#
+# The owner recorded at spawn IS the agent's tenant: `_resolve_agent_owner_by_auth`
+# maps the agent's web_auth back to it, and that decides whose Google account,
+# VFS root, deep-memory pool and Library keys the agent acts with. So it comes
+# from a verified identity or FD's own records — never from a request body, and
+# never borrowed from some unrelated agent.
+
+
+def _legacy_inherited_owner(include_docker: bool = False) -> str:
+    """Auth-disabled only: the first owner FD has on record (process registry,
+    then this deck's Docker labels). With auth off there is a single tenant, so any recorded
+    owner is it; with auth on this would hand the agent an arbitrary tenant."""
+    for entry in _load_process_registry().values():
+        if entry.get("owner"):
+            return str(entry["owner"])
+    if include_docker:
+        try:
+            for c in _deck_containers(all=True):
+                o = (c.labels or {}).get(OWNER_LABEL, "")
+                if o:
+                    return o
+        except Exception:
+            pass
+    return ""
+
+
+async def _is_deck_user(uid: str) -> bool:
+    """True when ``uid`` is a user of THIS deck's DB."""
+    if not uid:
+        return False
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        return await get_db().get_user_by_id(uid) is not None
+    except Exception:
+        return False
+
+
+async def _sole_user_id() -> str:
+    """The deck's only user when exactly one exists (single-user mode), else ""."""
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        db = get_db()
+        if await db.count_users() != 1:
+            return ""
+        users = await db.list_users(limit=1)
+    except Exception:
+        return ""
+    return str(users[0].get("id", "")) if users else ""
+
+
+async def _resolve_unverified_spawn_owner(request: Request, hint: str) -> str:
+    """Owner for an HTTP spawn that carried no valid JWT while auth is on — in
+    practice an FD-spawned agent's ``flight_deck`` spawn tool, which sends its
+    own ``X-Agent-Auth`` + ``X-Agent-Secret``.
+
+    The owner comes ONLY from the calling agent's identity, never from the
+    body: an ``owner_hint`` names a tenant but proves nothing (user ids are
+    listed to every user by /fd/shares/users), and there is no "sole user"
+    fallback either — any web page open on the FD host can POST here.
+
+    1. Transport guard (loopback or X-Agent-Secret; FD_LOCKDOWN makes the
+       secret mandatory), so an off-machine caller can't spawn anything.
+    2. A browser (it sends ``Origin``) must be signed in: 401, which also
+       sends a SPA whose access token expired off to refresh.
+    3. ``X-Agent-Auth`` must be a web_auth THIS deck issued
+       (`_resolve_agent_identity_by_auth`), and its recorded owner a user of
+       this deck. An agent this deck recorded without an owner (spawned while
+       auth was off, pre-owner entries) belongs to the deck's sole user in
+       single-user mode — the token being this deck's own makes that safe —
+       and is refused on a multi-user deck. The synthetic ``local`` owner an
+       auth-disabled deck records counts as no owner (as for Google), and so
+       does an ``owner_hint`` of ``local`` (such an agent's FD_OWNER_ID);
+       any other ``owner_hint`` must agree.
+    """
+    from captain_claw.flight_deck.auth import _LOCAL_USER
+
+    local = str(_LOCAL_USER["id"])
+    if not _agent_caller_ok(request):
+        raise HTTPException(401, "Not authenticated")
+    if request.headers.get("Origin"):
+        raise HTTPException(401, "Not authenticated")
+    token = request.headers.get("X-Agent-Auth", "").strip()
+    if not token:
+        raise HTTPException(401, "Not authenticated")
+    matched, owner = _resolve_agent_identity_by_auth(token)
+    if not matched:
+        raise HTTPException(403, "could not resolve calling agent's owner")
+    if owner and owner != local:
+        if not await _is_deck_user(owner):
+            raise HTTPException(403, "could not resolve calling agent's owner")
+    else:
+        owner = await _sole_user_id()
+        if not owner:
+            raise HTTPException(403, "calling agent has no recorded owner on this deck")
+    if hint and hint != local and hint != owner:
+        raise HTTPException(403, "owner_hint does not match the calling agent")
+    return owner
+
+
+async def _resolve_spawn_owner(config: AgentConfig, request, *, docker: bool = False) -> str:
+    """Authoritative owner for a new agent, or an HTTPException.
+
+    * ``request.state.user_id`` — set only by the auth dependency from a
+      verified JWT, or by an in-process caller's stub Request (Basna / Vatra /
+      Dubina / flows / beings) carrying its run owner. Authoritative.
+    * Auth disabled (desktop / local single-user): no tenant boundary, so the
+      body's owner_hint is ignored — the calling agent's recorded owner when
+      it proves one (X-Agent-Auth), else the first recorded owner.
+    * In-process stub without a uid: its owner_hint was set by FD code; else
+      the deck's sole user; else refuse rather than borrow another tenant.
+    * Real HTTP request without a JWT: `_resolve_unverified_spawn_owner`. Such
+      a caller also may not choose the child's web_auth (its identity token).
+
+    Normalises ``config.owner_hint`` to the result so `_resolve_archetype`
+    loads the SAME owner's Library archetypes and tier keys.
+    """
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    hint = (config.owner_hint or "").strip()
+    owner = str(getattr(getattr(request, "state", None), "user_id", "") or "")
+    if not owner:
+        is_http = isinstance(request, Request)
+        if not _fd_auth_enabled():
+            if is_http:
+                token = request.headers.get("X-Agent-Auth", "").strip()
+                owner = _resolve_agent_identity_by_auth(token)[1]
+            else:
+                owner = hint
+            owner = owner or _legacy_inherited_owner(include_docker=docker)
+        elif is_http:
+            owner = await _resolve_unverified_spawn_owner(request, hint)
+            config.web_auth_token = ""
+        else:
+            owner = hint or await _sole_user_id()
+            if not owner:
+                raise HTTPException(403, "could not resolve an owner for this spawn")
+    config.owner_hint = owner
+    return owner
+
+
+def _web_auth_in_use(token: str, slug: str) -> bool:
+    """True when an agent other than ``slug`` (process or container) already
+    holds ``token``. web_auth IS an agent's identity to FD (X-Agent-Auth →
+    recorded owner → that tenant's Google account etc.): two agents sharing one
+    would be indistinguishable, and a spawn naming a victim's token would get
+    the victim's identity."""
+    if not token:
+        return False
+    for s, e in _load_process_registry().items():
+        if s != slug and e.get("web_auth") == token:
+            return True
+    try:
+        for c in _deck_containers(all=True):
+            if c.name != slug and (c.labels or {}).get("flight-deck.web-auth", "") == token:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+# Appended to a spawn's message when the requested web_auth_token was replaced.
+_WEB_AUTH_REPLACED_NOTE = (
+    " — the requested web auth token is already used by another agent, so this"
+    " agent got a new one"
+)
+
+
+def _claim_web_auth(config: AgentConfig, slug: str) -> bool:
+    """Give the new agent a web_auth no other agent holds.
+
+    Minted when none was requested — with web disabled too: it is also the
+    agent's X-Agent-Auth identity (its owner's Google, spawning children), and
+    captain-claw-web serves its port either way, without a token
+    unauthenticated. A requested one (only a signed-in user or FD code can
+    still request one: `_resolve_spawn_owner` clears an unverified caller's) is
+    kept unless another agent already holds it — e.g. a Spawner preset that
+    fixes one password for every agent. Then a fresh one is minted instead:
+    two agents sharing an identity would be indistinguishable to FD.
+
+    Returns True when a requested token was replaced.
+    """
+    requested = config.web_auth_token
+    if requested and not _web_auth_in_use(requested, slug):
+        return False
+    config.web_auth_token = secrets.token_urlsafe(32)
+    return bool(requested)
+
+
 @app.post("/fd/spawn", response_model=ContainerActionResult)
 async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = _optional_user_dep):
     """Spawn a new Captain Claw container."""
+    # Owner first: it gates the whole spawn (nothing is written or removed for
+    # a caller we can't attribute) and feeds the archetype's Library lookup.
+    owner_id = await _resolve_spawn_owner(config, request, docker=True)
     # Resolve an archetype selector (if any) into cognitive_mode/tools/tier/model,
     # then a bare model-recommendation tier to a concrete provider/model.
     await _resolve_archetype(config, request, user)
@@ -1816,7 +2135,7 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         # Count existing containers for this user
         client_tmp = get_docker()
         user_id = user["id"]
-        owned = [c for c in client_tmp.containers.list(all=True, filters={"label": CONTAINER_LABEL})
+        owned = [c for c in _deck_containers(all=True, client=client_tmp)
                  if (c.labels or {}).get(OWNER_LABEL, "") == user_id]
         await check_agent_count_limit(user, len(owned))
 
@@ -1828,13 +2147,17 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         config.web_port = _find_available_port(config.web_port if config.web_port > 0 else 24080)
 
     # Auto-generate auth token if none provided — prevents unauthenticated
-    # direct access to agent ports bypassing Flight Deck.
-    if config.web_enabled and not config.web_auth_token:
-        config.web_auth_token = secrets.token_urlsafe(32)
+    # direct access to agent ports bypassing Flight Deck. A caller-chosen one
+    # that duplicates another agent's (its FD identity) is replaced. Minted
+    # with web disabled too (a token in config doesn't turn a web UI on).
+    web_auth_replaced = _claim_web_auth(config, slug)
 
     # Check for name collision
     try:
         existing = client.containers.get(slug)
+        if not _is_this_decks_container(existing):
+            # Container names are host-global; never remove another deck's.
+            raise HTTPException(409, f"Container name '{slug}' is used by another Flight Deck on this host.")
         if existing.status == "running":
             raise HTTPException(400, f"Container '{slug}' already running. Stop it first or use a different name.")
         # Remove stopped container with same name
@@ -1900,27 +2223,8 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         if ev.get("key"):
             environment[ev["key"]] = ev.get("value", "")
 
-    # Resolve owner: authenticated user > owner_hint > infer from existing agents
-    owner_id = getattr(request.state, "user_id", "") or config.owner_hint
-    if not owner_id:
-        # Fallback: inherit owner from an existing agent in the registry.
-        registry = _load_process_registry()
-        for _entry in registry.values():
-            if _entry.get("owner"):
-                owner_id = _entry["owner"]
-                break
-        if not owner_id:
-            # Try Docker containers
-            try:
-                for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
-                    o = (c.labels or {}).get(OWNER_LABEL, "")
-                    if o:
-                        owner_id = o
-                        break
-            except Exception:
-                pass
-
-    # Pass owner ID so child agents can propagate ownership when spawning
+    # Pass owner ID (resolved up front by _resolve_spawn_owner) so child agents
+    # can propagate ownership when spawning
     if owner_id:
         environment["FD_OWNER_ID"] = owner_id
         # A spawned worker belongs to THIS run's owner, so it must write its VFS
@@ -1937,6 +2241,7 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     # Labels for tracking
     labels = {
         CONTAINER_LABEL: "true",
+        DECK_LABEL: _deck_id(),
         OWNER_LABEL: owner_id,
         "flight-deck.agent-name": config.name or slug,
         "flight-deck.description": config.description or "",
@@ -2001,6 +2306,11 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         # Notify other agents about the new peer (scoped to same owner)
         if config.web_enabled:
             _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=owner_id)
+        if web_auth_replaced:
+            return ContainerActionResult(
+                ok=True, container_id=container.short_id,
+                message=f"Agent '{slug}' spawned{port_info}{_WEB_AUTH_REPLACED_NOTE}",
+                web_auth=config.web_auth_token)
         return ContainerActionResult(ok=True, container_id=container.short_id, message=f"Agent '{slug}' spawned{port_info}")
     except docker.errors.ImageNotFound:
         raise HTTPException(404, f"Docker image '{config.image}' not found. Pull it first.")
@@ -2064,7 +2374,10 @@ async def rebuild_container(container_id: str, request: Request, req: RebuildReq
 
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     old_short_id = c.short_id
-    labels = c.labels or {}
+    labels = dict(c.labels or {})
+    # The rebuilt container is this deck's (a legacy unlabelled one included:
+    # _find_container only hands out this deck's or legacy containers).
+    labels[DECK_LABEL] = _deck_id()
 
     # If frontend sent a description override, update the label
     if req and req.description:
@@ -2176,7 +2489,8 @@ def _find_available_port(start: int) -> int:
 
     used_ports: set[int] = set()
 
-    # Collect ports from Docker containers
+    # Collect ports from Docker containers — every deck's (not _deck_containers):
+    # host ports are shared by all decks on this host.
     try:
         client = get_docker()
         for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
@@ -2244,6 +2558,9 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
     client = get_docker()
     try:
         existing = client.containers.get(new_slug)
+        if not _is_this_decks_container(existing):
+            # Container names are host-global; never remove another deck's.
+            raise HTTPException(409, f"Container name '{new_slug}' is used by another Flight Deck on this host.")
         if existing.status == "running":
             raise HTTPException(400, f"Container '{new_slug}' already running.")
         existing.remove()
@@ -2279,6 +2596,23 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
         if "=" in e:
             k, v = e.split("=", 1)
             environment[k] = v
+
+    # The clone gets its OWN web_auth: that token is an agent's identity to FD
+    # (X-Agent-Auth → recorded owner), so two containers sharing one would be
+    # indistinguishable. The container reads it at start from the label FD
+    # checks, its config files (the clone's own host-side copies, bind-mounted
+    # in — nothing inside the image) and possibly its env.
+    new_web_auth = secrets.token_urlsafe(32) if web_auth else ""
+    if new_web_auth:
+        for k, v in environment.items():
+            if web_auth in v:
+                environment[k] = v.replace(web_auth, new_web_auth)
+        for copied in (new_agent_dir / "config.yaml", new_agent_dir / ".env",
+                       new_agent_dir / "data" / "home-config" / "config.yaml"):
+            if copied.is_file():
+                text = copied.read_text()
+                if web_auth in text:
+                    copied.write_text(text.replace(web_auth, new_web_auth))
 
     # Build volume mounts for the clone — use the known structure
     # instead of trying to remap arbitrary paths from the old container.
@@ -2321,9 +2655,12 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
     if old_web_port:
         new_web_port = _find_available_port(old_web_port + 1)
 
-    # Update labels for the clone
+    # Update labels for the clone (spawned by — so belonging to — this deck)
+    labels[DECK_LABEL] = _deck_id()
     labels["flight-deck.agent-name"] = new_name
     labels["flight-deck.description"] = ""
+    if new_web_auth:
+        labels["flight-deck.web-auth"] = new_web_auth
     if new_web_port:
         labels["flight-deck.web-port"] = str(new_web_port)
 
@@ -3066,14 +3403,15 @@ class FleetAgent(BaseModel):
 
 @app.get("/fd/fleet", response_model=list[FleetAgent])
 async def get_fleet(request: Request, user: dict | None = _optional_user_dep):
-    """Return all running/known agents across docker, process, and local stores."""
+    """Return all running/known agents across docker, process, and local stores
+    — this deck's only (another deck's containers on this host are not peers)."""
     fleet: list[FleetAgent] = []
     user_id = getattr(request.state, "user_id", "")
 
     # Docker containers
     try:
         client = get_docker()
-        for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
+        for c in _deck_containers(all=True, client=client):
             labels = c.labels or {}
             if AUTH_ENABLED and user_id and labels.get(OWNER_LABEL, "") != user_id:
                 continue
@@ -3115,7 +3453,7 @@ def _resolve_agent_auth(port: int) -> str:
     # Check Docker containers
     try:
         client = get_docker()
-        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+        for c in _deck_containers(client=client):
             labels = c.labels or {}
             wp = labels.get("flight-deck.web-port", "")
             if wp and int(wp) == port:
@@ -3147,7 +3485,7 @@ def _resolve_agent_owner(port: int) -> str:
     # Check Docker containers (owner stamped as a label at spawn time).
     try:
         client = get_docker()
-        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+        for c in _deck_containers(client=client):
             labels = c.labels or {}
             wp = labels.get("flight-deck.web-port", "")
             if wp and int(wp) == port:
@@ -3181,6 +3519,10 @@ def _find_agent_by_auth(token: str) -> tuple[bool, str, str]:
 
     ``owner`` is the owner recorded at spawn ("" when none was); ``slug`` is the
     FD_AGENT_SLUG the agent was spawned with (registry key / container slug).
+    Containers come from `_deck_containers`: one carrying ANOTHER deck's label
+    is never consulted — its labels were chosen by whoever spawned it there
+    (with auth off, anyone), so honouring them would let that deck mint an
+    identity here. Unlabelled (pre-label) containers are accepted as before.
     When legacy duplicates exist (old clones copied their source's token), a
     match with a recorded owner wins over an ownerless one. Uses a constant-time
     compare: callers hand this whatever arrived in an X-Agent-Auth header.
@@ -3196,7 +3538,7 @@ def _find_agent_by_auth(token: str) -> tuple[bool, str, str]:
             if not found[0]:
                 found = (True, "", slug)
     try:
-        for c in get_docker().containers.list(filters={"label": CONTAINER_LABEL}):
+        for c in _deck_containers():
             labels = c.labels or {}
             wa = str(labels.get("flight-deck.web-auth", "") or "")
             if wa and _token_eq(wa, token):
@@ -3223,6 +3565,8 @@ def _resolve_agent_identity_by_auth(token: str) -> tuple[bool, str]:
     More reliable than port-based lookup (a spawn-time port reassignment can make
     an agent's configured port differ from its registry entry): the auth token is
     unique per agent and stored in both its config and the registry/Docker label.
+    When legacy duplicates exist (old clones copied their source's token), a
+    match with a recorded owner wins over an ownerless one.
     """
     matched, owner, _slug_ = _find_agent_by_auth(token)
     return matched, owner
@@ -3255,7 +3599,7 @@ def _resolve_agent_grid_by_auth(token: str) -> tuple[list[str], str]:
         return [], ""
     try:
         client = get_docker()
-        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+        for c in _deck_containers(client=client):
             labels = c.labels or {}
             if labels.get("flight-deck.web-auth", "") == token:
                 return _parse_grid_labels(labels)
@@ -3272,7 +3616,7 @@ def _resolve_agent_grid(port: int) -> tuple[list[str], str]:
     `_resolve_agent_owner`. Prefers a live process over stale same-port entries."""
     try:
         client = get_docker()
-        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+        for c in _deck_containers(client=client):
             labels = c.labels or {}
             wp = labels.get("flight-deck.web-port", "")
             if wp and int(wp) == port:
@@ -3912,7 +4256,7 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
 
     try:
         client = get_docker()
-        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+        for c in _deck_containers(client=client):
             labels = c.labels or {}
             if AUTH_ENABLED and owner_id and labels.get(OWNER_LABEL, "") != owner_id:
                 continue
@@ -3937,7 +4281,7 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
     fleet: list[dict] = []
     try:
         client = get_docker()
-        for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
+        for c in _deck_containers(all=True, client=client):
             labels = c.labels or {}
             if AUTH_ENABLED and owner_id and labels.get(OWNER_LABEL, "") != owner_id:
                 continue
@@ -4074,8 +4418,7 @@ def _agent_record_by_auth(token: str) -> dict | None:
                 return rec
             found = found or rec
     try:
-        client = get_docker()
-        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+        for c in _deck_containers():  # never another deck's (forgeable) labels
             labels = c.labels or {}
             if labels.get("flight-deck.web-auth", "") == token:
                 wp = str(labels.get("flight-deck.web-port", ""))
@@ -6046,6 +6389,8 @@ class ProcessActionResult(BaseModel):
     ok: bool
     slug: str
     message: str = ""
+    # See ContainerActionResult.web_auth.
+    web_auth: str = ""
 
 
 @app.get("/fd/processes", response_model=list[ProcessInfo])
@@ -6092,6 +6437,10 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
 
 
 async def _spawn_process_locked(config: AgentConfig, request: Request, user: dict | None):
+    # Owner first: it gates the whole spawn (nothing is written for a caller we
+    # can't attribute) and feeds the archetype's Library lookup. `request` may
+    # be a lightweight stub (headless/background spawns) — the resolver copes.
+    owner_id = await _resolve_spawn_owner(config, request)
     # Resolve an archetype selector (if any) into cognitive_mode/tools/tier/model,
     # then a bare model-recommendation tier to a concrete provider/model.
     await _resolve_archetype(config, request, user)
@@ -6117,9 +6466,10 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         config.web_port = _find_available_port(config.web_port if config.web_port > 0 else 24080)
 
     # Auto-generate auth token if none provided — prevents unauthenticated
-    # direct access to agent ports bypassing Flight Deck.
-    if config.web_enabled and not config.web_auth_token:
-        config.web_auth_token = secrets.token_urlsafe(32)
+    # direct access to agent ports bypassing Flight Deck. A caller-chosen one
+    # that duplicates another agent's (its FD identity) is replaced. Minted
+    # with web disabled too — see _claim_web_auth.
+    web_auth_replaced = _claim_web_auth(config, slug)
 
     # Prepare data directory
     agent_dir = DATA_DIR / slug
@@ -6138,8 +6488,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     env_content = _build_env(config)
     (agent_dir / ".env").write_text(env_content)
 
-    # Build environment variables
-    environment = dict(os.environ)
+    # Build environment variables (FD's env minus its own secrets)
+    environment = _agent_base_env()
     if env_content:
         for line in env_content.strip().split("\n"):
             if "=" in line:
@@ -6149,24 +6499,9 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         if ev.get("key"):
             environment[ev["key"]] = ev.get("value", "")
 
-    # Resolve owner: authenticated user > owner_hint > infer from existing registry.
-    # `request` may be a lightweight stub (headless/background spawns), so reach
-    # for `.state.user_id` defensively rather than assuming a real Request.
-    owner_id = getattr(getattr(request, "state", None), "user_id", "") or config.owner_hint
-    if not owner_id:
-        # Fallback: inherit owner from an existing agent in the registry.
-        # Covers the case where an internal caller (e.g. Old Man spawned before
-        # the FD_OWNER_ID env var was added) doesn't have owner info.
-        _reg = _load_process_registry()
-        for _entry in _reg.values():
-            if _entry.get("owner"):
-                owner_id = _entry["owner"]
-                break
-
-    # Tell agents how to reach Flight Deck internally (for Telegram, Discord, etc.)
-    if "FD_URL" not in environment:
-        fd_port = os.environ.get("FD_PORT", "25080")
-        environment["FD_URL"] = f"http://localhost:{fd_port}"
+    # Tell agents how to reach Flight Deck internally (for Telegram, Discord,
+    # Google, etc.) — always THIS deck, whatever the env or env_vars carried.
+    _pin_fd_url(environment)
 
     # Pass owner ID so child agents can propagate ownership when spawning
     if owner_id:
@@ -6330,7 +6665,11 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     if config.web_enabled:
         _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=owner_id)
 
-    return ProcessActionResult(ok=True, slug=slug, message=f"Process agent '{slug}' spawned (PID {proc.pid}, port {config.web_port})")
+    message = f"Process agent '{slug}' spawned (PID {proc.pid}, port {config.web_port})"
+    if web_auth_replaced:
+        return ProcessActionResult(ok=True, slug=slug, message=message + _WEB_AUTH_REPLACED_NOTE,
+                                   web_auth=config.web_auth_token)
+    return ProcessActionResult(ok=True, slug=slug, message=message)
 
 
 def _verify_process_owner(slug: str, user_id: str) -> dict:
@@ -6620,11 +6959,20 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
     old_port = entry.get("web_port", 24080)
     new_port = _find_available_port(old_port + 1)
 
-    # Update config.yaml with new port and name
+    # The clone gets its OWN web_auth: that token is an agent's identity to FD
+    # (X-Agent-Auth → recorded owner), so two agents sharing one would be
+    # indistinguishable — and the clone would keep resolving through the
+    # source's entry, or through nothing at all once the source is removed.
+    old_auth = str(entry.get("web_auth", "") or "")
+    new_auth = secrets.token_urlsafe(32) if old_auth else ""
+
+    # Update config.yaml with new port, name and web auth token
     cfg_path = new_agent_dir / "config.yaml"
     if cfg_path.is_file():
         cfg_text = cfg_path.read_text()
         cfg_text = cfg_text.replace(f"port: {old_port}", f"port: {new_port}")
+        if old_auth:
+            cfg_text = cfg_text.replace(old_auth, new_auth)
         old_name = entry.get("name", slug)
         if old_name:
             cfg_text = cfg_text.replace(f"instance_name: {old_name}", f"instance_name: {new_name}")
@@ -6635,16 +6983,23 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
         if hc_path.is_file():
             hc_path.write_text(cfg_text)
 
-    # Register clone (but don't start it)
+    # Register clone (but don't start it). It belongs to the source's owner —
+    # without `owner` it would resolve to no tenant (Google then falls back to
+    # the primary owner) and the proxy's ownership guard would let anyone in.
+    # The grid fields travel with it too: they scope its deep-memory like owner.
     registry[new_slug] = {
         "slug": new_slug,
         "name": new_name,
         "description": "",
         "web_port": new_port,
-        "web_auth": entry.get("web_auth", ""),
+        "web_auth": new_auth,
         "pid": None,
         "provider": entry.get("provider", ""),
         "model": entry.get("model", ""),
+        "tier": entry.get("tier", ""),
+        "owner": entry.get("owner", ""),
+        "grid_tags": list(entry.get("grid_tags") or []),
+        "grid_recall": entry.get("grid_recall", ""),
     }
     _save_process_registry(registry)
 
@@ -6958,7 +7313,7 @@ def _build_old_man_config(
         env_vars=[
             {"key": "CLAW_OLD_MAN__ENABLED", "value": "true"},
             {"key": "CLAW_TOOLS__SCREEN_CAPTURE__HOTKEY_ENABLED", "value": "true"},
-            {"key": "FD_URL", "value": f"http://localhost:{os.environ.get('FD_PORT', '25080')}"},
+            {"key": "FD_URL", "value": _fd_self_url()},
         ],
     )
 
@@ -7278,11 +7633,13 @@ def main():
         os.environ["FD_SIMPLE_CHAT"] = "1"
 
     # Record the actual bound port so spawned agents get a correct FD_URL
-    # callback. The FD_URL auto-injection (when an agent's env lacks it) reads
-    # FD_PORT; without this it would fall back to a hardcoded 25080 guess.
-    # setdefault: don't clobber an externally-provided value (e.g. a
-    # reverse-proxy public port that differs from the bind port).
-    os.environ.setdefault("FD_PORT", str(args.port))
+    # callback (_fd_self_url reads FD_PORT; without this it would fall back to
+    # a hardcoded 25080 guess). Overwrite, never setdefault: an FD_PORT
+    # inherited from the shell or a CWD .env belongs to whatever deck set it,
+    # and with several decks on one host it would point this deck's agents at
+    # another deck. A different agent-facing URL (e.g. through a local proxy)
+    # is what FD_INTERNAL_URL is for.
+    os.environ["FD_PORT"] = str(args.port)
 
     if not args.dev and not STATIC_DIR.is_dir():
         print(f"Warning: Static files not found at {STATIC_DIR}")
