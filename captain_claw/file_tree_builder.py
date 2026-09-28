@@ -154,8 +154,41 @@ def resolve_gws_binary() -> str | None:
     return found
 
 
-async def _run_gws(binary: str, args: list[str]) -> dict[str, Any] | str:
-    """Run a ``gws`` command and return parsed JSON or error string."""
+_RESOLVE = object()  # _run_gws(env=...) default: resolve the env itself
+
+
+async def _gws_env() -> tuple[dict[str, str] | None, str]:
+    """``(env, error)`` for a gws subprocess — the gws tool's identity rules.
+
+    Standalone: ``(None, "")`` — inherit; gws keeps its ``gws auth login``.
+    Under Flight Deck: FD's env with the ambient gws / ADC credentials scrubbed
+    and the agent OWNER's access token injected, so a tree listing can only
+    ever show that owner's Drive — never an operator credential every tenant's
+    agent inherited. No token for the owner → ``(None, <the tool's "not
+    connected" text>)``: fail closed, the caller must not run gws. Any other
+    failure to resolve the identity fails closed the same way.
+    """
+    from captain_claw.tools._gws_runtime import gws_subprocess_env
+
+    try:
+        return await gws_subprocess_env(), ""
+    except Exception as exc:  # GwsNotConnected, or anything unexpected
+        return None, str(exc) or "gws: could not resolve this agent's Google identity"
+
+
+async def _run_gws(
+    binary: str, args: list[str], env: Any = _RESOLVE,
+) -> dict[str, Any] | str:
+    """Run a ``gws`` command and return parsed JSON or error string.
+
+    ``env`` is the env :func:`_gws_env` resolved (callers making several calls
+    resolve it once); left out, it is resolved here — never skipped.
+    """
+    if env is _RESOLVE:
+        env, error = await _gws_env()
+        if error:
+            return error
+
     cmd = [binary] + args + ["--format", "json"]
     log.debug("file_tree_builder gws", cmd=" ".join(cmd))
 
@@ -163,6 +196,7 @@ async def _run_gws(binary: str, args: list[str]) -> dict[str, Any] | str:
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
 
     try:
@@ -198,6 +232,9 @@ async def build_gdrive_tree(
     binary = resolve_gws_binary()
     if binary is None:
         return "[gws CLI not available]", 0
+    env, error = await _gws_env()
+    if error:
+        return f"Google Drive: {folder_name} [error: {error}]", 0
 
     lines: list[str] = []
     entry_count = 0
@@ -220,6 +257,7 @@ async def build_gdrive_tree(
         result = await _run_gws(
             binary,
             ["drive", "files", "list", "--params", json.dumps(params)],
+            env=env,
         )
 
         if isinstance(result, str):
@@ -265,7 +303,7 @@ async def build_gdrive_tree(
 
 # ── Shared drives helper ──────────────────────────────────────────────
 
-async def _list_shared_drives(binary: str) -> list[dict[str, str]]:
+async def _list_shared_drives(binary: str, env: Any = _RESOLVE) -> list[dict[str, str]]:
     """Return ``[{"id": ..., "name": ...}]`` for all accessible shared drives."""
     params = {
         "pageSize": 100,
@@ -274,6 +312,7 @@ async def _list_shared_drives(binary: str) -> list[dict[str, str]]:
     result = await _run_gws(
         binary,
         ["drive", "drives", "list", "--params", json.dumps(params)],
+        env=env,
     )
     if isinstance(result, str):
         log.debug("shared drives listing failed", error=result[:120])
@@ -298,6 +337,9 @@ async def browse_gdrive_folders(folder_id: str = "root") -> dict[str, Any]:
     binary = resolve_gws_binary()
     if binary is None:
         return {"folders": [], "shared_drives": [], "error": "gws CLI not available"}
+    env, error = await _gws_env()
+    if error:
+        return {"folders": [], "shared_drives": [], "error": error}
 
     escaped = folder_id.replace("'", "\\'")
     params: dict[str, Any] = {
@@ -316,6 +358,7 @@ async def browse_gdrive_folders(folder_id: str = "root") -> dict[str, Any]:
     result = await _run_gws(
         binary,
         ["drive", "files", "list", "--params", json.dumps(params)],
+        env=env,
     )
 
     if isinstance(result, str):
@@ -330,6 +373,6 @@ async def browse_gdrive_folders(folder_id: str = "root") -> dict[str, Any]:
     # When browsing root, also fetch shared drives.
     shared_drives: list[dict[str, str]] = []
     if folder_id == "root":
-        shared_drives = await _list_shared_drives(binary)
+        shared_drives = await _list_shared_drives(binary, env=env)
 
     return {"folders": folders, "shared_drives": shared_drives}

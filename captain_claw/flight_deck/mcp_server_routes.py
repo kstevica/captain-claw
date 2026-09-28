@@ -109,8 +109,9 @@ def _user_agents(user_id: str) -> list[dict]:
 
     out: list[dict] = []
     try:
-        client = S.get_docker()
-        for c in client.containers.list(all=True, filters={"label": S.CONTAINER_LABEL}):
+        # THIS deck's containers only — another deck's on this host are not
+        # this caller's agents, whatever owner label they carry.
+        for c in S._deck_containers(all=True):
             labels = c.labels or {}
             if S.AUTH_ENABLED and user_id and labels.get(S.OWNER_LABEL, "") != user_id:
                 continue

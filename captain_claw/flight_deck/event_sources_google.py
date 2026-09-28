@@ -1,10 +1,13 @@
 """Google Calendar + Gmail source adapters for the event spine (#2).
 
-FD-side: fetch directly from the Google APIs with FD's OAuth token
-(``get_valid_google_access_token``). Calendar surfaces new/changed events AND
-soon-starting ones; Gmail surfaces important+unread inbox messages. Per-user
-enable via the autonomy config (``event_calendar_enabled`` / ``event_gmail_enabled``).
-Each poll fetches the token itself, so it no-ops cleanly when Google isn't connected.
+FD-side: fetch directly from the Google APIs with the polled user's OWN OAuth
+token (``get_valid_google_access_token(user_id)``) — never a deployment-wide
+one, which put the primary owner's inbox in every user's feed. Calendar
+surfaces new/changed events AND soon-starting ones; Gmail surfaces
+important+unread inbox messages. Per-user enable via the autonomy config
+(``event_calendar_enabled`` / ``event_gmail_enabled``), and gated on that user
+having connected Google (``requires_google``); each poll also fetches the token
+itself, so it no-ops cleanly when the user isn't connected.
 """
 
 from __future__ import annotations
@@ -23,9 +26,9 @@ _CAL = "https://www.googleapis.com/calendar/v3"
 _GMAIL = "https://gmail.googleapis.com/gmail/v1"
 
 
-async def _token() -> str | None:
+async def _token(user_id: str) -> str | None:
     from captain_claw.flight_deck.google_oauth_routes import get_valid_google_access_token
-    return await get_valid_google_access_token()
+    return await get_valid_google_access_token(user_id)
 
 
 def _evt_start(ev: dict[str, Any]) -> str:
@@ -36,7 +39,7 @@ def _evt_start(ev: dict[str, Any]) -> str:
 async def poll_calendar(user_id: str, cursor: str) -> tuple[list[dict[str, Any]], str]:
     """Surface new/changed events (incremental via updatedMin) AND events starting
     in the next 24h. Dedup: changed by id+updated, upcoming once per id+start."""
-    token = await _token()
+    token = await _token(user_id)
     if not token:
         return [], cursor
     headers = {"Authorization": f"Bearer {token}"}
@@ -105,7 +108,7 @@ def _is_automated_sender(frm: str) -> bool:
 async def poll_gmail(user_id: str, cursor: str) -> tuple[list[dict[str, Any]], str]:
     """Surface important + unread inbox messages. Dedup by message id (unread ones
     persist, so re-listing them is a no-op once ingested)."""
-    token = await _token()
+    token = await _token(user_id)
     if not token:
         return [], cursor
     headers = {"Authorization": f"Bearer {token}"}
@@ -165,10 +168,12 @@ register(Adapter(
     interval_seconds=float(get_config().events.calendar_interval_seconds),
     poll=poll_calendar,
     enabled=lambda uid: _cfg_flag(uid, "event_calendar_enabled"),
+    requires_google=True,
 ))
 register(Adapter(
     name="gmail",
     interval_seconds=float(get_config().events.gmail_interval_seconds),
     poll=poll_gmail,
     enabled=lambda uid: _cfg_flag(uid, "event_gmail_enabled"),
+    requires_google=True,
 ))

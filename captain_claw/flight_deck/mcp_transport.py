@@ -451,7 +451,12 @@ class StdioTransport(Transport):
             if not command:
                 raise MCPTransportError("stdio transport: 'command' is empty")
             resolved = shutil.which(command) or command
-            full_env = os.environ.copy()
+            # FD's environment minus its own secrets (FD_JWT_SECRET etc. — the
+            # list process agents are spawned without; imported lazily, server
+            # imports this module). The server's configured env still wins.
+            from captain_claw.flight_deck.server import _FD_ONLY_ENV_VARS
+
+            full_env = {k: v for k, v in os.environ.items() if k not in _FD_ONLY_ENV_VARS}
             for k, v in self.env.items():
                 full_env[k] = v
             try:

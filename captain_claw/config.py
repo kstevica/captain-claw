@@ -1223,11 +1223,21 @@ class GoogleOAuthConfig(BaseModel):
     # backend that owns the real OAuth tokens. The manager will fetch
     # fresh access tokens from `{flight_deck_url}/fd/google/access_token`
     # instead of running its own authorization flow. Typical value:
-    # "http://localhost:25080".
+    # "http://localhost:25080". Agents Flight Deck spawns don't need it
+    # (FD injects FD_URL). Flight Deck only serves agents IT spawned: it
+    # identifies the caller by the per-agent ``web.auth_token`` it minted
+    # (sent as ``X-Agent-Auth``) and returns that agent's OWNER's token.
+    # Any other instance pointed here — a standalone agent, another deck's
+    # agent — is refused (403). A deck with auth disabled serves Google to
+    # no agent at all (403, "not available").
     flight_deck_url: str = ""
-    # Optional shared secret sent as ``X-Agent-Secret`` when talking to
-    # Flight Deck's agent-facing endpoints. Leave empty for same-host
-    # deployments — Flight Deck allows loopback callers unconditionally.
+    # Shared secret sent as ``X-Agent-Secret`` to Flight Deck's agent-facing
+    # endpoints (falls back to the FD_AGENT_SHARED_SECRET env var, then the
+    # per-deck ``agent_secret`` file). Flight
+    # Deck accepts loopback callers without it unless FD_LOCKDOWN is set, in
+    # which case it is required even from loopback (401 otherwise); off-host
+    # callers always need it. It proves the caller is *an* agent, never which
+    # one — that is ``X-Agent-Auth`` above.
     flight_deck_secret: str = ""
     scopes: list[str] = Field(default_factory=lambda: [
         "https://www.googleapis.com/auth/cloud-platform",

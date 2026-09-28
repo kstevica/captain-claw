@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { useAuthStore } from './authStore'
+import { useAuthStore, refreshAccessToken, registerSignOutTeardown } from './authStore'
 
 export interface GrantedScope {
   scope: string
@@ -54,6 +54,7 @@ interface GoogleAuthStore {
   lastPopupMessage: string | null
 
   refresh: () => Promise<void>
+  syncStatus: () => Promise<void>
   saveConfig: (patch: Partial<{
     client_id: string
     client_secret: string
@@ -62,7 +63,7 @@ interface GoogleAuthStore {
     scopes: string[]
   }>) => Promise<boolean>
   clearCredentials: () => Promise<boolean>
-  connect: () => void
+  connect: () => Promise<void>
   disconnect: () => Promise<void>
   startMessageListener: () => () => void
 }
@@ -85,8 +86,25 @@ function authHeaders(): Record<string, string> {
   }
 }
 
+// A non-2xx answer. `detail` is FastAPI's error detail when it's a string.
+class HttpError extends Error {
+  readonly status: number
+  readonly detail: string
+
+  constructor(status: number, statusText: string, text: string) {
+    super(`${status} ${statusText}: ${text}`)
+    this.status = status
+    let detail = ''
+    try {
+      const parsed = JSON.parse(text)
+      if (typeof parsed?.detail === 'string') detail = parsed.detail
+    } catch { /* not JSON */ }
+    this.detail = detail
+  }
+}
+
 async function fetchJson(url: string, init?: RequestInit): Promise<any> {
-  const resp = await fetch(url, {
+  const doFetch = () => fetch(url, {
     credentials: 'include',
     ...init,
     headers: {
@@ -94,11 +112,84 @@ async function fetchJson(url: string, init?: RequestInit): Promise<any> {
       ...(init?.headers || {}),
     },
   })
+  let resp = await doFetch()
+  // The access JWT lives 15 min; a tab left open on Connections outlives it.
+  if (resp.status === 401 && useAuthStore.getState().authEnabled && (await refreshAccessToken())) {
+    resp = await doFetch()
+  }
   if (!resp.ok) {
     const text = await resp.text().catch(() => '')
-    throw new Error(`${resp.status} ${resp.statusText}: ${text}`)
+    throw new HttpError(resp.status, resp.statusText, text)
   }
   return resp.json()
+}
+
+// /fd/google/login is a 302 to Google, so it runs in a popup — which can't
+// carry an Authorization header. A single-use, short-lived ticket minted by an
+// authenticated POST (fetchJson: Bearer, and a refresh + retry on a 401) names
+// the connecting user instead, so the JWT never goes in a URL (history, logs,
+// Referer). /login binds the flow to the ticket's user — and only in the
+// browser holding the cookie this POST sets (credentials: 'include').
+async function _mintConnectTicket(): Promise<string> {
+  const data = await fetchJson('/fd/google/connect-ticket', { method: 'POST', body: '{}' })
+  const ticket = typeof data?.ticket === 'string' ? data.ticket : ''
+  if (!ticket) throw new Error('Flight Deck returned no sign-in ticket.')
+  return ticket
+}
+
+// The OAuth popup this tab opened. Kept so a sign-out can close it: left open,
+// the next person at the screen could finish the consent — and the pending
+// login is bound to whoever clicked Connect, so THEIR Google account would be
+// linked to the outgoing user. Also polled so the card updates once it closes.
+let _popup: Window | null = null
+let _popupWatch: ReturnType<typeof setInterval> | null = null
+const _POPUP_POLL_MS = 500
+const _POPUP_WATCH_MAX_MS = 10 * 60_000  // the pending login expires by then
+
+function _forgetPopup(close: boolean): void {
+  if (_popupWatch) clearInterval(_popupWatch)
+  _popupWatch = null
+  if (close && _popup && !_popup.closed) {
+    try { _popup.close() } catch { /* already gone */ }
+  }
+  _popup = null
+}
+
+function _watchPopup(popup: Window, onClosed: () => void): void {
+  _forgetPopup(false)  // a re-used named window is the same one — don't close it
+  _popup = popup
+  const started = Date.now()
+  _popupWatch = setInterval(() => {
+    if (popup.closed) {
+      _forgetPopup(false)
+      onClosed()
+    } else if (Date.now() - started > _POPUP_WATCH_MAX_MS) {
+      // Stop polling, but keep the handle so a sign-out can still close it.
+      if (_popupWatch) clearInterval(_popupWatch)
+      _popupWatch = null
+    }
+  }, _POPUP_POLL_MS)
+}
+
+registerSignOutTeardown(() => _forgetPopup(true))
+
+// The Electron shell (desktop/preload.js): it hands every http(s)
+// window.open to the system browser and denies the in-app window.
+function _isDesktopShell(): boolean {
+  return !!(window as Window & { captainClawDesktop?: { isDesktop?: boolean } }).captainClawDesktop?.isDesktop
+}
+
+const _POPUP_BLOCKED = 'The browser blocked the Google sign-in popup — allow popups for this site and try again.'
+const _SESSION_EXPIRED = 'Your Flight Deck session has expired — sign in again, then connect Google.'
+const _AUTH_OFF = "Google isn't available on this deck: Flight Deck sign-in is turned off."
+const _DESKTOP_SHELL = "The desktop app can't run the Google sign-in — open Flight Deck in a web browser to connect Google."
+
+function _connectError(exc: unknown): string {
+  if (exc instanceof HttpError && exc.status === 401) return _SESSION_EXPIRED
+  const why = exc instanceof HttpError && exc.detail
+    ? exc.detail
+    : exc instanceof Error ? exc.message : String(exc)
+  return `Couldn't start Google sign-in: ${why}`
 }
 
 export const useGoogleAuthStore = create<GoogleAuthStore>((set, get) => ({
@@ -109,6 +200,11 @@ export const useGoogleAuthStore = create<GoogleAuthStore>((set, get) => ({
   lastPopupMessage: null,
 
   refresh: async () => {
+    // No Google via FD with sign-in off (see connect()) — nothing to ask.
+    if (useAuthStore.getState().authEnabled === false) {
+      set({ status: emptyStatus, config: null, loading: false, error: null })
+      return
+    }
     set({ loading: true, error: null })
     try {
       const [status, config] = await Promise.all([
@@ -127,6 +223,24 @@ export const useGoogleAuthStore = create<GoogleAuthStore>((set, get) => ({
         status: get().status || emptyStatus,
       })
     }
+  },
+
+  // Quiet status re-check for the background triggers (popup closed, window
+  // focus): no spinner, and a failure keeps whatever the card shows — it must
+  // not wipe e.g. a "session expired" error that connect() just set. When it
+  // sees the connection appear, it says so in place of the message the
+  // callback couldn't deliver (and of the "finish in your browser" hint).
+  syncStatus: async () => {
+    try {
+      const status = (await fetchJson('/fd/google/status')) as GoogleAuthStatus
+      const justConnected = !!status?.connected && !get().status?.connected
+      set({
+        status,
+        ...(justConnected
+          ? { lastPopupMessage: `Connected${status.user?.email ? ` as ${status.user.email}` : ''}` }
+          : {}),
+      })
+    } catch { /* the next explicit refresh() reports it */ }
   },
 
   saveConfig: async (patch) => {
@@ -165,25 +279,57 @@ export const useGoogleAuthStore = create<GoogleAuthStore>((set, get) => ({
     }
   },
 
-  connect: () => {
-    // The login endpoint is a 302 to Google, so open it as a popup.
-    // A popup can't carry an Authorization header, so pass the JWT as
-    // ?fd_token= — /fd/google/login reads it to record WHICH user is
-    // connecting, so the tokens are stored against the right account
-    // (per-user connections). Omitted when auth is off (no token).
-    const { token } = useAuthStore.getState()
-    const url = token
-      ? `/fd/google/login?fd_token=${encodeURIComponent(token)}`
-      : '/fd/google/login'
+  connect: async () => {
+    // The login endpoint is a 302 to Google, so it opens as a popup, at
+    // /login?ticket=<single-use ticket> (see _mintConnectTicket).
+    //
+    // The result comes back by postMessage from the callback page when it
+    // can; the popup-closed watch and the focus re-check (startMessageListener)
+    // cover the flows where it can't.
+    set({ error: null })
+    // A Google connection belongs to a Flight Deck user, so it needs sign-in:
+    // with auth off FD offers no Google (the card says so instead of Connect).
+    if (!useAuthStore.getState().authEnabled) {
+      set({ error: _AUTH_OFF })
+      return
+    }
+    // The Electron shell denies in-app windows and hands URLs to the system
+    // browser — which doesn't hold the ticket's cookie, so /login refuses it
+    // there. (The desktop app runs FD with sign-in off anyway: no Google.)
+    if (_isDesktopShell()) {
+      set({ error: _DESKTOP_SHELL })
+      return
+    }
     const w = 520
     const h = 640
     const left = window.screenX + (window.outerWidth - w) / 2
     const top = window.screenY + (window.outerHeight - h) / 2
-    window.open(
-      url,
-      'captain-claw-google-oauth',
-      `width=${w},height=${h},left=${left},top=${top}`,
-    )
+    const name = 'captain-claw-google-oauth'
+    const features = `width=${w},height=${h},left=${left},top=${top}`
+    // Open the popup synchronously — still inside the click, so blockers allow
+    // it — and point it at /login once the ticket is in hand.
+    const popup = window.open('about:blank', name, features)
+    if (!popup) {
+      set({ error: _POPUP_BLOCKED })
+      return
+    }
+
+    let ticket: string
+    try {
+      ticket = await _mintConnectTicket()
+    } catch (exc) {
+      popup.close()
+      set({ error: _connectError(exc) })
+      return
+    }
+    // Closed meanwhile — by the user, or by a sign-out's teardown: the ticket
+    // is for a flow nobody is waiting on any more.
+    if (popup.closed || !useAuthStore.getState().isAuthenticated) {
+      if (!popup.closed) popup.close()
+      return
+    }
+    popup.location.href = `${window.location.origin}/fd/google/login?ticket=${encodeURIComponent(ticket)}`
+    _watchPopup(popup, () => { get().syncStatus() })
   },
 
   disconnect: async () => {
@@ -201,6 +347,9 @@ export const useGoogleAuthStore = create<GoogleAuthStore>((set, get) => ({
 
   startMessageListener: () => {
     const handler = (event: MessageEvent) => {
+      // Only our own /fd/google/callback page (same origin as the SPA) may
+      // report a result — any other window could post a fake "Connected as …".
+      if (event.origin !== window.location.origin) return
       const data = event.data
       if (!data || typeof data !== 'object') return
       if (data.type !== 'captain-claw-google-oauth') return
@@ -212,7 +361,16 @@ export const useGoogleAuthStore = create<GoogleAuthStore>((set, get) => ({
       })
       setTimeout(() => { get().refresh() }, 300)
     }
+    // No message comes when the callback can't reach this window: the Electron
+    // flow finishes in the system browser, an FD_PUBLIC_URL deck lands the
+    // callback on another origin, and Google's opener policy can cut
+    // window.opener. Coming back to this window is the signal then.
+    const onFocus = () => { get().syncStatus() }
     window.addEventListener('message', handler)
-    return () => window.removeEventListener('message', handler)
+    window.addEventListener('focus', onFocus)
+    return () => {
+      window.removeEventListener('message', handler)
+      window.removeEventListener('focus', onFocus)
+    }
   },
 }))

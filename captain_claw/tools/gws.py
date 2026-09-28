@@ -1,7 +1,12 @@
 """Google Workspace CLI (gws) tool for Drive, Docs, and Calendar.
 
 Wraps the ``gws`` CLI (https://github.com/googleworkspace/cli) which must
-be installed and authenticated separately (``gws auth setup && gws auth login``).
+be installed separately. Standalone it is authenticated with
+``gws auth setup && gws auth login``. Under Flight Deck it is NOT: each call
+runs as the agent owner's Google account (the connection they made in
+Flight Deck → Connections → Google), injected per call by
+:func:`~captain_claw.tools._gws_runtime.gws_subprocess_env` — never an ambient
+on-disk / env credential that every user on the deck would share.
 
 Gmail is intentionally NOT handled here — use the :class:`GoogleMailTool`
 instead, which uses the centralized OAuth token manager and supports
@@ -19,7 +24,12 @@ from captain_claw.logging import get_logger
 from captain_claw.tools._gws_calendar import GwsCalendarMixin
 from captain_claw.tools._gws_docs import GwsDocsMixin
 from captain_claw.tools._gws_drive import GwsDriveMixin
-from captain_claw.tools._gws_runtime import GwsRuntimeMixin
+from captain_claw.tools._gws_runtime import (
+    FD_CONNECT_HINT,
+    GwsNotConnected,
+    GwsRuntimeMixin,
+    gws_flight_deck_mode,
+)
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
@@ -47,7 +57,9 @@ class GwsTool(
         "calendar_create (create a calendar event), calendar_agenda (show agenda). "
         "For Gmail, use the 'google_mail' tool instead — it supports reading, sending, "
         "drafting, replying, and label modification. "
-        "Requires the gws CLI to be installed and authenticated (gws auth login)."
+        "Requires the gws CLI to be installed. Under Flight Deck it acts as the "
+        "agent owner's Google account (Flight Deck → Connections → Google); "
+        "standalone it uses the 'gws auth login' account."
     )
     timeout_seconds = 180.0
     parameters = {
@@ -186,12 +198,19 @@ class GwsTool(
 
         binary = self._resolve_binary()
         if binary is None:
+            if gws_flight_deck_mode():
+                auth_hint = (
+                    "No 'gws auth login' is needed under Flight Deck — it uses "
+                    "the agent owner's Google account. " + FD_CONNECT_HINT
+                )
+            else:
+                auth_hint = "Then authenticate: gws auth setup && gws auth login"
             return ToolResult(
                 success=False,
                 error=(
                     "The 'gws' CLI binary was not found. "
                     "Please install it: npm install -g @googleworkspace/cli  "
-                    "Then authenticate: gws auth setup && gws auth login"
+                    + auth_hint
                 ),
             )
 
@@ -228,13 +247,22 @@ class GwsTool(
                 error=f"Unknown action '{action}'. Use one of: {', '.join(handlers)}",
             )
 
+        # Resolve the Google identity once for the whole call — under Flight
+        # Deck the owner's token, failing closed when there is none.
+        self._gws_env_cache = None
         try:
+            await self._gws_env()
             return await handler(binary, saved_base=saved_base, runtime_base=runtime_base, **kwargs)
+        except GwsNotConnected as exc:
+            return ToolResult(success=False, error=str(exc))
         except asyncio.TimeoutError:
             return ToolResult(success=False, error="gws command timed out.")
         except Exception as exc:
             log.error("gws tool error", action=action, error=str(exc))
             return ToolResult(success=False, error=str(exc))
+        finally:
+            # Don't keep the owner's token on the tool object between calls.
+            self._gws_env_cache = None
 
     # ------------------------------------------------------------------
     # Raw passthrough
@@ -252,5 +280,18 @@ class GwsTool(
             tokens = shlex.split(raw_args)
         except ValueError as e:
             return ToolResult(success=False, error=f"Failed to parse raw_args: {e}")
+
+        # Under Flight Deck gws's own credential store is never the identity
+        # (the owner's token is injected per call), so `gws auth ...` could
+        # only mislead — or hang on an interactive login.
+        subcommand = next((t for t in tokens if not t.startswith("-")), "")
+        if subcommand == "auth" and gws_flight_deck_mode():
+            return ToolResult(
+                success=False,
+                error=(
+                    "'gws auth' is not used under Flight Deck — gws runs as the "
+                    "agent owner's Google account. " + FD_CONNECT_HINT
+                ),
+            )
 
         return await self._run_gws(binary, tokens)

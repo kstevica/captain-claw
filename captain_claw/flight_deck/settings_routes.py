@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from captain_claw.flight_deck.auth import get_current_user, get_db
@@ -12,6 +12,29 @@ from captain_claw.flight_deck.auth import get_current_user, get_db
 router = APIRouter(prefix="/fd/settings", tags=["settings"])
 
 PROVIDER_KEYS_SETTING = "fd:provider-keys"
+
+
+# Server-owned keys that share the per-user store but are never the browser's
+# to read or write. ``google_oauth:*`` is the user's Google refresh/access token
+# and connected identity: only the OAuth routes write it (/fd/google/callback,
+# a token refresh, /fd/google/logout). Readable here, any script running as the
+# user would get the refresh token; writable, a user could forge a Google
+# identity (e.g. to make another user's Disconnect skip the revoke) or clear
+# their connection without the revoke.
+_SERVER_OWNED_PREFIXES = ("google_oauth:",)
+
+
+def _server_owned(key: str) -> bool:
+    return str(key).strip().lower().startswith(_SERVER_OWNED_PREFIXES)
+
+
+def _refuse_server_owned(keys) -> None:
+    bad = sorted(k for k in keys if _server_owned(k))
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Setting(s) managed by Flight Deck, not writable here: {', '.join(bad)}",
+        )
 
 
 class SettingsUpdate(BaseModel):
@@ -22,11 +45,13 @@ class SettingsUpdate(BaseModel):
 @router.get("")
 async def get_settings(user: dict = Depends(get_current_user)):
     db = get_db()
-    return await db.get_all_settings(user["id"])
+    settings = await db.get_all_settings(user["id"])
+    return {k: v for k, v in settings.items() if not _server_owned(k)}
 
 
 @router.put("")
 async def put_settings(body: SettingsUpdate, user: dict = Depends(get_current_user)):
+    _refuse_server_owned(body.settings)
     db = get_db()
     await db.set_settings(user["id"], body.settings)
     return {"ok": True, "count": len(body.settings)}
@@ -34,6 +59,7 @@ async def put_settings(body: SettingsUpdate, user: dict = Depends(get_current_us
 
 @router.delete("/{key:path}")
 async def delete_setting(key: str, user: dict = Depends(get_current_user)):
+    _refuse_server_owned([key])
     db = get_db()
     deleted = await db.delete_setting(user["id"], key)
     if not deleted:

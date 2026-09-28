@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { useAuthStore } from './authStore'
+import { useAuthStore, refreshAccessToken } from './authStore'
 import { useMCPStore, type MCPProbeResult } from './mcpStore'
 
 // Traffic-light health for an external connection FD depends on.
@@ -38,11 +38,16 @@ function authHeaders(): Record<string, string> {
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<any> {
-  const resp = await fetch(url, {
+  const doFetch = () => fetch(url, {
     credentials: 'include',
     ...init,
     headers: { ...authHeaders(), ...(init?.headers || {}) },
   })
+  let resp = await doFetch()
+  // An expired access JWT would otherwise paint Google red ("401 … Token expired").
+  if (resp.status === 401 && useAuthStore.getState().authEnabled && (await refreshAccessToken())) {
+    resp = await doFetch()
+  }
   if (!resp.ok) {
     const text = await resp.text().catch(() => '')
     throw new Error(`${resp.status} ${resp.statusText}: ${text}`)
@@ -56,6 +61,10 @@ async function probeGoogle(): Promise<ConnectionStatus> {
     kind: 'google',
     label: 'Google',
     checkedAt: Date.now(),
+  }
+  // Google connections belong to FD users: none on a deck with sign-in off.
+  if (useAuthStore.getState().authEnabled === false) {
+    return { ...base, health: 'gray', detail: 'Not available — Flight Deck sign-in is off' }
   }
   try {
     const r = await fetchJson('/fd/google/probe')

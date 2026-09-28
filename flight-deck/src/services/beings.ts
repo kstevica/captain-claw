@@ -17,23 +17,22 @@ async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
     const refreshed = await refreshAccessToken()
     if (!refreshed) throw new Error('Not authenticated')
   }
-  const res = await fetch(`${FD_BASE}${path}`, {
+  let res = await fetch(`${FD_BASE}${path}`, {
     headers: _authHeaders(),
     credentials: 'include',
     ...init,
   })
+  // Only a failed refresh ends the session (see docker.ts fdFetch).
   if (res.status === 401 && useAuthStore.getState().authEnabled) {
-    const refreshed = await refreshAccessToken()
-    if (refreshed) {
-      const retry = await fetch(`${FD_BASE}${path}`, {
-        headers: _authHeaders(),
-        credentials: 'include',
-        ...init,
-      })
-      if (retry.ok) return retry.json()
+    if (!(await refreshAccessToken())) {
+      useAuthStore.getState().clearAuth()
+      throw new Error('Session expired')
     }
-    useAuthStore.getState().clearAuth()
-    throw new Error('Session expired')
+    res = await fetch(`${FD_BASE}${path}`, {
+      headers: _authHeaders(),
+      credentials: 'include',
+      ...init,
+    })
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }))

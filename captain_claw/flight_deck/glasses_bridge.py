@@ -1060,9 +1060,10 @@ def _resolve_default_agent() -> tuple[str, int, str] | None:
         pass
 
     try:
-        from captain_claw.flight_deck.server import CONTAINER_LABEL, get_docker
-        client = get_docker()
-        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+        # THIS deck's containers only: another deck on the host has its own
+        # agents (and their web_auth is that deck's business).
+        from captain_claw.flight_deck.server import _deck_containers
+        for c in _deck_containers():
             labels = c.labels or {}
             wp = labels.get("flight-deck.web-port", "")
             if wp:

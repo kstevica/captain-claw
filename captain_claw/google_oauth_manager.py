@@ -8,13 +8,16 @@ Two operating modes:
    refresh token.
 
 2. **Flight Deck client mode**. When
-   ``config.google_oauth.flight_deck_url`` is set, this instance does
-   **not** run its own OAuth flow. Instead, every call that needs an
-   access token hits ``{flight_deck_url}/fd/google/access_token`` and
+   ``config.google_oauth.flight_deck_url`` (or the ``FD_URL`` Flight Deck
+   injects at spawn) is set, this instance does **not** run its own OAuth
+   flow. Instead, every call that needs an access token hits
+   ``{flight_deck_url}/fd/google/access_token`` and
    ``/fd/google/credentials`` to retrieve a freshly-refreshed token
-   managed by Flight Deck. This lets many captain-claw agents running
-   on different ports / hosts share a single Google connection without
-   juggling refresh tokens or redirect URIs.
+   managed by Flight Deck — the connection of this agent's OWNER, whom
+   Flight Deck resolves from the ``X-Agent-Auth`` token it minted at spawn.
+   Agents the deck didn't spawn are refused (403), and the refusal's reason
+   is raised as :class:`FlightDeckRefused` so the Google tools report it
+   instead of telling a connected user to "connect Google".
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from typing import Any
 import httpx
 
 from captain_claw.config import get_config
+from captain_claw.drive_client import DriveNotConnected
 from captain_claw.google_oauth import (
     STATE_KEY_TOKENS,
     STATE_KEY_USER,
@@ -73,6 +77,44 @@ def is_google_connected_cached(max_age: float | None = None) -> bool:
     return _GOOGLE_CONNECTED
 
 
+class FlightDeckRefused(DriveNotConnected):
+    """Flight Deck answered this agent's Google token request with 401/403.
+
+    Carries FD's own reason (``detail``) — e.g. an agent FD didn't spawn, or
+    one it can't attribute to a user — which is NOT "Google isn't connected",
+    so the tools must not send the user off to reconnect. A ``RuntimeError``
+    (the google_* tools report ``str(exc)`` of those) and a
+    :class:`~captain_claw.drive_client.DriveNotConnected` (the Drive/VFS paths
+    handle it like any other unusable connection).
+    """
+
+    def __init__(self, status: int, detail: str, *, auth_disabled: bool = False) -> None:
+        self.status = status
+        self.detail = detail
+        # FD said "no Google via FD here: auth is disabled" — a single-tenant
+        # deck, where the agent may keep its own credentials (see _gws_runtime).
+        self.auth_disabled = auth_disabled
+        super().__init__(
+            f"Flight Deck refused this agent's Google request (HTTP {status}): "
+            f"{detail or 'no reason given'}"
+        )
+
+
+def _fd_refusal(resp: httpx.Response) -> FlightDeckRefused | None:
+    """A :class:`FlightDeckRefused` for a 401/403 from Flight Deck, else None."""
+    if resp.status_code not in (401, 403):
+        return None
+    detail = ""
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            detail = str(body.get("detail") or "")
+    except Exception:
+        pass
+    auth_disabled = resp.headers.get("X-FD-Google-Unavailable", "").strip().lower() == "auth-disabled"
+    return FlightDeckRefused(resp.status_code, detail[:500], auth_disabled=auth_disabled)
+
+
 class GoogleOAuthManager:
     """Manages Google OAuth token storage and refresh."""
 
@@ -108,16 +150,34 @@ class GoogleOAuthManager:
 
     @staticmethod
     def _flight_deck_headers() -> dict[str, str]:
+        """This agent's credentials for FD's Google endpoints — sent only to
+        :meth:`_flight_deck_base`, which comes from config / the env FD pins at
+        spawn, never from a session or a websocket message.
+
+        ``X-Agent-Secret``: ``google_oauth.flight_deck_secret``, else the deck
+        secret — ``FD_AGENT_SHARED_SECRET``, then the per-deck ``agent_secret``
+        file (as ``tools.flight_deck._fd_agent_headers`` sends). Under
+        FD_LOCKDOWN FD refuses (401) an agent call without it, even from
+        loopback.
+        """
         headers: dict[str, str] = {}
         secret = (get_config().google_oauth.flight_deck_secret or "").strip()
         if not secret:
             secret = (os.environ.get("FD_AGENT_SHARED_SECRET", "") or "").strip()
+        if not secret:
+            try:
+                from captain_claw.flight_deck.agent_secret import get_or_create_agent_secret
+
+                secret = get_or_create_agent_secret()
+            except Exception:  # noqa: BLE001 — the header is an upgrade, never a blocker
+                secret = ""
         if secret:
             headers["X-Agent-Secret"] = secret
         # The per-agent web_auth token lets Flight Deck resolve WHICH user's
-        # Google connection to return — the shared secret can't. Without it, FD
-        # falls back to the primary owner (correct single-user, wrong once the
-        # deployment has more than one connected user).
+        # Google connection to return — the shared secret can't. Without one
+        # FD refuses (403): it never falls back to some other user's account.
+        # (httpx sends no Origin / Sec-Fetch-* headers, which FD's agent
+        # endpoints refuse as browser traffic.)
         token = str(getattr(getattr(get_config(), "web", None), "auth_token", "") or "").strip()
         if token:
             headers["X-Agent-Auth"] = token
@@ -127,6 +187,9 @@ class GoogleOAuthManager:
         return bool(self._flight_deck_base())
 
     async def _fd_get_access_token(self) -> GoogleOAuthTokens | None:
+        """The owner's access token from Flight Deck; None when FD is
+        unreachable or has none (404 — not configured / not connected).
+        Raises :class:`FlightDeckRefused` on a 401/403, keeping FD's reason."""
         base = self._flight_deck_base()
         if not base:
             return None
@@ -134,10 +197,18 @@ class GoogleOAuthManager:
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(url, headers=self._flight_deck_headers())
-                if resp.status_code == 404:
-                    return None  # Not configured / not connected upstream.
-                resp.raise_for_status()
-                data = resp.json()
+        except Exception as exc:
+            log.warning("Flight Deck access_token fetch failed: %s", exc)
+            return None
+        if resp.status_code == 404:
+            return None  # Not configured / not connected upstream.
+        refusal = _fd_refusal(resp)
+        if refusal:
+            log.warning("Flight Deck refused access_token: %s", refusal)
+            raise refusal
+        try:
+            resp.raise_for_status()
+            data = resp.json()
         except Exception as exc:
             log.warning("Flight Deck access_token fetch failed: %s", exc)
             return None
@@ -163,6 +234,10 @@ class GoogleOAuthManager:
                 resp = await client.get(url, headers=self._flight_deck_headers())
                 if resp.status_code == 404:
                     return None
+                refusal = _fd_refusal(resp)
+                if refusal:  # the LLM path wants None; keep FD's reason in the log
+                    log.warning("Flight Deck refused credentials: %s", refusal)
+                    return None
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
@@ -179,14 +254,21 @@ class GoogleOAuthManager:
         """Load tokens, refreshing if expired.
 
         In Flight Deck client mode this always calls out to Flight Deck
-        (which handles its own refresh). In local mode it reads from
-        ``app_state`` and refreshes in-process.
+        (which handles its own refresh) and raises :class:`FlightDeckRefused`
+        when Flight Deck refuses this agent — the google_* tools surface that
+        reason. In local mode it reads from ``app_state`` and refreshes
+        in-process.
         """
         if self._is_flight_deck_client():
             if self._cached_tokens and not self._cached_tokens.is_expired():
                 _mark_google_connected(True)
                 return self._cached_tokens
-            tokens = await self._fd_get_access_token()
+            try:
+                tokens = await self._fd_get_access_token()
+            except FlightDeckRefused:
+                self._cached_tokens = None
+                _mark_google_connected(False)
+                raise
             if tokens:
                 self._cached_tokens = tokens
                 _mark_google_connected(True)
@@ -303,7 +385,10 @@ class GoogleOAuthManager:
     async def is_connected(self) -> bool:
         """Return *True* when a valid access token can be obtained."""
         if self._is_flight_deck_client():
-            tokens = await self.get_tokens()
+            try:
+                tokens = await self.get_tokens()
+            except FlightDeckRefused:
+                tokens = None
             connected = bool(tokens and tokens.access_token)
         else:
             tokens = await self.get_tokens()

@@ -128,10 +128,31 @@ def pinned_flight_deck_url() -> str:
     return _norm_url(os.environ.get("FD_URL") or os.environ.get("FD_INTERNAL_URL"))
 
 
+# Names for "this machine" — from inside a Docker container FD is reached at
+# host.docker.internal while its env FD_URL may still say localhost.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
+
+
+def _pin_key(url: str | None) -> str:
+    """Comparison key for a FD base URL: normalized and lowercased, with every
+    local-host alias folded together (same scheme and port still required)."""
+    from urllib.parse import urlsplit
+
+    n = _norm_url(url).lower()
+    try:
+        parts = urlsplit(n)
+        host, port = parts.hostname or "", parts.port
+    except ValueError:
+        return n
+    if host not in _LOCAL_HOSTS:
+        return n
+    return f"{parts.scheme}://local:{port or ''}{parts.path}"
+
+
 def _pinned_flight_deck_urls() -> set[str]:
     """Every FD base URL from this agent's environment or config
     (``google_oauth.flight_deck_url``) — never one a websocket client supplied
-    (the session ``fd_url`` a ``peer_agents`` message sets)."""
+    (the session ``fd_url`` a ``peer_agents`` message sets). As `_pin_key`s."""
     urls = {os.environ.get("FD_URL", ""), os.environ.get("FD_INTERNAL_URL", "")}
     try:
         from captain_claw.config import get_config
@@ -139,7 +160,30 @@ def _pinned_flight_deck_urls() -> set[str]:
         urls.add(str(get_config().google_oauth.flight_deck_url or ""))
     except Exception:
         pass
-    return {u.lower() for u in map(_norm_url, urls) if u}
+    return {_pin_key(u) for u in urls if _norm_url(u)}
+
+
+def is_pinned_flight_deck_url(url: str | None) -> bool:
+    """Is ``url`` a FD this agent was configured with (see
+    `_pinned_flight_deck_urls`)? Only such a URL may receive its identity."""
+    return bool(_norm_url(url)) and _pin_key(url) in _pinned_flight_deck_urls()
+
+
+def resolve_flight_deck_url(session_url: str | None) -> str:
+    """The FD base URL an agent tool should call, given the session's ``fd_url``
+    (set by a ``peer_agents`` websocket message — any socket can send one).
+
+    The pinned URL, so a websocket client can't redirect the agent's calls (and
+    the messages they carry) elsewhere — except that a session URL naming the
+    SAME deck through another local-host alias wins: a Docker agent's env may
+    say ``localhost`` while the session carries the reachable
+    ``host.docker.internal``. With nothing pinned, the session URL (which then
+    gets no identity — see `agent_identity_headers`).
+    """
+    session = _norm_url(session_url)
+    if session and is_pinned_flight_deck_url(session):
+        return session
+    return pinned_flight_deck_url() or session
 
 
 def agent_identity_headers(fd_url: str) -> dict[str, str]:
@@ -155,7 +199,7 @@ def agent_identity_headers(fd_url: str) -> dict[str, str]:
     Both are credentials, so they never go to a URL a websocket client chose.
     Best-effort: a header that can't be resolved is left out.
     """
-    if not fd_url or _norm_url(fd_url).lower() not in _pinned_flight_deck_urls():
+    if not is_pinned_flight_deck_url(fd_url):
         return {}
     try:
         from captain_claw.config import get_config

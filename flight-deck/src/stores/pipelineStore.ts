@@ -108,9 +108,13 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
   },
 }))
 
+// Absent key → reset, so a previous user's list can't linger in memory and be
+// saved into the next account on its first edit (see localAgentStore).
 registerHydrator((settings) => {
   const raw = settings[STORAGE_KEY]
-  if (raw) {
-    try { usePipelineStore.setState({ pipelines: JSON.parse(raw) }) } catch { /* ignore */ }
+  if (!raw) {
+    usePipelineStore.setState({ pipelines: [] })
+    return
   }
+  try { usePipelineStore.setState({ pipelines: JSON.parse(raw) }) } catch { /* ignore */ }
 })

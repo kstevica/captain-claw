@@ -90,9 +90,17 @@ export const useLocalAgentStore = create<LocalAgentStore>((set, get) => ({
   },
 }))
 
+// Server settings are authoritative once signed in (same as uiStore): a key
+// that's ABSENT resets the list, so a previous user's agents — host, port and
+// authToken — can't linger for the next account in this tab. Safe against the
+// localStorage → server migration: hydrateAllStores runs it BEFORE hydrators
+// (a migrated list is already in `settings`), skips hydrators when the fetch
+// fails, and drops the localStorage copy of absent keys itself.
 registerHydrator((settings) => {
   const raw = settings[STORAGE_KEY]
-  if (raw) {
-    try { useLocalAgentStore.setState({ agents: JSON.parse(raw) }) } catch { /* ignore */ }
+  if (!raw) {
+    useLocalAgentStore.setState({ agents: [] })
+    return
   }
+  try { useLocalAgentStore.setState({ agents: JSON.parse(raw) }) } catch { /* ignore */ }
 })

@@ -121,8 +121,9 @@ export const useUIStore = create<UIStore>((set, get) => ({
 // Server-side settings win on login. The hydrator only runs when authenticated
 // (hydrateAllStores), so treat the server as authoritative: a key that's ABSENT
 // there resets the field to its default. Otherwise a previous user's mode/rails
-// would survive in the module-level store on a shared browser, since logout
-// doesn't reload. hydrateAllStores() clears the localStorage mirror for absent
+// would survive in the module-level store on a shared browser whenever the tab
+// isn't reloaded between sessions (sign-out reloads — this is defense in
+// depth). hydrateAllStores() clears the localStorage mirror for absent
 // keys itself, so we only re-mirror keys the server actually has.
 registerHydrator((settings) => {
   const mode = settings[LAYOUT_MODE_KEY]

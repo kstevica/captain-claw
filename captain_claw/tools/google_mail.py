@@ -297,9 +297,17 @@ class GoogleMailTool(Tool):
         mgr = GoogleOAuthManager(get_session_manager())
         tokens = await mgr.get_tokens()
         if not tokens:
+            if mgr._is_flight_deck_client():
+                # Under Flight Deck the agent-local OAuth flow's tokens are
+                # discarded — the owner connects THEIR account in Flight Deck.
+                raise RuntimeError(
+                    "Google account is not connected. Connect your Google "
+                    "account in Flight Deck → Connections → Google."
+                )
             raise RuntimeError(
                 "Google account is not connected. "
-                "Please connect via the Flight Deck Connections page."
+                "Please connect via the web UI (Settings > Google OAuth) or "
+                "navigate to /auth/google/login in your browser."
             )
 
         granted = set(tokens.scope.split()) if tokens.scope else set()

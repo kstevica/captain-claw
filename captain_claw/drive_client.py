@@ -6,8 +6,9 @@ through large folders, retries rate limits, and accepts any of the three Drive
 scopes rather than demanding full read/write.
 
 It is deliberately auth-agnostic. Tokens arrive through a ``token_provider``
-callback, so the same client works with today's global Google connection and
-with a future per-user one — only the provider changes, never this code.
+callback: Flight Deck routes pass an explicit per-user provider (the calling
+user's own connection), agents use :func:`global_token_provider` (the agent
+owner's connection) — only the provider changes, never this code.
 """
 
 from __future__ import annotations
@@ -381,12 +382,16 @@ class DriveClient:
 
 
 async def global_token_provider() -> tuple[str, str]:
-    """Resolve a token from the deployment-wide Google connection.
+    """Resolve a token from THIS process's Google connection.
 
-    This is the connection every Google tool uses today. It is correct for a
-    single-operator deployment; a per-user provider (resolving the mount
-    owner's own token) is the multi-tenant successor and is the ONLY piece that
-    has to change to get there — the client and the mount stay as they are.
+    The same connection every agent-side Google tool uses, via
+    :class:`GoogleOAuthManager`. Standalone that is the instance's own OAuth
+    connection. Under Flight Deck it is per-owner, not deployment-wide: FD
+    resolves the calling agent's OWNER (from its ``X-Agent-Auth``) and returns
+    that user's token — and the agent's VFS root is pinned to the same owner
+    (``CLAW_VFS_USER``), so mount owner and token owner coincide. Flight Deck's
+    own routes don't use this; they pass a per-user provider for the
+    requesting user (see ``vfs_routes._drive_client``).
     """
     from captain_claw.google_oauth_manager import GoogleOAuthManager
     from captain_claw.session import get_session_manager
@@ -399,5 +404,6 @@ async def global_token_provider() -> tuple[str, str]:
 
 
 def make_client(token_provider: TokenProvider | None = None) -> DriveClient:
-    """A DriveClient over the given provider, or the global connection."""
+    """A DriveClient over the given provider, or this process's connection
+    (the agent owner's under Flight Deck — see :func:`global_token_provider`)."""
     return DriveClient(token_provider or global_token_provider)

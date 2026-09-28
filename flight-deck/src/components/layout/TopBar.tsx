@@ -1,4 +1,4 @@
-import { RefreshCw, PanelLeft, Pin, FileText, ClipboardList, Sun, Moon, Keyboard, LogOut, MessageSquare, Menu, Columns3 } from 'lucide-react'
+import { RefreshCw, PanelLeft, Pin, FileText, ClipboardList, Sun, Moon, Keyboard, LogOut, Loader2, MessageSquare, Menu, Columns3 } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
 import { useAuthStore, logoutUser } from '../../stores/authStore'
 import { useThemeStore } from '../../stores/themeStore'
@@ -29,7 +29,7 @@ export function TopBar({
   isMobile, isTablet, onToggleSidebarDrawer,
 }: TopBarProps) {
   const { stats, fetchInstances, fetchStats, fetchConcerns } = useAgentStore()
-  const { authEnabled, user: authUser } = useAuthStore()
+  const { authEnabled, user: authUser, signingOut } = useAuthStore()
   const { theme, toggle: toggleTheme } = useThemeStore()
   const mobilePanel = useUIStore((s) => s.mobilePanel)
   const toggleMobilePanel = useUIStore((s) => s.toggleMobilePanel)
@@ -190,10 +190,11 @@ export function TopBar({
             {!isMobile && <span className="text-xs text-zinc-500">{authUser.display_name || authUser.email}</span>}
             <button
               onClick={logoutUser}
+              disabled={signingOut}
               className="rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 transition-colors"
-              title="Sign out"
+              title={signingOut ? 'Signing out…' : 'Sign out'}
             >
-              <LogOut className="h-3.5 w-3.5" />
+              {signingOut ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <LogOut className="h-3.5 w-3.5" />}
             </button>
           </>
         )}

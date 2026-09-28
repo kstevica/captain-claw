@@ -272,14 +272,21 @@ def build_authorization_url(
     state: str | None = None,
     code_challenge: str | None = None,
 ) -> str:
-    """Build the Google OAuth2 authorization URL."""
+    """Build the Google OAuth2 authorization URL.
+
+    ``prompt`` always shows the account chooser (``select_account``) as well as
+    the consent screen: without it a browser already signed into one Google
+    account goes straight to consent for THAT account, so on a shared machine
+    the next person silently connects the previous person's Google. ``consent``
+    (with ``access_type=offline``) still guarantees a refresh_token every time.
+    """
     params: dict[str, str] = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": " ".join(scopes or DEFAULT_SCOPES),
         "access_type": "offline",
-        "prompt": "consent",
+        "prompt": "select_account consent",
     }
     if state:
         params["state"] = state

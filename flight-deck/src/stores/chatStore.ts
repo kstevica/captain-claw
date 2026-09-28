@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { AgentChatWS, type ChatMessage, type TokenUsage } from '../services/agentChat'
-import { useAuthStore } from './authStore'
+import { useAuthStore, registerSignOutFlush } from './authStore'
 import { useContainerStore } from './containerStore'
 import { useLocalAgentStore } from './localAgentStore'
 import { useProcessStore } from './processStore'
@@ -190,6 +190,12 @@ async function _flushMessages() {
     } catch { /* ignore */ }
   }
 }
+
+// Sign-out drains the debounce now, while the outgoing user's token is valid.
+registerSignOutFlush(async () => {
+  if (_msgTimer) clearTimeout(_msgTimer)
+  await _flushMessages()
+})
 
 interface AgentModelInfo {
   id: string

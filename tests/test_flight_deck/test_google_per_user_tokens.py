@@ -36,8 +36,10 @@ def _tokens(access="A-tok", refresh="A-refresh", scope="openid https://www.googl
 async def db(monkeypatch):
     tmp = tempfile.mkdtemp()
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
     d = FlightDeckDB(str(Path(tmp) / "fd.db"))
     await d.init()
+    prev_db = auth._db
     auth.set_auth_db(d)
     # Two users with fixed ids (create_user mints its own UUID; the per-user
     # token rows just need valid FKs, and the tests key off known ids).
@@ -53,11 +55,12 @@ async def db(monkeypatch):
     await d.set_system_setting(gr._K_CLIENT_ID, "cid")
     await d.set_system_setting(gr._K_CLIENT_SECRET, "csecret")
     # Deterministic primary owner + reset the module cache between tests.
-    gr._primary_owner_cache["id"] = ALICE
+    gr._primary_owner_cache.update(id=ALICE, at=time.time())
     try:
         yield d
     finally:
-        gr._primary_owner_cache["id"] = None
+        gr._primary_owner_cache.update(id=None, at=0.0)
+        auth.set_auth_db(prev_db)
         await d.close()
 
 
@@ -124,6 +127,17 @@ class TestClientRotationClearsEveryone:
         assert await gr._load_tokens(db, BOB) is None
 
 
+def _registry(monkeypatch, tokens):
+    """Stand in for ``server._resolve_agent_identity_by_auth`` — which must
+    exist (a rename would 403 every agent while a stub hid it): (matched,
+    owner) for a web_auth token THIS deck issued, else (False, "")."""
+    import captain_claw.flight_deck.server as srv
+    monkeypatch.setattr(
+        srv, "_resolve_agent_identity_by_auth",
+        lambda t: (t in tokens, tokens.get(t, "")) if t else (False, ""),
+    )
+
+
 class TestAgentOwnerResolution:
     """An agent's Google token follows its OWNER, resolved from FD's records —
     never from what the agent claims."""
@@ -136,18 +150,43 @@ class TestAgentOwnerResolution:
         )
 
     async def test_web_auth_token_maps_to_owner(self, db, monkeypatch):
-        import captain_claw.flight_deck.server as srv
-        monkeypatch.setattr(srv, "_resolve_agent_owner_by_auth",
-                            lambda t: {"tok-alice": ALICE, "tok-bob": BOB}.get(t, ""))
+        _registry(monkeypatch, {"tok-alice": ALICE, "tok-bob": BOB})
         owner = await gr._agent_owner(self._req({"X-Agent-Auth": "tok-bob"}))
         assert owner == BOB
 
-    async def test_falls_back_to_primary_owner(self, db, monkeypatch):
+    async def test_unresolved_caller_is_refused_not_given_primary_owner(self, db, monkeypatch):
+        # An agent FD can't pin to a user (no / unknown X-Agent-Auth — e.g. a
+        # teammate's shell curl, or another deck's agent) used to silently get
+        # the PRIMARY OWNER's Google. It must fail closed, like deep memory.
+        from fastapi import HTTPException
+        _registry(monkeypatch, {})
+        for headers in ({}, {"X-Agent-Auth": "not-a-known-agent"}):
+            with pytest.raises(HTTPException) as exc:
+                await gr._agent_owner(self._req(headers, port=24080))
+            assert exc.value.status_code == 403
+
+    async def test_source_port_is_not_an_identity(self, db, monkeypatch):
+        # request.client.port is the caller's ephemeral outbound port — even if
+        # it happened to equal an agent's web port it must not pick an owner.
         import captain_claw.flight_deck.server as srv
-        monkeypatch.setattr(srv, "_resolve_agent_owner_by_auth", lambda t: "")
-        monkeypatch.setattr(srv, "_resolve_agent_owner", lambda p: "")
-        owner = await gr._agent_owner(self._req({}))  # nothing resolvable
-        assert owner == ALICE  # primary owner
+        from fastapi import HTTPException
+        _registry(monkeypatch, {})
+        monkeypatch.setattr(srv, "_resolve_agent_owner", lambda p: BOB)
+        with pytest.raises(HTTPException):
+            await gr._agent_owner(self._req({}, port=24080))
+
+    async def test_auth_disabled_deck_serves_no_agent(self, db, monkeypatch):
+        # Desktop (auth-off) deck: Google via FD isn't available there (no DB,
+        # no way to tell callers apart) — not even to an agent it spawned.
+        from fastapi import HTTPException
+        monkeypatch.setenv("FD_AUTH_ENABLED", "false")
+        _registry(monkeypatch, {"tok-bob": BOB, "tok-orphan": ""})
+        for headers in ({"X-Agent-Auth": "tok-bob"}, {"X-Agent-Auth": "tok-orphan"}, {},
+                        {"X-Agent-Auth": "other-deck"}):
+            with pytest.raises(HTTPException) as exc:
+                await gr._agent_owner(self._req(headers))
+            assert exc.value.status_code == 403
+            assert "auth is disabled" in exc.value.detail
 
 
 class TestAgentAccessTokenRoute:
@@ -161,9 +200,7 @@ class TestAgentAccessTokenRoute:
         )
 
     async def test_agent_gets_its_owners_token(self, db, monkeypatch):
-        import captain_claw.flight_deck.server as srv
-        monkeypatch.setattr(srv, "_resolve_agent_owner_by_auth",
-                            lambda t: {"tok-alice": ALICE, "tok-bob": BOB}.get(t, ""))
+        _registry(monkeypatch, {"tok-alice": ALICE, "tok-bob": BOB})
         monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "")  # loopback gate
         await gr._store_tokens(db, ALICE, _tokens(access="alice-only"))
 
@@ -171,10 +208,8 @@ class TestAgentAccessTokenRoute:
         assert out["access_token"] == "alice-only"
 
     async def test_agent_for_unconnected_owner_gets_404(self, db, monkeypatch):
-        import captain_claw.flight_deck.server as srv
         from fastapi import HTTPException
-        monkeypatch.setattr(srv, "_resolve_agent_owner_by_auth",
-                            lambda t: {"tok-alice": ALICE, "tok-bob": BOB}.get(t, ""))
+        _registry(monkeypatch, {"tok-alice": ALICE, "tok-bob": BOB})
         monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "")
         await gr._store_tokens(db, ALICE, _tokens())  # only alice connected
         with pytest.raises(HTTPException) as exc:

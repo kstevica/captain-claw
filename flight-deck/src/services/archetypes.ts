@@ -1,6 +1,7 @@
 // Per-tenant archetype management — talks to /fd/archetypes (CRUD + generate).
 // The merged registry itself (base + the user's own) is fetched by useTierConfig.
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+import type { ArchetypeRegistry } from './tierConfig'
 
 // The editable shape of a user archetype, matching the backend ArchetypeBody.
 export interface ArchetypeInput {
@@ -44,6 +45,12 @@ async function jsonOrThrow(res: Response) {
     throw new Error(body.detail || `${res.status}`)
   }
   return res.json()
+}
+
+// The merged gallery (base + the caller's own + shared-with-them) without the
+// tier-set machinery of useTierConfig — for read-only pickers.
+export async function listArchetypes(): Promise<ArchetypeRegistry> {
+  return jsonOrThrow(await authFetch('/fd/archetypes', { method: 'GET' }))
 }
 
 export async function createArchetype(body: ArchetypeInput) {

@@ -66,9 +66,13 @@ export const useClipboardStore = create<ClipboardStore>((set, get) => ({
   },
 }))
 
+// Absent key → reset, so a previous user's list can't linger in memory and be
+// saved into the next account on its first edit (see localAgentStore).
 registerHydrator((settings) => {
   const raw = settings[STORAGE_KEY]
-  if (raw) {
-    try { useClipboardStore.setState({ entries: JSON.parse(raw) }) } catch { /* ignore */ }
+  if (!raw) {
+    useClipboardStore.setState({ entries: [] })
+    return
   }
+  try { useClipboardStore.setState({ entries: JSON.parse(raw) }) } catch { /* ignore */ }
 })
