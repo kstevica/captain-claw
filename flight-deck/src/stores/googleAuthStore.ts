@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { useAuthStore, refreshAccessToken } from './authStore'
+import { useAuthStore, refreshAccessToken, registerSignOutTeardown } from './authStore'
 
 export interface GrantedScope {
   scope: string
@@ -170,6 +170,8 @@ function _watchPopup(popup: Window, onClosed: () => void): void {
     }
   }, _POPUP_POLL_MS)
 }
+
+registerSignOutTeardown(() => _forgetPopup(true))
 
 // The Electron shell (desktop/preload.js): it hands every http(s)
 // window.open to the system browser and denies the in-app window.

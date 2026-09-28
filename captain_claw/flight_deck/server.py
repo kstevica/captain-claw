@@ -6457,6 +6457,13 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
 
     slug = _slug(config.name)
 
+    # A name is a directory: re-spawning a stopped agent reuses its data dir
+    # (workspace, sessions, memory). Another user's name is theirs — refuse it
+    # rather than hand this caller that agent's data and registry entry.
+    prior_owner = str((_load_process_registry().get(slug) or {}).get("owner") or "")
+    if AUTH_ENABLED and prior_owner and owner_id and prior_owner != owner_id:
+        raise HTTPException(409, f"An agent named '{slug}' already exists. Choose a different name.")
+
     # Check if already running
     if _process_is_alive(slug):
         raise HTTPException(400, f"Process '{slug}' is already running. Stop it first or use a different name.")
@@ -7617,10 +7624,10 @@ def main():
         help=(
             "Kiosk mode: lock the UI to the chat-first Simple layout — agents on "
             "the left, conversation in the middle, the active agent's files and "
-            "data on the right. Strips the full-view switch, spawn, agent config, "
-            "start/stop and sign-out controls so shared-account users can only "
-            "chat with the agents that are already running. Also settable via the "
-            "FD_SIMPLE_CHAT env var."
+            "data on the right. Strips the full-view switch, the Spawner, agent "
+            "config and start/stop controls so shared-account users can only "
+            "chat, create an agent from a Library archetype, or sign out. Admins "
+            "are exempt. Also settable via the FD_SIMPLE_CHAT env var."
         ),
     )
     args = parser.parse_args()

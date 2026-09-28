@@ -24,24 +24,25 @@ async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
     if (!refreshed) throw new Error('Not authenticated')
   }
 
-  const res = await fetch(`${FD_BASE}${path}`, {
+  let res = await fetch(`${FD_BASE}${path}`, {
     headers: _authHeaders(),
     credentials: 'include',
     ...init,
   })
-  // On 401 try to refresh the token once
+  // On 401 try to refresh the token once. Only a FAILED refresh ends the
+  // session: a retry that still fails with a fresh token is an ordinary
+  // error, and clearing auth on it would bounce the tab through the
+  // session-end reload (App) for nothing.
   if (res.status === 401 && useAuthStore.getState().authEnabled) {
-    const refreshed = await refreshAccessToken()
-    if (refreshed) {
-      const retry = await fetch(`${FD_BASE}${path}`, {
-        headers: _authHeaders(),
-        credentials: 'include',
-        ...init,
-      })
-      if (retry.ok) return retry.json()
+    if (!(await refreshAccessToken())) {
+      useAuthStore.getState().clearAuth()
+      throw new Error('Session expired')
     }
-    useAuthStore.getState().clearAuth()
-    throw new Error('Session expired')
+    res = await fetch(`${FD_BASE}${path}`, {
+      headers: _authHeaders(),
+      credentials: 'include',
+      ...init,
+    })
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }))
@@ -266,6 +267,23 @@ export const spawnProcess = (config: SpawnConfig) =>
   fdFetch<ProcessActionResult>('/spawn-process', {
     method: 'POST',
     body: JSON.stringify(config),
+  })
+
+// Spawn a process agent from a Library archetype, resolved SERVER-side: FD
+// fills tools / cognitive mode / runtime from the archetype and the model from
+// the caller's tier set (else the admin-published team default), so no model
+// config or API key passes through the browser. The kiosk's "New agent" picker.
+export const spawnArchetypeProcess = (archetypeId: string, name: string, description: string) =>
+  fdFetch<ProcessActionResult>('/spawn-process', {
+    method: 'POST',
+    body: JSON.stringify({
+      name,
+      description,
+      archetype: archetypeId,
+      botport_enabled: false,
+      web_enabled: true,
+      web_port: 0,
+    }),
   })
 
 export const stopProcess = (slug: string) =>

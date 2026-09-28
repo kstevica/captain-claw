@@ -6,7 +6,7 @@
  * One-time migration: reads localStorage fd:* keys, uploads, clears.
  */
 
-import { useAuthStore } from '../stores/authStore'
+import { useAuthStore, registerSignOutFlush } from '../stores/authStore'
 
 const FD = '/fd'
 
@@ -62,6 +62,18 @@ export async function fetchSettings(): Promise<Record<string, string>> {
   return res.json()
 }
 
+async function _fetchSettingsOrNull(): Promise<Record<string, string> | null> {
+  try {
+    const res = await fetch(`${FD}/settings`, {
+      headers: _headers(),
+      credentials: 'include',
+    })
+    return res.ok ? await res.json() : null
+  } catch {
+    return null
+  }
+}
+
 /** Save settings to server (partial merge). */
 export async function saveSettings(settings: Record<string, string>): Promise<void> {
   await fetch(`${FD}/settings`, {
@@ -105,6 +117,12 @@ async function _flush(): Promise<void> {
   }
 }
 
+// Sign-out drains the debounce now, while the outgoing user's token is valid.
+registerSignOutFlush(async () => {
+  if (_timer) clearTimeout(_timer)
+  await _flush()
+})
+
 // ── Migration ──
 
 /** Migrate localStorage fd:* keys to server. Called once on first auth login. */
@@ -144,12 +162,22 @@ export function registerHydrator(fn: StoreHydrator): void {
  * If no server settings exist, attempt migration from localStorage.
  */
 export async function hydrateAllStores(): Promise<void> {
-  let settings = await fetchSettings()
+  // A FAILED fetch is not "no settings": treating it as empty would run the
+  // one-time migration — a PUT merging whatever fd:* keys this browser holds
+  // over the user's real server settings — and then delete every fd:*
+  // localStorage mirror. Skip all of it; the next load retries. This does not
+  // make the list stores (pins, clipboard, pipelines…) safe to edit: after a
+  // load they start from this browser's localStorage (normally nothing), not
+  // the server, so until a hydrate succeeds the first add still saves that
+  // list over the server's copy.
+  let settings = await _fetchSettingsOrNull()
+  if (settings === null) return
 
   // If server has no settings, try migrating from localStorage
   if (Object.keys(settings).length === 0) {
     await migrateFromLocalStorage()
-    settings = await fetchSettings()
+    settings = await _fetchSettingsOrNull()
+    if (settings === null) return
   }
 
   for (const hydrate of _hydrators) {

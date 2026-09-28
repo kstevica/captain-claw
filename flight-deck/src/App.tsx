@@ -45,7 +45,7 @@ import { BeingsPage } from './pages/BeingsPage'
 import { PublicBeingPage } from './pages/PublicBeingPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
-import { useAuthStore, selectKioskLocked, checkAuthStatus, refreshAccessToken } from './stores/authStore'
+import { useAuthStore, selectKioskLocked, awaitAuthStatus, refreshAccessToken, reloadAfterSessionEnd } from './stores/authStore'
 import { useChatStore } from './stores/chatStore'
 import { useContainerStore } from './stores/containerStore'
 import { useLocalAgentStore } from './stores/localAgentStore'
@@ -393,9 +393,9 @@ function AppContent() {
   // ── Kiosk lock (server --simple-chat / FD_SIMPLE_CHAT) ──
   // Force the locked, chat-first Simple layout on every form factor and ignore
   // the stored layoutMode entirely. `locked` strips the escape hatches (full
-  // view, spawn, agent config, start/stop, sign-out) so shared-account users
-  // can only chat with the agents that are already running — nothing else is
-  // reachable. Placed before the mobile/tablet/full branches so it always wins.
+  // view, the Spawner, agent config, start/stop) so shared-account users can
+  // only chat, create an agent from a Library archetype, or sign out — nothing
+  // else is reachable. Placed before the mobile/tablet/full branches so it always wins.
   // Admins are exempt (selectKioskLocked) — they keep full access even here.
   if (kioskLocked) {
     return (
@@ -571,6 +571,7 @@ function App() {
   const authEnabled = useAuthStore((s) => s.authEnabled)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const [authChecked, setAuthChecked] = useState(false)
+  const [fdUnreachable, setFdUnreachable] = useState(false)
 
   // The public square (plan §9) is the one surface that lives OUTSIDE auth:
   // /village and /b/<slug> render for anyone, logged in or not, before the
@@ -580,10 +581,15 @@ function App() {
     return <PublicBeingPage />
   }
 
-  // On mount: check if auth is enabled, try to refresh token
+  // On mount: check if auth is enabled, try to refresh token. An unreachable
+  // FD is retried, never taken as "auth off" — that would render the full,
+  // unlocked UI (kiosk lock included) on a deck that enforces auth.
   useEffect(() => {
+    let cancelled = false
     async function init() {
-      const enabled = await checkAuthStatus()
+      const enabled = await awaitAuthStatus(() => setFdUnreachable(true), () => cancelled)
+      if (enabled === null || cancelled) return
+      setFdUnreachable(false)
       if (enabled) {
         // Try refreshing an existing session
         const ok = await refreshAccessToken()
@@ -595,13 +601,19 @@ function App() {
       setAuthChecked(true)
     }
     init()
+    return () => { cancelled = true }
   }, [])
 
-  // After login, hydrate stores
+  // After login, hydrate stores. On the way back out (sign-out, or a session
+  // that expired: a 401 whose refresh failed → clearAuth()), reload instead of
+  // just showing LoginPage over the old session's sockets and stores — see
+  // reloadAfterSessionEnd (it's loop-guarded; startup never goes true → false).
   const prevAuth = useRef(false)
   useEffect(() => {
     if (isAuthenticated && !prevAuth.current) {
       hydrateAllStores()
+    } else if (!isAuthenticated && prevAuth.current) {
+      reloadAfterSessionEnd()
     }
     prevAuth.current = isAuthenticated
   }, [isAuthenticated])
@@ -610,7 +622,9 @@ function App() {
   if (!authChecked) {
     return (
       <div className="min-h-screen bg-[#0a0a1a] flex items-center justify-center">
-        <div className="text-zinc-500 text-sm">Loading...</div>
+        <div className="text-zinc-500 text-sm">
+          {fdUnreachable ? "Can't reach Flight Deck — retrying…" : 'Loading...'}
+        </div>
       </div>
     )
   }

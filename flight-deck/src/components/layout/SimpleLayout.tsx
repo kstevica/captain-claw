@@ -35,6 +35,7 @@ import { ChatPanel } from '../agents/ChatPanel'
 import { AgentFilesPanel } from '../agents/AgentFilesPanel'
 import { AgentDatastorePanel } from '../agents/AgentDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
+import { ArchetypeSpawnDialog } from './ArchetypeSpawnDialog'
 import { NotificationBell } from '../common/NotificationCenter'
 import { APP_VERSION, BUILD_DATE } from '../../version'
 
@@ -113,6 +114,10 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
 
   const [starting, setStarting] = useState<Set<string>>(() => new Set())
   const [optionsAgent, setOptionsAgent] = useState<SimpleAgent | null>(null)
+  // Kiosk "New agent" picker, and the agent it just spawned — opened as soon
+  // as it comes up reachable.
+  const [archetypeOpen, setArchetypeOpen] = useState(false)
+  const [pendingOpenId, setPendingOpenId] = useState<string | null>(null)
 
   // Keep the agent list fresh — the Desktop page normally does this polling,
   // and it isn't mounted here. Same auth guard as there: with auth on and no
@@ -204,12 +209,41 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
 
   const refresh = () => { fetchContainers(); fetchProcesses(); probeAll() }
 
-  // In the kiosk lock, spawning leaves the chat surface (it flips to the full
-  // layout's Spawner) — so it's a no-op there and the triggers are hidden.
+  // The full Spawner leaves the chat surface, which the kiosk lock can't — so
+  // there spawning means the archetype picker instead.
   const goSpawn = () => {
-    if (locked) return
+    if (locked) { setArchetypeOpen(true); return }
     useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('spawner')
   }
+
+  // Open the just-spawned agent once it actually answers: FD lists a process as
+  // running the moment it launches, seconds before its web server binds, and a
+  // chat opened then fails for good. Gives up after ~90s (it's in the list).
+  const agentsRef = useRef(agents)
+  agentsRef.current = agents
+  useEffect(() => {
+    if (!pendingOpenId) return
+    let cancelled = false
+    let tries = 0
+    let timer: ReturnType<typeof setTimeout>
+    const tick = async () => {
+      const a = agentsRef.current.find((x) => x.id === pendingOpenId)
+      if (a?.reachable) {
+        const { token } = useAuthStore.getState()
+        const ok = await fetch(`/fd/probe?host=${encodeURIComponent(a.host)}&port=${a.port}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          credentials: 'include',
+        }).then((r) => (r.ok ? r.json() : null)).then((d) => !!d?.ok).catch(() => false)
+        if (cancelled) return
+        if (ok) { setPendingOpenId(null); handleOpen(a); return }
+      }
+      if (++tries >= 60) { setPendingOpenId(null); return }
+      timer = setTimeout(tick, 1500)
+    }
+    timer = setTimeout(tick, 1500)
+    return () => { cancelled = true; clearTimeout(timer) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenId])
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -237,6 +271,18 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
         agentName={activeSessionName}
         onOptions={!locked && activeAgent ? () => setOptionsAgent(activeAgent) : undefined}
       />
+
+      {archetypeOpen && (
+        <ArchetypeSpawnDialog
+          takenSlugs={new Set(processes.map((p) => p.slug))}
+          onClose={() => setArchetypeOpen(false)}
+          onSpawned={(slug) => {
+            setArchetypeOpen(false)
+            setPendingOpenId(`proc-${slug}`)
+            useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
+          }}
+        />
+      )}
 
       {!locked && optionsAgent && createPortal(
         <AgentConfigEditor
@@ -271,7 +317,7 @@ function AgentsColumn({
   const setOpen = useUIStore((s) => s.setSimpleLeftOpen)
   const setLayoutMode = useUIStore((s) => s.setLayoutMode)
   const wsConnected = useAgentStore((s) => s.wsConnected)
-  const { authEnabled, user: authUser } = useAuthStore()
+  const { authEnabled, user: authUser, signingOut } = useAuthStore()
   const { theme, toggle: toggleTheme } = useThemeStore()
   const width = usePersistedSize('fd:simple-left-width', 260, 200, 440, 'x')
   const [search, setSearch] = useState('')
@@ -339,11 +385,9 @@ function AgentsColumn({
               </button>
             )
           })}
-          {!locked && (
-            <button onClick={onSpawn} className={`${iconBtn} mt-1`} title="Spawn a new agent">
-              <Plus className="h-4 w-4" />
-            </button>
-          )}
+          <button onClick={onSpawn} className={`${iconBtn} mt-1`} title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}>
+            <Plus className="h-4 w-4" />
+          </button>
         </div>
         <div className="flex flex-col items-center gap-0.5 border-t border-zinc-800 py-2">
           <button onClick={toggleTheme} className={iconBtn} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
@@ -352,9 +396,11 @@ function AgentsColumn({
           <button onClick={onRefresh} className={iconBtn} title="Refresh agents">
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
-          {!locked && authEnabled && authUser && (
-            <button onClick={logoutUser} className={iconBtn} title={`Sign out ${authUser.display_name || authUser.email}`}>
-              <LogOut className="h-3.5 w-3.5" />
+          {/* Sign-out stays in the kiosk lock too — it's how a shared kiosk
+              hands the screen to the next person. */}
+          {authEnabled && authUser && (
+            <button onClick={logoutUser} disabled={signingOut} className={iconBtn} title={signingOut ? 'Signing out…' : `Sign out ${authUser.display_name || authUser.email}`}>
+              {signingOut ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <LogOut className="h-3.5 w-3.5" />}
             </button>
           )}
         </div>
@@ -395,11 +441,9 @@ function AgentsColumn({
         <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">
           Agents ({agents.length})
         </span>
-        {!locked && (
-          <button onClick={onSpawn} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300" title="Spawn a new agent">
-            <Plus className="h-3.5 w-3.5" />
-          </button>
-        )}
+        <button onClick={onSpawn} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300" title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}>
+          <Plus className="h-3.5 w-3.5" />
+        </button>
       </div>
 
       {/* Search (only once the list is long enough to need it) */}
@@ -513,11 +557,9 @@ function AgentsColumn({
         {authEnabled && authUser && (
           <div className="flex min-w-0 items-center gap-1">
             <span className="truncate text-xs text-zinc-500">{authUser.display_name || authUser.email}</span>
-            {!locked && (
-              <button onClick={logoutUser} className={iconBtn} title="Sign out">
-                <LogOut className="h-3.5 w-3.5" />
-              </button>
-            )}
+            <button onClick={logoutUser} disabled={signingOut} className={iconBtn} title={signingOut ? 'Signing out…' : 'Sign out'}>
+              {signingOut ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <LogOut className="h-3.5 w-3.5" />}
+            </button>
           </div>
         )}
       </div>
@@ -559,15 +601,15 @@ function EmptyChat({ hasAgents, onSpawn, locked = false }: { hasAgents: boolean;
           {hasAgents
             ? 'Choose an agent on the left to start a conversation. Its files and data show up on the right.'
             : locked
-              ? 'No agents are running yet. Ask an administrator to start one.'
+              ? 'Create an agent from an archetype to start chatting.'
               : 'Spawn your first agent to start chatting.'}
         </p>
-        {!hasAgents && !locked && (
+        {!hasAgents && (
           <button
             onClick={onSpawn}
             className="mt-6 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500"
           >
-            Spawn an agent
+            {locked ? 'New agent' : 'Spawn an agent'}
           </button>
         )}
       </div>

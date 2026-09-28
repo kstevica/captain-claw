@@ -399,6 +399,26 @@ class TestSpawnProcessRoute:
         assert not (spawn_env / "forged").exists()
         assert _FakePopen.calls == []
 
+    async def test_another_users_agent_name_is_refused(self, spawn_env, users):
+        """alice-agent is stopped; re-spawning it would reuse its data dir. Bob
+        (e.g. a kiosk account picking an archetype's default name) gets a 409,
+        and nothing of Alice's is touched."""
+        before = dict(server._load_process_registry()["alice-agent"])
+        async with _client(REMOTE) as c:
+            r = await c.post("/fd/spawn-process", json={"name": "Alice-Agent", "web_port": 24530},
+                             headers={"Authorization": f"Bearer {create_access_token(BOB)}"})
+        assert r.status_code == 409
+        assert "already exists" in r.json()["detail"]
+        assert server._load_process_registry()["alice-agent"] == before
+        assert _FakePopen.calls == []
+
+    async def test_own_stopped_agent_can_be_respawned(self, spawn_env, users):
+        async with _client(REMOTE) as c:
+            r = await c.post("/fd/spawn-process", json={"name": "alice-agent", "web_port": 24531},
+                             headers={"Authorization": f"Bearer {create_access_token(ALICE)}"})
+        assert r.status_code == 200, r.text
+        assert server._load_process_registry()["alice-agent"]["owner"] == ALICE
+
     async def test_jwt_user_cannot_be_reassigned_by_hint(self, spawn_env, users):
         tok = create_access_token(BOB)
         async with _client(REMOTE) as c:
