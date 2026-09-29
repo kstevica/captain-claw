@@ -952,11 +952,7 @@ async def lifespan(app: FastAPI):
             # (_build_env writes env_vars AFTER provider_api_key, so a same-named env
             # var would otherwise clobber it). Only strip when we actually resolved one.
             if resolved.get("api_key"):
-                _prov_env = {
-                    "anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY",
-                    "gemini": "GEMINI_API_KEY", "xai": "XAI_API_KEY",
-                    "openrouter": "OPENROUTER_API_KEY",
-                }.get(str(resolved.get("provider") or ""), "")
+                _prov_env = _PROVIDER_KEY_ENV.get(str(resolved.get("provider") or ""), "")
                 if _prov_env:
                     merged_env.pop(_prov_env, None)
             env_list = [{"key": k, "value": v} for k, v in merged_env.items()]
@@ -1540,21 +1536,35 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
     # the caller-inherited model when we actually resolve one; otherwise leave it
     # and let `_resolve_tier` try the central registry table as a last resort.
     eff_tier = explicit_tier or str(arch.get("tier") or "")
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    tiers_map: dict = {}
+    owner_env: list = []
+    try:
+        tiers_map, owner_env = await _load_owner_tiers(get_db(), uid)
+    except Exception as exc:
+        log.warning("Archetype owner-config resolve failed", tier=eff_tier, error=str(exc))
     if eff_tier:
-        tcfg: dict = {}
-        try:
-            from captain_claw.flight_deck.basna_routes import _load_owner_tiers
-            tiers_map, _env = await _load_owner_tiers(get_db(), uid)
-            tcfg = (tiers_map or {}).get(eff_tier) or {}
-        except Exception as exc:
-            log.warning("Archetype tier resolve failed", tier=eff_tier, error=str(exc))
+        tcfg: dict = (tiers_map or {}).get(eff_tier) or {}
         if tcfg.get("model"):
             new_provider = tcfg.get("provider", config.provider)
             provider_changed = new_provider != config.provider
             config.provider = new_provider
             config.model = tcfg["model"]
+            # The tier's key verbatim, as the Library spawn sends it: "@system"
+            # (team-default sets) is swapped for the org key by
+            # _resolve_spawn_provider_key; a blank one stays blank, so the set's
+            # own env var (below) or the caller's key applies — never the org
+            # key by default. A caller key for another provider is no use here.
             if tcfg.get("api_key"):
                 config.provider_api_key = tcfg["api_key"]
+            elif provider_changed:
+                config.provider_api_key = ""
+            # The tier's context sizes, where the caller didn't set its own (a
+            # model whose output cap is below the 32768 default would 400).
+            if "max_tokens" not in config.model_fields_set and int(tcfg.get("output_ctx") or 0) > 0:
+                config.max_tokens = int(tcfg["output_ctx"])
+            if "max_context" not in config.model_fields_set and int(tcfg.get("input_ctx") or 0) > 0:
+                config.max_context = int(tcfg["input_ctx"])
             if tcfg.get("base_url"):
                 config.base_url = tcfg["base_url"]
             elif provider_changed:
@@ -1565,6 +1575,19 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
             config.tier = ""  # pinned now — don't let _resolve_tier re-map it
         elif not config.tier:
             config.tier = eff_tier  # last resort: central registry tier table
+    # The tier set's own keys (BRAVE_API_KEY, TAVILY_API_KEY, …) — what the
+    # Library spawn sends as env_vars; without them the agent's tools have no
+    # credentials. Names the caller set win, and a set var never clobbers the
+    # resolved LLM key (_build_env writes env_vars after provider_api_key).
+    have = {str(ev.get("key") or "") for ev in config.env_vars}
+    llm_env = _PROVIDER_KEY_ENV.get(config.provider, "") if config.provider_api_key else ""
+    for ev in owner_env or []:
+        if not isinstance(ev, dict):  # settings are free-form; never fail the spawn
+            continue
+        name = str(ev.get("key") or "").strip()
+        if name and name not in have and name != llm_env and str(ev.get("value") or ""):
+            config.env_vars.append({"key": name, "value": str(ev["value"])})
+            have.add(name)
     log.info("Resolved archetype spawn", archetype=aid, tier=eff_tier or "(default)",
              cognitive_mode=config.cognitive_mode, provider=config.provider, model=config.model)
 
@@ -1693,18 +1716,20 @@ def _build_config_yaml(c: AgentConfig) -> str:
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
+# The env var an agent reads its LLM provider key from.
+_PROVIDER_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "xai": "XAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
 def _build_env(c: AgentConfig) -> str:
     lines: list[str] = []
     if c.provider_api_key:
-        # Map provider to env var name
-        key_map = {
-            "anthropic": "ANTHROPIC_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "gemini": "GEMINI_API_KEY",
-            "xai": "XAI_API_KEY",
-            "openrouter": "OPENROUTER_API_KEY",
-        }
-        env_name = key_map.get(c.provider, "API_KEY")
+        env_name = _PROVIDER_KEY_ENV.get(c.provider, "API_KEY")
         lines.append(f"{env_name}={c.provider_api_key}")
     # Ollama inside Docker needs to reach the host
     if c.provider == "ollama":
