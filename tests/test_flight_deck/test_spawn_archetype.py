@@ -33,22 +33,23 @@ def patch_registry(monkeypatch: pytest.MonkeyPatch):
     import captain_claw.flight_deck.auth as auth_mod
     import captain_claw.flight_deck.basna_routes as basna_mod
 
-    state = types.SimpleNamespace(archetypes=[], tiers={}, last_uid=None)
+    state = types.SimpleNamespace(archetypes=[], tiers={}, env=[], last_uid=None)
 
     async def fake_merged(db, uid):
         state.last_uid = uid
         return list(state.archetypes)
 
     async def fake_owner_tiers(db, uid):
-        return dict(state.tiers), []
+        return dict(state.tiers), list(state.env)
 
     monkeypatch.setattr(arch_mod, "merged_archetypes", fake_merged)
     monkeypatch.setattr(auth_mod, "get_db", lambda: object())
     monkeypatch.setattr(basna_mod, "_load_owner_tiers", fake_owner_tiers)
 
-    def _set(archetypes=None, tiers=None):
+    def _set(archetypes=None, tiers=None, env=None):
         state.archetypes = archetypes or []
         state.tiers = tiers or {}
+        state.env = env or []
 
     state.set = _set
     return state
@@ -160,3 +161,127 @@ async def test_owner_hint_used_when_no_authenticated_user(patch_registry):
     await server._resolve_archetype(cfg, _req(), None)
     assert patch_registry.last_uid == "owner-42"
     assert cfg.cognitive_mode == "kritika"  # resolution actually happened
+
+
+# ── keys from the owner's tier set (kiosk "New agent" spawns only send the id) ──
+
+_ANALYST = {"id": "analyst", "role": "Data Analyst", "tier": "balanced"}
+
+
+async def test_tier_set_env_vars_reach_the_agent(patch_registry):
+    """The set's own keys (tool credentials) come along, as the Library spawn
+    sends them — the kiosk picker sends only the archetype id."""
+    patch_registry.set(
+        archetypes=[_ANALYST],
+        tiers={"balanced": {"provider": "anthropic", "model": "claude-sonnet-5", "api_key": "sk-tier"}},
+        env=[{"key": "BRAVE_API_KEY", "value": "brave-1"}, {"key": "TAVILY_API_KEY", "value": "tav-1"},
+             {"key": "EMPTY", "value": ""}],
+    )
+    cfg = server.AgentConfig(name="x", archetype="analyst")
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.provider_api_key == "sk-tier"
+    env = {e["key"]: e["value"] for e in cfg.env_vars}
+    assert env == {"BRAVE_API_KEY": "brave-1", "TAVILY_API_KEY": "tav-1"}
+    assert "BRAVE_API_KEY=brave-1" in server._build_env(cfg)
+
+
+async def test_caller_env_wins_and_set_never_clobbers_the_llm_key(patch_registry):
+    patch_registry.set(
+        archetypes=[_ANALYST],
+        tiers={"balanced": {"provider": "anthropic", "model": "claude-sonnet-5", "api_key": "sk-tier"}},
+        env=[{"key": "BRAVE_API_KEY", "value": "from-set"},
+             {"key": "ANTHROPIC_API_KEY", "value": "stale-extra"}],
+    )
+    cfg = server.AgentConfig(name="x", archetype="analyst",
+                             env_vars=[{"key": "BRAVE_API_KEY", "value": "from-caller"}])
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    env = {e["key"]: e["value"] for e in cfg.env_vars}
+    assert env == {"BRAVE_API_KEY": "from-caller"}
+    assert "ANTHROPIC_API_KEY=sk-tier" in server._build_env(cfg)
+    assert "stale-extra" not in server._build_env(cfg)
+
+
+async def test_system_tier_key_is_left_for_the_fresh_org_key_lookup(patch_registry, monkeypatch):
+    """Team-default sets store "@system"; it's carried verbatim (as the Library
+    spawn sends it) and _resolve_spawn_provider_key swaps in the org key from a
+    fresh read just before .env is written."""
+    import captain_claw.flight_deck.auth as auth_mod
+
+    class _DB:
+        async def get_system_setting(self, key):
+            return '{"openai": "sk-org"}' if key == "fd:provider-keys" else None
+
+    patch_registry.set(archetypes=[_ANALYST],
+                       tiers={"balanced": {"provider": "openai", "model": "gpt-6", "api_key": "@system"}})
+    cfg = server.AgentConfig(name="x", archetype="analyst")
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.provider_api_key == "@system"
+    monkeypatch.setattr(auth_mod, "get_db", lambda: _DB())
+    await server._resolve_spawn_provider_key(cfg)
+    assert (cfg.provider, cfg.model, cfg.provider_api_key) == ("openai", "gpt-6", "sk-org")
+
+
+async def test_blank_tier_key_never_becomes_the_org_key(patch_registry, monkeypatch):
+    """A blank tier key stays blank: the set's own OPENAI_API_KEY applies (the
+    user's key), never a silent org key — also not to a custom gateway."""
+    import captain_claw.flight_deck.basna_routes as basna_mod
+
+    monkeypatch.setattr(basna_mod, "_SYSTEM_PROVIDER_KEYS", {"openai": "sk-org"})
+    patch_registry.set(
+        archetypes=[_ANALYST],
+        tiers={"balanced": {"provider": "openai", "model": "gpt-6", "api_key": "",
+                            "base_url": "https://gw.example/v1"}},
+        env=[{"key": "OPENAI_API_KEY", "value": "sk-user-own"}])
+    cfg = server.AgentConfig(name="x", archetype="analyst")
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.provider_api_key == ""
+    env = server._build_env(cfg)
+    assert "OPENAI_API_KEY=sk-user-own" in env and "sk-org" not in env
+
+
+async def test_blank_tier_key_keeps_the_callers_same_provider_key(patch_registry):
+    """The flight_deck tool sends the parent's own key; a blank tier key on the
+    same provider doesn't replace it."""
+    patch_registry.set(archetypes=[_ANALYST],
+                       tiers={"balanced": {"provider": "anthropic", "model": "claude-sonnet-5", "api_key": ""}})
+    cfg = server.AgentConfig(name="x", archetype="analyst", provider="anthropic",
+                             provider_api_key="sk-ant-caller")
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.provider_api_key == "sk-ant-caller"
+
+
+async def test_provider_switch_without_a_key_drops_the_inherited_one(patch_registry):
+    patch_registry.set(archetypes=[_ANALYST],
+                       tiers={"balanced": {"provider": "openai", "model": "gpt-6", "api_key": ""}})
+    cfg = server.AgentConfig(name="x", archetype="analyst", provider="anthropic",
+                             provider_api_key="sk-ant-caller")
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.provider == "openai" and cfg.provider_api_key == ""
+
+
+async def test_tier_context_sizes_apply_unless_the_caller_set_them(patch_registry):
+    patch_registry.set(archetypes=[_ANALYST],
+                       tiers={"balanced": {"provider": "openai", "model": "gpt-6", "api_key": "k",
+                                           "output_ctx": 8192, "input_ctx": 64000}})
+    kiosk = server.AgentConfig(name="x", archetype="analyst")
+    await server._resolve_archetype(kiosk, _req("u1"), None)
+    assert (kiosk.max_tokens, kiosk.max_context) == (8192, 64000)
+    explicit = server.AgentConfig(name="x", archetype="analyst", max_tokens=4096, max_context=32000)
+    await server._resolve_archetype(explicit, _req("u1"), None)
+    assert (explicit.max_tokens, explicit.max_context) == (4096, 32000)
+
+
+async def test_malformed_env_entries_are_skipped_not_fatal(patch_registry):
+    patch_registry.set(archetypes=[{"id": "plain", "role": "Plain"}],
+                       env=["garbage", None, {"key": "BRAVE_API_KEY", "value": "brave-1"}])
+    cfg = server.AgentConfig(name="x", archetype="plain")
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.env_vars == [{"key": "BRAVE_API_KEY", "value": "brave-1"}]
+
+
+async def test_tier_set_env_applies_without_a_tier(patch_registry):
+    patch_registry.set(archetypes=[{"id": "plain", "role": "Plain"}],
+                       env=[{"key": "BRAVE_API_KEY", "value": "brave-1"}])
+    cfg = server.AgentConfig(name="x", archetype="plain")
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.env_vars == [{"key": "BRAVE_API_KEY", "value": "brave-1"}]
