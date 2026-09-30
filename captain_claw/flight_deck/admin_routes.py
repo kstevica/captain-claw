@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -290,22 +291,23 @@ async def get_provider_keys(admin: dict = Depends(require_admin)):
 async def update_provider_keys(body: ProviderKeysRequest, admin: dict = Depends(require_admin)):
     """Save system-level provider API keys (admin only)."""
     db = get_db()
-    # Merge with existing: allows partial updates, empty string removes key
-    raw = await db.get_system_setting(PROVIDER_KEYS_SETTING)
-    existing: dict[str, str] = {}
-    if raw:
-        try:
-            existing = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            pass
-    for k, v in body.keys.items():
-        if v:
-            existing[k] = v
-        else:
-            existing.pop(k, None)
-    await db.set_system_setting(PROVIDER_KEYS_SETTING, json.dumps(existing))
-    _drop_org_key_cache()
-    return {"ok": True, "keys": existing}
+    async with _team_keys_lock():
+        # Merge with existing: allows partial updates, empty string removes key
+        raw = await db.get_system_setting(PROVIDER_KEYS_SETTING)
+        existing: dict[str, str] = {}
+        if raw:
+            try:
+                existing = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        for k, v in body.keys.items():
+            if v:
+                existing[k] = v
+            else:
+                existing.pop(k, None)
+        await db.set_system_setting(PROVIDER_KEYS_SETTING, json.dumps(existing))
+        _drop_org_key_cache()
+    return {"ok": True, "keys": existing, "agents_given_key": await _give_agents_their_key()}
 
 
 def _drop_org_key_cache() -> None:
@@ -314,6 +316,47 @@ def _drop_org_key_cache() -> None:
     from captain_claw.flight_deck import basna_routes
 
     basna_routes._SYSTEM_KEYS_TS = 0.0
+
+
+# Publishing and recovery both rewrite the org key stores and the published sets.
+_TEAM_KEYS_LOCK: asyncio.Lock | None = None
+
+
+def _team_keys_lock() -> asyncio.Lock:
+    global _TEAM_KEYS_LOCK
+    if _TEAM_KEYS_LOCK is None:  # built in the running loop, not at import
+        _TEAM_KEYS_LOCK = asyncio.Lock()
+    return _TEAM_KEYS_LOCK
+
+
+async def _system_dict(db, setting: str) -> dict:
+    raw = await db.get_system_setting(setting)
+    try:
+        data = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+# `server.heal_keyless_agents` of the server module that is actually SERVING,
+# registered by its lifespan. Importing it by name here would, on a deck started
+# as `python -m captain_claw.flight_deck.server` (it runs as __main__), load a
+# second copy of the module with its own process table — agents restarted
+# through that copy can no longer be stopped by the routes.
+_agent_key_healer = None
+
+
+async def _give_agents_their_key() -> int:
+    """Agents created while the team had no key for their model get it now
+    (`server.heal_keyless_agents`). Returns how many."""
+    try:
+        healer = _agent_key_healer
+        if healer is None:  # no lifespan ran (tests, tooling): the module by name
+            from captain_claw.flight_deck.server import heal_keyless_agents as healer
+
+        return len(await healer())
+    except Exception:
+        return 0
 
 
 # ── Shared (team-default) tier sets ──
@@ -499,33 +542,32 @@ async def update_shared_tier_sets(body: SharedTierSetsRequest, admin: dict = Dep
     whose owner can read it. The response names providers and endpoint hosts,
     never key values.
     """
-    from captain_claw.flight_deck.basna_routes import ENDPOINT_KEYS_SETTING
+    from captain_claw.flight_deck.basna_routes import ENDPOINT_KEYS_SETTING, NO_PROVIDER_FALLBACK
 
     db = get_db()
-
-    async def _load(setting: str) -> dict:
-        raw = await db.get_system_setting(setting)
-        try:
-            data = json.loads(raw) if raw else {}
-        except (json.JSONDecodeError, TypeError):
-            data = {}
-        return data if isinstance(data, dict) else {}
-
-    org_keys = await _load(PROVIDER_KEYS_SETTING)
-    endpoint_keys = await _load(ENDPOINT_KEYS_SETTING)
-    published = (await _load(SHARED_TIER_SETS_SETTING)).get("sets")
-    plan = _plan_team_keys(body.sets, org_keys, endpoint_keys,
-                           published if isinstance(published, list) else None)
-    if plan["provider_keys"]:
-        await db.set_system_setting(
-            PROVIDER_KEYS_SETTING, json.dumps({**org_keys, **plan["provider_keys"]}))
-    if plan["endpoint_keys"]:
-        await db.set_system_setting(
-            ENDPOINT_KEYS_SETTING, json.dumps({**endpoint_keys, **plan["endpoint_keys"]}))
-    if plan["provider_keys"] or plan["endpoint_keys"]:
-        _drop_org_key_cache()
-    payload = {"sets": _mask_shared_sets(body.sets), "defaultSetId": body.defaultSetId}
-    await db.set_system_setting(SHARED_TIER_SETS_SETTING, json.dumps(payload))
+    async with _team_keys_lock():
+        org_keys = await _system_dict(db, PROVIDER_KEYS_SETTING)
+        endpoint_keys = await _system_dict(db, ENDPOINT_KEYS_SETTING)
+        published = (await _system_dict(db, SHARED_TIER_SETS_SETTING)).get("sets")
+        plan = _plan_team_keys(body.sets, org_keys, endpoint_keys,
+                               published if isinstance(published, list) else None)
+        if plan["provider_keys"]:
+            await db.set_system_setting(
+                PROVIDER_KEYS_SETTING, json.dumps({**org_keys, **plan["provider_keys"]}))
+        if plan["endpoint_keys"]:
+            await db.set_system_setting(
+                ENDPOINT_KEYS_SETTING, json.dumps({**endpoint_keys, **plan["endpoint_keys"]}))
+        if plan["provider_keys"] or plan["endpoint_keys"]:
+            _drop_org_key_cache()
+        payload = {"sets": _mask_shared_sets(body.sets), "defaultSetId": body.defaultSetId}
+        # These sets' keys are dealt with from here on: `recover_team_keys`
+        # leaves them alone (a team key an admin later removes stays removed).
+        now_keyed = {**endpoint_keys, **plan["endpoint_keys"]}
+        marks = (await _system_dict(db, SHARED_TIER_SETS_SETTING)).get(NO_PROVIDER_FALLBACK)
+        stored = {**payload, KEYS_SHARED: [str(s.get("id") or "") for s in payload["sets"]],
+                  NO_PROVIDER_FALLBACK: sorted(str(e) for e in (marks if isinstance(marks, list) else [])
+                                               if not now_keyed.get(str(e)))}
+        await db.set_system_setting(SHARED_TIER_SETS_SETTING, json.dumps(stored))
     return {
         "ok": True, **payload,
         "team_keys_added": plan["added"],
@@ -533,7 +575,196 @@ async def update_shared_tier_sets(body: SharedTierSetsRequest, admin: dict = Dep
         "team_endpoints_shared": plan["endpoints"],
         "team_keys_conflict": plan["conflicts"],
         "team_keys_missing": plan["missing"],
+        "agents_given_key": await _give_agents_their_key(),
     }
+
+
+# In the published blob: ids of the sets whose keys a publish (or the recovery
+# below) has already put in the org stores.
+KEYS_SHARED = "keys_shared"
+# …and, for a set that is still open, the providers / endpoints already settled.
+KEYS_SETTLED = "keys_settled"
+
+
+async def recover_team_keys(db) -> dict:
+    """Give the sets that are ALREADY published the team keys a publish gives
+    them now — without anyone having to publish again. A one-time migration
+    per set.
+
+    A set published before publishing shared its keys (or before custom
+    endpoints had keys of their own) sits in ``fd:shared-tier-sets`` with
+    "@system" or blank tier keys and nothing behind them: teammates' agents get
+    the model and no credentials. The keys are still in the publishing admin's
+    own copy of that set (same set id). They are taken from there — only an
+    admin's copy, only for a tier that still names the same provider and
+    endpoint — and stored exactly as a publish stores them. Gaps only: a team
+    key that exists is never replaced, and one that reaches agents through
+    Flight Deck's own environment is left to it.
+
+    A set is done (``KEYS_SHARED``) once none of its tiers is left without a
+    key — as is every set published from now on — and is never looked at
+    again; in a set that stays open, what has a key is settled
+    (``KEYS_SETTLED``) and only the keyless tiers are tried again. So removing
+    a team key in Admin → Provider keys sticks.
+
+    A provider key recovered here came from a tier on the provider's OWN
+    endpoint: it is not the key of a gateway tier whose own key could not be
+    found, and must not be sent there (``NO_PROVIDER_FALLBACK``).
+
+    Returns what it shared (provider ids / endpoint hosts, never key values)
+    and, under ``"unresolved"``, the tiers it found no key for; empty when
+    there was nothing to do.
+    """
+    import os
+
+    from captain_claw.flight_deck.basna_routes import (
+        ENDPOINT_KEYS_SETTING, NO_PROVIDER_FALLBACK, endpoint_key_id,
+    )
+    from captain_claw.flight_deck.server import _provider_key_env_names, _signs_in_through_chatgpt
+
+    async with _team_keys_lock():
+        blob = await _system_dict(db, SHARED_TIER_SETS_SETTING)
+        sets = [s for s in (blob.get("sets") if isinstance(blob.get("sets"), list) else [])
+                if isinstance(s, dict)]
+
+        def _listed(field: str) -> set[str]:
+            return {str(i) for i in (blob.get(field) if isinstance(blob.get(field), list) else [])}
+
+        done, settled, no_fallback = _listed(KEYS_SHARED), _listed(KEYS_SETTLED), _listed(NO_PROVIDER_FALLBACK)
+        before = (frozenset(settled), frozenset(no_fallback))
+        org = {str(p): str(k) for p, k in (await _system_dict(db, PROVIDER_KEYS_SETTING)).items() if k}
+        eps = {str(p): str(k) for p, k in (await _system_dict(db, ENDPOINT_KEYS_SETTING)).items() if k}
+
+        def _facts(t: dict) -> tuple[str, str, str, str]:
+            provider = str(t.get("provider") or "")
+            base_url = str(t.get("base_url") or "").strip()
+            return provider, base_url, endpoint_key_id(provider, base_url), _tier_key(t)
+
+        def _in_set_env(s: dict, provider: str) -> bool:
+            names = _provider_key_env_names(provider)
+            return any(isinstance(ev, dict) and ev.get("key") in names and ev.get("value")
+                       for ev in (s.get("envVars") or []))
+
+        def _candidate(s: dict, t: dict) -> bool:
+            """A published tier the admin's copy may hold a team key for."""
+            provider, _base_url, eid, key = _facts(t)
+            if not t.get("model") or key not in ("", "@system") or (eid or provider) in settled:
+                return False
+            if eid:  # a custom endpoint: until it has a key of its own
+                return not eps.get(eid)
+            names = _provider_key_env_names(provider)
+            if not names or org.get(provider) or _signs_in_through_chatgpt(provider, str(t.get("model") or "")):
+                return False
+            # …which agents don't already get with the set's extra keys, or
+            # inherit from Flight Deck's environment.
+            return not (_in_set_env(s, provider) or any(os.environ.get(n) for n in names))
+
+        def _keyless(s: dict, t: dict) -> bool:
+            """…and has nothing at all behind its "@system": an agent on it gets
+            no key. (A BLANK tier was published without one — nothing is owed.)"""
+            provider, _base_url, eid, key = _facts(t)
+            if key != "@system" or not _candidate(s, t) or not _provider_key_env_names(provider):
+                return False
+            # A gateway tier otherwise runs on the provider's key.
+            return not (eid and org.get(provider) and eid not in no_fallback)
+
+        pending = [str(s.get("id") or "") for s in sets if str(s.get("id") or "") not in done]
+        if not pending:
+            return {}
+        wanted = [(s, name, t) for s in sets if str(s.get("id") or "") in pending
+                  for name, t in (s.get("tiers") or {}).items()
+                  if isinstance(t, dict) and _candidate(s, t)]
+
+        # The admins' own copies of the published sets, by set id (oldest admin first).
+        copies: dict[str, list[dict]] = {}
+        ids = {str(s.get("id") or "") for s, _n, _t in wanted}
+        for user in reversed(await db.list_users(limit=1_000_000)) if wanted else []:
+            if user.get("role") != "admin":
+                continue
+            try:
+                own = json.loads(await db.get_setting(user["id"], "fd:forge-tiers") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for own_set in (own.get("sets") if isinstance(own, dict) else None) or []:
+                if isinstance(own_set, dict) and str(own_set.get("id") or "") in ids:
+                    copies.setdefault(str(own_set["id"]), []).append(own_set)
+
+        def _publisher_key(set_id: str, name: str, provider: str, eid: str) -> str:
+            for own_set in copies.get(set_id, []):
+                tiers = own_set.get("tiers") if isinstance(own_set.get("tiers"), dict) else {}
+                on_endpoint = False
+                for t in [tiers.get(name), *tiers.values()]:  # the same tier first
+                    if not isinstance(t, dict):
+                        continue
+                    t_provider, _b, t_eid, key = _facts(t)
+                    if t_provider == provider and t_eid == eid:
+                        on_endpoint = True
+                        if key not in ("", "@system"):
+                            return key
+                if on_endpoint and not eid:  # …or kept with the set's extra keys
+                    names = _provider_key_env_names(provider)
+                    for ev in own_set.get("envVars") or []:
+                        if isinstance(ev, dict) and ev.get("key") in names and str(ev.get("value") or "").strip():
+                            return str(ev["value"]).strip()
+            return ""
+
+        providers: list[str] = []
+        hosts: list[str] = []
+        for s, name, t in wanted:
+            provider, base_url, eid, key = _facts(t)
+            found = (eps.get(eid) if eid else org.get(provider)) or _publisher_key(
+                str(s.get("id") or ""), name, provider, eid)
+            if not found:
+                continue
+            if eid:
+                stored = eid not in eps and found != org.get(provider)
+                if stored:
+                    eps[eid] = found
+                host = _endpoint_host(base_url)
+                if (stored or key == "") and host not in hosts:
+                    hosts.append(host)
+            elif provider not in org:
+                org[provider] = found
+                providers.append(provider)
+            if key == "":  # published blank: now there is a key behind the sentinel
+                t["api_key"] = "@system"
+        for _s, _name, t in wanted:
+            provider, _base_url, eid, key = _facts(t)
+            if eid and key == "@system" and not eps.get(eid) and provider in providers:
+                no_fallback.add(eid)
+
+        # What is still without a key keeps its set open for a later try.
+        unresolved: list[str] = []
+        open_sets: set[str] = set()
+        for s, t in ((s, t) for s in sets if str(s.get("id") or "") in pending
+                     for t in (s.get("tiers") or {}).values() if isinstance(t, dict) and _keyless(s, t)):
+            provider, base_url, _eid, _key = _facts(t)
+            label = f"{provider} at {_endpoint_host(base_url)}" if base_url else provider
+            if label not in unresolved:
+                unresolved.append(label)
+            open_sets.add(str(s.get("id") or ""))
+        newly_done = [i for i in pending if i not in open_sets]
+        # In a set that stays open, everything but its keyless tiers is settled.
+        for s in sets:
+            if str(s.get("id") or "") in open_sets:
+                for t in (s.get("tiers") or {}).values():
+                    if isinstance(t, dict) and t.get("model") and not _keyless(s, t):
+                        provider, _base_url, eid, _key = _facts(t)
+                        settled.add(eid or provider)
+        if not (providers or hosts or newly_done) and before == (frozenset(settled), frozenset(no_fallback)):
+            return {"unresolved": unresolved} if unresolved else {}
+        if providers or hosts:
+            await db.set_system_setting(PROVIDER_KEYS_SETTING, json.dumps(org))
+            await db.set_system_setting(ENDPOINT_KEYS_SETTING, json.dumps(eps))
+        await db.set_system_setting(SHARED_TIER_SETS_SETTING, json.dumps({
+            **blob, "sets": sets, KEYS_SHARED: sorted(done | set(newly_done)),
+            KEYS_SETTLED: sorted(settled), NO_PROVIDER_FALLBACK: sorted(no_fallback)}))
+        _drop_org_key_cache()
+    if not (providers or hosts):
+        return {"unresolved": unresolved} if unresolved else {}
+    print(f"Flight Deck: recovered team keys for the published tier sets — "
+          f"{', '.join([*providers, *hosts])}", flush=True)
+    return {"providers": providers, "endpoints": hosts, **({"unresolved": unresolved} if unresolved else {})}
 
 
 @router.put("/plans/{plan}")

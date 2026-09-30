@@ -763,7 +763,7 @@ async def lifespan(app: FastAPI):
     # and their drift announcements get "connection refused".
     async def _deferred_reattach():
         await asyncio.sleep(1.0)
-        await asyncio.to_thread(_reattach_processes)
+        await _startup_team_keys_then_reattach()
     asyncio.create_task(_deferred_reattach())
     print(f"Flight Deck: {origin_guard.describe_policy()}")
     # Initialize database for auth & settings — always, see _init_fd_db.
@@ -1763,24 +1763,32 @@ def _provider_key_env_names(provider: str) -> tuple[str, ...]:
     return (name, *_PROVIDER_KEY_ENV_ALSO.get(provider, ())) if name else ()
 
 
+# Providers whose client refuses to make a call without a key, whatever the
+# endpoint (the others send a keyless request to a custom ``base_url``).
+_KEY_REQUIRED_ON_ANY_ENDPOINT = ("openai", "anthropic", "gemini")
+
+
+def _signs_in_through_chatgpt(provider: str, model: str) -> bool:
+    """OpenAI's GPT-5 / Codex family runs on the ChatGPT connection, not an API key."""
+    if provider != "openai":
+        return False
+    try:
+        from captain_claw.llm import _is_codex_family_model
+
+        return bool(_is_codex_family_model(model or ""))
+    except Exception:
+        return False
+
+
 def _needs_provider_key(provider: str, model: str = "", base_url: str = "") -> bool:
     """Does an agent on this provider/model/endpoint need the PROVIDER's API key?
 
     Not on a custom endpoint (a local server or gateway has its own key, or
-    none), and not OpenAI's GPT-5 / Codex family, which signs in through the
-    ChatGPT connection instead of an API key.
+    none), and not a model that signs in through the ChatGPT connection.
     """
     if not _provider_key_env_names(provider) or str(base_url or "").strip():
         return False
-    if provider == "openai":
-        try:
-            from captain_claw.llm import _is_codex_family_model
-
-            if _is_codex_family_model(model or ""):
-                return False
-        except Exception:
-            pass
-    return True
+    return not _signs_in_through_chatgpt(provider, model)
 
 
 def _build_env(c: AgentConfig) -> str:
@@ -1798,67 +1806,244 @@ def _build_env(c: AgentConfig) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
+async def _system_json(setting: str) -> dict:
+    from captain_claw.flight_deck.auth import get_db
+
+    raw = await get_db().get_system_setting(setting)
+    try:
+        data = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+async def _team_key(provider: str, base_url: str, *, asked: bool) -> str:
+    """The team's API key for a model endpoint ("" when there is none).
+
+    A custom endpoint (``base_url``) has its own key (``fd:endpoint-keys``);
+    the provider's own endpoint runs on the provider's (``fd:provider-keys``).
+
+    ``asked`` — the caller holds the ``@system`` sentinel, i.e. a team tier: an
+    endpoint with no key of its own then runs on the provider's (a deck that
+    routes a provider through one gateway). A caller with a BLANK key is never
+    handed the provider's key for some endpoint of its own choosing — only for
+    one the published team sets themselves send it to.
+    """
+    from captain_claw.flight_deck.basna_routes import (
+        ENDPOINT_KEYS_SETTING, NO_PROVIDER_FALLBACK, endpoint_key_id,
+    )
+
+    eid = endpoint_key_id(provider, base_url)
+    if eid:
+        key = str((await _system_json(ENDPOINT_KEYS_SETTING)).get(eid) or "")
+        if key:
+            return key
+        if not asked:
+            published = (await _system_json("fd:shared-tier-sets")).get("sets")
+            if not any(
+                isinstance(t, dict) and str(t.get("api_key") or "").strip() == "@system"
+                and endpoint_key_id(str(t.get("provider") or ""), str(t.get("base_url") or "")) == eid
+                for st in (published if isinstance(published, list) else []) if isinstance(st, dict)
+                for t in (st.get("tiers") or {}).values()
+            ):
+                return ""
+        if eid in ((await _system_json("fd:shared-tier-sets")).get(NO_PROVIDER_FALLBACK) or []):
+            return ""  # the provider's key is known not to be this endpoint's
+    return str((await _system_json("fd:provider-keys")).get(provider) or "")
+
+
+def _endpoint_label(provider: str, base_url: str) -> str:
+    from captain_claw.flight_deck.admin_routes import _endpoint_host
+
+    return f"{provider} at {_endpoint_host(base_url)}" if (base_url or "").strip() else provider
+
+
 async def _resolve_spawn_provider_key(config: AgentConfig, *, inherits_fd_env: bool = True) -> None:
-    """Resolve the ``@system`` API-key sentinel to the real org key at spawn time.
+    """Give a spawn that brings no model key of its own the team's (`_team_key`).
 
     The browser never receives raw org keys (GET /fd/settings/provider-keys is
-    masked). When a spawn requests the shared system key it sends the sentinel
-    ``@system``; here — server-side, before anything is written for the agent —
-    we swap it for the admin-configured key: the custom endpoint's own
-    (``fd:endpoint-keys``) when the spawn has a ``base_url`` and one is stored,
-    else the provider's (``fd:provider-keys``). Both spawn endpoints call it
-    right after the archetype / tier resolve.
+    masked). A spawn on a team tier carries the sentinel ``@system``; here —
+    server-side, before anything is written for the agent — it is swapped for
+    the real key. Both spawn endpoints call this right after the archetype /
+    tier resolve.
 
-    A BLANK key on a custom endpoint gets that endpoint's team key too (a user's
-    copy of a team set published before endpoints had keys holds a blank one) —
-    the endpoint's only, never the provider's, and not over a key the spawn
-    brings in its own env vars.
+    A BLANK key gets the team's key too (a user's own set that holds no key for
+    a model the team has one for — typically a copy of a team set), but never
+    over a key the spawn already has: a real one, one in its env vars, or the
+    one a process agent inherits from Flight Deck's environment.
 
-    A request for the team key that nothing can satisfy is refused (409) rather
-    than started as an agent whose first model call fails with "missing
-    credentials" — only where the agent really needs the provider's key
-    (`_needs_provider_key`) and it arrives no other way: the spawn's own env
-    vars, or Flight Deck's environment, which process agents inherit
-    (``inherits_fd_env``; containers don't).
+    Where the team has no key for the endpoint, a set published before
+    publishing shared its keys may still be waiting for them: they are
+    recovered from the publishing admin's own copy (`recover_team_keys`).
+
+    A spawn that ends with no key at all for a model that needs one is refused
+    (409) rather than started as an agent whose first call fails with "missing
+    credentials" — when it asked for the team key, or is an archetype spawn
+    (Flight Deck picked the model; the caller had no say in the key). Not when
+    the model needs none (no key env for the provider, ChatGPT sign-in).
     """
     requested = (config.provider_api_key or "").strip()
     if requested and requested != "@system":
         return
+    asked = requested == "@system"
     env_names = _provider_key_env_names(config.provider)
+    custom = bool((config.base_url or "").strip())
+    chatgpt = _signs_in_through_chatgpt(config.provider, config.model)
+    # A key that reaches the agent without us: its own env vars, or (process
+    # agents only — containers don't inherit) Flight Deck's environment. That
+    # one is the PROVIDER's key: on a custom endpoint it doesn't stand in for
+    # the endpoint's team key (it would be sent to that host instead).
     in_env_vars = any(isinstance(ev, dict) and ev.get("key") in env_names and ev.get("value")
                       for ev in config.env_vars)
-    asked = requested == "@system"
-    if not asked and (in_env_vars or not (config.base_url or "").strip()):
+    fd_env = inherits_fd_env and any(os.environ.get(n) for n in env_names)
+    supplied = in_env_vars or (fd_env and not custom)
+    if not asked and (chatgpt or not (env_names or custom) or supplied):
         return
     config.provider_api_key = ""
     try:
-        from captain_claw.flight_deck.auth import get_db
-        from captain_claw.flight_deck.basna_routes import ENDPOINT_KEYS_SETTING, endpoint_key_id
-        db = get_db()
-        eid = endpoint_key_id(config.provider, config.base_url)
-        if eid:
-            raw = await db.get_system_setting(ENDPOINT_KEYS_SETTING)
-            keys = json.loads(raw) if raw else {}
-            if isinstance(keys, dict):
-                config.provider_api_key = str(keys.get(eid, "") or "")
-        if asked and not config.provider_api_key:
-            raw = await db.get_system_setting("fd:provider-keys")
-            keys = json.loads(raw) if raw else {}
-            if isinstance(keys, dict):
-                config.provider_api_key = str(keys.get(config.provider, "") or "")
+        key = await _team_key(config.provider, config.base_url, asked=asked)
+        if not key and not supplied:
+            from captain_claw.flight_deck.admin_routes import recover_team_keys
+            from captain_claw.flight_deck.auth import get_db
+
+            if await recover_team_keys(get_db()):
+                key = await _team_key(config.provider, config.base_url, asked=asked)
     except Exception as exc:
-        log.warning("system provider-key resolve failed", provider=config.provider, error=str(exc))
+        log.warning("team key resolve failed", provider=config.provider, error=str(exc))
         return
-    if not asked or config.provider_api_key:
+    config.provider_api_key = key
+    if key or supplied or fd_env or chatgpt or not env_names:
         return
-    if not _needs_provider_key(config.provider, config.model, config.base_url):
+    if not (asked or config.archetype):
         return
-    if in_env_vars or (inherits_fd_env and any(os.environ.get(n) for n in env_names)):
-        return
+    if not asked and custom and config.provider not in _KEY_REQUIRED_ON_ANY_ENDPOINT:
+        return  # a local / no-auth server behind this provider runs keyless
     raise HTTPException(409, (
-        f"No team API key for {config.provider}. An admin can add one in "
-        "Admin → Provider keys, or publish a tier set that has one."
+        f"No API key for {_endpoint_label(config.provider, config.base_url)}: the tier set this "
+        "agent runs on has none, and neither has the team. An admin can publish the tier set "
+        "again in Library (that shares its keys), or add the key in Admin → Provider keys."
     ))
+
+
+def _agent_config_model(slug: str) -> tuple[dict, dict] | None:
+    """(model, provider_keys) sections of a process agent's config — the copy in
+    its home overlaid on the one in its directory, as the agent loads them."""
+    agent_dir = DATA_DIR / slug
+    model: dict = {}
+    provider_keys: dict = {}
+    found = False
+    for path in (agent_dir / "config.yaml",
+                 agent_dir / "data" / "home-config-parent" / ".captain-claw" / "config.yaml"):
+        try:
+            data = yaml.safe_load(path.read_text())
+        except (OSError, ValueError, yaml.YAMLError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        found = True
+        if isinstance(data.get("model"), dict):
+            model.update({k: v for k, v in data["model"].items() if v not in (None, "")})
+        if isinstance(data.get("provider_keys"), dict):
+            provider_keys.update({k: v for k, v in data["provider_keys"].items() if v})
+    return (model, provider_keys) if found else None
+
+
+def _agent_model_key_gap(slug: str) -> tuple[str, str, str] | None:
+    """(provider, base_url, env name) of a process agent that has no key for its
+    model anywhere it looks — .env, its config, or the environment it inherits
+    from Flight Deck — and needs one. None when it is fine, or not ours to judge."""
+    loaded = _agent_config_model(slug)
+    if loaded is None:
+        return None
+    model, provider_keys = loaded
+    provider = str(model.get("provider") or "")
+    base_url = str(model.get("base_url") or "").strip()
+    env_names = _provider_key_env_names(provider)
+    if not env_names or _signs_in_through_chatgpt(provider, str(model.get("model") or "")):
+        return None
+    if str(model.get("api_key") or "").strip() or str(provider_keys.get(provider) or "").strip():
+        return None
+    if not base_url and any(os.environ.get(n) for n in env_names):
+        return None
+    try:
+        from captain_claw.config import Config
+
+        dotenv = Config._read_dotenv_file(DATA_DIR / slug / ".env")
+    except Exception:
+        return None
+    if any(str(dotenv.get(n) or "").strip() for n in env_names):
+        return None
+    return provider, base_url, env_names[0]
+
+
+async def _heal_agent_model_key(slug: str) -> bool:
+    """Write the team's key into a process agent that was created without one
+    for its model (the team had none then). True when the .env changed — a
+    running agent has to be restarted to pick it up."""
+    try:
+        gap = _agent_model_key_gap(slug)
+        if not gap:
+            return False
+        provider, base_url, env_name = gap
+        key = await _team_key(provider, base_url, asked=False)
+        if not key:
+            log.warning("Agent has no model key and the team has none for it",
+                        slug=slug, provider=provider, endpoint=_endpoint_label(provider, base_url))
+            return False
+        if not _upsert_dotenv_var(DATA_DIR / slug / ".env", env_name, key):
+            return False
+    except Exception as exc:
+        log.warning("agent key heal failed", slug=slug, error=str(exc))
+        return False
+    log.info("Agent had no model key — team key written", slug=slug, provider=provider)
+    return True
+
+
+def _restart_processes(slugs: list[str]) -> None:
+    import time
+
+    for slug in slugs:
+        try:
+            _do_stop_process(slug)
+            time.sleep(1)
+            _do_start_process(slug)
+        except Exception as exc:
+            log.warning("restart after key heal failed", slug=slug, error=str(exc))
+
+
+async def heal_keyless_agents(*, restart: bool = True) -> list[str]:
+    """`_heal_agent_model_key` for every process agent. Returns the slugs whose
+    .env changed; with ``restart`` the running ones among them are restarted in
+    the background so the key takes effect."""
+    healed = [slug for slug in list(_load_process_registry()) if await _heal_agent_model_key(slug)]
+    running = [slug for slug in healed if _process_is_alive(slug)] if restart else []
+    if running:
+        asyncio.get_running_loop().run_in_executor(None, _restart_processes, running)
+    return healed
+
+
+async def _startup_team_keys_then_reattach() -> None:
+    """Startup, once the server is listening: team keys first — a set published
+    before publishing shared its keys gets them now, and agents created without
+    a model key get theirs — then the dead agents are started again (with the
+    key), and the ones that were running without it are restarted."""
+    stale: list[str] = []
+    try:
+        from captain_claw.flight_deck import admin_routes
+        from captain_claw.flight_deck.auth import get_db
+
+        admin_routes._agent_key_healer = heal_keyless_agents  # THIS module's — see there
+        left = (await admin_routes.recover_team_keys(get_db())).get("unresolved")
+        if left:
+            log.warning("No team API key for %s — the published tier set names it, but no admin's "
+                        "copy of the set holds a key. Publish the set again in Library.", ", ".join(left))
+        healed = await heal_keyless_agents(restart=False)
+        stale = [slug for slug in healed if _process_is_alive(slug)]
+    except Exception as exc:
+        log.warning("team key recovery at startup failed", error=str(exc))
+    await asyncio.to_thread(_reattach_processes)
+    if stale:  # after the reattach: both rewrite the process registry
+        await asyncio.to_thread(_restart_processes, stale)
 
 
 def _localize_url(url: str) -> str:
@@ -6997,14 +7182,20 @@ def _do_stop_process(slug: str) -> ProcessActionResult:
     if not _process_is_alive(slug):
         return ProcessActionResult(ok=True, slug=slug, message="Already stopped")
 
+    # Our handle only while it is the live process: an agent restarted through
+    # another copy of this module (`python -m …server` runs it as __main__, and
+    # importers get a second one) leaves a dead handle here — the registry has
+    # the pid that is actually running.
     proc = _processes.get(slug)
-    registry = _load_process_registry()
-    pid = proc.pid if proc else registry.get(slug, {}).get("pid")
+    pid = proc.pid if proc and proc.poll() is None else _load_process_registry().get(slug, {}).get("pid")
 
     if pid:
         _kill_pid(pid)
 
-    # Update registry — mark as intentionally stopped
+    # Update registry — mark as intentionally stopped. Re-read: the kill can
+    # take seconds, and whatever was written meanwhile (a spawn, a port
+    # announce) must not be overwritten with the snapshot from before it.
+    registry = _load_process_registry()
     if slug in registry:
         registry[slug]["pid"] = None
         registry[slug]["stopped"] = True
@@ -7125,6 +7316,7 @@ async def start_process(slug: str, request: Request, user: dict | None = _agent_
     """Start a stopped process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     import asyncio
+    await _heal_agent_model_key(slug)
     return await asyncio.get_event_loop().run_in_executor(None, _do_start_process, slug)
 
 
@@ -7132,6 +7324,7 @@ async def start_process(slug: str, request: Request, user: dict | None = _agent_
 async def restart_process(slug: str, request: Request, user: dict | None = _agent_manager_dep):
     """Restart a process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
+    await _heal_agent_model_key(slug)
     _do_stop_process(slug)
     import time
     time.sleep(1)

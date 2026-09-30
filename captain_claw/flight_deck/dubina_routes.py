@@ -52,6 +52,7 @@ from captain_claw.flight_deck.basna_routes import (
     _guess_mime,
     _is_texty,
     _load_owner_tiers,
+    tier_api_key,
     _safe_name,
 )
 from captain_claw.flight_deck.dubina_agents import (
@@ -252,7 +253,7 @@ def _library_provider_factory(tiers_map: dict[str, dict]):
             raise ValueError(f"tier {tier!r} is not configured in your Library")
         return create_provider(
             provider=t.get("provider", "anthropic"), model=t.get("model", ""),
-            base_url=t.get("base_url") or None, api_key=t.get("api_key") or None,
+            base_url=t.get("base_url") or None, api_key=tier_api_key(t),
             temperature=0.7, max_tokens=int(t.get("output_ctx") or 0) or 8000,
         )
     return factory

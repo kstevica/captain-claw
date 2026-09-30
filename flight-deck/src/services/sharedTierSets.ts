@@ -49,6 +49,8 @@ export interface PublishResult {
   teamKeysConflict: string[]
   /** Providers the set uses that teammates still have no key for. */
   teamKeysMissing: string[]
+  /** Existing agents that had no model key and were given the team's. */
+  agentsGivenKey: number
 }
 
 /**
@@ -78,5 +80,6 @@ export async function publishSharedTierSets(
     teamEndpointsShared: list(data?.team_endpoints_shared),
     teamKeysConflict: list(data?.team_keys_conflict),
     teamKeysMissing: list(data?.team_keys_missing),
+    agentsGivenKey: Number(data?.agents_given_key) || 0,
   }
 }

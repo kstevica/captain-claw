@@ -84,6 +84,10 @@ async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("FD_PORT", "25999")
     monkeypatch.setenv("FD_SPAWN_SETTLE_S", "0")
     monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    # The archetype's tier is the registry's (Anthropic) and nobody configured a
+    # key: this deck has it in its environment, which process agents inherit —
+    # an archetype agent with no model key at all is refused.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fd-env-key")
 
     def _no_docker():
         raise RuntimeError("docker unavailable in tests")

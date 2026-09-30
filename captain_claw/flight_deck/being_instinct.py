@@ -562,7 +562,7 @@ async def _one_shot(db, being: dict, system: str,
                     user: str) -> tuple[str, dict | None]:
     if db is None:
         raise BeingError("no FD database — the feet cannot think")
-    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers, tier_api_key
     tiers, _env = await _load_owner_tiers(db, being["owner_id"])
     cfg = (tiers or {}).get(FEET_TIER) or (tiers or {}).get("balanced") \
         or next(iter((tiers or {}).values()), None)
@@ -572,7 +572,7 @@ async def _one_shot(db, being: dict, system: str,
     provider = create_provider(
         provider=cfg.get("provider", "anthropic"), model=cfg.get("model", ""),
         base_url=cfg.get("base_url") or None,
-        api_key=cfg.get("api_key") or None,
+        api_key=tier_api_key(cfg),
         temperature=0.7, max_tokens=FEET_MAX_TOKENS)
     resp = await provider.complete(
         messages=[Message(role="system", content=system),

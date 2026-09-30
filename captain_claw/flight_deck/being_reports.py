@@ -602,6 +602,7 @@ async def run_report(store: BeingsStore, owner_id: str, report_id: str, *,
 def build_owner_provider(tiers_map: dict, *, preferred: str = "reason"):
     """(tier_name, provider) for an owner's report run, or (‑, None) if the
     owner has configured no tiers. Kept here so the route stays a thin shell."""
+    from captain_claw.flight_deck.basna_routes import tier_api_key
     from captain_claw.llm import create_provider
     tier = _pick_tier(tiers_map, preferred)
     if not tier:
@@ -609,6 +610,6 @@ def build_owner_provider(tiers_map: dict, *, preferred: str = "reason"):
     t = tiers_map[tier]
     provider = create_provider(
         provider=t.get("provider", "anthropic"), model=t.get("model", ""),
-        base_url=t.get("base_url") or None, api_key=t.get("api_key") or None,
+        base_url=t.get("base_url") or None, api_key=tier_api_key(t),
         temperature=0.5, max_tokens=int(t.get("output_ctx") or 0) or 8000)
     return tier, provider

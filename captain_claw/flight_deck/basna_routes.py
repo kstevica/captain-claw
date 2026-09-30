@@ -831,6 +831,13 @@ class AgentStartReq(_AgentReq):
 ENDPOINT_KEYS_SETTING = "fd:endpoint-keys"
 _SYSTEM_PROVIDER_KEYS: dict[str, str] = {}
 _SYSTEM_ENDPOINT_KEYS: dict[str, str] = {}
+# Custom endpoints the provider's key must NOT be sent to (see NO_PROVIDER_FALLBACK).
+_SYSTEM_NO_FALLBACK: frozenset[str] = frozenset()
+# In the 'fd:shared-tier-sets' blob: endpoint ids of published "@system" gateway
+# tiers that have no key of their own while their provider's org key is known
+# to belong to the provider's own endpoint (it was recovered from a tier on
+# it). Such a tier gets no key rather than that one.
+NO_PROVIDER_FALLBACK = "no_provider_fallback"
 _SYSTEM_KEYS_TS: float = 0.0
 _SYSTEM_KEYS_TTL = 15.0  # seconds
 
@@ -848,7 +855,7 @@ async def _refresh_system_provider_keys(db) -> None:
     _effective_key below always sees fresh keys without threading async DB
     access through the credential resolvers.
     """
-    global _SYSTEM_PROVIDER_KEYS, _SYSTEM_ENDPOINT_KEYS, _SYSTEM_KEYS_TS
+    global _SYSTEM_PROVIDER_KEYS, _SYSTEM_ENDPOINT_KEYS, _SYSTEM_NO_FALLBACK, _SYSTEM_KEYS_TS
     now = time.monotonic()
     if (_SYSTEM_PROVIDER_KEYS or _SYSTEM_ENDPOINT_KEYS) and (now - _SYSTEM_KEYS_TS) < _SYSTEM_KEYS_TTL:
         return
@@ -861,6 +868,10 @@ async def _refresh_system_provider_keys(db) -> None:
         keys = json.loads(raw) if raw else {}
         if isinstance(keys, dict):
             _SYSTEM_ENDPOINT_KEYS = {str(k): str(v) for k, v in keys.items() if v}
+        raw = await db.get_system_setting("fd:shared-tier-sets")
+        blob = json.loads(raw) if raw else {}
+        marked = blob.get(NO_PROVIDER_FALLBACK) if isinstance(blob, dict) else None
+        _SYSTEM_NO_FALLBACK = frozenset(str(e) for e in marked) if isinstance(marked, list) else frozenset()
         _SYSTEM_KEYS_TS = now
     except Exception:
         pass
@@ -876,7 +887,31 @@ def _effective_key(provider: str, api_key: str | None, base_url: str | None = No
     eid = endpoint_key_id(provider, base_url)
     if eid and _SYSTEM_ENDPOINT_KEYS.get(eid):
         return _SYSTEM_ENDPOINT_KEYS[eid]
+    if eid in _SYSTEM_NO_FALLBACK:
+        return None
     return _SYSTEM_PROVIDER_KEYS.get(provider or "", "") or None
+
+
+def tier_api_key(tier: dict) -> str | None:
+    """The key to call a tier's model with directly (`create_provider`): the
+    tier's own, or the team's behind an "@system" one. None — a blank key, or
+    a sentinel with nothing behind it — lets the provider fall back to the
+    environment; the sentinel itself is never a key."""
+    key = str(tier.get("api_key") or "").strip()
+    if key != "@system":
+        return key or None
+    return _effective_key(str(tier.get("provider") or ""), key, tier.get("base_url")) or None
+
+
+async def _request_api_key(provider: str, api_key: str | None, base_url: str | None) -> str | None:
+    """`tier_api_key` for creds that arrive in a request body (the UI sends a
+    team tier's "@system" as it holds it) — with the org keys read fresh."""
+    if (api_key or "").strip() == "@system":
+        try:
+            await _refresh_system_provider_keys(get_db())
+        except Exception:
+            pass
+    return tier_api_key({"provider": provider, "api_key": api_key, "base_url": base_url})
 
 
 async def _load_shared_default_tiers(db) -> tuple[dict, list]:
@@ -894,6 +929,39 @@ async def _load_shared_default_tiers(db) -> tuple[dict, list]:
     default_id = blob.get("defaultSetId")
     chosen = next((s for s in sets if s.get("id") == default_id), sets[0])
     return chosen.get("tiers") or {}, chosen.get("envVars") or []
+
+
+def _set_is_unconfigured(tier_set: dict) -> bool:
+    """Is this set still the registry seed the UI saves on a first visit —
+    every tier on the registry's default model, with no key, no custom
+    endpoint, and no extra keys? A set whose models someone chose is theirs,
+    however keyless (local models, a deck that runs on its own environment).
+
+    A tier the registry gained later is one the UI backfilled from a sibling
+    (`backfillTierMap`: "reason" for "coding", else "balanced"), so that
+    sibling's default model counts as untouched too.
+    """
+    tiers = tier_set.get("tiers")
+    if tier_set.get("envVars") or not isinstance(tiers, dict):
+        return False
+    try:
+        seed = _load_registry().get("tiers") or {}
+    except Exception:
+        return False
+    for name, t in tiers.items():
+        default = seed.get(name)
+        if not isinstance(t, dict) or not isinstance(default, dict):
+            return False
+        if str(t.get("api_key") or "").strip():
+            return False
+        if str(t.get("base_url") or "").strip() not in ("", str(default.get("base_url") or "").strip()):
+            return False
+        donor = seed.get("reason" if name == "coding" else "balanced") or {}
+        if (t.get("provider"), t.get("model")) not in (
+                (default.get("provider"), default.get("model")),
+                (donor.get("provider"), donor.get("model"))):
+            return False
+    return True
 
 
 async def _load_owner_tiers(db, owner_id: str) -> tuple[dict, list]:
@@ -923,6 +991,13 @@ async def _load_owner_tiers(db, owner_id: str) -> tuple[dict, list]:
         if isinstance(sets, list) and sets:
             active_id = blob.get("activeSetId")
             chosen = next((s for s in sets if s.get("id") == active_id), sets[0])
+            # A set nobody configured — the registry seed the UI saves on a
+            # first visit: no key, no endpoint, no extra keys — is not a
+            # choice: such a user rides the team default like one with no set.
+            if _set_is_unconfigured(chosen):
+                team = await _load_shared_default_tiers(db)
+                if team[0]:
+                    return team
             return chosen.get("tiers") or {}, chosen.get("envVars") or []
         # Legacy single-set shape: {tiers, forgeTier} + separate env-vars key.
         if isinstance(blob.get("tiers"), dict):
@@ -1581,7 +1656,8 @@ async def recommend_setup(body: RecommendRequest, user: dict = Depends(get_curre
     try:
         from captain_claw.llm import Message, create_provider
         prov = create_provider(provider=provider, model=model,
-                               api_key=body.api_key or None, base_url=base_url or None,
+                               api_key=await _request_api_key(provider, body.api_key, base_url),
+                               base_url=base_url or None,
                                temperature=0.2, max_tokens=800)
         resp = await prov.complete(
             messages=[Message(role="system", content=system_prompt),
@@ -1663,7 +1739,8 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
             from captain_claw.llm import Message, create_provider
             bprov = create_provider(
                 provider=provider, model=model,
-                api_key=body.api_key or None, base_url=base_url or None,
+                api_key=await _request_api_key(provider, body.api_key, base_url),
+                base_url=base_url or None,
                 temperature=0.2, max_tokens=body.max_tokens)
             bresp = await bprov.complete(
                 messages=[Message(role="user", content=research_brief.derive_brief_prompt(intent))],
@@ -1703,7 +1780,8 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         from captain_claw.llm import Message, create_provider
         prov = create_provider(
             provider=provider, model=model,
-            api_key=body.api_key or None, base_url=base_url or None,
+            api_key=await _request_api_key(provider, body.api_key, base_url),
+            base_url=base_url or None,
             temperature=0.2, max_tokens=body.max_tokens,
         )
         resp = await prov.complete(
