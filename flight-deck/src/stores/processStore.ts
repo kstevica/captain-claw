@@ -23,6 +23,10 @@ function persistMap(key: string, m: Record<string, string | boolean>) {
   if (useAuthStore.getState().authEnabled) queueSave(key, val)
   else localStorage.setItem(key, val)
 }
+// Agents whose instructions this tab is saving right now — the list poll must
+// not roll its own edit back with the server's previous value.
+const _savingInstructions = new Set<string>()
+
 function loadBoolMap(key: string): Record<string, boolean> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
 }
@@ -94,7 +98,21 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
         ...(nameOverrides[p.slug] != null ? { name: nameOverrides[p.slug] } : {}),
         ...(modelOverrides[p.slug] != null ? { provider: modelOverrides[p.slug].provider, model: modelOverrides[p.slug].model } : {}),
       }))
-      set({ processes: merged })
+      // Instructions: Flight Deck's copy wins (it is what an archetype spawn
+      // or an admin acting for this user wrote), so an already-open tab picks
+      // up the change instead of sending — and later re-saving — a stale one.
+      const cur = get().fleetInstructionsOverrides
+      let next = cur
+      if (useAuthStore.getState().authEnabled) {
+        for (const p of processes) {
+          if (p.fleet_instructions === undefined || _savingInstructions.has(p.slug)) continue
+          if ((cur[p.slug] || '') === p.fleet_instructions) continue
+          if (next === cur) next = { ...cur }
+          if (p.fleet_instructions) next[p.slug] = p.fleet_instructions
+          else delete next[p.slug]
+        }
+      }
+      set(next === cur ? { processes: merged } : { processes: merged, fleetInstructionsOverrides: next })
     } catch {
       set({ processes: [] })
     }
@@ -157,8 +175,18 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
 
   setFleetInstructions: (slug, instructions) => {
     const overrides = { ...get().fleetInstructionsOverrides, [slug]: instructions }
-    persistMap(FLEET_INSTRUCTIONS_KEY, overrides)
     set({ fleetInstructionsOverrides: overrides })
+    if (!useAuthStore.getState().authEnabled) {
+      localStorage.setItem(FLEET_INSTRUCTIONS_KEY, JSON.stringify(overrides))
+      return
+    }
+    // With accounts, save just this agent's entry: writing the whole map from
+    // this tab would undo entries Flight Deck added since it loaded. If that
+    // isn't possible (agent not registered yet, older server) keep the old way.
+    _savingInstructions.add(slug)
+    dockerApi.saveAgentInstructions('process', slug, instructions)
+      .catch(() => persistMap(FLEET_INSTRUCTIONS_KEY, get().fleetInstructionsOverrides))
+      .finally(() => _savingInstructions.delete(slug))
   },
 
   getFleetInstructions: (slug) => get().fleetInstructionsOverrides[slug] || '',

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck import auth as _auth
@@ -108,8 +108,16 @@ def _validate(body: ArchetypeBody) -> dict:
 
 # ── Routes ───────────────────────────────────────────────────────────
 
+async def _registry_user(request: Request, user: dict | None = Depends(_optional_user)) -> dict | None:
+    """The user whose registry to list: the caller, or — for an admin creating
+    an agent on someone's behalf (``X-FD-Act-As``) — that user, since a spawn
+    resolves archetypes against the new agent's owner. Read-only here; every
+    write route below stays the caller's own."""
+    return await _auth.act_as_target(request, user)
+
+
 @router.get("")
-async def list_archetypes(user: dict | None = Depends(_optional_user)):
+async def list_archetypes(user: dict | None = Depends(_registry_user)):
     """Merged archetype registry (base + the caller's own)."""
     # Tolerate a not-yet-initialized DB (e.g. auth-disabled standalone): fall
     # back to the base set, matching the pre-merge behavior of this endpoint.

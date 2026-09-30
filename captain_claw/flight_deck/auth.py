@@ -206,6 +206,73 @@ async def get_current_user(
     return user
 
 
+# An admin managing ANOTHER user's agents names that user here.
+ACT_AS_HEADER = "X-FD-Act-As"
+
+
+async def act_as_target(request: Request, user: dict | None) -> dict | None:
+    """The user an agent-management request acts FOR.
+
+    Normally the caller. An admin may name another user in ``X-FD-Act-As``: the
+    request then runs exactly as if that user had made it — their agents, their
+    owner on a new agent, their agent-count limit, their Library — because every
+    ownership check reads ``request.state.user_id``, which becomes the target.
+
+    Deliberately narrow: only the routes that take `get_managed_user` honour
+    the header (agent list / create / start / stop / config / remove). It is
+    not a login-as — the target's settings page, connections, files and chats
+    are not opened by it. It does reach what those agent routes reach: an agent
+    created here runs on the target's tier keys, and reading an agent's config
+    returns its ``.env``. A non-admin naming someone else is refused, not ignored.
+
+    ``request.state.acting_admin`` / ``acting_admin_id`` name who really made
+    the request (rate limits, the usage log); every change is also recorded in
+    the admin's own usage log.
+    """
+    target = (request.headers.get(ACT_AS_HEADER) or "").strip()
+    if not target or not user or target == str(user.get("id") or ""):
+        return user
+    if not _fd_auth_enabled():
+        return user  # one tenant: nobody else to act for
+    import logging
+
+    audit = logging.getLogger("flight_deck.auth")
+    if user.get("role") != "admin":
+        audit.warning("act-as refused: %s is not an admin (%s %s)",
+                      user.get("id"), request.method, request.url.path)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required to manage another user's agents",
+        )
+    db = get_db()
+    target_user = await db.get_user_by_id(target)
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    request.state.acting_admin = user
+    request.state.acting_admin_id = str(user.get("id") or "")
+    request.state.user_id = str(target_user["id"])
+    request.state.user_role = target_user.get("role", "user")
+    if request.method in ("GET", "HEAD"):  # the dialog's list polling
+        audit.debug("admin %s reading for user %s: %s", user.get("id"), target_user["id"], request.url.path)
+    else:
+        audit.info("admin %s acting for user %s: %s %s",
+                   user.get("id"), target_user["id"], request.method, request.url.path)
+        try:
+            import json
+
+            await db.log_usage(str(user.get("id") or ""), "admin_act_as", json.dumps({
+                "target_user": str(target_user["id"]),
+                "method": request.method, "path": request.url.path}))
+        except Exception:  # never fail the request over its own audit row
+            audit.warning("could not record act-as usage for admin %s", user.get("id"))
+    return target_user
+
+
+async def get_managed_user(request: Request, user: dict = Depends(get_current_user)) -> dict:
+    """`get_current_user`, honouring an admin's ``X-FD-Act-As`` (see `act_as_target`)."""
+    return await act_as_target(request, user)
+
+
 async def get_optional_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
@@ -233,6 +300,14 @@ async def get_optional_user(
         return user
     except HTTPException:
         return None
+
+
+async def get_optional_managed_user(
+    request: Request, user: dict | None = Depends(get_optional_user),
+) -> dict | None:
+    """`get_optional_user`, honouring an admin's ``X-FD-Act-As``. A caller with
+    no verified session (an agent) has nobody to act for: the header is ignored."""
+    return await act_as_target(request, user)
 
 
 # Personal access tokens for headless clients (MCP). A raw token looks like

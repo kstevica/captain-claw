@@ -27,11 +27,15 @@ function uniqueName(base: string, taken: Set<string>): string {
   }
 }
 
-export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned }: {
+export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, ownerLabel }: {
   /** Slugs of the agents this user can see — the default name avoids them. */
   takenSlugs: Set<string>
   onClose: () => void
   onSpawned: (slug: string) => void
+  /** Admin creating the agent FOR that user: their gallery, their ownership,
+   *  their tier set and plan. */
+  asUser?: string
+  ownerLabel?: string
 }) {
   const [archetypes, setArchetypes] = useState<Archetype[] | null>(null)
   const [loadErr, setLoadErr] = useState('')
@@ -43,10 +47,10 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned }: {
   const nameRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    listArchetypes()
+    listArchetypes(asUser)
       .then((reg) => setArchetypes(reg.archetypes || []))
       .catch((e) => setLoadErr(e instanceof Error ? e.message : String(e)))
-  }, [])
+  }, [asUser])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) onClose() }
@@ -84,20 +88,24 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned }: {
     try {
       let res
       try {
-        res = await spawnArchetypeProcess(picked.id, finalName, picked.description)
+        res = await spawnArchetypeProcess(picked.id, finalName, picked.description, asUser)
       } catch (e) {
         // Taken by an agent this user can't see (another account's): try once
         // more with a short suffix rather than make a kiosk user guess.
         const msg = e instanceof Error ? e.message : String(e)
         if (!/already (exists|running)/i.test(msg)) throw e
         finalName = `${finalName} ${Math.random().toString(36).slice(2, 6)}`
-        res = await spawnArchetypeProcess(picked.id, finalName, picked.description)
+        res = await spawnArchetypeProcess(picked.id, finalName, picked.description, asUser)
       }
       if (!res.ok) throw new Error(res.message)
       const slug = res.slug || agentSlug(finalName)
-      const procs = useProcessStore.getState()
-      if (picked.fleet_instructions) procs.setFleetInstructions(slug, picked.fleet_instructions)
-      procs.fetchProcesses()
+      // FD records the archetype's instructions for the owner; mirror them
+      // into this browser's store only when the agent is the viewer's own.
+      if (!asUser) {
+        const procs = useProcessStore.getState()
+        if (picked.fleet_instructions) procs.setFleetInstructions(slug, picked.fleet_instructions)
+        procs.fetchProcesses()
+      }
       onSpawned(slug)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -119,7 +127,7 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned }: {
             <Library className="h-3.5 w-3.5" />
           </span>
           <div>
-            <h3 className="text-sm font-semibold text-zinc-200">New agent</h3>
+            <h3 className="text-sm font-semibold text-zinc-200">New agent{asUser && ownerLabel ? ` for ${ownerLabel}` : ''}</h3>
             <p className="text-[11px] text-zinc-500">Pick an archetype — its role, tools and model come with it.</p>
           </div>
           <button onClick={onClose} disabled={busy} className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50" title="Close">

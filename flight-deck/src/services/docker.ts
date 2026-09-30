@@ -4,16 +4,22 @@ import { useAuthStore, refreshAccessToken } from '../stores/authStore'
 
 const FD_BASE = '/fd'
 
-function _authHeaders(): Record<string, string> {
+// An admin managing another user's agents names that user in this header. Only
+// the agent-management endpoints honour it (list / create / start / stop /
+// config / remove) — it is not a login-as. See auth.act_as_target (backend).
+export const ACT_AS_HEADER = 'X-FD-Act-As'
+
+function _authHeaders(asUser?: string): Record<string, string> {
   const { token, authEnabled } = useAuthStore.getState()
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (authEnabled && token) {
     headers['Authorization'] = `Bearer ${token}`
   }
+  if (asUser) headers[ACT_AS_HEADER] = asUser
   return headers
 }
 
-async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
+async function fdFetch<T>(path: string, init?: RequestInit, asUser?: string): Promise<T> {
   // Auth guard: when auth is enabled but we don't have a token in memory
   // (page reload before refresh, post-logout, etc.) try to refresh once
   // before issuing the request. Skips the inevitable 401 round-trip and
@@ -25,7 +31,7 @@ async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   let res = await fetch(`${FD_BASE}${path}`, {
-    headers: _authHeaders(),
+    headers: _authHeaders(asUser),
     credentials: 'include',
     ...init,
   })
@@ -39,7 +45,7 @@ async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
       throw new Error('Session expired')
     }
     res = await fetch(`${FD_BASE}${path}`, {
-      headers: _authHeaders(),
+      headers: _authHeaders(asUser),
       credentials: 'include',
       ...init,
     })
@@ -133,8 +139,9 @@ export interface SpawnConfig {
 
 // ── Endpoints ──
 
-export const listContainers = () =>
-  fdFetch<ContainerInfo[]>('/containers')
+// `asUser` on the calls below: an admin acting for that user (ACT_AS_HEADER).
+export const listContainers = (asUser?: string) =>
+  fdFetch<ContainerInfo[]>('/containers', undefined, asUser)
 
 export const getContainer = (id: string) =>
   fdFetch<ContainerDetail>(`/containers/${id}`)
@@ -145,14 +152,14 @@ export const spawnAgent = (config: SpawnConfig) =>
     body: JSON.stringify(config),
   })
 
-export const stopContainer = (id: string) =>
-  fdFetch<ContainerActionResult>(`/containers/${id}/stop`, { method: 'POST' })
+export const stopContainer = (id: string, asUser?: string) =>
+  fdFetch<ContainerActionResult>(`/containers/${id}/stop`, { method: 'POST' }, asUser)
 
-export const startContainer = (id: string) =>
-  fdFetch<ContainerActionResult>(`/containers/${id}/start`, { method: 'POST' })
+export const startContainer = (id: string, asUser?: string) =>
+  fdFetch<ContainerActionResult>(`/containers/${id}/start`, { method: 'POST' }, asUser)
 
-export const restartContainer = (id: string) =>
-  fdFetch<ContainerActionResult>(`/containers/${id}/restart`, { method: 'POST' })
+export const restartContainer = (id: string, asUser?: string) =>
+  fdFetch<ContainerActionResult>(`/containers/${id}/restart`, { method: 'POST' }, asUser)
 
 export const rebuildContainer = (id: string, description?: string) =>
   fdFetch<ContainerActionResult>(`/containers/${id}/rebuild`, {
@@ -166,8 +173,8 @@ export const cloneContainer = (id: string, newName: string) =>
     body: JSON.stringify({ new_name: newName }),
   })
 
-export const removeContainer = (id: string, force = false) =>
-  fdFetch<ContainerActionResult>(`/containers/${id}?force=${force}`, { method: 'DELETE' })
+export const removeContainer = (id: string, force = false, asUser?: string) =>
+  fdFetch<ContainerActionResult>(`/containers/${id}?force=${force}`, { method: 'DELETE' }, asUser)
 
 export interface LogResult {
   logs: string
@@ -202,6 +209,9 @@ export interface ProcessInfo {
   model: string
   /** Free-OpenRouter agent — eligible for "Refresh free models" */
   freebie?: boolean
+  /** The owner's standing instructions for this agent, as Flight Deck holds
+   *  them — the process store syncs its copy from here. */
+  fleet_instructions?: string
 }
 
 // ── Free OpenRouter ("Freebie") agents ──
@@ -260,8 +270,8 @@ export const spawnOldMan = (config: OldManSpawnRequest) =>
 
 // ── Process agent endpoints ──
 
-export const listProcesses = () =>
-  fdFetch<ProcessInfo[]>('/processes')
+export const listProcesses = (asUser?: string) =>
+  fdFetch<ProcessInfo[]>('/processes', undefined, asUser)
 
 export const spawnProcess = (config: SpawnConfig) =>
   fdFetch<ProcessActionResult>('/spawn-process', {
@@ -273,7 +283,9 @@ export const spawnProcess = (config: SpawnConfig) =>
 // fills tools / cognitive mode / runtime from the archetype and the model from
 // the caller's tier set (else the admin-published team default), so no model
 // config or API key passes through the browser. The kiosk's "New agent" picker.
-export const spawnArchetypeProcess = (archetypeId: string, name: string, description: string) =>
+export const spawnArchetypeProcess = (
+  archetypeId: string, name: string, description: string, asUser?: string,
+) =>
   fdFetch<ProcessActionResult>('/spawn-process', {
     method: 'POST',
     body: JSON.stringify({
@@ -284,19 +296,29 @@ export const spawnArchetypeProcess = (archetypeId: string, name: string, descrip
       web_enabled: true,
       web_port: 0,
     }),
-  })
+  }, asUser)
 
-export const stopProcess = (slug: string) =>
-  fdFetch<ProcessActionResult>(`/processes/${slug}/stop`, { method: 'POST' })
+// An agent's standing instructions live in its owner's settings; Flight Deck
+// writes one agent's entry at a time (never the whole map from a stale tab).
+export const saveAgentInstructions = (
+  kind: 'process' | 'docker', id: string, instructions: string, asUser?: string,
+) =>
+  fdFetch<{ ok: boolean }>(`/agent-instructions/${kind}/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ instructions }),
+  }, asUser)
 
-export const startProcess = (slug: string) =>
-  fdFetch<ProcessActionResult>(`/processes/${slug}/start`, { method: 'POST' })
+export const stopProcess = (slug: string, asUser?: string) =>
+  fdFetch<ProcessActionResult>(`/processes/${slug}/stop`, { method: 'POST' }, asUser)
 
-export const restartProcess = (slug: string) =>
-  fdFetch<ProcessActionResult>(`/processes/${slug}/restart`, { method: 'POST' })
+export const startProcess = (slug: string, asUser?: string) =>
+  fdFetch<ProcessActionResult>(`/processes/${slug}/start`, { method: 'POST' }, asUser)
 
-export const removeProcess = (slug: string) =>
-  fdFetch<ProcessActionResult>(`/processes/${slug}`, { method: 'DELETE' })
+export const restartProcess = (slug: string, asUser?: string) =>
+  fdFetch<ProcessActionResult>(`/processes/${slug}/restart`, { method: 'POST' }, asUser)
+
+export const removeProcess = (slug: string, asUser?: string) =>
+  fdFetch<ProcessActionResult>(`/processes/${slug}`, { method: 'DELETE' }, asUser)
 
 export const getProcessLogs = async (slug: string, tail = 200, sinceByte = 0): Promise<LogResult> => {
   const qs = sinceByte > 0
