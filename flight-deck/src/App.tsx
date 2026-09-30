@@ -394,8 +394,9 @@ function AppContent() {
   // Force the locked, chat-first Simple layout on every form factor and ignore
   // the stored layoutMode entirely. `locked` strips the escape hatches (full
   // view, the Spawner, agent config, start/stop) so shared-account users can
-  // only chat, create an agent from a Library archetype, or sign out — nothing
-  // else is reachable. Placed before the mobile/tablet/full branches so it always wins.
+  // only chat, create an agent from a Library archetype, manage their Google /
+  // MCP connections, or sign out — nothing else is reachable. Placed before the
+  // mobile/tablet/full branches so it always wins.
   // Admins are exempt (selectKioskLocked) — they keep full access even here.
   if (kioskLocked) {
     return (
