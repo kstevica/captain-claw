@@ -44,6 +44,7 @@ from captain_claw.flight_deck.basna_routes import (
     _dispatch_one,
     _fallback_difficulty,
     _load_owner_tiers,
+    tier_api_key,
     _load_registry,
     _phase,
     _progress,
@@ -104,6 +105,7 @@ async def _update_map(repo: Path, tiers_map: dict, registry: dict) -> None:
         changed = res.get("changed_files") or []
         if changed:
             creds = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
+            creds = {**creds, "api_key": tier_api_key(creds) or ""}  # never the "@system" sentinel
             await code_map.summarize_changed(repo, changed, creds)
     except Exception as e:  # noqa: BLE001
         log.warning("code map update failed", error=str(e))
@@ -543,7 +545,7 @@ async def _write_session_handoff(repo: Path, sdir: Path, intent: str, plan_file:
         tcfg = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
         prov = create_provider(
             provider=tcfg.get("provider", "anthropic"), model=tcfg.get("model", ""),
-            api_key=tcfg.get("api_key") or None, base_url=tcfg.get("base_url") or None,
+            api_key=tier_api_key(tcfg), base_url=tcfg.get("base_url") or None,
             temperature=0.2, max_tokens=1100)
         resp = await asyncio.wait_for(
             prov.complete(messages=[Message(role="user", content=_handoff_prompt(
@@ -827,7 +829,7 @@ async def _classify(intent: str, context: str, archetypes: list[dict],
         from captain_claw.llm import Message, create_provider
         prov = create_provider(
             provider=fast.get("provider", "anthropic"), model=fast.get("model", ""),
-            api_key=fast.get("api_key") or None, base_url=fast.get("base_url") or None,
+            api_key=tier_api_key(fast), base_url=fast.get("base_url") or None,
             temperature=0.1, max_tokens=600,
         )
         user_prompt = (f"{context}\nRequest: {intent}" if context else f"Request: {intent}")
@@ -1261,7 +1263,7 @@ async def _triage_reviews(reviews: list[dict], intent: str,
         from captain_claw.llm import Message, create_provider
         prov = create_provider(
             provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
-            api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+            api_key=tier_api_key(tier), base_url=tier.get("base_url") or None,
             temperature=0.1, max_tokens=4000,
         )
         resp = await prov.complete(messages=[
@@ -1368,7 +1370,7 @@ async def _coverage_gaps(repo: Path, plan_file: str, intent: str,
         from captain_claw.llm import Message, create_provider
         prov = create_provider(
             provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
-            api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+            api_key=tier_api_key(tier), base_url=tier.get("base_url") or None,
             temperature=0.1, max_tokens=1200)
         resp = await prov.complete(messages=[
             Message(role="system", content=(
@@ -1415,7 +1417,7 @@ async def _load_or_derive_contract(repo: Path, plan_file: str, intent: str,
         from captain_claw.llm import Message, create_provider
         prov = create_provider(
             provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
-            api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+            api_key=tier_api_key(tier), base_url=tier.get("base_url") or None,
             temperature=0.1, max_tokens=1500)
         resp = await prov.complete(messages=[
             Message(role="system", content="You extract checkable acceptance criteria. "
@@ -1448,7 +1450,7 @@ async def _validate_contract(repo: Path, constraints: list[dict],
             from captain_claw.llm import Message, create_provider
             prov = create_provider(
                 provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
-                api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+                api_key=tier_api_key(tier), base_url=tier.get("base_url") or None,
                 temperature=0.1, max_tokens=1000)
             resp = await prov.complete(messages=[
                 Message(role="system", content="You judge acceptance rules a script can't "
@@ -1600,7 +1602,7 @@ async def _decompose_plan(repo: Path, plan_file: str, intent: str, by_id: dict,
         from captain_claw.llm import Message, create_provider
         prov = create_provider(
             provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
-            api_key=tier.get("api_key") or None, base_url=tier.get("base_url") or None,
+            api_key=tier_api_key(tier), base_url=tier.get("base_url") or None,
             temperature=0.1, max_tokens=2500)
         resp = await prov.complete(messages=[
             Message(role="system", content="You are a build coordinator. Reply with JSON only."),
@@ -2188,7 +2190,7 @@ async def _run_build_loop(request: Request, user: dict, pkey: str, repo: Path, s
                 _tier = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
                 _prov = create_provider(
                     provider=_tier.get("provider", "anthropic"), model=_tier.get("model", ""),
-                    api_key=_tier.get("api_key") or None, base_url=_tier.get("base_url") or None,
+                    api_key=tier_api_key(_tier), base_url=_tier.get("base_url") or None,
                     temperature=0.2, max_tokens=400)
                 _resp = await _prov.complete(messages=[Message(role="user", content=_cl.distill_prompt(
                     intent, _signal, "fixed" if fix_rounds_run else "accepted"))],

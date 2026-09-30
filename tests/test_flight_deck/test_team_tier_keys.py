@@ -14,15 +14,20 @@ models and NO credentials ("Missing credentials … OPENAI_API_KEY"). So:
   there. It reports what it added / replaced / shared / what is still missing —
   provider ids and hostnames only, never key values;
 * a spawn that asks for the team key when there is none is refused (409)
-  instead of starting a dead agent — only where the agent really needs the
-  provider's key (not ChatGPT-signed-in models, not custom endpoints);
-* an unresolvable ``@system`` doesn't shadow the set's own provider env var.
+  instead of starting a dead agent — unless the model needs no key
+  (ChatGPT-signed-in models, providers without one) or it arrives another way;
+* an unresolvable ``@system`` doesn't shadow the set's own provider env var;
+* nobody has to publish again or recreate agents for any of it: a set that is
+  already published gets its keys from the publishing admin's own copy, a
+  blank key in a user's own set falls back to the team's key, and an agent
+  created without a model key is given it.
 
 Real FlightDeckDB in a tmp dir; no network, nothing spawned.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import types
 
@@ -56,7 +61,15 @@ async def db(monkeypatch, tmp_path):
     # The org-key cache is process-global: start every test cold.
     monkeypatch.setattr(basna_mod, "_SYSTEM_PROVIDER_KEYS", {})
     monkeypatch.setattr(basna_mod, "_SYSTEM_ENDPOINT_KEYS", {})
+    monkeypatch.setattr(basna_mod, "_SYSTEM_NO_FALLBACK", frozenset())
     monkeypatch.setattr(basna_mod, "_SYSTEM_KEYS_TS", 0.0)
+    monkeypatch.setattr(admin_routes, "_TEAM_KEYS_LOCK", None)
+    monkeypatch.setattr(admin_routes, "_agent_key_healer", None)
+    monkeypatch.setattr(server, "_processes", {})
+    # Agents live on disk under DATA_DIR — never the developer's real ones.
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path / "fd-data")
+    monkeypatch.setattr(server, "PROCESS_REGISTRY_FILE", tmp_path / "fd-data" / ".processes.json")
+    (tmp_path / "fd-data").mkdir()
     for name in server._PROVIDER_KEY_ENV.values():
         monkeypatch.delenv(name, raising=False)
 
@@ -82,10 +95,27 @@ def _req(uid: str):
     return types.SimpleNamespace(state=types.SimpleNamespace(user_id=uid))
 
 
+async def _add_user(db, uid: str, role: str = "user", own_set: dict | None = None) -> None:
+    await db._db.execute(
+        "INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)"
+        " VALUES (?, ?, 'h', ?, ?, '2026-01-01', '2026-01-01')", (uid, f"{uid}@x.co", uid, role))
+    await db._db.commit()
+    if own_set is not None:
+        await db.set_settings(uid, {"fd:forge-tiers": json.dumps(
+            {"sets": [own_set], "activeSetId": own_set["id"]})})
+
+
+async def _already_published(db, *sets: dict) -> None:
+    """A set as an EARLIER Flight Deck left it in the store: no team keys."""
+    await db.set_system_setting(
+        "fd:shared-tier-sets", json.dumps({"sets": list(sets), "defaultSetId": sets[0]["id"]}))
+
+
 async def _spawn_config(uid: str = "new-user") -> server.AgentConfig:
     """What the kiosk picker's spawn resolves to for ``uid`` (no personal set)."""
     cfg = server.AgentConfig(name="x", archetype="market-research")
     await server._resolve_archetype(cfg, _req(uid), None)
+    server._resolve_tier(cfg)
     await server._resolve_spawn_provider_key(cfg)
     return cfg
 
@@ -353,9 +383,9 @@ class TestNewUserAgentGetsTheTeamKey:
             {"balanced": _tier(api_key="", base_url=GW)},
             env=[{"key": "BRAVE_API_KEY", "value": "brave-1"}])], "activeSetId": "s1"})})
         await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
-        env = server._build_env(await _spawn_config())
-        assert "OPENAI_API_KEY" not in env          # no endpoint key yet: blank stays blank,
-        assert "sk-org" not in env                  # never the provider's org key
+        with pytest.raises(HTTPException) as exc:   # no endpoint key yet — and never the
+            await _spawn_config()                   # provider's org key for that host
+        assert exc.value.status_code == 409 and "gw.example" in exc.value.detail
         await _publish(_set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
         env = server._build_env(await _spawn_config())
         assert "OPENAI_API_KEY=gateway-key" in env and "BRAVE_API_KEY=brave-1" in env
@@ -405,8 +435,20 @@ class TestNewUserAgentGetsTheTeamKey:
         with pytest.raises(HTTPException) as exc:
             await _spawn_config()
         assert exc.value.status_code == 409
-        assert "No team API key for openai" in exc.value.detail
+        assert "No API key for openai:" in exc.value.detail
         assert "Provider keys" in exc.value.detail
+
+    async def test_an_archetype_agent_is_never_created_without_a_model_key(self, db):
+        """Flight Deck picked the model, so the caller had no say in the key: a
+        BLANK one with nothing behind it is refused as well — also when the
+        tier isn't in the set at all and the registry's model is used."""
+        for tiers in ({"balanced": _tier(api_key="")},                      # own endpoint
+                      {"balanced": _tier(api_key="", base_url=GW)},          # a gateway
+                      {"fast": _tier(api_key="sk-x")}):                      # no "balanced" tier
+            await _already_published(db, _set(tiers))
+            with pytest.raises(HTTPException) as exc:
+                await _spawn_config()
+            assert exc.value.status_code == 409 and "No API key for" in exc.value.detail
 
     async def test_unresolvable_system_key_lets_the_sets_own_env_var_through(self, db):
         await db.set_system_setting("fd:shared-tier-sets", json.dumps({"sets": [_set(
@@ -454,9 +496,19 @@ class TestSpawnProviderKey:
         await server._resolve_spawn_provider_key(cfg)
         assert cfg.provider_api_key == ""
 
-    async def test_a_custom_endpoint_is_never_refused(self, db):
+    async def test_a_custom_endpoint_with_no_team_key_is_refused_too(self, db):
+        """"@system" says the published tier HAD a key; an agent without it
+        can't make one call ("Missing credentials") — say so at creation."""
         cfg = server.AgentConfig(name="x", provider="openai", model="local-model",
-                                 base_url="http://localhost:1234/v1", provider_api_key="@system")
+                                 base_url="http://user:pw@localhost:1234/v1", provider_api_key="@system")
+        with pytest.raises(HTTPException) as exc:
+            await server._resolve_spawn_provider_key(cfg)
+        assert exc.value.status_code == 409
+        assert "openai at localhost:1234" in exc.value.detail and "pw" not in exc.value.detail
+
+    async def test_a_keyless_provider_on_a_custom_endpoint_is_never_refused(self, db):
+        cfg = server.AgentConfig(name="x", provider="ollama", model="qwen",
+                                 base_url="http://localhost:11434", provider_api_key="@system")
         await server._resolve_spawn_provider_key(cfg)
         assert cfg.provider_api_key == ""
 
@@ -467,10 +519,698 @@ class TestSpawnProviderKey:
         await server._resolve_spawn_provider_key(cfg)
         assert cfg.provider_api_key == ""
 
-    async def test_a_real_or_blank_key_is_left_alone(self, db):
+    async def test_a_real_key_is_left_alone(self, db):
         await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
         await db.set_system_setting("fd:endpoint-keys", json.dumps({f"openai|{GW}": "gateway-key"}))
-        for key, base_url in (("sk-mine", ""), ("sk-mine", GW), ("", ""), ("", "https://other.example/v1")):
-            cfg = server.AgentConfig(name="x", provider="openai", provider_api_key=key, base_url=base_url)
+        for base_url in ("", GW):
+            cfg = server.AgentConfig(name="x", provider="openai", provider_api_key="sk-mine", base_url=base_url)
             await server._resolve_spawn_provider_key(cfg)
-            assert cfg.provider_api_key == key
+            assert cfg.provider_api_key == "sk-mine"
+
+
+# ── a blank key in a user's own set ─────────────────────────────────────────
+
+class TestBlankKeyFallsBackToTheTeams:
+    """A user's own set (often an automatic copy of a team set) with no key for
+    a model the team has one for: the agent gets the team's — never over a key
+    the spawn brings itself, and never the provider's key for a foreign host."""
+
+    async def _cfg(self, **kw) -> server.AgentConfig:
+        cfg = server.AgentConfig(name="x", provider="openai", model="gpt-4.1", **kw)
+        await server._resolve_spawn_provider_key(cfg)
+        return cfg
+
+    async def test_own_endpoint_gets_the_providers_team_key(self, db):
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
+        assert (await self._cfg()).provider_api_key == "sk-org"
+
+    async def test_no_team_key_is_no_refusal(self, db):
+        assert (await self._cfg()).provider_api_key == ""
+        assert (await self._cfg(base_url=GW)).provider_api_key == ""
+
+    async def test_a_key_in_the_spawns_env_vars_wins(self, db):
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
+        cfg = await self._cfg(env_vars=[{"key": "OPENAI_API_KEY", "value": "sk-mine"}])
+        assert cfg.provider_api_key == "" and "sk-org" not in server._build_env(cfg)
+
+    async def test_a_key_inherited_from_flight_decks_environment_is_kept(self, db, monkeypatch):
+        """A process agent with a blank key already runs on the deck's
+        environment key — it keeps it; a container doesn't inherit, so it
+        gets the team's."""
+        monkeypatch.setenv("OPENAI_API_KEY", "fd-env-key")
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
+        assert (await self._cfg()).provider_api_key == ""
+        cfg = server.AgentConfig(name="x", provider="openai", model="gpt-4.1")
+        await server._resolve_spawn_provider_key(cfg, inherits_fd_env=False)
+        assert cfg.provider_api_key == "sk-org"
+
+    async def test_flight_decks_provider_key_is_not_a_gateways_key(self, db, monkeypatch):
+        """On a custom endpoint the inherited key is the wrong one (it would be
+        sent to that host): the endpoint's team key still applies."""
+        monkeypatch.setenv("OPENAI_API_KEY", "fd-env-openai-key")
+        await db.set_system_setting("fd:endpoint-keys", json.dumps({f"openai|{GW}": "gateway-key"}))
+        assert (await self._cfg(base_url=GW)).provider_api_key == "gateway-key"
+        # …and a gateway that really runs on the environment's key is not refused.
+        cfg = server.AgentConfig(name="x", provider="openai", model="m", archetype="market-research",
+                                 base_url="https://other.example/v1")
+        await server._resolve_spawn_provider_key(cfg)
+        assert cfg.provider_api_key == ""
+
+    async def test_a_keyless_local_server_behind_a_keyed_provider_is_not_refused(self, db):
+        for provider in ("openrouter", "xai"):
+            cfg = server.AgentConfig(name="x", provider=provider, model="m", archetype="market-research",
+                                     base_url="http://localhost:1234/v1")
+            await server._resolve_spawn_provider_key(cfg)
+            assert cfg.provider_api_key == ""
+        cfg = server.AgentConfig(name="x", provider="openai", model="m", archetype="market-research",
+                                 base_url="http://localhost:1234/v1")
+        with pytest.raises(HTTPException):       # the OpenAI client makes no call without a key
+            await server._resolve_spawn_provider_key(cfg)
+
+    async def test_a_failing_lookup_leaves_the_spawn_alone(self, db, monkeypatch):
+        async def boom(*_a, **_k):
+            raise RuntimeError("db gone")
+
+        monkeypatch.setattr(server, "_team_key", boom)
+        cfg = server.AgentConfig(name="x", provider="openai", model="gpt-4.1", provider_api_key="@system")
+        await server._resolve_spawn_provider_key(cfg)
+        assert cfg.provider_api_key == ""
+
+    async def test_chatgpt_signed_in_models_get_no_api_key(self, db):
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
+        cfg = server.AgentConfig(name="x", provider="openai", model="gpt-5.2")
+        await server._resolve_spawn_provider_key(cfg)
+        assert cfg.provider_api_key == ""
+
+    async def test_a_foreign_endpoint_never_gets_the_providers_key(self, db):
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
+        await db.set_system_setting("fd:endpoint-keys", json.dumps({f"openai|{GW}": "gateway-key"}))
+        assert (await self._cfg(base_url="https://other.example/v1")).provider_api_key == ""
+        assert (await self._cfg(base_url=GW + "/")).provider_api_key == "gateway-key"
+
+    async def test_an_endpoint_the_team_runs_on_the_providers_key(self, db):
+        """One gateway for the whole deck, on the org key: the published tier is
+        "@system" with no endpoint key. A user's blank copy resolves like it."""
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "gw-key"}))
+        await _publish(_set({"balanced": _tier(api_key="gw-key", base_url=GW)}))
+        assert await _endpoint_keys(db) == {}
+        assert (await self._cfg(base_url=GW)).provider_api_key == "gw-key"
+        await _add_user(db, "new-user", own_set=_set({"balanced": _tier(api_key="", base_url=GW)}))
+        assert "OPENAI_API_KEY=gw-key" in server._build_env(await _spawn_config())
+
+
+def _seed_set(**changes) -> dict:
+    """What the UI saves on a first visit: every registry tier, its default model, no keys."""
+    tiers = {name: {"provider": t["provider"], "model": t["model"], "api_key": "", "base_url": ""}
+             for name, t in basna_mod._load_registry()["tiers"].items()}
+    tiers["balanced"].update(changes)
+    return {"id": "seed", "name": "Default", "envVars": [], "tiers": tiers}
+
+
+class TestAnUntouchedSeedSetRidesTheTeamDefault:
+    """The UI saves a registry-seeded set on a user's first visit when it has
+    no team set to copy yet. Nobody chose it — so it must not shadow the team
+    default forever. A set somebody DID choose is theirs, however keyless."""
+
+    TEAM = [{"key": "BRAVE_API_KEY", "value": "brave-1"}]
+
+    async def test_the_team_default_applies(self, db):
+        await _add_user(db, "new-user", own_set=_seed_set())
+        await _publish(_set({"balanced": _tier(model="swift", api_key="gateway-key", base_url=GW)}, env=self.TEAM))
+        cfg = await _spawn_config()
+        assert (cfg.provider, cfg.model) == ("openai", "swift")
+        env = server._build_env(cfg)
+        assert "OPENAI_API_KEY=gateway-key" in env and "BRAVE_API_KEY=brave-1" in env
+
+    async def test_a_set_somebody_chose_stays_theirs(self, db):
+        await _publish(_set({"balanced": _tier(model="swift", api_key="gateway-key", base_url=GW)}, env=self.TEAM))
+        for own in (_seed_set(api_key="sk-mine"),
+                    _seed_set(base_url="http://localhost:1234/v1"),
+                    _seed_set(provider="ollama", model="qwen3.5:4b"),          # local models: keyless by design
+                    _seed_set(model="claude-another"),                        # own model on the deck's key
+                    {**_seed_set(), "envVars": [{"key": "BRAVE_API_KEY", "value": "b"}]},
+                    {**_seed_set(), "tiers": {"mine": _tier(provider="anthropic", model="claude")}}):
+            assert not basna_mod._set_is_unconfigured(own)
+        await _add_user(db, "new-user", own_set=_seed_set(provider="ollama", model="qwen3.5:4b"))
+        tiers, env = await basna_mod._load_owner_tiers(db, "new-user")
+        assert tiers["balanced"]["model"] == "qwen3.5:4b" and env == []
+
+    async def test_a_seed_the_ui_backfilled_with_a_later_tier_is_still_a_seed(self, db):
+        """A tier the registry gained later is copied from a sibling by the UI
+        (micro ← balanced), not taken from the registry."""
+        seed = _seed_set()
+        seed["tiers"]["micro"] = dict(seed["tiers"]["balanced"])
+        seed["tiers"]["coding"] = dict(seed["tiers"]["reason"])
+        assert basna_mod._set_is_unconfigured(seed)
+        seed["tiers"]["micro"] = {**seed["tiers"]["balanced"], "model": "some-other-model"}
+        assert not basna_mod._set_is_unconfigured(seed)             # somebody picked that one
+
+    async def test_without_a_team_default_the_seed_is_what_there_is(self, db):
+        await _add_user(db, "new-user", own_set=_seed_set())
+        tiers, _env = await basna_mod._load_owner_tiers(db, "new-user")
+        assert tiers["balanced"]["provider"] == "anthropic"
+
+    async def test_an_unreadable_registry_keeps_the_users_set(self, db, monkeypatch):
+        def boom():
+            raise HTTPException(500, "Archetype registry not found")
+
+        monkeypatch.setattr(basna_mod, "_load_registry", boom)
+        assert not basna_mod._set_is_unconfigured(
+            {"tiers": {"balanced": _tier(provider="anthropic", model="claude-sonnet-4-6")}})
+
+
+class TestDirectModelCallsUseTheTeamKey:
+    """Code, Dubina and the beings call a tier's model themselves
+    (create_provider) instead of spawning an agent: the "@system" sentinel is
+    not a key there either."""
+
+    async def test_the_sentinel_becomes_the_team_key_for_its_endpoint(self, db):
+        await _publish(_set({"balanced": _tier(api_key="gateway-key", base_url=GW),
+                             "fast": _tier(api_key="sk-real-openai")}))
+        tiers, _env = await basna_mod._load_owner_tiers(db, "new-user")
+        assert basna_mod.tier_api_key(tiers["balanced"]) == "gateway-key"
+        assert basna_mod.tier_api_key(tiers["fast"]) == "sk-real-openai"
+
+    async def test_nothing_behind_the_sentinel_is_no_key_not_the_sentinel(self, db):
+        assert basna_mod.tier_api_key(_tier(api_key="@system")) is None
+
+    async def test_a_tiers_own_key_or_none_is_passed_through(self, db, monkeypatch):
+        monkeypatch.setattr(basna_mod, "_SYSTEM_PROVIDER_KEYS", {"openai": "sk-org"})
+        assert basna_mod.tier_api_key(_tier(api_key="sk-mine")) == "sk-mine"
+        assert basna_mod.tier_api_key(_tier(api_key="")) is None   # the environment's, as before
+
+    async def test_creds_in_a_request_body_are_resolved_the_same_way(self, db):
+        """Basna's router call gets the tier's key as the UI (or agent_start) holds it."""
+        await _publish(_set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
+        assert await basna_mod._request_api_key("openai", "@system", GW) == "gateway-key"
+        assert await basna_mod._request_api_key("openai", "@system", "") is None
+        assert await basna_mod._request_api_key("openai", "sk-mine", GW) == "sk-mine"
+        assert await basna_mod._request_api_key("openai", "", GW) is None
+
+    async def test_the_code_map_summary_gets_a_key_not_the_sentinel(self, db, monkeypatch, tmp_path):
+        from captain_claw.flight_deck import code_routes
+
+        seen: dict = {}
+
+        async def summarize(_repo, _changed, creds):
+            seen.update(creds)
+
+        monkeypatch.setattr(code_routes.code_map, "reindex", lambda repo: {"changed_files": ["a.py"]})
+        monkeypatch.setattr(code_routes.code_map, "summarize_changed", summarize)
+        await _publish(_set({"fast": _tier(api_key="gateway-key", base_url=GW)}))
+        tiers, _env = await basna_mod._load_owner_tiers(db, "new-user")
+        await code_routes._update_map(tmp_path, tiers, {})
+        assert seen["api_key"] == "gateway-key" and seen["base_url"] == GW
+
+    async def test_dubina_builds_its_provider_with_the_team_key(self, db, monkeypatch):
+        from captain_claw.flight_deck import dubina_routes
+
+        seen: dict = {}
+        monkeypatch.setattr(dubina_routes, "create_provider", lambda **kw: seen.update(kw) or "provider")
+        await _publish(_set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
+        tiers = await dubina_routes._resolve_tiers(db, "new-user")
+        assert dubina_routes._library_provider_factory(tiers)("balanced") == "provider"
+        assert seen["api_key"] == "gateway-key" and seen["base_url"] == GW
+
+
+# ── sets that are already published ─────────────────────────────────────────
+
+class TestPublishedSetsGetTheirKeysWithoutRepublishing:
+    """The reported case, three times over: the set was published by an earlier
+    Flight Deck, the fix was deployed, nobody clicked Publish again — and a new
+    agent still had BRAVE_API_KEY and no model key."""
+
+    ENV = [{"key": "BRAVE_API_KEY", "value": "brave-1"}]
+
+    async def test_a_sentinel_with_nothing_behind_it(self, db):
+        """Published when the copy was masked but no key was stored anywhere."""
+        await _add_user(db, "admin-1", "admin", _set(
+            {"balanced": _tier(model="swift", api_key="gateway-key", base_url=GW)}, env=self.ENV))
+        await _already_published(db, _set(
+            {"balanced": _tier(model="swift", api_key="@system", base_url=GW)}, env=self.ENV))
+        env = server._build_env(await _spawn_config())
+        assert "OPENAI_API_KEY=gateway-key" in env and "BRAVE_API_KEY=brave-1" in env
+        assert await _endpoint_keys(db) == {f"openai|{GW}": "gateway-key"}
+
+    async def test_a_custom_endpoint_tier_that_was_published_blank(self, db):
+        await _add_user(db, "admin-1", "admin", _set(
+            {"balanced": _tier(api_key="gateway-key", base_url=GW + "/")}))
+        await _already_published(db, _set({"balanced": _tier(api_key="", base_url=GW)}))
+        assert "OPENAI_API_KEY=gateway-key" in server._build_env(await _spawn_config())
+        stored = await db.get_system_setting("fd:shared-tier-sets")
+        assert _published_key(stored, "balanced") == "@system" and "gateway-key" not in stored
+
+    async def test_a_tier_on_the_providers_own_endpoint(self, db):
+        await _add_user(db, "admin-1", "admin", _set(
+            {"balanced": _tier(provider="anthropic", model="claude", api_key="sk-ant")}))
+        await _already_published(db, _set(
+            {"balanced": _tier(provider="anthropic", model="claude", api_key="@system")}))
+        assert "ANTHROPIC_API_KEY=sk-ant" in server._build_env(await _spawn_config())
+        assert await _org_keys(db) == {"anthropic": "sk-ant"}
+
+    async def test_it_happens_at_startup_too_and_only_once(self, db):
+        await _add_user(db, "admin-1", "admin", _set({
+            "balanced": _tier(api_key="gateway-key", base_url=GW),
+            "fast": _tier(provider="anthropic", model="claude", api_key="sk-ant")}))
+        await _already_published(db, _set({
+            "balanced": _tier(api_key="", base_url=GW),
+            "fast": _tier(provider="anthropic", model="claude", api_key="@system")}))
+        res = await admin_routes.recover_team_keys(db)
+        assert res == {"providers": ["anthropic"], "endpoints": ["gw.example"]}
+        assert "gateway-key" not in json.dumps(res) and "sk-ant" not in json.dumps(res)
+        assert await admin_routes.recover_team_keys(db) == {}
+
+    async def test_a_team_key_that_exists_is_never_replaced(self, db):
+        await db.set_system_setting("fd:provider-keys", json.dumps({"anthropic": "sk-team"}))
+        await db.set_system_setting("fd:endpoint-keys", json.dumps({f"openai|{GW}": "team-gw"}))
+        await _add_user(db, "admin-1", "admin", _set({
+            "balanced": _tier(api_key="other-gw", base_url=GW),
+            "fast": _tier(provider="anthropic", model="claude", api_key="sk-other")}))
+        await _already_published(db, _set({
+            "balanced": _tier(api_key="", base_url=GW),
+            "fast": _tier(provider="anthropic", model="claude", api_key="@system")}))
+        assert await admin_routes.recover_team_keys(db) == {}
+        assert await _org_keys(db) == {"anthropic": "sk-team"}
+        assert await _endpoint_keys(db) == {f"openai|{GW}": "team-gw"}
+        assert "OPENAI_API_KEY=team-gw" in server._build_env(await _spawn_config())
+
+    async def test_only_an_admins_copy_of_that_very_set_counts(self, db):
+        published = _set({"balanced": _tier(api_key="@system", base_url=GW)})
+        await _already_published(db, published)
+        await _add_user(db, "teammate", "user", _set({"balanced": _tier(api_key="not-yours", base_url=GW)}))
+        await _add_user(db, "admin-2", "admin", _set(
+            {"balanced": _tier(api_key="another-set", base_url=GW)}, sid="other-set"))
+        assert await admin_routes.recover_team_keys(db) == {"unresolved": ["openai at gw.example"]}
+        assert await _endpoint_keys(db) == {} and await _org_keys(db) == {}
+        with pytest.raises(HTTPException) as exc:   # …and the spawn says what is wrong
+            await _spawn_config()
+        assert exc.value.status_code == 409 and "gw.example" in exc.value.detail
+
+    async def test_a_tier_the_admin_has_since_moved_elsewhere_gives_no_key(self, db):
+        await _already_published(db, _set({"balanced": _tier(api_key="@system", base_url=GW)}))
+        await _add_user(db, "admin-1", "admin", _set({
+            "balanced": _tier(api_key="sk-real-openai"),                          # own endpoint now
+            "fast": _tier(provider="anthropic", api_key="sk-ant", base_url=GW)}))  # other provider
+        assert await admin_routes.recover_team_keys(db) == {"unresolved": ["openai at gw.example"]}
+        assert await _endpoint_keys(db) == {} and await _org_keys(db) == {}
+
+    async def test_another_tier_of_the_set_on_the_same_endpoint_will_do(self, db):
+        await _already_published(db, _set({"balanced": _tier(api_key="@system", base_url=GW)}))
+        await _add_user(db, "admin-1", "admin", _set({
+            "balanced": _tier(api_key="@system", base_url=GW),
+            "fast": _tier(api_key="gateway-key", base_url=GW)}))
+        assert (await admin_routes.recover_team_keys(db))["endpoints"] == ["gw.example"]
+        assert await _endpoint_keys(db) == {f"openai|{GW}": "gateway-key"}
+
+    async def test_a_blank_tier_on_the_providers_own_endpoint(self, db):
+        """Published with no key in the tier; the admin's copy has one now."""
+        await _add_user(db, "admin-1", "admin", _set({"balanced": _tier(api_key="sk-real-openai")}))
+        await _already_published(db, _set({"balanced": _tier(api_key="")}))
+        assert "OPENAI_API_KEY=sk-real-openai" in server._build_env(await _spawn_config())
+        assert _published_key(await db.get_system_setting("fd:shared-tier-sets"), "balanced") == "@system"
+
+    async def test_the_oldest_admins_copy_wins(self, db):
+        await db._db.executemany(
+            "INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)"
+            " VALUES (?, ?, 'h', ?, 'admin', ?, ?)",
+            [("late", "late@x.co", "late", "2026-05-01", "2026-05-01"),
+             ("first", "first@x.co", "first", "2026-01-01", "2026-01-01")])
+        await db._db.commit()
+        for uid in ("late", "first"):
+            await db.set_settings(uid, {"fd:forge-tiers": json.dumps({"sets": [_set(
+                {"balanced": _tier(api_key=f"key-of-{uid}", base_url=GW)})], "activeSetId": "s1"})})
+        await _already_published(db, _set({"balanced": _tier(api_key="@system", base_url=GW)}))
+        await admin_routes.recover_team_keys(db)
+        assert await _endpoint_keys(db) == {f"openai|{GW}": "key-of-first"}
+
+    async def test_a_key_flight_decks_environment_supplies_is_left_to_it(self, db, monkeypatch):
+        """The deck runs on a key in its environment; process agents inherit
+        it. An admin's personal key must not quietly replace it."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "company-env-key")
+        await _add_user(db, "admin-1", "admin", _set(
+            {"balanced": _tier(provider="anthropic", model="claude", api_key="sk-admin-personal")}))
+        await _already_published(db, _set(
+            {"balanced": _tier(provider="anthropic", model="claude", api_key="@system")}))
+        assert await admin_routes.recover_team_keys(db) == {}
+        env = server._build_env(await _spawn_config())
+        assert "ANTHROPIC_API_KEY" not in env and await _org_keys(db) == {}
+
+    async def test_a_team_key_an_admin_removes_stays_removed(self, db):
+        """Recovery is a one-time migration of sets published EARLIER — not a
+        standing rule that undoes Admin → Provider keys."""
+        own = _set({"balanced": _tier(provider="anthropic", model="claude", api_key="sk-ant")})
+        await _add_user(db, "admin-1", "admin", own)
+        await _publish(own)
+        await admin_routes.update_provider_keys(
+            admin_routes.ProviderKeysRequest(keys={"anthropic": ""}), admin=ADMIN)
+        assert await admin_routes.recover_team_keys(db) == {} and await _org_keys(db) == {}
+        with pytest.raises(HTTPException) as exc:
+            await _spawn_config()
+        assert exc.value.status_code == 409 and await _org_keys(db) == {}
+        await _publish(own)                                   # sharing it again is a publish
+        assert "ANTHROPIC_API_KEY=sk-ant" in server._build_env(await _spawn_config())
+
+    async def test_a_recovered_set_is_done_too(self, db):
+        await _add_user(db, "admin-1", "admin", _set(
+            {"balanced": _tier(provider="anthropic", model="claude", api_key="sk-ant")}))
+        await _already_published(db, _set(
+            {"balanced": _tier(provider="anthropic", model="claude", api_key="@system")}))
+        assert (await admin_routes.recover_team_keys(db))["providers"] == ["anthropic"]
+        await admin_routes.update_provider_keys(
+            admin_routes.ProviderKeysRequest(keys={"anthropic": ""}), admin=ADMIN)
+        assert await admin_routes.recover_team_keys(db) == {} and await _org_keys(db) == {}
+
+    async def test_a_set_still_missing_a_key_is_tried_again(self, db):
+        await _already_published(db, _set({"balanced": _tier(api_key="@system", base_url=GW)}))
+        assert await admin_routes.recover_team_keys(db) == {"unresolved": ["openai at gw.example"]}
+        await _add_user(db, "admin-1", "admin", _set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
+        assert (await admin_routes.recover_team_keys(db))["endpoints"] == ["gw.example"]
+
+    async def test_a_gateway_tier_is_not_left_on_the_providers_key(self, db):
+        """The deck has an OpenAI key in Admin → Provider keys AND an old
+        "@system" tier on a gateway whose key the admin's copy still holds:
+        the gateway gets ITS key, as a publish would store it."""
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-openai-direct"}))
+        await _add_user(db, "admin-1", "admin", _set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
+        await _already_published(db, _set({"balanced": _tier(api_key="@system", base_url=GW)}))
+        assert (await admin_routes.recover_team_keys(db))["endpoints"] == ["gw.example"]   # at startup
+        assert "OPENAI_API_KEY=gateway-key" in server._build_env(await _spawn_config())
+        assert await _endpoint_keys(db) == {f"openai|{GW}": "gateway-key"}
+        assert await _org_keys(db) == {"openai": "sk-openai-direct"}
+
+    async def test_a_blank_tier_nobody_has_a_key_for_does_not_keep_the_set_open(self, db):
+        """Published without a key and the admin's copy has none either: there
+        is nothing to wait for — the set is done, and stays done."""
+        own = _set({"balanced": _tier(api_key="", base_url="http://localhost:1234/v1"),
+                    "fast": _tier(provider="anthropic", model="claude", api_key="sk-ant")})
+        await _add_user(db, "admin-1", "admin", own)
+        await _already_published(db, _set({
+            "balanced": _tier(api_key="", base_url="http://localhost:1234/v1"),
+            "fast": _tier(provider="anthropic", model="claude", api_key="@system")}))
+        assert (await admin_routes.recover_team_keys(db)) == {"providers": ["anthropic"], "endpoints": []}
+        await admin_routes.update_provider_keys(
+            admin_routes.ProviderKeysRequest(keys={"anthropic": ""}), admin=ADMIN)
+        assert await admin_routes.recover_team_keys(db) == {} and await _org_keys(db) == {}
+
+    async def test_the_other_published_sets_and_the_default_are_kept(self, db):
+        done = _set({"balanced": _tier(provider="anthropic", model="claude", api_key="@system")}, sid="a")
+        legacy = _set({"balanced": _tier(api_key="@system", base_url=GW)}, sid="b")
+        await db.set_system_setting("fd:shared-tier-sets", json.dumps(
+            {"sets": [done, legacy], "defaultSetId": "b", "keys_shared": ["a"]}))
+        await _add_user(db, "admin-1", "admin", _set({"balanced": _tier(api_key="gateway-key", base_url=GW)}, sid="b"))
+        await admin_routes.recover_team_keys(db)
+        blob = json.loads(await db.get_system_setting("fd:shared-tier-sets"))
+        assert blob["defaultSetId"] == "b" and blob["keys_shared"] == ["a", "b"]
+        assert [s["id"] for s in blob["sets"]] == ["a", "b"]
+        assert await _org_keys(db) == {}                     # set "a" was done: not looked at again
+        assert "OPENAI_API_KEY=gateway-key" in server._build_env(await _spawn_config())
+
+    async def test_a_set_with_nothing_to_recover_is_marked_done_anyway(self, db):
+        await db.set_system_setting("fd:provider-keys", json.dumps({"anthropic": "sk-team"}))
+        own = _set({"balanced": _tier(provider="anthropic", model="claude", api_key="sk-mine")})
+        await _add_user(db, "admin-1", "admin", own)
+        await _already_published(db, _set({"balanced": _tier(provider="anthropic", model="claude", api_key="@system")}))
+        assert await admin_routes.recover_team_keys(db) == {}
+        assert json.loads(await db.get_system_setting("fd:shared-tier-sets"))["keys_shared"] == ["s1"]
+        await admin_routes.update_provider_keys(
+            admin_routes.ProviderKeysRequest(keys={"anthropic": ""}), admin=ADMIN)
+        assert await admin_routes.recover_team_keys(db) == {} and await _org_keys(db) == {}
+
+    async def test_a_key_the_set_carries_in_its_extra_keys_needs_no_recovery(self, db):
+        await _add_user(db, "admin-1", "admin", _set({"balanced": _tier(api_key="sk-real-openai")}))
+        await _already_published(db, _set({"balanced": _tier(api_key="@system")},
+                                          env=[{"key": "OPENAI_API_KEY", "value": "sk-in-set"}]))
+        assert await admin_routes.recover_team_keys(db) == {} and await _org_keys(db) == {}
+        assert "OPENAI_API_KEY=sk-in-set" in server._build_env(await _spawn_config())
+
+    async def test_a_key_the_admin_keeps_in_the_sets_extra_keys_is_found(self, db):
+        await _add_user(db, "admin-1", "admin", _set(
+            {"balanced": _tier(api_key="")}, env=[{"key": "OPENAI_API_KEY", "value": "sk-in-extra"}]))
+        await _already_published(db, _set({"balanced": _tier(api_key="@system")}))
+        assert "OPENAI_API_KEY=sk-in-extra" in server._build_env(await _spawn_config())
+
+    async def test_a_recovered_provider_key_is_not_sent_to_a_gateway_without_its_own(self, db):
+        """Old publish: a tier on api.openai.com and one on a gateway, both
+        "@system". The admin's copy still has the OpenAI key but no longer a
+        key for THAT gateway (URL edited since). The OpenAI key is recovered —
+        and must not become the gateway tier's key by fallback."""
+        old_gw = "https://old-gw.example/v1"
+        await _already_published(db, _set({"fast": _tier(api_key="@system"),
+                                          "balanced": _tier(api_key="@system", base_url=old_gw)}))
+        await _add_user(db, "admin-1", "admin", _set({
+            "fast": _tier(api_key="sk-openai-direct"),
+            "balanced": _tier(api_key="gw-key", base_url="https://new-gw.example/v1")}))
+        res = await admin_routes.recover_team_keys(db)
+        assert res == {"providers": ["openai"], "endpoints": [], "unresolved": ["openai at old-gw.example"]}
+        with pytest.raises(HTTPException) as exc:                 # no key — and it says so
+            await _spawn_config()
+        assert exc.value.status_code == 409 and "old-gw.example" in exc.value.detail
+        assert await server._team_key("openai", old_gw, asked=True) == ""
+        assert await server._team_key("openai", old_gw, asked=False) == ""
+        await basna_mod._refresh_system_provider_keys(db)          # Basna / Vatra / direct calls too
+        assert basna_mod._effective_key("openai", "@system", old_gw) is None
+        assert basna_mod._effective_key("openai", "@system") == "sk-openai-direct"
+        _agent("on-old-gw", base_url=old_gw)                       # …nor healed into an agent
+        assert await server.heal_keyless_agents(restart=False) == []
+        # Publishing a key for that gateway settles it; publishing without one keeps the mark.
+        await _publish(_set({"fast": _tier(api_key="@system")}))
+        assert await server._team_key("openai", old_gw, asked=True) == ""
+        await _publish(_set({"balanced": _tier(api_key="old-gw-key", base_url=old_gw)}))
+        assert await server._team_key("openai", old_gw, asked=True) == "old-gw-key"
+        assert json.loads(await db.get_system_setting("fd:shared-tier-sets"))["no_provider_fallback"] == []
+
+    async def test_a_provider_key_in_the_sets_extra_keys_does_not_hide_a_gateways_own(self, db):
+        extra = [{"key": "OPENAI_API_KEY", "value": "sk-openai-direct"}]
+        await _add_user(db, "admin-1", "admin", _set(
+            {"fast": _tier(api_key=""), "balanced": _tier(api_key="gw-key", base_url=GW)}, env=extra))
+        await _already_published(db, _set(
+            {"fast": _tier(api_key=""), "balanced": _tier(api_key="@system", base_url=GW)}, env=extra))
+        assert (await admin_routes.recover_team_keys(db))["endpoints"] == ["gw.example"]
+        env = server._build_env(await _spawn_config())
+        assert "OPENAI_API_KEY=gw-key" in env and "sk-openai-direct" not in env
+
+    async def test_in_a_set_that_stays_open_a_removed_key_stays_removed_too(self, db):
+        await _already_published(db, _set({
+            "fast": _tier(provider="anthropic", model="claude", api_key="@system"),
+            "balanced": _tier(api_key="@system", base_url=GW)}))          # no key for it anywhere
+        await _add_user(db, "admin-1", "admin", _set(
+            {"fast": _tier(provider="anthropic", model="claude", api_key="sk-ant")}))
+        res = await admin_routes.recover_team_keys(db)
+        assert res["providers"] == ["anthropic"] and res["unresolved"] == ["openai at gw.example"]
+        await admin_routes.update_provider_keys(
+            admin_routes.ProviderKeysRequest(keys={"anthropic": ""}), admin=ADMIN)
+        assert await admin_routes.recover_team_keys(db) == {"unresolved": ["openai at gw.example"]}
+        assert await _org_keys(db) == {}
+
+    async def test_a_published_blank_gateway_tier_is_no_team_endpoint(self, db):
+        """Until recovery finds its key, a blank tier is no licence to send the
+        provider's org key to that host."""
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
+        await _already_published(db, _set({"balanced": _tier(api_key="", base_url=GW)}))
+        assert await server._team_key("openai", GW, asked=False) == ""
+
+    async def test_a_gateway_key_that_is_the_org_key_is_not_stored_twice(self, db):
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "gw-key"}))
+        await _add_user(db, "admin-1", "admin", _set({"balanced": _tier(api_key="gw-key", base_url=GW)}))
+        await _already_published(db, _set({"balanced": _tier(api_key="", base_url=GW)}))
+        assert "OPENAI_API_KEY=gw-key" in server._build_env(await _spawn_config())
+        assert await _endpoint_keys(db) == {}
+
+
+# ── agents created without a model key ──────────────────────────────────────
+
+def _agent(slug: str, provider="openai", model="swift", base_url=GW, env="BRAVE_API_KEY=brave-1\n",
+           api_key="") -> None:
+    import yaml
+
+    agent_dir = server.DATA_DIR / slug
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "config.yaml").write_text(yaml.safe_dump(
+        {"model": {"provider": provider, "model": model, "api_key": api_key, "base_url": base_url}}))
+    (agent_dir / ".env").write_text(env)
+    registry = server._load_process_registry()
+    registry[slug] = {"slug": slug, "name": slug, "provider": provider, "model": model,
+                      "owner": "new-user", "pid": None, "web_port": 0}
+    server._save_process_registry(registry)
+
+
+def _env(slug: str) -> str:
+    return (server.DATA_DIR / slug / ".env").read_text()
+
+
+class TestAgentsCreatedWithoutAKeyGetIt:
+    """An agent's .env is written once, at creation. One created while the team
+    had no key for its model stays dead unless somebody recreates it — so give
+    it the key when there is one: on publish, on a provider-key change, at
+    startup, and when it is started."""
+
+    async def test_publishing_gives_existing_agents_their_key(self, db):
+        _agent("marco")
+        res = await _publish(_set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
+        assert res["agents_given_key"] == 1
+        assert _env("marco") == "BRAVE_API_KEY=brave-1\nOPENAI_API_KEY=gateway-key\n"
+        assert (await _publish(_set({"balanced": _tier(api_key="gateway-key", base_url=GW)})))[
+            "agents_given_key"] == 0
+
+    async def test_a_provider_key_change_does_too(self, db):
+        _agent("claude-agent", provider="anthropic", model="claude", base_url="", env="")
+        res = await admin_routes.update_provider_keys(
+            admin_routes.ProviderKeysRequest(keys={"anthropic": "sk-ant"}), admin=ADMIN)
+        assert res["agents_given_key"] == 1 and _env("claude-agent") == "ANTHROPIC_API_KEY=sk-ant\n"
+
+    async def test_startup_heals_after_recovering_the_keys(self, db):
+        """The whole unattended path: old publish, new Flight Deck, restart."""
+        _agent("marco")
+        await _add_user(db, "admin-1", "admin", _set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
+        await _already_published(db, _set({"balanced": _tier(api_key="@system", base_url=GW)}))
+        await admin_routes.recover_team_keys(db)
+        assert await server.heal_keyless_agents(restart=False) == ["marco"]
+        assert "OPENAI_API_KEY=gateway-key" in _env("marco")
+
+    async def test_agents_that_have_or_need_no_key_are_left_alone(self, db, monkeypatch):
+        await db.set_system_setting("fd:provider-keys", json.dumps(
+            {"openai": "sk-org", "anthropic": "sk-ant"}))
+        await db.set_system_setting("fd:endpoint-keys", json.dumps({f"openai|{GW}": "gateway-key"}))
+        _agent("own-key", env="OPENAI_API_KEY=mine\n")
+        _agent("key-in-config", api_key="in-config")
+        _agent("chatgpt", model="gpt-5.2", base_url="", env="")
+        _agent("local", provider="ollama", model="qwen", base_url="http://localhost:11434", env="")
+        _agent("elsewhere", base_url="https://other.example/v1", env="")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "from-fd-env")   # process agents inherit it
+        _agent("inherits", provider="anthropic", model="claude", base_url="", env="")
+        before = {slug: _env(slug) for slug in server._load_process_registry()}
+        assert await server.heal_keyless_agents(restart=False) == []
+        assert {slug: _env(slug) for slug in before} == before
+
+    async def test_an_agent_that_is_missing_on_disk_is_skipped(self, db):
+        server._save_process_registry({"ghost": {"slug": "ghost", "pid": None}})
+        assert await server.heal_keyless_agents(restart=False) == []
+
+    async def test_the_key_is_looked_for_where_the_agent_looks(self, db, monkeypatch):
+        import yaml
+
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
+        await db.set_system_setting("fd:endpoint-keys", json.dumps({f"openai|{GW}": "gateway-key"}))
+        _agent("exported", env='export OPENAI_API_KEY="mine"\n')              # a key, however written
+        _agent("in-provider-keys")
+        (server.DATA_DIR / "in-provider-keys" / "config.yaml").write_text(yaml.safe_dump(
+            {"model": {"provider": "openai", "model": "swift", "base_url": GW},
+             "provider_keys": {"openai": "from-settings"}}))
+        _agent("in-home-config")                                               # the copy the agent loads
+        home = server.DATA_DIR / "in-home-config" / "data" / "home-config-parent" / ".captain-claw"
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {"api_key": "in-home"}}))
+        _agent("unreadable")
+        (server.DATA_DIR / "unreadable" / "config.yaml").write_bytes(b"\xff\xfe not yaml: [")
+        _agent("blank-value", env='OPENAI_API_KEY=""\n')                      # no key at all
+        monkeypatch.setenv("OPENAI_API_KEY", "fd-env-key")                     # …not the gateway's key:
+        _agent("gateway")                                                      # it still gets its own
+        assert sorted(await server.heal_keyless_agents(restart=False)) == ["blank-value", "gateway"]
+        assert "OPENAI_API_KEY=gateway-key" in _env("blank-value")
+
+    async def test_only_the_running_agents_are_restarted(self, db, monkeypatch):
+        _agent("running")
+        _agent("stopped")
+        restarted: list = []
+        monkeypatch.setattr(server, "_process_is_alive", lambda slug: slug == "running")
+        monkeypatch.setattr(server, "_restart_processes", lambda slugs: restarted.append(list(slugs)))
+        res = await _publish(_set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
+        await asyncio.sleep(0.05)                       # the restart runs in a worker thread
+        assert res["agents_given_key"] == 2 and restarted == [["running"]]
+
+    async def test_the_serving_modules_healer_is_the_one_called(self, db, monkeypatch):
+        """`python -m …server` runs the server as __main__; its lifespan hands
+        admin_routes ITS healer, so restarts use the process table the routes use."""
+        calls: list = []
+
+        async def serving_healer():
+            calls.append("serving")
+            return ["a", "b"]
+
+        monkeypatch.setattr(admin_routes, "_agent_key_healer", serving_healer)
+        res = await _publish(_set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
+        assert calls == ["serving"] and res["agents_given_key"] == 2
+
+    async def test_startup_recovers_heals_then_reattaches_then_restarts(self, db, monkeypatch):
+        _agent("dead")                                   # reattach will start it — with the key
+        _agent("live")                                   # running without it: restarted after
+        await _add_user(db, "admin-1", "admin", _set({"balanced": _tier(api_key="gateway-key", base_url=GW)}))
+        await _already_published(db, _set({"balanced": _tier(api_key="@system", base_url=GW)}))
+        order: list = []
+        monkeypatch.setattr(server, "_process_is_alive", lambda slug: slug == "live")
+        monkeypatch.setattr(server, "_reattach_processes",
+                            lambda: order.append(("reattach", "OPENAI_API_KEY=gateway-key" in _env("dead"))))
+        monkeypatch.setattr(server, "_do_stop_process", lambda slug: order.append(("stop", slug)))
+        monkeypatch.setattr(server, "_do_start_process", lambda slug: order.append(("start", slug)))
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        await server._startup_team_keys_then_reattach()
+        assert order == [("reattach", True), ("stop", "live"), ("start", "live")]
+        assert admin_routes._agent_key_healer is server.heal_keyless_agents
+
+    async def test_startup_says_which_published_tier_has_no_key(self, db, monkeypatch, caplog):
+        await _already_published(db, _set({"balanced": _tier(api_key="@system", base_url=GW)}))
+        monkeypatch.setattr(server, "_reattach_processes", lambda: None)
+        with caplog.at_level("WARNING"):
+            await server._startup_team_keys_then_reattach()
+        assert "No team API key for openai at gw.example" in caplog.text
+
+    async def test_startup_survives_a_failing_recovery(self, db, monkeypatch):
+        async def boom(_db):
+            raise RuntimeError("db not ready")
+
+        calls: list = []
+        monkeypatch.setattr(admin_routes, "recover_team_keys", boom)
+        monkeypatch.setattr(server, "_reattach_processes", lambda: calls.append("reattach"))
+        await server._startup_team_keys_then_reattach()
+        assert calls == ["reattach"]
+
+    async def test_starting_or_restarting_an_agent_gives_it_the_key_first(self, db, monkeypatch):
+        await db.set_system_setting("fd:endpoint-keys", json.dumps({f"openai|{GW}": "gateway-key"}))
+        seen: list = []
+        monkeypatch.setattr(server, "_do_stop_process", lambda slug: None)
+        monkeypatch.setattr(server, "_do_start_process",
+                            lambda slug: seen.append("OPENAI_API_KEY=gateway-key" in _env(slug)))
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        _agent("a")
+        await server.start_process("a", _req("new-user"), None)
+        _agent("b")
+        await server.restart_process("b", _req("new-user"), None)
+        assert seen == [True, True]
+
+
+class TestStoppingAnAgent:
+    def _registered(self, pid):
+        server._save_process_registry({"marco": {"slug": "marco", "pid": pid, "web_port": 1}})
+
+    async def test_a_dead_handle_does_not_hide_the_running_process(self, db, monkeypatch):
+        """Restarted through another copy of the module, the agent's live pid
+        is in the registry while this one still holds the old handle."""
+        self._registered(4242)
+        killed: list = []
+        server._processes["marco"] = types.SimpleNamespace(pid=1111, poll=lambda: 0)   # exited
+        monkeypatch.setattr(server, "_process_is_alive", lambda slug: True)
+        monkeypatch.setattr(server, "_kill_pid", lambda pid: killed.append(pid))
+        assert server._do_stop_process("marco").message == "Stopped"
+        assert killed == [4242]
+
+    async def test_a_live_handle_is_the_one_stopped(self, db, monkeypatch):
+        self._registered(4242)
+        killed: list = []
+        server._processes["marco"] = types.SimpleNamespace(pid=1111, poll=lambda: None)
+        monkeypatch.setattr(server, "_kill_pid", lambda pid: killed.append(pid))
+        server._do_stop_process("marco")
+        assert killed == [1111]
+
+    async def test_what_is_written_during_the_kill_survives_it(self, db, monkeypatch):
+        self._registered(4242)
+
+        def slow_kill(_pid):   # a spawn lands in the registry while we wait for the process to die
+            registry = server._load_process_registry()
+            registry["newcomer"] = {"slug": "newcomer", "pid": 7, "web_port": 2}
+            server._save_process_registry(registry)
+
+        monkeypatch.setattr(server, "_process_is_alive", lambda slug: True)
+        monkeypatch.setattr(server, "_kill_pid", slow_kill)
+        server._do_stop_process("marco")
+        registry = server._load_process_registry()
+        assert "newcomer" in registry and registry["marco"]["stopped"] is True

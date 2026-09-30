@@ -180,7 +180,7 @@ async def faculty_send(store, being: dict, prompt: str, faculty: str,
     except Exception:  # noqa: BLE001 — no FD db (tests/standalone) → body
         return None
     try:
-        from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+        from captain_claw.flight_deck.basna_routes import _load_owner_tiers, tier_api_key
         tiers, _env = await _load_owner_tiers(db, being["owner_id"])
         cfg = (tiers or {}).get(MICRO_TIER) or {}
         if not str(cfg.get("model") or "").strip():
@@ -198,7 +198,7 @@ async def faculty_send(store, being: dict, prompt: str, faculty: str,
             provider=cfg.get("provider", "ollama"),
             model=cfg.get("model", ""),
             base_url=cfg.get("base_url") or None,
-            api_key=cfg.get("api_key") or None,
+            api_key=tier_api_key(cfg),
             temperature=temperature,
             max_tokens=output_cap,
             num_ctx=input_cap + output_cap,

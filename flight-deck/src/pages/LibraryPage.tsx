@@ -392,7 +392,7 @@ export function LibraryPage() {
                 run on the team key of each provider, not on this set's own. */}
             {publishNote && (publishNote.teamKeysAdded.length > 0 || publishNote.teamKeysUpdated.length > 0
               || publishNote.teamEndpointsShared.length > 0 || publishNote.teamKeysConflict.length > 0
-              || publishNote.teamKeysMissing.length > 0) && (
+              || publishNote.teamKeysMissing.length > 0 || publishNote.agentsGivenKey > 0) && (
               <div className="space-y-1 text-[11px]">
                 {publishNote.teamKeysAdded.length > 0 && (
                   <p className="text-emerald-700 dark:text-emerald-300">
@@ -407,6 +407,11 @@ export function LibraryPage() {
                 {publishNote.teamEndpointsShared.length > 0 && (
                   <p className="text-emerald-700 dark:text-emerald-300">
                     The key for {publishNote.teamEndpointsShared.join(', ')} is shared with the team — used only for that endpoint.
+                  </p>
+                )}
+                {publishNote.agentsGivenKey > 0 && (
+                  <p className="text-emerald-700 dark:text-emerald-300">
+                    {publishNote.agentsGivenKey === 1 ? '1 agent that had no model key now has it' : `${publishNote.agentsGivenKey} agents that had no model key now have it`} — running ones are being restarted.
                   </p>
                 )}
                 {publishNote.teamKeysConflict.length > 0 && (
