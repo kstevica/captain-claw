@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { X, Save, Loader2, AlertTriangle, FileText, KeyRound, BookOpen, SlidersHorizontal, Server } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
+import { ACT_AS_HEADER } from '../../services/docker'
 import { ModelSelector } from '../common/ModelSelector'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 
@@ -14,21 +15,31 @@ interface AgentConfigEditorProps {
   identifier: string    // container id, process slug, or local agent id
   agentName: string
   onClose: () => void
+  /** Admin managing ANOTHER user's agent (docker / process): that user's id.
+   *  Everything then goes through the server on their behalf — nothing is read
+   *  from or written to the admin's own browser stores — and the controls that
+   *  only work on the viewer's own agents (model, cognitive mode) are hidden. */
+  asUser?: string
+  /** With `asUser`: who the agent belongs to, and its current description. */
+  ownerLabel?: string
+  initialDescription?: string
 }
 
-async function fdFetchConfig<T>(path: string, init?: RequestInit): Promise<T> {
-  const { token, authEnabled } = useAuthStore.getState()
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+async function fdFetchConfig<T>(path: string, init?: RequestInit, asUser?: string): Promise<T> {
+  const build = (): Record<string, string> => {
+    const { token, authEnabled } = useAuthStore.getState()
+    const h: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (authEnabled && token) h['Authorization'] = `Bearer ${token}`
+    if (asUser) h[ACT_AS_HEADER] = asUser
+    return h
+  }
+  const { authEnabled } = useAuthStore.getState()
 
-  let res = await fetch(`/fd${path}`, { headers, credentials: 'include', ...init })
+  let res = await fetch(`/fd${path}`, { headers: build(), credentials: 'include', ...init })
   if (res.status === 401 && authEnabled) {
     const ok = await refreshAccessToken()
     if (ok) {
-      const h2: Record<string, string> = { 'Content-Type': 'application/json' }
-      const t2 = useAuthStore.getState().token
-      if (t2) h2['Authorization'] = `Bearer ${t2}`
-      res = await fetch(`/fd${path}`, { headers: h2, credentials: 'include', ...init })
+      res = await fetch(`/fd${path}`, { headers: build(), credentials: 'include', ...init })
     }
   }
   if (!res.ok) {
@@ -40,13 +51,25 @@ async function fdFetchConfig<T>(path: string, init?: RequestInit): Promise<T> {
 
 type Tab = 'general' | 'instructions' | 'config' | 'env'
 
-export function AgentConfigEditor({ kind, identifier, agentName, onClose }: AgentConfigEditorProps) {
+export function AgentConfigEditor({
+  kind, identifier, agentName, onClose, asUser, ownerLabel, initialDescription,
+}: AgentConfigEditorProps) {
   const isLocal = kind === 'local'
+  // A container's name / description are browser-side labels of whoever views
+  // it, so an admin acting for its owner has nothing to edit on General.
+  const hasGeneral = !(asUser && kind === 'docker')
 
-  const [activeTab, setActiveTab] = useState<Tab>('general')
+  const [activeTab, setActiveTab] = useState<Tab>(hasGeneral ? 'general' : 'instructions')
   const [configYaml, setConfigYaml] = useState('')
   const [env, setEnv] = useState('')
   const [loadingConfig, setLoadingConfig] = useState(!isLocal)
+  // A failed load leaves the editors empty; saving then would write that
+  // emptiness over the real files. Save stays off until a load succeeds.
+  const [loadFailed, setLoadFailed] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
+  // What the server held when this opened — the as-user Save sends only what
+  // differs, so it never rewrites parts the admin didn't touch.
+  const loaded = useRef({ configYaml: '', env: '', fleet: '', name: '', description: '' })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -62,10 +85,12 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
 
   // Friendly field state, seeded from the stores (instant, no fetch needed).
   const [name, setName] = useState(() =>
-    isLocal ? (localAgent?.name ?? agentName) : (store.nameOverrides[identifier] || agentName))
+    asUser ? agentName
+      : isLocal ? (localAgent?.name ?? agentName) : (store.nameOverrides[identifier] || agentName))
   const [description, setDescription] = useState(() =>
-    isLocal ? (localAgent?.description ?? '') : (store.descriptionOverrides[identifier] || ''))
-  const [fleet, setFleet] = useState(() => (isLocal ? '' : store.getFleetInstructions(identifier)))
+    asUser ? (initialDescription ?? '')
+      : isLocal ? (localAgent?.description ?? '') : (store.descriptionOverrides[identifier] || ''))
+  const [fleet, setFleet] = useState(() => (isLocal || asUser ? '' : store.getFleetInstructions(identifier)))
   const [cog, setCog] = useState(() => (isLocal ? 'neutra' : store.getCognitiveMode(identifier)))
   const [cogSaved, setCogSaved] = useState(false)
 
@@ -74,17 +99,42 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
     if (isLocal) return
     let cancelled = false
     setLoadingConfig(true)
+    setLoadFailed(false)
     setError('')
-    fdFetchConfig<{ config_yaml: string; env: string }>(`/agent-config/${kind}/${identifier}`)
-      .then((data) => {
+    const loads: Promise<unknown>[] = [
+      fdFetchConfig<{ config_yaml: string; env: string }>(`/agent-config/${kind}/${identifier}`, undefined, asUser)
+        .then((data) => {
+          if (cancelled) return
+          setConfigYaml(data.config_yaml || '')
+          setEnv(data.env || '')
+          loaded.current.configYaml = data.config_yaml || ''
+          loaded.current.env = data.env || ''
+        }),
+    ]
+    // The owner's instructions live in THEIR settings — ask the server.
+    if (asUser) {
+      loaded.current.name = agentName
+      loaded.current.description = initialDescription ?? ''
+      loads.push(
+        fdFetchConfig<{ instructions: string }>(`/agent-instructions/${kind}/${identifier}`, undefined, asUser)
+          .then((data) => {
+            if (cancelled) return
+            setFleet(data.instructions || '')
+            loaded.current.fleet = data.instructions || ''
+          }),
+      )
+    }
+    Promise.all(loads)
+      .catch((e) => {
         if (cancelled) return
-        setConfigYaml(data.config_yaml || '')
-        setEnv(data.env || '')
+        setLoadFailed(true)
+        setError(`${e.message || 'Failed to load'} — nothing can be saved until it loads.`)
       })
-      .catch((e) => { if (!cancelled) setError(e.message || 'Failed to load config') })
       .finally(() => { if (!cancelled) setLoadingConfig(false) })
     return () => { cancelled = true }
-  }, [kind, identifier, isLocal])
+    // agentName / initialDescription only seed the snapshot for this open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, identifier, isLocal, asUser, reloadKey])
 
   // Cognitive mode applies instantly (store + best-effort live push), matching
   // the agent cards. A stopped agent just stores the choice for next start.
@@ -112,6 +162,51 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
       if (isLocal) {
         localStore.updateAgent(identifier, { name: name.trim() || agentName, description })
         setSuccess('Saved.')
+      } else if (asUser) {
+        // On the owner's behalf: registry identity, their instructions, the
+        // files on disk — all server-side, none of it in this browser's stores.
+        // Only what changed is sent, so the owner's own edits to the rest (made
+        // since this opened) are left alone.
+        const was = loaded.current
+        const saved: string[] = []
+        try {
+          const newName = name.trim() || agentName
+          if (kind === 'process' && (newName !== was.name || description !== was.description)) {
+            await fdFetchConfig(`/processes/${identifier}/identity`, {
+              method: 'POST',
+              body: JSON.stringify({
+                ...(newName !== was.name ? { name: newName } : {}),
+                ...(description !== was.description ? { description } : {}),
+              }),
+            }, asUser)
+            was.name = newName
+            was.description = description
+            saved.push('name and description')
+          }
+          if (fleet !== was.fleet) {
+            await fdFetchConfig(`/agent-instructions/${kind}/${identifier}`, {
+              method: 'PUT', body: JSON.stringify({ instructions: fleet }),
+            }, asUser)
+            was.fleet = fleet
+            saved.push('instructions')
+          }
+          if (configYaml !== was.configYaml || env !== was.env) {
+            await fdFetchConfig<{ ok: boolean; message: string }>(`/agent-config/${kind}/${identifier}`, {
+              method: 'PUT',
+              body: JSON.stringify({
+                ...(configYaml !== was.configYaml ? { config_yaml: configYaml } : {}),
+                ...(env !== was.env ? { env } : {}),
+              }),
+            }, asUser)
+            was.configYaml = configYaml
+            was.env = env
+            saved.push('config.yaml / .env (restart the agent to apply)')
+          }
+        } catch (e) {
+          const why = e instanceof Error ? e.message : 'Failed to save'
+          throw new Error(saved.length ? `Saved ${saved.join(', ')} — then failed: ${why}` : why)
+        }
+        setSuccess(saved.length ? `Saved ${saved.join(', ')}.` : 'Nothing changed.')
       } else {
         // Update the FD-side override so the list reflects it instantly…
         store.setNameOverride(identifier, name.trim() || agentName)
@@ -143,7 +238,7 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
   const tabs: { id: Tab; label: string; icon: typeof FileText }[] = isLocal
     ? [{ id: 'general', label: 'General', icon: SlidersHorizontal }]
     : [
-        { id: 'general', label: 'General', icon: SlidersHorizontal },
+        ...(hasGeneral ? [{ id: 'general' as Tab, label: 'General', icon: SlidersHorizontal }] : []),
         { id: 'instructions', label: 'Instructions', icon: BookOpen },
         { id: 'config', label: 'config.yaml', icon: FileText },
         { id: 'env', label: '.env', icon: KeyRound },
@@ -163,7 +258,9 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
             </div>
             <div>
               <div className="text-sm font-semibold text-zinc-100">Agent options</div>
-              <div className="text-xs text-zinc-500">{agentName}</div>
+              <div className="text-xs text-zinc-500">
+                {agentName}{asUser && ownerLabel ? ` · managed for ${ownerLabel}` : ''}
+              </div>
             </div>
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300">
@@ -219,6 +316,14 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
                     live on that machine. Only its label and description are stored here.
                   </span>
                 </div>
+              ) : asUser ? (
+                <div className="flex items-start gap-2.5 rounded-lg border border-zinc-800 bg-zinc-950/50 px-4 py-3 text-xs text-zinc-500">
+                  <Server className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-600" />
+                  <span>
+                    You're managing this agent for its owner. Change its model, keys and mode on the
+                    config.yaml and .env tabs, then restart it.
+                  </span>
+                </div>
               ) : (
                 <>
                   <Field label="Model" hint="Provider, model and API key. Applies on the agent's next turn.">
@@ -235,7 +340,9 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
             </div>
           )}
 
-          {activeTab === 'instructions' && (
+          {activeTab === 'instructions' && (asUser && loadingConfig ? (
+            <Loading label="Loading instructions…" />
+          ) : (
             <div className="flex h-full flex-col p-6">
               <p className="shrink-0 pb-3 text-xs leading-relaxed text-zinc-500">
                 Standing instructions added to this agent's system prompt on every conversation.
@@ -250,7 +357,7 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
                 className="min-h-0 w-full flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
               />
             </div>
-          )}
+          ))}
 
           {activeTab === 'config' && (
             loadingConfig ? (
@@ -294,7 +401,12 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
         {/* Status */}
         {error && (
           <div className="mx-6 mb-2 flex shrink-0 items-center gap-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {error}
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> <span className="min-w-0 flex-1">{error}</span>
+            {loadFailed && (
+              <button onClick={() => setReloadKey((k) => k + 1)} className="shrink-0 rounded px-2 py-0.5 font-medium underline hover:no-underline">
+                Retry
+              </button>
+            )}
           </div>
         )}
         {success && (
@@ -308,6 +420,8 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
           <span className="text-[11px] text-zinc-600">
             {isLocal
               ? 'Label and description are saved locally.'
+              : asUser
+                ? 'Saved for the owner. config.yaml / .env need a restart.'
               : kind === 'process'
                 ? 'Name, description and instructions apply immediately. config.yaml / .env need a restart.'
                 : 'General changes apply immediately. config.yaml / .env need a restart.'}
@@ -321,7 +435,7 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
             </button>
             <button
               onClick={handleSave}
-              disabled={saving || (!isLocal && loadingConfig)}
+              disabled={saving || (!isLocal && (loadingConfig || loadFailed))}
               className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-40"
             >
               {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}

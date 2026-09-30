@@ -2,6 +2,7 @@
 // The merged registry itself (base + the user's own) is fetched by useTierConfig.
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
 import type { ArchetypeRegistry } from './tierConfig'
+import { ACT_AS_HEADER } from './docker'
 
 // The editable shape of a user archetype, matching the backend ArchetypeBody.
 export interface ArchetypeInput {
@@ -20,20 +21,21 @@ export interface ArchetypeInput {
   runtime?: string
 }
 
-function authHeaders(): Record<string, string> {
+function authHeaders(asUser?: string): Record<string, string> {
   const { token, authEnabled } = useAuthStore.getState()
   const h: Record<string, string> = { 'Content-Type': 'application/json' }
   if (authEnabled && token) h['Authorization'] = `Bearer ${token}`
+  if (asUser) h[ACT_AS_HEADER] = asUser
   return h
 }
 
 // fetch with one transparent token-refresh retry on 401, mirroring callForge.
-async function authFetch(path: string, init: RequestInit): Promise<Response> {
+async function authFetch(path: string, init: RequestInit, asUser?: string): Promise<Response> {
   const { authEnabled } = useAuthStore.getState()
-  let res = await fetch(path, { ...init, headers: authHeaders(), credentials: 'include' })
+  let res = await fetch(path, { ...init, headers: authHeaders(asUser), credentials: 'include' })
   if (res.status === 401 && authEnabled) {
     if (await refreshAccessToken()) {
-      res = await fetch(path, { ...init, headers: authHeaders(), credentials: 'include' })
+      res = await fetch(path, { ...init, headers: authHeaders(asUser), credentials: 'include' })
     }
   }
   return res
@@ -48,9 +50,11 @@ async function jsonOrThrow(res: Response) {
 }
 
 // The merged gallery (base + the caller's own + shared-with-them) without the
-// tier-set machinery of useTierConfig — for read-only pickers.
-export async function listArchetypes(): Promise<ArchetypeRegistry> {
-  return jsonOrThrow(await authFetch('/fd/archetypes', { method: 'GET' }))
+// tier-set machinery of useTierConfig — for read-only pickers. `asUser`: an
+// admin creating an agent for that user sees THEIR gallery, the one the spawn
+// resolves the archetype against.
+export async function listArchetypes(asUser?: string): Promise<ArchetypeRegistry> {
+  return jsonOrThrow(await authFetch('/fd/archetypes', { method: 'GET' }, asUser))
 }
 
 export async function createArchetype(body: ArchetypeInput) {

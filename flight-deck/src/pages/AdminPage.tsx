@@ -14,8 +14,10 @@ import {
   Key,
   Save,
   Check,
+  Bot,
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
+import { UserAgentsDialog } from '../components/agents/UserAgentsDialog'
 
 // ── Types ──
 
@@ -351,6 +353,7 @@ function UserRow({
   const [role, setRole] = useState(user.role)
   const [password, setPassword] = useState('')
   const [saving, setSaving] = useState(false)
+  const [agentsOpen, setAgentsOpen] = useState(false)
   const isSelf = user.id === currentUserId
 
   const handleSave = async () => {
@@ -448,6 +451,14 @@ function UserRow({
             >
               {saving ? 'Saving...' : 'Save Changes'}
             </button>
+            <button
+              onClick={() => setAgentsOpen(true)}
+              title="Create, start, stop, configure and remove this user's agents"
+              className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:border-violet-500/40 hover:text-zinc-100"
+            >
+              <Bot className="h-3 w-3 inline mr-1" />
+              Agents
+            </button>
             {!isSelf && (
               <button
                 onClick={() => { if (confirm(`Delete user ${user.email}? This cannot be undone.`)) onDelete(user.id) }}
@@ -459,6 +470,13 @@ function UserRow({
             )}
           </div>
         </div>
+      )}
+      {agentsOpen && (
+        <UserAgentsDialog
+          userId={user.id}
+          userLabel={user.display_name || user.email}
+          onClose={() => setAgentsOpen(false)}
+        />
       )}
     </div>
   )

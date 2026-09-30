@@ -38,7 +38,10 @@ load_dotenv()
 
 import logging
 
-from captain_claw.flight_deck.auth import get_current_user, get_optional_user, get_ws_user, set_auth_db, decode_access_token
+from captain_claw.flight_deck.auth import (
+    decode_access_token, get_current_user, get_managed_user, get_optional_managed_user,
+    get_optional_user, get_ws_user, set_auth_db,
+)
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.flight_deck import origin_guard
 
@@ -1208,6 +1211,11 @@ async def _no_user() -> None:
 
 _optional_user_dep = Depends(get_optional_user) if AUTH_ENABLED else Depends(_no_user)
 _required_user_dep = Depends(get_current_user) if AUTH_ENABLED else Depends(_no_user)
+# Agent management (list / create / start / stop / config / remove): the same
+# two, but an admin may act for another user with X-FD-Act-As — see
+# auth.act_as_target. Only the routes below that take these honour the header.
+_agent_manager_dep = Depends(get_managed_user) if AUTH_ENABLED else Depends(_no_user)
+_optional_agent_manager_dep = Depends(get_optional_managed_user) if AUTH_ENABLED else Depends(_no_user)
 
 # ── Auth & user routes ──
 
@@ -1365,6 +1373,12 @@ class AgentConfig(BaseModel):
     # (mirroring dubina's `_build_agent_config`). Explicit fields the caller already
     # set win over the archetype; an unknown id is a non-fatal no-op.
     archetype: str = ""
+    # The agent's standing instructions (its role brief — what a chat sends it
+    # as `fleet_instructions` on connect). Filled from the archetype when empty,
+    # and stored for the OWNER at spawn: the chat reads them from the owner's
+    # settings, so they must be there whoever created the agent (the owner's
+    # own browser, or an admin acting for them).
+    fleet_instructions: str = Field(default="", max_length=64_000)
     # Deep-memory grid config, populated when `archetype` resolves to a composed
     # function×domain leaf (see archetype_compose). `grid_memory_tags` are stamped
     # onto the agent's deep-memory writes; `grid_recall_mode` (pool | domain | self)
@@ -1526,6 +1540,8 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
         config.description = str(arch.get("role") or arch.get("description") or f"archetype:{aid}")
     if not config.runtime and arch.get("runtime") in ("classic", "mrav"):
         config.runtime = str(arch["runtime"])
+    if not config.fleet_instructions and arch.get("fleet_instructions"):
+        config.fleet_instructions = str(arch["fleet_instructions"])
     # Composed function×domain leaves carry deep-memory grid config; base/user
     # archetypes don't, so these stay empty (today's behaviour) for them.
     if arch.get("memory_tags"):
@@ -1959,7 +1975,7 @@ def _find_container(container_id: str, owner_id: str = "") -> docker.models.cont
 # ── Endpoints ──
 
 @app.get("/fd/containers", response_model=list[ContainerInfo])
-async def list_containers(request: Request, user: dict | None = _required_user_dep):
+async def list_containers(request: Request, user: dict | None = _agent_manager_dep):
     """List this deck's managed containers (filtered by owner when auth enabled).
 
     Never another deck's: each entry carries the container's web_auth — its
@@ -1974,7 +1990,8 @@ async def list_containers(request: Request, user: dict | None = _required_user_d
     if AUTH_ENABLED and user_id:
         containers = [c for c in containers if (c.labels or {}).get(OWNER_LABEL, "") == user_id]
     infos = [_container_info(c) for c in containers]
-    if not origin_guard.may_expose_agent_secrets(request.headers):
+    if (not origin_guard.may_expose_agent_secrets(request.headers)
+            or getattr(request.state, "acting_admin_id", "")):  # see list_processes
         for info in infos:
             info.web_auth = ""
     return infos
@@ -2140,6 +2157,9 @@ async def _resolve_spawn_owner(config: AgentConfig, request, *, docker: bool = F
         elif is_http:
             owner = await _resolve_unverified_spawn_owner(request, hint)
             config.web_auth_token = ""
+            # …nor write its own text into the owner's settings: only an
+            # archetype's instructions (filled in later) are stored for it.
+            config.fleet_instructions = ""
         else:
             owner = hint or await _sole_user_id()
             if not owner:
@@ -2197,7 +2217,7 @@ def _claim_web_auth(config: AgentConfig, slug: str) -> bool:
 
 
 @app.post("/fd/spawn", response_model=ContainerActionResult)
-async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = _optional_user_dep):
+async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = _optional_agent_manager_dep):
     """Spawn a new Captain Claw container."""
     # Owner first: it gates the whole spawn (nothing is written or removed for
     # a caller we can't attribute) and feeds the archetype's Library lookup.
@@ -2214,8 +2234,11 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         raise HTTPException(403, "Docker container spawning is disabled by the administrator.")
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
-        check_api_rate_limit(user)
-        check_spawn_rate_limit(user)
+        # An admin acting for this user spends their own request / spawn budget;
+        # the agent-count cap below stays the owner's.
+        _limited = getattr(request.state, "acting_admin", None) or user
+        check_api_rate_limit(_limited)
+        check_spawn_rate_limit(_limited)
         # Count existing containers for this user
         client_tmp = get_docker()
         user_id = user["id"]
@@ -2385,7 +2408,11 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         # Log usage
         if AUTH_ENABLED and user:
             db = app.state.fd_db
-            await db.log_usage(user["id"], "agent_spawn", json.dumps({"agent": slug, "type": "container", "image": config.image}))
+            await db.log_usage(user["id"], "agent_spawn", json.dumps({
+                "agent": slug, "type": "container", "image": config.image, **_acting_admin_detail(request)}))
+        if config.fleet_instructions:
+            await _set_owner_agent_instructions(
+                owner_id, "docker", container.short_id, config.fleet_instructions)
         # Notify other agents about the new peer (scoped to same owner)
         if config.web_enabled:
             _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=owner_id)
@@ -2402,7 +2429,7 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
 
 
 @app.post("/fd/containers/{container_id}/stop", response_model=ContainerActionResult)
-async def stop_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
+async def stop_container(container_id: str, request: Request, user: dict | None = _agent_manager_dep):
     import asyncio
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if c.status != "running":
@@ -2412,7 +2439,7 @@ async def stop_container(container_id: str, request: Request, user: dict | None 
 
 
 @app.post("/fd/containers/{container_id}/start", response_model=ContainerActionResult)
-async def start_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
+async def start_container(container_id: str, request: Request, user: dict | None = _agent_manager_dep):
     import asyncio
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if c.status == "running":
@@ -2426,7 +2453,7 @@ async def start_container(container_id: str, request: Request, user: dict | None
 
 
 @app.post("/fd/containers/{container_id}/restart", response_model=ContainerActionResult)
-async def restart_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
+async def restart_container(container_id: str, request: Request, user: dict | None = _agent_manager_dep):
     import asyncio
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     await asyncio.get_event_loop().run_in_executor(None, lambda: c.restart(timeout=5))
@@ -2434,11 +2461,13 @@ async def restart_container(container_id: str, request: Request, user: dict | No
 
 
 @app.delete("/fd/containers/{container_id}", response_model=ContainerActionResult)
-async def remove_container(container_id: str, force: bool = False, request: Request = None, user: dict | None = _required_user_dep):
+async def remove_container(container_id: str, force: bool = False, request: Request = None, user: dict | None = _agent_manager_dep):
     import asyncio
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     name = c.name
+    owner_id, short_id = str((c.labels or {}).get(OWNER_LABEL, "") or ""), c.short_id
     await asyncio.get_event_loop().run_in_executor(None, lambda: c.remove(force=force))
+    await _set_owner_agent_instructions(owner_id, "docker", short_id, "")
     return ContainerActionResult(ok=True, container_id=container_id, message=f"Removed '{name}'")
 
 
@@ -2451,7 +2480,7 @@ class CloneRequest(BaseModel):
 
 
 @app.post("/fd/containers/{container_id}/rebuild", response_model=ContainerActionResult)
-async def rebuild_container(container_id: str, request: Request, req: RebuildRequest | None = None, user: dict | None = _required_user_dep):
+async def rebuild_container(container_id: str, request: Request, req: RebuildRequest | None = None, user: dict | None = _agent_manager_dep):
     """Rebuild a container: stop, remove, pull latest image, re-spawn with same config."""
     import platform
 
@@ -2810,7 +2839,7 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
 
 
 @app.get("/fd/containers/{container_id}/logs")
-async def container_logs(container_id: str, tail: int = 200, since_ts: float = 0, follow: bool = False, request: Request = None, user: dict | None = _required_user_dep):
+async def container_logs(container_id: str, tail: int = 200, since_ts: float = 0, follow: bool = False, request: Request = None, user: dict | None = _agent_manager_dep):
     """Fetch container logs.
 
     When *since_ts* > 0 the Docker ``since`` parameter is used so only
@@ -2832,6 +2861,153 @@ async def container_logs(container_id: str, tail: int = 200, since_ts: float = 0
     else:
         logs = c.logs(tail=tail).decode("utf-8", errors="replace")
         return {"logs": logs, "timestamp": now}
+
+
+def _acting_admin_detail(request) -> dict:
+    """``{"acting_admin": id}`` when an admin made this request for the user
+    (X-FD-Act-As), so the usage log says who really did it."""
+    admin_id = getattr(getattr(request, "state", None), "acting_admin_id", "") or ""
+    return {"acting_admin": admin_id} if admin_id else {}
+
+
+# ── Agent instructions ──
+#
+# An agent's standing instructions live in its OWNER's settings — a map per
+# agent kind — and a chat sends them to the agent as `fleet_instructions` on
+# connect. Flight Deck is the writer (one entry at a time, under a per-owner
+# lock) and the SPA syncs from the agent list, so an entry survives whoever
+# wrote it: the owner, an archetype spawn, or an admin acting for the owner.
+
+_AGENT_INSTRUCTIONS_SETTING = {
+    "process": "fd:process-fleet-instructions",
+    "docker": "fd:container-fleet-instructions",
+}
+# The owner's browser-side labels for an agent, laid over the registry's.
+_PROCESS_LABEL_SETTINGS = ("fd:process-names", "fd:process-descriptions")
+_MAX_AGENT_INSTRUCTIONS = 64_000  # characters
+_owner_setting_locks: dict[str, asyncio.Lock] = {}
+
+
+def _owner_setting_lock(owner_id: str) -> asyncio.Lock:
+    lock = _owner_setting_locks.get(owner_id)
+    if lock is None:
+        lock = _owner_setting_locks[owner_id] = asyncio.Lock()
+    return lock
+
+
+async def _read_owner_map(owner_id: str, key: str) -> dict[str, str]:
+    """A ``{agent id: text}`` user setting ({} when unset or not a map).
+    Read errors propagate: a caller about to write the map back must not
+    mistake "couldn't read" for "empty" and wipe every other entry."""
+    from captain_claw.flight_deck.auth import get_db
+
+    raw = await get_db().get_setting(owner_id, key)
+    try:
+        data = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+async def _update_owner_map(owner_id: str, key: str, identifier: str, text: str | None) -> None:
+    """Set (or, with empty / None, drop) one entry of an owner's map setting."""
+    from captain_claw.flight_deck.auth import get_db
+
+    async with _owner_setting_lock(owner_id):
+        current = await _read_owner_map(owner_id, key)
+        if text:
+            if current.get(identifier) == text:
+                return
+            current[identifier] = text
+        elif identifier in current:
+            del current[identifier]
+        else:
+            return
+        await get_db().set_settings(owner_id, {key: json.dumps(current)})
+
+
+async def _owner_agent_instructions(owner_id: str, kind: str) -> dict[str, str]:
+    """``{agent id: instructions}`` from ``owner_id``'s settings — {} when there
+    are none, no accounts, or the read fails (for display; never written back)."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    if not owner_id or not _fd_auth_enabled():
+        return {}
+    try:
+        return await _read_owner_map(owner_id, _AGENT_INSTRUCTIONS_SETTING[kind])
+    except Exception as exc:
+        log.warning("Could not read agent instructions", owner=owner_id, error=str(exc))
+        return {}
+
+
+async def _set_owner_agent_instructions(
+    owner_id: str, kind: str, identifier: str, text: str, *, strict: bool = False,
+) -> None:
+    """Record (or, with empty text, drop) ``identifier``'s instructions in
+    ``owner_id``'s settings. No-op without accounts (auth off keeps these in the
+    browser). Best-effort for spawn / remove, which must not fail over it;
+    ``strict`` for an explicit save, which must not report a write that didn't
+    happen."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    if not owner_id or not _fd_auth_enabled():
+        return
+    try:
+        await _update_owner_map(
+            owner_id, _AGENT_INSTRUCTIONS_SETTING[kind], identifier,
+            (text or "")[:_MAX_AGENT_INSTRUCTIONS])
+    except Exception as exc:
+        if strict:
+            raise
+        log.warning("Could not store agent instructions", agent=identifier, error=str(exc))
+
+
+class AgentInstructionsUpdate(BaseModel):
+    instructions: str = Field(default="", max_length=_MAX_AGENT_INSTRUCTIONS)
+
+
+def _owned_agent_key(kind: str, identifier: str, user_id: str) -> str:
+    """The id an owner's settings key this agent by, after the ownership check."""
+    if kind not in _AGENT_INSTRUCTIONS_SETTING:
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    if kind == "docker":
+        return _find_container(identifier, user_id).short_id
+    _verify_process_owner(identifier, user_id)
+    return identifier
+
+
+@app.get("/fd/agent-instructions/{kind}/{identifier}")
+async def get_agent_instructions(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """An agent's standing instructions, from its owner's settings."""
+    user_id = getattr(request.state, "user_id", "")
+    key = _owned_agent_key(kind, identifier, user_id)
+    return {"instructions": (await _owner_agent_instructions(user_id, kind)).get(key, "")}
+
+
+@app.put("/fd/agent-instructions/{kind}/{identifier}")
+async def update_agent_instructions(
+    kind: str, identifier: str, body: AgentInstructionsUpdate, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Set an agent's standing instructions in its owner's settings. The owner's
+    Flight Deck picks them up from the agent list; they reach the agent the next
+    time a chat connects to it."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    if not _fd_auth_enabled():
+        raise HTTPException(400, "Without accounts, instructions are kept in the browser")
+    user_id = getattr(request.state, "user_id", "")
+    key = _owned_agent_key(kind, identifier, user_id)
+    try:
+        await _set_owner_agent_instructions(
+            user_id, kind, key, body.instructions.strip(), strict=True)
+    except Exception as exc:
+        log.warning("Agent instructions save failed", agent=key, error=str(exc))
+        raise HTTPException(500, "Could not save the instructions — nothing was changed")
+    return {"ok": True}
 
 
 # ── Agent config editing ──
@@ -2858,7 +3034,7 @@ def _resolve_agent_dir(identifier: str, kind: str, user_id: str) -> Path:
 @app.get("/fd/agent-config/{kind}/{identifier}")
 async def get_agent_config(
     kind: str, identifier: str, request: Request,
-    user: dict | None = _required_user_dep,
+    user: dict | None = _agent_manager_dep,
 ):
     """Read an agent's config.yaml and .env files."""
     if kind not in ("docker", "process"):
@@ -2880,7 +3056,7 @@ async def get_agent_config(
 @app.put("/fd/agent-config/{kind}/{identifier}")
 async def update_agent_config(
     kind: str, identifier: str, body: AgentConfigUpdate, request: Request,
-    user: dict | None = _required_user_dep,
+    user: dict | None = _agent_manager_dep,
 ):
     """Update an agent's config.yaml and/or .env files. Agent must be restarted for changes to take effect."""
     if kind not in ("docker", "process"):
@@ -2918,7 +3094,7 @@ class AgentModelUpdate(BaseModel):
 @app.put("/fd/agent-model/{kind}/{identifier}")
 async def update_agent_model(
     kind: str, identifier: str, body: AgentModelUpdate, request: Request,
-    user: dict | None = _required_user_dep,
+    user: dict | None = _agent_manager_dep,
 ):
     """Quick-update an agent's provider, model, and optionally api_key in all config locations."""
     if kind not in ("docker", "process"):
@@ -2962,7 +3138,7 @@ class AgentModeUpdate(BaseModel):
 @app.put("/fd/agent-mode/{kind}/{identifier}")
 async def update_agent_mode(
     kind: str, identifier: str, body: AgentModeUpdate, request: Request,
-    user: dict | None = _required_user_dep,
+    user: dict | None = _agent_manager_dep,
 ):
     """Update an agent's cognitive mode at runtime (no restart needed).
 
@@ -3346,7 +3522,7 @@ async def list_cognitive_modes():
 
 
 @app.get("/fd/containers/{container_id}")
-async def get_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
+async def get_container(container_id: str, request: Request, user: dict | None = _agent_manager_dep):
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     info = _container_info(c)
     labels = dict(c.labels or {})
@@ -3355,6 +3531,9 @@ async def get_container(container_id: str, request: Request, user: dict | None =
         info.web_auth = ""
         labels.pop("flight-deck.web-auth", None)
         env = []  # provider keys live here
+    elif getattr(request.state, "acting_admin_id", ""):  # see list_processes
+        info.web_auth = ""
+        labels.pop("flight-deck.web-auth", None)
     # Add extra details
     return {
         **info.model_dump(),
@@ -6466,6 +6645,10 @@ class ProcessInfo(BaseModel):
     provider: str = ""
     model: str = ""
     freebie: bool = False
+    # The owner's standing instructions for this agent (their settings) — the
+    # SPA syncs its copy from here, so a change made elsewhere (an archetype
+    # spawn, an admin) reaches an already-open Flight Deck.
+    fleet_instructions: str = ""
 
 
 class ProcessActionResult(BaseModel):
@@ -6477,7 +6660,7 @@ class ProcessActionResult(BaseModel):
 
 
 @app.get("/fd/processes", response_model=list[ProcessInfo])
-async def list_processes(request: Request, user: dict | None = _required_user_dep):
+async def list_processes(request: Request, user: dict | None = _agent_manager_dep):
     """List all Flight Deck managed process agents.
 
     ``web_auth`` (the token that drives an agent directly) is only returned to
@@ -6487,7 +6670,11 @@ async def list_processes(request: Request, user: dict | None = _required_user_de
     """
     registry = _load_process_registry()
     user_id = getattr(request.state, "user_id", "")
-    expose_auth = origin_guard.may_expose_agent_secrets(request.headers)
+    # An admin managing someone's agents gets the list, not the tokens that
+    # drive them (their dialog never opens a chat).
+    expose_auth = (origin_guard.may_expose_agent_secrets(request.headers)
+                   and not getattr(request.state, "acting_admin_id", ""))
+    instructions = await _owner_agent_instructions(user_id, "process")
     result = []
     for slug, entry in registry.items():
         if AUTH_ENABLED and user_id and entry.get("owner", "") != user_id:
@@ -6500,6 +6687,7 @@ async def list_processes(request: Request, user: dict | None = _required_user_de
             status="running" if alive else "stopped",
             web_port=entry.get("web_port", 0),
             web_auth=entry.get("web_auth", "") if expose_auth else "",
+            fleet_instructions=instructions.get(slug, ""),
             pid=entry.get("pid") if alive else None,
             provider=entry.get("provider", ""),
             model=entry.get("model", ""),
@@ -6509,7 +6697,7 @@ async def list_processes(request: Request, user: dict | None = _required_user_de
 
 
 @app.post("/fd/spawn-process", response_model=ProcessActionResult)
-async def spawn_process(config: AgentConfig, request: Request, user: dict | None = _optional_user_dep):
+async def spawn_process(config: AgentConfig, request: Request, user: dict | None = _optional_agent_manager_dep):
     """Spawn a new Captain Claw process agent (pip-installed, no Docker)."""
     # Serialise spawns so two concurrent requests can't both land on the same
     # port between the port-pick and the Popen. The lock also covers a small
@@ -6531,8 +6719,11 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     await _resolve_spawn_provider_key(config)
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
-        check_api_rate_limit(user)
-        check_spawn_rate_limit(user)
+        # An admin acting for this user spends their own request / spawn budget;
+        # the agent-count cap below stays the owner's.
+        _limited = getattr(request.state, "acting_admin", None) or user
+        check_api_rate_limit(_limited)
+        check_spawn_rate_limit(_limited)
         # Count existing processes for this user
         registry = _load_process_registry()
         user_id = user["id"]
@@ -6698,7 +6889,9 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         if db is None:
             from captain_claw.flight_deck.auth import get_db as _get_auth_db
             db = _get_auth_db()
-        await db.log_usage(user["id"], "agent_spawn", json.dumps({"agent": slug, "type": "process", "provider": config.provider, "model": config.model}))
+        await db.log_usage(user["id"], "agent_spawn", json.dumps({
+            "agent": slug, "type": "process", "provider": config.provider, "model": config.model,
+            **_acting_admin_detail(request)}))
 
     # Let the child actually bind its TCP port (and potentially announce a
     # drift back to us) before the spawn lock is released and the next queued
@@ -6754,6 +6947,9 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     # AFTER the settle so the announced port is used, not the stale one.
     if config.web_enabled:
         _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=owner_id)
+
+    if config.fleet_instructions:
+        await _set_owner_agent_instructions(owner_id, "process", slug, config.fleet_instructions)
 
     message = f"Process agent '{slug}' spawned (PID {proc.pid}, port {config.web_port})"
     if web_auth_replaced:
@@ -6894,7 +7090,7 @@ async def announce_process_port(slug: str, body: AnnouncePortRequest):
 
 
 @app.post("/fd/processes/{slug}/stop", response_model=ProcessActionResult)
-async def stop_process(slug: str, request: Request, user: dict | None = _required_user_dep):
+async def stop_process(slug: str, request: Request, user: dict | None = _agent_manager_dep):
     """Stop a running process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     import asyncio
@@ -6902,7 +7098,7 @@ async def stop_process(slug: str, request: Request, user: dict | None = _require
 
 
 @app.post("/fd/processes/{slug}/start", response_model=ProcessActionResult)
-async def start_process(slug: str, request: Request, user: dict | None = _required_user_dep):
+async def start_process(slug: str, request: Request, user: dict | None = _agent_manager_dep):
     """Start a stopped process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     import asyncio
@@ -6910,7 +7106,7 @@ async def start_process(slug: str, request: Request, user: dict | None = _requir
 
 
 @app.post("/fd/processes/{slug}/restart", response_model=ProcessActionResult)
-async def restart_process(slug: str, request: Request, user: dict | None = _required_user_dep):
+async def restart_process(slug: str, request: Request, user: dict | None = _agent_manager_dep):
     """Restart a process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     _do_stop_process(slug)
@@ -6920,16 +7116,19 @@ async def restart_process(slug: str, request: Request, user: dict | None = _requ
 
 
 @app.delete("/fd/processes/{slug}", response_model=ProcessActionResult)
-async def remove_process(slug: str, force: bool = False, request: Request = None, user: dict | None = _required_user_dep):
+async def remove_process(slug: str, force: bool = False, request: Request = None, user: dict | None = _agent_manager_dep):
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Remove a process agent from the registry. Stops it first if running."""
     if _process_is_alive(slug):
         _do_stop_process(slug)
 
     registry = _load_process_registry()
+    owner_id = str((registry.get(slug) or {}).get("owner") or "")
     registry.pop(slug, None)
     _save_process_registry(registry)
     _processes.pop(slug, None)
+    # …and its instructions, so a later agent of the same name doesn't inherit them.
+    await _set_owner_agent_instructions(owner_id, "process", slug, "")
 
     return ProcessActionResult(ok=True, slug=slug, message=f"Removed '{slug}' from registry")
 
@@ -6942,7 +7141,7 @@ class ProcessIdentityUpdate(BaseModel):
 @app.post("/fd/processes/{slug}/identity", response_model=ProcessActionResult)
 async def update_process_identity(
     slug: str, body: ProcessIdentityUpdate, request: Request,
-    user: dict | None = _required_user_dep,
+    user: dict | None = _agent_manager_dep,
 ):
     """Persist a process agent's display name and/or description into the
     registry. Unlike the FD-side per-user override, this is canonical: it
@@ -6959,11 +7158,22 @@ async def update_process_identity(
         entry["description"] = body.description
     registry[slug] = entry
     _save_process_registry(registry)
+    # The owner's Flight Deck lays its own saved labels over the registry's, so
+    # an admin's rename would stay hidden behind them: drop those for this agent.
+    if getattr(request.state, "acting_admin_id", ""):
+        owner_id = getattr(request.state, "user_id", "")
+        for key, changed in zip(_PROCESS_LABEL_SETTINGS, (body.name, body.description)):
+            if changed is None:
+                continue
+            try:
+                await _update_owner_map(owner_id, key, slug, None)
+            except Exception as exc:
+                log.warning("Could not clear the owner's label override", agent=slug, error=str(exc))
     return ProcessActionResult(ok=True, slug=slug, message="Saved.")
 
 
 @app.get("/fd/processes/{slug}/logs")
-async def process_logs(slug: str, tail: int = 200, since_byte: int = 0, request: Request = None, user: dict | None = _required_user_dep):
+async def process_logs(slug: str, tail: int = 200, since_byte: int = 0, request: Request = None, user: dict | None = _agent_manager_dep):
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Read logs from a process agent's log file.
 
