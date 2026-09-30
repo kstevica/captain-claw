@@ -1108,6 +1108,21 @@ class TestAgentsCreatedWithoutAKeyGetIt:
         assert sorted(await server.heal_keyless_agents(restart=False)) == ["blank-value", "gateway"]
         assert "OPENAI_API_KEY=gateway-key" in _env("blank-value")
 
+    async def test_an_agent_moved_back_to_the_providers_endpoint_gets_that_key(self, db):
+        """Spawned on the gateway, then Base URL cleared in its Settings: the
+        blank in its home config wins (as it does in the agent), so it is
+        healed with the provider's key, not the gateway's."""
+        import yaml
+
+        await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
+        await db.set_system_setting("fd:endpoint-keys", json.dumps({f"openai|{GW}": "gateway-key"}))
+        _agent("moved", env="")
+        home = server.DATA_DIR / "moved" / "data" / "home-config-parent" / ".captain-claw"
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text(yaml.safe_dump({"model": {"base_url": ""}}))
+        assert await server.heal_keyless_agents(restart=False) == ["moved"]
+        assert _env("moved") == "OPENAI_API_KEY=sk-org\n"
+
     async def test_only_the_running_agents_are_restarted(self, db, monkeypatch):
         _agent("running")
         _agent("stopped")
@@ -1176,6 +1191,66 @@ class TestAgentsCreatedWithoutAKeyGetIt:
         _agent("b")
         await server.restart_process("b", _req("new-user"), None)
         assert seen == [True, True]
+
+
+class TestAChildSpawnedByAnAgent:
+    """The flight_deck tool sends the parent's provider / model / key / base_url
+    as a baseline. With a mixed team set each child must end on ITS tier's
+    endpoint with that endpoint's key — not on the parent's."""
+
+    MIXED = {"balanced": _tier(model="swift", api_key="gateway-key", base_url=GW),
+             "reason": _tier(model="gpt-4.1", api_key="sk-real-openai")}
+
+    async def _child(self, tier: str, **parent) -> server.AgentConfig:
+        cfg = server.AgentConfig(name="kid", archetype=f"market-research@{tier}", provider="openai", **parent)
+        await server._resolve_archetype(cfg, _req("new-user"), None)
+        server._resolve_tier(cfg)
+        await server._resolve_spawn_provider_key(cfg)
+        return cfg
+
+    async def test_a_parent_on_the_gateway_spawns_a_child_on_the_providers_endpoint(self, db):
+        await _publish(_set(dict(self.MIXED)))
+        cfg = await self._child("reason", model="swift", provider_api_key="gateway-key", base_url=GW)
+        assert (cfg.model, cfg.base_url) == ("gpt-4.1", "")
+        env = server._build_env(cfg)
+        assert "OPENAI_API_KEY=sk-real-openai" in env and "gateway-key" not in env
+
+    async def test_a_parent_on_the_providers_endpoint_spawns_a_child_on_the_gateway(self, db):
+        await _publish(_set(dict(self.MIXED)))
+        cfg = await self._child("balanced", model="gpt-4.1", provider_api_key="sk-real-openai")
+        assert (cfg.model, cfg.base_url) == ("swift", GW)
+        env = server._build_env(cfg)
+        assert "OPENAI_API_KEY=gateway-key" in env and "sk-real-openai" not in env
+
+
+class TestAKeylessLocalServerTier:
+    """A tier on a local OpenAI-compatible server with no key: the OpenAI client
+    makes no call without one. It used to "work" for agent-spawned children by
+    sending the parent's real key to that server."""
+
+    LOCAL = "http://localhost:1234/v1"
+
+    async def test_the_parents_key_is_not_sent_there_and_the_refusal_says_what_to_do(self, db):
+        await _add_user(db, "new-user", own_set=_set({"balanced": _tier(model="local", base_url=self.LOCAL)}))
+        cfg = server.AgentConfig(name="kid", archetype="market-research", provider="openai",
+                                 model="gpt-4.1", provider_api_key="sk-parents-real-key")
+        await server._resolve_archetype(cfg, _req("new-user"), None)
+        assert (cfg.base_url, cfg.provider_api_key) == (self.LOCAL, "")
+        with pytest.raises(HTTPException) as exc:
+            await server._resolve_spawn_provider_key(cfg)
+        assert exc.value.status_code == 409
+        assert "127.0.0.1:1234" in exc.value.detail or "localhost:1234" in exc.value.detail
+        assert "placeholder" in exc.value.detail
+
+    async def test_a_placeholder_key_in_the_tier_is_all_it_takes(self, db):
+        await _add_user(db, "new-user", own_set=_set(
+            {"balanced": _tier(model="local", api_key="lm-studio", base_url=self.LOCAL)}))
+        cfg = server.AgentConfig(name="kid", archetype="market-research", provider="openai",
+                                 model="gpt-4.1", provider_api_key="sk-parents-real-key")
+        await server._resolve_archetype(cfg, _req("new-user"), None)
+        await server._resolve_spawn_provider_key(cfg)
+        env = server._build_env(cfg)
+        assert "OPENAI_API_KEY=lm-studio" in env and "sk-parents-real-key" not in env
 
 
 class TestStoppingAnAgent:

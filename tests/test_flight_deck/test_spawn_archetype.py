@@ -125,12 +125,12 @@ async def test_tier_keeps_base_url_when_provider_unchanged(patch_registry):
     # Same provider, tier names no base_url → keep the caller's inherited endpoint.
     patch_registry.set(
         archetypes=[{"id": "fact-checker", "role": "Checker", "tier": "reason"}],
-        tiers={"reason": {"provider": "openai", "model": "gpt-5"}},  # no base_url
+        tiers={"reason": {"provider": "openai", "model": "other-local"}},  # no base_url
     )
     cfg = server.AgentConfig(name="x", archetype="fact-checker",
                              provider="openai", model="local", base_url="http://localhost:1234/v1")
     await server._resolve_archetype(cfg, _req("u1"), {"id": "u1"})
-    assert cfg.provider == "openai" and cfg.model == "gpt-5"
+    assert cfg.provider == "openai" and cfg.model == "other-local"
     assert cfg.base_url == "http://localhost:1234/v1"  # preserved
 
 
@@ -285,3 +285,133 @@ async def test_tier_set_env_applies_without_a_tier(patch_registry):
     cfg = server.AgentConfig(name="x", archetype="plain")
     await server._resolve_archetype(cfg, _req("u1"), None)
     assert cfg.env_vars == [{"key": "BRAVE_API_KEY", "value": "brave-1"}]
+
+
+# ── a child spawned by an agent: the caller's key and endpoint are a baseline ─
+#
+# The flight_deck tool sends the PARENT's provider / model / key / base_url so a
+# child always has a usable model. A key belongs to its endpoint, so the two
+# must travel together — never the tier's key to the parent's gateway, never the
+# parent's key to the tier's endpoint.
+
+GW = "https://gw.example/v1"
+
+
+def _from_parent(archetype="analyst", **model) -> "server.AgentConfig":
+    unit = {"provider": "openai", "model": "swift", "provider_api_key": "gw-key", "base_url": GW, **model}
+    return server.AgentConfig(name="kid", archetype=archetype, **unit)
+
+
+@pytest.mark.parametrize("tier_key", ["@system", "sk-real-openai"])
+async def test_a_keyed_tier_runs_on_its_own_endpoint_not_the_parents_gateway(patch_registry, tier_key):
+    """The parent runs on a gateway; the child's tier is the same provider on
+    its OWN endpoint, with a key. The child must not be routed at the gateway
+    (its key — or the team key behind "@system" — would go there)."""
+    patch_registry.set(archetypes=[_ANALYST],
+                       tiers={"balanced": {"provider": "openai", "model": "gpt-6", "api_key": tier_key}})
+    cfg = _from_parent()
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert (cfg.provider, cfg.model, cfg.base_url, cfg.provider_api_key) == ("openai", "gpt-6", "", tier_key)
+
+
+@pytest.mark.parametrize("parent_base_url", ["", "https://other-gw.example/v1"])
+async def test_the_parents_key_does_not_follow_the_child_to_another_endpoint(patch_registry, parent_base_url):
+    patch_registry.set(archetypes=[_ANALYST],
+                       tiers={"balanced": {"provider": "openai", "model": "swift", "api_key": "", "base_url": GW}})
+    cfg = _from_parent(provider_api_key="parents-key", base_url=parent_base_url)
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.base_url == GW and cfg.provider_api_key == ""
+
+
+async def test_the_same_endpoint_written_differently_keeps_the_parents_key(patch_registry):
+    patch_registry.set(archetypes=[_ANALYST], tiers={"balanced": {
+        "provider": "openai", "model": "other-model", "api_key": "", "base_url": "HTTPS://GW.example/v1/"}})
+    cfg = _from_parent()
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.model == "other-model" and cfg.provider_api_key == "gw-key"
+
+
+async def test_a_bare_model_tier_takes_the_parents_key_and_endpoint_as_one(patch_registry):
+    """No key, no endpoint: the tier is just another model where the parent runs."""
+    patch_registry.set(archetypes=[_ANALYST], tiers={"balanced": {"provider": "openai", "model": "other-model"}})
+    cfg = _from_parent()
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert (cfg.model, cfg.base_url, cfg.provider_api_key) == ("other-model", GW, "gw-key")
+
+
+async def test_a_tier_missing_from_the_set_does_not_put_another_providers_model_on_the_parents_gateway(
+        patch_registry):
+    """The registry's tiers are Anthropic models with no key and no endpoint: on
+    the parent's key and gateway URL that child could not run. The parent's
+    own working model is kept instead."""
+    patch_registry.set(archetypes=[_ANALYST], tiers={})
+    cfg = _from_parent()
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    server._resolve_tier(cfg)
+    assert (cfg.provider, cfg.model, cfg.base_url, cfg.provider_api_key) == ("openai", "swift", GW, "gw-key")
+    assert cfg.tier == ""
+
+
+async def test_the_registry_tier_still_applies_on_the_parents_own_provider_or_with_no_model(patch_registry):
+    patch_registry.set(archetypes=[_ANALYST], tiers={})
+    same = server.AgentConfig(name="kid", archetype="analyst", provider="anthropic",
+                              model="claude-haiku", provider_api_key="sk-ant")
+    await server._resolve_archetype(same, _req("u1"), None)
+    server._resolve_tier(same)
+    assert same.provider == "anthropic" and same.model != "claude-haiku"   # the tier's model…
+    assert same.provider_api_key == "sk-ant"                                # …on the parent's key
+    kiosk = server.AgentConfig(name="kid", archetype="analyst")            # no model of its own
+    await server._resolve_archetype(kiosk, _req("u1"), None)
+    assert kiosk.tier == "balanced"
+
+
+async def test_a_chatgpt_sign_in_tier_does_not_land_on_the_parents_gateway(patch_registry):
+    """A GPT-5 / Codex tier has no key and no endpoint by nature — it signs in
+    through ChatGPT. On the parent's gateway it would post the ChatGPT token
+    there."""
+    patch_registry.set(archetypes=[_ANALYST], tiers={"balanced": {"provider": "openai", "model": "gpt-5.2"}})
+    cfg = _from_parent()
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert (cfg.model, cfg.base_url, cfg.provider_api_key) == ("gpt-5.2", "", "")
+
+
+async def test_a_keyed_model_tier_does_not_land_on_a_chatgpt_parents_endpoint(patch_registry):
+    patch_registry.set(archetypes=[_ANALYST], tiers={"balanced": {"provider": "openai", "model": "gpt-4.1"}})
+    cfg = _from_parent(model="gpt-5.2", provider_api_key="",
+                       base_url="https://chatgpt.com/backend-api/codex/responses")
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert (cfg.model, cfg.base_url) == ("gpt-4.1", "")
+
+
+async def test_two_chatgpt_models_stay_together(patch_registry):
+    patch_registry.set(archetypes=[_ANALYST], tiers={"balanced": {"provider": "openai", "model": "gpt-5.2-codex"}})
+    codex = "https://chatgpt.com/backend-api/codex/responses"
+    cfg = _from_parent(model="gpt-5.2", provider_api_key="", base_url=codex)
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert (cfg.model, cfg.base_url) == ("gpt-5.2-codex", codex)
+
+
+def test_a_providers_own_endpoint_written_out_is_no_other_endpoint():
+    same = server._same_endpoint
+    assert same("openrouter", "https://openrouter.ai/api/v1", "openrouter", "")      # Freebie agents write it
+    assert same("openai", "", "openai", "https://api.openai.com/v1/")
+    assert same("openai", "http://localhost:1234/v1", "openai", "http://127.0.0.1:1234/v1")
+    assert not same("openai", "https://openrouter.ai/api/v1", "openai", "")          # another provider's URL
+    assert not same("openai", GW, "openai", "")
+    assert not same("openai", GW, "anthropic", GW)
+    assert same("anthropic", "https://api.anthropic.com", "anthropic", "")
+    assert same("anthropic", "", "anthropic", "https://api.anthropic.com/v1")
+    assert same("xai", "https://api.x.ai/v1", "xai", "")
+    assert not same("xai", "https://api.x.ai/v2", "xai", "")
+    assert same("chatgpt", GW, "openai", GW) and same(" OpenAI ", "", "openai", "https://api.openai.com/v1")
+    assert same("claude", "", "anthropic", "") and same("grok", "", "xai", "") and same("google", GW, "gemini", GW)
+
+
+async def test_a_tier_that_spells_out_the_providers_endpoint_keeps_the_parents_key(patch_registry):
+    patch_registry.set(archetypes=[_ANALYST], tiers={"balanced": {
+        "provider": "openrouter", "model": "qwen/qwen3:free", "api_key": "",
+        "base_url": "https://openrouter.ai/api/v1"}})
+    cfg = _from_parent(provider="openrouter", model="x/y", provider_api_key="sk-or", base_url="")
+    await server._resolve_archetype(cfg, _req("u1"), None)
+    assert cfg.provider_api_key == "sk-or"
+

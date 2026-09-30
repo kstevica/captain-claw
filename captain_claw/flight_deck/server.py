@@ -43,6 +43,7 @@ from captain_claw.flight_deck.auth import (
     get_optional_user, get_ws_user, set_auth_db,
 )
 from captain_claw.flight_deck.db import FlightDeckDB
+from captain_claw.flight_deck.endpoints import same_endpoint as _same_endpoint
 from captain_claw.flight_deck import origin_guard
 
 
@@ -1449,6 +1450,13 @@ class AgentConfig(BaseModel):
     workspace_path: str = ""
 
 
+def _registry_tier(tier: str) -> dict | None:
+    """A tier's definition in the central table (instructions/archetypes.json)."""
+    registry_file = Path(__file__).parent.parent / "instructions" / "archetypes.json"
+    tier_def = (json.loads(registry_file.read_text()).get("tiers") or {}).get(tier)
+    return tier_def if isinstance(tier_def, dict) else None
+
+
 def _resolve_tier(config: AgentConfig) -> None:
     """Resolve a model-recommendation `tier` to a concrete provider/model.
 
@@ -1464,10 +1472,8 @@ def _resolve_tier(config: AgentConfig) -> None:
     """
     if not config.tier:
         return
-    registry_file = Path(__file__).parent.parent / "instructions" / "archetypes.json"
     try:
-        registry = json.loads(registry_file.read_text())
-        tier_def = (registry.get("tiers") or {}).get(config.tier)
+        tier_def = _registry_tier(config.tier)
     except (OSError, json.JSONDecodeError) as exc:
         log.warning("Tier resolution failed; using provider/model as-is",
                     tier=config.tier, error=str(exc))
@@ -1481,6 +1487,29 @@ def _resolve_tier(config: AgentConfig) -> None:
         config.base_url = tier_def["base_url"]
     log.info("Resolved model tier",
              tier=config.tier, provider=config.provider, model=config.model)
+
+
+def _registry_tier_fits_the_caller(config: AgentConfig, tier: str) -> bool:
+    """May an archetype spawn fall back on the registry's model for ``tier``?
+
+    The registry names a provider and a model, no key and no endpoint — the
+    child would run it on whatever the caller sent. A caller that is itself an
+    agent sends its own working model, key and endpoint: fine when the
+    registry's tier is on that same provider (a different model, same place),
+    but another provider would be given the caller's key and gateway URL. Then
+    the caller's own working model is the better child.
+    """
+    if "provider" not in config.model_fields_set:
+        return True  # the caller brought no model of its own
+    try:
+        tier_def = _registry_tier(tier)
+    except (OSError, json.JSONDecodeError):
+        return True
+    if not tier_def or tier_def.get("provider", config.provider) == config.provider:
+        return True
+    log.info("Archetype tier not in the owner's tier set and the registry's is another provider — "
+             "keeping the caller's model", tier=tier, provider=config.provider, model=config.model)
+    return False
 
 
 async def _resolve_archetype(config: AgentConfig, request: Request, user: dict | None) -> None:
@@ -1568,34 +1597,49 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
         if tcfg.get("model"):
             new_provider = tcfg.get("provider", config.provider)
             provider_changed = new_provider != config.provider
-            config.provider = new_provider
-            config.model = tcfg["model"]
+            tier_key = str(tcfg.get("api_key") or "").strip()
+            tier_base_url = str(tcfg.get("base_url") or "").strip()
+            # Where the child runs. A caller that is itself an agent sends its
+            # own key and endpoint as a baseline (flight_deck tool), and a key
+            # belongs to its endpoint — so the two travel together:
+            #   * the tier names an endpoint            → that one;
+            #   * the tier carries a key but no endpoint → the provider's own
+            #     (the key — or the team key behind "@system" — is that
+            #     endpoint's, never the caller's gateway's);
+            #   * the tier is just a model on the caller's provider (no key, no
+            #     endpoint) → the caller's endpoint AND key, as one — unless one
+            #     of the two signs in through ChatGPT and the other with a key:
+            #     those are different places too.
+            if tier_base_url:
+                child_base_url = tier_base_url
+            elif (provider_changed or tier_key
+                  or _signs_in_through_chatgpt(new_provider, tcfg["model"])
+                  != _signs_in_through_chatgpt(config.provider, config.model)):
+                child_base_url = ""
+            else:
+                child_base_url = config.base_url
             # The tier's key verbatim, as the Library spawn sends it: "@system"
             # (team-default sets) is swapped for the org key by
             # _resolve_spawn_provider_key; a blank one stays blank, so the set's
             # own env var (below) or the caller's key applies — never the
             # provider's org key by default (a custom endpoint's own team key
             # is the one exception, see there). A caller key for another
-            # provider is no use here.
-            if tcfg.get("api_key"):
+            # provider, or another endpoint, is no use here.
+            if tier_key:
                 config.provider_api_key = tcfg["api_key"]
-            elif provider_changed:
+            elif not _same_endpoint(new_provider, child_base_url, config.provider, config.base_url):
                 config.provider_api_key = ""
+            config.provider = new_provider
+            config.model = tcfg["model"]
+            config.base_url = child_base_url
             # The tier's context sizes, where the caller didn't set its own (a
             # model whose output cap is below the 32768 default would 400).
             if "max_tokens" not in config.model_fields_set and int(tcfg.get("output_ctx") or 0) > 0:
                 config.max_tokens = int(tcfg["output_ctx"])
             if "max_context" not in config.model_fields_set and int(tcfg.get("input_ctx") or 0) > 0:
                 config.max_context = int(tcfg["input_ctx"])
-            if tcfg.get("base_url"):
-                config.base_url = tcfg["base_url"]
-            elif provider_changed:
-                # The tier moved us to a different provider but named no endpoint —
-                # drop any caller-inherited base_url so we don't route the new
-                # provider at the old provider's custom URL.
-                config.base_url = ""
             config.tier = ""  # pinned now — don't let _resolve_tier re-map it
-        elif not config.tier:
+        elif not config.tier and _registry_tier_fits_the_caller(config, eff_tier):
             config.tier = eff_tier  # last resort: central registry tier table
     # The tier set's own keys (BRAVE_API_KEY, TAVILY_API_KEY, …) — what the
     # Library spawn sends as env_vars; without them the agent's tools have no
@@ -1922,6 +1966,8 @@ async def _resolve_spawn_provider_key(config: AgentConfig, *, inherits_fd_env: b
         f"No API key for {_endpoint_label(config.provider, config.base_url)}: the tier set this "
         "agent runs on has none, and neither has the team. An admin can publish the tier set "
         "again in Library (that shares its keys), or add the key in Admin → Provider keys."
+        + (" A local server that needs no key still needs a placeholder one in the tier."
+           if custom else "")
     ))
 
 
@@ -1942,7 +1988,9 @@ def _agent_config_model(slug: str) -> tuple[dict, dict] | None:
             continue
         found = True
         if isinstance(data.get("model"), dict):
-            model.update({k: v for k, v in data["model"].items() if v not in (None, "")})
+            # A blank base_url in the home copy is a choice — back to the
+            # provider's own endpoint — and wins, as it does in the agent.
+            model.update({k: v for k, v in data["model"].items() if v not in (None, "") or k == "base_url"})
         if isinstance(data.get("provider_keys"), dict):
             provider_keys.update({k: v for k, v in data["provider_keys"].items() if v})
     return (model, provider_keys) if found else None
