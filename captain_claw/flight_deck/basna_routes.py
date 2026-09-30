@@ -818,15 +818,27 @@ class AgentStartReq(_AgentReq):
 
 
 # ── System provider keys + shared (team-default) tier sets ────────────
-# Org API keys live server-side only (system_settings 'fd:provider-keys') and
-# are never sent to browsers. A tier whose api_key is empty or the "@system"
-# sentinel resolves to the org key for its provider at run time via
-# _effective_key. The sentinel is exactly what the admin-published team-default
-# tier set stores (system_settings 'fd:shared-tier-sets'), so a teammate riding
-# the team default runs real models without ever holding a key.
+# Org API keys live server-side only and are never sent to browsers:
+#   * 'fd:provider-keys'  — one per provider, for the provider's OWN endpoint
+#   * 'fd:endpoint-keys'  — one per (provider, base_url), for a custom endpoint
+#     (a gateway or a local server): its key is that endpoint's, never the
+#     provider's, so it is kept — and only ever sent — per endpoint.
+# A tier whose api_key is empty or the "@system" sentinel resolves to the org
+# key for its endpoint at run time via _effective_key. The sentinel is exactly
+# what the admin-published team-default tier set stores (system_settings
+# 'fd:shared-tier-sets'), so a teammate riding the team default runs real
+# models without ever holding a key.
+ENDPOINT_KEYS_SETTING = "fd:endpoint-keys"
 _SYSTEM_PROVIDER_KEYS: dict[str, str] = {}
+_SYSTEM_ENDPOINT_KEYS: dict[str, str] = {}
 _SYSTEM_KEYS_TS: float = 0.0
 _SYSTEM_KEYS_TTL = 15.0  # seconds
+
+
+def endpoint_key_id(provider: str | None, base_url: str | None) -> str:
+    """The id a custom endpoint's org key is stored under ("" with no base_url)."""
+    url = (base_url or "").strip().rstrip("/").lower()
+    return f"{(provider or '').strip().lower()}|{url}" if url else ""
 
 
 async def _refresh_system_provider_keys(db) -> None:
@@ -836,25 +848,34 @@ async def _refresh_system_provider_keys(db) -> None:
     _effective_key below always sees fresh keys without threading async DB
     access through the credential resolvers.
     """
-    global _SYSTEM_PROVIDER_KEYS, _SYSTEM_KEYS_TS
+    global _SYSTEM_PROVIDER_KEYS, _SYSTEM_ENDPOINT_KEYS, _SYSTEM_KEYS_TS
     now = time.monotonic()
-    if _SYSTEM_PROVIDER_KEYS and (now - _SYSTEM_KEYS_TS) < _SYSTEM_KEYS_TTL:
+    if (_SYSTEM_PROVIDER_KEYS or _SYSTEM_ENDPOINT_KEYS) and (now - _SYSTEM_KEYS_TS) < _SYSTEM_KEYS_TTL:
         return
     try:
         raw = await db.get_system_setting("fd:provider-keys")
         keys = json.loads(raw) if raw else {}
         if isinstance(keys, dict):
             _SYSTEM_PROVIDER_KEYS = {str(k): str(v) for k, v in keys.items() if v}
+        raw = await db.get_system_setting(ENDPOINT_KEYS_SETTING)
+        keys = json.loads(raw) if raw else {}
+        if isinstance(keys, dict):
+            _SYSTEM_ENDPOINT_KEYS = {str(k): str(v) for k, v in keys.items() if v}
         _SYSTEM_KEYS_TS = now
     except Exception:
         pass
 
 
-def _effective_key(provider: str, api_key: str | None) -> str | None:
-    """Swap an empty or "@system" tier key for the org key of its provider."""
+def _effective_key(provider: str, api_key: str | None, base_url: str | None = None) -> str | None:
+    """Swap an empty or "@system" tier key for the org key of its endpoint:
+    the custom endpoint's own key when the tier has a ``base_url`` and one is
+    stored for it, else the provider's."""
     k = (api_key or "").strip()
     if k and k != "@system":
         return api_key
+    eid = endpoint_key_id(provider, base_url)
+    if eid and _SYSTEM_ENDPOINT_KEYS.get(eid):
+        return _SYSTEM_ENDPOINT_KEYS[eid]
     return _SYSTEM_PROVIDER_KEYS.get(provider or "", "") or None
 
 
@@ -2060,7 +2081,7 @@ def _tier_creds(registry: dict, tier: str, api_key: str) -> dict:
     provider = t.get("provider", "anthropic")
     return {"provider": provider, "model": t.get("model", ""),
             "base_url": t.get("base_url", "") or None,
-            "api_key": _effective_key(provider, api_key),
+            "api_key": _effective_key(provider, api_key, t.get("base_url")),
             "output_ctx": int(t.get("output_ctx") or 0)}
 
 
@@ -2075,7 +2096,7 @@ def _resolve_merge_creds(body, registry: dict, tier: str) -> dict:
         provider = lt.get("provider", "anthropic")
         return {"provider": provider, "model": lt.get("model", ""),
                 "base_url": lt.get("base_url") or None,
-                "api_key": _effective_key(provider, lt.get("api_key") or body.api_key),
+                "api_key": _effective_key(provider, lt.get("api_key") or body.api_key, lt.get("base_url")),
                 "output_ctx": int(lt.get("output_ctx") or 0)}
     return _tier_creds(registry, tier, body.api_key)
 

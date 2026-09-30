@@ -37,23 +37,25 @@ export async function fetchSharedTierSets(): Promise<SharedTierSets> {
   }
 }
 
-/** What publishing did to the team's provider keys (ids and tier names, never key values). */
+/** What publishing did to the team's keys (provider ids and hostnames, never key values). */
 export interface PublishResult {
   /** Providers whose key in the set became the team key (none existed). */
   teamKeysAdded: string[]
-  /** Providers whose key in the set is not the existing team key (which stays). */
-  teamKeysDiffer: string[]
-  /** Tiers on a custom endpoint whose key isn't shared with the team. */
-  teamKeysUnshared: string[]
+  /** Providers whose team key was replaced by the different one in the set. */
+  teamKeysUpdated: string[]
+  /** Custom endpoints (hosts) whose key is now shared, for that endpoint only. */
+  teamEndpointsShared: string[]
+  /** Providers / endpoint hosts the set holds more than one key for (one is used). */
+  teamKeysConflict: string[]
   /** Providers the set uses that teammates still have no key for. */
   teamKeysMissing: string[]
 }
 
 /**
  * Publish tier sets as team defaults (admin only). The published copy never
- * holds a raw tier key; server-side, a key on a provider's own endpoint becomes
- * the team key for that provider when none is set, so teammates' agents can run
- * on it (it is written into those agents, whose owners can read it).
+ * holds a raw tier key; server-side each key becomes the team key for its
+ * endpoint — the provider's own, or the tier's custom base URL — so teammates'
+ * agents run on it (it is written into those agents, whose owners can read it).
  */
 export async function publishSharedTierSets(
   sets: TierSet[], defaultSetId: string | null,
@@ -72,8 +74,9 @@ export async function publishSharedTierSets(
   const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : [])
   return {
     teamKeysAdded: list(data?.team_keys_added),
-    teamKeysDiffer: list(data?.team_keys_differ),
-    teamKeysUnshared: list(data?.team_keys_unshared),
+    teamKeysUpdated: list(data?.team_keys_updated),
+    teamEndpointsShared: list(data?.team_endpoints_shared),
+    teamKeysConflict: list(data?.team_keys_conflict),
     teamKeysMissing: list(data?.team_keys_missing),
   }
 }
