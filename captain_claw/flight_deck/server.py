@@ -957,7 +957,8 @@ async def lifespan(app: FastAPI):
             from captain_claw.flight_deck.basna_routes import _effective_key
             _tier_key = str(resolved.get("api_key") or "").strip()
             if _tier_key == "@system":  # no org key behind it → the inherited one stays
-                _tier_key = _effective_key(str(resolved.get("provider") or ""), _tier_key) or ""
+                _tier_key = _effective_key(
+                    str(resolved.get("provider") or ""), _tier_key, resolved.get("base_url")) or ""
             if _tier_key:
                 for _prov_env in _provider_key_env_names(str(resolved.get("provider") or "")):
                     merged_env.pop(_prov_env, None)
@@ -1572,8 +1573,10 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
             # The tier's key verbatim, as the Library spawn sends it: "@system"
             # (team-default sets) is swapped for the org key by
             # _resolve_spawn_provider_key; a blank one stays blank, so the set's
-            # own env var (below) or the caller's key applies — never the org
-            # key by default. A caller key for another provider is no use here.
+            # own env var (below) or the caller's key applies — never the
+            # provider's org key by default (a custom endpoint's own team key
+            # is the one exception, see there). A caller key for another
+            # provider is no use here.
             if tcfg.get("api_key"):
                 config.provider_api_key = tcfg["api_key"]
             elif provider_changed:
@@ -1603,7 +1606,7 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
     have = {str(ev.get("key") or "") for ev in config.env_vars}
     llm_key = (config.provider_api_key or "").strip()
     if llm_key == "@system":
-        llm_key = _effective_key(config.provider, llm_key) or ""
+        llm_key = _effective_key(config.provider, llm_key, config.base_url) or ""
     llm_envs = _provider_key_env_names(config.provider) if llm_key else ()
     for ev in owner_env or []:
         if not isinstance(ev, dict):  # settings are free-form; never fail the spawn
@@ -1798,12 +1801,18 @@ def _build_env(c: AgentConfig) -> str:
 async def _resolve_spawn_provider_key(config: AgentConfig, *, inherits_fd_env: bool = True) -> None:
     """Resolve the ``@system`` API-key sentinel to the real org key at spawn time.
 
-    The browser never receives raw org provider keys (GET /fd/settings/
-    provider-keys is masked). When a spawn requests the shared system key it
-    sends the sentinel ``@system``; here — server-side, before anything is
-    written for the agent — we swap it for the admin-configured key from the
-    ``fd:provider-keys`` system setting. Both spawn endpoints call it right
-    after the archetype / tier resolve.
+    The browser never receives raw org keys (GET /fd/settings/provider-keys is
+    masked). When a spawn requests the shared system key it sends the sentinel
+    ``@system``; here — server-side, before anything is written for the agent —
+    we swap it for the admin-configured key: the custom endpoint's own
+    (``fd:endpoint-keys``) when the spawn has a ``base_url`` and one is stored,
+    else the provider's (``fd:provider-keys``). Both spawn endpoints call it
+    right after the archetype / tier resolve.
+
+    A BLANK key on a custom endpoint gets that endpoint's team key too (a user's
+    copy of a team set published before endpoints had keys holds a blank one) —
+    the endpoint's only, never the provider's, and not over a key the spawn
+    brings in its own env vars.
 
     A request for the team key that nothing can satisfy is refused (409) rather
     than started as an agent whose first model call fails with "missing
@@ -1812,25 +1821,39 @@ async def _resolve_spawn_provider_key(config: AgentConfig, *, inherits_fd_env: b
     vars, or Flight Deck's environment, which process agents inherit
     (``inherits_fd_env``; containers don't).
     """
-    if (config.provider_api_key or "").strip() != "@system":
+    requested = (config.provider_api_key or "").strip()
+    if requested and requested != "@system":
+        return
+    env_names = _provider_key_env_names(config.provider)
+    in_env_vars = any(isinstance(ev, dict) and ev.get("key") in env_names and ev.get("value")
+                      for ev in config.env_vars)
+    asked = requested == "@system"
+    if not asked and (in_env_vars or not (config.base_url or "").strip()):
         return
     config.provider_api_key = ""
     try:
         from captain_claw.flight_deck.auth import get_db
-        raw = await get_db().get_system_setting("fd:provider-keys")
-        keys = json.loads(raw) if raw else {}
-        if isinstance(keys, dict):
-            config.provider_api_key = str(keys.get(config.provider, "") or "")
+        from captain_claw.flight_deck.basna_routes import ENDPOINT_KEYS_SETTING, endpoint_key_id
+        db = get_db()
+        eid = endpoint_key_id(config.provider, config.base_url)
+        if eid:
+            raw = await db.get_system_setting(ENDPOINT_KEYS_SETTING)
+            keys = json.loads(raw) if raw else {}
+            if isinstance(keys, dict):
+                config.provider_api_key = str(keys.get(eid, "") or "")
+        if asked and not config.provider_api_key:
+            raw = await db.get_system_setting("fd:provider-keys")
+            keys = json.loads(raw) if raw else {}
+            if isinstance(keys, dict):
+                config.provider_api_key = str(keys.get(config.provider, "") or "")
     except Exception as exc:
         log.warning("system provider-key resolve failed", provider=config.provider, error=str(exc))
         return
-    if config.provider_api_key or not _needs_provider_key(config.provider, config.model, config.base_url):
+    if not asked or config.provider_api_key:
         return
-    env_names = _provider_key_env_names(config.provider)
-    if inherits_fd_env and any(os.environ.get(n) for n in env_names):
+    if not _needs_provider_key(config.provider, config.model, config.base_url):
         return
-    if any(isinstance(ev, dict) and ev.get("key") in env_names and ev.get("value")
-           for ev in config.env_vars):
+    if in_env_vars or (inherits_fd_env and any(os.environ.get(n) for n in env_names)):
         return
     raise HTTPException(409, (
         f"No team API key for {config.provider}. An admin can add one in "

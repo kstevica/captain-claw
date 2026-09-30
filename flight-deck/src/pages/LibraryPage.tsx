@@ -371,7 +371,7 @@ export function LibraryPage() {
                     }
                   }}
                   disabled={publishState === 'publishing'}
-                  title="Publish this set as the team default — teammates who configured no models run on it. A key in this set becomes the team key for its provider when none is set: teammates' agents use it, and whoever owns an agent can read it in that agent's settings."
+                  title="Publish this set as the team default — teammates who configured no models run on it. The keys in this set become the team's keys for those models: teammates' agents use them, and whoever owns an agent can read them in that agent's settings."
                   className="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-500/20 disabled:opacity-50 dark:text-emerald-200"
                 >
                   {publishState === 'publishing' ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -390,22 +390,28 @@ export function LibraryPage() {
             </div>
             {/* What publishing meant for the team's keys — teammates' agents
                 run on the team key of each provider, not on this set's own. */}
-            {publishNote && (publishNote.teamKeysAdded.length > 0 || publishNote.teamKeysDiffer.length > 0
-              || publishNote.teamKeysUnshared.length > 0 || publishNote.teamKeysMissing.length > 0) && (
+            {publishNote && (publishNote.teamKeysAdded.length > 0 || publishNote.teamKeysUpdated.length > 0
+              || publishNote.teamEndpointsShared.length > 0 || publishNote.teamKeysConflict.length > 0
+              || publishNote.teamKeysMissing.length > 0) && (
               <div className="space-y-1 text-[11px]">
                 {publishNote.teamKeysAdded.length > 0 && (
                   <p className="text-emerald-700 dark:text-emerald-300">
                     Your {publishNote.teamKeysAdded.map(providerLabel).join(', ')} key is now the team key — teammates' agents run on it.
                   </p>
                 )}
-                {publishNote.teamKeysDiffer.length > 0 && (
-                  <p className="text-amber-700 dark:text-amber-300">
-                    The team key for {publishNote.teamKeysDiffer.map(providerLabel).join(', ')} is not the key in this set — teammates keep running on the existing team key. Change it in Admin → Provider keys.
+                {publishNote.teamKeysUpdated.length > 0 && (
+                  <p className="text-emerald-700 dark:text-emerald-300">
+                    The team key for {publishNote.teamKeysUpdated.map(providerLabel).join(', ')} was replaced with the key in this set.
                   </p>
                 )}
-                {publishNote.teamKeysUnshared.length > 0 && (
+                {publishNote.teamEndpointsShared.length > 0 && (
+                  <p className="text-emerald-700 dark:text-emerald-300">
+                    The key for {publishNote.teamEndpointsShared.join(', ')} is shared with the team — used only for that endpoint.
+                  </p>
+                )}
+                {publishNote.teamKeysConflict.length > 0 && (
                   <p className="text-amber-700 dark:text-amber-300">
-                    Custom-endpoint tier{publishNote.teamKeysUnshared.length > 1 ? 's' : ''} ({publishNote.teamKeysUnshared.join(', ')}): the key isn't shared — teammates' agents on {publishNote.teamKeysUnshared.length > 1 ? 'these tiers' : 'this tier'} get no key for that endpoint.
+                    This set holds more than one key for {publishNote.teamKeysConflict.map(providerLabel).join(', ')} — teammates' agents run on just one of them.
                   </p>
                 )}
                 {publishNote.teamKeysMissing.length > 0 && (

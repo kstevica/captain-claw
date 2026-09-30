@@ -636,7 +636,7 @@ def _resolve_creds(registry: dict, tiers: dict | None, api_key: str, tier: str) 
         provider = lt.get("provider", "anthropic")
         return {"provider": provider, "model": lt.get("model", ""),
                 "base_url": lt.get("base_url") or None,
-                "api_key": _effective_key(provider, lt.get("api_key") or api_key),
+                "api_key": _effective_key(provider, lt.get("api_key") or api_key, lt.get("base_url")),
                 "output_ctx": int(lt.get("output_ctx") or 0)}
     return _tier_creds(registry, tier, api_key or "")
 
