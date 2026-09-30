@@ -7651,8 +7651,9 @@ def main():
             "the left, conversation in the middle, the active agent's files and "
             "data on the right. Strips the full-view switch, the Spawner, agent "
             "config and start/stop controls so shared-account users can only "
-            "chat, create an agent from a Library archetype, or sign out. Admins "
-            "are exempt. Also settable via the FD_SIMPLE_CHAT env var."
+            "chat, create an agent from a Library archetype, manage their Google "
+            "/ MCP connections, or sign out. Admins are exempt. Also settable "
+            "via the FD_SIMPLE_CHAT env var."
         ),
     )
     args = parser.parse_args()

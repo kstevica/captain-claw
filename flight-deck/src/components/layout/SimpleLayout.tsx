@@ -20,6 +20,8 @@ import {
   FolderOpen,
   Database,
   Settings,
+  Plug,
+  X,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -36,6 +38,7 @@ import { AgentFilesPanel } from '../agents/AgentFilesPanel'
 import { AgentDatastorePanel } from '../agents/AgentDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
 import { ArchetypeSpawnDialog } from './ArchetypeSpawnDialog'
+import ConnectionsPage from '../../pages/ConnectionsPage'
 import { NotificationBell } from '../common/NotificationCenter'
 import { APP_VERSION, BUILD_DATE } from '../../version'
 
@@ -118,6 +121,9 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
   // as it comes up reachable.
   const [archetypeOpen, setArchetypeOpen] = useState(false)
   const [pendingOpenId, setPendingOpenId] = useState<string | null>(null)
+  // Kiosk Connections dialog — the full layout's Connections page, which the
+  // lock otherwise puts out of reach.
+  const [connectionsOpen, setConnectionsOpen] = useState(false)
 
   // Keep the agent list fresh — the Desktop page normally does this polling,
   // and it isn't mounted here. Same auth guard as there: with auth on and no
@@ -257,6 +263,7 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
         onRefresh={refresh}
         onSpawn={goSpawn}
         onOptions={setOptionsAgent}
+        onConnections={locked ? () => setConnectionsOpen(true) : undefined}
         locked={locked}
       />
 
@@ -284,6 +291,8 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
         />
       )}
 
+      {locked && connectionsOpen && <KioskConnectionsDialog onClose={() => setConnectionsOpen(false)} />}
+
       {!locked && optionsAgent && createPortal(
         <AgentConfigEditor
           kind={optionsAgent.kind}
@@ -297,10 +306,47 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
   )
 }
 
+// ── Kiosk: the Connections page in a dialog ──────────────────────────
+//
+// The same page the full layout shows, minus the deck-setup cards (see
+// ConnectionsPage's `kiosk`), so a kiosk user can link their own Google
+// account and the MCP servers without leaving the chat surface.
+
+function KioskConnectionsDialog({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-label="Connections"
+        className="relative flex h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          onClick={onClose}
+          title="Close"
+          className="absolute right-3 top-3 z-10 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+        >
+          <X className="h-4 w-4" />
+        </button>
+        <div className="min-h-0 flex-1">
+          <ConnectionsPage kiosk />
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 // ── Left: agents ─────────────────────────────────────────────────────
 
 function AgentsColumn({
-  agents, activeAgentId, sessionInfo, starting, onOpen, onStart, onRefresh, onSpawn, onOptions, locked = false,
+  agents, activeAgentId, sessionInfo, starting, onOpen, onStart, onRefresh, onSpawn, onOptions, onConnections, locked = false,
 }: {
   agents: SimpleAgent[]
   activeAgentId: string | null
@@ -311,6 +357,8 @@ function AgentsColumn({
   onRefresh: () => void
   onSpawn: () => void
   onOptions: (a: SimpleAgent) => void
+  /** Kiosk only: open the Connections dialog. */
+  onConnections?: () => void
   locked?: boolean
 }) {
   const open = useUIStore((s) => s.simpleLeftOpen)
@@ -396,6 +444,11 @@ function AgentsColumn({
           <button onClick={onRefresh} className={iconBtn} title="Refresh agents">
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
+          {onConnections && (
+            <button onClick={onConnections} className={iconBtn} title="Connections — Google and MCP">
+              <Plug className="h-3.5 w-3.5" />
+            </button>
+          )}
           {/* Sign-out stays in the kiosk lock too — it's how a shared kiosk
               hands the screen to the next person. */}
           {authEnabled && authUser && (
@@ -553,6 +606,11 @@ function AgentsColumn({
           <button onClick={onRefresh} className={iconBtn} title="Refresh agents">
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
+          {onConnections && (
+            <button onClick={onConnections} className={iconBtn} title="Connections — Google and MCP">
+              <Plug className="h-3.5 w-3.5" />
+            </button>
+          )}
         </div>
         {authEnabled && authUser && (
           <div className="flex min-w-0 items-center gap-1">

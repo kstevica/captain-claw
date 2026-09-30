@@ -5,7 +5,10 @@ import MCPConnection from '../components/connections/MCPConnection'
 import MCPAgentAccess from '../components/connections/MCPAgentAccess'
 import TypesenseConnection from '../components/connections/TypesenseConnection'
 
-export default function ConnectionsPage() {
+// `kiosk` — the locked Simple layout's Connections dialog: a person's own
+// connections only (their Google account, the deck's MCP servers). The ChatGPT
+// subscription and the deep-memory server are deck setup, left to the full view.
+export default function ConnectionsPage({ kiosk = false }: { kiosk?: boolean }) {
   return (
     <div className="h-full overflow-y-auto bg-zinc-950 text-zinc-200">
       <div className="max-w-3xl mx-auto px-6 py-8 pb-16">
@@ -23,10 +26,10 @@ export default function ConnectionsPage() {
 
         <div className="space-y-4">
           <GoogleConnection />
-          <CodexConnection />
+          {!kiosk && <CodexConnection />}
           <MCPConnection />
           <MCPAgentAccess />
-          <TypesenseConnection />
+          {!kiosk && <TypesenseConnection />}
         </div>
       </div>
     </div>
