@@ -951,9 +951,12 @@ async def lifespan(app: FastAPI):
             # Don't let an inherited LLM-provider key override the resolved tier key
             # (_build_env writes env_vars AFTER provider_api_key, so a same-named env
             # var would otherwise clobber it). Only strip when we actually resolved one.
-            if resolved.get("api_key"):
-                _prov_env = _PROVIDER_KEY_ENV.get(str(resolved.get("provider") or ""), "")
-                if _prov_env:
+            from captain_claw.flight_deck.basna_routes import _effective_key
+            _tier_key = str(resolved.get("api_key") or "").strip()
+            if _tier_key == "@system":  # no org key behind it → the inherited one stays
+                _tier_key = _effective_key(str(resolved.get("provider") or ""), _tier_key) or ""
+            if _tier_key:
+                for _prov_env in _provider_key_env_names(str(resolved.get("provider") or "")):
                     merged_env.pop(_prov_env, None)
             env_list = [{"key": k, "value": v} for k, v in merged_env.items()]
             return await dubina_agents.spawn_archetype_agent(
@@ -1536,7 +1539,7 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
     # the caller-inherited model when we actually resolve one; otherwise leave it
     # and let `_resolve_tier` try the central registry table as a last resort.
     eff_tier = explicit_tier or str(arch.get("tier") or "")
-    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    from captain_claw.flight_deck.basna_routes import _effective_key, _load_owner_tiers
     tiers_map: dict = {}
     owner_env: list = []
     try:
@@ -1578,14 +1581,19 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
     # The tier set's own keys (BRAVE_API_KEY, TAVILY_API_KEY, …) — what the
     # Library spawn sends as env_vars; without them the agent's tools have no
     # credentials. Names the caller set win, and a set var never clobbers the
-    # resolved LLM key (_build_env writes env_vars after provider_api_key).
+    # resolved LLM key (_build_env writes env_vars after provider_api_key) —
+    # unless that key is an "@system" with no org key behind it, where the
+    # set's own var is the only key there is.
     have = {str(ev.get("key") or "") for ev in config.env_vars}
-    llm_env = _PROVIDER_KEY_ENV.get(config.provider, "") if config.provider_api_key else ""
+    llm_key = (config.provider_api_key or "").strip()
+    if llm_key == "@system":
+        llm_key = _effective_key(config.provider, llm_key) or ""
+    llm_envs = _provider_key_env_names(config.provider) if llm_key else ()
     for ev in owner_env or []:
         if not isinstance(ev, dict):  # settings are free-form; never fail the spawn
             continue
         name = str(ev.get("key") or "").strip()
-        if name and name not in have and name != llm_env and str(ev.get("value") or ""):
+        if name and name not in have and name not in llm_envs and str(ev.get("value") or ""):
             config.env_vars.append({"key": name, "value": str(ev["value"])})
             have.add(name)
     log.info("Resolved archetype spawn", archetype=aid, tier=eff_tier or "(default)",
@@ -1726,6 +1734,36 @@ _PROVIDER_KEY_ENV = {
 }
 
 
+# Other env names an agent also accepts for a provider's key.
+_PROVIDER_KEY_ENV_ALSO = {"gemini": ("GOOGLE_API_KEY",)}
+
+
+def _provider_key_env_names(provider: str) -> tuple[str, ...]:
+    """Every env var an agent reads ``provider``'s API key from (() if none)."""
+    name = _PROVIDER_KEY_ENV.get(provider or "", "")
+    return (name, *_PROVIDER_KEY_ENV_ALSO.get(provider, ())) if name else ()
+
+
+def _needs_provider_key(provider: str, model: str = "", base_url: str = "") -> bool:
+    """Does an agent on this provider/model/endpoint need the PROVIDER's API key?
+
+    Not on a custom endpoint (a local server or gateway has its own key, or
+    none), and not OpenAI's GPT-5 / Codex family, which signs in through the
+    ChatGPT connection instead of an API key.
+    """
+    if not _provider_key_env_names(provider) or str(base_url or "").strip():
+        return False
+    if provider == "openai":
+        try:
+            from captain_claw.llm import _is_codex_family_model
+
+            if _is_codex_family_model(model or ""):
+                return False
+        except Exception:
+            pass
+    return True
+
+
 def _build_env(c: AgentConfig) -> str:
     lines: list[str] = []
     if c.provider_api_key:
@@ -1741,15 +1779,22 @@ def _build_env(c: AgentConfig) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
-async def _resolve_spawn_provider_key(config: AgentConfig) -> None:
+async def _resolve_spawn_provider_key(config: AgentConfig, *, inherits_fd_env: bool = True) -> None:
     """Resolve the ``@system`` API-key sentinel to the real org key at spawn time.
 
     The browser never receives raw org provider keys (GET /fd/settings/
     provider-keys is masked). When a spawn requests the shared system key it
-    sends the sentinel ``@system``; here — server-side, just before the key is
-    written into the agent's .env — we swap it for the admin-configured key from
-    the ``fd:provider-keys`` system setting. Covers every spawn path because all
-    of them funnel through ``_build_env``.
+    sends the sentinel ``@system``; here — server-side, before anything is
+    written for the agent — we swap it for the admin-configured key from the
+    ``fd:provider-keys`` system setting. Both spawn endpoints call it right
+    after the archetype / tier resolve.
+
+    A request for the team key that nothing can satisfy is refused (409) rather
+    than started as an agent whose first model call fails with "missing
+    credentials" — only where the agent really needs the provider's key
+    (`_needs_provider_key`) and it arrives no other way: the spawn's own env
+    vars, or Flight Deck's environment, which process agents inherit
+    (``inherits_fd_env``; containers don't).
     """
     if (config.provider_api_key or "").strip() != "@system":
         return
@@ -1762,6 +1807,19 @@ async def _resolve_spawn_provider_key(config: AgentConfig) -> None:
             config.provider_api_key = str(keys.get(config.provider, "") or "")
     except Exception as exc:
         log.warning("system provider-key resolve failed", provider=config.provider, error=str(exc))
+        return
+    if config.provider_api_key or not _needs_provider_key(config.provider, config.model, config.base_url):
+        return
+    env_names = _provider_key_env_names(config.provider)
+    if inherits_fd_env and any(os.environ.get(n) for n in env_names):
+        return
+    if any(isinstance(ev, dict) and ev.get("key") in env_names and ev.get("value")
+           for ev in config.env_vars):
+        return
+    raise HTTPException(409, (
+        f"No team API key for {config.provider}. An admin can add one in "
+        "Admin → Provider keys, or publish a tier set that has one."
+    ))
 
 
 def _localize_url(url: str) -> str:
@@ -2148,6 +2206,7 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     # then a bare model-recommendation tier to a concrete provider/model.
     await _resolve_archetype(config, request, user)
     _resolve_tier(config)
+    await _resolve_spawn_provider_key(config, inherits_fd_env=False)  # a container doesn't get FD's env
     # Check if docker spawn is allowed
     sys_cfg = await _get_system_config()
     docker_default = not os.environ.get("CAPTAIN_CLAW_DOCKER")
@@ -2205,7 +2264,6 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     # that CC's settings page may have written into ~/.captain-claw/config.yaml
     (agent_dir / "data" / "home-config" / "config.yaml").write_text(config_yaml)
 
-    await _resolve_spawn_provider_key(config)
     env_content = _build_env(config)
     (agent_dir / ".env").write_text(env_content)
 
@@ -6470,6 +6528,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     # then a bare model-recommendation tier to a concrete provider/model.
     await _resolve_archetype(config, request, user)
     _resolve_tier(config)
+    await _resolve_spawn_provider_key(config)
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
         check_api_rate_limit(user)
@@ -6516,7 +6575,6 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     (agent_dir / "config.yaml").write_text(config_yaml)
     (agent_dir / "data" / "home-config" / "config.yaml").write_text(config_yaml)
 
-    await _resolve_spawn_provider_key(config)
     env_content = _build_env(config)
     (agent_dir / ".env").write_text(env_content)
 

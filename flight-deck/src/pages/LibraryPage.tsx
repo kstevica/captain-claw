@@ -19,9 +19,14 @@ import {
 } from '../services/archetypes'
 import { ForgeArchetypesModal } from '../components/library/ForgeArchetypesModal'
 import { useAuthStore } from '../stores/authStore'
-import { publishSharedTierSets } from '../services/sharedTierSets'
+import { publishSharedTierSets, type PublishResult } from '../services/sharedTierSets'
 
 type SpawnState = 'spawning' | 'done' | 'error'
+
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: 'Anthropic', openai: 'OpenAI', gemini: 'Gemini', xai: 'xAI', openrouter: 'OpenRouter',
+}
+const providerLabel = (id: string) => PROVIDER_LABELS[id] || id
 
 const COGNITIVE_MODES = [
   'neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian',
@@ -57,6 +62,7 @@ export function LibraryPage() {
   } = useTierConfig()
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const [publishState, setPublishState] = useState<'idle' | 'publishing' | 'done' | 'error'>('idle')
+  const [publishNote, setPublishNote] = useState<PublishResult | null>(null)
 
   // Archetype editor: null = closed; otherwise the draft being edited. `editingId`
   // is the existing archetype_id when editing (PUT), or null for a new one (POST).
@@ -351,10 +357,12 @@ export function LibraryPage() {
                 <button
                   onClick={async () => {
                     setPublishState('publishing')
+                    setPublishNote(null)
                     try {
-                      // Publish the active set as the team default. Keys are
-                      // masked to @system server-side.
-                      await publishSharedTierSets([activeSet], activeSet.id)
+                      // Publish the active set as the team default. The
+                      // published copy holds only @system; a key in the set
+                      // becomes the team key for its provider if none is set.
+                      setPublishNote(await publishSharedTierSets([activeSet], activeSet.id))
                       setPublishState('done')
                       setTimeout(() => setPublishState('idle'), 2000)
                     } catch {
@@ -363,7 +371,7 @@ export function LibraryPage() {
                     }
                   }}
                   disabled={publishState === 'publishing'}
-                  title="Publish this set as the team default — teammates who configured no models run on it (API keys are never shared)"
+                  title="Publish this set as the team default — teammates who configured no models run on it. A key in this set becomes the team key for its provider when none is set: teammates' agents use it, and whoever owns an agent can read it in that agent's settings."
                   className="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-500/20 disabled:opacity-50 dark:text-emerald-200"
                 >
                   {publishState === 'publishing' ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -380,6 +388,33 @@ export function LibraryPage() {
                 <Wand2 className="h-3.5 w-3.5" /> Setup wizard
               </button>
             </div>
+            {/* What publishing meant for the team's keys — teammates' agents
+                run on the team key of each provider, not on this set's own. */}
+            {publishNote && (publishNote.teamKeysAdded.length > 0 || publishNote.teamKeysDiffer.length > 0
+              || publishNote.teamKeysUnshared.length > 0 || publishNote.teamKeysMissing.length > 0) && (
+              <div className="space-y-1 text-[11px]">
+                {publishNote.teamKeysAdded.length > 0 && (
+                  <p className="text-emerald-700 dark:text-emerald-300">
+                    Your {publishNote.teamKeysAdded.map(providerLabel).join(', ')} key is now the team key — teammates' agents run on it.
+                  </p>
+                )}
+                {publishNote.teamKeysDiffer.length > 0 && (
+                  <p className="text-amber-700 dark:text-amber-300">
+                    The team key for {publishNote.teamKeysDiffer.map(providerLabel).join(', ')} is not the key in this set — teammates keep running on the existing team key. Change it in Admin → Provider keys.
+                  </p>
+                )}
+                {publishNote.teamKeysUnshared.length > 0 && (
+                  <p className="text-amber-700 dark:text-amber-300">
+                    Custom-endpoint tier{publishNote.teamKeysUnshared.length > 1 ? 's' : ''} ({publishNote.teamKeysUnshared.join(', ')}): the key isn't shared — teammates' agents on {publishNote.teamKeysUnshared.length > 1 ? 'these tiers' : 'this tier'} get no key for that endpoint.
+                  </p>
+                )}
+                {publishNote.teamKeysMissing.length > 0 && (
+                  <p className="text-amber-700 dark:text-amber-300">
+                    No team key for {publishNote.teamKeysMissing.map(providerLabel).join(', ')} — teammates' agents on those models will have no key. Add one in Admin → Provider keys.
+                  </p>
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <select
                 value={activeSetId}
