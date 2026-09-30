@@ -125,7 +125,8 @@ class FlightDeckTool(Tool):
                     "library archetype (its role, tools, cognitive mode, and tier→model). "
                     "You can also pass provider/model/api_key/base_url/description/tools overrides, and an "
                     "`env` map ({\"BRAVE_API_KEY\": \"...\"}) to give the new agent extra credentials, via the "
-                    "message field as JSON. Without an archetype it uses your own provider/model/key/base_url as defaults. "
+                    "message field as JSON. Without an archetype it uses your own provider/model/key/base_url as defaults "
+                    "(your key only together with your own provider and base_url — for another one pass its api_key). "
                     "RULE: If the user says 'delegate' or the task involves work (not just a question), use 'delegate'."
                 ),
             },
@@ -143,8 +144,10 @@ class FlightDeckTool(Tool):
                     "Optional, for 'spawn_agent' only: base the new agent on a library "
                     "archetype. Format 'id' or 'id@tier' (e.g. 'fact-checker' or "
                     "'fact-checker@reason'). The archetype supplies the agent's role, "
-                    "tools, cognitive mode, and model tier; explicit provider/model/tools "
-                    "overrides in the message JSON still take precedence."
+                    "tools, cognitive mode, and model tier. The tier's model (with its "
+                    "own key and endpoint) is used when the owner's tier set defines "
+                    "it; otherwise the new agent runs on your own model. Explicit "
+                    "tools/description overrides in the message JSON still take precedence."
                 ),
             },
             "message": {
@@ -590,14 +593,38 @@ class FlightDeckTool(Tool):
                 if isinstance(ev, dict) and str(ev.get("key", "")).strip():
                     env_vars.append({"key": str(ev["key"]), "value": str(ev.get("value", ""))})
 
+        # Our key goes with OUR endpoint (provider + base_url): a child that an
+        # override moves to another provider must not be routed at our endpoint,
+        # and one moved anywhere else must not be handed our key — a blank key
+        # lets Flight Deck supply the team's key for that endpoint instead.
+        from captain_claw.flight_deck.endpoints import same_endpoint
+        from captain_claw.llm import _is_codex_family_model, _normalize_provider_name
+
+        default_provider = _normalize_provider_name(default_provider)
+        provider = _normalize_provider_name(str(overrides.get("provider") or default_provider))
+        model = str(overrides.get("model") or default_model)
+        inherited_key = default_api_key
+        if provider != default_provider:
+            default_api_key = default_base_url = ""
+        elif "base_url" in overrides:
+            if same_endpoint(provider, overrides["base_url"], default_provider, default_base_url):
+                overrides = {**overrides, "base_url": default_base_url}  # ours, however it was spelled
+            else:
+                default_api_key = ""
+        elif provider == "openai" and _is_codex_family_model(model) != _is_codex_family_model(default_model):
+            # GPT-5 / Codex models sign in through ChatGPT, the others with a
+            # key: another model across that line is another place too.
+            default_api_key = default_base_url = ""
+        key_withheld = bool(inherited_key) and not default_api_key and "api_key" not in overrides
+
         spawn_body: dict[str, Any] = {
             "name": agent_name,
             # Inherit the caller's working provider/model/key/base_url as a baseline
             # so the child always has a usable, correctly-routed model even if an
             # archetype tier doesn't resolve; explicit overrides (and an archetype's
             # tier) may still override these server-side.
-            "provider": overrides.get("provider", default_provider),
-            "model": overrides.get("model", default_model),
+            "provider": provider,
+            "model": model,
             "provider_api_key": overrides.get("api_key", default_api_key),
             "base_url": overrides.get("base_url", default_base_url),
             "web_enabled": True,
@@ -632,12 +659,20 @@ class FlightDeckTool(Tool):
                         result = resp.json()
                         if result.get("ok"):
                             arch_line = f"Archetype: {archetype}\n" if archetype else ""
+                            key_line = (
+                                "Note: your own API key was not passed along — the new agent runs on "
+                                "another provider or endpoint than you. It uses the team's key for "
+                                "that endpoint if Flight Deck has one, else the key for this provider in "
+                                "Flight Deck's own environment; pass \"api_key\" in the message JSON to "
+                                "choose the key (any placeholder for a local server that needs none).\n"
+                            ) if key_withheld and not archetype else ""
                             return ToolResult(
                                 success=True,
                                 content=(
                                     f"Agent **{agent_name}** spawned successfully.\n"
                                     f"{arch_line}"
                                     f"Provider: {spawn_body['provider']}, Model: {spawn_body['model']}\n"
+                                    f"{key_line}"
                                     f"The agent will be available in the fleet shortly. "
                                     f"Use list_agents to check when it's running."
                                 ),

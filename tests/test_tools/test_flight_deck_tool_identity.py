@@ -188,6 +188,100 @@ class TestEveryCallCarriesTheAgentsIdentity:
             assert r.headers.get("X-Agent-Secret") == secret, r.url.path
 
 
+class TestSpawnBaseline:
+    """The child inherits this agent's working model as a baseline — its key
+    and endpoint only together with its provider."""
+
+    GW = "https://gw.example/v1"
+
+    def _agent(self):
+        return types.SimpleNamespace(provider=types.SimpleNamespace(
+            provider="openai", model="swift", api_key="gw-key", base_url=self.GW))
+
+    async def _body(self, fd, overrides: dict | None = None) -> dict:
+        res = await FlightDeckTool()._spawn_agent(
+            FD, "kid", json.dumps(overrides) if overrides is not None else "", _agent=self._agent())
+        assert res.success, res.error
+        return json.loads(fd.requests[-1].content)
+
+    async def test_no_overrides_inherits_the_whole_model(self, cfg, fd):
+        body = await self._body(fd)
+        assert (body["provider"], body["model"], body["provider_api_key"], body["base_url"]) == (
+            "openai", "swift", "gw-key", self.GW)
+
+    async def test_another_model_on_the_same_provider_stays_on_our_endpoint(self, cfg, fd):
+        body = await self._body(fd, {"model": "swift-mini"})
+        assert (body["model"], body["provider_api_key"], body["base_url"]) == ("swift-mini", "gw-key", self.GW)
+
+    async def test_another_provider_gets_neither_our_key_nor_our_endpoint(self, cfg, fd):
+        body = await self._body(fd, {"provider": "anthropic", "model": "claude"})
+        assert (body["provider"], body["provider_api_key"], body["base_url"]) == ("anthropic", "", "")
+
+    @pytest.mark.parametrize("base_url", ["http://third-party.example/v1", ""])
+    async def test_another_endpoint_on_our_provider_does_not_get_our_key(self, cfg, fd, base_url):
+        body = await self._body(fd, {"model": "local", "base_url": base_url})
+        assert (body["provider"], body["provider_api_key"], body["base_url"]) == ("openai", "", base_url)
+
+    async def test_our_own_endpoint_written_differently_is_still_ours(self, cfg, fd):
+        body = await self._body(fd, {"base_url": self.GW.upper() + "/"})
+        assert body["provider_api_key"] == "gw-key"
+
+    @pytest.mark.parametrize("alias", ["chatgpt", "OpenAI"])
+    async def test_an_alias_of_our_provider_is_not_another_provider(self, cfg, fd, alias):
+        body = await self._body(fd, {"provider": alias, "model": "swift-mini"})
+        assert (body["provider"], body["provider_api_key"], body["base_url"]) == ("openai", "gw-key", self.GW)
+
+    async def test_our_own_key_override_stays_on_our_endpoint(self, cfg, fd):
+        body = await self._body(fd, {"api_key": "another-gw-key"})
+        assert (body["provider_api_key"], body["base_url"]) == ("another-gw-key", self.GW)
+
+    async def _spawn(self, fd, parent, overrides: dict):
+        agent = types.SimpleNamespace(provider=types.SimpleNamespace(**parent))
+        res = await FlightDeckTool()._spawn_agent(FD, "kid", json.dumps(overrides), _agent=agent)
+        assert res.success, res.error
+        return json.loads(fd.requests[-1].content), res.content
+
+    @pytest.mark.parametrize("parent_url, override_url", [
+        ("", "https://api.openai.com/v1"),                      # our own endpoint, spelled out
+        ("https://api.openai.com/v1/", ""),
+        ("http://localhost:1234/v1", "http://127.0.0.1:1234/v1"),
+    ])
+    async def test_our_endpoint_is_recognised_the_way_flight_deck_recognises_it(
+            self, cfg, fd, parent_url, override_url):
+        parent = dict(provider="openai", model="m", api_key="our-key", base_url=parent_url)
+        body, _text = await self._spawn(fd, parent, {"model": "m2", "base_url": override_url})
+        assert (body["provider_api_key"], body["base_url"]) == ("our-key", parent_url)
+
+    async def test_a_chatgpt_sign_in_model_does_not_go_to_our_gateway(self, cfg, fd):
+        """GPT-5 / Codex models sign in through ChatGPT: on our gateway the
+        child would post the ChatGPT token there."""
+        body = await self._body(fd, {"model": "gpt-5.2"})
+        assert (body["model"], body["provider_api_key"], body["base_url"]) == ("gpt-5.2", "", "")
+
+    async def test_a_keyed_model_does_not_go_to_our_chatgpt_endpoint(self, cfg, fd):
+        parent = dict(provider="openai", model="gpt-5.2", api_key="",
+                      base_url="https://chatgpt.com/backend-api/codex/responses")
+        body, _text = await self._spawn(fd, parent, {"model": "gpt-4.1"})
+        assert (body["model"], body["base_url"]) == ("gpt-4.1", "")
+        body, _text = await self._spawn(fd, parent, {"model": "gpt-5.2-codex"})   # still ChatGPT: stays
+        assert body["base_url"] == parent["base_url"]
+
+    async def test_the_agent_is_told_when_its_key_was_not_passed_along(self, cfg, fd):
+        agent = self._agent()
+        withheld = await FlightDeckTool()._spawn_agent(
+            FD, "kid", json.dumps({"model": "local", "base_url": "http://localhost:1234/v1"}), _agent=agent)
+        assert "your own API key was not passed along" in withheld.content
+        for overrides in ({}, {"model": "swift-mini"},
+                          {"base_url": "http://localhost:1234/v1", "api_key": "lm-studio"}):
+            res = await FlightDeckTool()._spawn_agent(FD, "kid", json.dumps(overrides), _agent=agent)
+            assert "not passed along" not in res.content
+
+    async def test_another_provider_with_its_own_key_and_endpoint_keeps_them(self, cfg, fd):
+        body = await self._body(fd, {"provider": "anthropic", "model": "claude", "api_key": "sk-ant",
+                                     "base_url": "https://proxy.example"})
+        assert (body["provider_api_key"], body["base_url"]) == ("sk-ant", "https://proxy.example")
+
+
 class TestSpawnRefusal:
     @pytest.mark.parametrize("status", [401, 403])
     async def test_auth_refusal_is_reported_not_retried_on_docker(self, cfg, fd, status):
