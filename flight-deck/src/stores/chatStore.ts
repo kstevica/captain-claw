@@ -792,6 +792,11 @@ interface ChatStore {
   removeQueueItem: (containerId: string, id: string) => void
   markQueueItemDone: (containerId: string, id: string) => void
   toggleQueueAutoMode: (containerId: string) => void
+  /** Switch Auto off on every lane of an AGENT whose queue still has items —
+   *  open in this tab or only persisted — so nothing re-runs by itself when
+   *  its chat next connects. With `check`, only report whether any would be.
+   *  Returns true when a queue was (or would be) parked. */
+  parkQueues: (agentId: string, check?: boolean) => boolean
   clearQueue: (containerId: string) => void
   /** Drop the finished items, keeping pending and in-flight ones. */
   clearQueueFinished: (containerId: string) => void
@@ -1909,6 +1914,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!next) { cancelAutoCompleteWatch(containerId); cancelQuestionWatch(containerId) }
     // Turning auto-mode on while idle should kick the queue.
     if (next) tryDispatchNext(containerId)
+  },
+
+  parkQueues: (agentId, check = false) => {
+    let parked = false
+    for (const lane of LANES) {
+      const key = laneKey(agentId, lane)
+      const session = get().sessions.get(key)
+      if (session) {
+        if (!session.queueAutoMode || !session.queue.some((q) => q.status !== 'done')) continue
+        parked = true
+        if (!check) get().toggleQueueAutoMode(key)
+        continue
+      }
+      // Not open here: the queue a reopened chat would pick up from storage.
+      try {
+        const raw = window.localStorage.getItem(_queueLSKey(key))
+        const slice = raw ? JSON.parse(raw) as PersistedQueueSlice : null
+        if (!slice?.queueAutoMode || !Array.isArray(slice.queue)
+          || !slice.queue.some((q) => q.status !== 'done')) continue
+        parked = true
+        if (!check) saveQueueSlice(key, { queue: slice.queue, queueAutoMode: false })
+      } catch { /* unreadable storage — nothing to park */ }
+    }
+    return parked
   },
 
   clearQueueFinished: (containerId) => {
