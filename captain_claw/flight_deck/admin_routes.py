@@ -304,16 +304,26 @@ async def update_provider_keys(body: ProviderKeysRequest, admin: dict = Depends(
         else:
             existing.pop(k, None)
     await db.set_system_setting(PROVIDER_KEYS_SETTING, json.dumps(existing))
+    _drop_org_key_cache()
     return {"ok": True, "keys": existing}
+
+
+def _drop_org_key_cache() -> None:
+    """Basna/Vatra (and the archetype spawn) resolve ``@system`` from a
+    short-lived cache of the org keys — make the next read a fresh one."""
+    from captain_claw.flight_deck import basna_routes
+
+    basna_routes._SYSTEM_KEYS_TS = 0.0
 
 
 # ── Shared (team-default) tier sets ──
 # An admin publishes one or more of their own tier sets as team defaults. Stored
 # as system_settings 'fd:shared-tier-sets' = {"sets": [...], "defaultSetId": id}.
-# Every tier's api_key is masked to the "@system" sentinel on write, so no raw
-# secret is persisted globally — the real key is resolved at run time from
-# fd:provider-keys by provider (see basna_routes._effective_key). Teammates who
-# configured no tier set of their own fall back to the default set.
+# The stored copy never holds a raw tier key: a tier says "@system" — resolved at
+# run time from fd:provider-keys by provider (see basna_routes._effective_key) —
+# or nothing. Teammates who configured no tier set of their own fall back to the
+# default set, so publishing also has to leave them a key to run on: see
+# `_plan_team_keys`.
 SHARED_TIER_SETS_SETTING = "fd:shared-tier-sets"
 
 
@@ -322,8 +332,88 @@ class SharedTierSetsRequest(BaseModel):
     defaultSetId: str | None = None
 
 
-def _mask_shared_sets(sets: list[dict]) -> list[dict]:
-    """Replace every tier's populated api_key with the @system sentinel."""
+def _tier_key(t: dict) -> str:
+    return str(t.get("api_key") or "").strip()
+
+
+def _on_custom_endpoint(t: dict) -> bool:
+    return bool(str(t.get("base_url") or "").strip())
+
+
+def _plan_team_keys(sets: list[dict], org_keys: dict) -> dict:
+    """What publishing ``sets`` means for the org provider keys.
+
+    An org key is THE key for a provider's own endpoint, so only a tier on that
+    endpoint can supply one — never a tier behind a custom ``base_url`` (its
+    key belongs to that gateway or local server, often a placeholder), and only
+    for providers an agent reads a key for. An existing org key is never
+    replaced. Returns provider ids / tier names only, never key values:
+
+    * ``add``      — {provider: key} to store: own-endpoint keys with no org key yet
+    * ``differs``  — providers whose own-endpoint key in the set is not the
+                     existing org key (teammates keep running on the org key)
+    * ``unshared`` — tiers on a custom endpoint whose key can't be shared
+                     (published keyless — see `_mask_shared_sets`)
+    * ``missing``  — providers teammates would have no key for at all: a tier
+                     needs the provider's key, there is no org key, and neither
+                     the set's env vars nor Flight Deck's environment supply one
+    """
+    import os
+
+    from captain_claw.flight_deck.server import _needs_provider_key, _provider_key_env_names
+
+    have = {str(p): str(k) for p, k in (org_keys or {}).items() if k}
+    add: dict[str, str] = {}
+    differs: set[str] = set()
+    unshared: list[str] = []
+    for s in sets or []:
+        if not isinstance(s, dict):
+            continue
+        for name, t in (s.get("tiers") or {}).items():
+            if not isinstance(t, dict) or not t.get("model"):
+                continue
+            provider, key = str(t.get("provider") or ""), _tier_key(t)
+            if not key or key == "@system":
+                continue
+            if _on_custom_endpoint(t):
+                if have.get(provider) != key and str(name) not in unshared:
+                    unshared.append(str(name))
+            elif _provider_key_env_names(provider):
+                if provider in have:
+                    if have[provider] != key:
+                        differs.add(provider)
+                else:
+                    add.setdefault(provider, key)
+    after = {**have, **add}
+    missing: set[str] = set()
+    for s in sets or []:
+        if not isinstance(s, dict):
+            continue
+        env_names = {str(ev.get("key") or "") for ev in (s.get("envVars") or [])
+                     if isinstance(ev, dict) and str(ev.get("value") or "")}
+        for t in (s.get("tiers") or {}).values():
+            if not isinstance(t, dict) or not t.get("model"):
+                continue
+            provider = str(t.get("provider") or "")
+            if provider in after or not _needs_provider_key(
+                    provider, str(t.get("model") or ""), str(t.get("base_url") or "")):
+                continue
+            names = _provider_key_env_names(provider)
+            if not any(n in env_names or os.environ.get(n) for n in names):
+                missing.add(provider)
+    return {"add": add, "differs": sorted(differs), "unshared": unshared, "missing": sorted(missing)}
+
+
+def _mask_shared_sets(sets: list[dict], org_keys: dict | None = None) -> list[dict]:
+    """The publishable copy of ``sets``: no raw tier key survives.
+
+    A key becomes the ``@system`` sentinel where that resolves to the right key
+    for the tier's endpoint: on the provider's own endpoint, or on a custom one
+    whose key IS the org key (a deck that runs everything through one gateway).
+    Any other custom-endpoint key is dropped — ``@system`` there would send the
+    provider's real key to that other host.
+    """
+    org = {str(p): str(k) for p, k in (org_keys or {}).items() if k}
     out: list[dict] = []
     for s in sets or []:
         if not isinstance(s, dict):
@@ -333,8 +423,12 @@ def _mask_shared_sets(sets: list[dict]) -> list[dict]:
             if not isinstance(t, dict):
                 continue
             tt = dict(t)
-            if tt.get("api_key"):
-                tt["api_key"] = "@system"
+            key = _tier_key(tt)
+            if not key:
+                tt["api_key"] = ""
+            elif key != "@system":
+                shareable = not _on_custom_endpoint(tt) or org.get(str(tt.get("provider") or "")) == key
+                tt["api_key"] = "@system" if shareable else ""
             tiers[tname] = tt
         out.append({**s, "tiers": tiers})
     return out
@@ -356,11 +450,37 @@ async def get_shared_tier_sets(admin: dict = Depends(require_admin)):
 
 @router.put("/shared-tier-sets")
 async def update_shared_tier_sets(body: SharedTierSetsRequest, admin: dict = Depends(require_admin)):
-    """Publish tier sets as team defaults (admin only). API keys are masked to @system."""
+    """Publish tier sets as team defaults (admin only).
+
+    Teammates' agents run on the ORG key of each provider, so a key in a
+    published tier becomes the org key for its provider when none is set
+    (`_plan_team_keys`) — otherwise they would get the team's models and no
+    credentials. That shares the key with the team: it is written into each
+    teammate's agent, whose owner can read it. The response names providers and
+    tiers, never key values.
+    """
     db = get_db()
-    payload = {"sets": _mask_shared_sets(body.sets), "defaultSetId": body.defaultSetId}
+    raw = await db.get_system_setting(PROVIDER_KEYS_SETTING)
+    try:
+        org_keys = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        org_keys = {}
+    if not isinstance(org_keys, dict):
+        org_keys = {}
+    plan = _plan_team_keys(body.sets, org_keys)
+    if plan["add"]:
+        org_keys = {**org_keys, **plan["add"]}
+        await db.set_system_setting(PROVIDER_KEYS_SETTING, json.dumps(org_keys))
+        _drop_org_key_cache()
+    payload = {"sets": _mask_shared_sets(body.sets, org_keys), "defaultSetId": body.defaultSetId}
     await db.set_system_setting(SHARED_TIER_SETS_SETTING, json.dumps(payload))
-    return {"ok": True, **payload}
+    return {
+        "ok": True, **payload,
+        "team_keys_added": sorted(plan["add"]),
+        "team_keys_differ": plan["differs"],
+        "team_keys_unshared": plan["unshared"],
+        "team_keys_missing": plan["missing"],
+    }
 
 
 @router.put("/plans/{plan}")
