@@ -126,16 +126,25 @@ _SLICES_INLINE_CHARS = 12_000
 _MAX_TEXT_FALLBACK_BYTES = 256 * 1024
 # The Lead's plan is the single heaviest planning call (a full decomposition +
 # shared contract, up to a large token cap). Generous so a slow LOCAL model can
-# finish it — cloud models return in a few seconds regardless.
-_DECOMPOSE_TIMEOUT = 300  # seconds for the Lead LLM call
+# finish it — cloud models return in a few seconds regardless. A run's own
+# dispatch_timeout raises it: a slow composer on a long task can need more.
+_DECOMPOSE_TIMEOUT = 300  # seconds for the Lead LLM call (floor)
 
 
-def _lead_error_msg(e: Exception) -> str:
+def _decompose_timeout(dispatch_timeout: Any = None) -> float:
+    """The Lead's time limit: the run's dispatch_timeout when that's longer."""
+    try:
+        return max(float(_DECOMPOSE_TIMEOUT), float(dispatch_timeout or 0))
+    except (TypeError, ValueError):
+        return float(_DECOMPOSE_TIMEOUT)
+
+
+def _lead_error_msg(e: Exception, timeout: float = _DECOMPOSE_TIMEOUT) -> str:
     """A readable reason for a Lead-decompose failure. A bare TimeoutError
     stringifies to '' (the mysterious 'Vatra Lead failed:' with no detail), so
     name it and make it actionable."""
     if isinstance(e, TimeoutError):  # asyncio.TimeoutError is TimeoutError on 3.11+
-        return (f"the Lead timed out after {_DECOMPOSE_TIMEOUT}s — the planning model is too "
+        return (f"the Lead timed out after {int(timeout)}s — the planning model is too "
                 "slow for this. Try a faster Router tier, fewer Max agents, or a shorter task.")
     return str(e).strip() or type(e).__name__
 
@@ -644,7 +653,8 @@ def _resolve_creds(registry: dict, tiers: dict | None, api_key: str, tier: str) 
 async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dict,
                       force_ids: list[str] | None = None,
                       shared_datastore: bool = False, vfs_project: str = "",
-                      prior_knowledge: str = "", constraints_block: str = "") -> dict:
+                      prior_knowledge: str = "", constraints_block: str = "",
+                      timeout: float = _DECOMPOSE_TIMEOUT) -> dict:
     """Run the Lead and shape the result into a persistable Vatra route:
     {mode, domain, rationale, subtasks, selected}. `selected` mirrors Basna's
     shape so the read-tool and list UI render the owners. `force_ids` fixes the
@@ -672,7 +682,7 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
         _llm_decompose(intent, archetypes, reliability, creds, cap, force_ids=forced or None,
                        shared_datastore=shared_datastore, state_manifest=state_manifest,
                        prior_knowledge=prior_knowledge, constraints_block=constraints_block),
-        _DECOMPOSE_TIMEOUT)
+        timeout)
     subtasks = plan["subtasks"]
     # Guarantee every fixed-team archetype actually got a piece — if the Lead missed
     # one, add a task-derived subtask for it so "all selected are used" holds.
@@ -1129,18 +1139,19 @@ async def _ensure_route(db, user_id: str, sess: dict, sid: str, *, intent: str,
                   f"{existing.get('domain', '')}")
         return existing
     _progress(sid, "route", "Lead decomposing the task…")
+    _timeout = _decompose_timeout(cfg.get("dispatch_timeout"))
     try:
         # A plan-step child can fix the team via config.force_ids.
         _force = [str(a) for a in (cfg.get("force_ids") or []) if str(a).strip()]
         route = await _build_plan(db, user_id, intent, max_agents, creds,
                                   force_ids=_force or None, shared_datastore=shared_datastore,
-                                  vfs_project=vfs_project)
+                                  vfs_project=vfs_project, timeout=_timeout)
     except HTTPException:
         await db.update_basna_session(sid, user_id, status="error")
         raise
     except Exception as e:
         await db.update_basna_session(sid, user_id, status="error")
-        _msg = _lead_error_msg(e)
+        _msg = _lead_error_msg(e, _timeout)
         _progress(sid, "route", f"Lead decomposition failed: {_msg[:200]}", ok=False)
         raise HTTPException(502, f"Vatra Lead failed: {_msg}")
     await db.update_basna_session(
@@ -4739,7 +4750,8 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
                                   force_ids=body.archetype_ids or None,
                                   shared_datastore=body.shared_datastore,
                                   vfs_project=body.vfs_project, prior_knowledge=_prior,
-                                  constraints_block=_constraints_block)
+                                  constraints_block=_constraints_block,
+                                  timeout=_decompose_timeout(body.dispatch_timeout))
         # Fold read-only reference folders into shared_context so every worker checks
         # them before web-searching.
         _ref = _reference_directive(_ref_folders)
@@ -4752,7 +4764,8 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
         raise
     except Exception as e:
         await db.delete_basna_session(sid, user["id"])
-        raise HTTPException(502, f"Vatra Lead failed: {_lead_error_msg(e)}")
+        raise HTTPException(502, f"Vatra Lead failed: "
+                                 f"{_lead_error_msg(e, _decompose_timeout(body.dispatch_timeout))}")
     route["brief"] = brief  # R12: persisted with the plan; execute dispatches on it, UI edits it
     # Persist the project binding on the session config so the UI groups the run
     # and any later step can recover the bundle.
