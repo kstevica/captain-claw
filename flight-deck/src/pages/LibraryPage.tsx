@@ -544,7 +544,7 @@ export function LibraryPage() {
                         <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Provider</label>
                         <select
                           value={tc.provider}
-                          onChange={(e) => updateTier(t, { provider: e.target.value })}
+                          onChange={(e) => updateTier(t, e.target.value === 'antigravity-cli' ? { provider: e.target.value, api_key: '', base_url: '' } : { provider: e.target.value })}
                           className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
                         >
                           {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -617,7 +617,7 @@ export function LibraryPage() {
                     </label>
 
                     {/* Connection — credentials (usually server-provided) */}
-                    <div className="grid grid-cols-1 gap-3 border-t border-zinc-800/70 pt-3 sm:grid-cols-2">
+                    {tc.provider === 'antigravity-cli' ? <p className="text-xs text-zinc-400">Local Google sign-in through Antigravity. Text only; no tools, API keys or extra credits. Sampling and output limits are controlled by the CLI.</p> : <div className="grid grid-cols-1 gap-3 border-t border-zinc-800/70 pt-3 sm:grid-cols-2">
                       <div>
                         <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">
                           API Key <span className="font-normal normal-case text-zinc-600">— optional</span>
@@ -641,7 +641,7 @@ export function LibraryPage() {
                           placeholder="default endpoint"
                         />
                       </div>
-                    </div>
+                    </div>}
                   </div>
                 )
               })}

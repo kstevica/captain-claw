@@ -695,6 +695,9 @@ def _normalize_provider_name(provider: str) -> str:
         "gemini": "gemini",
         "google": "gemini",
         "googleai": "gemini",
+        "antigravity-cli": "antigravity-cli",
+        "antigravity": "antigravity-cli",
+        "google-subscription": "antigravity-cli",
         "grok": "xai",
         "xai": "xai",
         "ollama": "ollama",
@@ -4894,6 +4897,8 @@ def create_provider(
       only (no tool calling); requires ``claude login`` /
       ``claude setup-token``. See :class:`ClaudeCLIProvider`.
     - `gemini` / `google`
+    - `antigravity-cli` / `google-subscription` — local Google sign-in through
+      Antigravity CLI, text only, no API fallback or Google One credit overages.
     - `grok` / `xai`
     - `openrouter`
     - `litert` / `litert-lm` — local Gemma via Google's litert-lm runtime.
@@ -4904,6 +4909,13 @@ def create_provider(
       ``LITERT_BACKEND=cpu`` env var to force CPU; defaults to GPU.
     """
     normalized = _normalize_provider_name(provider)
+
+    if normalized == "antigravity-cli":
+        from captain_claw.llm.antigravity import AntigravityCLIProvider
+
+        if api_key or base_url or extra_headers:
+            raise LLMError("Antigravity CLI uses local Google sign-in; remove API key, base URL and headers.")
+        return AntigravityCLIProvider(model=model, tokens_per_minute=tokens_per_minute)
 
     if normalized == "browser":
         # Browser-tab inference worker via the Flight Deck broker; base_url
