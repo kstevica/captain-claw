@@ -17,7 +17,7 @@ interface ModelInfo {
 const KNOWN_PROVIDERS = [
   'ollama', 'anthropic', 'openai', 'gemini', 'groq', 'mistral',
   'deepseek', 'openrouter', 'xai', 'together', 'cerebras', 'sambanova', 'fireworks',
-  'litert',
+  'litert', 'antigravity-cli',
 ]
 
 function parseModelFromYaml(yaml: string): ModelInfo {
@@ -115,7 +115,9 @@ export function ModelSelector({ kind, identifier, onModelChange }: ModelSelector
         model: model.trim(),
       }
       // Only send api_key if it was changed (non-empty means user typed something)
-      if (showApiKey && apiKey.trim()) {
+      if (provider.trim() === 'antigravity-cli') {
+        body.api_key = ''
+      } else if (showApiKey && apiKey.trim()) {
         body.api_key = apiKey.trim()
       }
       await fdFetch<{ ok: boolean }>(`/agent-model/${kind}/${identifier}`, {
@@ -217,7 +219,7 @@ export function ModelSelector({ kind, identifier, onModelChange }: ModelSelector
       </div>
 
       {/* API Key toggle + input */}
-      <div>
+      {provider.trim() === 'antigravity-cli' ? <p className="text-xs text-zinc-400">Local Google sign-in. Text only; no API key or extra credits. See Connections.</p> : <div>
         <button
           onClick={() => setShowApiKey(!showApiKey)}
           className={`flex items-center gap-1 text-[11px] transition-colors ${
@@ -236,7 +238,7 @@ export function ModelSelector({ kind, identifier, onModelChange }: ModelSelector
             className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none font-mono"
           />
         )}
-      </div>
+      </div>}
 
       {/* Error */}
       {error && (

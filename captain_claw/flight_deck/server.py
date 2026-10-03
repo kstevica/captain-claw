@@ -1236,6 +1236,7 @@ from captain_claw.flight_deck.code_routes import router as code_router
 from captain_claw.flight_deck.queue_planner import router as queue_router
 from captain_claw.flight_deck.google_oauth_routes import router as google_oauth_router
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
+from captain_claw.flight_deck.antigravity_routes import router as antigravity_router
 from captain_claw.flight_deck.games_routes import router as games_router
 from captain_claw.flight_deck.vastai_routes import router as vastai_router
 from captain_claw.flight_deck.prompt_routes import router as prompt_router
@@ -1283,6 +1284,7 @@ app.include_router(code_router)
 app.include_router(queue_router)
 app.include_router(google_oauth_router)
 app.include_router(codex_oauth_router)
+app.include_router(antigravity_router)
 app.include_router(games_router)
 app.include_router(vastai_router)
 app.include_router(prompt_router)
@@ -3379,7 +3381,10 @@ async def update_agent_model(
             data["model"] = {}
         data["model"]["provider"] = body.provider
         data["model"]["model"] = body.model
-        if body.api_key is not None:
+        if body.provider.strip() in {"antigravity-cli", "antigravity", "google-subscription"}:
+            data["model"].pop("api_key", None)
+            data["model"].pop("base_url", None)
+        elif body.api_key is not None:
             data["model"]["api_key"] = body.api_key
         cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
         updated_count += 1

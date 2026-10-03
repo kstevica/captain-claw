@@ -2869,7 +2869,7 @@ class AgentOrchestrationMixin:
         self._set_runtime_status("streaming")
         async for chunk in self.provider.complete_streaming(
             messages=messages,
-            tools=tool_defs if tool_defs else None,
+            tools=tool_defs if tool_defs and getattr(self.provider, "supports_tools", True) else None,
         ):
             full_content += chunk
             yield chunk
