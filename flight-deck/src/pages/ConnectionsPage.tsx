@@ -5,10 +5,12 @@ import AntigravityConnection from '../components/connections/AntigravityConnecti
 import MCPConnection from '../components/connections/MCPConnection'
 import MCPAgentAccess from '../components/connections/MCPAgentAccess'
 import TypesenseConnection from '../components/connections/TypesenseConnection'
+import WhatsAppNudgeConnection from '../components/connections/WhatsAppNudgeConnection'
 
 // `kiosk` — the locked Simple layout's Connections dialog: a person's own
 // connections only (their Google account, the deck's MCP servers). The ChatGPT
-// subscription and the deep-memory server are deck setup, left to the full view.
+// subscription and the deep-memory server are deck setup, left to the full view;
+// WhatsApp nudges come from Autonomous Work, which the kiosk doesn't expose.
 export default function ConnectionsPage({ kiosk = false }: { kiosk?: boolean }) {
   return (
     <div className="h-full overflow-y-auto bg-zinc-950 text-zinc-200">
@@ -31,6 +33,7 @@ export default function ConnectionsPage({ kiosk = false }: { kiosk?: boolean }) 
           {!kiosk && <AntigravityConnection />}
           <MCPConnection />
           <MCPAgentAccess />
+          {!kiosk && <WhatsAppNudgeConnection />}
           {!kiosk && <TypesenseConnection />}
         </div>
       </div>
