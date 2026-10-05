@@ -27,6 +27,7 @@ import { TodayPage } from './pages/TodayPage'
 import { SkillsPage } from './pages/SkillsPage'
 import { GamesPage } from './pages/GamesPage'
 import ConnectionsPage from './pages/ConnectionsPage'
+import { ProfilePage } from './pages/ProfilePage'
 import { GPUCloudPage } from './pages/GPUCloudPage'
 import { PromptBuilderPage } from './pages/PromptBuilderPage'
 import { ProjectsPage } from './pages/ProjectsPage'
@@ -346,6 +347,7 @@ function AppContent() {
       {view === 'browser-llm' && <BrowserLLMPage />}
       {view === 'beings' && <BeingsPage />}
       {view === 'connections' && <ConnectionsPage />}
+      {view === 'profile' && <ProfilePage />}
       {view === 'gpu-cloud' && <GPUCloudPage />}
       {view === 'scheduler' && <SchedulerPage />}
       {view === 'projects' && <ProjectsPage />}
@@ -395,8 +397,8 @@ function AppContent() {
   // the stored layoutMode entirely. `locked` strips the escape hatches (full
   // view, the Spawner, agent config, start/stop) so shared-account users can
   // only chat, create an agent from a Library archetype, manage their Google /
-  // MCP connections, or sign out — nothing else is reachable. Placed before the
-  // mobile/tablet/full branches so it always wins.
+  // MCP connections, edit their profile, or sign out — nothing else is
+  // reachable. Placed before the mobile/tablet/full branches so it always wins.
   // Admins are exempt (selectKioskLocked) — they keep full access even here.
   if (kioskLocked) {
     return (

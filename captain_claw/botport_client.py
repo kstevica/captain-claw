@@ -792,6 +792,9 @@ class BotPortClient:
         agent.instructions = InstructionLoader()
         agent._initialized = True
         agent.max_iterations = 10  # Allow more iterations than a basic worker.
+        # The task comes from a remote BotPort instance, not this deck's
+        # owner: keep the owner profile (tenant_context.md) out of the prompt.
+        agent._tenant_hidden = True
 
         persona_name = agent_spec.get("persona_name", "") if agent_spec else ""
         resolved_model = getattr(provider, "model", "?")

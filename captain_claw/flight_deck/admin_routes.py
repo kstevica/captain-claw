@@ -153,6 +153,14 @@ async def update_user(
         return {"ok": True, "message": "No changes"}
 
     await db.update_user(user_id, **updates)
+    if "display_name" in updates and updates["display_name"] != (user.get("display_name") or ""):
+        # Their agents' owner profile names them: rewrite it.
+        try:
+            from captain_claw.flight_deck import tenant_profile
+
+            await tenant_profile.refresh_agents(db, user_id)
+        except Exception:
+            pass
     return {"ok": True, "user_id": user_id}
 
 
@@ -165,6 +173,13 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
     deleted = await db.delete_user(user_id)
     if not deleted:
         raise HTTPException(404, "User not found")
+    # Their profile went with them: their agents' copies of it go too.
+    try:
+        from captain_claw.flight_deck import tenant_profile
+
+        await tenant_profile.refresh_agents(db, user_id)
+    except Exception:
+        pass
     return {"ok": True}
 
 

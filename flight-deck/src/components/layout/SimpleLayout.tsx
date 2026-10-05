@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Radio,
@@ -21,6 +21,7 @@ import {
   Database,
   Settings,
   Plug,
+  IdCard,
   X,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
@@ -39,6 +40,7 @@ import { AgentDatastorePanel } from '../agents/AgentDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
 import { ArchetypeSpawnDialog } from './ArchetypeSpawnDialog'
 import ConnectionsPage from '../../pages/ConnectionsPage'
+import { ProfilePage } from '../../pages/ProfilePage'
 import { NotificationBell } from '../common/NotificationCenter'
 import { APP_VERSION, BUILD_DATE } from '../../version'
 
@@ -140,6 +142,8 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
   // Kiosk Connections dialog — the full layout's Connections page, which the
   // lock otherwise puts out of reach.
   const [connectionsOpen, setConnectionsOpen] = useState(false)
+  // Kiosk Profile dialog — the owner profile every agent of theirs receives.
+  const [profileOpen, setProfileOpen] = useState(false)
 
   // Keep the agent list fresh — the Desktop page normally does this polling,
   // and it isn't mounted here. Same auth guard as there: with auth on and no
@@ -347,6 +351,7 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
         onSpawn={goSpawn}
         onOptions={setOptionsAgent}
         onConnections={locked ? () => setConnectionsOpen(true) : undefined}
+        onProfile={locked ? () => setProfileOpen(true) : undefined}
         locked={locked}
       />
 
@@ -375,6 +380,7 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
       )}
 
       {locked && connectionsOpen && <KioskConnectionsDialog onClose={() => setConnectionsOpen(false)} />}
+      {locked && profileOpen && <KioskProfileDialog onClose={() => setProfileOpen(false)} />}
 
       {!locked && optionsAgent && createPortal(
         <AgentConfigEditor
@@ -396,6 +402,33 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
 // account and the MCP servers without leaving the chat surface.
 
 function KioskConnectionsDialog({ onClose }: { onClose: () => void }) {
+  return (
+    <KioskDialog label="Connections" onClose={onClose}>
+      <ConnectionsPage kiosk />
+    </KioskDialog>
+  )
+}
+
+// ── Kiosk: the Profile page in a dialog ──────────────────────────────
+//
+// About me / my company / my standing preferences — what every agent working
+// for this user receives. Long-form text, so closing asks before it drops an
+// unsaved edit.
+
+function KioskProfileDialog({ onClose }: { onClose: () => void }) {
+  const dirty = useRef(false)
+  const close = useCallback(() => {
+    if (dirty.current && !window.confirm('Discard your unsaved profile changes?')) return
+    onClose()
+  }, [onClose])
+  return (
+    <KioskDialog label="Profile" onClose={close}>
+      <ProfilePage kiosk onDirtyChange={(d) => { dirty.current = d }} />
+    </KioskDialog>
+  )
+}
+
+function KioskDialog({ label, onClose, children }: { label: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -406,7 +439,7 @@ function KioskConnectionsDialog({ onClose }: { onClose: () => void }) {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       <div
         role="dialog"
-        aria-label="Connections"
+        aria-label={label}
         className="relative flex h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
@@ -418,7 +451,7 @@ function KioskConnectionsDialog({ onClose }: { onClose: () => void }) {
           <X className="h-4 w-4" />
         </button>
         <div className="min-h-0 flex-1">
-          <ConnectionsPage kiosk />
+          {children}
         </div>
       </div>
     </div>,
@@ -429,7 +462,7 @@ function KioskConnectionsDialog({ onClose }: { onClose: () => void }) {
 // ── Left: agents ─────────────────────────────────────────────────────
 
 function AgentsColumn({
-  agents, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onRefresh, onSpawn, onOptions, onConnections, locked = false,
+  agents, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onRefresh, onSpawn, onOptions, onConnections, onProfile, locked = false,
 }: {
   agents: SimpleAgent[]
   activeAgentId: string | null
@@ -445,6 +478,8 @@ function AgentsColumn({
   onOptions: (a: SimpleAgent) => void
   /** Kiosk only: open the Connections dialog. */
   onConnections?: () => void
+  /** Kiosk only: open the Profile dialog. */
+  onProfile?: () => void
   locked?: boolean
 }) {
   const open = useUIStore((s) => s.simpleLeftOpen)
@@ -534,6 +569,11 @@ function AgentsColumn({
           {onConnections && (
             <button onClick={onConnections} className={iconBtn} title="Connections — Google and MCP">
               <Plug className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {onProfile && (
+            <button onClick={onProfile} className={iconBtn} title="Profile — about you, your company, your preferences">
+              <IdCard className="h-3.5 w-3.5" />
             </button>
           )}
           {/* Sign-out stays in the kiosk lock too — it's how a shared kiosk
@@ -717,6 +757,11 @@ function AgentsColumn({
           {onConnections && (
             <button onClick={onConnections} className={iconBtn} title="Connections — Google and MCP">
               <Plug className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {onProfile && (
+            <button onClick={onProfile} className={iconBtn} title="Profile — about you, your company, your preferences">
+              <IdCard className="h-3.5 w-3.5" />
             </button>
           )}
         </div>

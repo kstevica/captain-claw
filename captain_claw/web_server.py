@@ -397,6 +397,9 @@ class WebServer:
                 return _send_msg
 
             agent = await self._build_scoped_agent(session, _make_send(session_id))
+            # Public visitors are not the deck owner: keep the owner profile
+            # (tenant_context.md) out of this agent's system prompt.
+            agent._public_scoped = True
             self._public_agents[session_id] = agent
             log.info("Created public agent", session_id=session_id, session_name=session.name)
             return agent

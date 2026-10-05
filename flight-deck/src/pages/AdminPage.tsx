@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { UserAgentsDialog } from '../components/agents/UserAgentsDialog'
+import { DeckProfileDefaults } from '../components/profile/DeckProfileDefaults'
 
 // ── Types ──
 
@@ -877,6 +878,11 @@ export function AdminPage() {
             </div>
           </div>
         )}
+
+        {/* Owner profile defaults every user's agents receive. Not behind
+            `loading`: it loads on its own, and a Refresh must not unmount it
+            and drop a long unsaved draft. */}
+        {tab === 'settings' && <DeckProfileDefaults />}
 
         {/* Plans tab */}
         {!loading && tab === 'plans' && (
