@@ -12,9 +12,13 @@ Nothing vertical-specific may be hardcoded in the shell.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+
+# Keys row_manifest stamps on from the registry row — identity, not content.
+_REGISTRY_STAMPS = ("slug", "pack_status", "pack_version")
 
 
 def packs_root() -> Path:
@@ -71,3 +75,24 @@ def row_manifest(row: dict) -> dict:
     manifest["pack_status"] = row.get("status", "")
     manifest["pack_version"] = row.get("version", 0)
     return manifest
+
+
+def _canon(v):
+    """85.0 → 85: the Studio's JSON round-trip through the browser drops the
+    '.0', and an unchanged save must not read as an edit."""
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, dict):
+        return {k: _canon(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_canon(x) for x in v]
+    return v
+
+
+def manifest_hash(manifest: dict) -> str:
+    """A content hash of a manifest, ignoring the registry stamps — what the
+    ship-gate binds an eval verdict to, so only a verdict for the manifest as it
+    is NOW can publish it."""
+    body = {k: _canon(v) for k, v in (manifest or {}).items()
+            if k not in _REGISTRY_STAMPS}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()

@@ -103,7 +103,15 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
         _need_auth(authorization)
         if sid not in log["sessions"]:
             raise HTTPException(404, "session not found")
-        new_sid = "sess-bbbb2222"
+        log["continue_calls"] = log.get("continue_calls", 0) + 1
+        if log.get("fail_continue"):
+            raise HTTPException(502, "engine unavailable")
+        parent = log["sessions"][sid]
+        # Like FD: a run that ended badly has no assembled report to build on.
+        if parent["status"] in ("error", "cancelled", "rejected") and not parent.get("truth"):
+            raise HTTPException(400, "This run has no assembled report to build on yet.")
+        n = log["continue_calls"]
+        new_sid = "sess-bbbb2222" if n == 1 else f"sess-cont{n:04d}"
         log["sessions"][new_sid] = {
             "id": new_sid, "status": "running", "intent": body["instruction"],
             "title": "round 2", "truth": "", "route": {}, "analysis": {},
@@ -144,10 +152,11 @@ def make_fake_fd() -> tuple[FastAPI, dict]:
             sess["status"] = "error"
             return sess
         # Poll-driven progression so headless (factory) runs can complete:
-        # planning → awaiting_plan on first read; running → done after 2 reads.
+        # planning → awaiting_plan on first read; running → done after 2 reads
+        # (log["hold_runs"] parks running sessions until a test releases them).
         if sess["status"] == "planning":
             sess["status"] = "awaiting_plan"
-        elif sess["status"] == "running":
+        elif sess["status"] == "running" and not log.get("hold_runs"):
             sess["polls"] = sess.get("polls", 0) + 1
             if sess["polls"] >= 2:
                 sess["status"] = "done"
@@ -530,10 +539,16 @@ async def test_standing_brief_lifecycle(bff, monkeypatch):
     brief = (await client.get(f"/api/streams/{stream_id}/brief",
                               headers=h)).json()["brief"]
     assert brief["last_session_id"] == rounds[-1]["session_id"]
-    assert brief["next_run_at"] > brief["last_run_at"]  # pushed a cadence ahead
+    assert brief["next_run_at"] == ""  # parked until this round ends
 
-    # Not due anymore.
+    # Nothing stacks on the running round; once it ends, the next run is a
+    # cadence ahead.
     assert await fire_due_briefs(app.state) == 0
+    log["sessions"][rounds[-1]["session_id"]]["status"] = "done"
+    assert await fire_due_briefs(app.state) == 0
+    brief = (await client.get(f"/api/streams/{stream_id}/brief",
+                              headers=h)).json()["brief"]
+    assert brief["next_run_at"] > brief["last_run_at"]  # pushed a cadence ahead
 
     # Inbox lists the scheduled round with its stream title.
     inbox = (await client.get("/api/inbox", headers=h)).json()["rounds"]
@@ -550,6 +565,146 @@ async def test_standing_brief_lifecycle(bff, monkeypatch):
                                 headers=h)).status_code == 200
     assert (await client.get(f"/api/streams/{stream_id}/brief",
                              headers=h)).json()["brief"] is None
+
+
+def _shift_clock(monkeypatch, **delta):
+    """Run the brief scheduler `delta` in the future without sleeping; returns
+    that shifted 'now'."""
+    import lupa_api.server as server
+    from datetime import datetime as _dt, timedelta, timezone
+    offset = timedelta(**delta)
+
+    class _Shifted(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return _dt.now(tz) + offset
+
+    monkeypatch.setattr(server, "datetime", _Shifted)
+    return _dt.now(timezone.utc) + offset
+
+
+async def _stream_with_done_round(client, log, h) -> tuple[str, str]:
+    """A stream whose round 1 finished cleanly (a report to continue from)."""
+    stream_id = (await client.post("/api/streams", json={"title": "watch"},
+                                   headers=h)).json()["id"]
+    sid = (await client.post(f"/api/streams/{stream_id}/commissions",
+                             json={"brief": "baseline"}, headers=h)).json()["session_id"]
+    await client.post(f"/api/commissions/{sid}/approve", json={}, headers=h)
+    log["sessions"][sid].update(status="done", truth="# Baseline")
+    return stream_id, sid
+
+
+async def _brief(client, stream_id, h) -> dict:
+    return (await client.get(f"/api/streams/{stream_id}/brief", headers=h)).json()["brief"]
+
+
+async def _tip(client, stream_id, h) -> str:
+    rounds = (await client.get(f"/api/streams/{stream_id}", headers=h)).json()["rounds"]
+    return rounds[-1]["session_id"]
+
+
+async def test_brief_next_run_counts_from_completion(bff, monkeypatch):
+    """A round that outlasts its cadence must not trigger a back-to-back run:
+    nothing fires while it runs, and once it finishes the next round is due a
+    full cadence after COMPLETION — never at once, never in the past."""
+    from datetime import datetime, timedelta
+    from lupa_api.server import fire_due_briefs
+    client, log, app = bff
+    h = _auth()
+    stream_id, _ = await _stream_with_done_round(client, log, h)
+    await client.put(f"/api/streams/{stream_id}/brief",
+                     json={"instruction": "watch", "cadence_hours": 1}, headers=h)
+    log["hold_runs"] = True  # the brief's round runs long
+    assert await fire_due_briefs(app.state) == 1
+    brief_sid = await _tip(client, stream_id, h)
+
+    # Twice the cadence later it is still running → nothing stacks on top.
+    _shift_clock(monkeypatch, hours=2)
+    assert await fire_due_briefs(app.state) == 0
+    assert log["continue_calls"] == 1
+
+    # It finishes → no immediate back-to-back round; next = completion + cadence.
+    log["sessions"][brief_sid].update(status="done", truth="# Delta")
+    done_at = _shift_clock(monkeypatch, hours=2, minutes=5)
+    assert await fire_due_briefs(app.state) == 0
+    brief = await _brief(client, stream_id, h)
+    assert datetime.fromisoformat(brief["next_run_at"]) >= done_at + timedelta(minutes=59)
+    assert brief["last_error"] == ""
+
+    _shift_clock(monkeypatch, hours=3)  # still inside the cadence after completion
+    assert await fire_due_briefs(app.state) == 0
+    _shift_clock(monkeypatch, hours=3, minutes=6)
+    assert await fire_due_briefs(app.state) == 1
+    assert log["continued"]["parent"] == brief_sid
+    assert log["continue_calls"] == 2
+
+
+async def test_failed_brief_round_is_recorded_not_wedged(bff, monkeypatch):
+    """A failed round is recorded and the next attempt is scheduled a cadence
+    later, continuing from the last round that finished cleanly — the brief
+    never wedges on a failed tip. A refused FD continue is recorded and retried
+    a cadence later too, not hammered every tick."""
+    from datetime import datetime, timezone
+    from lupa_api.server import fire_due_briefs
+    client, log, app = bff
+    h = _auth()
+    stream_id, base_sid = await _stream_with_done_round(client, log, h)
+    await client.put(f"/api/streams/{stream_id}/brief",
+                     json={"instruction": "watch", "cadence_hours": 1}, headers=h)
+    log["hold_runs"] = True
+    assert await fire_due_briefs(app.state) == 1
+    failed_sid = await _tip(client, stream_id, h)
+
+    # The brief's round fails → recorded, next attempt scheduled in the future.
+    log["sessions"][failed_sid]["status"] = "error"
+    assert await fire_due_briefs(app.state) == 0
+    brief = await _brief(client, stream_id, h)
+    assert "error" in brief["last_error"]
+    assert datetime.fromisoformat(brief["next_run_at"]) > datetime.now(timezone.utc)
+
+    # A cadence later it continues from the last GOOD round (the failed one
+    # has no report to build on).
+    _shift_clock(monkeypatch, hours=1, minutes=1)
+    assert await fire_due_briefs(app.state) == 1
+    assert log["continued"]["parent"] == base_sid
+
+    # That round succeeds → the failure note clears.
+    retry_sid = await _tip(client, stream_id, h)
+    log["sessions"][retry_sid].update(status="done", truth="# Delta")
+    assert await fire_due_briefs(app.state) == 0
+    assert (await _brief(client, stream_id, h))["last_error"] == ""
+
+    # FD refuses the continue → recorded and rescheduled, not retried every tick.
+    log["fail_continue"] = True
+    now = _shift_clock(monkeypatch, hours=2, minutes=10)
+    calls = log["continue_calls"]
+    assert await fire_due_briefs(app.state) == 0
+    assert await fire_due_briefs(app.state) == 0
+    assert log["continue_calls"] == calls + 1
+    brief = await _brief(client, stream_id, h)
+    assert "502" in brief["last_error"]
+    assert datetime.fromisoformat(brief["next_run_at"]) > now
+
+
+async def test_brief_without_a_completed_round_does_not_wedge(bff):
+    """A stream whose only round failed has nothing to continue from: the
+    brief records why and tries again a cadence later instead of spinning."""
+    from datetime import datetime, timezone
+    from lupa_api.server import fire_due_briefs
+    client, log, app = bff
+    h = _auth()
+    stream_id = (await client.post("/api/streams", json={"title": "w"},
+                                   headers=h)).json()["id"]
+    sid = (await client.post(f"/api/streams/{stream_id}/commissions",
+                             json={"brief": "baseline"}, headers=h)).json()["session_id"]
+    log["sessions"][sid]["status"] = "error"
+    await client.put(f"/api/streams/{stream_id}/brief",
+                     json={"instruction": "watch", "cadence_hours": 1}, headers=h)
+    assert await fire_due_briefs(app.state) == 0
+    brief = await _brief(client, stream_id, h)
+    assert "no completed round" in brief["last_error"]
+    assert datetime.fromisoformat(brief["next_run_at"]) > datetime.now(timezone.utc)
+    assert log.get("continue_calls", 0) == 0
 
 
 async def test_house_style_forge_save_and_pinned_cast(bff):
@@ -761,6 +916,156 @@ async def test_factory_generate_evaluate_publish(bff):
     assert [s["id"] for s in scoped] == [stream_id]
     assert (await client.get("/api/streams", params={"pack": "research-desk"},
                              headers=h)).json()["streams"] == []
+
+
+async def _generated_draft(client, admin: dict, slug: str) -> dict:
+    await client.post("/api/packs", json={"slug": slug, "name": slug}, headers=admin)
+    await client.post(f"/api/packs/{slug}/generate",
+                      json={"instructions": "a desk"}, headers=admin)
+    return await _wait_for(client, f"/api/packs/{slug}", admin,
+                           ["generation", "status"], "done")
+
+
+async def _evaluate_green(client, admin: dict, slug: str) -> dict:
+    assert (await client.post(f"/api/packs/{slug}/evaluate",
+                              headers=admin)).status_code == 200
+    return await _wait_for(client, f"/api/packs/{slug}", admin,
+                           ["eval", "verdict"], "green")
+
+
+async def test_ship_gate_is_bound_to_the_evaluated_manifest(bff):
+    """Publishing needs a green verdict for the manifest AS IT IS NOW: a change
+    after the eval — or one made while it ran — re-locks the gate until it is
+    re-evaluated; a save that changes nothing doesn't."""
+    client, log, app = bff
+    admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+
+    # A green verdict that doesn't say which manifest it judged (a legacy row)
+    # vouches for nothing.
+    await client.post("/api/packs", json={"slug": "legacy-desk", "name": "L"},
+                      headers=admin)
+    await app.state.db.update_pack(
+        "legacy-desk", eval_state={"status": "done", "verdict": "green"})
+    assert (await client.post("/api/packs/legacy-desk/publish",
+                              headers=admin)).status_code == 409
+
+    slug, url = "gate-desk", "/api/packs/gate-desk"
+    await _generated_draft(client, admin, slug)
+    body = await _evaluate_green(client, admin, slug)
+
+    # A no-op save (Studio round-trip, registry stamps included) keeps the gate open.
+    assert (await client.put(url, json={"manifest": body["pack"]},
+                             headers=admin)).status_code == 200
+    assert (await client.get(url, headers=admin)).json()["eval"]["verdict"] == "green"
+
+    # A real change clears the verdict → publish refused.
+    edited = {**body["pack"], "tagline": "edited after the eval"}
+    assert (await client.put(url, json={"manifest": edited},
+                             headers=admin)).status_code == 200
+    assert (await client.get(url, headers=admin)).json()["eval"].get("verdict") != "green"
+    assert (await client.post(f"{url}/publish", headers=admin)).status_code == 409
+
+    # An edit made WHILE the golden run is in flight: the run judged the old
+    # manifest, so its green verdict can't publish the new one.
+    log["hold_runs"] = True
+    assert (await client.post(f"{url}/evaluate", headers=admin)).status_code == 200
+    await _wait_for(client, url, admin, ["eval", "session_id"], "sess-aaaa1111")
+    assert (await client.put(url, json={"manifest": {**edited, "tagline": "mid-run"}},
+                             headers=admin)).status_code == 200
+    assert (await client.get(url, headers=admin)).json()["eval"]["status"] == "running"
+    log["hold_runs"] = False
+    await _wait_for(client, url, admin, ["eval", "verdict"], "green")
+    r = await client.post(f"{url}/publish", headers=admin)
+    assert r.status_code == 409
+    assert "changed" in r.json()["detail"]
+
+    # Re-evaluating what is there now opens the gate.
+    await _evaluate_green(client, admin, slug)
+    assert (await client.post(f"{url}/publish", headers=admin)).status_code == 200
+
+
+async def test_editing_a_published_desk_takes_it_back_through_the_gate(bff):
+    """An edit to a LIVE desk never reaches users unevaluated: the desk drops
+    back to draft (hidden; its streams fall back to the default desk) until the
+    change is re-evaluated green and published again as a new version."""
+    client, log, _ = bff
+    admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+    u2 = _auth("u2")
+    slug, url = "live-desk", "/api/packs/live-desk"
+    await _generated_draft(client, admin, slug)
+    await _evaluate_green(client, admin, slug)
+    assert (await client.post(f"{url}/publish", headers=admin)).status_code == 200
+    stream_id = (await client.post("/api/streams", json={"title": "t", "pack": slug},
+                                   headers=u2)).json()["id"]
+
+    async def listed() -> dict | None:
+        packs = (await client.get("/api/packs", headers=u2)).json()["packs"]
+        return next((p for p in packs if p["slug"] == slug), None)
+
+    # A save that changes nothing leaves the live desk alone.
+    live = (await client.get(url, headers=admin)).json()["pack"]
+    await client.put(url, json={"manifest": live}, headers=admin)
+    assert (await listed())["status"] == "published"
+
+    # A real change takes it offline until it passes the gate again.
+    edited = {**live, "name": "Live Desk v2", "quality": {"profile": "balanced"}}
+    assert (await client.put(url, json={"manifest": edited},
+                             headers=admin)).status_code == 200
+    assert await listed() is None
+    assert (await client.get(url, headers=u2)).status_code == 404
+    detail = (await client.get(url, headers=admin)).json()
+    assert detail["summary"]["status"] == "draft"
+    assert detail["eval"].get("verdict") != "green"
+    # The user's existing stream doesn't run the unevaluated settings.
+    sid = (await client.post(f"/api/streams/{stream_id}/commissions",
+                             json={"brief": "x"}, headers=u2)).json()["session_id"]
+    assert log["start_body"]["quality"] == {"profile": "thorough"}
+    assert (await client.post(f"{url}/publish", headers=admin)).status_code == 409
+
+    # Re-evaluated green → live again as v2, carrying the change.
+    await _evaluate_green(client, admin, slug)
+    assert (await client.post(f"{url}/publish", headers=admin)).status_code == 200
+    desk = await listed()
+    assert desk["version"] == 2 and desk["name"] == "Live Desk v2"
+    await client.post(f"/api/commissions/{sid}/approve", json={}, headers=u2)
+    assert log["approve_body"]["quality"] == {"profile": "balanced"}
+
+
+async def test_edited_default_desk_is_not_served_until_republished(bff):
+    """The default desk (/api/pack) comes from the registry only while it is
+    published — after an unevaluated edit, a restart serves the repo copy."""
+    client, _, _ = bff
+    admin = {"Authorization": f"Bearer {make_token('boss', 'admin')}"}
+    live = (await client.get("/api/packs/research-desk", headers=admin)).json()["pack"]
+    assert (await client.put("/api/packs/research-desk",
+                             json={"manifest": {**live, "name": "Unevaluated"}},
+                             headers=admin)).status_code == 200
+    # The default desk stays open: the SPA at "/" sends its slug explicitly.
+    assert (await client.post("/api/streams",
+                              json={"title": "t", "pack": "research-desk"},
+                              headers=_auth())).status_code == 200
+
+    fake_fd, _ = make_fake_fd()
+    app2 = create_app(fd_transport=httpx.ASGITransport(app=fake_fd))
+    async with app2.router.lifespan_context(app2):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app2),
+                                     base_url="http://lupa.test") as c2:
+            assert (await c2.get("/api/pack")).json()["name"] == live["name"]
+            assert (await c2.post("/api/streams",
+                                  json={"title": "t", "pack": "research-desk"},
+                                  headers=_auth())).status_code == 200
+
+
+def test_manifest_hash_survives_the_browser_round_trip():
+    """The Studio sends the manifest back through JS, which turns 85.0 into 85 —
+    an unchanged save must not read as an edit (it would unpublish the desk)."""
+    from lupa_api.packs import manifest_hash
+    stored = {"roi": {"analyst_hourly_usd": 85.0}, "briefs": {"presets": [{"hours": 24.0}]},
+              "slug": "x", "pack_status": "published", "pack_version": 3}
+    assert manifest_hash(stored) == manifest_hash(
+        json.loads(json.dumps({"roi": {"analyst_hourly_usd": 85},
+                               "briefs": {"presets": [{"hours": 24}]}})))
+    assert manifest_hash(stored) != manifest_hash({"roi": {"analyst_hourly_usd": 85.5}})
 
 
 async def test_factory_streams_eval_progress(bff):

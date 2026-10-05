@@ -14,6 +14,7 @@ the real Calendar/Gmail adapters fetch FD-side once Google is connected.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -129,6 +130,14 @@ def _extract_rows(content: str, items_path: str) -> list[dict[str, Any]] | None:
     return None
 
 
+def _dedup_key(name: str, value: Any) -> str:
+    """Content-derived dedup key for an item with no id. A stable digest, not
+    built-in ``hash()`` — that is salted per process (PYTHONHASHSEED), so its keys
+    changed on every FD restart and already-seen items re-fired as new events."""
+    raw = value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
+    return f"{name}:{hashlib.sha256(raw.encode('utf-8', 'surrogatepass')).hexdigest()[:32]}"
+
+
 def _row_summary(label: str, row: dict[str, Any], template: str) -> str:
     if template:
         try:
@@ -187,7 +196,7 @@ async def _poll_custom_sources(user_id: str, now: float, store: Any) -> int:
                     user_id, source=name, event_type="custom",
                     summary=f"{label}: {content}"[:300], body=content[:8000],
                     metadata={"_fetch_tool": fetch_tool},
-                    dedup_key=f"{name}:{hash(content)}",
+                    dedup_key=_dedup_key(name, content),
                 ) is not None:
                     ingested += 1
                 continue
@@ -198,7 +207,9 @@ async def _poll_custom_sources(user_id: str, now: float, store: Any) -> int:
                 if store.add_event(
                     user_id, source=name, event_type="custom",
                     summary=_row_summary(label, row, template), body="",
-                    metadata=md, dedup_key=(f"{name}:{rid}" if rid else ""),
+                    # No id (e.g. a tool returning one JSON object) → key on the
+                    # row's content, else every poll re-ingests it.
+                    metadata=md, dedup_key=(f"{name}:{rid}" if rid else _dedup_key(name, row)),
                 ) is not None:
                     ingested += 1
         except Exception as exc:

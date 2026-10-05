@@ -418,19 +418,38 @@ class AutonomyStore:
 
     def recent_titles(self, user_id: str, iso_cutoff: str) -> set[str]:
         """Lowercased titles of any action created since ``iso_cutoff`` — used to
-        stop the Arbiter re-proposing something just rejected (or recently done)."""
+        stop the Arbiter re-proposing something just rejected (or recently done).
+        A proposal that EXPIRED since the cutoff counts too, however old it is, so
+        an ignored proposal isn't re-proposed the moment it expires."""
         uid = _norm_user(user_id)
         with self._lock:
             rows = self._c().execute(
                 "SELECT title FROM autonomous_actions"
-                " WHERE user_id = ? AND created_at >= ?",
-                (uid, iso_cutoff),
+                " WHERE user_id = ? AND (created_at >= ?"
+                " OR (status = 'expired' AND completed_at >= ?))",
+                (uid, iso_cutoff, iso_cutoff),
             ).fetchall()
         return {str(r["title"]).strip().lower() for r in rows if r["title"]}
 
+    def expire_stale_proposals(self, user_id: str, iso_cutoff: str) -> int:
+        """Move this user's proposals still ``awaiting_approval`` and created
+        before ``iso_cutoff`` to ``expired``. Returns how many expired."""
+        uid = _norm_user(user_id)
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute(
+                "UPDATE autonomous_actions SET status = 'expired', completed_at = ?,"
+                " outcome_note = 'expired: no approval in time'"
+                " WHERE user_id = ? AND status = 'awaiting_approval' AND created_at < ?",
+                (_utcnow_iso(), uid, iso_cutoff),
+            )
+            conn.commit()
+        return int(cur.rowcount or 0)
+
     def open_actions(self, user_id: str) -> list[dict[str, Any]]:
-        """In-flight actions — candidate/awaiting/queued/dispatched — used for the
-        concurrency cap and for dedup against what's already proposed."""
+        """Unresolved actions — candidate/awaiting/queued/dispatched — used for
+        the in-flight and pending-approval caps and for dedup against what's
+        already proposed."""
         uid = _norm_user(user_id)
         with self._lock:
             rows = self._c().execute(

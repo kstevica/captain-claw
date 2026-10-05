@@ -308,6 +308,52 @@ def _reference_directive(folders: list[str]) -> str:
     )
 
 
+async def _plan_seed(db, user_id: str, *, project_id: str = "",
+                     reference_folders: list[str] | None = None,
+                     knowledge_session_ids: list[str] | None = None,
+                     include_board: bool = False) -> dict:
+    """The plan-time seeds a fresh Lead decomposition folds in — shared by /route and
+    _ensure_route (the /start, continuation and resume paths) so they plan alike:
+    ``theme`` (the project bundle's description + instructions, for the Lead's task),
+    ``reference_folders`` (caller extras + the project folder + the knowledge runs'
+    folders, all read-only) and ``prior_knowledge`` (the knowledge runs' preamble)."""
+    from captain_claw.flight_deck.basna_routes import (
+        _project_context,
+        build_prior_knowledge,
+        knowledge_run_folders,
+    )
+    theme, folder = "", ""
+    if (project_id or "").strip():
+        theme, folder = await _project_context(db, user_id, project_id.strip())
+    refs = list(reference_folders or [])
+    if folder:
+        refs = list(dict.fromkeys(refs + [folder]))
+    prior = ""
+    if knowledge_session_ids:
+        prior = await build_prior_knowledge(db, user_id, knowledge_session_ids,
+                                            include_board=include_board)
+        # Prior runs' folders are read-only reference by default.
+        refs = list(dict.fromkeys(
+            refs + await knowledge_run_folders(db, user_id, knowledge_session_ids)))
+    return {"theme": theme, "reference_folders": refs, "prior_knowledge": prior}
+
+
+def _seed_kwargs(body) -> dict:
+    """The caller's seed inputs riding on an ExecuteRequest (/start sets them; every
+    other entry leaves them empty) as ``_ensure_route`` kwargs."""
+    return {"reference_folders": list(getattr(body, "reference_folders", None) or []),
+            "knowledge_session_ids": list(getattr(body, "knowledge_session_ids", None) or []),
+            "knowledge_include_board": bool(getattr(body, "knowledge_include_board", False))}
+
+
+def _fold_references(route: dict, folders: list[str]) -> None:
+    """Fold read-only reference folders into the plan's shared_context so every
+    worker checks them before web-searching."""
+    ref = _reference_directive(folders)
+    if ref:
+        route["shared_context"] = (route.get("shared_context", "") + ref).strip()
+
+
 def _group_instr_block(st: dict, arch: dict, group_instructions: dict) -> str:
     """Per-group extra instructions the user attached in the team-plan editor,
     injected into every owner that runs in that group. '' if none for its group."""
@@ -1124,11 +1170,17 @@ REPORTER_SMOOTH_DIRECTIVE = (
 
 async def _ensure_route(db, user_id: str, sess: dict, sid: str, *, intent: str,
                         max_agents: int, creds: dict, cfg: dict,
-                        shared_datastore: bool, vfs_project: str) -> dict:
+                        shared_datastore: bool, vfs_project: str,
+                        reference_folders: list[str] | None = None,
+                        knowledge_session_ids: list[str] | None = None,
+                        knowledge_include_board: bool = False) -> dict:
     """Reuse a route prepared by the UI's /route step if present; otherwise decompose
     now and persist it. Shared by the Group 0 pre-phase and ``execute_vatra`` so both
-    paths decompose identically. Emits the same route progress lines. Raises
-    HTTPException (after marking the session errored) if the Lead fails."""
+    paths decompose identically. A fresh decomposition folds the same seeds /route
+    does (``_plan_seed``): config.force_ids, the session's project bundle
+    (config.project_id) and the caller's reference folders / knowledge runs. Emits the
+    same route progress lines. Raises HTTPException (after marking the session
+    errored) if the Lead fails."""
     try:
         existing = json.loads(sess.get("route") or "{}")
     except json.JSONDecodeError:
@@ -1141,11 +1193,24 @@ async def _ensure_route(db, user_id: str, sess: dict, sid: str, *, intent: str,
     _progress(sid, "route", "Lead decomposing the task…")
     _timeout = _decompose_timeout(cfg.get("dispatch_timeout"))
     try:
-        # A plan-step child can fix the team via config.force_ids.
+        # A plan-step child, /start's pinned cast or a same-cast continuation fixes
+        # the team via config.force_ids.
         _force = [str(a) for a in (cfg.get("force_ids") or []) if str(a).strip()]
-        route = await _build_plan(db, user_id, intent, max_agents, creds,
+        seed = await _plan_seed(db, user_id, project_id=str(cfg.get("project_id") or ""),
+                                reference_folders=reference_folders,
+                                knowledge_session_ids=knowledge_session_ids,
+                                include_board=knowledge_include_board)
+        # Round 1 plans against the project theme, as /route does. A continuation
+        # round keeps its own framing (execute_vatra folds the theme into
+        # shared_context) but still gets the project folder as a reference below.
+        _plan_intent = intent
+        if seed["theme"] and not cfg.get("parent_session_id"):
+            _plan_intent = f"{seed['theme']}\n\n---\n\n{intent}"
+        route = await _build_plan(db, user_id, _plan_intent, max_agents, creds,
                                   force_ids=_force or None, shared_datastore=shared_datastore,
-                                  vfs_project=vfs_project, timeout=_timeout)
+                                  vfs_project=vfs_project,
+                                  prior_knowledge=seed["prior_knowledge"], timeout=_timeout)
+        _fold_references(route, seed["reference_folders"])
     except HTTPException:
         await db.update_basna_session(sid, user_id, status="error")
         raise
@@ -1319,7 +1384,8 @@ async def plan_vatra_group0(body: ExecuteRequest, request: Request, user: dict, 
 
     route = await _ensure_route(db, user["id"], sess, sid, intent=intent,
                                 max_agents=max_agents, creds=_creds(_role_tier("lead", "reason")), cfg=cfg,
-                                shared_datastore=_shared_ds, vfs_project=_vfs_project(sid))
+                                shared_datastore=_shared_ds, vfs_project=_vfs_project(sid),
+                                **_seed_kwargs(body))
     subtasks = route.get("subtasks") or []
     # Re-resolve execution groups from the user's team-plan edits BEFORE the plan is
     # drafted. The `/route` step pinned `group_resolved` from the Lead's assignment;
@@ -1491,7 +1557,8 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
     # _ensure_route so both decompose identically.
     route = await _ensure_route(db, user["id"], sess, sid, intent=intent,
                                 max_agents=max_agents, creds=_creds(_role_tier("lead", "reason")), cfg=cfg,
-                                shared_datastore=_shared_ds, vfs_project=_vfs_project(sid))
+                                shared_datastore=_shared_ds, vfs_project=_vfs_project(sid),
+                                **_seed_kwargs(body))
     domain = route["domain"]
     subtasks = route["subtasks"]
     shared_context = route.get("shared_context", "")
@@ -4715,27 +4782,18 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
             log.warning("Vatra intent-brief derivation failed; planning on raw intent", error=str(e))
             brief = ""
     task_for_planning = research_brief.brief_task(intent, brief)
-    # Project bundle: the theme (description + instructions) seeds the Lead's plan
-    # and every worker's shared_context; the project folder becomes a reference.
-    _proj_theme, _proj_folder = "", ""
-    if body.project_id.strip():
-        from captain_claw.flight_deck.basna_routes import _project_context
-        _proj_theme, _proj_folder = await _project_context(db, user["id"], body.project_id.strip())
-    if _proj_theme:
-        task_for_planning = f"{_proj_theme}\n\n---\n\n{task_for_planning}"
     try:
-        _prior = ""
-        _ref_folders = list(body.reference_folders or [])
-        if _proj_folder:
-            _ref_folders = list(dict.fromkeys(_ref_folders + [_proj_folder]))
-        if body.knowledge_session_ids:
-            from captain_claw.flight_deck.basna_routes import build_prior_knowledge, knowledge_run_folders
-            _prior = await build_prior_knowledge(
-                db, user["id"], body.knowledge_session_ids,
-                include_board=body.knowledge_include_board)
-            # Prior runs' folders are read-only reference by default.
-            _ref_folders = list(dict.fromkeys(
-                _ref_folders + await knowledge_run_folders(db, user["id"], body.knowledge_session_ids)))
+        # Plan-time seeds, shared with _ensure_route (the /start path): the project
+        # bundle's theme seeds the Lead's plan (execute folds it into every worker's
+        # shared_context); its folder, the extra folders and the knowledge runs'
+        # folders become read-only references; the knowledge runs seed the Lead.
+        _seed = await _plan_seed(db, user["id"], project_id=body.project_id,
+                                 reference_folders=body.reference_folders,
+                                 knowledge_session_ids=body.knowledge_session_ids,
+                                 include_board=body.knowledge_include_board)
+        _proj_theme = _seed["theme"]
+        if _proj_theme:
+            task_for_planning = f"{_proj_theme}\n\n---\n\n{task_for_planning}"
         # R2 (opt-in): learned constraints for the lead decompose. Domain is still an
         # unknown output of the decomposition here, so fetch global top-N (domain=None).
         _constraints_block = ""
@@ -4749,14 +4807,11 @@ async def route_vatra(body: VatraStartRequest, user: dict = Depends(get_current_
         route = await _build_plan(db, user["id"], task_for_planning, body.max_agents, creds,
                                   force_ids=body.archetype_ids or None,
                                   shared_datastore=body.shared_datastore,
-                                  vfs_project=body.vfs_project, prior_knowledge=_prior,
+                                  vfs_project=body.vfs_project,
+                                  prior_knowledge=_seed["prior_knowledge"],
                                   constraints_block=_constraints_block,
                                   timeout=_decompose_timeout(body.dispatch_timeout))
-        # Fold read-only reference folders into shared_context so every worker checks
-        # them before web-searching.
-        _ref = _reference_directive(_ref_folders)
-        if _ref:
-            route["shared_context"] = (route.get("shared_context", "") + _ref).strip()
+        _fold_references(route, _seed["reference_folders"])
         # The project theme is folded into shared_context by execute_vatra (the one
         # choke point both fresh and continuation runs pass through) — not here.
     except HTTPException:
@@ -5104,11 +5159,22 @@ async def start_vatra(body: VatraStartRequest, request: Request,
         _tiers = _owner_tiers
         if _env is None:
             _env = _owner_env
+    # The pinned cast + project binding /route honours: persisted so the Group 0
+    # pre-phase's _ensure_route decomposes on them (and a resume re-decomposes
+    # alike), the UI groups the run, and execute folds the project theme.
+    _proj_id = body.project_id.strip()
+    _proj_theme = ""
+    if _proj_id:
+        from captain_claw.flight_deck.basna_routes import _project_context
+        _proj_theme, _ = await _project_context(db, user["id"], _proj_id)
     sess = await db.create_basna_session(
         user["id"], intent, title=title,
         config=json.dumps({"mode": "vatra", "source": "ui", "max_agents": body.max_agents,
                            **({"shared_datastore": True} if body.shared_datastore else {}),
                            **({"horizon": body.horizon} if body.horizon else {}),
+                           **({"force_ids": list(body.archetype_ids)} if body.archetype_ids else {}),
+                           **({"project_id": _proj_id, "project_context": _proj_theme}
+                              if _proj_id else {}),
                            # Long-form hardening (Increment 3): persist so /plan/approve
                            # inherits them. quality was previously dropped here.
                            **({"quality": body.quality} if body.quality else {}),
@@ -5124,7 +5190,11 @@ async def start_vatra(body: VatraStartRequest, request: Request,
         vfs_project=body.vfs_project or "",
         quality=body.quality or None, deliverable=body.deliverable or None,
         role_tiers=body.role_tiers or None,
-        dispatch_timeout=body.dispatch_timeout or 600.0)
+        dispatch_timeout=body.dispatch_timeout or 600.0,
+        # Plan-time seeds for the Group 0 decomposition (folded as /route does).
+        reference_folders=list(body.reference_folders or []),
+        knowledge_session_ids=list(body.knowledge_session_ids or []),
+        knowledge_include_board=body.knowledge_include_board)
     # Background task with a stub request carrying the owner (spawn_process reads
     # request.state.user_id) — the real request object isn't safe to use post-response.
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=user["id"]))
@@ -5275,6 +5345,8 @@ async def _continue_run(owner: str, parent_session_id: str, user: dict, *,
         cfg["max_parallel"] = int(parent_cfg["max_parallel"])
     # Keep the whole chain in the parent's project bundle; theme re-derived so
     # edits between rounds are picked up (execute injects it into shared_context).
+    # config.project_id also makes _ensure_route re-add the project folder as a
+    # read-only reference when it decomposes this round.
     _proj_id = parent_cfg.get("project_id") or ""
     if _proj_id:
         from captain_claw.flight_deck.basna_routes import _project_context

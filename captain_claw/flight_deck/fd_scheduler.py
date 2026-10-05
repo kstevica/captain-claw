@@ -52,6 +52,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -303,9 +304,17 @@ class SchedulerStore:
                 )
             except Exception:
                 pass  # column already exists
+            # The FD user a job belongs to ("" = system / pre-owner legacy row,
+            # which only admins see through the REST API).
+            try:
+                self._conn_or_open().execute(
+                    "ALTER TABLE scheduler_jobs ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''"
+                )
+            except Exception:
+                pass  # column already exists
             self._conn_or_open().commit()
 
-    def create(self, **fields: Any) -> dict[str, Any]:
+    def create(self, *, owner_id: str = "", **fields: Any) -> dict[str, Any]:
         schedule = str(fields.get("schedule", "")).strip()
         validate_schedule(schedule)  # raises ScheduleError
         kind = str(fields.get("delivery_kind", "")).strip().lower()
@@ -325,6 +334,7 @@ class SchedulerStore:
         next_run = compute_next_run(schedule) if enabled else None
         row = {
             "id": jid,
+            "owner_id": str(owner_id or "").strip(),
             "name": str(fields.get("name", "")).strip(),
             "schedule": schedule,
             "agent_slug": str(fields.get("agent_slug", "")).strip(),
@@ -347,12 +357,12 @@ class SchedulerStore:
             conn.execute(
                 """
                 INSERT INTO scheduler_jobs
-                  (id, name, schedule, agent_slug, agent_auth, prompt, flow_id,
+                  (id, owner_id, name, schedule, agent_slug, agent_auth, prompt, flow_id,
                    delivery_kind, delivery_target, enabled, ignore_quiet_hours,
                    created_at, updated_at, next_run_at, last_run_at,
                    last_status, last_result)
                 VALUES
-                  (:id, :name, :schedule, :agent_slug, :agent_auth, :prompt, :flow_id,
+                  (:id, :owner_id, :name, :schedule, :agent_slug, :agent_auth, :prompt, :flow_id,
                    :delivery_kind, :delivery_target, :enabled, :ignore_quiet_hours,
                    :created_at, :updated_at, :next_run_at, :last_run_at,
                    :last_status, :last_result)
@@ -369,11 +379,18 @@ class SchedulerStore:
             ).fetchone()
             return dict(r) if r else None
 
-    def list(self) -> list[dict[str, Any]]:
+    def list(self, owner_id: str | None = None) -> list[dict[str, Any]]:
+        """Every job, or only ``owner_id``'s when given."""
         with self._lock:
-            rows = self._conn_or_open().execute(
-                "SELECT * FROM scheduler_jobs ORDER BY created_at"
-            ).fetchall()
+            if owner_id is None:
+                rows = self._conn_or_open().execute(
+                    "SELECT * FROM scheduler_jobs ORDER BY created_at"
+                ).fetchall()
+            else:
+                rows = self._conn_or_open().execute(
+                    "SELECT * FROM scheduler_jobs WHERE owner_id = ? ORDER BY created_at",
+                    (owner_id,),
+                ).fetchall()
             return [dict(r) for r in rows]
 
     def list_due(self, now_epoch: float) -> list[dict[str, Any]]:
@@ -616,8 +633,22 @@ async def _execute_flow_job(job: dict[str, Any], flow_id: str) -> tuple[str, str
     # Neutral payload: the scheduler delivers the flow's output itself, so the
     # flow's own auto-delivery (output -> same with no channel) is a no-op.
     payload = {"channel": "scheduler", "scheduled": True, "scheduler_job": job.get("id", "")}
+    # Tenancy: an owned job runs the flow as its owner (the runner refuses a
+    # non-admin owner's run of another user's flow); an ownerless legacy job
+    # keeps acting as the flow's owner.
+    owner = str(job.get("owner_id") or "")
+    run_ctx: dict[str, Any] = {}
+    if owner:
+        is_admin = False
+        check = getattr(runner, "user_is_admin", None)
+        if check is not None:
+            try:
+                is_admin = bool(await check(owner))
+            except Exception:
+                is_admin = False
+        run_ctx = {"owner_id": owner, "is_admin": is_admin}
     try:
-        result = await runner.run(flow, payload)
+        result = await runner.run(flow, payload, **run_ctx)
     except Exception as exc:
         return ("error:flow-run", str(exc))
     status = str(result.get("status") or "")
@@ -766,16 +797,49 @@ async def scheduler_loop(stop_event: asyncio.Event) -> None:
 # ── REST API ──────────────────────────────────────────────────────────
 
 
-def _require_scheduler_caller(request: Request) -> None:
-    """Authenticate a scheduler API caller.
+# What the API shows instead of a job's ``agent_auth`` (an agent's web token —
+# never returned). The SchedulerPage edit form sends back what it was shown, so
+# an update carrying this placeholder keeps the stored value; "" clears it.
+_AGENT_AUTH_MASK = "********"
+
+
+@dataclass(frozen=True)
+class _SchedulerCaller:
+    owner: str      # owner stamped on jobs it creates ("" = system)
+    sees_all: bool  # an admin, or the one trusted user of an auth-off deck
+
+
+def _calling_agent_owner(request: Request) -> str:
+    """Owner FD recorded for the agent named by ``X-Agent-Auth`` — "" when the
+    request names none, an unknown one, or one recorded without a real owner
+    (the auth-off deck's synthetic ``local`` user counts as none)."""
+    token = request.headers.get("X-Agent-Auth", "").strip()
+    if not token:
+        return ""
+    try:
+        from captain_claw.flight_deck.auth import _LOCAL_USER
+        from captain_claw.flight_deck.server import _find_agent_by_auth
+        matched, owner, _slug = _find_agent_by_auth(token)
+    except Exception:  # fail closed: an unidentified caller is "system"
+        return ""
+    owner = str(owner or "") if matched else ""
+    return "" if owner == _LOCAL_USER["id"] else owner
+
+
+def _require_scheduler_caller(request: Request) -> _SchedulerCaller:
+    """Authenticate a scheduler API caller and say whose jobs it may reach.
 
     Scheduler jobs deliver to the owner's WhatsApp/Telegram, so the routes must
     never be open. Accept any of:
-      * a valid Flight Deck user JWT (the SchedulerPage UI);
+      * a valid Flight Deck user JWT (the SchedulerPage UI) — that user's own
+        jobs, or every job for an admin;
       * a trusted internal caller — the shared agent secret (X-Agent-Secret),
         or a loopback request when not in lockdown (intentions.py materializing
         a job on the same host);
       * the legacy glasses shared secret when FD_GLASSES_BRIDGE_TOKEN is set.
+    An internal caller acts for the owner of the agent its ``X-Agent-Auth``
+    names; one that names none may create (system) jobs but reads none — so
+    dropping the header never widens an agent's view.
     Anything else is rejected. This closes the prior hole where an unset
     FD_GLASSES_BRIDGE_TOKEN made ``_check_token`` pass every request.
     """
@@ -783,7 +847,7 @@ def _require_scheduler_caller(request: Request) -> None:
 
     # Local/standalone mode (auth disabled) — single trusted user.
     if not _fd_auth_enabled():
-        return
+        return _SchedulerCaller(owner="", sees_all=True)
 
     # (a) Flight Deck user JWT.
     auth_hdr = request.headers.get("Authorization", "")
@@ -792,41 +856,91 @@ def _require_scheduler_caller(request: Request) -> None:
         tok = request.query_params.get("fd_token", "") or ""
     if tok:
         try:
-            decode_access_token(tok)
-            return
+            payload = decode_access_token(tok)
         except Exception:
-            pass
+            payload = None
+        if not payload or not payload.get("sub"):
+            # A user token that doesn't verify (usually an expired session)
+            # must not fall through to the internal branches: on loopback the
+            # user would silently become "system" — an empty list, and the jobs
+            # they create would land ownerless (admin-only).
+            raise HTTPException(status_code=401, detail="invalid or expired session token")
+        return _SchedulerCaller(
+            owner=str(payload["sub"]),
+            sees_all=payload.get("role", "user") == "admin",
+        )
 
+    internal = False
     # (b) Trusted internal caller — shared agent secret.
     provided = request.headers.get("X-Agent-Secret", "")
     if provided:
         try:
             from captain_claw.flight_deck.agent_secret import get_or_create_agent_secret
-            if secrets.compare_digest(provided, get_or_create_agent_secret()):
-                return
+            internal = secrets.compare_digest(provided, get_or_create_agent_secret())
         except Exception:
             pass
 
     # (c) Legacy glasses shared secret (only when configured).
     required = os.environ.get("FD_GLASSES_BRIDGE_TOKEN", "").strip()
-    if required:
+    if not internal and required:
         got = request.query_params.get("t", "") or request.headers.get("x-glasses-token", "")
-        if got and secrets.compare_digest(got, required):
-            return
+        internal = bool(got) and secrets.compare_digest(got, required)
 
     # (d) Loopback fallback for same-host internal callers, unless locked down.
-    if os.environ.get("FD_LOCKDOWN", "").lower() not in ("true", "1", "yes"):
+    if not internal and os.environ.get("FD_LOCKDOWN", "").lower() not in ("true", "1", "yes"):
         client_host = request.client.host if request.client else ""
-        if client_host in ("127.0.0.1", "::1", "localhost"):
-            return
+        internal = client_host in ("127.0.0.1", "::1", "localhost")
 
+    if internal:
+        return _SchedulerCaller(owner=_calling_agent_owner(request), sees_all=False)
     raise HTTPException(status_code=401, detail="scheduler requires authentication")
+
+
+def _caller_may_access(caller: _SchedulerCaller, job: dict[str, Any]) -> bool:
+    """Admins reach every job; anyone else only jobs stamped with their own
+    (non-empty) owner — so ownerless legacy/system jobs are admin-only."""
+    if caller.sees_all:
+        return True
+    return bool(caller.owner) and str(job.get("owner_id") or "") == caller.owner
+
+
+def _job_for_caller(job_id: str, caller: _SchedulerCaller) -> dict[str, Any]:
+    """The job, or 404 — also for another user's job, so ids don't leak."""
+    job = get_store().get(job_id)
+    if not job or not _caller_may_access(caller, job):
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+def _public_job(job: dict[str, Any]) -> dict[str, Any]:
+    """A job as the API returns it: ``agent_auth`` redacted to a placeholder."""
+    out = dict(job)
+    out["agent_auth"] = _AGENT_AUTH_MASK if job.get("agent_auth") else ""
+    return out
+
+
+async def _json_object(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="expected a JSON object")
+    # The owner comes from the caller, never the body; and the redaction
+    # placeholder is not a token — on update it means "unchanged".
+    body.pop("owner_id", None)
+    if body.get("agent_auth") == _AGENT_AUTH_MASK:
+        body.pop("agent_auth")
+    return body
 
 
 @router.get("/scheduler/jobs")
 async def list_jobs(request: Request) -> JSONResponse:
-    _require_scheduler_caller(request)
-    return JSONResponse(get_store().list(), headers=_NO_CACHE)
+    caller = _require_scheduler_caller(request)
+    if caller.sees_all:
+        rows = get_store().list()
+    elif caller.owner:
+        rows = get_store().list(owner_id=caller.owner)
+    else:
+        rows = []
+    return JSONResponse([_public_job(r) for r in rows], headers=_NO_CACHE)
 
 
 @router.get("/scheduler/recipients")
@@ -843,40 +957,40 @@ async def list_recipients(request: Request) -> JSONResponse:
 
 @router.post("/scheduler/jobs")
 async def create_job(request: Request) -> JSONResponse:
-    _require_scheduler_caller(request)
-    body = await request.json()
+    caller = _require_scheduler_caller(request)
+    body = await _json_object(request)
     try:
-        row = get_store().create(**body)
+        row = get_store().create(owner_id=caller.owner, **body)
     except (ScheduleError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return JSONResponse(row, headers=_NO_CACHE)
+    return JSONResponse(_public_job(row), headers=_NO_CACHE)
 
 
 @router.get("/scheduler/jobs/{job_id}")
 async def get_job(job_id: str, request: Request) -> JSONResponse:
-    _require_scheduler_caller(request)
-    row = get_store().get(job_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="job not found")
-    return JSONResponse(row, headers=_NO_CACHE)
+    caller = _require_scheduler_caller(request)
+    row = _job_for_caller(job_id, caller)
+    return JSONResponse(_public_job(row), headers=_NO_CACHE)
 
 
 @router.patch("/scheduler/jobs/{job_id}")
 async def update_job(job_id: str, request: Request) -> JSONResponse:
-    _require_scheduler_caller(request)
-    body = await request.json()
+    caller = _require_scheduler_caller(request)
+    _job_for_caller(job_id, caller)
+    body = await _json_object(request)
     try:
         row = get_store().update(job_id, **body)
     except (ScheduleError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not row:
         raise HTTPException(status_code=404, detail="job not found")
-    return JSONResponse(row, headers=_NO_CACHE)
+    return JSONResponse(_public_job(row), headers=_NO_CACHE)
 
 
 @router.delete("/scheduler/jobs/{job_id}")
 async def delete_job(job_id: str, request: Request) -> JSONResponse:
-    _require_scheduler_caller(request)
+    caller = _require_scheduler_caller(request)
+    _job_for_caller(job_id, caller)
     if not get_store().delete(job_id):
         raise HTTPException(status_code=404, detail="job not found")
     return JSONResponse({"ok": True}, headers=_NO_CACHE)
@@ -888,10 +1002,8 @@ async def run_job_now(job_id: str, request: Request) -> JSONResponse:
 
     Does NOT change the job's next_run_at — it's an out-of-band test fire.
     """
-    _require_scheduler_caller(request)
-    job = get_store().get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="job not found")
+    caller = _require_scheduler_caller(request)
+    job = _job_for_caller(job_id, caller)
     status, result = await execute_job(job, force=True)
     get_store().mark_run(
         job_id, status=status, result=result,

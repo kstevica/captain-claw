@@ -366,9 +366,12 @@ async def match_flow(payload: dict[str, Any]) -> dict[str, Any] | None:
     except Exception as exc:
         log.warning("flow match: store error: %s", exc)
         return None
+    # Tenancy: a user's flow fires only on messages to that user's own agents.
+    serves = getattr(_RUNNER, "origin_allowed", None)
     for flow in flows:
         try:
-            if _trigger_matches(flow.get("trigger") or {}, payload):
+            if _trigger_matches(flow.get("trigger") or {}, payload) and (
+                    serves is None or await serves(flow, payload)):
                 return flow
         except Exception:
             continue

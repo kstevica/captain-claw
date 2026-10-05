@@ -299,6 +299,15 @@ async def maybe_run_arbiter(
         store.log(user_id, event, detail, level_)
 
     try:
+        # Expire proposals nobody answered before any cap is checked — otherwise
+        # an ignored queue holds the loop shut forever.
+        ttl = int(cfg.get("proposal_ttl_hours", 48))
+        if ttl > 0:
+            ttl_cutoff = (datetime.now(timezone.utc) - timedelta(hours=ttl)).isoformat()
+            expired = store.expire_stale_proposals(user_id, ttl_cutoff)
+            if expired:
+                emit("expired stale proposals", f"{expired} awaiting approval for over {ttl}h")
+
         if _in_quiet_hours(int(cfg.get("quiet_hours_start", 22)), int(cfg.get("quiet_hours_end", 8))):
             emit("skipped: quiet hours", f"{cfg.get('quiet_hours_start')}–{cfg.get('quiet_hours_end')} UTC", routine=True)
             return {"ran": False, "reason": "quiet-hours"}
@@ -309,8 +318,22 @@ async def maybe_run_arbiter(
             return {"ran": False, "reason": "daily-cap"}
 
         open_actions = store.open_actions(user_id)
-        if len(open_actions) >= int(cfg.get("max_concurrent_actions", 2)):
-            emit("skipped: concurrency cap", f"{len(open_actions)} in flight, max={cfg.get('max_concurrent_actions')}", routine=True)
+        # Proposals waiting on the human are not running work: they get their own
+        # cap, and a full queue is a stall the user must see (not a routine skip).
+        pending = [a for a in open_actions if a.get("status") == "awaiting_approval"]
+        in_flight = [a for a in open_actions if a.get("status") != "awaiting_approval"]
+        if len(pending) >= int(cfg.get("max_pending_proposals", 5)):
+            event = f"loop paused: {len(pending)} proposals awaiting approval"
+            last = store.list_log(user_id, limit=1)
+            # Once per pause, not every 180s pulse (the log keeps only 500 rows).
+            if trigger == "manual" or not last or last[0]["event"] != event:
+                store.log(user_id, event,
+                          f"max_pending_proposals={cfg.get('max_pending_proposals')} — approve or "
+                          "reject them" + (f" (unanswered ones expire after {ttl}h)" if ttl > 0 else ""),
+                          "warn")
+            return {"ran": False, "reason": "pending-cap"}
+        if len(in_flight) >= int(cfg.get("max_concurrent_actions", 2)):
+            emit("skipped: concurrency cap", f"{len(in_flight)} in flight, max={cfg.get('max_concurrent_actions')}", routine=True)
             return {"ran": False, "reason": "concurrent-cap"}
         look_cutoff = (
             datetime.now(timezone.utc)

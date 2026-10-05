@@ -4,7 +4,8 @@ Two audiences hit these endpoints:
 
 1. **Admin UI** (``/fd/mcp/servers``, ``/fd/mcp/servers/<name>``,
    ``/fd/mcp/servers/<name>/test``) — gated by the normal Flight Deck
-   user auth. Returns secrets in masked form only.
+   user auth. Returns secrets in masked form only. Anything touching a
+   stdio server (a command FD spawns on its host) is admin-only.
 
 2. **Captain-claw agents** (``/fd/mcp/<server>/tools``,
    ``/fd/mcp/<server>/call``) — gated like the Codex token endpoint:
@@ -56,6 +57,29 @@ def _authorize_agent_call(request: Request) -> str:
     return require_agent_caller(request, what="the MCP proxy").slug
 
 
+# ── stdio gate ──────────────────────────────────────────────────────
+
+
+def _require_stdio_admin(user: dict) -> None:
+    """A stdio server is a command FD spawns on its own host, so only an admin
+    may add one, switch a server to it, edit / remove / test one, or probe an
+    ad-hoc stdio config. HTTP servers stay open to every signed-in user (the
+    kiosk Connections dialog). An auth-off deck has one trusted user and
+    ``get_current_user`` hands it a synthetic admin, so it passes unchanged."""
+    if (user or {}).get("role") != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Only an admin can manage stdio MCP servers — they run a "
+                "command on the Flight Deck host."
+            ),
+        )
+
+
+def _is_stdio(record: dict | None) -> bool:
+    return bool(record) and str(record.get("transport") or "").strip().lower() == "stdio"
+
+
 # ── admin: list / add / remove servers ──────────────────────────────
 
 
@@ -70,7 +94,7 @@ async def list_servers(_user: dict = Depends(get_current_user)) -> dict[str, Any
 @router.post("/servers")
 async def add_or_update_server(
     payload: dict = Body(...),
-    _user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Insert or update a server by ``name``. Existing client_secret is
     preserved when the new payload has an empty / masked client_secret."""
@@ -80,6 +104,12 @@ async def add_or_update_server(
     command = str(payload.get("command") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
+    existing = mcp_storage.get_server(name)
+    # Creating a stdio server, switching one to stdio, or touching an existing
+    # stdio server in any way (command/args/env, enabled, or overwriting it
+    # with an http config) is admin-only.
+    if transport == "stdio" or _is_stdio(existing):
+        _require_stdio_admin(user)
     if transport == "http" and not url:
         raise HTTPException(status_code=400, detail="url is required for http transport")
     if transport == "stdio" and not command:
@@ -92,7 +122,6 @@ async def add_or_update_server(
     # stored secret if the user re-submits without changing that field.
     looks_masked = incoming_secret and set(incoming_secret) <= {"•", "*"}
     if looks_masked or not incoming_secret:
-        existing = mcp_storage.get_server(name)
         if existing is not None:
             incoming_secret = existing.get("client_secret", "")
 
@@ -110,7 +139,7 @@ async def add_or_update_server(
         "enabled": bool(payload.get("enabled", True)),
         "allowed_agents": payload.get("allowed_agents") or [],
     }
-    existed_before = mcp_storage.get_server(name) is not None
+    existed_before = existing is not None
     saved = await mcp_storage.upsert_server(record)
     # Drop any cached upstream session so the new config takes effect.
     # Awaited so a running stdio child gets terminated before we return —
@@ -130,8 +159,10 @@ async def add_or_update_server(
 @router.delete("/servers/{name}")
 async def remove_server(
     name: str,
-    _user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
+    if _is_stdio(mcp_storage.get_server(name)):
+        _require_stdio_admin(user)
     deleted = await mcp_storage.delete_server(name)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"No MCP server named '{name}'")
@@ -143,18 +174,21 @@ async def remove_server(
 @router.post("/servers/{name}/test")
 async def test_server(
     name: str,
-    _user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Probe a configured server: re-init, list tools, surface any error."""
-    if mcp_storage.get_server(name) is None:
+    record = mcp_storage.get_server(name)
+    if record is None:
         raise HTTPException(status_code=404, detail=f"No MCP server named '{name}'")
+    if _is_stdio(record):
+        _require_stdio_admin(user)
     return await get_manager().test_server(name)
 
 
 @router.post("/probe")
 async def probe_transient(
     payload: dict = Body(...),
-    _user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Probe an ad-hoc server config without persisting it.
 
@@ -168,6 +202,9 @@ async def probe_transient(
     transport = str(payload.get("transport") or "http").strip().lower() or "http"
     url = str(payload.get("url") or "").strip()
     command = str(payload.get("command") or "").strip()
+    if transport == "stdio":
+        # A stdio probe spawns ``command`` right now.
+        _require_stdio_admin(user)
     if transport == "http" and not url:
         raise HTTPException(status_code=400, detail="url is required for http transport")
     if transport == "stdio" and not command:

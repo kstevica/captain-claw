@@ -96,6 +96,8 @@ class LupaDB:
             # seed_hash: the hash of the manifest last written by the seeder, so
             # startup can tell a repo change from a runtime edit on a system pack.
             "ALTER TABLE packs ADD COLUMN seed_hash TEXT NOT NULL DEFAULT ''",
+            # last_error: why the brief's last round/attempt failed ('' = fine).
+            "ALTER TABLE briefs ADD COLUMN last_error TEXT NOT NULL DEFAULT ''",
         ):
             try:
                 await self._db.execute(stmt)
@@ -190,7 +192,8 @@ class LupaDB:
     async def upsert_brief(self, stream_id: str, user_id: str, instruction: str,
                            cadence_hours: float, enabled: bool) -> dict:
         """One standing brief per stream. (Re)creating one schedules the first
-        run for NOW — the brief reports immediately, then every cadence."""
+        run for NOW — the brief reports immediately, then a cadence after each
+        round finishes."""
         assert self._db is not None
         now = _utcnow()
         await self._db.execute(
@@ -235,6 +238,19 @@ class LupaDB:
             "UPDATE briefs SET last_run_at = ?, last_session_id = ?,"
             " next_run_at = ?, updated_at = ? WHERE stream_id = ?",
             (now, session_id, next_run_at, now, stream_id))
+        await self._db.commit()
+
+    async def reschedule_brief(self, stream_id: str, next_run_at: str,
+                               last_error: str | None = None) -> None:
+        """Move a brief's next run without firing it. ``last_error`` records why
+        the last round/attempt failed ('' clears it, None leaves it as is)."""
+        assert self._db is not None
+        sets, args = ["next_run_at = ?", "updated_at = ?"], [next_run_at, _utcnow()]
+        if last_error is not None:
+            sets.append("last_error = ?"); args.append(last_error)
+        args.append(stream_id)
+        await self._db.execute(
+            f"UPDATE briefs SET {', '.join(sets)} WHERE stream_id = ?", args)
         await self._db.commit()
 
     async def list_brief_rounds(self, user_id: str, limit: int = 20) -> list[dict]:

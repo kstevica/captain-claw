@@ -50,10 +50,11 @@ class _Root:
     one ordered, depth-tagged timeline."""
 
     __slots__ = ("run_id", "control", "trace", "budget", "depth_cap", "dry",
-                 "arch_agents", "arch_slugs", "arch_lock")
+                 "arch_agents", "arch_slugs", "arch_lock", "owner_id", "is_admin", "scope")
 
     def __init__(self, run_id: str, control: "_RunControl | None", dry: bool,
-                 budget: dict[str, int], depth_cap: int) -> None:
+                 budget: dict[str, int], depth_cap: int, *, owner_id: str = "",
+                 is_admin: bool = False, scope: str | None = None) -> None:
         self.run_id = run_id
         self.control = control
         self.trace: list[dict[str, Any]] = []
@@ -68,6 +69,11 @@ class _Root:
         self.arch_agents: dict[str, dict[str, Any]] = {}
         self.arch_slugs: list[str] = []
         self.arch_lock = asyncio.Lock()
+        # Who the run acts as. `scope` is the user whose agents its steps may
+        # address (None = any: auth off, an admin, or a legacy ownerless flow).
+        self.owner_id = owner_id
+        self.is_admin = is_admin
+        self.scope = scope
 
 
 class _RunControl:
@@ -507,6 +513,9 @@ class FlowRunner:
         spawn_archetype: Callable[..., Awaitable[tuple[int, str, str]]] | None = None,
         stop_archetype: Callable[[str], Awaitable[None]] | None = None,
         resolve_tier_cfg: Callable[[dict[str, Any], str, str], Awaitable[dict[str, Any]]] | None = None,
+        resolve_owner: Callable[[int], str] | None = None,
+        user_is_admin: Callable[[str], Awaitable[bool]] | None = None,
+        enforce_owner: bool = False,
     ) -> None:
         self.store = store
         self.get_agents = get_agents
@@ -535,47 +544,131 @@ class FlowRunner:
         self.spawn_archetype = spawn_archetype
         self.stop_archetype = stop_archetype
         self.resolve_tier_cfg = resolve_tier_cfg
+        # ── tenancy (FD auth on) ──
+        # A run acts as a user: a step may only address that user's agents.
+        #   resolve_owner(port) -> owner FD recorded at spawn ('' = none); used
+        #     for agents whose pool entry doesn't carry an `owner`.
+        #   user_is_admin(user_id) -> admins' runs may address any agent.
+        # enforce_owner=False (auth off: one trusted user) leaves runs unscoped.
+        self.resolve_owner = resolve_owner
+        self.user_is_admin = user_is_admin
+        self.enforce_owner = enforce_owner
 
     # ── agent pool selection ───────────────────────────────────────────
 
-    def _select_agent(self, selector: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    def _pool(self) -> list[dict[str, Any]]:
+        return [a for a in self.get_agents() if str(a.get("status", "")).lower() in ("running", "")]
+
+    def _owned_by(self, agent: dict[str, Any], user_id: str) -> bool:
+        """Does *agent* belong to *user_id*, per FD's spawn records? An agent with
+        no recorded owner belongs to nobody (as for the peer routes)."""
+        if "owner" in agent:
+            owner = str(agent.get("owner") or "")
+        elif self.resolve_owner is not None:
+            try:
+                owner = str(self.resolve_owner(int(agent.get("port") or 0)) or "")
+            except Exception:  # noqa: BLE001
+                owner = ""
+        else:
+            owner = ""
+        return bool(owner) and owner == user_id
+
+    def _agent_allowed(self, agent: dict[str, Any], root: "_Root | None") -> bool:
+        return root is None or root.scope is None or self._owned_by(agent, root.scope)
+
+    def _explicit_origin(self, payload: dict[str, Any], agents: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """The agent the payload names as its origin, or None when it names none."""
+        host = payload.get("origin_host") or "localhost"
+        port = payload.get("origin_port")
+        name = str(payload.get("origin_name") or "").strip()
+        # Resolve to the LIVE registry entry so we get the current port AND
+        # the matching auth token. Prefer name (the origin may have drifted
+        # ports since the message arrived), then port.
+        if name:
+            for a in agents:
+                if str(a.get("name", "")).lower() == name.lower():
+                    return a
+        if port:
+            for a in agents:
+                if int(a.get("port") or 0) == int(port):
+                    return a
+            # Fallback: hand-built target with a resolved token.
+            return {"name": name or "origin", "host": host, "port": int(port),
+                    "auth": self.resolve_auth(int(port)) if self.resolve_auth else ""}
+        return None
+
+    def _select_agent(self, selector: str, payload: dict[str, Any],
+                      root: "_Root | None" = None) -> dict[str, Any] | None:
         sel = (selector or "origin").strip()
-        agents = [a for a in self.get_agents() if str(a.get("status", "")).lower() in ("running", "")]
+        agents = self._pool()
+        # A scoped run only ever picks among its owner's agents.
+        allowed = [a for a in agents if self._agent_allowed(a, root)]
         if sel == "origin" or not sel:
-            host = payload.get("origin_host") or "localhost"
-            port = payload.get("origin_port")
-            name = str(payload.get("origin_name") or "").strip()
-            # Resolve to the LIVE registry entry so we get the current port AND
-            # the matching auth token. Prefer name (the origin may have drifted
-            # ports since the message arrived), then port.
-            if name:
-                for a in agents:
-                    if str(a.get("name", "")).lower() == name.lower():
-                        return a
-            if port:
-                for a in agents:
-                    if int(a.get("port") or 0) == int(port):
-                        return a
-                # Fallback: hand-built target with a resolved token.
-                return {"name": name or "origin", "host": host, "port": int(port),
-                        "auth": self.resolve_auth(int(port)) if self.resolve_auth else ""}
-            return agents[0] if agents else None
+            origin = self._explicit_origin(payload, agents)
+            if origin is not None:
+                return origin if self._agent_allowed(origin, root) else None
+            return allowed[0] if allowed else None
         if sel.startswith("name:"):
             want = sel.split(":", 1)[1].strip().lower()
-            for a in agents:
+            for a in allowed:
                 if str(a.get("name", "")).lower() == want:
                     return a
             return None
         if sel.startswith("capability:"):
             cap = sel.split(":", 1)[1].strip().lower()
             hints = _VISION_HINTS if cap in ("vision", "image", "multimodal") else (cap,)
-            for a in agents:
+            for a in allowed:
                 blob = f"{a.get('name','')} {a.get('description','')}".lower()
                 if any(h in blob for h in hints):
                     return a
             return None
         # "any"
-        return agents[0] if agents else None
+        return allowed[0] if allowed else None
+
+    # ── run owner context ──────────────────────────────────────────────
+
+    async def _run_context(self, flow: dict[str, Any], owner_id: str | None,
+                           is_admin: bool) -> tuple[str, bool, bool]:
+        """(owner, is_admin, explicit) a run acts as. A caller's context (a route's
+        user, a scheduler job's owner) wins; without one — a message trigger — the
+        run acts as the flow's owner. A legacy flow with no owner has none."""
+        if owner_id or is_admin:
+            return str(owner_id or ""), bool(is_admin), True
+        owner = str(flow.get("owner_id") or "")
+        admin = False
+        if owner and self.enforce_owner and self.user_is_admin is not None:
+            try:
+                admin = bool(await self.user_is_admin(owner))
+            except Exception:  # noqa: BLE001
+                admin = False
+        return owner, admin, False
+
+    def _scope_for(self, owner: str, admin: bool) -> str | None:
+        return owner if (self.enforce_owner and owner and not admin) else None
+
+    def _origin_refusal(self, payload: dict[str, Any], scope: str | None) -> str:
+        """Why a run scoped to *scope* may not serve this payload's origin agent
+        ('' = it may). The origin is where the message came from and where the
+        run delivers — another user's agent is neither read nor written."""
+        if scope is None or not (payload.get("origin_port") or payload.get("origin_name")):
+            return ""
+        origin = self._explicit_origin(payload, self._pool())
+        if origin is not None and not self._owned_by(origin, scope):
+            return f"origin agent '{origin.get('name') or origin.get('port')}' belongs to another user"
+        return ""
+
+    async def origin_allowed(self, flow: dict[str, Any], payload: dict[str, Any]) -> bool:
+        """May *flow* fire on this inbound message? A user's flow only serves
+        messages to that user's own agents (trigger matching asks this)."""
+        owner, admin, _ = await self._run_context(flow, None, False)
+        return not self._origin_refusal(payload, self._scope_for(owner, admin))
+
+    def _owner_payload(self, payload: dict[str, Any], root: "_Root") -> dict[str, Any]:
+        """The payload the archetype seams resolve their owner from: the run's
+        owner, not a `user_id` the caller (or a gosub arg) put in the payload."""
+        if self.enforce_owner and root.owner_id:
+            return {**payload, "user_id": root.owner_id}
+        return payload
 
     # ── ephemeral archetype agents (`on archetype:<id>[@tier]`) ─────────
 
@@ -603,6 +696,7 @@ class FlowRunner:
         aid, tier = self._parse_archetype_selector(selector)
         if not aid:
             return None, "archetype selector needs an id, e.g. archetype:fact-checker"
+        payload = self._owner_payload(payload, root)
         cache_key = f"{aid}@{tier}"
         # Serialise lazy spawns so two concurrent steps on the same archetype
         # don't each spawn an agent (the second would wastefully orphan one).
@@ -700,7 +794,20 @@ class FlowRunner:
         sel = (selector or "").strip()
         if sel.startswith("archetype:"):
             return await self._ensure_archetype_agent(sel, root, payload)
-        return self._select_agent(sel, payload), ""
+        agent = self._select_agent(sel, payload, root)
+        if agent is None and root.scope is not None:
+            # Say why, rather than reporting a missing agent — only for an agent
+            # the flow itself named (`any`/`capability:` must not reveal the
+            # names of other users' agents).
+            if sel.startswith("name:"):
+                other = self._select_agent(sel, payload)
+            elif sel in ("", "origin"):
+                other = self._explicit_origin(payload, self._pool())
+            else:
+                other = None
+            if other is not None:
+                return None, f"agent '{other.get('name') or other.get('port')}' belongs to another user"
+        return agent, ""
 
     # ── step dispatch ──────────────────────────────────────────────────
 
@@ -812,7 +919,7 @@ class FlowRunner:
         # Progress breadcrumb: name the specialist working this step so a long /
         # multi-stage flow isn't a silent "thinking" spinner in the origin UI.
         who = self._who(agent)
-        await self._push_progress(payload, "narration", {"text": f"▶ {who} working…"})
+        await self._push_progress(payload, "narration", {"text": f"▶ {who} working…"}, root)
 
         final, err = "", ""
         _last_note = ""  # de-dupe identical consecutive progress lines
@@ -842,7 +949,7 @@ class FlowRunner:
                                     "tool_name": f"{who}:llm",
                                     "arguments": {},
                                     "output": _udet,
-                                })
+                                }, root)
                         break
                     if evt.get("ok") is False:
                         err = str(evt.get("error") or "agent error")
@@ -857,7 +964,7 @@ class FlowRunner:
                         note = str(data.get("text") or data.get("status") or "").strip()
                         if note and note != _last_note:
                             _last_note = note
-                            await self._push_progress(payload, "thinking", {"text": f"{who}: {note[:200]}"})
+                            await self._push_progress(payload, "thinking", {"text": f"{who}: {note[:200]}"}, root)
                     elif ev == "monitor":
                         tool = str(data.get("tool_name") or data.get("tool") or "").strip()
                         if tool:
@@ -865,7 +972,7 @@ class FlowRunner:
                                 "tool_name": f"{who}:{tool}",
                                 "arguments": data.get("arguments") or {},
                                 "output": str(data.get("output") or "")[:400],
-                            })
+                            }, root)
         except Exception as exc:
             err = str(exc)
         return (final or f"(no result: {err})"), agent.get("name", "")
@@ -908,7 +1015,8 @@ class FlowRunner:
         except Exception as exc:
             return f"(vision dispatch failed: {exc})", agent.get("name", "")
 
-    async def _deliver(self, payload: dict[str, Any], text: str, *, role: str = "assistant") -> bool:
+    async def _deliver(self, payload: dict[str, Any], text: str, *, role: str = "assistant",
+                       root: "_Root | None" = None) -> bool:
         """Send a message to the user on the originating channel.
 
         WhatsApp → whatsapp_send. Agent-handled channels (web/glasses) → push
@@ -925,7 +1033,7 @@ class FlowRunner:
             except Exception as exc:
                 log.warning("flow deliver (whatsapp) failed: %s", exc)
                 return False
-        agent = self._select_agent("origin", payload)
+        agent = self._select_agent("origin", payload, root)
         if not agent:
             return False
         import httpx
@@ -940,7 +1048,8 @@ class FlowRunner:
             log.warning("flow deliver (agent push) failed: %s", exc)
             return False
 
-    async def _push_progress(self, payload: dict[str, Any], kind: str, fields: dict[str, Any]) -> None:
+    async def _push_progress(self, payload: dict[str, Any], kind: str, fields: dict[str, Any],
+                             root: "_Root | None" = None) -> None:
         """Push a live-progress event into the origin agent's chat UI so the user
         sees what a flow step (or its spawned specialist) is doing in real time.
 
@@ -953,7 +1062,7 @@ class FlowRunner:
             return
         if not (payload.get("origin_port") or payload.get("origin_name")):
             return  # no origin chat UI to render into (e.g. scheduler runs)
-        agent = self._select_agent("origin", payload)
+        agent = self._select_agent("origin", payload, root)
         if not agent:
             return
         import httpx
@@ -1000,6 +1109,7 @@ class FlowRunner:
     async def _run_input_step(
         self, step: dict[str, Any], ctx: dict[str, Any],
         payload: dict[str, Any], flow: dict[str, Any], *, dry: bool = False,
+        root: "_Root | None" = None,
     ) -> tuple[str, str]:
         """Pause the run, prompt the user (naming the flow), and resume with
         their reply as this step's output. Returns (user_text, "")."""
@@ -1018,7 +1128,7 @@ class FlowRunner:
         tag = f" `[{handle}]`" if handle else ""
         announce = f"⏳ *{flow_name}*{tag} needs your input:\n\n{prompt}"
 
-        if not await self._deliver(payload, announce):
+        if not await self._deliver(payload, announce, root=root):
             # No reachable channel to ask on — fail clearly instead of hanging.
             return "(input step: no channel available to prompt the user)", ""
 
@@ -1037,29 +1147,33 @@ class FlowRunner:
             flow_router.clear_input_prompt(key)
         return text, ""
 
-    async def _emit(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> str:
+    async def _emit(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any],
+                    root: "_Root | None" = None) -> str:
         channel = str(step.get("channel") or "log")
         body = _render(str(step.get("body") or "{{steps}}"), ctx)
         # 'same'/'whatsapp'/'glasses'/'web' all deliver on the originating
         # channel (whatsapp_send or agent chat-push); 'log' just records.
         if channel in ("whatsapp", "same", "glasses", "web"):
-            if await self._deliver(payload, body):
+            if await self._deliver(payload, body, root=root):
                 return f"(emitted to {channel})"
         return body  # 'log' / fallthrough — captured in the run record
 
     # ── flow resolution (for gosub) ────────────────────────────────────
 
-    async def _resolve_flow_by_name(self, name: str) -> dict[str, Any] | None:
-        """Resolve a flow by name for `gosub` (Phase 1: permanent space only)."""
+    async def _resolve_flow_by_name(self, name: str, root: "_Root | None" = None) -> dict[str, Any] | None:
+        """Resolve a flow by name for `gosub` (Phase 1: permanent space only).
+        A scoped run resolves only its owner's flows."""
         name_l = name.strip().lower()
         if not name_l:
             return None
+        scope = root.scope if root is not None else None
         try:
             getter = getattr(self.store, "get_flow_by_name", None)
             if getter:
-                return await getter(name)
+                return await (getter(name) if scope is None else getter(name, owner_id=scope))
             for f in await self.store.list_flows():
-                if str(f.get("name", "")).lower() == name_l:
+                if str(f.get("name", "")).lower() == name_l and (
+                        scope is None or f.get("owner_id") == scope):
                     return f
         except Exception as exc:
             log.warning("gosub resolve failed: %s", exc)
@@ -1077,7 +1191,7 @@ class FlowRunner:
         # returning a catchable status, so infinite recursion can't be swallowed.
         if depth + 1 > root.depth_cap:
             raise RuntimeError(f"max flow recursion depth ({root.depth_cap}) exceeded")
-        target = await self._resolve_flow_by_name(name)
+        target = await self._resolve_flow_by_name(name, root)
         if not target:
             return f"(gosub: no flow named '{name}')", "gosub", "error"
         blocked = self._guard_cross_space(caller_origin, target, name, "gosub")
@@ -1093,9 +1207,22 @@ class FlowRunner:
         child_payload["args"] = args
         for k, v in args.items():
             child_payload[k] = v
+        # Args can re-point the origin; the child shares this root, so check it as
+        # run() checks a root payload (a `wait` keys on it, archetypes inherit it).
+        refusal = self._origin_refusal(child_payload, root.scope)
+        if refusal:
+            return f"(gosub '{name}': {refusal})", "gosub", "error"
         result = await self._run_frame(target, child_payload, root=root, depth=depth + 1)
         st = str(result.get("status") or "done")
         return str(result.get("value", "")), f"flow:{name}", ("done" if st in ("done", "returned") else st)
+
+    @staticmethod
+    def _child_context(root: "_Root | None") -> dict[str, Any]:
+        """A spawned run acts as its parent's owner (a legacy, ownerless parent
+        passes none, so the child acts as its own flow's owner)."""
+        if root is None:
+            return {}
+        return {"owner_id": root.owner_id or None, "is_admin": root.is_admin}
 
     def _guard_cross_space(self, caller_origin: str, target: dict[str, Any], name: str, verb: str) -> str:
         """Return a block message if a synthesized (agent) flow tries to call a
@@ -1109,7 +1236,7 @@ class FlowRunner:
 
     async def _run_spawn(
         self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any],
-        caller_origin: str = "user",
+        caller_origin: str = "user", root: "_Root | None" = None,
     ) -> tuple[str, str, str]:
         """Launch another flow as an INDEPENDENT background root run and stash its
         task as a future. Returns immediately; the parent continues. Returns
@@ -1117,7 +1244,7 @@ class FlowRunner:
         name = _render(str(step.get("flow") or ""), ctx).strip()
         if not name:
             return "(spawn: no flow name)", "spawn", "error"
-        target = await self._resolve_flow_by_name(name)
+        target = await self._resolve_flow_by_name(name, root)
         if not target:
             return f"(spawn: no flow named '{name}')", "spawn", "error"
         blocked = self._guard_cross_space(caller_origin, target, name, "spawn")
@@ -1132,7 +1259,7 @@ class FlowRunner:
             child_payload[k] = v
         # New, independent root run (its own run_id + control handle): not killed
         # by the parent's `flow stop`, reachable by `flow stop all`, joinable.
-        task = asyncio.create_task(self.run(target, child_payload))
+        task = asyncio.create_task(self.run(target, child_payload, **self._child_context(root)))
         ctx.setdefault("_spawns", {})[str(step.get("id"))] = task
         return f"(spawned '{name}')", f"flow:{name}", "done"
 
@@ -1190,7 +1317,7 @@ class FlowRunner:
                 args = _render(step.get("args") or {}, ctx)
                 if not isinstance(args, dict):
                     args = {}
-                target = await self._resolve_flow_by_name(_render(fname, ctx))
+                target = await self._resolve_flow_by_name(_render(fname, ctx), root)
                 if not target or self._guard_cross_space(caller_origin, target, fname, "foreach"):
                     tasks.append(None)
                     continue
@@ -1198,7 +1325,7 @@ class FlowRunner:
                 cp["args"] = args
                 for k, v in args.items():
                     cp[k] = v
-                tasks.append(asyncio.create_task(self.run(target, cp)))
+                tasks.append(asyncio.create_task(self.run(target, cp, **self._child_context(root))))
             timeout = float(step.get("timeout") or _DEFAULT_JOIN_TIMEOUT)
             for tk in tasks:
                 if tk is None:
@@ -1402,7 +1529,7 @@ class FlowRunner:
                     out, agent, call_status = await self._run_gosub(step, ctx, payload, root, depth, frame_origin)
                     ctx["calls"][sid] = {"output": out, "status": call_status}
                 elif stype == "spawn":
-                    out, agent, call_status = await self._run_spawn(step, ctx, payload, frame_origin)
+                    out, agent, call_status = await self._run_spawn(step, ctx, payload, frame_origin, root)
                     ctx.setdefault("spawns", {})[sid] = {"status": call_status}
                 elif stype == "join":
                     out, agent, call_status = await self._run_join(step, ctx, root)
@@ -1413,7 +1540,7 @@ class FlowRunner:
                     # message may reference {{error.message}}) and continue.
                     msg = _render(str(step.get("message") or ""), ctx)
                     if msg:
-                        self_delivered = await self._deliver(payload, msg)
+                        self_delivered = await self._deliver(payload, msg, root=root)
                     out, agent = (msg or "(error handler)"), ""
                 elif stype == "set":
                     name = str(step.get("var") or "")
@@ -1445,9 +1572,9 @@ class FlowRunner:
                 elif stype == "vision":
                     out, agent = await self._run_vision_step(step, ctx, payload, root)
                 elif stype == "input":
-                    out, agent = await self._run_input_step(step, ctx, payload, flow, dry=dry)
+                    out, agent = await self._run_input_step(step, ctx, payload, flow, dry=dry, root=root)
                 elif stype == "emit":
-                    out, agent = await self._emit(step, ctx, payload), ""
+                    out, agent = await self._emit(step, ctx, payload, root), ""
                 else:
                     out, agent = f"(unknown step type '{stype}')", ""
 
@@ -1512,8 +1639,14 @@ class FlowRunner:
 
     # ── run (root concerns: control, budget, delivery, persistence) ─────
 
-    async def run(self, flow: dict[str, Any], payload: dict[str, Any] | None = None, *, dry: bool = False, run_id: str | None = None) -> dict[str, Any]:
+    async def run(self, flow: dict[str, Any], payload: dict[str, Any] | None = None, *, dry: bool = False,
+                  run_id: str | None = None, owner_id: str | None = None,
+                  is_admin: bool = False) -> dict[str, Any]:
+        """Run *flow*. `owner_id`/`is_admin` say who the run acts as (a route's
+        user; a scheduler job's owner); omitted, it acts as the flow's owner."""
         payload = payload or {}
+        owner, admin, explicit = await self._run_context(flow, owner_id, is_admin)
+        scope = self._scope_for(owner, admin)
         if dry:
             run_id = ""
         elif not run_id:
@@ -1527,12 +1660,20 @@ class FlowRunner:
         guard = flow.get("guardrails") or {}
         budget = {"steps_left": int(guard.get("max_total_steps", _DEFAULT_MAX_TOTAL_STEPS))}
         depth_cap = int(guard.get("max_depth", _DEFAULT_MAX_DEPTH))
-        root = _Root(run_id=run_id, control=ctrl, dry=dry, budget=budget, depth_cap=depth_cap)
+        root = _Root(run_id=run_id, control=ctrl, dry=dry, budget=budget, depth_cap=depth_cap,
+                     owner_id=owner, is_admin=admin, scope=scope)
 
         status = "done"
         error = ""
         final_text = ""
         try:
+            # Tenancy: a user runs only their own flows, on their own agents'
+            # messages (the origin is read from and delivered to).
+            if explicit and scope is not None and str(flow.get("owner_id") or "") != scope:
+                raise RuntimeError("this flow belongs to another user")
+            refusal = self._origin_refusal(payload, scope)
+            if refusal:
+                raise RuntimeError(refusal)
             result = await self._run_frame(flow, payload, root=root, depth=0)
             final_text = str(result.get("value") or "")
             # Deliver the root flow's output to the user channel (children never
@@ -1543,14 +1684,14 @@ class FlowRunner:
             out_channel = str(output.get("channel") or "log")
             if not result.get("self_delivered") and not dry and out_channel in ("whatsapp", "same", "glasses", "web") and final_text:
                 try:
-                    await self._deliver(payload, str(final_text))
+                    await self._deliver(payload, str(final_text), root=root)
                 except Exception as exc:
                     log.warning("flow output delivery failed: %s", exc)
         except _FlowStopped:
             status = "stopped"
             if ctrl is not None and ctrl.stop_message:
                 try:
-                    await self._deliver(payload, ctrl.stop_message)
+                    await self._deliver(payload, ctrl.stop_message, root=root)
                 except Exception as exc:
                     log.warning("flow stop message delivery failed: %s", exc)
         except Exception as exc:
@@ -1561,7 +1702,7 @@ class FlowRunner:
                 status = "stopped"
                 if ctrl.stop_message:
                     try:
-                        await self._deliver(payload, ctrl.stop_message)
+                        await self._deliver(payload, ctrl.stop_message, root=root)
                     except Exception as dexc:
                         log.warning("flow stop message delivery failed: %s", dexc)
             else:
