@@ -7,6 +7,7 @@ Scoped to the logged-in user. Phase 1 surface:
   * POST    /fd/autonomy/actions/{id}/approve|reject — resolve a pending action
   * GET     /fd/autonomy/reliability   — learned per-kind weights
   * POST    /fd/autonomy/nudge         — force one arbiter pass (no-op until Phase 2)
+  * GET/PUT /fd/autonomy/whatsapp      — this user's WhatsApp nudge number (+ POST …/test)
 
 Approve/reject already move ledger rows; wiring them through to ``follow_through``
 (intentions) and dispatch lands with Topics 1–3.
@@ -15,6 +16,7 @@ Approve/reject already move ledger rows; wiring them through to ``follow_through
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
@@ -73,6 +75,103 @@ async def put_config_route(
     overrides = body.get("config") if isinstance(body.get("config"), dict) else body
     effective = save_config(uid, overrides)
     return {"config": effective, "defaults": global_defaults()}
+
+
+# ── WhatsApp nudge delivery (the Connections card) ──────────────────
+
+
+def _waid_list(raw: Any) -> list[str]:
+    """Normalise typed numbers: ``"+385 91 123-4567, 111"`` → ``["385911234567", "111"]``."""
+    out: list[str] = []
+    for part in str(raw or "").split(","):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        if digits and digits not in out:
+            out.append(digits)
+    return out
+
+
+def _whatsapp_state(uid: str) -> dict[str, Any]:
+    """Where this user's nudges go right now — never the deck's allowlist itself."""
+    from captain_claw.flight_deck.fd_dispatch import _nudge_waids
+    from captain_claw.flight_deck.whatsapp_bridge import _allowed_waids, _env, _send_url
+
+    cfg = resolve_config(uid)
+    recipients, issue = _nudge_waids(cfg)
+    return {
+        # Without send credentials a push silently no-ops, so "configured"
+        # needs them as well as the allowlist.
+        "bridge_configured": bool(_allowed_waids() and _env("WHATSAPP_ACCESS_TOKEN") and _send_url()),
+        "auth_enabled": _auth_enabled(),
+        "autonomy_enabled": bool(cfg.get("enabled")),
+        "nudge_to_whatsapp": bool(cfg.get("nudge_to_whatsapp", True)),
+        "notify_waid": str(cfg.get("notify_waid") or ""),
+        "recipients": recipients,
+        "issue": issue,
+    }
+
+
+@router.get("/whatsapp")
+async def get_whatsapp_route(
+    request: Request,
+    _user: dict | None = Depends(get_optional_user),
+):
+    """This user's WhatsApp nudge binding and where nudges would be delivered."""
+    return _whatsapp_state(_user_id(request))
+
+
+@router.put("/whatsapp")
+async def put_whatsapp_route(
+    request: Request,
+    _user: dict | None = Depends(get_optional_user),
+):
+    """Set ``notify_waid`` and/or ``nudge_to_whatsapp``, merged into the user's
+    other overrides. Every number must be on the bridge allowlist."""
+    from captain_claw.flight_deck.whatsapp_bridge import _allowed_waids
+
+    uid = _user_id(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+    overrides = get_store().get_overrides(uid)
+    if "notify_waid" in body:
+        waids = _waid_list(body.get("notify_waid"))
+        allowed = _allowed_waids()
+        if waids and not allowed:
+            raise HTTPException(status_code=400,
+                                detail="WhatsApp isn't set up on this deck (WHATSAPP_ALLOWED_WAIDS is empty).")
+        missing = [w for w in waids if w not in allowed]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{', '.join(missing)} is not on this deck's WhatsApp allowlist — "
+                       "ask an admin to add it to WHATSAPP_ALLOWED_WAIDS.")
+        overrides["notify_waid"] = ",".join(waids)
+    if "nudge_to_whatsapp" in body:
+        overrides["nudge_to_whatsapp"] = bool(body.get("nudge_to_whatsapp"))
+    save_config(uid, overrides)
+    return _whatsapp_state(uid)
+
+
+@router.post("/whatsapp/test")
+async def test_whatsapp_route(
+    request: Request,
+    _user: dict | None = Depends(get_optional_user),
+):
+    """Send a test message to wherever this user's nudges would go."""
+    from captain_claw.flight_deck.whatsapp_bridge import push_to_waid
+
+    state = _whatsapp_state(_user_id(request))
+    recipients = state["recipients"]
+    if not state["bridge_configured"]:
+        raise HTTPException(status_code=400, detail="WhatsApp isn't set up on this deck.")
+    if not recipients:
+        raise HTTPException(status_code=400,
+                            detail=state["issue"] or "WhatsApp isn't set up on this deck.")
+    sent = 0
+    for waid in recipients:
+        if await push_to_waid(waid, "Captain Claw: test nudge — autonomous nudges will reach you here."):
+            sent += 1
+    return {"sent": sent, "total": len(recipients)}
 
 
 @router.get("/actions")

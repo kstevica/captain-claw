@@ -101,7 +101,14 @@ def resolve_config(user_id: str) -> dict[str, Any]:
     no FK to the users table — so it works identically in single-user and
     multi-tenant deployments.
     """
-    return merge_config(get_store().get_overrides(user_id))
+    overrides = get_store().get_overrides(user_id)
+    cfg = merge_config(overrides)
+    # A WhatsApp number is personal: with auth on only the user's own binding
+    # counts — a deck-wide notify_waid would route everyone's nudges to one phone.
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+    if _fd_auth_enabled():
+        cfg["notify_waid"] = str(overrides.get("notify_waid") or "")
+    return cfg
 
 
 def save_config(user_id: str, overrides: dict[str, Any]) -> dict[str, Any]:
