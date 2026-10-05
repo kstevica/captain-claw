@@ -139,7 +139,10 @@ async def dispatch_local_command(
         return "continue"
 
     if result == "SESSIONS":
-        sessions = await agent.session_manager.list_sessions(limit=20)
+        from captain_claw.speaker import list_owner_sessions
+
+        # Shared-agent members' private sessions are not listed or indexed.
+        sessions = await list_owner_sessions(agent.session_manager, limit=20)
         ui.print_session_list(
             sessions,
             current_session_id=agent.session.id if agent.session else None,
@@ -259,10 +262,16 @@ async def dispatch_local_command(
         return "continue"
 
     if result.startswith("SESSION_SELECT:"):
+        from captain_claw.speaker import member_session_refusal, select_owner_session
+
         selector = result.split(":", 1)[1].strip()
-        selected = await agent.session_manager.select_session(selector)
+        selected = await select_owner_session(agent.session_manager, selector)
         if not selected:
             ui.print_error(f"Session not found: {selector}")
+            return "continue"
+        refusal = member_session_refusal(selected)
+        if refusal:
+            ui.print_error(refusal)
             return "continue"
         agent.session = selected
         agent.refresh_session_runtime_flags()
@@ -381,9 +390,15 @@ async def dispatch_local_command(
         if not selector or not prompt:
             ui.print_error("Usage: /session run <id|name|#index> <prompt>")
             return "continue"
-        selected = await agent.session_manager.select_session(selector)
+        from captain_claw.speaker import member_session_refusal, select_owner_session
+
+        selected = await select_owner_session(agent.session_manager, selector)
         if not selected:
             ui.print_error(f"Session not found: {selector}")
+            return "continue"
+        refusal = member_session_refusal(selected)
+        if refusal:
+            ui.print_error(refusal)
             return "continue"
 
         async def _run_selected_session_prompt() -> None:
@@ -430,11 +445,15 @@ async def dispatch_local_command(
             {"step": "resolve_parents", "parent_one_selector": parent_one_selector, "parent_two_selector": parent_two_selector},
             "step=resolve_parents\nstatus=locating_parent_sessions",
         )
-        parent_one = await agent.session_manager.select_session(parent_one_selector)
+        from captain_claw.speaker import select_owner_session
+
+        # Same `#N` / name resolution as the session list (members' sessions
+        # are not indexed).
+        parent_one = await select_owner_session(agent.session_manager, parent_one_selector)
         if not parent_one:
             ui.print_error(f"Session not found: {parent_one_selector}")
             return "continue"
-        parent_two = await agent.session_manager.select_session(parent_two_selector)
+        parent_two = await select_owner_session(agent.session_manager, parent_two_selector)
         if not parent_two:
             ui.print_error(f"Session not found: {parent_two_selector}")
             return "continue"

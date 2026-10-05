@@ -152,7 +152,8 @@ async def handle_chat(
     no_broadcast: bool = False,
     no_next_steps: bool = False,
     no_rephrase: bool = False,
-) -> None:
+    speaker_turn: str | None = None,
+) -> bool:
     """Process a chat message through the agent.
 
     The actual work is launched as a background asyncio task so that the
@@ -164,10 +165,32 @@ async def handle_chat(
     messages whose timestamp is ≤ that value before the new message is
     processed.  This lets the user "fork" from an earlier point in the
     conversation.
+
+    Returns True iff the ``_run_agent`` task was launched (it then owns the
+    turn's final ``ready`` frame). Every early return is False and emits no
+    ready frame — on a shared-agent member socket the speaker gate owns it.
+    Existing callers ignore the return value.
     """
+    from captain_claw.speaker import speaker_error, speaker_key_of
+
+    speaker_key = speaker_key_of(ws)
     if not server.agent:
-        await server._send(ws, {"type": "error", "message": "Agent not initialized"})
-        return
+        await server._send(ws, speaker_error("invalid", "Agent not initialized")
+                           if speaker_key is not None
+                           else {"type": "error", "message": "Agent not initialized"})
+        return False
+
+    # ── Shared-agent member: own instance, own busy flag, own sockets ──
+    # Handled entirely apart from the owner path below, so a member turn
+    # never reads WhatsApp/origin stamping, attachments or flows.
+    if speaker_key is not None:
+        return await _handle_speaker_chat(
+            server, ws, content, speaker_key,
+            rewind_to=rewind_to,
+            no_next_steps=no_next_steps,
+            no_rephrase=no_rephrase,
+            speaker_turn=speaker_turn or "",
+        )
 
     # ── Resolve the agent to use ─────────────────────────────────
     public_session_id: str | None = getattr(ws, "_public_session_id", None)
@@ -183,14 +206,14 @@ async def handle_chat(
             agent = await server._get_public_agent(public_session_id)
         except Exception as e:
             await server._send(ws, {"type": "error", "message": f"Session error: {e}"})
-            return
+            return False
         # Check if this specific agent is busy.
         if getattr(agent, "_public_busy", False):
             await server._send(ws, {
                 "type": "error",
                 "message": "Your session is busy processing. Please wait.",
             })
-            return
+            return False
         # Register the WS for this session so callbacks can reach it.
         server._public_active_ws[public_session_id] = ws
     elif lane != server.LANE_MAIN:
@@ -200,13 +223,13 @@ async def handle_chat(
             agent = await server._get_lane_agent(lane)
         except Exception as e:
             await server._send(ws, {"type": "error", "message": f"Lane error: {e}"})
-            return
+            return False
         if getattr(agent, "_lane_busy", False):
             await server._send(ws, {
                 "type": "error",
                 "message": f"Lane {lane} is busy processing another request. Please wait.",
             })
-            return
+            return False
     else:
         # Admin / normal mode — use the main shared agent (lane A).
         if server._busy:
@@ -214,7 +237,7 @@ async def handle_chat(
                 "type": "error",
                 "message": "Agent is busy processing another request. Please wait.",
             })
-            return
+            return False
         agent = server.agent
 
     # ── Remember the originating WhatsApp chat (if any) ──
@@ -243,25 +266,7 @@ async def handle_chat(
             pass
 
     # ── History branching: rewind session to a prior point ──
-    if rewind_to and agent.session:
-        session = agent.session
-        before = len(session.messages)
-        session.messages = [
-            m for m in session.messages
-            if (m.get("timestamp") or "") <= rewind_to
-        ]
-        after = len(session.messages)
-        if before != after:
-            log.info(
-                "Session rewound for history branch",
-                before=before, after=after, rewind_to=rewind_to,
-            )
-            try:
-                from captain_claw.session import get_session_manager
-                sm = get_session_manager()
-                await sm.save_session(session)
-            except Exception as e:
-                log.warning("Failed to persist rewound session", error=str(e))
+    await _rewind_session(agent, rewind_to)
 
     # Build attachment prefix — supports single or multiple files.
     effective_content = content
@@ -377,44 +382,8 @@ async def handle_chat(
     if not hasattr(server, "_recent_prompts"):
         server._recent_prompts: list[str] = []
 
-    _naming_model = getattr(agent.provider, "model", "")
-    _naming_provider = getattr(agent.provider, "provider", "")
-    if _naming_model and "/" not in _naming_model and _naming_provider:
-        _naming_model = f"{_naming_provider}/{_naming_model}"
-    _naming_api_key = getattr(agent.provider, "api_key", None)
-    _naming_base_url = getattr(agent.provider, "base_url", None)
-    _naming_extra_headers = getattr(agent.provider, "extra_headers", None)
-    # Mark provider class so the namer can skip litellm entirely for
-    # the ChatGPT/Codex OAuth path (no api_key, OAuth headers attached
-    # only just-in-time inside complete()).
-    _naming_provider_class = type(agent.provider).__name__
-
-    log.info(
-        "Task naming: setup",
-        model=_naming_model,
-        has_key=bool(_naming_api_key),
-        key_prefix=(_naming_api_key[:8] + "...") if _naming_api_key else "none",
-    )
-
-    async def _name_and_store() -> None:
-        # A headless FD worker (Basna/Vatra/Council/Code, or an Iskra being) has
-        # no conversation to name — skip the extra, concurrent naming LLM call.
-        from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
-        if _is_fd_spawned_worker() or _naming_provider_class == "ChatGPTResponsesProvider":
-            agent._current_task_name = ""
-            return
-        name = await _generate_task_name(
-            content, server._recent_prompts, _naming_model, _naming_api_key,
-            _naming_base_url, _naming_extra_headers,
-        )
-        agent._current_task_name = name
-
-    naming_task = asyncio.create_task(_name_and_store())
-
-    if not _is_continuation(content):
-        server._recent_prompts.append(content[:500])
-        if len(server._recent_prompts) > _MAX_RECENT_PROMPTS:
-            server._recent_prompts.pop(0)
+    naming_task = _start_task_naming(agent, content, server._recent_prompts)
+    _remember_prompt(server._recent_prompts, content)
 
     # Launch the heavy work as a background task.
     task = asyncio.create_task(_run_agent(
@@ -443,6 +412,163 @@ async def handle_chat(
         agent._public_task = task  # type: ignore[attr-defined]
     else:
         server._active_task = task
+    return True
+
+
+async def _rewind_session(agent: Any, rewind_to: str | None) -> None:
+    """History branching: truncate *agent*'s session to messages at or before
+    *rewind_to* (an ISO-8601 timestamp) and persist it."""
+    if not rewind_to or not agent.session:
+        return
+    session = agent.session
+    before = len(session.messages)
+    session.messages = [
+        m for m in session.messages
+        if (m.get("timestamp") or "") <= rewind_to
+    ]
+    after = len(session.messages)
+    if before != after:
+        log.info(
+            "Session rewound for history branch",
+            before=before, after=after, rewind_to=rewind_to,
+        )
+        try:
+            from captain_claw.session import get_session_manager
+            sm = get_session_manager()
+            await sm.save_session(session)
+        except Exception as e:
+            log.warning("Failed to persist rewound session", error=str(e))
+
+
+def _start_task_naming(agent: Any, content: str, recent_prompts: list[str]) -> asyncio.Task:
+    """Name the task with a micro LLM call, concurrently with the turn.
+
+    *recent_prompts* is read when the naming call runs (after the caller
+    has recorded *content* in it), so continuations get their context.
+    """
+    _naming_model = getattr(agent.provider, "model", "")
+    _naming_provider = getattr(agent.provider, "provider", "")
+    if _naming_model and "/" not in _naming_model and _naming_provider:
+        _naming_model = f"{_naming_provider}/{_naming_model}"
+    _naming_api_key = getattr(agent.provider, "api_key", None)
+    _naming_base_url = getattr(agent.provider, "base_url", None)
+    _naming_extra_headers = getattr(agent.provider, "extra_headers", None)
+    # Mark provider class so the namer can skip litellm entirely for
+    # the ChatGPT/Codex OAuth path (no api_key, OAuth headers attached
+    # only just-in-time inside complete()).
+    _naming_provider_class = type(agent.provider).__name__
+
+    log.info(
+        "Task naming: setup",
+        model=_naming_model,
+        has_key=bool(_naming_api_key),
+        key_prefix=(_naming_api_key[:8] + "...") if _naming_api_key else "none",
+    )
+
+    async def _name_and_store() -> None:
+        # A headless FD worker (Basna/Vatra/Council/Code, or an Iskra being) has
+        # no conversation to name — skip the extra, concurrent naming LLM call.
+        from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+        if _is_fd_spawned_worker() or _naming_provider_class == "ChatGPTResponsesProvider":
+            agent._current_task_name = ""
+            return
+        name = await _generate_task_name(
+            content, recent_prompts, _naming_model, _naming_api_key,
+            _naming_base_url, _naming_extra_headers,
+        )
+        agent._current_task_name = name
+
+    return asyncio.create_task(_name_and_store())
+
+
+def _remember_prompt(recent_prompts: list[str], content: str) -> None:
+    """Keep the last few non-continuation prompts for naming continuations."""
+    if not _is_continuation(content):
+        recent_prompts.append(content[:500])
+        if len(recent_prompts) > _MAX_RECENT_PROMPTS:
+            recent_prompts.pop(0)
+
+
+async def _handle_speaker_chat(
+    server: WebServer,
+    ws: web.WebSocketResponse,
+    content: str,
+    speaker_key: tuple[str, str],
+    *,
+    rewind_to: str | None,
+    no_next_steps: bool,
+    no_rephrase: bool,
+    speaker_turn: str,
+) -> bool:
+    """A shared-agent member's chat turn on their own instance.
+
+    Returns True iff ``_run_agent`` was launched (it then sends the single
+    ``ready``/``turn_end`` frame). Busy/capacity/instance errors go out as
+    ``error`` frames and return False — the speaker gate sends turn_end.
+    """
+    from captain_claw.speaker import speaker_error
+    from captain_claw.web_server import SpeakerCapacityError
+
+    try:
+        agent = await server._get_speaker_agent(ws._speaker_principal)
+    except SpeakerCapacityError:
+        await server._send(ws, speaker_error(
+            "capacity", "This agent is at member capacity. Try again later.",
+        ))
+        return False
+    except Exception as e:
+        log.error("Speaker instance error", error=str(e))
+        await server._send(ws, speaker_error(
+            "invalid", "Couldn't open your conversation on this agent.",
+        ))
+        return False
+    if getattr(agent, "_lane_busy", False):
+        await server._send(ws, speaker_error(
+            "busy", "Your previous message is still being answered.",
+        ))
+        return False
+    # Claim the instance synchronously — no await between the check and the
+    # claim, so a second frame (or a second tab) can't start a parallel turn
+    # before the task below gets to run.
+    agent._lane_busy = True  # type: ignore[attr-defined]
+    try:
+        main = server.agent
+        agent._fleet_identity = getattr(main, "_fleet_identity", None)  # type: ignore[attr-defined]
+        agent._fleet_instructions = getattr(main, "_fleet_instructions", "") or ""  # type: ignore[attr-defined]
+        agent._fd_url = getattr(main, "_fd_url", "") or ""  # type: ignore[attr-defined]
+
+        await _rewind_session(agent, rewind_to)
+
+        send = server._speaker_send(speaker_key)
+        send({"type": "status", "status": "thinking"})
+        send({
+            "type": "chat_message", "role": "user",
+            "content": content,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+
+        recent = getattr(agent, "_recent_prompts", None)
+        if not isinstance(recent, list):
+            recent = []
+            agent._recent_prompts = recent  # type: ignore[attr-defined]
+        naming_task = _start_task_naming(agent, content, recent)
+        _remember_prompt(recent, content)
+
+        task = asyncio.create_task(_run_agent(
+            server, ws, agent, content, naming_task,
+            lane=speaker_key[1],
+            no_flow=True,
+            no_next_steps=no_next_steps,
+            no_rephrase=no_rephrase,
+            flow_text=content,
+            speaker_key=speaker_key,
+            speaker_turn=speaker_turn,
+        ))
+        agent._public_task = task  # type: ignore[attr-defined]
+        return True
+    except BaseException:
+        agent._lane_busy = False  # type: ignore[attr-defined]
+        raise
 
 
 async def _prefix_video_analysis(
@@ -653,8 +779,16 @@ async def _run_agent(
     no_rephrase: bool = False,
     flow_text: str = "",
     flow_attach: dict | None = None,
+    speaker_key: tuple[str, str] | None = None,
+    speaker_turn: str = "",
 ) -> None:
-    """Background coroutine that drives the agent and finalises the turn."""
+    """Background coroutine that drives the agent and finalises the turn.
+
+    With *speaker_key* (a shared-agent member's turn) the member's principal
+    is bound for the whole turn, output goes only to that member's sockets,
+    flows never run, and the final ``ready`` frame carries
+    ``turn_end=speaker_turn`` — exactly one per launched turn, on every path.
+    """
     import json as _json
 
     def _send_to_ws(msg: dict) -> None:
@@ -667,8 +801,12 @@ async def _run_agent(
     # step runs on a channel-connected agent (e.g. the WhatsApp origin agent).
     # A lane streams to every socket watching that lane; lane A (and anything
     # with no lane) still broadcasts, because lane A IS the main agent.
-    _is_side_lane = lane != server.LANE_MAIN
-    if is_public or no_broadcast:
+    # A member's turn is a side lane of its own, whatever its lane letter.
+    _is_side_lane = bool(speaker_key) or lane != server.LANE_MAIN
+    if speaker_key:
+        send = server._speaker_send(speaker_key)
+        no_flow = True
+    elif is_public or no_broadcast:
         send = _send_to_ws
     elif _is_side_lane:
         send = server._lane_send(lane)
@@ -684,7 +822,24 @@ async def _run_agent(
         agent._lane_busy = True  # type: ignore[attr-defined]
 
     _video_policy_slug = None  # set when a video turn restricts script/shell tools
+    _speaker_tok = None
     try:
+        if speaker_key:
+            from captain_claw import speaker as _speaker
+            _speaker_tok = _speaker.bind(getattr(agent, "_speaker_principal", None))
+            # Commons caches (insights, intuitions) are refreshed for member
+            # turns when stale; the owner's caches never are.
+            import time as _time
+            _now = _time.monotonic()
+            _refreshed = float(getattr(agent, "_speaker_cache_refreshed_at", 0.0) or 0.0)
+            if _now - _refreshed > _speaker.SPEAKER_CACHE_REFRESH_S:
+                for _refresh in ("_refresh_insights_context_cache", "_refresh_nervous_system_cache"):
+                    try:
+                        await getattr(agent, _refresh)()
+                    except Exception:
+                        pass
+                agent._speaker_cache_refreshed_at = _now  # type: ignore[attr-defined]
+
         if naming_task is not None:
             try:
                 await asyncio.wait_for(naming_task, timeout=5.0)
@@ -769,7 +924,8 @@ async def _run_agent(
 
         # Route /orchestrate requests to the orchestrator (admin only).
         stripped = content.strip()
-        if not is_public and stripped.lower().startswith("/orchestrate ") and server._orchestrator:
+        if (not is_public and not speaker_key
+                and stripped.lower().startswith("/orchestrate ") and server._orchestrator):
             orchestrate_input = stripped[len("/orchestrate "):].strip()
             if not orchestrate_input:
                 send({"type": "error", "message": "Usage: /orchestrate <request>"})
@@ -890,7 +1046,8 @@ async def _run_agent(
         # beings (and normal agents) but NOT other FD task workers. Internally
         # throttled (cooldown + max/day + quiet hours), so it fires rarely, not
         # the per-faculty-call thrash — one occasional generation is acceptable.
-        if (not _worker or _being_worker) and not is_public:
+        # Never for a member's turn: proposals go to the owner's channels.
+        if (not _worker or _being_worker) and not is_public and not speaker_key:
             try:
                 import asyncio as _asyncio4
                 from captain_claw.intentions_generator import maybe_auto_propose
@@ -915,8 +1072,15 @@ async def _run_agent(
             pass
 
     except Exception as e:
-        log.error("Chat error", error=str(e), public=is_public)
-        send({"type": "error", "message": f"Error: {str(e)}"})
+        log.error("Chat error", error=str(e), public=is_public, speaker=bool(speaker_key))
+        if speaker_key:
+            # A member never sees the exception text: it can carry the
+            # owner's provider errors, LLM base URLs or key fragments.
+            from captain_claw.speaker import TURN_FAILED_MESSAGE, speaker_error
+
+            send(speaker_error("invalid", TURN_FAILED_MESSAGE))
+        else:
+            send({"type": "error", "message": f"Error: {str(e)}"})
     finally:
         try:
             agent._suppress_memory_context = False  # type: ignore[attr-defined]
@@ -938,7 +1102,12 @@ async def _run_agent(
         # Clear any /btw instructions accumulated during this task.
         if hasattr(agent, "_btw_instructions"):
             agent._btw_instructions = []
-        send({"type": "status", "status": "ready"})
+        send({
+            "type": "status", "status": "ready",
+            **({"turn_end": speaker_turn} if speaker_key else {}),
+        })
+        if _speaker_tok is not None:
+            _speaker.reset(_speaker_tok)
         # Inbound peer notifications are now drained by the serialized
         # _inbound_queue_consumer (web_server.py), which waits for _busy to
         # clear — no ad-hoc draining needed here.

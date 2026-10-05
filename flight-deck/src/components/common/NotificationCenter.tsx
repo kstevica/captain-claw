@@ -1,6 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Bell, X, CheckCheck, Trash2, AlertTriangle, Info, CheckCircle2, AlertCircle } from 'lucide-react'
 import { useNotificationStore, type Notification, type NotificationType } from '../../stores/notificationStore'
+import { useAuthStore, selectKioskLocked } from '../../stores/authStore'
+import { useChatStore } from '../../stores/chatStore'
+import { useSharedAgentStore } from '../../stores/sharedAgentStore'
+import { useUIStore } from '../../stores/uiStore'
+import {
+  SHARED_SECTION_ID, sharedNotificationAction, type SharedNotificationAction,
+} from '../../utils/sharedAgent'
 
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
@@ -62,9 +69,40 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
   )
 }
 
-function NotificationDropdown({ onClose: _onClose }: { onClose: () => void }) {
+// The Agent Desktop may still be mounting after setView('desktop'): look for
+// the "Shared with me" section for a moment before giving up.
+function revealSharedSection(tries = 20): void {
+  const el = document.getElementById(SHARED_SECTION_ID)
+  if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
+  if (tries > 0) setTimeout(() => revealSharedSection(tries - 1), 50)
+}
+
+function NotificationDropdown({ onClose }: { onClose: () => void }) {
   const { notifications, markRead, markAllRead, remove, clear } = useNotificationStore()
   const [filter, setFilter] = useState<NotificationType | 'all'>('all')
+  // A notice about an agent someone shared with you leads to it. The list is
+  // only polled where agents are shown, so refresh it when the bell opens.
+  const sharedAgents = useSharedAgentStore((s) => s.agents)
+  const kioskLocked = useAuthStore(selectKioskLocked)
+  const layoutMode = useUIStore((s) => s.layoutMode)
+  const layout = kioskLocked || layoutMode === 'simple' ? 'simple' : 'full'
+  const aboutAgents = notifications.some((n) => n.refType === 'agent')
+  useEffect(() => {
+    if (aboutAgents) void useSharedAgentStore.getState().fetch()
+  }, [aboutAgents])
+
+  const activate = (action: SharedNotificationAction) => {
+    if (action.kind === 'none') return
+    onClose()
+    if (action.kind === 'chat') {
+      useChatStore.getState().openSharedChat(action.agentRef, action.name, action.ownerName)
+    } else if (layout === 'full') {
+      useUIStore.getState().setView('desktop')
+      revealSharedSection()
+    } else {
+      useUIStore.getState().setSimpleLeftOpen(true)
+    }
+  }
 
   const filtered = filter === 'all' ? notifications : notifications.filter((n) => n.type === filter)
 
@@ -104,7 +142,14 @@ function NotificationDropdown({ onClose: _onClose }: { onClose: () => void }) {
           <div className="px-3 py-6 text-center text-xs text-zinc-600">No notifications</div>
         ) : (
           filtered.map((n) => (
-            <NotificationItem key={n.id} notification={n} onRead={() => markRead(n.id)} onRemove={() => remove(n.id)} />
+            <NotificationItem
+              key={n.id}
+              notification={n}
+              action={sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
+              onRead={() => markRead(n.id)}
+              onActivate={activate}
+              onRemove={() => remove(n.id)}
+            />
           ))
         )}
       </div>
@@ -112,7 +157,13 @@ function NotificationDropdown({ onClose: _onClose }: { onClose: () => void }) {
   )
 }
 
-function NotificationItem({ notification: n, onRead, onRemove }: { notification: Notification; onRead: () => void; onRemove: () => void }) {
+function NotificationItem({ notification: n, action, onRead, onActivate, onRemove }: {
+  notification: Notification
+  action: SharedNotificationAction
+  onRead: () => void
+  onActivate: (action: SharedNotificationAction) => void
+  onRemove: () => void
+}) {
   const Icon = typeIcon[n.type]
   const color = typeColor[n.type]
 
@@ -121,7 +172,8 @@ function NotificationItem({ notification: n, onRead, onRemove }: { notification:
       className={`group flex items-start gap-2 border-b border-zinc-800/40 px-3 py-2 hover:bg-zinc-900/30 cursor-pointer ${
         !n.read ? 'bg-zinc-900/20' : ''
       }`}
-      onClick={onRead}
+      onClick={() => { onRead(); onActivate(action) }}
+      title={action.kind === 'chat' ? `Chat with ${action.name}` : undefined}
     >
       <Icon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${color}`} />
       <div className="min-w-0 flex-1">
@@ -130,6 +182,9 @@ function NotificationItem({ notification: n, onRead, onRemove }: { notification:
           {!n.read && <span className="h-1.5 w-1.5 rounded-full bg-violet-500" />}
         </div>
         <p className="text-[10px] text-zinc-500 mt-0.5">{n.message}</p>
+        {action.kind !== 'none' && (
+          <p className="mt-0.5 text-[10px] text-sky-700 dark:text-sky-400">{action.hint}</p>
+        )}
         <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-zinc-600">
           {n.agentName && <span>{n.agentName}</span>}
           <span>{relativeTime(n.createdAt)}</span>

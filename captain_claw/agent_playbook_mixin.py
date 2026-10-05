@@ -381,6 +381,18 @@ class AgentPlaybookMixin:
                 result[entry.id] = scripts
         return result
 
+    async def _playbook_scripts_for_prompt(
+        self, entries: list[PlaybookEntry],
+    ) -> dict[str, list[ScriptEntry]]:
+        """Linked scripts to show alongside injected playbooks.
+
+        None on a shared-agent member's turn: the owner's scripts (names,
+        file paths, purposes) are not theirs to see, and they can't run them.
+        """
+        if getattr(self, "_speaker_scoped", False) is True:
+            return {}
+        return await self._resolve_playbook_scripts(entries)
+
     async def _build_playbook_block(
         self,
         user_input: str,
@@ -413,7 +425,7 @@ class AgentPlaybookMixin:
             except Exception:
                 pass  # best-effort
 
-        resolved_scripts = await self._resolve_playbook_scripts(entries)
+        resolved_scripts = await self._playbook_scripts_for_prompt(entries)
         block = format_playbook_block(entries, resolved_scripts=resolved_scripts)
         self._emit_playbook_event(
             "injected",
@@ -452,7 +464,7 @@ class AgentPlaybookMixin:
             except Exception:
                 pass
 
-        resolved_scripts = await self._resolve_playbook_scripts(entries)
+        resolved_scripts = await self._playbook_scripts_for_prompt(entries)
         return format_playbook_context_note(entries, resolved_scripts=resolved_scripts)
 
     def _build_playbook_context_note_sync(

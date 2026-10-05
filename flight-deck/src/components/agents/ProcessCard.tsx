@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift, Bug } from 'lucide-react'
+import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift, Bug, Users } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -21,6 +21,10 @@ import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { ModelSelector } from '../common/ModelSelector'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
+import { ShareModal } from '../common/ShareModal'
+import { useSharedAgentStore } from '../../stores/sharedAgentStore'
+import { isManagedAgent } from '../../utils/managedAgents'
+import { OWNER_SHARE_NOTE } from '../../utils/sharedAgent'
 
 // Cap log buffer to avoid unbounded browser memory growth during long polling sessions
 const LOG_TAIL_LINES = 100
@@ -123,6 +127,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [showTopics, setShowTopics] = useState(false)
   const [showMergeReflection, setShowMergeReflection] = useState(false)
   const [showPendingInsights, setShowPendingInsights] = useState(false)
+  const [showShare, setShowShare] = useState(false)
+  // Sharing: only on decks that share agents, never a Flight Deck–managed
+  // worker, and only once the agent has a stable ref (it has an access token).
+  const sharingEnabled = useSharedAgentStore((s) => s.enabled)
+  const canShare = sharingEnabled && !!proc.agent_ref && !isManagedAgent(proc.slug, proc.description || '')
   const cognitiveMode = getCognitiveMode(proc.slug)
   const [modeSaved, setModeSaved] = useState(false)
   const ecoMode = getEcoMode(proc.slug)
@@ -225,6 +234,8 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     onStart: () => doAction('start', () => startProcess(proc.slug)),
     onStop: () => doAction('stop', () => stopProcess(proc.slug)),
     onRestart: () => doAction('restart', () => restartProcess(proc.slug)),
+    onShare: () => setShowShare(true),
+    canShare,
     onClone: () => {
       const newName = prompt(`Clone '${agentName}'\n\nEnter a name for the cloned agent:`, `${agentName}-clone`)
       if (newName?.trim())
@@ -251,10 +262,23 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   }
 
   // ── Config modal (rendered in all view modes via portal) ──
-  const configModal = showConfig && createPortal(
-    <AgentConfigEditor kind="process" identifier={proc.slug} agentName={agentName} onClose={() => setShowConfig(false)} />,
-    document.body
-  )
+  const configModal = (<>
+    {showConfig && createPortal(
+      <AgentConfigEditor kind="process" identifier={proc.slug} agentName={agentName} onClose={() => setShowConfig(false)} />,
+      document.body
+    )}
+    {showShare && canShare && createPortal(
+      <ShareModal
+        resourceType="agent"
+        resourceId={proc.agent_ref!}
+        resourceName={agentName}
+        allowEdit={false}
+        note={OWNER_SHARE_NOTE}
+        onClose={() => setShowShare(false)}
+      />,
+      document.body
+    )}
+  </>)
 
   const datastoreModal = showDatastore && isRunning && createPortal(
     <DatastoreBrowser host="localhost" port={proc.web_port} auth={proc.web_auth} agentName={agentName} onClose={() => setShowDatastore(false)} />,
@@ -848,12 +872,14 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   )
 }
 
-function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, freebie, onRefreshFreeModels, memoryState, memoryBusy, iconOnly }: {
+function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onShare, canShare, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, freebie, onRefreshFreeModels, memoryState, memoryBusy, iconOnly }: {
   isRunning: boolean
   actionLoading: string | null
   onStart: () => void
   onStop: () => void
   onRestart: () => void
+  onShare: () => void
+  canShare: boolean
   onClone: () => void
   onRemove: () => void
   onConfig: () => void
@@ -908,6 +934,7 @@ function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onR
     { icon: ShieldAlert, label: 'Import (stage conflicts)', onClick: onImportStageMemory, show: isRunning, disabled: memoryBusy },
     { icon: Brain,     label: 'Merge Reflection…', onClick: onMergeReflection, show: isRunning },
     { icon: Inbox,     label: 'Pending Insights…', onClick: onReviewPending, show: isRunning },
+    { icon: Users,     label: 'Share…',  onClick: onShare,   show: canShare },
     { icon: Copy,      label: 'Clone',   onClick: onClone,   loading: actionLoading === 'clone' },
     { icon: Trash2,    label: 'Remove',  onClick: onRemove,  loading: actionLoading === 'remove',  danger: true },
   ]

@@ -12,13 +12,72 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from captain_claw.config import get_config
+from captain_claw.logging import get_logger
 
 if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
 
+log = get_logger(__name__)
+
 # Pending nuke confirmation codes.
 # Maps ws id() → (code, timestamp) so each connection has its own code.
 _pending_nuke: dict[int, tuple[int, float]] = {}
+
+# Session metadata that binds a session to a shared-agent member; it
+# survives /clear so the member keeps the same private session.
+_SPEAKER_META_KEYS = ("speaker_id", "speaker_lane", "speaker_name")
+
+
+def _is_view(server: Any) -> bool:
+    """A lane / member facade over the real server (not the server itself)."""
+    from captain_claw.web_server import _LaneServerView
+
+    return isinstance(server, _LaneServerView)
+
+
+def _is_speaker_server(server: Any) -> bool:
+    """Commands are running for a shared-agent member's own instance."""
+    from captain_claw.speaker import is_speaker_agent
+
+    return is_speaker_agent(getattr(server, "agent", None))
+
+
+async def _create_new_session(server: Any, name: str | None) -> Any:
+    """Create the session `/new` (or `/session new`) switches to.
+
+    A member's instance reuses its current session while that is still
+    empty; otherwise it gets a new session tagged with the member (at most
+    ``MAX_SESSIONS_PER_SPEAKER`` — the server raises
+    ``SpeakerSessionLimitError`` beyond that), rebound through the server
+    (app_state mapping + speaker registry keys). Everyone else gets a plain
+    session.
+    """
+    agent = server.agent
+    if _is_speaker_server(server):
+        from captain_claw.speaker import session_name_reserved
+
+        p = agent._speaker_principal
+        if session_name_reserved(name):
+            # `default` / `lane-<X>` are looked up by name for the owner's
+            # agents; a member's session never takes one.
+            name = None
+        current = getattr(agent, "session", None)
+        if (
+            current is not None
+            and not current.messages
+            and (current.metadata or {}).get("speaker_id") == p.speaker_id
+        ):
+            # Nothing to leave behind: no new row for an empty conversation.
+            if name and name != current.name:
+                current.name = name
+                await agent.session_manager.save_session(current)
+            return current
+        session = await server._create_speaker_session(p, name=name)
+        await server._set_speaker_session(agent, session)
+        return session
+    session = await agent.session_manager.create_session(name=name or "web-session")
+    agent.session = session
+    return session
 
 
 async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str) -> None:
@@ -30,22 +89,37 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
     cmd = parts[0].lower()
     args = parts[1] if len(parts) > 1 else ""
 
+    # A shared-agent member's instance: the speaker gate already filtered
+    # this; refuse again here so no other path can widen it.
+    if _is_speaker_server(server):
+        from captain_claw.speaker import NOT_ALLOWED_MESSAGE, slash_allowed
+
+        if not slash_allowed(raw):
+            await server._send(ws, {
+                "type": "command_result", "command": raw, "content": NOT_ALLOWED_MESSAGE,
+            })
+            return
+
     result = ""
 
     try:
         if cmd in ("/help", "/h"):
-            result = format_help()
+            result = format_help(speaker=_is_speaker_server(server))
 
         elif cmd in ("/clear",):
             if server.agent.session:
                 server.agent.session.messages.clear()
                 # Preserve model selection across clear so the user's
                 # chosen model doesn't reset to the default.
-                saved_model = (server.agent.session.metadata or {}).get("model_selection")
+                _old_meta = server.agent.session.metadata or {}
+                saved_model = _old_meta.get("model_selection")
+                # A shared-agent member's session keeps its owner mapping.
+                _kept = {k: _old_meta[k] for k in _SPEAKER_META_KEYS if k in _old_meta}
                 # Reset session metadata so planning/pipeline state doesn't leak
                 server.agent.session.metadata = {}
                 if saved_model:
                     server.agent.session.metadata["model_selection"] = saved_model
+                server.agent.session.metadata.update(_kept)
                 await server.agent.session_manager.save_session(server.agent.session)
                 # Reset agent runtime state to defaults (pipeline=loop, planning=off)
                 server.agent.refresh_session_runtime_flags()
@@ -129,12 +203,19 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
             # Freeze the outgoing session into history before switching, so the
             # conversation stays verbatim-searchable (same as before compaction).
             server.agent.archive_current_session_to_history()
-            session = await server.agent.session_manager.create_session(
-                name=name or "web-session"
-            )
-            server.agent.session = session
+            from captain_claw.web_server import SpeakerSessionLimitError
+
+            try:
+                session = await _create_new_session(server, name)
+            except SpeakerSessionLimitError as e:
+                from captain_claw.speaker import speaker_error
+
+                await server._send(ws, speaker_error("not_allowed", str(e)))
+                return
             server.agent.refresh_session_runtime_flags()
-            await server.agent.session_manager.set_last_active_session(session.id)
+            # Lane / member views never move the owner's "last active" pointer.
+            if not _is_view(server):
+                await server.agent.session_manager.set_last_active_session(session.id)
             server.agent.last_usage = server.agent._empty_usage()
             server.agent.last_context_window = {}
             result = f"New session created: **{session.name}** (`{session.id[:8]}`)"
@@ -154,7 +235,10 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
                 result = await handle_session_subcommand(server, args.strip())
 
         elif cmd in ("/sessions",):
-            sessions = await server.agent.session_manager.list_sessions(limit=20)
+            from captain_claw.speaker import list_owner_sessions
+
+            # Members' private sessions are not the owner's to list or index.
+            sessions = await list_owner_sessions(server.agent.session_manager, limit=20)
             if sessions:
                 lines = []
                 for i, s in enumerate(sessions, 1):
@@ -375,7 +459,12 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
             result = f"Unknown command: `{cmd}`. Type `/help` for available commands."
 
     except Exception as e:
-        result = f"Command error: {str(e)}"
+        if _is_speaker_server(server):
+            # A member never sees the exception text (provider errors, paths).
+            log.error("Member command failed", command=cmd, error=str(e))
+            result = "That command couldn't be completed — try again."
+        else:
+            result = f"Command error: {str(e)}"
 
     await server._send(ws, {
         "type": "command_result",
@@ -635,7 +724,9 @@ async def handle_session_subcommand(server: WebServer, args: str) -> str:
     subargs = parts[1].strip() if len(parts) > 1 else ""
 
     if subcmd in ("list",):
-        sessions = await server.agent.session_manager.list_sessions(limit=20)
+        from captain_claw.speaker import list_owner_sessions
+
+        sessions = await list_owner_sessions(server.agent.session_manager, limit=20)
         lines = []
         for i, s in enumerate(sessions, 1):
             active = " (active)" if (server.agent.session and s.id == server.agent.session.id) else ""
@@ -645,7 +736,14 @@ async def handle_session_subcommand(server: WebServer, args: str) -> str:
     elif subcmd in ("switch", "load"):
         if not subargs:
             return "Usage: `/session switch <id|name|#N>`"
-        session = await server.agent.session_manager.select_session(subargs)
+        from captain_claw.speaker import member_session_refusal, select_owner_session
+
+        session = await select_owner_session(server.agent.session_manager, subargs)
+        refusal = member_session_refusal(session)
+        if refusal:
+            # A member's private conversation on this shared agent: nobody
+            # (the owner included) takes it over by switching into it.
+            return refusal
         if session:
             server.agent.session = session
             await server.agent.session_manager.set_last_active_session(session.id)
@@ -656,11 +754,10 @@ async def handle_session_subcommand(server: WebServer, args: str) -> str:
         return f"Session not found: `{subargs}`"
 
     elif subcmd in ("new",):
-        name = subargs or "web-session"
-        session = await server.agent.session_manager.create_session(name=name)
-        server.agent.session = session
+        session = await _create_new_session(server, subargs or None)
         server.agent.refresh_session_runtime_flags()
-        await server.agent.session_manager.set_last_active_session(session.id)
+        if not _is_view(server):
+            await server.agent.session_manager.set_last_active_session(session.id)
         server.agent.last_usage = server.agent._empty_usage()
         server.agent.last_context_window = {}
         server._broadcast({"type": "session_info", **server._session_info()})
@@ -670,6 +767,11 @@ async def handle_session_subcommand(server: WebServer, args: str) -> str:
     elif subcmd in ("rename",):
         if not subargs:
             return "Usage: `/session rename <new-name>`"
+        if _is_speaker_server(server):
+            from captain_claw.speaker import session_name_reserved
+
+            if session_name_reserved(subargs):
+                return "That name is reserved on a shared agent — pick another."
         if server.agent.session:
             server.agent.session.name = subargs
             await server.agent.session_manager.save_session(server.agent.session)
@@ -1757,12 +1859,17 @@ async def _handle_watch_command(server: "WebServer", args: str) -> str:
     return f"Watch created (every {interval_str}): **{query}** (`{watch_id}`)"
 
 
-def format_help() -> str:
-    """Format help text for the /help command."""
+def format_help(speaker: bool = False) -> str:
+    """Format help text for the /help command (a member sees only theirs)."""
     from captain_claw.web_server import COMMANDS
 
+    commands = COMMANDS
+    if speaker:
+        from captain_claw.speaker import speaker_commands
+
+        commands = speaker_commands()
     categories: dict[str, list[dict[str, str]]] = {}
-    for cmd in COMMANDS:
+    for cmd in commands:
         cat = cmd["category"]
         categories.setdefault(cat, []).append(cmd)
     lines = ["## Captain Claw Commands\n"]

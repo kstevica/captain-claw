@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift, Bug } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift, Bug, Users } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -21,6 +21,10 @@ import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { ModelSelector } from '../common/ModelSelector'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
+import { ShareModal } from '../common/ShareModal'
+import { useSharedAgentStore } from '../../stores/sharedAgentStore'
+import { dockerSlug, isManagedAgent } from '../../utils/managedAgents'
+import { OWNER_SHARE_NOTE } from '../../utils/sharedAgent'
 
 // Cap log buffer to avoid unbounded browser memory growth during long polling sessions
 const LOG_TAIL_LINES = 100
@@ -165,6 +169,12 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
 
   const isRunning = container.status === 'running'
   const agentName = container.agent_name || container.name
+  const [showShare, setShowShare] = useState(false)
+  // Sharing: only on decks that share agents, never a Flight Deck–managed
+  // worker, and only once the agent has a stable ref (it has an access token).
+  const sharingEnabled = useSharedAgentStore((s) => s.enabled)
+  const canShare = sharingEnabled && !!container.agent_ref
+    && !isManagedAgent(dockerSlug(container.agent_name || container.name), container.description || '')
 
   const memory = useAgentMemoryTransfer({
     host: 'localhost',
@@ -236,6 +246,8 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
       if (confirm(`This will stop and remove the current container '${container.name}', pull the latest image, and create a new container with the same configuration.\n\nAgent data (workspace, sessions, skills) will be preserved.\n\nContinue?`))
         doAction('rebuild', () => rebuildContainer(container.id))
     },
+    onShare: () => setShowShare(true),
+    canShare,
     onClone: () => {
       const newName = prompt(`Clone '${agentName}'\n\nEnter a name for the cloned agent:`, `${agentName}-clone`)
       if (newName?.trim())
@@ -263,10 +275,23 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   }
 
   // ── Config modal (rendered in all view modes via portal) ──
-  const configModal = showConfig && createPortal(
-    <AgentConfigEditor kind="docker" identifier={container.id} agentName={agentName} onClose={() => setShowConfig(false)} />,
-    document.body
-  )
+  const configModal = (<>
+    {showConfig && createPortal(
+      <AgentConfigEditor kind="docker" identifier={container.id} agentName={agentName} onClose={() => setShowConfig(false)} />,
+      document.body
+    )}
+    {showShare && canShare && createPortal(
+      <ShareModal
+        resourceType="agent"
+        resourceId={container.agent_ref!}
+        resourceName={agentName}
+        allowEdit={false}
+        note={OWNER_SHARE_NOTE}
+        onClose={() => setShowShare(false)}
+      />,
+      document.body
+    )}
+  </>)
 
   const datastoreModal = showDatastore && isRunning && container.web_port && createPortal(
     <DatastoreBrowser host="localhost" port={container.web_port} auth={container.web_auth} agentName={agentName} onClose={() => setShowDatastore(false)} />,
@@ -1011,13 +1036,15 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   )
 }
 
-function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, freebie, onRefreshFreeModels, memoryState, memoryBusy, canMemory, iconOnly }: {
+function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onShare, canShare, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, freebie, onRefreshFreeModels, memoryState, memoryBusy, canMemory, iconOnly }: {
   isRunning: boolean
   actionLoading: string | null
   onStart: () => void
   onStop: () => void
   onRestart: () => void
   onRebuild: () => void
+  onShare: () => void
+  canShare: boolean
   onClone: () => void
   onRemove: () => void
   onConfig: () => void
@@ -1074,6 +1101,7 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
     { icon: Brain,     label: 'Merge Reflection…', onClick: onMergeReflection, show: isRunning && canMemory },
     { icon: Inbox,     label: 'Pending Insights…', onClick: onReviewPending, show: isRunning && canMemory },
     { icon: RefreshCw, label: 'Rebuild', onClick: onRebuild, loading: actionLoading === 'rebuild' },
+    { icon: Users,     label: 'Share…',  onClick: onShare,   show: canShare },
     { icon: Copy,      label: 'Clone',   onClick: onClone,   loading: actionLoading === 'clone' },
     { icon: Trash2,    label: 'Remove',  onClick: onRemove,  loading: actionLoading === 'remove',  danger: true },
   ]

@@ -280,6 +280,10 @@ class ToolRegistry:
         self._global_policy: ToolPolicy | None = None
         self._session_policies: dict[str, ToolPolicy] = {}
         self._approval_callback: Callable[[str], bool] | None = None
+        # Session keys (raw id and slug) owned by shared-agent speakers. A call
+        # carrying one is a member call even if the speaker contextvar was lost
+        # (executor threads) or never bound (paths that pass only session_id).
+        self._speaker_session_keys: set[str] = set()
         self.set_runtime_base_path(base_path or Path.cwd())
 
     @staticmethod
@@ -373,6 +377,37 @@ class ToolRegistry:
             return
         self._session_policies.pop(key, None)
 
+    # ── Shared-agent speakers (A1) ──────────────────────────────────
+
+    def register_speaker_session(self, key: str) -> None:
+        """Mark a session key as a member's: calls with it get the speaker allowlist."""
+        k = str(key or "").strip()
+        if k:
+            self._speaker_session_keys.add(k)
+
+    def unregister_speaker_session(self, key: str) -> None:
+        k = str(key or "").strip()
+        if k:
+            self._speaker_session_keys.discard(k)
+
+    def _is_speaker_call(
+        self, session_id: str | None, arguments: dict[str, Any] | None = None,
+    ) -> bool:
+        """Whether this call is made for a shared-agent member.
+
+        Three independent signals, any one is enough: the speaker contextvar,
+        a registered speaker session key, or a speaker-scoped ``_agent``.
+        """
+        from captain_claw import speaker as _speaker
+
+        if _speaker.current() is not None:
+            return True
+        keys = getattr(self, "_speaker_session_keys", None) or ()
+        if keys and str(session_id or "").strip() in keys:
+            return True
+        agent = (arguments or {}).get("_agent") if isinstance(arguments, dict) else None
+        return _speaker.is_speaker_agent(agent)
+
     def _resolve_policy_chain(
         self,
         *,
@@ -395,6 +430,14 @@ class ToolRegistry:
         effective_task_policy = self._coerce_policy(task_policy)
         if effective_task_policy is not None:
             steps.append(("task", effective_task_policy))
+
+        # A member's call: the speaker allowlist is the LAST step and has no
+        # also_allow, so no session/task policy (or per-turn set/clear) can
+        # widen it.
+        if self._is_speaker_call(session_id):
+            from captain_claw.speaker import SPEAKER_TOOL_ALLOWLIST
+
+            steps.append(("principal", ToolPolicy(allow=sorted(SPEAKER_TOOL_ALLOWLIST))))
         return ToolPolicyChain(steps=steps)
 
     def _resolve_tools(
@@ -561,6 +604,34 @@ class ToolRegistry:
             ToolBlockedError if tool is blocked
             ToolExecutionError if execution fails
         """
+        # Shared-agent member: only the speaker allowlist, narrowed per tool.
+        # Checked before anything else (classic loop, run_tool-style paths and
+        # Mrav all land here).
+        tool_context = None  # None → the tool task copies the current context
+        if self._is_speaker_call(session_id, arguments):
+            from captain_claw import speaker as _speaker
+
+            if name not in _speaker.SPEAKER_TOOL_ALLOWLIST:
+                raise ToolBlockedError(name, _speaker.NOT_ALLOWED_MESSAGE)
+            arguments, rule_error = _speaker.apply_tool_rules(
+                name, arguments, (arguments or {}).get("_agent"),
+            )
+            if rule_error:
+                raise ToolBlockedError(name, rule_error)
+            if _speaker.current() is None:
+                # Recognised by the session key or `_agent` alone: bind a
+                # principal for the tool task, so the tool's own member rules
+                # (public-only web_fetch, hidden sources/excerpts) apply on
+                # every signal, not only on the contextvar.
+                import contextvars
+
+                principal = (
+                    _speaker.principal_for(arguments.get("_agent"))
+                    or _speaker.UNKNOWN_PRINCIPAL
+                )
+                tool_context = contextvars.copy_context()
+                tool_context.run(_speaker.bind, principal)
+
         # Resolve per-call overrides (fall back to instance defaults).
         effective_base_path = runtime_base_path or self._runtime_base_path
         effective_approval = approval_callback or self._approval_callback
@@ -658,6 +729,9 @@ class ToolRegistry:
                 _workflow_started_at = getattr(file_registry, "workflow_started_at", None)
                 _workflow_run_dir = getattr(file_registry, "workflow_run_dir", None)
 
+            _task_kwargs: dict[str, Any] = {}
+            if tool_context is not None:
+                _task_kwargs["context"] = tool_context
             execute_task = asyncio.create_task(
                 tool.execute(
                     **arguments,
@@ -670,7 +744,8 @@ class ToolRegistry:
                     _workflow_run_dir=_workflow_run_dir,
                     _stream_callback=stream_callback,
                     _approval_callback=effective_approval,
-                )
+                ),
+                **_task_kwargs,
             )
             abort_wait_task = asyncio.create_task(tool_abort_event.wait())
             done, _ = await asyncio.wait(

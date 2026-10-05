@@ -1002,12 +1002,14 @@ class AgentOrchestrationMixin:
         if not getattr(self, "_turn_is_automated", False):
             self._record_timing_event("last_user_msg_at")
         await self._auto_compact_if_needed()
-        await self._refresh_cron_context_cache()
-        await self._refresh_todo_context_cache()
-        await self._refresh_contacts_context_cache()
-        await self._refresh_scripts_context_cache()
-        await self._refresh_apis_context_cache()
-        await self._refresh_datastore_context_cache()
+        # The owner's caches are never loaded for a shared-agent member.
+        if getattr(self, "_speaker_scoped", False) is not True:
+            await self._refresh_cron_context_cache()
+            await self._refresh_todo_context_cache()
+            await self._refresh_contacts_context_cache()
+            await self._refresh_scripts_context_cache()
+            await self._refresh_apis_context_cache()
+            await self._refresh_datastore_context_cache()
         if clarification_context_applied:
             self._emit_tool_output(
                 "task_contract",
@@ -1622,11 +1624,13 @@ class AgentOrchestrationMixin:
             # the user connects or disconnects via Flight Deck. Cheap:
             # flight-deck client mode re-uses the in-process access-token
             # cache; local mode hits SQLite app_state.
-            try:
-                from captain_claw.google_oauth_manager import GoogleOAuthManager
-                await GoogleOAuthManager(self.session_manager).is_connected()
-            except Exception:
-                pass
+            # (Not for a shared-agent member: Google isn't theirs to use.)
+            if getattr(self, "_speaker_scoped", False) is not True:
+                try:
+                    from captain_claw.google_oauth_manager import GoogleOAuthManager
+                    await GoogleOAuthManager(self.session_manager).is_connected()
+                except Exception:
+                    pass
 
             active_task_tool_policy = self._active_task_tool_policy_payload(planning_pipeline)
             tool_defs = self.tools.get_definitions(

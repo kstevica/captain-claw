@@ -22,6 +22,7 @@ import {
   Settings,
   Plug,
   IdCard,
+  Users,
   X,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
@@ -33,6 +34,9 @@ import { useContainerStore } from '../../stores/containerStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useProcessStore } from '../../stores/processStore'
 import { useThemeStore } from '../../stores/themeStore'
+import { useSharedAgentStore } from '../../stores/sharedAgentStore'
+import { isManagedAgent } from '../../utils/managedAgents'
+import { SHARED_PREFIX, sharedContainerId } from '../../utils/sharedAgent'
 import { usePersistedSize } from '../../hooks/usePersistedSize'
 import { ChatPanel } from '../agents/ChatPanel'
 import { AgentFilesPanel } from '../agents/AgentFilesPanel'
@@ -55,9 +59,10 @@ import { APP_VERSION, BUILD_DATE } from '../../version'
 type AgentState = 'running' | 'starting' | 'stopped' | 'unknown'
 
 interface SimpleAgent {
-  /** Chat id: docker container id, `proc-<slug>`, or the local agent id. */
+  /** Chat id: docker container id, `proc-<slug>`, the local agent id, or
+   *  `shared:<agent_ref>` for an agent another user shared with you. */
   id: string
-  kind: 'docker' | 'process' | 'local'
+  kind: 'docker' | 'process' | 'local' | 'shared'
   name: string
   description: string
   state: AgentState
@@ -70,14 +75,11 @@ interface SimpleAgent {
   startKey: string
   /** Flight Deck runs this one itself (a run's worker, a being's body): not the user's to switch. */
   managed: boolean
+  /** Shared with you: its agent_ref, and whose it is. */
+  sharedRef?: string
+  ownerId?: string
+  ownerName?: string
 }
-
-// Agents Flight Deck spawns and stops itself — the workers of a Basna / Vatra /
-// Council / Dubina run and an Iskra being's body — by the names it generates
-// for them (not a bare prefix: "Council notes" is somebody's own agent).
-const MANAGED_AGENT = /^(?:(?:basna|vatra)-[0-9a-f]{8}-|council-[0-9a-f]{6}-|iskra-.+-[0-9a-f]{4}$)/
-const isManagedProcess = (slug: string, description: string) =>
-  MANAGED_AGENT.test(slug) || (slug.startsWith('dubina-') && description.startsWith('Dubina ephemeral'))
 
 const STATE_RANK: Record<AgentState, number> = { running: 0, starting: 1, unknown: 2, stopped: 3 }
 
@@ -121,6 +123,12 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
     return sig
   })
   const openChat = useChatStore((s) => s.openChat)
+  const openSharedChat = useChatStore((s) => s.openSharedChat)
+  // Narrow selectors: the list keeps its identity across polls when nothing changed.
+  const sharingEnabled = useSharedAgentStore((s) => s.enabled)
+  const sharedAgents = useSharedAgentStore((s) => s.agents)
+  const fetchShared = useSharedAgentStore((s) => s.fetch)
+  const leaveShared = useSharedAgentStore((s) => s.leave)
   const setLayoutMode = useUIStore((s) => s.setLayoutMode)
   const setView = useUIStore((s) => s.setView)
   const authEnabled = useAuthStore((s) => s.authEnabled)
@@ -153,10 +161,11 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
     checkHealth()
     fetchContainers()
     fetchProcesses()
+    fetchShared()
     probeAll()
-    const interval = setInterval(() => { fetchContainers(); fetchProcesses() }, 10000)
+    const interval = setInterval(() => { fetchContainers(); fetchProcesses(); fetchShared() }, 10000)
     return () => clearInterval(interval)
-  }, [checkHealth, fetchContainers, fetchProcesses, probeAll, authEnabled, isAuthenticated])
+  }, [checkHealth, fetchContainers, fetchProcesses, fetchShared, probeAll, authEnabled, isAuthenticated])
 
   const agents: SimpleAgent[] = useMemo(() => {
     const list: SimpleAgent[] = []
@@ -179,7 +188,7 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
         description: procDesc[p.slug] || p.description || '',
         state, reachable: state === 'running' && !!p.web_port,
         host: 'localhost', port: p.web_port, auth: p.web_auth || '',
-        startKey: p.slug, managed: isManagedProcess(p.slug, p.description || ''),
+        startKey: p.slug, managed: isManagedAgent(p.slug, p.description || ''),
       })
     }
     for (const a of localAgents) {
@@ -192,9 +201,22 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
         startKey: a.id, managed: false,
       })
     }
+    // Shared with you: chat only, through Flight Deck — no host, port or token.
+    if (sharingEnabled) {
+      for (const sa of sharedAgents) {
+        const running = sa.status === 'running'
+        list.push({
+          id: sharedContainerId(sa.agent_ref), kind: 'shared',
+          name: sa.name || sa.slug, description: sa.description || '',
+          state: running ? 'running' : 'stopped', reachable: running,
+          host: '', port: 0, auth: '', startKey: '', managed: false,
+          sharedRef: sa.agent_ref, ownerId: sa.owner_id, ownerName: sa.owner_name,
+        })
+      }
+    }
     list.sort((x, y) => STATE_RANK[x.state] - STATE_RANK[y.state] || x.name.localeCompare(y.name))
     return list
-  }, [containers, processes, localAgents, dockerDesc, procDesc])
+  }, [containers, processes, localAgents, dockerDesc, procDesc, sharingEnabled, sharedAgents])
 
   // Per-agent chat state, folded across lanes: busy if any lane is, unread if
   // any lane finished something while the user looked elsewhere.
@@ -217,7 +239,21 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
     // An existing session survives the agent stopping; openChat just
     // re-activates it (stale host/port are ignored for a known key).
     if (!a.reachable && !useChatStore.getState().sessions.has(a.id)) return
+    if (a.kind === 'shared') { openSharedChat(a.sharedRef!, a.name, a.ownerName || ''); return }
     openChat(a.id, a.name, a.host, a.port, a.auth)
+  }
+
+  // Give up an agent somebody shared with you. Its chats close here.
+  const handleLeave = async (a: SimpleAgent) => {
+    if (a.kind !== 'shared' || !a.sharedRef) return
+    const owner = a.ownerName || 'its owner'
+    if (!confirm(`Leave ${a.name}? You'll lose access until ${owner} shares it again.`)) return
+    try {
+      await leaveShared(a.sharedRef, a.ownerId || '')
+    } catch (e) {
+      useNotificationStore.getState().add('error', 'Could not leave agent',
+        `${a.name}: ${e instanceof Error ? e.message : String(e)}`)
+    }
   }
 
   const startBoot = (id: string, force: boolean) => {
@@ -289,7 +325,7 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
     }
   }
 
-  const refresh = () => { fetchContainers(); fetchProcesses(); probeAll() }
+  const refresh = () => { fetchContainers(); fetchProcesses(); fetchShared(); probeAll() }
 
   // The full Spawner leaves the chat surface, which the kiosk lock can't — so
   // there spawning means the archetype picker instead.
@@ -347,6 +383,7 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
         booting={booting}
         onOpen={handleOpen}
         onPower={handlePower}
+        onLeave={handleLeave}
         onRefresh={refresh}
         onSpawn={goSpawn}
         onOptions={setOptionsAgent}
@@ -364,7 +401,7 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
       <ContextColumn
         agentId={activeAgentId}
         agentName={activeSessionName}
-        onOptions={!locked && activeAgent ? () => setOptionsAgent(activeAgent) : undefined}
+        onOptions={!locked && activeAgent && activeAgent.kind !== 'shared' ? () => setOptionsAgent(activeAgent) : undefined}
       />
 
       {archetypeOpen && (
@@ -382,7 +419,7 @@ export function SimpleLayout({ locked = false }: { locked?: boolean }) {
       {locked && connectionsOpen && <KioskConnectionsDialog onClose={() => setConnectionsOpen(false)} />}
       {locked && profileOpen && <KioskProfileDialog onClose={() => setProfileOpen(false)} />}
 
-      {!locked && optionsAgent && createPortal(
+      {!locked && optionsAgent && optionsAgent.kind !== 'shared' && createPortal(
         <AgentConfigEditor
           kind={optionsAgent.kind}
           identifier={optionsAgent.startKey}
@@ -462,7 +499,7 @@ function KioskDialog({ label, onClose, children }: { label: string; onClose: () 
 // ── Left: agents ─────────────────────────────────────────────────────
 
 function AgentsColumn({
-  agents, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onRefresh, onSpawn, onOptions, onConnections, onProfile, locked = false,
+  agents, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onLeave, onRefresh, onSpawn, onOptions, onConnections, onProfile, locked = false,
 }: {
   agents: SimpleAgent[]
   activeAgentId: string | null
@@ -473,6 +510,8 @@ function AgentsColumn({
   onOpen: (a: SimpleAgent) => void
   /** Power an agent on (or, for a local one, check it again) or off. */
   onPower: (a: SimpleAgent, on: boolean) => void
+  /** Leave an agent somebody shared with you. */
+  onLeave: (a: SimpleAgent) => void
   onRefresh: () => void
   onSpawn: () => void
   onOptions: (a: SimpleAgent) => void
@@ -524,7 +563,8 @@ function AgentsColumn({
             const hasChat = sessionInfo.has(a.id)
             const isBooting = booting.has(a.id) && a.state !== 'stopped'
             const openable = !switching.has(a.id) && ((a.reachable && !isBooting) || hasChat)
-            const canStart = a.kind === 'local' ? a.state !== 'running' && !locked : a.state === 'stopped' && !a.managed
+            const canStart = a.kind === 'local' ? a.state !== 'running' && !locked
+              : a.kind !== 'shared' && a.state === 'stopped' && !a.managed
             const railStart = canStart && !switching.has(a.id)
             return (
               <button
@@ -654,7 +694,8 @@ function AgentsColumn({
             const info = sessionInfo.get(a.id)
             const active = a.id === activeAgentId
             const busy = !!info?.busy
-            const KindIcon = a.kind === 'docker' ? Box : a.kind === 'process' ? Cpu : Server
+            const KindIcon = a.kind === 'docker' ? Box : a.kind === 'process' ? Cpu : a.kind === 'shared' ? Users : Server
+            const shared = a.kind === 'shared'
             const hasChat = sessionInfo.has(a.id)
             const isBooting = booting.has(a.id) && a.state !== 'stopped'
             const working = switching.has(a.id)
@@ -662,7 +703,7 @@ function AgentsColumn({
             // A power switch for the agents Flight Deck runs; a local one can
             // only be checked again (and not from the kiosk).
             const powered = a.state === 'running'
-            const canPower = a.kind !== 'local' && !a.managed && (powered || a.state === 'stopped')
+            const canPower = a.kind !== 'local' && !shared && !a.managed && (powered || a.state === 'stopped')
             const canRecheck = a.kind === 'local' && a.state !== 'running' && !locked
             return (
               <li key={a.id} className="group flex items-center gap-0.5">
@@ -696,14 +737,26 @@ function AgentsColumn({
                       {info?.unread && !active && !busy && (
                         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" title="New reply" />
                       )}
+                      {shared && (
+                        <span
+                          className="flex shrink-0 items-center gap-0.5 rounded border border-sky-500/25 bg-sky-500/15 px-1 py-0.5 text-[9px] font-medium leading-none text-sky-700 dark:text-sky-300"
+                          title={`Shared by ${a.ownerName || 'another user'}`}
+                        >
+                          <Users className="h-2.5 w-2.5" />shared
+                        </span>
+                      )}
                     </div>
                     <div className="truncate text-[11px] text-zinc-500">
-                      {isBooting ? 'Starting…' : a.state === 'running' && a.reachable && a.description ? a.description : stateLabel(a)}
+                      {isBooting
+                        ? 'Starting…'
+                        : shared && a.state === 'running'
+                          ? `Shared by ${a.ownerName || 'another user'}`
+                          : a.state === 'running' && a.reachable && a.description ? a.description : stateLabel(a)}
                     </div>
                   </div>
                   <KindIcon className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
                 </button>
-                {!locked && (
+                {!locked && !shared && (
                   <button
                     onClick={() => onOptions(a)}
                     title={`Options — ${a.name}`}
@@ -727,6 +780,16 @@ function AgentsColumn({
                     }`}
                   >
                     {working ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
+                  </button>
+                )}
+                {shared && (
+                  <button
+                    onClick={() => onLeave(a)}
+                    title={`Leave ${a.name}`}
+                    aria-label={`Leave ${a.name}`}
+                    className="shrink-0 rounded p-1.5 text-zinc-500 opacity-0 transition-colors hover:bg-zinc-800 hover:text-red-600 focus:opacity-100 group-hover:opacity-100 dark:hover:text-red-400"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
                   </button>
                 )}
                 {canRecheck && (
@@ -831,6 +894,8 @@ function EmptyChat({ hasAgents, onSpawn, locked = false }: { hasAgents: boolean;
 // ── Right: files + datastore of the active agent ─────────────────────
 
 function ContextColumn({ agentId, agentName, onOptions }: { agentId: string | null; agentName: string; onOptions?: () => void }) {
+  // A shared agent is chat only: its files and datastore stay its owner's.
+  const shared = !!agentId && agentId.startsWith(SHARED_PREFIX)
   const open = useUIStore((s) => s.simpleRightOpen)
   const setOpen = useUIStore((s) => s.setSimpleRightOpen)
   // The handle is on the LEFT edge of a right-docked column, so dragging left
@@ -902,7 +967,11 @@ function ContextColumn({ agentId, agentName, onOptions }: { agentId: string | nu
         </div>
       </div>
 
-      {agentId ? (
+      {agentId && shared ? (
+        <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-zinc-500">
+          A shared agent is chat only — its files and datastore stay with its owner.
+        </div>
+      ) : agentId ? (
         <div ref={regionRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Top: files. Shrinkable with a floor so a stale oversized height
               can't push the datastore off-screen. */}

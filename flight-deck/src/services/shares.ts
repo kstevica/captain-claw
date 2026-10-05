@@ -41,7 +41,7 @@ async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ── Types ──
 
-export type ResourceType = 'archetype' | 'code' | 'basna' | 'council' | 'vfs'
+export type ResourceType = 'archetype' | 'code' | 'basna' | 'council' | 'vfs' | 'agent'
 export type Permission = 'view' | 'edit'
 
 export interface ShareUser {

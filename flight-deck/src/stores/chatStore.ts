@@ -1,12 +1,13 @@
 import { create } from 'zustand'
 import { AgentChatWS, type ChatMessage, type TokenUsage } from '../services/agentChat'
-import { useAuthStore, registerSignOutFlush } from './authStore'
+import { useAuthStore, registerSignOutFlush, registerSignOutTeardown } from './authStore'
 import { useContainerStore } from './containerStore'
 import { useLocalAgentStore } from './localAgentStore'
 import { useProcessStore } from './processStore'
 import { useTraceStore } from './traceStore'
 import type { TraceSpan } from '../types'
 import { sanitizeAgentContent } from '../utils/sanitizeAgentContent'
+import { SHARED_PREFIX, sharedContainerId, sharedSliceId } from '../utils/sharedAgent'
 
 // ── Chat persistence helpers ──
 
@@ -76,7 +77,7 @@ export const PLAN_LEVELS = ['plain', 'enriched', 'insightful', 'complete'] as co
 export type PlanLevel = (typeof PLAN_LEVELS)[number]
 
 function _planLSKey(containerId: string): string {
-  return `fd.plan.${containerId}`
+  return `fd.plan.${_sliceId(containerId)}`
 }
 
 function savePlanSlice(containerId: string, slice: PersistedPlanSlice): void {
@@ -119,7 +120,7 @@ interface PersistedQueueSlice {
 }
 
 function _queueLSKey(containerId: string): string {
-  return `fd.queue.${containerId}`
+  return `fd.queue.${_sliceId(containerId)}`
 }
 
 function saveQueueSlice(containerId: string, slice: PersistedQueueSlice): void {
@@ -149,6 +150,48 @@ function loadQueueSlice(containerId: string): PersistedQueueSlice | null {
     return null
   }
 }
+
+// A shared agent is used alike by every member of it, and several members may
+// use this browser — unlike a queue on an agent only you own. So a shared
+// chat's slices are kept per deck user (`fd.queue.shared:<ref>[::lane]@<uid>`,
+// same for plan): a session that ends with no teardown here (expired refresh
+// cookie, an admin reset) can't hand the next person the last member's queue,
+// nor — with auto-mode on — send it into their own private chat as theirs.
+function _sliceId(chatKey: string): string {
+  return sharedSliceId(chatKey, useAuthStore.getState().user?.id)
+}
+
+// …and they still go when the session does.
+function purgeSharedSlices(): void {
+  try {
+    const prefixes = [`fd.queue.${SHARED_PREFIX}`, `fd.plan.${SHARED_PREFIX}`]
+    const doomed: string[] = []
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i)
+      if (k && prefixes.some((p) => k.startsWith(p))) doomed.push(k)
+    }
+    for (const k of doomed) window.localStorage.removeItem(k)
+  } catch { /* storage blocked — nothing persisted to purge */ }
+}
+
+/** Drop this user's queue and plan slices of one shared agent, every lane —
+ *  for a member leaving it (a later re-share starts clean). */
+export function clearSharedSlices(agentRef: string): void {
+  for (const lane of LANES) {
+    const key = laneKey(sharedContainerId(agentRef), lane)
+    try {
+      window.localStorage.removeItem(_queueLSKey(key))
+      window.localStorage.removeItem(_planLSKey(key))
+    } catch { /* storage blocked — nothing persisted */ }
+  }
+}
+
+registerSignOutTeardown(() => {
+  purgeSharedSlices()
+  // A shared socket can still deliver a reply (and re-save a slice) between
+  // here and the unload — purge once more on the way out.
+  try { window.addEventListener('pagehide', purgeSharedSlices, { once: true }) } catch { /* ignore */ }
+})
 
 // Debounced batch persist
 const _msgQueue: Map<string, ChatMessage[]> = new Map()
@@ -752,6 +795,25 @@ interface ChatSession {
   queue: QueuedMessage[]
   queueAutoMode: boolean
   queueDispatchedId: string | null
+  /** An agent another deck user shared with you (containerId `shared:<ref>`):
+   *  reached through Flight Deck's member route, chat only. */
+  shared?: { agentRef: string; ownerName: string }
+  /** Shared chats: Flight Deck closed the socket for good (access removed,
+   *  agent stopped…) — the chat shows why instead of reconnecting. */
+  closed?: { code: number; reason: string } | null
+  /** Shared chats: who the agent knows it is talking to (from `welcome`). */
+  speaker?: { id: string; name: string; owner_name: string; lane: string } | null
+}
+
+/** What the internal opener needs; `shared` marks an agent shared with you. */
+interface OpenSessionArgs {
+  containerId: string
+  containerName: string
+  host: string
+  port: number
+  auth: string
+  lane?: string
+  shared?: { agentRef: string; ownerName: string }
 }
 
 interface ChatStore {
@@ -767,6 +829,11 @@ interface ChatStore {
   /** Open (or focus) a chat. `lane` picks the parallel context — omit for A,
    *  which is the agent's main context and today's behaviour exactly. */
   openChat: (id: string, name: string, host: string, port: number, auth: string, lane?: string) => void
+  /** Open (or focus) a chat with an agent shared with you. Only its agent_ref
+   *  travels; Flight Deck connects to the agent itself. */
+  openSharedChat: (agentRef: string, name: string, ownerName: string, lane?: string) => void
+  /** Internal: the one opener behind openChat and openSharedChat. */
+  _openSession: (args: OpenSessionArgs) => void
   /** Which lane the UI is showing for a given agent (agent id → lane). */
   setActiveLane: (containerId: string, lane: string) => void
   closeChat: () => void
@@ -812,17 +879,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   chatOpen: false,
   chatFullscreen: false,
 
-  openChat: (containerId, containerName, host, port, auth, lane = LANE_MAIN) => {
+  openChat: (containerId, containerName, host, port, auth, lane = LANE_MAIN) =>
+    get()._openSession({ containerId, containerName, host, port, auth, lane }),
+
+  openSharedChat: (agentRef, name, ownerName, lane = LANE_MAIN) =>
+    get()._openSession({
+      containerId: sharedContainerId(agentRef), containerName: name,
+      host: '', port: 0, auth: '', lane, shared: { agentRef, ownerName },
+    }),
+
+  _openSession: ({ containerId, containerName, host, port, auth, lane = LANE_MAIN, shared }) => {
     const key = laneKey(containerId, lane)
     const existing = get().sessions.get(key)
     if (existing) {
-      // Already have a session, just activate it
-      if (!existing.connected) {
+      // Already have a session, just activate it. A shared socket still in
+      // Flight Deck's handshake is left to finish rather than restarted.
+      if (!existing.connected && !(existing.shared && existing.ws.connecting)) {
         // Clear old replay messages — agent will resend them on reconnect
         const kept = existing.messages.filter((m) => !m.replay)
         if (kept.length !== existing.messages.length) {
           updateSession(key, { messages: kept })
         }
+        if (existing.closed) updateSession(key, { closed: null })
         existing.ws.connect()
       }
       if (existing.unread) updateSession(key, { unread: false })
@@ -830,10 +908,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return
     }
 
-    const ws = new AgentChatWS(containerId, host, port, auth, lane)
+    const ws = new AgentChatWS(containerId, host, port, auth, lane,
+      shared ? { sharedRef: shared.agentRef } : undefined)
     // Re-hydrate any persisted plan slice so the PlanCard reappears instantly
     // after a page refresh. Live ws events will keep updating it from here.
-    const persisted = loadPlanSlice(key)
+    // (Shared chats have no plan mode.)
+    const persisted = shared ? null : loadPlanSlice(key)
     const persistedQueue = loadQueueSlice(key)
     // Auto-progress is a habit you set for an AGENT, not for one room of it.
     // A fresh lane has no persisted slice, so without this it silently opens
@@ -872,6 +952,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       queue: persistedQueue?.queue ?? [],
       queueAutoMode: persistedQueue?.queueAutoMode ?? sibling?.queueAutoMode ?? false,
       queueDispatchedId: null,
+      ...(shared ? { shared: { ...shared }, closed: null, speaker: null } : {}),
     }
 
     const sessions = new Map(get().sessions)
@@ -905,7 +986,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // Wire up event handlers
     ws.on('_connected', () => {
-      updateSession(key, { connected: true })
+      updateSession(key, shared ? { connected: true, closed: null } : { connected: true })
       // If we hydrated a queue with pending items and auto-mode is on, kick
       // off the first dispatch now that the socket is live.
       const cur = useChatStore.getState().sessions.get(key)
@@ -922,9 +1003,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       cancelAutoCompleteWatch(key)
     })
 
+    // Shared chats: Flight Deck closed the member socket for good. Say why
+    // (the chat shows it) instead of reconnecting.
+    ws.on('_closed', (data) => {
+      updateSession(key, {
+        connected: false, busy: false, statusText: '',
+        closed: { code: Number(data.code) || 0, reason: String(data.reason || '') },
+      })
+    })
+
     ws.on('welcome', (data) => {
       const sessionInfo = data.session as Record<string, unknown> | undefined
       const name = sessionInfo?.name as string || ''
+      if (shared) {
+        // A shared agent offers no model or persona choice, and it must NOT
+        // get the peer_agents handshake below — that would hand the member's
+        // own agents (and their tokens) to somebody else's agent.
+        const sp = data.speaker as Record<string, unknown> | undefined
+        const patch: Partial<ChatSession> = {
+          models: [], personalities: [],
+          speaker: sp ? {
+            id: String(sp.id ?? ''), name: String(sp.name ?? ''),
+            owner_name: String(sp.owner_name ?? ''), lane: String(sp.lane ?? ''),
+          } : null,
+        }
+        if (name) patch.statusText = `Session: ${name}`
+        updateSession(key, patch)
+        return
+      }
       const models = (data.models as AgentModelInfo[] || [])
       const personalities = (data.personalities as AgentPersonalityInfo[] || [])
       const patch: Partial<ChatSession> = { models, personalities }
@@ -1707,9 +1813,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const anyLane = state.sessions.get(containerId)
         || [...state.sessions.values()].find((s) => s.containerId === containerId)
       if (!anyLane) return          // the agent isn't open at all
-      state.openChat(containerId, anyLane.containerName, anyLane.host,
-                     anyLane.port, anyLane.auth, target)
-    } else if (!existing.connected) {
+      if (anyLane.shared) {
+        state.openSharedChat(anyLane.shared.agentRef, anyLane.containerName,
+                             anyLane.shared.ownerName, target)
+      } else {
+        state.openChat(containerId, anyLane.containerName, anyLane.host,
+                       anyLane.port, anyLane.auth, target)
+      }
+    } else if (!existing.connected && !(existing.shared && existing.ws.connecting)) {
+      if (existing.closed) updateSession(key, { closed: null })
       existing.ws.connect()
     }
     set((s) => ({
@@ -1790,7 +1902,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setModel: (containerId, selector) => {
     const session = get().sessions.get(containerId)
-    if (session) {
+    if (session && !session.shared) {
       session.ws.sendJSON({ type: 'set_model', selector })
       updateSession(containerId, { activeModel: selector })
     }
@@ -1798,7 +1910,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setPersonality: (containerId, personalityId) => {
     const session = get().sessions.get(containerId)
-    if (session) {
+    if (session && !session.shared) {
       session.ws.sendJSON({ type: 'set_personality', personality_id: personalityId })
       updateSession(containerId, { activePersonality: personalityId })
     }
@@ -1818,7 +1930,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setPlanningEnabled: (containerId, enabled) => {
     const session = get().sessions.get(containerId)
-    if (!session) return
+    if (!session || session.shared) return  // no plan mode in shared chats
     // Optimistic update — confirmed/corrected by command_result handler.
     updateSession(containerId, { planningEnabled: enabled })
     // Send as a regular chat message so it routes through the slash command
@@ -1828,7 +1940,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setPlanLevel: (containerId, level) => {
     const session = get().sessions.get(containerId)
-    if (!session) return
+    if (!session || session.shared) return  // no plan mode in shared chats
     // Optimistic update — confirmed/corrected by command_result handler.
     updateSession(containerId, { planLevel: level })
     session.ws.send(`/planning level ${level}`)

@@ -7,6 +7,7 @@ import os
 import re
 import signal
 import sys
+import time
 from pathlib import Path
 
 # Ensure HOME is set — some environments (Docker, systemd, PyInstaller)
@@ -206,15 +207,19 @@ class _LaneServerView:
     sockets instead of every admin client.
     """
 
-    __slots__ = ("_server", "agent", "_send")
+    # The lane sender lives in `_lane_sender`, NOT `_send`: handlers call
+    # `await server._send(ws, msg)` (the real server's per-socket send), and
+    # shadowing it made every slash command on a lane view raise TypeError
+    # at its final reply.
+    __slots__ = ("_server", "agent", "_lane_sender")
 
     def __init__(self, server: "WebServer", agent: Agent, send: Any) -> None:
         object.__setattr__(self, "_server", server)
         object.__setattr__(self, "agent", agent)
-        object.__setattr__(self, "_send", send)
+        object.__setattr__(self, "_lane_sender", send)
 
     def _broadcast(self, msg: dict[str, Any]) -> None:
-        self._send(msg)
+        self._lane_sender(msg)
 
     def _session_info(self, agent: Any = None) -> dict[str, Any]:
         # Describe THIS lane's session, not the main agent's — otherwise
@@ -227,9 +232,23 @@ class _LaneServerView:
     def __setattr__(self, name: str, value: Any) -> None:
         # `agent` is fixed for the lifetime of the view; anything else a
         # handler assigns (e.g. server._busy) belongs to the real server.
-        if name in ("agent", "_server", "_send"):
+        if name in ("agent", "_server", "_lane_sender"):
             raise AttributeError(f"{name} is read-only on a lane view")
         setattr(self._server, name, value)
+
+
+def _is_speaker_agent(agent: Any) -> bool:
+    from captain_claw.speaker import is_speaker_agent
+
+    return is_speaker_agent(agent)
+
+
+class SpeakerCapacityError(Exception):
+    """No room for another shared-agent speaker instance (global or per member)."""
+
+
+class SpeakerSessionLimitError(Exception):
+    """A member already has MAX_SESSIONS_PER_SPEAKER sessions on this agent."""
 
 
 class WebServer:
@@ -297,6 +316,22 @@ class WebServer:
         self._public_active_ws: dict[str, web.WebSocketResponse] = {}
         # Pending playbook approval requests: request_id → (event, [result_bool])
         self._pending_playbook_approvals: dict[str, tuple[asyncio.Event, list[bool]]] = {}
+        self._init_speaker_state()
+
+    def _init_speaker_state(self) -> None:
+        """Shared-agent speakers: one Agent per (member, lane), keyed
+        ``(speaker_id, lane)``. Empty unless Flight Deck connects with a
+        verified ``X-FD-Speaker`` header (see captain_claw/speaker.py)."""
+        self._speaker_agents: dict[tuple[str, str], Agent] = {}
+        self._speaker_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._speaker_sockets: dict[tuple[str, str], set[web.WebSocketResponse]] = {}
+        self._speaker_last_used: dict[tuple[str, str], float] = {}
+        # approval request id → the speaker key that may answer it.
+        self._speaker_approval_ids: dict[str, tuple[str, str]] = {}
+        # Keys whose instance is being built right now (counted against caps).
+        self._speaker_building: set[tuple[str, str]] = set()
+        # speaker_id → lock over that member's session list (all lanes).
+        self._speaker_session_locks: dict[str, asyncio.Lock] = {}
 
     async def _init_agent(self) -> None:
         """Initialize the agent with web callbacks."""
@@ -468,8 +503,21 @@ class WebServer:
         sm = get_session_manager()
         name = f"lane-{lane}"
         try:
+            # Straight by name first: a recency window can be pushed past by
+            # other sessions (members' included) and would lose the lane.
+            by_name = await sm.load_session_by_name(name)
+            if by_name is not None and not (getattr(by_name, "metadata", None) or {}).get("speaker_id"):
+                return by_name
+        except Exception as e:
+            log.debug("lane session lookup failed", lane=lane, error=str(e))
+        try:
             for s in await sm.list_sessions(limit=200):
                 if s.name == name:
+                    # A shared-agent member's session is never adopted as a
+                    # lane, whatever it is called (the owner's lane agent
+                    # would write its turns into the member's transcript).
+                    if (getattr(s, "metadata", None) or {}).get("speaker_id"):
+                        continue
                     session = await sm.load_session(s.id)
                     if session is not None:
                         return session
@@ -478,12 +526,244 @@ class WebServer:
             log.debug("lane session lookup failed", lane=lane, error=str(e))
         return await sm.create_session(name=name)
 
+    # ── Shared-agent speakers ─────────────────────────────────────────
+    #
+    # A member of a shared agent chats through Flight Deck, which opens this
+    # process's /ws with a signed X-FD-Speaker header. Each (member, lane)
+    # gets its own Agent instance and its own private session — built like a
+    # lane, but tools are NOT re-registered (the registry is process-global)
+    # and the owner's caches are never warmed. Speaker sockets are never in
+    # `clients` or `_lane_sockets`; they are reached only via _speaker_send.
+
+    def _speaker_send(self, key: tuple[str, str]):
+        """A sender bound to one speaker key — fans out to that member's sockets."""
+        def _send_msg(msg: dict) -> None:
+            data = json.dumps(msg, default=str)
+            for ws in list(self._speaker_sockets.get(key, ())):
+                if not ws.closed:
+                    fire_and_forget_send(ws, data)
+        return _send_msg
+
+    @staticmethod
+    def _speaker_state_key(speaker_id: str, lane: str) -> str:
+        return f"speaker_session:{speaker_id}|{lane}"
+
+    @staticmethod
+    def _speaker_session_name(display_name: str, lane: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", str(display_name or "").lower()).strip("-")
+        return f"spk-{(slug or 'member')[:24]}-{lane}"
+
+    @staticmethod
+    def _speaker_session_metadata(p: Any) -> dict[str, Any]:
+        return {
+            "speaker_id": p.speaker_id,
+            "speaker_lane": p.lane,
+            "speaker_name": p.display_name,
+        }
+
+    async def _speaker_session(self, p: Any) -> Any:
+        """The member's session for this lane, rejoined across reconnects and
+        restarts through ONE app_state key per mapping (never a name scan)."""
+        from captain_claw.session import get_session_manager
+
+        sm = get_session_manager()
+        state_key = self._speaker_state_key(p.speaker_id, p.lane)
+        session = None
+        try:
+            sid = await sm.get_app_state(state_key)
+            if sid:
+                session = await sm.load_session(sid)
+        except Exception as e:
+            log.debug("speaker session lookup failed", error=str(e))
+            session = None
+        if session is None or (session.metadata or {}).get("speaker_id") != p.speaker_id:
+            # Counted, but never refused: a member must always get a session.
+            session = await self._create_speaker_session(p, enforce_cap=False)
+            await sm.set_app_state(state_key, session.id)
+        return session
+
+    @staticmethod
+    def _speaker_sessions_key(speaker_id: str) -> str:
+        return f"speaker_sessions:{speaker_id}"
+
+    async def _create_speaker_session(
+        self, p: Any, name: str | None = None, *, enforce_cap: bool = True,
+    ) -> Any:
+        """Create a session for member *p*, recorded in their session list
+        (one app_state key per member, all lanes). With *enforce_cap*, raise
+        :class:`SpeakerSessionLimitError` once they have
+        ``MAX_SESSIONS_PER_SPEAKER`` sessions that still exist."""
+        from captain_claw.session import get_session_manager
+        from captain_claw.speaker import MAX_SESSIONS_PER_SPEAKER
+
+        sm = get_session_manager()
+        list_key = self._speaker_sessions_key(p.speaker_id)
+        lock = self._speaker_session_locks.setdefault(p.speaker_id, asyncio.Lock())
+        async with lock:
+            try:
+                ids = json.loads(await sm.get_app_state(list_key) or "[]")
+            except (TypeError, ValueError):
+                ids = []
+            ids = [i for i in ids if isinstance(i, str) and i] if isinstance(ids, list) else []
+            if enforce_cap and len(ids) >= MAX_SESSIONS_PER_SPEAKER:
+                # Forget sessions that no longer exist (deleted by the owner).
+                ids = [i for i in ids if await sm.load_session(i) is not None]
+                if len(ids) >= MAX_SESSIONS_PER_SPEAKER:
+                    await sm.set_app_state(list_key, json.dumps(ids))
+                    raise SpeakerSessionLimitError(
+                        f"You already have {MAX_SESSIONS_PER_SPEAKER} conversations on this "
+                        "shared agent — clear this one with /clear instead.",
+                    )
+            session = await sm.create_session(
+                name=name or self._speaker_session_name(p.display_name, p.lane),
+                metadata=self._speaker_session_metadata(p),
+            )
+            ids.append(session.id)
+            await sm.set_app_state(list_key, json.dumps(ids))
+            return session
+
+    def _register_speaker_keys(self, agent: Agent) -> None:
+        """Mark the instance's current session (raw id and slug) as a member's
+        in the tool registry. Earlier keys stay registered until eviction."""
+        keys = getattr(agent, "_speaker_registry_keys", None)
+        if not isinstance(keys, set):
+            keys = set()
+        session = getattr(agent, "session", None)
+        for k in (getattr(session, "id", ""), agent._current_session_slug()):
+            k = str(k or "").strip()
+            if k:
+                agent.tools.register_speaker_session(k)
+                keys.add(k)
+        agent._speaker_registry_keys = keys
+
+    async def _set_speaker_session(self, agent: Agent, session: Any) -> None:
+        """Rebind a speaker instance to *session* (after /new): app_state key,
+        registry keys, agent.session."""
+        from captain_claw.session import get_session_manager
+
+        p = agent._speaker_principal
+        await get_session_manager().set_app_state(
+            self._speaker_state_key(p.speaker_id, p.lane), session.id,
+        )
+        agent.session = session
+        self._register_speaker_keys(agent)
+
+    async def _get_speaker_agent(self, p: Any) -> Agent:
+        """Return (or lazily create) the Agent for member *p* on its lane."""
+        from captain_claw import speaker as _speaker
+
+        key = (p.speaker_id, p.lane)
+        agent = self._speaker_agents.get(key)
+        if agent is not None:
+            self._speaker_last_used[key] = time.monotonic()
+            return agent
+
+        lock = self._speaker_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            agent = self._speaker_agents.get(key)
+            if agent is not None:
+                self._speaker_last_used[key] = time.monotonic()
+                return agent
+
+            self._evict_speaker_agents()
+            live = set(self._speaker_agents) | self._speaker_building
+            if len(live) >= _speaker.SPEAKER_MAX_INSTANCES:
+                raise SpeakerCapacityError("This agent is at its member capacity.")
+            if sum(1 for k in live if k[0] == p.speaker_id) >= _speaker.SPEAKER_MAX_PER_USER:
+                raise SpeakerCapacityError("Too many open conversations on this agent.")
+
+            self._speaker_building.add(key)
+            try:
+                session = await self._speaker_session(p)
+                agent = await self._build_scoped_agent(
+                    session, self._speaker_send(key),
+                    register_tools=False, warm_owner_caches=False, approval_owner=key,
+                )
+            finally:
+                self._speaker_building.discard(key)
+            # Agent.__init__ pointed the process-global registry's fallback
+            # approval callback at this instance's — give it back to main.
+            if self.agent is not None:
+                try:
+                    self.agent.tools.set_approval_callback(self.agent.approval_callback)
+                except Exception:
+                    pass
+            agent._speaker_scoped = True
+            agent._speaker_principal = p
+            agent._speaker_profile = ("", "")
+            agent._user_id = None
+            agent._active_personality_id = None
+            agent._recent_prompts = []
+            agent._lane_busy = False
+            agent._peer_agents = []
+            agent._speaker_cache_refreshed_at = time.monotonic()
+            main = self.agent
+            agent._fleet_identity = getattr(main, "_fleet_identity", None) if main else None
+            # "" not None: the prompt builder calls .strip() on these.
+            agent._fleet_instructions = (getattr(main, "_fleet_instructions", "") if main else "") or ""
+            agent._fd_url = (getattr(main, "_fd_url", "") if main else "") or ""
+            self._register_speaker_keys(agent)
+            self._speaker_agents[key] = agent
+            self._speaker_last_used[key] = time.monotonic()
+            log.info("Created speaker agent", lane=p.lane, session_id=session.id)
+            return agent
+
+    def _speaker_evictable(self, key: tuple[str, str]) -> bool:
+        agent = self._speaker_agents.get(key)
+        if agent is None:
+            return False
+        if any(not ws.closed for ws in self._speaker_sockets.get(key, ())):
+            return False
+        return not getattr(agent, "_lane_busy", False)
+
+    def _drop_speaker_agent(self, key: tuple[str, str]) -> None:
+        agent = self._speaker_agents.pop(key, None)
+        self._speaker_last_used.pop(key, None)
+        self._speaker_locks.pop(key, None)
+        if not self._speaker_sockets.get(key):
+            self._speaker_sockets.pop(key, None)
+        if agent is None:
+            return
+        for k in list(getattr(agent, "_speaker_registry_keys", None) or ()):
+            try:
+                agent.tools.unregister_speaker_session(k)
+            except Exception:
+                pass
+        log.info("Evicted speaker agent", lane=key[1])
+
+    def _evict_speaker_agents(self) -> None:
+        """Drop idle instances (no live socket, not mid-turn): anything idle
+        longer than SPEAKER_IDLE_EVICT_S, then least-recently-used at the cap."""
+        from captain_claw import speaker as _speaker
+
+        now = time.monotonic()
+        for key in list(self._speaker_agents):
+            idle = now - self._speaker_last_used.get(key, 0.0)
+            if idle > _speaker.SPEAKER_IDLE_EVICT_S and self._speaker_evictable(key):
+                self._drop_speaker_agent(key)
+        if len(self._speaker_agents) >= _speaker.SPEAKER_MAX_INSTANCES:
+            candidates = sorted(
+                (k for k in self._speaker_agents if self._speaker_evictable(k)),
+                key=lambda k: self._speaker_last_used.get(k, 0.0),
+            )
+            while candidates and len(self._speaker_agents) >= _speaker.SPEAKER_MAX_INSTANCES:
+                self._drop_speaker_agent(candidates.pop(0))
+
     async def resolve_agent(self, ws: Any) -> Agent:
         """The Agent this socket talks to: its public session, its lane, or main.
 
         One resolver so every message type (chat, set_model, cancel, slash
         commands, feedback) lands on the same agent for a given socket.
         """
+        from captain_claw.speaker import speaker_key_of
+
+        speaker_key = speaker_key_of(ws)
+        if speaker_key:
+            # A member's socket only ever reaches that member's own instance.
+            agent = self._speaker_agents.get(speaker_key)
+            if agent is None:
+                agent = await self._get_speaker_agent(ws._speaker_principal)
+            return agent
         sid = getattr(ws, "_public_session_id", None)
         if sid:
             return self._public_agents.get(sid) or self.agent
@@ -503,6 +783,13 @@ class WebServer:
         that would leak across lanes — `_broadcast` — is redirected to the
         lane's own sockets.
         """
+        from captain_claw.speaker import speaker_key_of
+
+        speaker_key = speaker_key_of(ws)
+        if speaker_key:
+            # BEFORE the lane-A shortcut: a member on lane A must still act on
+            # their own instance, never on the owner's main agent.
+            return _LaneServerView(self, agent, self._speaker_send(speaker_key))
         lane = self.normalize_lane(getattr(ws, "_lane", ""))
         if lane == self.LANE_MAIN or agent is self.agent:
             return self
@@ -534,12 +821,26 @@ class WebServer:
                         error=str(e))
             return base
 
-    async def _build_scoped_agent(self, session: Any, send: Any) -> Agent:
+    async def _build_scoped_agent(
+        self,
+        session: Any,
+        send: Any,
+        *,
+        register_tools: bool = True,
+        warm_owner_caches: bool = True,
+        approval_owner: tuple[str, str] | None = None,
+    ) -> Agent:
         """Build an Agent whose output goes to *send* instead of _broadcast.
 
-        Shared by public sessions and lanes: both need an Agent that lives
-        alongside the main one, runs concurrently with it, and streams to a
-        subset of sockets rather than to every admin client.
+        Shared by public sessions, lanes and shared-agent speakers: each needs
+        an Agent that lives alongside the main one, runs concurrently with it,
+        and streams to a subset of sockets rather than to every admin client.
+
+        Speakers pass ``register_tools=False`` (the registry is process-global
+        and already populated; re-registering would rebind history/cron/
+        terminal/personality to the newest instance), ``warm_owner_caches=False``
+        (no owner briefing), and ``approval_owner`` (their speaker key, so only
+        their socket may answer this instance's approval requests).
         """
         from captain_claw.session import get_session_manager
 
@@ -609,6 +910,8 @@ class WebServer:
             event = asyncio.Event()
             result_holder: list[bool] = [True]  # default: approve on timeout
             self._pending_playbook_approvals[request_id] = (event, result_holder)
+            if approval_owner is not None:
+                self._speaker_approval_ids[request_id] = approval_owner
             _send({
                 "type": "approval_request",
                 "id": request_id,
@@ -621,6 +924,8 @@ class WebServer:
                 pass
             finally:
                 self._pending_playbook_approvals.pop(request_id, None)
+                if approval_owner is not None:
+                    self._speaker_approval_ids.pop(request_id, None)
             return result_holder[0]
 
         agent = Agent(
@@ -648,7 +953,8 @@ class WebServer:
         agent.session = session
         agent.session_manager = sm
         agent._sync_runtime_flags_from_session()
-        agent._register_default_tools()
+        if register_tools:
+            agent._register_default_tools()
         agent.instructions = self.agent.instructions if self.agent else agent.instructions
         agent._initialized = True
         agent._byok_active = False
@@ -662,10 +968,11 @@ class WebServer:
             await agent._refresh_nervous_system_cache()
         except Exception:
             pass
-        try:
-            await agent._refresh_briefing_context_cache()
-        except Exception:
-            pass
+        if warm_owner_caches:
+            try:
+                await agent._refresh_briefing_context_cache()
+            except Exception:
+                pass
 
         return agent
 
@@ -859,6 +1166,7 @@ class WebServer:
         stale: list[web.WebSocketResponse] = []
 
         from captain_claw.config import get_config
+        from captain_claw.speaker import speaker_key_of
         public_mode = bool(get_config().web.public_run)
 
         for ws in self.clients:
@@ -872,6 +1180,10 @@ class WebServer:
             # callbacks — broadcasting to them would leak lane A's turn into
             # lane B's transcript. Lane A *is* the main agent, so it stays.
             if self.normalize_lane(getattr(ws, "_lane", "")) != self.LANE_MAIN:
+                continue
+            # A shared-agent member's socket never sees the owner's turns.
+            # (They are never in `clients`; this is belt and braces.)
+            if speaker_key_of(ws):
                 continue
             try:
                 fire_and_forget_send(ws, data)
@@ -906,6 +1218,18 @@ class WebServer:
                 raise
 
     # ── Session helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _session_tools(agent: Any) -> list[str]:
+        """Tool names shown in a session header: a speaker instance shows only
+        the speaker allowlist (the registry itself is process-global)."""
+        if not agent:
+            return []
+        if _is_speaker_agent(agent):
+            from captain_claw.speaker import SPEAKER_TOOL_ALLOWLIST
+
+            return sorted(n for n in SPEAKER_TOOL_ALLOWLIST if agent.tools.has_tool(n))
+        return agent.tools.list_tools()
 
     def _session_info(self, agent: Any = None) -> dict[str, Any]:
         """Session info payload for *agent* (default: the main agent).
@@ -944,8 +1268,8 @@ class WebServer:
             "provider": model_details.get("provider", ""),
             "description": (s.metadata or {}).get("description", ""),
             "message_count": len(s.messages),
-            "tools": agent.tools.list_tools() if agent else [],
-            "skills": [
+            "tools": self._session_tools(agent),
+            "skills": [] if _is_speaker_agent(agent) else [
                 {"name": cmd.name, "skill": cmd.skill_name, "description": cmd.description}
                 for cmd in (agent.list_user_invocable_skills() if agent else [])
             ],
