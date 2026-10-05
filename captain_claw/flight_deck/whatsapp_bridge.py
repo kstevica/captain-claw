@@ -1919,6 +1919,52 @@ async def push_to_waid(waid: str, text: str) -> bool:
     return True
 
 
+async def send_text_checked(waid: str, text: str) -> tuple[bool, str]:
+    """Send one plain text message and report what Meta said: ``(ok, why_not)``.
+
+    For the Connections card's test button — unlike ``push_to_waid`` it skips
+    the reply dedup and the audio extra, and it surfaces the Cloud API's
+    synchronous error (bad token, recipient not allowed…) instead of swallowing
+    it. ``ok`` means WhatsApp accepted the message, not that it was delivered:
+    an outside-the-24h-window failure only arrives later on the status webhook."""
+    waid = (waid or "").lstrip("+").strip()
+    if not waid or waid not in _allowed_waids():
+        return False, "not on this deck's WhatsApp allowlist"
+    if is_push_muted(waid):
+        return False, "muted — send /unmute to the bot in WhatsApp"
+    token = _env("WHATSAPP_ACCESS_TOKEN")
+    url = _send_url()
+    if not token or not url:
+        return False, "WhatsApp isn't set up on this deck"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={
+                    "messaging_product": "whatsapp",
+                    "recipient_type": "individual",
+                    "to": waid,
+                    "type": "text",
+                    "text": {"body": text[:_MAX_CHUNK], "preview_url": False},
+                },
+            )
+    except httpx.HTTPError as exc:
+        return False, f"couldn't reach WhatsApp ({type(exc).__name__})"
+    if resp.status_code < 300:
+        _WAID_LAST_SEND_AT[waid] = time.time()
+        return True, ""
+    try:
+        body = resp.json()
+        err = body.get("error") if isinstance(body, dict) else None
+        err = err if isinstance(err, dict) else {}
+        data = err.get("error_data") if isinstance(err.get("error_data"), dict) else {}
+        detail = str(data.get("details") or err.get("message") or "")
+    except ValueError:
+        detail = ""
+    return False, f"WhatsApp refused it ({resp.status_code}{': ' + detail if detail else ''})"
+
+
 @router.post("/whatsapp/push")
 async def whatsapp_push(request: Request) -> JSONResponse:
     """Proactive push delivery primitive. Body: ``{to, text}``.

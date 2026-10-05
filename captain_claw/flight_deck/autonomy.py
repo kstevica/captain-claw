@@ -296,6 +296,20 @@ class AutonomyStore:
         except (ValueError, TypeError):
             return {}
 
+    def all_overrides(self) -> dict[str, dict[str, Any]]:
+        """Every user's stored override blob, keyed by normalized user id."""
+        with self._lock:
+            rows = self._c().execute("SELECT user_id, overrides FROM autonomy_config").fetchall()
+        out: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            try:
+                parsed = json.loads(r["overrides"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                out[r["user_id"]] = parsed
+        return out
+
     def set_overrides(self, user_id: str, overrides: dict[str, Any]) -> None:
         uid = _norm_user(user_id)
         now = _utcnow_iso()
