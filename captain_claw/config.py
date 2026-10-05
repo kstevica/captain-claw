@@ -1006,7 +1006,11 @@ class AutonomousWorkConfig(BaseModel):
     arbiter_on_pulse: bool = True               # run the arbiter inside the heartbeat pulse
     arbiter_min_score: float = 0.6              # ignore candidates below this priority
     max_actions_per_day: int = 6
-    max_concurrent_actions: int = 2             # mirrors Basna's 2/owner cap
+    max_concurrent_actions: int = 2             # in-flight (queued/dispatched); mirrors Basna's 2/owner cap
+    # Proposals awaiting approval have their own cap — a full queue pauses the
+    # loop (logged visibly) — and unanswered ones expire after the TTL (0 = never).
+    max_pending_proposals: int = 5
+    proposal_ttl_hours: int = 48
     candidate_lookback_hours: int = 24
     quiet_hours_start: int = 22                 # 22:00
     quiet_hours_end: int = 8                    # 08:00 (wraps midnight)
@@ -1030,9 +1034,12 @@ class AutonomousWorkConfig(BaseModel):
     trust_threshold: float = 0.85
     trust_min_runs: int = 3
 
-    # Also deliver proactive nudges to the user's WhatsApp (the configured
-    # WHATSAPP_ALLOWED_WAIDS), not just the agent's web chat.
+    # Also deliver proactive nudges to the user's WhatsApp, not just the agent's
+    # web chat. ``notify_waid`` is the owner's own number(s) (comma-separated,
+    # each must be on WHATSAPP_ALLOWED_WAIDS) — set it per user. Unset: a deck
+    # without auth pushes to every allowlisted number; with auth, nowhere.
     nudge_to_whatsapp: bool = True
+    notify_waid: str = ""
 
     # ── #5 Grounded verification — confirm a side effect actually landed ──
     # After a catalog action with a verify spec runs, read it back; if it's

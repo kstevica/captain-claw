@@ -33,6 +33,7 @@ from lupa_api.packs import (
     active_pack_slug,
     list_seed_packs,
     load_pack,
+    manifest_hash,
     pack_quality,
     row_manifest,
 )
@@ -236,9 +237,48 @@ def _brief_instruction(text: str) -> str:
             f"format. The standing question: {text}")
 
 
+# FD statuses that end a round ("missing": FD no longer has it); anything else
+# is still in flight.
+_ROUND_ENDED = ("done", "error", "cancelled", "rejected", "missing")
+
+
+async def _round_status(fd, sid: str, headers: dict) -> str | None:
+    """A round's FD status — None when FD couldn't answer (transient: the
+    scheduler retries next tick)."""
+    try:
+        r = await fd.get(f"/fd/basna/sessions/{sid}", headers=headers)
+    except httpx.HTTPError:
+        return None
+    if r.status_code == 404:
+        return "missing"
+    if r.status_code != 200:
+        return None
+    return str(r.json().get("status") or "")
+
+
+async def _latest_done_round(fd, rounds: list[dict], headers: dict) -> str | None:
+    """The newest of ``rounds`` that finished cleanly — '' when none did, None
+    when FD couldn't answer."""
+    for rnd in reversed(rounds):
+        status = await _round_status(fd, rnd["session_id"], headers)
+        if status is None:
+            return None
+        if status == "done":
+            return rnd["session_id"]
+    return ""
+
+
 async def fire_due_briefs(state) -> int:
     """One scheduler pass; returns how many briefs fired. Kept separate from
     the sleep loop so tests can drive it deterministically.
+
+    The next round counts from when the previous one FINISHED, not from when it
+    fired: a fired brief is parked (next_run_at '' — due, re-checked each tick)
+    until its round ends, then rescheduled a cadence from that moment, so a
+    round that outlasts its cadence never triggers a back-to-back run. Nothing
+    fires while the stream's latest round is still running. A failed round or
+    a refused continue is recorded in last_error and retried a cadence later
+    from the latest round that finished cleanly — it never wedges the brief.
 
     Continuation rounds inherit the parent run's quality profile, and both
     `balanced` and `thorough` include the delta_rounds lever — so brief
@@ -250,40 +290,62 @@ async def fire_due_briefs(state) -> int:
     now = datetime.now(timezone.utc)
     fired = 0
     for brief in await db.list_due_briefs(now.isoformat()):
+        stream_id = brief["stream_id"]
         try:
-            rounds = await db.list_rounds(brief["stream_id"])
+            rounds = await db.list_rounds(stream_id)
             if not rounds:
                 continue  # a brief needs an initial round to continue from
             headers = {"Authorization":
                        f"Bearer {_mint_owner_token(brief['user_id'], secret)}"}
-            tip = rounds[-1]["session_id"]
-            r = await fd.get(f"/fd/basna/sessions/{tip}", headers=headers)
-            if r.status_code != 200 or r.json().get("status") != "done":
-                continue  # tip still running/failed — retried next tick
-            stream = await db.get_stream(brief["stream_id"], brief["user_id"])
+            later = (now + timedelta(hours=float(brief["cadence_hours"]))).isoformat()
+            status = await _round_status(fd, rounds[-1]["session_id"], headers)
+            if status is None:
+                continue  # FD unreachable — retried next tick
+            if status not in _ROUND_ENDED:
+                continue  # never stack a round on one that is still running
+            if not brief["next_run_at"]:
+                # The round it was parked on just ended → next run a full
+                # cadence from now; a failure is recorded, not retried at once.
+                await db.reschedule_brief(
+                    stream_id, later,
+                    last_error="" if status == "done"
+                    else f"the last round ended with status {status}")
+                continue
+            # Due and idle: continue from the latest round that finished
+            # cleanly (a failed one has no report to build on).
+            base = (rounds[-1]["session_id"] if status == "done"
+                    else await _latest_done_round(fd, rounds[:-1], headers))
+            if base is None:
+                continue  # FD unreachable — retried next tick
+            if not base:
+                await db.reschedule_brief(
+                    stream_id, later,
+                    last_error="no completed round to continue from")
+                continue
+            stream = await db.get_stream(stream_id, brief["user_id"])
             if not stream:
                 continue
             settings = _stream_settings(stream)
             resp = await fd.post(
-                f"/fd/vatra/sessions/{tip}/continue",
+                f"/fd/vatra/sessions/{base}/continue",
                 json={"instruction": _brief_instruction(brief["instruction"]),
                       "kind": "continue",
                       "same_cast": bool(settings.get("same_cast", True))},
                 headers=headers)
-            if resp.status_code != 200:
-                log.warning("brief continue failed for stream %s: %s",
-                            brief["stream_id"], resp.status_code)
-                continue
-            sid = resp.json().get("session_id") or ""
+            sid = (resp.json().get("session_id") or "") if resp.status_code == 200 else ""
             if not sid:
+                log.warning("brief continue failed for stream %s: %s",
+                            stream_id, resp.status_code)
+                await db.reschedule_brief(
+                    stream_id, later,
+                    last_error=f"could not start the round "
+                               f"({resp.status_code}: {_fd_error(resp).detail})")
                 continue
-            await db.add_round(brief["stream_id"], sid, "brief")
-            nxt = (now + timedelta(hours=float(brief["cadence_hours"]))).isoformat()
-            await db.mark_brief_ran(brief["stream_id"], sid, nxt)
+            await db.add_round(stream_id, sid, "brief")
+            await db.mark_brief_ran(stream_id, sid, "")  # parked until it ends
             fired += 1
         except Exception:  # noqa: BLE001 — one bad brief must not stop the rest
-            log.exception("brief scheduler pass failed for stream %s",
-                          brief.get("stream_id"))
+            log.exception("brief scheduler pass failed for stream %s", stream_id)
     return fired
 
 
@@ -470,7 +532,15 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         for slug, manifest in list_seed_packs().items():
             await app.state.db.upsert_seed_pack(slug, manifest)
         row = await app.state.db.get_pack(active_pack_slug())
-        app.state.pack = row_manifest(row) if row else load_pack()
+        if row and row["status"] != "published":
+            # Edited and awaiting re-evaluation — serve the repo copy until it
+            # is published again, so an unevaluated edit never goes live.
+            try:
+                app.state.pack = load_pack()
+            except (OSError, ValueError):
+                app.state.pack = row_manifest(row)  # registry-only: nothing else
+        else:
+            app.state.pack = row_manifest(row) if row else load_pack()
         scheduler = asyncio.create_task(_brief_loop(app.state))
         yield
         scheduler.cancel()
@@ -509,10 +579,12 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     # ── streams ──────────────────────────────────────────────────────
 
     async def _pack_by_slug(request: Request, slug: str) -> dict:
-        """A stream's pack manifest from the registry; default pack fallback."""
+        """A stream's pack manifest from the registry; default pack fallback.
+        Only a published desk drives runs — one edited and awaiting
+        re-evaluation falls back to the default instead of going live."""
         if slug:
             row = await _db(request).get_pack(slug)
-            if row:
+            if row and row["status"] == "published":
                 return row_manifest(row)
         return request.app.state.pack
 
@@ -525,8 +597,11 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     @app.post("/api/streams")
     async def create_stream(body: StreamCreate, request: Request,
                             user: dict = Depends(require_user)):
-        slug = body.pack.strip() or request.app.state.pack.get("slug", "")
-        if body.pack.strip():
+        default = request.app.state.pack.get("slug", "")
+        slug = body.pack.strip() or default
+        # The default desk is always open (served from app.state.pack even while
+        # its registry row is a draft awaiting re-evaluation).
+        if slug != default:
             row = await _db(request).get_pack(slug)
             if not row or row["status"] != "published":
                 raise HTTPException(404, "unknown desk")
@@ -803,6 +878,19 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         except (ValueError, TypeError):
             return False
 
+    async def _save_manifest(db, row: dict, manifest: dict, **fields) -> None:
+        """Write a pack's manifest. A real CHANGE voids the evaluation behind
+        it: a published desk drops back to draft (an unevaluated edit never goes
+        live — it returns via evaluate → publish) and a finished verdict is
+        cleared so the ship-gate re-locks. A running eval is left alone: it is
+        stamped with the manifest it judged, so publish refuses its verdict."""
+        if manifest_hash(manifest) != manifest_hash(row_manifest(row)):
+            if row["status"] == "published":
+                fields["status"] = "draft"
+            if json.loads(row.get("eval_state") or "{}").get("status") != "running":
+                fields["eval_state"] = {}
+        await db.update_pack(row["slug"], manifest=manifest, **fields)
+
     def _pack_summary(row: dict) -> dict:
         m = row_manifest(row)
         gen = json.loads(row.get("generation") or "{}")
@@ -883,7 +971,7 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         manifest = dict(body.manifest)
         for k in ("slug", "pack_status", "pack_version"):
             manifest.pop(k, None)
-        await db.update_pack(slug, manifest=manifest)
+        await _save_manifest(db, row, manifest)
         return {"ok": True}
 
     async def _generate_pack(state, slug: str, name: str, instructions: str,
@@ -918,13 +1006,15 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         if not await _run_is_current(state.db, slug, "generation", run_id):
             return  # cancelled or superseded — don't clobber
         row = await state.db.get_pack(slug)
-        manifest = row_manifest(row) if row else {}
+        if not row:
+            return
+        manifest = row_manifest(row)
         for k in ("slug", "pack_status", "pack_version"):
             manifest.pop(k, None)
             generated.pop(k, None)
         manifest.update(generated)
-        await state.db.update_pack(slug, manifest=manifest,
-                                   generation={"status": "done", "run_id": run_id})
+        await _save_manifest(state.db, row, manifest,
+                             generation={"status": "done", "run_id": run_id})
 
     @app.post("/api/packs/{slug}/generate")
     async def generate_pack(slug: str, body: GenerateBody, request: Request,
@@ -949,6 +1039,8 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     async def _evaluate_pack(state, slug: str, token: str, run_id: str) -> None:
         row = await state.db.get_pack(slug)
         manifest = row_manifest(row) if row else {}
+        # The verdict vouches for exactly this manifest — publish checks it.
+        evaluated = manifest_hash(manifest)
         evals = manifest.get("evals") or []
         brief = str((evals[0] or {}).get("brief") if evals else "") or (
             f"Golden task: produce a short, source-verified overview of the "
@@ -957,7 +1049,8 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         async def _started(sid: str) -> None:
             if await _run_is_current(state.db, slug, "eval_state", run_id):
                 await state.db.update_pack(slug, eval_state={
-                    "status": "running", "session_id": sid, "run_id": run_id})
+                    "status": "running", "session_id": sid, "run_id": run_id,
+                    "manifest_hash": evaluated})
         detail, err = await _run_headless_vatra(
             state, token, brief, pack_quality(manifest) or {"profile": "thorough"},
             on_started=_started, execution_groups=pack_execution_groups(manifest))
@@ -965,7 +1058,8 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             return  # cancelled or superseded by a re-run — don't clobber
         if err:
             await state.db.update_pack(slug, eval_state={
-                "status": "error", "message": err, "run_id": run_id})
+                "status": "error", "message": err, "run_id": run_id,
+                "manifest_hash": evaluated})
             return
         analysis = detail.get("analysis") or {}
         if isinstance(analysis, str):
@@ -977,7 +1071,8 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
         await state.db.update_pack(
             slug, eval_state={"status": "done", "verdict": verdict,
                               "metrics": metrics, "run_id": run_id,
-                              "session_id": detail.get("id", "")})
+                              "session_id": detail.get("id", ""),
+                              "manifest_hash": evaluated})
 
     @app.post("/api/packs/{slug}/evaluate")
     async def evaluate_pack(slug: str, request: Request,
@@ -1029,6 +1124,10 @@ def create_app(fd_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
             raise HTTPException(409,
                                 "the ship-gate is closed: run an evaluation and "
                                 "get a green verdict before publishing")
+        if ev.get("manifest_hash") != manifest_hash(row_manifest(row)):
+            raise HTTPException(409,
+                                "the manifest changed since it was evaluated: run "
+                                "the evaluation again before publishing")
         await db.update_pack(slug, status="published", bump_version=True)
         return {"ok": True, "status": "published"}
 

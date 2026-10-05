@@ -868,33 +868,6 @@ async def lifespan(app: FastAPI):
                             return owner
             return os.environ.get("FD_OWNER_ID", "")
 
-        def _flow_origin_env(payload: dict) -> list:
-            """The triggering agent's own .env (KEY=VALUE pairs) so a spawned
-            specialist inherits ITS tool/provider keys (BRAVE_API_KEY, OPENAI_API_KEY,
-            …). This is the 'use the same keys as the agent I'm talking to' fallback
-            — tool keys live in the agent's .env, not its config.yaml. Best-effort."""
-            port = int(payload.get("origin_port") or 0)
-            name = str(payload.get("origin_name") or "")
-            slug = ""
-            for s, e in _load_process_registry().items():
-                if (port and int(e.get("web_port") or 0) == port) or (name and e.get("name") == name):
-                    slug = s
-                    break
-            if not slug:
-                return []
-            out: list = []
-            try:
-                for line in (DATA_DIR / slug / ".env").read_text().splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    if k.strip():
-                        out.append({"key": k.strip(), "value": v})
-            except Exception:
-                pass
-            return out
-
         async def _flow_load_archetype(payload: dict, aid: str):
             from captain_claw.flight_deck.archetypes import merged_archetypes
             from captain_claw.flight_deck.archetype_compose import resolve_pair
@@ -987,6 +960,10 @@ async def lifespan(app: FastAPI):
             load_archetype=_flow_load_archetype,
             spawn_archetype=_flow_spawn_archetype,
             stop_archetype=_flow_stop_archetype,
+            # Tenancy: a run reaches only its owner's agents (admins: any).
+            resolve_owner=_resolve_agent_owner,
+            user_is_admin=_flow_user_is_admin,
+            enforce_owner=AUTH_ENABLED,
         )
         app.state.flow_store = _flow_store
         app.state.flow_runner = _flow_runner
@@ -4184,7 +4161,44 @@ def _running_agents() -> list[dict[str, Any]]:
             # matches THIS agent — port-keyed re-resolution can collide when stale
             # entries share a port.
             "auth": entry.get("web_auth", ""),
+            # The owner recorded at spawn, from the same entry: a flow run may
+            # only address its owner's agents.
+            "owner": entry.get("owner", "") or "",
         })
+    return out
+
+
+def _flow_origin_env(payload: dict) -> list:
+    """The triggering agent's own .env (KEY=VALUE pairs) so a spawned
+    specialist inherits ITS tool/provider keys (BRAVE_API_KEY, OPENAI_API_KEY,
+    …). This is the 'use the same keys as the agent I'm talking to' fallback
+    — tool keys live in the agent's .env, not its config.yaml. Best-effort."""
+    port = int(payload.get("origin_port") or 0)
+    name = str(payload.get("origin_name") or "")
+    # Tenancy: an owned run (the runner stamps its owner as user_id)
+    # inherits only from that user's own agent — never another user's
+    # .env, whatever origin the payload or a gosub arg names.
+    uid = str(payload.get("user_id") or "") if AUTH_ENABLED else ""
+    slug = ""
+    for s, e in _load_process_registry().items():
+        if uid and str(e.get("owner") or "") != uid:
+            continue
+        if (port and int(e.get("web_port") or 0) == port) or (name and e.get("name") == name):
+            slug = s
+            break
+    if not slug:
+        return []
+    out: list = []
+    try:
+        for line in (DATA_DIR / slug / ".env").read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip():
+                out.append({"key": k.strip(), "value": v})
+    except Exception:
+        pass
     return out
 
 
@@ -4251,20 +4265,70 @@ def _flow_store():
     return store
 
 
+# ── Flow tenancy: a flow belongs to the user who created it. Non-admins see,
+# edit and run only their own; admins see all; legacy rows with no owner are
+# admin-only. Auth off → one trusted user, nothing is scoped. ──
+
+def _flow_caller(user: dict | None) -> tuple[str, bool]:
+    """(user_id, is_admin) of a flow-route caller; ("", True) with auth off."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+    if not _fd_auth_enabled() or not user:
+        return "", True
+    return str(user.get("id") or ""), user.get("role") == "admin"
+
+
+def _flow_visible(flow: dict | None, user: dict | None) -> bool:
+    uid, admin = _flow_caller(user)
+    return bool(flow) and (admin or (bool(uid) and flow.get("owner_id") == uid))
+
+
+async def _owned_flow(flow_id: str, user: dict | None) -> dict:
+    """The flow, if the caller may use it — else 404 (no existence oracle)."""
+    flow = await _flow_store().get_flow(flow_id)
+    if not _flow_visible(flow, user):
+        raise HTTPException(404, "flow not found")
+    return flow
+
+
+async def _check_flow_run(run_id: str, user: dict | None) -> None:
+    """404 unless the caller may see run *run_id* (it follows its flow)."""
+    if _flow_caller(user)[1]:
+        return
+    detail = await _flow_store().get_run(run_id)
+    flow_id = str(((detail or {}).get("run") or {}).get("flow_id") or "")
+    flow = await _flow_store().get_flow(flow_id) if flow_id else None
+    if not _flow_visible(flow, user):
+        raise HTTPException(404, "run not found")
+
+
+async def _flow_user_is_admin(uid: str) -> bool:
+    """Whether user *uid* is an admin (the flow runner's tenancy seam)."""
+    if not uid:
+        return False
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        u = await get_db().get_user_by_id(uid)
+    except Exception:
+        return False
+    return bool(u) and u.get("role") == "admin"
+
+
 @app.get("/fd/flows")
 async def fd_flows_list(request: Request, user: dict | None = _required_user_dep):
-    return {"flows": await _flow_store().list_flows()}
+    uid, admin = _flow_caller(user)
+    return {"flows": await _flow_store().list_flows(owner_id=None if admin else uid)}
 
 
 @app.post("/fd/flows")
 async def fd_flows_create(request: Request, user: dict | None = _required_user_dep):
     spec = await request.json()
-    fid = await _flow_store().create_flow(spec)
+    fid = await _flow_store().create_flow(spec, owner_id=_flow_caller(user)[0])
     return {"id": fid}
 
 
 @app.get("/fd/flows/runs/{run_id}")
 async def fd_flows_run_detail(run_id: str, request: Request, user: dict | None = _required_user_dep):
+    await _check_flow_run(run_id, user)
     detail = await _flow_store().get_run(run_id)
     if not detail:
         raise HTTPException(404, "run not found")
@@ -4306,8 +4370,15 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
         _target = _run_m.group(1).strip()
         _store = flow_router._STORE
         _flow = None
+        # Only the origin agent's owner's flows (an admin's agent: any flow).
+        _owner = _resolve_agent_owner(int(payload.get("origin_port") or 0)) if (
+            AUTH_ENABLED and payload.get("origin_port")) else ""
+        _scope = _owner if (_owner and not await _flow_user_is_admin(_owner)) else None
         if _store is not None:
-            _flow = await _store.get_flow(_target) or await _store.get_flow_by_name(_target)
+            _flow = await _store.get_flow(_target)
+            if _flow is not None and _scope is not None and _flow.get("owner_id") != _scope:
+                _flow = None
+            _flow = _flow or await _store.get_flow_by_name(_target, owner_id=_scope)
         if _flow is None:
             return {"matched": True, "output": f"No flow named “{_target}”."}
         if flow_router._flow_needs_async(_flow):
@@ -4604,6 +4675,7 @@ async def fd_flows_synthesize(request: Request, user: dict | None = _required_us
         return {"ok": False, "error": "no goal to synthesize"}
     author = str(body.get("author") or body.get("agent") or "").strip()
     store = _flow_store()
+    uid, admin = _flow_caller(user)
 
     # 1. Compile the goal to a validated flow via a pooled model.
     res = await _ai_compile_flow(goal, str(body.get("agent") or ""))
@@ -4616,14 +4688,14 @@ async def fd_flows_synthesize(request: Request, user: dict | None = _required_us
     # 2. Dedup: a structurally-identical scratch flow already exists → reuse it.
     #    A quarantined one is negative memory — don't re-create the same bad flow.
     h = flow_dsl.canonical_hash(flow)
-    existing = await store.find_scratch_by_hash(h)
+    existing = await store.find_scratch_by_hash(h, owner_id=uid or None)  # the caller's own
     if existing and existing.get("state") == "quarantined":
         return {"ok": False, "quarantined": True,
                 "error": "This flow pattern failed repeatedly before (quarantined) — refine the goal."}
     if existing:
         fid, name, reused = existing["id"], existing["name"], True
     else:
-        fid = await store.create_scratch_flow(flow, author=author, dsl_hash=h)
+        fid = await store.create_scratch_flow(flow, author=author, dsl_hash=h, owner_id=uid)
         name, reused = flow.get("name") or "Synthesized flow", False
 
     run = bool(body.get("run"))
@@ -4636,7 +4708,8 @@ async def fd_flows_synthesize(request: Request, user: dict | None = _required_us
     # 3. Optionally run it now (this records the outcome → drives promotion/quarantine).
     if run:
         target = await store.get_flow(fid)
-        result = await app.state.flow_runner.run(target, body.get("payload") or {})
+        result = await app.state.flow_runner.run(
+            target, body.get("payload") or {}, owner_id=uid, is_admin=admin)
         out["run_id"] = result.get("run_id")
         out["status"] = result.get("status")
         out["output"] = result.get("output") or ""
@@ -4652,7 +4725,8 @@ async def fd_flows_scratch(request: Request, user: dict | None = _required_user_
         await store.maintain_scratch()
     except Exception as exc:
         log.warning("scratch maintain failed: %s", exc)
-    return {"flows": await store.list_scratch_flows()}
+    uid, admin = _flow_caller(user)
+    return {"flows": await store.list_scratch_flows(owner_id=None if admin else uid)}
 
 
 @app.post("/fd/flows/scratch/maintain")
@@ -4665,6 +4739,7 @@ async def fd_flows_scratch_maintain(request: Request, user: dict | None = _requi
 @app.post("/fd/flows/{flow_id}/promote")
 async def fd_flows_promote(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     """Promote a scratch flow into the permanent space (optionally rename)."""
+    await _owned_flow(flow_id, user)
     try:
         body = await request.json()
     except Exception:
@@ -4677,14 +4752,12 @@ async def fd_flows_promote(flow_id: str, request: Request, user: dict | None = _
 
 @app.get("/fd/flows/{flow_id}")
 async def fd_flows_get(flow_id: str, request: Request, user: dict | None = _required_user_dep):
-    flow = await _flow_store().get_flow(flow_id)
-    if not flow:
-        raise HTTPException(404, "flow not found")
-    return flow
+    return await _owned_flow(flow_id, user)
 
 
 @app.put("/fd/flows/{flow_id}")
 async def fd_flows_update(flow_id: str, request: Request, user: dict | None = _required_user_dep):
+    await _owned_flow(flow_id, user)
     spec = await request.json()
     ok = await _flow_store().update_flow(flow_id, spec)
     if not ok:
@@ -4694,12 +4767,14 @@ async def fd_flows_update(flow_id: str, request: Request, user: dict | None = _r
 
 @app.delete("/fd/flows/{flow_id}")
 async def fd_flows_delete(flow_id: str, request: Request, user: dict | None = _required_user_dep):
+    await _owned_flow(flow_id, user)
     ok = await _flow_store().delete_flow(flow_id)
     return {"ok": ok}
 
 
 @app.post("/fd/flows/{flow_id}/enable")
 async def fd_flows_enable(flow_id: str, request: Request, user: dict | None = _required_user_dep):
+    await _owned_flow(flow_id, user)
     body = await request.json()
     ok = await _flow_store().set_enabled(flow_id, bool(body.get("enabled", True)))
     if not ok:
@@ -4710,22 +4785,24 @@ async def fd_flows_enable(flow_id: str, request: Request, user: dict | None = _r
 @app.post("/fd/flows/{flow_id}/run")
 async def fd_flows_run(flow_id: str, request: Request, user: dict | None = _required_user_dep):
     store = _flow_store()
-    flow = await store.get_flow(flow_id)
-    if not flow:
-        raise HTTPException(404, "flow not found")
+    flow = await _owned_flow(flow_id, user)
     try:
         body = await request.json()
     except Exception:
         body = {}
     payload = body.get("payload") or {}
+    uid, admin = _flow_caller(user)
     run_id = await store.start_run(flow_id, flow.get("name", ""), payload)
     # Run in the background; the UI polls /fd/flows/runs/{run_id} for the log.
-    asyncio.create_task(app.state.flow_runner.run(flow, payload, run_id=run_id))
+    # The run acts as the caller: its steps reach only the caller's agents.
+    asyncio.create_task(app.state.flow_runner.run(
+        flow, payload, run_id=run_id, owner_id=uid, is_admin=admin))
     return {"run_id": run_id}
 
 
 @app.post("/fd/flows/runs/{run_id}/pause")
 async def fd_flows_run_pause(run_id: str, request: Request, user: dict | None = _required_user_dep):
+    await _check_flow_run(run_id, user)
     from captain_claw.flight_deck import flow_runner
     ok = flow_runner.request_pause(run_id)
     if ok:
@@ -4738,6 +4815,7 @@ async def fd_flows_run_pause(run_id: str, request: Request, user: dict | None = 
 
 @app.post("/fd/flows/runs/{run_id}/resume")
 async def fd_flows_run_resume(run_id: str, request: Request, user: dict | None = _required_user_dep):
+    await _check_flow_run(run_id, user)
     from captain_claw.flight_deck import flow_runner
     ok = flow_runner.request_resume(run_id)
     if ok:
@@ -4750,6 +4828,7 @@ async def fd_flows_run_resume(run_id: str, request: Request, user: dict | None =
 
 @app.post("/fd/flows/runs/{run_id}/stop")
 async def fd_flows_run_stop(run_id: str, request: Request, user: dict | None = _required_user_dep):
+    await _check_flow_run(run_id, user)
     try:
         body = await request.json()
     except Exception:
@@ -4762,20 +4841,21 @@ async def fd_flows_run_stop(run_id: str, request: Request, user: dict | None = _
 
 @app.post("/fd/flows/{flow_id}/test")
 async def fd_flows_test(flow_id: str, request: Request, user: dict | None = _required_user_dep):
-    store = _flow_store()
-    flow = await store.get_flow(flow_id)
-    if not flow:
-        raise HTTPException(404, "flow not found")
+    flow = await _owned_flow(flow_id, user)
     try:
         body = await request.json()
     except Exception:
         body = {}
-    result = await app.state.flow_runner.run(flow, body.get("payload") or {}, dry=True)
+    uid, admin = _flow_caller(user)
+    # A dry run still dispatches its steps — same owner context as /run.
+    result = await app.state.flow_runner.run(
+        flow, body.get("payload") or {}, dry=True, owner_id=uid, is_admin=admin)
     return {"steps": result.get("steps", []), "status": result.get("status")}
 
 
 @app.get("/fd/flows/{flow_id}/runs")
 async def fd_flows_runs(flow_id: str, request: Request, user: dict | None = _required_user_dep):
+    await _owned_flow(flow_id, user)
     return {"runs": await _flow_store().list_runs(flow_id)}
 
 

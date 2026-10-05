@@ -306,18 +306,20 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
             # nudges and would suppress them via reliability. Delivery == success.
             success = True
             note = output[:300] or "delivered"
-            # Also push the nudge to the user's WhatsApp (the agent turn already
+            # Also push the nudge to the owner's WhatsApp (the agent turn already
             # surfaces it in web chat; this fans it out to WhatsApp too).
             if output and cfg.get("nudge_to_whatsapp", True):
                 try:
-                    from captain_claw.flight_deck.whatsapp_bridge import _allowed_waids, push_to_waid
-                    waids = list(_allowed_waids())
+                    from captain_claw.flight_deck.whatsapp_bridge import push_to_waid
+                    waids, skipped = _nudge_waids(cfg)
                     sent = 0
                     for waid in waids:
                         if await push_to_waid(waid, output):
                             sent += 1
                     if waids:
                         store.log(user_id, "nudge → whatsapp", f"sent to {sent}/{len(waids)} recipient(s)")
+                    elif skipped:
+                        store.log(user_id, "nudge → whatsapp skipped", skipped)
                 except Exception as exc:
                     _log.debug("nudge whatsapp delivery failed: %s", exc)
             # If this nudge was reminding about a tracked follow-up, re-arm it
@@ -349,6 +351,28 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
         _log.warning("dispatch execute/judge failed for %s: %s", aid, exc)
         store.log(user_id, "error: dispatch crashed", f"{action.get('title')}: {exc}", "error")
         store.update_status(aid, "done", outcome="fail", outcome_note=f"dispatch error: {exc}"[:500])
+
+
+def _nudge_waids(cfg: dict[str, Any]) -> tuple[list[str], str]:
+    """The WhatsApp numbers a nudge may go to, for the owner whose resolved
+    config is ``cfg`` — never another user's phone. Returns ``(waids, why_none)``.
+
+    The owner's ``notify_waid`` (comma-separated) wins, kept only where it is on
+    the bridge allowlist. With no binding, a deck without auth has one trusted
+    user, so every allowlisted number; with auth on, nobody (and say why)."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+    from captain_claw.flight_deck.whatsapp_bridge import _allowed_waids
+
+    allowed = _allowed_waids()
+    if not allowed:
+        return [], ""  # WhatsApp isn't set up on this deck — nothing to report
+    bound = {p.strip().lstrip("+") for p in str(cfg.get("notify_waid") or "").split(",") if p.strip()}
+    if bound:
+        waids = sorted(bound & allowed)
+        return waids, "" if waids else "notify_waid is not on WHATSAPP_ALLOWED_WAIDS"
+    if not _fd_auth_enabled():
+        return sorted(allowed), ""
+    return [], "no WhatsApp number bound to this user (set notify_waid)"
 
 
 def _escalate_follow_up(store: Any, user_id: str, fu_id: str, cfg: dict[str, Any]) -> None:

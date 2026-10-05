@@ -22,9 +22,17 @@ import {
   type MCPProbeResult,
   type MCPTransport,
 } from '../../stores/mcpStore'
+import { useAuthStore } from '../../stores/authStore'
 import { AgentAllowlistPicker } from './AgentAllowlistPicker'
 
 const SECRET_PLACEHOLDER = '••••••••'
+
+// A stdio server is a command FD spawns on its host, so the backend lets only
+// an admin add / edit / test / remove one. With auth off the single local user
+// is the admin.
+function useCanManageStdio(): boolean {
+  return useAuthStore((s) => s.authEnabled === false || s.user?.role === 'admin')
+}
 
 function emptyForm(): MCPServerInput {
   return {
@@ -63,9 +71,11 @@ function fromServer(server: MCPServer): MCPServerInput {
 interface ServerRowProps {
   server: MCPServer
   onEdit: () => void
+  // stdio server seen by a non-admin: shown, but not editable/testable/removable.
+  readOnly?: boolean
 }
 
-function ServerRow({ server, onEdit }: ServerRowProps) {
+function ServerRow({ server, onEdit, readOnly = false }: ServerRowProps) {
   const { testing, lastTestResult, testServer, removeServer } = useMCPStore()
   const [confirming, setConfirming] = useState(false)
   const isTesting = !!testing[server.name]
@@ -187,64 +197,73 @@ function ServerRow({ server, onEdit }: ServerRowProps) {
             </div>
           )}
         </div>
-        <div className="flex items-center gap-1.5 flex-wrap shrink-0">
-          <button
-            type="button"
-            onClick={onEdit}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 hover:bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200"
-            title="Edit this server"
+        {readOnly ? (
+          <span
+            className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border bg-zinc-500/10 text-zinc-400 border-zinc-500/30 shrink-0"
+            title="stdio servers run a command on the Flight Deck host — only an admin can change them"
           >
-            <Pencil className="h-3.5 w-3.5" />
-            Edit
-          </button>
-          <button
-            type="button"
-            onClick={() => testServer(server.name)}
-            disabled={isTesting}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 hover:bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200 disabled:opacity-50"
-            title="Run an end-to-end probe (initialize + list tools)"
-          >
-            {isTesting ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            Test
-          </button>
-          {confirming ? (
-            <>
-              <button
-                type="button"
-                onClick={async () => {
-                  await removeServer(server.name)
-                  setConfirming(false)
-                }}
-                className="inline-flex items-center gap-1.5 rounded-md bg-red-600 hover:bg-red-500 px-2.5 py-1.5 text-xs text-white"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                Confirm
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirming(false)}
-                className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 hover:bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300"
-              >
-                <X className="h-3.5 w-3.5" />
-                Cancel
-              </button>
-            </>
-          ) : (
+            Admin-managed
+          </span>
+        ) : (
+          <div className="flex items-center gap-1.5 flex-wrap shrink-0">
             <button
               type="button"
-              onClick={() => setConfirming(true)}
-              className="inline-flex items-center gap-1.5 rounded-md border border-red-500/30 hover:bg-red-500/10 px-2.5 py-1.5 text-xs text-red-400"
-              title="Remove this server"
+              onClick={onEdit}
+              className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 hover:bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200"
+              title="Edit this server"
             >
-              <Trash2 className="h-3.5 w-3.5" />
-              Remove
+              <Pencil className="h-3.5 w-3.5" />
+              Edit
             </button>
-          )}
-        </div>
+            <button
+              type="button"
+              onClick={() => testServer(server.name)}
+              disabled={isTesting}
+              className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 hover:bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200 disabled:opacity-50"
+              title="Run an end-to-end probe (initialize + list tools)"
+            >
+              {isTesting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              Test
+            </button>
+            {confirming ? (
+              <>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await removeServer(server.name)
+                    setConfirming(false)
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-red-600 hover:bg-red-500 px-2.5 py-1.5 text-xs text-white"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Confirm
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirming(false)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 hover:bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirming(true)}
+                className="inline-flex items-center gap-1.5 rounded-md border border-red-500/30 hover:bg-red-500/10 px-2.5 py-1.5 text-xs text-red-400"
+                title="Remove this server"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Remove
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -253,9 +272,11 @@ function ServerRow({ server, onEdit }: ServerRowProps) {
 interface ServerFormProps {
   initial?: MCPServer
   onClose: () => void
+  // false for a non-admin: the stdio transport tab is not offered.
+  allowStdio?: boolean
 }
 
-function ServerForm({ initial, onClose }: ServerFormProps) {
+function ServerForm({ initial, onClose, allowStdio = true }: ServerFormProps) {
   const { saving, saveServer, probeTransient } = useMCPStore()
   const [form, setForm] = useState<MCPServerInput>(
     initial ? fromServer(initial) : emptyForm(),
@@ -276,6 +297,7 @@ function ServerForm({ initial, onClose }: ServerFormProps) {
 
   const transport: MCPTransport = form.transport || 'http'
   const isEdit = !!initial
+  const transportOptions: MCPTransport[] = allowStdio ? ['http', 'stdio'] : ['http']
 
   const valid = (() => {
     if (!form.name.trim()) return false
@@ -356,7 +378,7 @@ function ServerForm({ initial, onClose }: ServerFormProps) {
 
       {/* Transport tabs */}
       <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
-        {(['http', 'stdio'] as const).map((t) => (
+        {transportOptions.map((t) => (
           <button
             key={t}
             type="button"
@@ -547,6 +569,7 @@ function ServerForm({ initial, onClose }: ServerFormProps) {
 
 export default function MCPConnection() {
   const { servers, loading, error, refresh } = useMCPStore()
+  const canManageStdio = useCanManageStdio()
   const [collapsed, setCollapsed] = useState(false)
   const [adding, setAdding] = useState(false)
   const [editingName, setEditingName] = useState<string | null>(null)
@@ -627,28 +650,31 @@ export default function MCPConnection() {
           )}
 
           <div className="space-y-2">
-            {servers.map((srv) =>
-              editingName === srv.name ? (
+            {servers.map((srv) => {
+              const readOnly = srv.transport === 'stdio' && !canManageStdio
+              return editingName === srv.name && !readOnly ? (
                 <ServerForm
                   key={srv.name}
                   initial={srv}
                   onClose={() => setEditingName(null)}
+                  allowStdio={canManageStdio}
                 />
               ) : (
                 <ServerRow
                   key={srv.name}
                   server={srv}
+                  readOnly={readOnly}
                   onEdit={() => {
                     setAdding(false)
                     setEditingName(srv.name)
                   }}
                 />
-              ),
-            )}
+              )
+            })}
           </div>
 
           {adding ? (
-            <ServerForm onClose={() => setAdding(false)} />
+            <ServerForm onClose={() => setAdding(false)} allowStdio={canManageStdio} />
           ) : (
             <div className="flex items-center gap-2">
               <button

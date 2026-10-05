@@ -154,20 +154,29 @@ class FlowStore:
             except Exception:
                 pass
         await db.execute("CREATE INDEX IF NOT EXISTS idx_flows_space ON flows(space)")
+        # Tenancy: the user who owns a flow (stamped on create). Legacy rows keep
+        # '' — no owner — which the routes treat as admin-only.
+        try:
+            await db.execute("ALTER TABLE flows ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
         await db.commit()
         self._db = db
         return db
 
     # ── flows CRUD ─────────────────────────────────────────────────────
 
-    async def create_flow(self, spec: dict[str, Any]) -> str:
+    async def create_flow(self, spec: dict[str, Any], *, owner_id: str = "") -> str:
+        """Insert a flow owned by *owner_id* ('' = no owner). The spec's own
+        `owner_id`, if any, is ignored — ownership comes from the caller."""
         db = await self._ensure_db()
         fid = str(spec.get("id") or "").strip() or _new_id("flow")
         now = _now()
         await db.execute(
             """INSERT INTO flows (id, name, description, enabled, priority,
-                 trigger_json, steps_json, guardrails_json, output_json, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 trigger_json, steps_json, guardrails_json, output_json, created_at, updated_at,
+                 owner_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fid,
                 str(spec.get("name") or "Untitled flow"),
@@ -180,6 +189,7 @@ class FlowStore:
                 json.dumps(spec.get("output") or {}),
                 now,
                 now,
+                str(owner_id or ""),
             ),
         )
         await db.commit()
@@ -228,27 +238,32 @@ class FlowStore:
             row = await cur.fetchone()
         return _row_to_flow(row) if row else None
 
-    async def get_flow_by_name(self, name: str) -> dict[str, Any] | None:
+    async def get_flow_by_name(self, name: str, *, owner_id: str | None = None) -> dict[str, Any] | None:
         """Case-insensitive name lookup for `gosub`/`spawn` resolution. The
         **permanent** space wins over **scratch** (no silent shadowing); highest
-        priority wins within a space."""
+        priority wins within a space. *owner_id* limits it to that user's flows."""
         db = await self._ensure_db()
         # Permanent first (space='user'), then scratch — ordered so the first row
         # is the winner.
+        owned = "" if owner_id is None else " AND owner_id=?"
+        params: tuple = (name.strip(),) if owner_id is None else (name.strip(), owner_id)
         async with db.execute(
-            """SELECT * FROM flows WHERE lower(name)=lower(?)
+            f"""SELECT * FROM flows WHERE lower(name)=lower(?){owned}
                ORDER BY (space='user') DESC, priority DESC LIMIT 1""",
-            (name.strip(),),
+            params,
         ) as cur:
             row = await cur.fetchone()
         return _row_to_flow(row) if row else None
 
-    async def list_flows(self) -> list[dict[str, Any]]:
+    async def list_flows(self, *, owner_id: str | None = None) -> list[dict[str, Any]]:
+        """Permanent flows — all of them, or only *owner_id*'s."""
         db = await self._ensure_db()
         # The user-facing list shows the PERMANENT space only; scratch flows are
         # listed separately (list_scratch_flows).
+        owned = "" if owner_id is None else " AND owner_id=?"
         async with db.execute(
-            "SELECT * FROM flows WHERE space='user' ORDER BY priority DESC, name"
+            f"SELECT * FROM flows WHERE space='user'{owned} ORDER BY priority DESC, name",
+            () if owner_id is None else (owner_id,),
         ) as cur:
             rows = await cur.fetchall()
         flows = [_row_to_flow(r) for r in rows]
@@ -273,27 +288,31 @@ class FlowStore:
 
     # ── scratch space (synthesized flows) ──────────────────────────────
 
-    async def list_scratch_flows(self) -> list[dict[str, Any]]:
+    async def list_scratch_flows(self, *, owner_id: str | None = None) -> list[dict[str, Any]]:
         db = await self._ensure_db()
+        owned = "" if owner_id is None else " AND owner_id=?"
         async with db.execute(
-            "SELECT * FROM flows WHERE space='scratch' ORDER BY last_used_at DESC, created_at DESC"
+            f"SELECT * FROM flows WHERE space='scratch'{owned} ORDER BY last_used_at DESC, created_at DESC",
+            () if owner_id is None else (owner_id,),
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_flow(r) for r in rows]
 
-    async def find_scratch_by_hash(self, dsl_hash: str) -> dict[str, Any] | None:
+    async def find_scratch_by_hash(self, dsl_hash: str, *, owner_id: str | None = None) -> dict[str, Any] | None:
         if not dsl_hash:
             return None
         db = await self._ensure_db()
+        owned = "" if owner_id is None else " AND owner_id=?"
         async with db.execute(
-            "SELECT * FROM flows WHERE space='scratch' AND dsl_hash=? LIMIT 1", (dsl_hash,)
+            f"SELECT * FROM flows WHERE space='scratch' AND dsl_hash=?{owned} LIMIT 1",
+            (dsl_hash,) if owner_id is None else (dsl_hash, owner_id),
         ) as cur:
             row = await cur.fetchone()
         return _row_to_flow(row) if row else None
 
     async def create_scratch_flow(
         self, spec: dict[str, Any], *, author: str = "", dsl_hash: str = "",
-        ttl_seconds: int = 7 * 86400,
+        ttl_seconds: int = 7 * 86400, owner_id: str = "",
     ) -> str:
         """Store an agent-synthesized flow in the scratch space (origin=agent,
         call-only). Returns the new flow id."""
@@ -304,8 +323,8 @@ class FlowStore:
         await db.execute(
             """INSERT INTO flows (id, name, description, enabled, priority,
                  trigger_json, steps_json, guardrails_json, output_json, created_at, updated_at,
-                 space, origin, dsl_hash, author, use_count, last_used_at, expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scratch', 'agent', ?, ?, 0, ?, ?)""",
+                 space, origin, dsl_hash, author, use_count, last_used_at, expires_at, owner_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scratch', 'agent', ?, ?, 0, ?, ?, ?)""",
             (
                 fid,
                 str(spec.get("name") or "Synthesized flow"),
@@ -316,7 +335,7 @@ class FlowStore:
                 json.dumps(spec.get("steps") or []),
                 json.dumps(spec.get("guardrails") or {}),
                 json.dumps(spec.get("output") or {}),
-                now, now, dsl_hash, author, now, expires,
+                now, now, dsl_hash, author, now, expires, str(owner_id or ""),
             ),
         )
         await db.commit()
@@ -523,6 +542,7 @@ def _row_to_flow(row: Any) -> dict[str, Any]:
         "space": d.get("space") or "user",
         "origin": d.get("origin") or "user",
         "author": d.get("author") or "",
+        "owner_id": d.get("owner_id") or "",
         "use_count": int(d.get("use_count") or 0),
         "last_used_at": d.get("last_used_at"),
         "expires_at": d.get("expires_at"),
