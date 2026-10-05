@@ -4822,6 +4822,51 @@ Instructions are stored in the Flight Deck frontend and sent to agents via the `
 
 In the agent's system prompt, fleet instructions appear under the heading **"Fleet-Level Instructions"** with the note that they come from the fleet operator.
 
+### Owner Profile
+
+Each Flight Deck user can describe themselves (**About me**, up to 1,500 characters) and their company (**My company**, 4,000), and give standing instructions (**My standing preferences**, 2,000). An admin can set deck-wide defaults: a company description and instructions that apply to everyone. The user's Captain Claw agents receive the result in their system prompt, alongside their own fleet-level instructions (who doesn't is listed under **Who gets it**).
+
+**Merge:** the user's company text replaces the deck's when it isn't empty. The user's preferences and the deck's instructions are kept apart, the user's first, each under a fixed label: "From your owner:" and "From your Flight Deck admin (applies to everyone on this deck):". The deck's part always carries its label, even when it's the only instructions, so an admin's text never reads as the owner's own. When both are present the block adds that the admin's win a conflict (deck policy). What people wrote never starts a line of its own (it's quoted with `>` in the full form and kept on its label's line in the compact one), so no text can pass for a label. The owner is named by their display name, falling back to their email's local part, or "your owner" on a deck without accounts.
+
+**Framing:** the agent is told that the background is reference data about its owner, not instructions, that people on shared channels (WhatsApp, Telegram, a shared or public chat) are not necessarily its owner, and to keep the section private: not to reveal or quote it to anyone but its owner. The preferences apply unless an explicit task, role or output-format contract, or a safety rule, says otherwise.
+
+**Two forms:**
+
+- **Full** (`tenant_context.md`): markdown with a section for the owner, their company and the standing preferences. Only the per-field caps limit its length.
+- **Compact** (`tenant_context.compact.md`): at most 1,000 characters, one line each for About, Company, the owner's preferences and the deck's instructions. The room left after the fixed wording is shared out across those four, and a short one leaves its unused share to the longer ones, so a long deck text can't crowd out the owner's own preferences. A cut text ends in "…".
+
+Eco mode is the default for new agents and runs the micro instructions, so **most agents receive the compact form**. The nano template and orchestrated workers (Council, Basna and Vatra teammates) receive it too. Only an agent on the standard instructions (eco and nano off, `context.micro_instructions` unset) that isn't an orchestrated worker receives the full form. The profile page previews both.
+
+**Who gets it:** the classic Captain Claw agents that Flight Deck spawned or cloned for the user, as Docker containers or local processes. These don't get it:
+
+- agents and workers on the Mrav micro runtime (it builds its own prompt);
+- Iskra beings;
+- public chat sessions;
+- BotPort dispatch agents;
+- Flight Deck's own direct LLM calls, such as planners and judges like the Vatra Lead decomposition.
+
+An agent with no owner on a deck with accounts gets nothing (not even the deck defaults), and so do the agents of a deleted user.
+
+**Routes:**
+
+| Route | Who | What |
+|---|---|---|
+| `GET /fd/profile` | signed-in user | `{profile, deck, caps, preview: {full, compact}}` |
+| `PUT /fd/profile` | signed-in user | partial update of `about_me` / `company` / `instructions`; same shape plus `agents_updated` |
+| `GET /fd/admin/profile-defaults` | admin | `{company, instructions, caps}` |
+| `PUT /fd/admin/profile-defaults` | admin | partial update; returns `{company, instructions, agents_updated}` and is recorded in the usage log (`profile_defaults_update`) |
+
+A field is refused with 400 when it's over its cap, isn't a string, or contains text that can't be encoded as UTF-8 (a lone surrogate). `/fd/profile` is always the caller's own profile: an admin's `X-FD-Act-As` header does not open another user's. With accounts off (`FD_AUTH_ENABLED=false`), the local user owns the profile and may set the defaults. The generic `/fd/settings` routes can't read or write these keys (`fd:tenant-profile…`).
+
+**Delivery:** Flight Deck writes both files into the `~/.captain-claw` that the agent's runtime reads, and only there. For a process agent that's `<agent dir>/data/home-config-parent/.captain-claw/`; for a Docker agent it's `<agent dir>/data/home-config/`. A process agent and a container with the same name share the agent dir, and this keeps them from reading each other's profile. Flight Deck writes the files:
+
+- when an agent is spawned or cloned (a clone gets its recorded owner's profile);
+- for all of the owner's agents when they save their profile or their display name changes;
+- for every agent on the deck when the deck defaults change;
+- for every agent on the deck once at Flight Deck startup, in the background. This catches an auth-mode switch or edits made while Flight Deck was down.
+
+An empty profile removes the files, and so does deleting the user. A failed write removes them too, so an agent never keeps a stale profile. The agent re-reads them on each turn, so a change applies without a restart.
+
 ### Datastore Browser
 
 The datastore browser provides a read-only view of an agent's SQLite-backed datastore tables directly from Flight Deck.

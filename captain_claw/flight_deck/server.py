@@ -46,6 +46,7 @@ from captain_claw.flight_deck.auth import (
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.flight_deck.endpoints import same_endpoint as _same_endpoint
 from captain_claw.flight_deck import origin_guard
+from captain_claw.flight_deck import tenant_profile
 
 
 # ── Console logging: timestamps + ANSI colors ──────────────────────────
@@ -773,6 +774,9 @@ async def lifespan(app: FastAPI):
     print(f"Flight Deck: {origin_guard.describe_policy()}")
     # Initialize database for auth & settings — always, see _init_fd_db.
     _fd_db = await _init_fd_db()
+    # Bring every agent's owner-profile files in line with the DB (an auth-mode
+    # switch, edits made while FD was down) — in the background, best-effort.
+    app.state.tenant_profile_reconcile = asyncio.create_task(tenant_profile.reconcile(_fd_db))
     if AUTH_ENABLED:
         app.state.fd_db = _fd_db
         # Persist the owning user id into the project-local .env so the
@@ -1206,6 +1210,7 @@ from captain_claw.flight_deck.auth_routes import router as auth_router
 from captain_claw.flight_deck.settings_routes import router as settings_router
 from captain_claw.flight_deck.chat_routes import router as chat_router
 from captain_claw.flight_deck.admin_routes import router as admin_router
+from captain_claw.flight_deck.profile_routes import router as profile_router
 from captain_claw.flight_deck.council_routes import router as council_router
 from captain_claw.flight_deck.basna_routes import router as basna_router
 from captain_claw.flight_deck.vatra_routes import router as vatra_router
@@ -1255,6 +1260,7 @@ app.include_router(auth_router)
 app.include_router(settings_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
+app.include_router(profile_router)
 app.include_router(council_router)
 app.include_router(basna_router)
 app.include_router(vatra_router)
@@ -2543,6 +2549,8 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
 
     # New agents deploy in eco mode by default.
     _write_eco_flag_on_spawn(agent_dir)
+    # …and know who they work for (the owner profile — see tenant_profile).
+    await tenant_profile.write_on_spawn(agent_dir, owner_id, "docker")
 
     # Build volume mounts
     # CC WORKDIR is /app — it loads ./config.yaml from CWD (/app/config.yaml)
@@ -3041,6 +3049,10 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
     env_path = new_agent_dir / ".env"
     if not env_path.is_file():
         env_path.write_text("")
+
+    # The clone works for the source's owner: their profile, not whatever an
+    # earlier agent of this slug left in the folder.
+    await tenant_profile.write_on_spawn(new_agent_dir, str(labels.get(OWNER_LABEL, "") or ""), "docker")
 
     hostname = new_slug
 
@@ -7170,6 +7182,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
 
     # New agents deploy in eco mode by default.
     _write_eco_flag_on_spawn(agent_dir)
+    # …and know who they work for (the owner profile — see tenant_profile).
+    await tenant_profile.write_on_spawn(agent_dir, owner_id, "process")
 
     # Open log file
     log_file = agent_dir / "process.log"
@@ -7662,6 +7676,8 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
         "grid_recall": entry.get("grid_recall", ""),
     }
     _save_process_registry(registry)
+    # Its owner's profile, not whatever an earlier agent of this slug left.
+    await tenant_profile.write_on_spawn(new_agent_dir, str(entry.get("owner") or ""), "process")
 
     return ProcessActionResult(ok=True, slug=new_slug, message=f"Cloned '{slug}' → '{new_slug}' (port {new_port})")
 

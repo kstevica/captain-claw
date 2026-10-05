@@ -246,6 +246,17 @@ async def get_me(user: dict = Depends(get_current_user)):
     }
 
 
+async def _refresh_owner_profile(db, user_id: str) -> None:
+    """The owner profile names its owner: rewrite their agents' copies after a
+    display-name change. Best-effort — never fails the update."""
+    try:
+        from captain_claw.flight_deck import tenant_profile
+
+        await tenant_profile.refresh_agents(db, user_id)
+    except Exception:
+        pass
+
+
 @router.put("/me")
 async def update_me(body: UpdateProfileRequest, user: dict = Depends(get_current_user)):
     db = get_db()
@@ -266,6 +277,8 @@ async def update_me(body: UpdateProfileRequest, user: dict = Depends(get_current
 
     if updates:
         await db.update_user(user["id"], **updates)
+        if "display_name" in updates and updates["display_name"] != (user.get("display_name") or ""):
+            await _refresh_owner_profile(db, str(user["id"]))
 
     updated = await db.get_user_by_id(user["id"])
     return {

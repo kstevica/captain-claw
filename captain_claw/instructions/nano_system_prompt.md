@@ -1,5 +1,6 @@
 {personality_block}
 {user_context_block}
+{fleet_instructions_block}
 {session_context_block}
 
 {tool_list_block}

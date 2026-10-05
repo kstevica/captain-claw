@@ -20,6 +20,16 @@ from captain_claw.tools.registry import Tool
 
 log = get_logger(__name__)
 
+# Fleet instructions in the nano system prompt are clipped to this many chars.
+_NANO_FLEET_INSTRUCTIONS_MAX_CHARS = 1500
+
+
+def _is_being_body() -> bool:
+    """True for ANY Iskra BEING's body (CLAW_BEING_WORKER, stamped by
+    being_life.spawn_body), whatever its stage's capabilities."""
+    return os.environ.get("CLAW_BEING_WORKER", "").strip().lower() in (
+        "1", "true", "yes")
+
 
 def _iskra_fleet_hidden() -> bool:
     """True for an Iskra BEING's body below the `agent_messaging` capability:
@@ -28,8 +38,7 @@ def _iskra_fleet_hidden() -> bool:
     body bypasses letters physics, rate limits and wallet metering (the
     Constitution's Containment + Economy invariants). CLAW_BEING_CAPS is
     stamped by being_life.spawn_body from the stage's capability set."""
-    if os.environ.get("CLAW_BEING_WORKER", "").strip().lower() not in (
-            "1", "true", "yes"):
+    if not _is_being_body():
         return False
     caps = {c.strip() for c in os.environ.get(
         "CLAW_BEING_CAPS", "").split(",") if c.strip()}
@@ -2829,6 +2838,14 @@ class AgentContextMixin:
             _fleet_inst = self.session.metadata.get("fleet_instructions", "").strip()
         if not _fleet_inst:
             _fleet_inst = getattr(self, "_fleet_instructions", "").strip() if hasattr(self, "_fleet_instructions") else ""
+        # The nano template is for tiny-context models; FD accepts fleet
+        # instructions up to 64k chars, so clip them there.
+        if (self.instructions.use_nano
+                and len(_fleet_inst) > _NANO_FLEET_INSTRUCTIONS_MAX_CHARS):
+            _fleet_inst = (
+                _fleet_inst[:_NANO_FLEET_INSTRUCTIONS_MAX_CHARS].rstrip()
+                + "… [truncated: fleet instructions clipped in nano mode]"
+            )
         if _fleet_inst:
             fleet_instructions_block = (
                 "\n\n## Fleet-Level Instructions\n"
@@ -3104,6 +3121,32 @@ class AgentContextMixin:
 
         # Collapse triple+ newlines left by absent conditional sections.
         base_prompt = re.sub(r"\n{3,}", "\n\n", base_prompt)
+
+        # Owner profile: who this agent works for, their company and standing
+        # preferences — composed by Flight Deck into ~/.captain-claw files and
+        # inserted verbatim before CACHE_SPLIT (static, cacheable part). Never
+        # for an Iskra body at ANY stage (its world is not the fleet's owner,
+        # and a public being would reveal the profile to strangers), a scoped
+        # public-session agent (strangers must not see the owner's profile),
+        # or an agent flagged _tenant_hidden (e.g. a BotPort dispatch agent
+        # answering a remote instance).
+        if (not _is_being_body()
+                and not getattr(self, "_public_scoped", False)
+                and not getattr(self, "_tenant_hidden", False)):
+            try:
+                from captain_claw.tenant_context import (
+                    insert_tenant_block,
+                    load_tenant_context,
+                    use_compact_tenant_context,
+                )
+                _tenant_block = load_tenant_context(use_compact_tenant_context(
+                    micro=self.instructions.use_micro,
+                    nano=self.instructions.use_nano,
+                ))
+                if _tenant_block:
+                    base_prompt = insert_tenant_block(base_prompt, _tenant_block)
+            except Exception:
+                pass
 
         # Shared VFS project: when this agent was spawned into a multi-agent run
         # (Council/Basna/Vatra), it is bound to ONE shared filesystem project.
