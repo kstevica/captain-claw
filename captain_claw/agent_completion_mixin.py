@@ -864,10 +864,13 @@ class AgentCompletionMixin:
             assistant_response=final_response,
         )
         await self._persist_assistant_response(final_response)
-        await self._auto_capture_todos(effective_user_input, final_response)
-        await self._auto_capture_contacts(effective_user_input, final_response)
-        await self._auto_capture_scripts(effective_user_input, final_response)
-        await self._auto_capture_apis(effective_user_input, final_response)
+        # The owner's todo/contacts/scripts/APIs stores are never written
+        # from a shared-agent member's turn.
+        if getattr(self, "_speaker_scoped", False) is not True:
+            await self._auto_capture_todos(effective_user_input, final_response)
+            await self._auto_capture_contacts(effective_user_input, final_response)
+            await self._auto_capture_scripts(effective_user_input, final_response)
+            await self._auto_capture_apis(effective_user_input, final_response)
 
         # ── Playbook rating hint (once per session, complex tasks only) ──
         final_response = self._maybe_append_playbook_hint(

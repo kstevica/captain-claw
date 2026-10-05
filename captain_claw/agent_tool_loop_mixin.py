@@ -1736,8 +1736,12 @@ class AgentToolLoopMixin:
                             self._emit_thinking(display, tool="progress", phase="tool")
                             self._trim_processed_extracts_in_session()
 
+                # The owner's contacts/scripts/APIs stores are never written
+                # from a shared-agent member's turn.
+                _owner_capture = result.success and getattr(self, "_speaker_scoped", False) is not True
+
                 # Auto-capture contacts from send_mail usage.
-                if result.success and hasattr(self, "_auto_capture_contacts_from_tool_call"):
+                if _owner_capture and hasattr(self, "_auto_capture_contacts_from_tool_call"):
                     try:
                         await self._auto_capture_contacts_from_tool_call(
                             tc.name, arguments if isinstance(arguments, dict) else {},
@@ -1746,7 +1750,7 @@ class AgentToolLoopMixin:
                         log.warning("Auto-capture contacts failed", tool=tc.name, error=str(_ac_err))
 
                 # Auto-capture scripts from write tool usage.
-                if result.success and hasattr(self, "_auto_capture_scripts_from_tool_call"):
+                if _owner_capture and hasattr(self, "_auto_capture_scripts_from_tool_call"):
                     try:
                         await self._auto_capture_scripts_from_tool_call(
                             tc.name, arguments if isinstance(arguments, dict) else {},
@@ -1755,7 +1759,7 @@ class AgentToolLoopMixin:
                         log.warning("Auto-capture scripts failed", tool=tc.name, error=str(_ac_err))
 
                 # Auto-capture APIs from web_fetch tool usage.
-                if result.success and hasattr(self, "_auto_capture_apis_from_tool_call"):
+                if _owner_capture and hasattr(self, "_auto_capture_apis_from_tool_call"):
                     try:
                         await self._auto_capture_apis_from_tool_call(
                             tc.name, arguments if isinstance(arguments, dict) else {},

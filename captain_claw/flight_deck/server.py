@@ -6,6 +6,7 @@ import os
 import sys
 import json
 import hashlib
+import re
 import secrets
 import signal
 import asyncio
@@ -47,6 +48,7 @@ from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.flight_deck.endpoints import same_endpoint as _same_endpoint
 from captain_claw.flight_deck import origin_guard
 from captain_claw.flight_deck import tenant_profile
+from captain_claw.flight_deck import agent_sharing
 
 
 # ── Console logging: timestamps + ANSI colors ──────────────────────────
@@ -131,6 +133,28 @@ class _SuppressShutdownCancelFilter(logging.Filter):
         return True
 
 
+class _RedactQueryTokenFilter(logging.Filter):
+    """Blank the values of ``fd_token=``, ``token=`` and ``t=`` query params in
+    what uvicorn logs. Its access line and its WebSocket "[accepted]" line carry
+    the request path WITH the query string, and those params hold a user's FD
+    access JWT (owner and member agent sockets), an agent's web token or a
+    download token — replayable by anyone who reads FD's log."""
+
+    _TOKEN_PARAM = re.compile(r"([?&](?:fd_token|token|t)=)[^&#\s\"']*", re.IGNORECASE)
+
+    @classmethod
+    def redact(cls, value):
+        return cls._TOKEN_PARAM.sub("\\1…", value) if isinstance(value, str) else value
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self.redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(self.redact(a) for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: self.redact(v) for k, v in record.args.items()}
+        return True
+
+
 def _configure_fd_logging() -> None:
     """Install our colored handler on the root logger and silence dupes."""
     use_color = sys.stderr.isatty() and os.environ.get("NO_COLOR", "") == ""
@@ -151,6 +175,12 @@ def _configure_fd_logging() -> None:
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
     # Suppress the per-stream CancelledError tracebacks during shutdown.
     logging.getLogger("uvicorn.error").addFilter(_SuppressShutdownCancelFilter())
+    # Never log a token from a request's query string (once per logger, even
+    # when this module is loaded twice — `python -m …server` plus an import).
+    for name in ("uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        if not any(type(f).__name__ == "_RedactQueryTokenFilter" for f in lg.filters):
+            lg.addFilter(_RedactQueryTokenFilter())
 
 
 _configure_fd_logging()
@@ -1246,6 +1276,7 @@ from captain_claw.flight_deck.delivery_routes import router as delivery_router
 from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
+from captain_claw.flight_deck.agent_sharing_routes import router as agent_sharing_router
 from captain_claw.flight_deck.notification_routes import router as notification_router
 from captain_claw.flight_deck.mcp_server_routes import router as mcp_inbound_router
 from captain_claw.flight_deck.mcp_oauth_routes import router as mcp_oauth_router
@@ -1301,6 +1332,7 @@ app.include_router(delivery_router)
 app.include_router(agents_fs_router)
 app.include_router(system_router)
 app.include_router(share_router)
+app.include_router(agent_sharing_router)
 app.include_router(notification_router)
 app.include_router(mcp_inbound_router)
 app.include_router(mcp_oauth_router)
@@ -1666,6 +1698,8 @@ class ContainerInfo(BaseModel):
     ports: dict = Field(default_factory=dict)
     web_port: int | None = None
     web_auth: str = ""
+    # Stable id of this agent for sharing (agent_sharing): "docker:<slug>:<instance>".
+    agent_ref: str = ""
 
 
 class ContainerActionResult(BaseModel):
@@ -2208,7 +2242,16 @@ def _container_info(c: docker.models.containers.Container) -> ContainerInfo:
         ports=c.attrs.get("NetworkSettings", {}).get("Ports", {}),
         web_port=web_port,
         web_auth=labels.get("flight-deck.web-auth", ""),
+        agent_ref=_container_agent_ref(c),
     )
+
+
+def _container_agent_ref(c) -> str:
+    """``docker:<slug>:<instance>`` (see agent_sharing), "" when it has none."""
+    try:
+        return agent_sharing.docker_ref(c)
+    except Exception:
+        return ""
 
 
 def _find_container(container_id: str, owner_id: str = "") -> docker.models.containers.Container:
@@ -2517,10 +2560,14 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         if not _is_this_decks_container(existing):
             # Container names are host-global; never remove another deck's.
             raise HTTPException(409, f"Container name '{slug}' is used by another Flight Deck on this host.")
+        # A name is a directory (DATA_DIR/<slug>): a container that isn't the
+        # caller's stays — refuse rather than hand them its data (the process
+        # spawn refuses another user's name the same way).
+        _refuse_other_owners_container(existing, owner_id, slug)
         if existing.status == "running":
             raise HTTPException(400, f"Container '{slug}' already running. Stop it first or use a different name.")
         # Remove stopped container with same name
-        existing.remove()
+        await _remove_replaced_container(existing)
     except docker.errors.NotFound:
         pass
 
@@ -2612,6 +2659,8 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         # containerised agent resolves the same tags/recall via its Docker labels.
         "flight-deck.grid-tags": json.dumps(list(config.grid_memory_tags or [])),
         "flight-deck.grid-recall": config.grid_recall_mode or "",
+        # A fresh agent: members of an earlier agent with this slug don't carry over.
+        agent_sharing.INSTANCE_LABEL: agent_sharing.new_instance_id(),
     }
 
     # Security options
@@ -2720,9 +2769,49 @@ async def remove_container(container_id: str, force: bool = False, request: Requ
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     name = c.name
     owner_id, short_id = str((c.labels or {}).get(OWNER_LABEL, "") or ""), c.short_id
+    agent_ref = _container_agent_ref(c)
     await asyncio.get_event_loop().run_in_executor(None, lambda: c.remove(force=force))
     await _set_owner_agent_instructions(owner_id, "docker", short_id, "")
+    await _forget_shared_agent(agent_ref, owner_id)
     return ContainerActionResult(ok=True, container_id=container_id, message=f"Removed '{name}'")
+
+
+def _refuse_other_owners_container(existing, owner_id: str, slug: str) -> None:
+    """409 unless ``existing`` — the container a spawn or clone named ``slug``
+    would replace — is ``owner_id``'s: its data dir (sessions, members' private
+    chats, memory) would go to the new agent. With auth off there is no tenant
+    boundary."""
+    if AUTH_ENABLED and owner_id and str((existing.labels or {}).get(OWNER_LABEL, "") or "") != owner_id:
+        raise HTTPException(409, f"An agent named '{slug}' already exists. Choose a different name.")
+
+
+async def _remove_replaced_container(existing) -> None:
+    """Remove the stopped container a spawn or clone replaces. Its successor is
+    a new agent (a new instance id), so the old one's shares go with it."""
+    agent_ref = _container_agent_ref(existing)
+    owner_id = str((existing.labels or {}).get(OWNER_LABEL, "") or "")
+    existing.remove()
+    await _forget_shared_agent(agent_ref, owner_id)
+
+
+async def _forget_shared_agent(agent_ref: str, owner_id: str) -> None:
+    """An agent was removed: drop its member grants and close its members'
+    sockets (4404). Best-effort — a removal never fails over it."""
+    if not agent_ref:
+        return
+    try:
+        if AUTH_ENABLED and owner_id:
+            from captain_claw.flight_deck.auth import get_db
+
+            await get_db().delete_shares_for_resource(
+                agent_sharing.AGENT_RESOURCE, agent_ref, owner_id)
+    except Exception as exc:
+        log.warning("Could not drop a removed agent's shares", error=str(exc))
+    try:
+        agent_sharing.invalidate_member_cache(agent_ref)
+        await agent_sharing.close_member_sockets(agent_ref, code=4404, reason="Agent removed")
+    except Exception as exc:
+        log.warning("Could not close a removed agent's member sockets", error=str(exc))
 
 
 class RebuildRequest(BaseModel):
@@ -2744,6 +2833,10 @@ async def rebuild_container(container_id: str, request: Request, req: RebuildReq
     # The rebuilt container is this deck's (a legacy unlabelled one included:
     # _find_container only hands out this deck's or legacy containers).
     labels[DECK_LABEL] = _deck_id()
+    # Same agent, same members: keep (or pin) its instance id across the rebuild.
+    _instance = agent_sharing.docker_instance_id(c)
+    if _instance:
+        labels.setdefault(agent_sharing.INSTANCE_LABEL, _instance)
 
     # If frontend sent a description override, update the label
     if req and req.description:
@@ -2927,9 +3020,11 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
         if not _is_this_decks_container(existing):
             # Container names are host-global; never remove another deck's.
             raise HTTPException(409, f"Container name '{new_slug}' is used by another Flight Deck on this host.")
+        # The clone is the source owner's: only their own stopped agent may go.
+        _refuse_other_owners_container(existing, str(labels.get(OWNER_LABEL, "") or ""), new_slug)
         if existing.status == "running":
             raise HTTPException(400, f"Container '{new_slug}' already running.")
-        existing.remove()
+        await _remove_replaced_container(existing)
     except docker.errors.NotFound:
         pass
 
@@ -3023,6 +3118,7 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
 
     # Update labels for the clone (spawned by — so belonging to — this deck)
     labels[DECK_LABEL] = _deck_id()
+    labels[agent_sharing.INSTANCE_LABEL] = agent_sharing.new_instance_id()
     labels["flight-deck.agent-name"] = new_name
     labels["flight-deck.description"] = ""
     if new_web_auth:
@@ -7013,6 +7109,8 @@ class ProcessInfo(BaseModel):
     # SPA syncs its copy from here, so a change made elsewhere (an archetype
     # spawn, an admin) reaches an already-open Flight Deck.
     fleet_instructions: str = ""
+    # Stable id of this agent for sharing (agent_sharing): "process:<slug>:<instance>".
+    agent_ref: str = ""
 
 
 class ProcessActionResult(BaseModel):
@@ -7056,6 +7154,7 @@ async def list_processes(request: Request, user: dict | None = _agent_manager_de
             provider=entry.get("provider", ""),
             model=entry.get("model", ""),
             freebie=bool(entry.get("freebie", False)),
+            agent_ref=agent_sharing.process_ref(slug, entry),
         ))
     return result
 
@@ -7200,12 +7299,16 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     # value. Pre-writing the entry also guarantees the announce-port
     # endpoint can find the slug.
     registry = _load_process_registry()
+    prior = registry.get(slug) or {}
     registry[slug] = {
         "slug": slug,
         "name": config.name or slug,
         "description": config.description,
         "web_port": config.web_port,
         "web_auth": config.web_auth_token,
+        # Re-spawning one's own stopped agent keeps its id (and its members);
+        # anything else is a new agent to share.
+        "instance_id": agent_sharing.process_instance_for_spawn(prior, owner_id, slug),
         "pid": None,  # filled in below once Popen returns
         "provider": config.provider,
         "model": config.model,
@@ -7498,11 +7601,13 @@ async def remove_process(slug: str, force: bool = False, request: Request = None
 
     registry = _load_process_registry()
     owner_id = str((registry.get(slug) or {}).get("owner") or "")
+    agent_ref = agent_sharing.process_ref(slug, registry.get(slug) or {})
     registry.pop(slug, None)
     _save_process_registry(registry)
     _processes.pop(slug, None)
     # …and its instructions, so a later agent of the same name doesn't inherit them.
     await _set_owner_agent_instructions(owner_id, "process", slug, "")
+    await _forget_shared_agent(agent_ref, owner_id)
 
     return ProcessActionResult(ok=True, slug=slug, message=f"Removed '{slug}' from registry")
 
@@ -7606,7 +7711,14 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
         raise HTTPException(400, "Name is required")
     new_slug = _slug(new_name)
 
-    if new_slug in registry:
+    # A name is a directory (see the spawn guard): only the caller's own stopped
+    # agent may be replaced — never another user's (or an unowned) entry and the
+    # data dir that goes with it.
+    replaced = registry.get(new_slug)
+    if replaced is not None:
+        caller = str(getattr(request.state, "user_id", "") or "")
+        if AUTH_ENABLED and (not caller or str(replaced.get("owner") or "") != caller):
+            raise HTTPException(409, f"An agent named '{new_slug}' already exists. Choose a different name.")
         if _process_is_alive(new_slug):
             raise HTTPException(400, f"Process '{new_slug}' already running.")
 
@@ -7667,6 +7779,7 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
         "description": "",
         "web_port": new_port,
         "web_auth": new_auth,
+        "instance_id": agent_sharing.new_instance_id(),
         "pid": None,
         "provider": entry.get("provider", ""),
         "model": entry.get("model", ""),
@@ -7676,6 +7789,9 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
         "grid_recall": entry.get("grid_recall", ""),
     }
     _save_process_registry(registry)
+    if replaced is not None:  # the clone is a new agent: the replaced one's shares go
+        await _forget_shared_agent(agent_sharing.process_ref(new_slug, replaced),
+                                   str(replaced.get("owner") or ""))
     # Its owner's profile, not whatever an earlier agent of this slug left.
     await tenant_profile.write_on_spawn(new_agent_dir, str(entry.get("owner") or ""), "process")
 

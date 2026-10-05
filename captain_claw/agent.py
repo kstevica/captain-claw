@@ -486,6 +486,10 @@ class Agent(
     # and with the flag off these overrides are pure pass-throughs.
 
     def _mrav_enabled(self) -> bool:
+        # A shared-agent member's instance always runs the classic loop: its
+        # tool allowlist, prompt and privacy rules are built around it.
+        if getattr(self, "_speaker_scoped", False) is True:
+            return False
         # Runtime flag file (Flight Deck toggle, like eco/nano) overrides
         # config in BOTH directions: "on" enables a classic-spawned agent,
         # "off" disables a mrav-spawned one. Absent → config decides.

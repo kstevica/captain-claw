@@ -17,10 +17,12 @@ interface Props {
   resourceName: string
   /** Archetypes are use-only — hide the View/Edit toggle and force 'view'. */
   allowEdit?: boolean
+  /** What sharing this resource means — shown under the header. */
+  note?: string
   onClose: () => void
 }
 
-export function ShareModal({ resourceType, resourceId, resourceName, allowEdit = true, onClose }: Props) {
+export function ShareModal({ resourceType, resourceId, resourceName, allowEdit = true, note, onClose }: Props) {
   const [users, setUsers] = useState<ShareUser[]>([])
   const [shares, setShares] = useState<ResourceShare[]>([])
   const [loading, setLoading] = useState(true)
@@ -96,6 +98,12 @@ export function ShareModal({ resourceType, resourceId, resourceName, allowEdit =
           </button>
         </div>
 
+        {note && (
+          <div className="whitespace-pre-line border-b border-amber-500/25 bg-amber-500/10 px-4 py-2.5 text-[11px] leading-relaxed text-amber-800 dark:text-amber-200">
+            {note}
+          </div>
+        )}
+
         {error && (
           <div className="border-b border-red-900/50 bg-red-950/20 px-4 py-2 text-xs text-red-400">{error}</div>
         )}
@@ -116,6 +124,9 @@ export function ShareModal({ resourceType, resourceId, resourceName, allowEdit =
                       <div className="truncate text-sm text-zinc-200">{s.grantee_name || s.grantee_email}</div>
                       <div className="truncate text-[11px] text-zinc-500">{s.grantee_email}</div>
                     </div>
+                    {!allowEdit && resourceType === 'agent' && (
+                      <span className="shrink-0 text-[11px] text-zinc-500">Can chat</span>
+                    )}
                     {allowEdit && (
                       <select
                         value={s.permission}

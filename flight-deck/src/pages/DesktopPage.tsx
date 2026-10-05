@@ -8,8 +8,9 @@ import { AgentDetail } from '../components/agents/AgentDetail'
 import { ContainerCard } from '../components/agents/ContainerCard'
 import { LocalAgentCard } from '../components/agents/LocalAgentCard'
 import { ProcessCard } from '../components/agents/ProcessCard'
+import { SharedAgentCard } from '../components/agents/SharedAgentCard'
 import { FileBrowser } from '../components/agents/FileBrowser'
-import { Radio, Plus, Server, LayoutGrid, Move, X, ChevronDown, Minimize2, Square, Play, Shuffle, Trash2, CheckCircle2 } from 'lucide-react'
+import { Radio, Plus, Server, LayoutGrid, Move, X, ChevronDown, Minimize2, Square, Play, Shuffle, Trash2, CheckCircle2, Users } from 'lucide-react'
 import { stopContainer as apiStopContainer, startContainer as apiStartContainer, stopProcess as apiStopProcess, startProcess as apiStartProcess, removeContainer as apiRemoveContainer, removeProcess as apiRemoveProcess } from '../services/docker'
 import type { AgentEndpoint } from '../services/fileTransfer'
 import { useGroupStore } from '../stores/groupStore'
@@ -17,6 +18,8 @@ import { useDesktopPrefsStore } from '../stores/desktopPrefsStore'
 import { useOnboardingStore } from '../stores/onboardingStore'
 import { useUIStore } from '../stores/uiStore'
 import { useAuthStore } from '../stores/authStore'
+import { useSharedAgentStore } from '../stores/sharedAgentStore'
+import { SHARED_SECTION_ID } from '../utils/sharedAgent'
 import { GroupFilter } from '../components/common/AgentGroups'
 import { queueSave, registerHydrator } from '../services/settingsSync'
 import { useIsMobile } from '../hooks/useMediaQuery'
@@ -83,6 +86,11 @@ export function DesktopPage() {
   const { containers, fetchContainers, dockerAvailable, checkHealth } = useContainerStore()
   const { agents: localAgents, addAgent, removeAgent, probeAll } = useLocalAgentStore()
   const { processes, fetchProcesses } = useProcessStore()
+  // Agents other users shared with you — their own section, never part of
+  // the fleet below (groups, hide toggles and bulk actions are owner-only).
+  const sharingEnabled = useSharedAgentStore((s) => s.enabled)
+  const sharedAgents = useSharedAgentStore((s) => s.agents)
+  const fetchShared = useSharedAgentStore((s) => s.fetch)
   const setView = useUIStore((s) => s.setView)
   const selectedInstance = instances.find((i) => i.id === selectedInstanceId)
   const onboarding = useOnboardingStore()
@@ -142,10 +150,11 @@ export function DesktopPage() {
     checkHealth()
     fetchContainers()
     fetchProcesses()
+    fetchShared()
     probeAll()
-    const interval = setInterval(() => { fetchContainers(); fetchProcesses() }, 10000)
+    const interval = setInterval(() => { fetchContainers(); fetchProcesses(); fetchShared() }, 10000)
     return () => clearInterval(interval)
-  }, [checkHealth, fetchContainers, fetchProcesses, probeAll, authEnabled, isAuthenticated])
+  }, [checkHealth, fetchContainers, fetchProcesses, fetchShared, probeAll, authEnabled, isAuthenticated])
 
   // Close bulk menu on outside click
   useEffect(() => {
@@ -342,6 +351,7 @@ export function DesktopPage() {
   }
 
   const hasContent = instances.length > 0 || containers.length > 0 || processes.length > 0 || localAgents.length > 0
+  const showShared = sharingEnabled && sharedAgents.length > 0
   const agentCount = containers.length + processes.length + localAgents.length
 
   // Auto-complete desktop onboarding when agents exist
@@ -404,8 +414,9 @@ export function DesktopPage() {
   }
 
   // First-run empty state: with no agents, show a clean modal-style card that
-  // points the user to the Spawn Agent page.
-  if (!hasContent) {
+  // points the user to the Spawn Agent page. (Agents shared with you still
+  // get the page, so they can be opened.)
+  if (!hasContent && !showShared) {
     return (
       <div className="flex h-full items-center justify-center p-6">
         <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900/80 p-8 text-center shadow-xl shadow-black/30">
@@ -459,6 +470,24 @@ export function DesktopPage() {
             )}
           </div>
         </div>
+
+        {/* Shared with me — agents other deck users shared with you. Chat only.
+            Above your own fleet: it's short, and the bell's share notice
+            sends you here (scroll target), so it must not hide below a
+            long grid or a free-layout canvas. */}
+        {showShared && (
+          <div id={SHARED_SECTION_ID} className="mb-8 scroll-mt-4">
+            <div className="mb-3 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
+              <Users className="h-3.5 w-3.5" />
+              Shared with me ({sharedAgents.length})
+            </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-5">
+              {sharedAgents.map((a) => (
+                <SharedAgentCard key={a.agent_ref} agent={a} />
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* BotPort connected agents */}
         {instances.length > 0 && (

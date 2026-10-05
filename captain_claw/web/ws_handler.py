@@ -29,6 +29,15 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     cfg = get_config()
     public_mode = bool(cfg.web.public_run)
 
+    # ── Shared-agent member (Flight Deck speaker handshake) ───────
+    # A verified X-FD-Speaker socket is a different principal: its own
+    # instance, its own session, never in `clients` / `_lane_sockets`.
+    # Without the header nothing below changes.
+    _speaker_header = request.headers.get("X-FD-Speaker")
+    if _speaker_header:
+        from captain_claw.web.speaker_ws import speaker_ws_session
+        return await speaker_ws_session(server, ws, request, _speaker_header, public_mode)
+
     # ── Public-mode authentication & session binding ──────────────
     public_session_id: str | None = None
     if public_mode:
@@ -125,40 +134,7 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         replay_session = _welcome_agent.session
 
     if replay_session:
-        batch: list[dict] = []
-        for msg in replay_session.messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            tool_name = msg.get("tool_name", "")
-            timestamp = msg.get("timestamp", "")
-            model = msg.get("model", "")
-            if role in ("user", "assistant"):
-                payload = {
-                    "type": "chat_message",
-                    "role": role,
-                    "content": content,
-                    "replay": True,
-                    "timestamp": timestamp,
-                    "model": model,
-                }
-                if msg.get("feedback"):
-                    payload["feedback"] = msg["feedback"]
-                batch.append(payload)
-            elif role == "tool" and tool_name == "task_rephrase":
-                batch.append({
-                    "type": "chat_message",
-                    "role": "rephrase",
-                    "content": content,
-                    "replay": True,
-                })
-            elif role == "tool" and tool_name and not Agent._is_monitor_only_tool_name(tool_name):
-                batch.append({
-                    "type": "monitor",
-                    "tool_name": tool_name,
-                    "arguments": msg.get("tool_arguments", {}),
-                    "output": content,
-                    "replay": True,
-                })
+        batch = _build_replay_batch(replay_session)
         if batch:
             await server._send(ws, {"type": "replay_batch", "messages": batch})
         await server._send(ws, {"type": "replay_done"})
@@ -190,6 +166,46 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         server._lane_sockets.get(getattr(ws, "_lane", ""), set()).discard(ws)
 
     return ws
+
+
+def _build_replay_batch(session) -> list[dict]:
+    """The ``replay_batch`` messages that rebuild *session*'s transcript in a
+    freshly connected client (chat, rephrase panels, monitor cards)."""
+    batch: list[dict] = []
+    for msg in session.messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        tool_name = msg.get("tool_name", "")
+        timestamp = msg.get("timestamp", "")
+        model = msg.get("model", "")
+        if role in ("user", "assistant"):
+            payload = {
+                "type": "chat_message",
+                "role": role,
+                "content": content,
+                "replay": True,
+                "timestamp": timestamp,
+                "model": model,
+            }
+            if msg.get("feedback"):
+                payload["feedback"] = msg["feedback"]
+            batch.append(payload)
+        elif role == "tool" and tool_name == "task_rephrase":
+            batch.append({
+                "type": "chat_message",
+                "role": "rephrase",
+                "content": content,
+                "replay": True,
+            })
+        elif role == "tool" and tool_name and not Agent._is_monitor_only_tool_name(tool_name):
+            batch.append({
+                "type": "monitor",
+                "tool_name": tool_name,
+                "arguments": msg.get("tool_arguments", {}),
+                "output": content,
+                "replay": True,
+            })
+    return batch
 
 
 async def _handle_telegram_delegate_result(
@@ -239,6 +255,12 @@ async def handle_ws_message(
     server: WebServer, ws: web.WebSocketResponse, data: dict
 ) -> None:
     """Dispatch incoming WebSocket messages."""
+    # Shared-agent member: frame allowlist + member-only handling first.
+    from captain_claw.speaker import speaker_key_of
+    if speaker_key_of(ws) is not None:
+        from captain_claw.web.speaker_ws import speaker_gate
+        if not await speaker_gate(server, ws, data):
+            return
     msg_type = data.get("type", "")
 
     if msg_type == "chat":
@@ -636,20 +658,31 @@ async def handle_ws_message(
             if _locked and not _is_ws_admin:
                 await server._send(ws, {
                     "type": "error",
+                    "code": "not_allowed",
                     "message": "Session settings are locked by the administrator.",
                 })
                 return
+            # A shared-agent member's values are persisted and go into every
+            # system prompt of their session: bounded.
+            from captain_claw.speaker import SESSION_SETTINGS_LIMITS
+            _limits = SESSION_SETTINGS_LIMITS if speaker_key_of(ws) is not None else {}
+
+            def _setting(key: str) -> str:
+                val = data[key].strip()
+                cap = _limits.get(key)
+                return val[:cap].strip() if cap else val
+
             changed = False
             if "session_name" in data and isinstance(data["session_name"], str):
-                val = data["session_name"].strip()
+                val = _setting("session_name")
                 if val:
                     session.metadata["session_display_name"] = val
                     changed = True
             if "session_description" in data and isinstance(data["session_description"], str):
-                session.metadata["session_description"] = data["session_description"].strip()
+                session.metadata["session_description"] = _setting("session_description")
                 changed = True
             if "session_instructions" in data and isinstance(data["session_instructions"], str):
-                session.metadata["session_instructions"] = data["session_instructions"].strip()
+                session.metadata["session_instructions"] = _setting("session_instructions")
                 changed = True
             if changed:
                 sm = get_session_manager()

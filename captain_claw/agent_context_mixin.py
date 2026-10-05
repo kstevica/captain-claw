@@ -23,6 +23,10 @@ log = get_logger(__name__)
 # Fleet instructions in the nano system prompt are clipped to this many chars.
 _NANO_FLEET_INSTRUCTIONS_MAX_CHARS = 1500
 
+# Rendered in place of the owner's filesystem paths in a shared-agent
+# member's system prompt.
+_SPEAKER_PATH_PLACEHOLDER = "(not available in shared chats)"
+
 
 def _is_being_body() -> bool:
     """True for ANY Iskra BEING's body (CLAW_BEING_WORKER, stamped by
@@ -664,6 +668,9 @@ class AgentContextMixin:
         self, user_message: str, assistant_response: str,
     ) -> None:
         """Extract to-do items from a completed turn via conservative pattern matching."""
+        # Owner-only store: never written from a shared-agent member's turn.
+        if getattr(self, "_speaker_scoped", False) is True:
+            return
         cfg = get_config()
         if not cfg.todo.enabled or not cfg.todo.auto_capture:
             return
@@ -763,6 +770,9 @@ class AgentContextMixin:
         self, user_message: str, assistant_response: str,
     ) -> None:
         """Extract contact info from conversation via conservative pattern matching."""
+        # Owner-only store: never written from a shared-agent member's turn.
+        if getattr(self, "_speaker_scoped", False) is True:
+            return
         cfg = get_config()
         if not cfg.addressbook.enabled or not cfg.addressbook.auto_capture:
             return
@@ -799,6 +809,9 @@ class AgentContextMixin:
         self, tool_name: str, arguments: dict[str, Any],
     ) -> None:
         """Extract contacts from send_mail tool usage."""
+        # Owner-only store: never written from a shared-agent member's turn.
+        if getattr(self, "_speaker_scoped", False) is True:
+            return
         cfg = get_config()
         if not cfg.addressbook.enabled or not cfg.addressbook.auto_capture:
             return
@@ -882,6 +895,9 @@ class AgentContextMixin:
         self, user_message: str, assistant_response: str,
     ) -> None:
         """Extract script info from conversation via conservative pattern matching."""
+        # Owner-only store: never written from a shared-agent member's turn.
+        if getattr(self, "_speaker_scoped", False) is True:
+            return
         cfg = get_config()
         if not cfg.scripts_memory.enabled or not cfg.scripts_memory.auto_capture:
             return
@@ -927,6 +943,9 @@ class AgentContextMixin:
         self, tool_name: str, arguments: dict[str, Any],
     ) -> None:
         """Extract script entries from write tool usage."""
+        # Owner-only store: never written from a shared-agent member's turn.
+        if getattr(self, "_speaker_scoped", False) is True:
+            return
         cfg = get_config()
         if not cfg.scripts_memory.enabled or not cfg.scripts_memory.auto_capture:
             return
@@ -1017,6 +1036,9 @@ class AgentContextMixin:
         self, user_message: str, assistant_response: str,
     ) -> None:
         """Extract API info from conversation via conservative pattern matching."""
+        # Owner-only store: never written from a shared-agent member's turn.
+        if getattr(self, "_speaker_scoped", False) is True:
+            return
         cfg = get_config()
         if not cfg.apis_memory.enabled or not cfg.apis_memory.auto_capture:
             return
@@ -1047,6 +1069,9 @@ class AgentContextMixin:
         self, tool_name: str, arguments: dict[str, Any],
     ) -> None:
         """Extract API entries from web_fetch tool usage."""
+        # Owner-only store: never written from a shared-agent member's turn.
+        if getattr(self, "_speaker_scoped", False) is True:
+            return
         cfg = get_config()
         if not cfg.apis_memory.enabled or not cfg.apis_memory.auto_capture:
             return
@@ -1946,11 +1971,25 @@ class AgentContextMixin:
             current_id = getattr(self.session, "id", "")
 
         context_blocks: list[str] = []
+        _member = getattr(self, "_speaker_scoped", False) is True
         for sel in selectors[:3]:  # Cap at 3 referenced sessions
             try:
-                ref_session = await session_manager.select_session(sel)
+                if _member:
+                    ref_session = await session_manager.select_session(sel)
+                else:
+                    # The owner's names and `#N` resolve among their own
+                    # sessions (as /sessions lists them), never a member's.
+                    from captain_claw.speaker import select_owner_session
+
+                    ref_session = await select_owner_session(session_manager, sel)
             except Exception:
                 ref_session = None
+            # A shared-agent member reaches only their OWN sessions — anybody
+            # else's (the owner's or another member's) stays unresolved.
+            if ref_session is not None and _member:
+                _me = getattr(getattr(self, "_speaker_principal", None), "speaker_id", None)
+                if not _me or (ref_session.metadata or {}).get("speaker_id") != _me:
+                    ref_session = None
             if ref_session is None:
                 context_blocks.append(
                     f"⚠️ Could not resolve session reference '{sel}'. "
@@ -2680,6 +2719,12 @@ class AgentContextMixin:
     def _build_tool_list(self) -> str:
         """Build the textual tool list from currently registered tools."""
         registered = self.tools.list_tools()
+        if getattr(self, "_speaker_scoped", False) is True:
+            # A shared-agent member sees only the tools they can call — never
+            # the owner's roster (MCP servers, Google, shell, plugins).
+            from captain_claw.speaker import SPEAKER_TOOL_ALLOWLIST
+
+            registered = [n for n in registered if n in SPEAKER_TOOL_ALLOWLIST]
         use_nano = self.instructions.use_nano
         use_micro = self.instructions.use_micro
 
@@ -2747,6 +2792,11 @@ class AgentContextMixin:
         or an empty string when the tool is not present.
         """
         names = (tool_name,) if isinstance(tool_name, str) else tool_name
+        if getattr(self, "_speaker_scoped", False) is True:
+            # A shared-agent member can't call these tools; don't describe them.
+            from captain_claw.speaker import SPEAKER_TOOL_ALLOWLIST
+
+            names = tuple(n for n in names if n in SPEAKER_TOOL_ALLOWLIST)
         if not any(self.tools.has_tool(n) for n in names):
             return ""
         if variables:
@@ -2939,7 +2989,21 @@ class AgentContextMixin:
             _tz_name = get_config().context.timezone
         except Exception:
             _tz_name = ""
-        system_info_block = build_system_info_block(detail_level=_detail, tz_name=_tz_name or None)
+        if getattr(self, "_speaker_scoped", False) is True:
+            # A shared-agent member gets the clock, never the owner's machine
+            # (hostname, local/public IP, memory, disk, load, uptime).
+            from captain_claw.system_info import build_datetime_lines
+
+            if _detail == "nano":
+                system_info_block = ""
+            else:
+                _dt_normal, _dt_micro = build_datetime_lines(_tz_name or None)
+                system_info_block = (
+                    f"Env: {_dt_micro}" if _detail == "micro"
+                    else "\n".join(["System environment:", *_dt_normal])
+                )
+        else:
+            system_info_block = build_system_info_block(detail_level=_detail, tz_name=_tz_name or None)
         # Append activity-timing lines (last user message / reply / cron run /
         # session start) so the model knows recency, not just the current clock.
         _timing_block = self._build_timing_block(detail_level=_detail)
@@ -2955,6 +3019,10 @@ class AgentContextMixin:
             cfg = get_config()
             extra_dirs = cfg.tools.read.extra_dirs
             gdrive_folders = cfg.tools.read.gdrive_folders
+            if getattr(self, "_speaker_scoped", False) is True:
+                # A shared-agent member never sees the owner's local or
+                # Drive folder trees (and has no file tools to use them).
+                extra_dirs, gdrive_folders = [], []
 
             parts: list[str] = []
 
@@ -3086,10 +3154,17 @@ class AgentContextMixin:
 
         from captain_claw import __version__, __build_date__
 
+        # The owner's filesystem layout (OS username, folders) means nothing to
+        # a shared-agent member, who has no file tools.
+        runtime_base_path: object = self.runtime_base_path
+        workspace_root: object = self.workspace_base_path
+        if getattr(self, "_speaker_scoped", False) is True:
+            runtime_base_path = workspace_root = saved_root = _SPEAKER_PATH_PLACEHOLDER
+
         base_prompt = self.instructions.render(
             "system_prompt.md",
-            runtime_base_path=self.runtime_base_path,
-            workspace_root=self.workspace_base_path,
+            runtime_base_path=runtime_base_path,
+            workspace_root=workspace_root,
             saved_root=saved_root,
             session_id=session_id,
             planning_block=planning_block,
@@ -3130,7 +3205,38 @@ class AgentContextMixin:
         # public-session agent (strangers must not see the owner's profile),
         # or an agent flagged _tenant_hidden (e.g. a BotPort dispatch agent
         # answering a remote instance).
-        if (not _is_being_body()
+        #
+        # A shared-agent member's instance gets the MEMBER's profile (sent by
+        # Flight Deck in fd_speaker_context) plus the speaker-mode note in the
+        # same slot — never the owner's block.
+        if getattr(self, "_speaker_scoped", False) is True:
+            try:
+                from captain_claw.speaker import SPEAKER_MODE_NOTE
+                from captain_claw.tenant_context import (
+                    insert_tenant_block,
+                    use_compact_tenant_context,
+                )
+                _profile = getattr(self, "_speaker_profile", None)
+                _full, _compact = (
+                    _profile if isinstance(_profile, tuple) and len(_profile) == 2 else ("", "")
+                )
+                _full = str(_full or "").strip()
+                _compact = str(_compact or "").strip()
+                if use_compact_tenant_context(
+                    micro=self.instructions.use_micro,
+                    nano=self.instructions.use_nano,
+                ):
+                    _member_block = _compact or _full
+                else:
+                    _member_block = _full or _compact
+                _member_block = (
+                    f"{_member_block}\n\n{SPEAKER_MODE_NOTE}" if _member_block
+                    else SPEAKER_MODE_NOTE
+                )
+                base_prompt = insert_tenant_block(base_prompt, _member_block)
+            except Exception:
+                pass
+        elif (not _is_being_body()
                 and not getattr(self, "_public_scoped", False)
                 and not getattr(self, "_tenant_hidden", False)):
             try:
@@ -3169,6 +3275,10 @@ class AgentContextMixin:
 
         skills_section = ""
         build_skills = getattr(self, "_build_skills_system_prompt_section", None)
+        # A shared-agent member can't read SKILL.md files (no file tools), and
+        # the owner's skills and their locations are not theirs to see.
+        if getattr(self, "_speaker_scoped", False) is True:
+            build_skills = None
         if callable(build_skills):
             try:
                 skills_section = str(build_skills() or "").strip()
@@ -3701,7 +3811,11 @@ class AgentContextMixin:
                 "tool_name": "scale_progress",
                 "token_count": self._count_tokens(scale_note),
             })
-        todo_note = self._build_todo_context_note()
+        # A shared-agent member's instance never sees the owner's caches
+        # (todo, contacts, scripts, apis, datastore, intentions, briefing);
+        # insights, intuitions and workspace notes are the shared commons.
+        _owner_notes = getattr(self, "_speaker_scoped", False) is not True
+        todo_note = self._build_todo_context_note() if _owner_notes else ""
         if todo_note:
             candidate_messages.append({
                 "role": "assistant",
@@ -3709,7 +3823,9 @@ class AgentContextMixin:
                 "tool_name": "todo_context",
                 "token_count": self._count_tokens(todo_note),
             })
-        contacts_note = self._build_contacts_context_note(query or "") if query else ""
+        contacts_note = (
+            self._build_contacts_context_note(query or "") if query and _owner_notes else ""
+        )
         if contacts_note:
             candidate_messages.append({
                 "role": "assistant",
@@ -3717,7 +3833,9 @@ class AgentContextMixin:
                 "tool_name": "contacts_context",
                 "token_count": self._count_tokens(contacts_note),
             })
-        scripts_note = self._build_scripts_context_note(query or "") if query else ""
+        scripts_note = (
+            self._build_scripts_context_note(query or "") if query and _owner_notes else ""
+        )
         if scripts_note:
             candidate_messages.append({
                 "role": "assistant",
@@ -3725,7 +3843,7 @@ class AgentContextMixin:
                 "tool_name": "scripts_context",
                 "token_count": self._count_tokens(scripts_note),
             })
-        apis_note = self._build_apis_context_note(query or "") if query else ""
+        apis_note = self._build_apis_context_note(query or "") if query and _owner_notes else ""
         if apis_note:
             candidate_messages.append({
                 "role": "assistant",
@@ -3733,7 +3851,7 @@ class AgentContextMixin:
                 "tool_name": "apis_context",
                 "token_count": self._count_tokens(apis_note),
             })
-        datastore_note = self._build_datastore_context_note()
+        datastore_note = self._build_datastore_context_note() if _owner_notes else ""
         if datastore_note:
             candidate_messages.append({
                 "role": "assistant",
@@ -3749,7 +3867,7 @@ class AgentContextMixin:
                 "tool_name": "insights_context",
                 "token_count": self._count_tokens(insights_note),
             })
-        intentions_note = self._build_intentions_context_note()
+        intentions_note = self._build_intentions_context_note() if _owner_notes else ""
         if intentions_note:
             candidate_messages.append({
                 "role": "assistant",
@@ -3765,7 +3883,7 @@ class AgentContextMixin:
                 "tool_name": "nervous_system_context",
                 "token_count": self._count_tokens(nervous_note),
             })
-        briefing_note = self._build_briefing_context_note()
+        briefing_note = self._build_briefing_context_note() if _owner_notes else ""
         if briefing_note:
             candidate_messages.append({
                 "role": "assistant",

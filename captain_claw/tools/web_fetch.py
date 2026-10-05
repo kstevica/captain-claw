@@ -109,6 +109,38 @@ async def _gdrive_fetch_block(url: str, agent: Any = None) -> str | None:
     )
 
 
+# A shared-agent member's fetch reads at most this much of a body, and the
+# whole fetch (every redirect hop included) must finish within this time —
+# httpx's own timeout is per read, so a fast huge download never trips it.
+MEMBER_FETCH_MAX_BYTES = 8 * 1024 * 1024
+MEMBER_FETCH_DEADLINE_S = 45.0
+
+
+async def _member_fetch(url: str) -> tuple[str, int, bool]:
+    """GET *url* for a member: public addresses only, body capped at
+    :data:`MEMBER_FETCH_MAX_BYTES`. Returns ``(text, status, truncated)``."""
+    from captain_claw import speaker as _speaker
+
+    async with _speaker.make_public_http_client() as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            chunks: list[bytes] = []
+            size = 0
+            truncated = False
+            async for chunk in response.aiter_bytes():
+                room = MEMBER_FETCH_MAX_BYTES - size
+                if len(chunk) > room:
+                    # More body than the cap allows: keep the cap, stop reading.
+                    chunks.append(chunk[:room])
+                    size += room
+                    truncated = True
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+            text = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+            return text, response.status_code, truncated
+
+
 def _make_http_client() -> httpx.AsyncClient:
     """Create a shared-style HTTP client."""
     return httpx.AsyncClient(
@@ -370,11 +402,24 @@ class WebFetchTool(Tool):
         # Hard guard: strip any extract_mode — web_fetch ALWAYS returns text.
         kwargs.pop("extract_mode", None)
 
-        # Redirect Google Drive URLs to google_drive while Google is connected.
-        gdrive_block = await _gdrive_fetch_block(url, kwargs.get("_agent"))
-        if gdrive_block:
-            return ToolResult(success=False, error=gdrive_block)
+        # A shared-agent member's fetch: plain HTTP only (no headless
+        # browser), public addresses only (checked at connect time on every
+        # hop), no Google redirect and no corpus write.
+        from captain_claw import speaker as _speaker
 
+        member = _speaker.principal_for(kwargs.get("_agent")) is not None
+        if member:
+            deep_fetch = False
+            url_error = _speaker.check_public_url(url)
+            if url_error:
+                return ToolResult(success=False, error=url_error)
+        else:
+            # Redirect Google Drive URLs to google_drive while Google is connected.
+            gdrive_block = await _gdrive_fetch_block(url, kwargs.get("_agent"))
+            if gdrive_block:
+                return ToolResult(success=False, error=gdrive_block)
+
+        body_truncated = False
         try:
             cfg = get_config()
             configured_max = int(getattr(cfg.tools.web_fetch, "max_chars", 100000))
@@ -386,6 +431,21 @@ class WebFetchTool(Tool):
                 raw_html = await _deep_fetch(url)
                 status_code = 200  # Playwright doesn't expose status easily
                 mode = "deep"
+            elif member:
+                log.info("Fetching URL (member text mode)", url=url)
+                try:
+                    raw_html, status_code, body_truncated = await asyncio.wait_for(
+                        _member_fetch(url), timeout=MEMBER_FETCH_DEADLINE_S,
+                    )
+                except TimeoutError:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"The page took longer than {int(MEMBER_FETCH_DEADLINE_S)} s "
+                            "to load and was abandoned."
+                        ),
+                    )
+                mode = "text"
             else:
                 log.info("Fetching URL (text mode)", url=url)
                 response = await self.client.get(url)
@@ -397,7 +457,7 @@ class WebFetchTool(Tool):
             content = _extract_readable_text(raw_html, base_url=url)
 
             # R10: in a corpus run, save the FULL text and return a head + pointer.
-            saved = _save_source_to_corpus(url, content)
+            saved = None if member else _save_source_to_corpus(url, content)
             if saved:
                 return ToolResult(
                     success=True,
@@ -410,8 +470,13 @@ class WebFetchTool(Tool):
             output = f"[URL: {url}]\n"
             output += f"[Status: {status_code}]\n"
             output += f"[Mode: {mode}]\n"
-            output += f"[Size: {len(raw_html)} chars]\n\n"
-            output += content
+            output += f"[Size: {len(raw_html)} chars]\n"
+            if body_truncated:
+                output += (
+                    f"[Body: only the first {MEMBER_FETCH_MAX_BYTES // (1024 * 1024)} MB "
+                    "was read]\n"
+                )
+            output += "\n" + content
 
             return ToolResult(
                 success=True,

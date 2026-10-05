@@ -2102,6 +2102,34 @@ class FlightDeckDB:
             await self._db.commit()
             return (cur.rowcount or 0) > 0
 
+    async def delete_shares_for_resource(
+        self, resource_type: str, resource_id: str, owner_id: str,
+    ) -> int:
+        """Drop every grant on one of ``owner_id``'s resources (it was removed)."""
+        assert self._db is not None
+        async with self._db.execute(
+            "DELETE FROM resource_shares"
+            " WHERE resource_type = ? AND resource_id = ? AND owner_id = ?",
+            (resource_type, resource_id, owner_id),
+        ) as cur:
+            await self._db.commit()
+            return int(cur.rowcount or 0)
+
+    async def is_agent_member(self, agent_ref: str, owner_id: str, user_id: str) -> bool:
+        """Has ``owner_id`` shared agent ``agent_ref`` with ``user_id``?"""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT 1 FROM resource_shares"
+            " WHERE resource_type = 'agent' AND resource_id = ? AND owner_id = ?"
+            " AND grantee_id = ? LIMIT 1",
+            (agent_ref, owner_id, user_id),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def list_agent_members(self, agent_ref: str, owner_id: str) -> list[dict]:
+        """Members of one of ``owner_id``'s shared agents."""
+        return await self.list_shares_for_resource("agent", agent_ref, owner_id)
+
     # ── Cost ledger (persisted run costs) ─────────────────────────────
 
     async def log_run_cost(

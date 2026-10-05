@@ -79,6 +79,9 @@ export interface ContainerInfo {
   web_auth: string
   /** Free-OpenRouter agent — eligible for "Refresh free models" */
   freebie?: boolean
+  /** Stable sharing id (`docker:<slug>:<instance>`); empty when the agent
+   *  has no access token, so it can't be shared. */
+  agent_ref?: string
 }
 
 export interface ContainerDetail extends ContainerInfo {
@@ -212,6 +215,9 @@ export interface ProcessInfo {
   /** The owner's standing instructions for this agent, as Flight Deck holds
    *  them — the process store syncs its copy from here. */
   fleet_instructions?: string
+  /** Stable sharing id (`process:<slug>:<instance>`); empty when the agent
+   *  has no access token, so it can't be shared. */
+  agent_ref?: string
 }
 
 // ── Free OpenRouter ("Freebie") agents ──

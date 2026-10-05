@@ -301,7 +301,10 @@ async def handle_remote_command(
             )
         return True
     if result == "SESSIONS":
-        sessions = await agent.session_manager.list_sessions(limit=20)
+        from captain_claw.speaker import list_owner_sessions
+
+        # Shared-agent members' private sessions are not listed or indexed.
+        sessions = await list_owner_sessions(agent.session_manager, limit=20)
         if not sessions:
             await send_text("No sessions found.")
             return True
@@ -381,10 +384,16 @@ async def handle_remote_command(
             await send_text(f"Started new session: {agent.session.name} ({agent.session.id})")
         return True
     if result.startswith("SESSION_SELECT:"):
+        from captain_claw.speaker import member_session_refusal, select_owner_session
+
         selector = result.split(":", 1)[1].strip()
-        selected = await agent.session_manager.select_session(selector)
+        selected = await select_owner_session(agent.session_manager, selector)
         if not selected:
             await send_text(f"Session not found: {selector}")
+            return True
+        refusal = member_session_refusal(selected)
+        if refusal:
+            await send_text(refusal)
             return True
         agent.session = selected
         agent.refresh_session_runtime_flags()

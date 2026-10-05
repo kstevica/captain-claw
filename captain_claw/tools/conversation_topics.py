@@ -64,7 +64,12 @@ class TopicsTool(Tool):
                 t = mgr.get_topic(topic, max_excerpts=n if limit else 40)
                 if not t:
                     return ToolResult(success=False, error=f"No topic found for {topic!r}.")
-                return ToolResult(success=True, content=_fmt_topic(t))
+                # Labels, summaries and keywords are the shared commons; the
+                # excerpts are transcripts — never shown to a shared-agent member.
+                from captain_claw.speaker import principal_for
+
+                speaker = principal_for(kwargs.get("_agent")) is not None
+                return ToolResult(success=True, content=_fmt_topic(t, include_messages=not speaker))
             return ToolResult(success=False, error=f"Unknown action: {action}")
         except Exception as e:
             log.error("Topics tool error", action=action, error=str(e))
@@ -86,13 +91,16 @@ def _fmt_overview(rows: list[dict[str, Any]], header: str) -> str:
     return "\n".join(lines)
 
 
-def _fmt_topic(t: dict[str, Any]) -> str:
+def _fmt_topic(t: dict[str, Any], include_messages: bool = True) -> str:
     lines = [
         f"Topic: {t['label']}  [{t['id']}]",
         f"Summary: {t.get('summary', '') or '(none)'}",
     ]
     if t.get("keywords"):
         lines.append(f"Tags: {t['keywords'].replace(',', ', ')}")
+    if not include_messages:
+        lines.append(f"Messages: {t.get('msg_count', 0)} total (excerpts are private).")
+        return "\n".join(lines)
     lines.append(f"Messages ({t.get('msg_count', 0)} total, showing recent):")
     for m in t.get("messages", []):
         ts = str(m.get("ts", ""))[:16].replace("T", " ")

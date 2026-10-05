@@ -23,6 +23,10 @@ export interface Notification {
   message: string
   agentId?: string
   agentName?: string
+  /** What a server notification is about (e.g. 'agent' + its agent_ref for
+   *  a shared agent) — lets the bell act on it. */
+  refType?: string
+  refId?: string
   createdAt: string
   read: boolean
 }
@@ -82,6 +86,8 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
       type: mapServerType(s.type),
       title: s.title,
       message: s.body || '',
+      refType: s.ref_type || undefined,
+      refId: s.ref_id || undefined,
       createdAt: s.created_at,
       read: !!s.read,
     }))

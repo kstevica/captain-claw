@@ -32,6 +32,8 @@ import {
   Wand2,
   Workflow,
   ListTodo,
+  Users,
+  RefreshCw,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -47,6 +49,9 @@ import { useClipboardStore } from '../../stores/clipboardStore'
 import { useTraceStore, selectSpanCount } from '../../stores/traceStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useAuthStore, selectKioskLocked } from '../../stores/authStore'
+import { useSharedAgentStore } from '../../stores/sharedAgentStore'
+import { sharedCloseInfo } from '../../utils/sharedAgent'
+import { SharedAgentNotice } from './SharedAgentNotice'
 import { SendContextModal } from './SendContextModal'
 import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
@@ -89,6 +94,12 @@ interface Attachment {
 
 let attachId = 0
 function nextAttachId() { return `attach-${Date.now()}-${++attachId}` }
+
+// Shared chats take no files: a drag is accepted and dropped on the floor.
+function swallowDrop(e: React.DragEvent) {
+  e.preventDefault()
+  e.stopPropagation()
+}
 
 // Build the outgoing message text, appending references to any uploaded files
 // so the agent can locate them. Images use the "[Attached image: …]" marker
@@ -244,6 +255,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
     setPlanningEnabled,
     setPlanLevel,
     toggleChatFullscreen,
+    openSharedChat,
   } = useChatStore(
     useShallow((s) => ({
       closeChat: s.closeChat,
@@ -254,8 +266,11 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
       setPlanningEnabled: s.setPlanningEnabled,
       setPlanLevel: s.setPlanLevel,
       toggleChatFullscreen: s.toggleChatFullscreen,
+      openSharedChat: s.openSharedChat,
     })),
   )
+  // Shared agents: the deck's host-trust warning, for the member notice.
+  const sharedHostWarning = useSharedAgentStore((s) => s.hostWarning)
   const localAgents = useLocalAgentStore((s) => s.agents)
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
@@ -302,6 +317,13 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
 
   if ((!chatOpen && !simple) || !session) return null
 
+  // An agent another deck user shared with you: chat only. No uploads, files,
+  // datastore, plan mode, traces, flows or sending its context elsewhere.
+  const shared = session.shared
+  const sharedClose = shared && session.closed
+    ? sharedCloseInfo(session.closed.code, shared.ownerName, session.closed.reason)
+    : null
+
   // Build target list for context transfer (all reachable agents except the
   // current one). Compare against the AGENT id — `activeChatId` is a lane key,
   // so on lane B it would otherwise fail to exclude this very agent.
@@ -344,6 +366,15 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
             </button>
           ))}
         </div>
+        {shared && (
+          <span
+            className="mr-1 flex shrink-0 items-center gap-1 rounded border border-sky-500/25 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300"
+            title={`${session.containerName} belongs to ${shared.ownerName || 'another user'}. Your chats are private from other members, not from ${shared.ownerName || 'its owner'} or this deck's admins.`}
+          >
+            <Users className="h-3 w-3" />
+            Shared · {shared.ownerName || 'another user'}
+          </span>
+        )}
         {simple && (
           <button
             onClick={() => setSimpleQueueOpen(!simpleQueueOpen)}
@@ -357,7 +388,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
             <ListTodo className="h-4 w-4" />
           </button>
         )}
-        {!kiosk && (
+        {!kiosk && !shared && (
           <button
             onClick={() => setShowFlows(true)}
             title="Flows — enable/disable and start a flow"
@@ -366,7 +397,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
             <Workflow className="h-4 w-4" />
           </button>
         )}
-        {!kiosk && (
+        {!kiosk && !shared && (
           <button
             onClick={() => setShowSendContext(true)}
             title="Send context to another agent"
@@ -381,7 +412,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
             enrichment levels. Picking a level enables planning AND sets the
             level in one click; picking Off disables auto-routing while
             preserving the previously-chosen level. */}
-        {!kiosk && (
+        {!kiosk && !shared && (
         <div className="relative mr-1" ref={planLevelMenuRef}>
           <button
             onClick={() => setPlanLevelMenuOpen((o) => !o)}
@@ -466,7 +497,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
           )}
         </div>
         )}
-        {!kiosk && (
+        {!kiosk && !shared && (
           <button
             onClick={() => setShowTracePanel(!showTracePanel)}
             title={showTracePanel ? 'Hide traces' : 'Show orchestrator traces'}
@@ -512,7 +543,33 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
         agentName={session.containerName}
       />
 
-      {showTracePanel ? (
+      {shared && (
+        <SharedAgentNotice
+          key={shared.agentRef}
+          agentRef={shared.agentRef}
+          agentName={session.containerName}
+          ownerName={shared.ownerName}
+          hostWarning={sharedHostWarning}
+        />
+      )}
+
+      {shared && sharedClose && (
+        <div className="flex items-center gap-2 border-b border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">{sharedClose.message}</span>
+          {sharedClose.retry !== 'none' && (
+            <button
+              onClick={() => openSharedChat(shared.agentRef, session.containerName, shared.ownerName, session.lane)}
+              className="flex shrink-0 items-center gap-1 rounded-md border border-amber-500/40 px-2 py-0.5 text-[11px] font-medium hover:bg-amber-500/20"
+            >
+              <RefreshCw className="h-3 w-3" />
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+
+      {showTracePanel && !shared ? (
         <div className="flex flex-1 flex-col overflow-hidden">
           <div className="flex items-center gap-2 border-b border-zinc-800/50 bg-zinc-900/30 px-3 py-2">
             <Activity className="h-3.5 w-3.5 text-violet-400" />
@@ -531,11 +588,12 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
         /* Chat content (optionally with queue panel on the left in fullscreen) */
         <div className="flex flex-1 overflow-hidden">
           {(simple ? simpleQueueOpen : chatFullscreen) && (
-            <QueueSidebar sessionKey={session.key} agentId={session.containerId} queueOnly={simple} />
+            <QueueSidebar sessionKey={session.key} agentId={session.containerId} queueOnly={simple || !!shared} shared={!!shared} />
           )}
           <ChatContent
             session={session}
             sessionKey={session.key}
+            shared={!!shared}
             minWidth={simple ? 300 : undefined}
             onSend={(content) => sendMessage(session.key, content)}
             onCancel={() => cancelTask(session.key)}
@@ -544,7 +602,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
       )}
 
       {/* Send context modal */}
-      {showSendContext && (
+      {showSendContext && !shared && (
         <SendContextModal
           sourceId={session.containerId}
           sourceName={session.containerName}
@@ -555,7 +613,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
       )}
 
       {/* Flow selector modal */}
-      {showFlows && (
+      {showFlows && !shared && (
         <FlowSelectorModal
           containerId={session.containerId}
           onClose={() => setShowFlows(false)}
@@ -590,14 +648,17 @@ function useAgentConnection(containerId: string) {
 function ChatContent({
   session,
   sessionKey,
+  shared = false,
   minWidth,
   onSend,
   onCancel,
 }: {
-  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null }
+  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null; closed?: { code: number; reason: string } | null }
   /** This lane's store key — for anything that reads or writes session state.
    *  The agent id lives on `session.containerId`. */
   sessionKey: string
+  /** An agent shared with you: chat only — no attachments, no plan card. */
+  shared?: boolean
   /** Conversation floor (simple layout): the queue column shrinks before this. */
   minWidth?: number
   onSend: (content: string) => void
@@ -646,6 +707,12 @@ function ChatContent({
       addFiles(e.dataTransfer.files)
     }
   }, [addFiles])
+  // Shared chats take text only: files never reach somebody else's agent. A
+  // drop is still swallowed, so the browser doesn't open the file in the tab.
+  const dropHandlers = shared
+    ? { onDragOver: swallowDrop, onDrop: swallowDrop }
+    : { onDragOver: handleDragOver, onDragLeave: handleDragLeave, onDrop: handleDrop }
+  const closed = !!session.closed
 
   const handleSend = () => {
     const text = input.trim()
@@ -694,12 +761,10 @@ function ChatContent({
     <div
       className={`flex flex-1 flex-col overflow-hidden ${dragOver ? 'ring-2 ring-inset ring-violet-500/50' : ''}`}
       style={minWidth ? { minWidth } : undefined}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
+      {...dropHandlers}
     >
       {/* Drag overlay */}
-      {dragOver && (
+      {dragOver && !shared && (
         <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/60">
           <div className="rounded-xl border-2 border-dashed border-violet-500/50 bg-zinc-900/90 px-8 py-6 text-center">
             <Paperclip className="mx-auto h-8 w-8 text-violet-400" />
@@ -710,7 +775,7 @@ function ChatContent({
 
       {/* Plan monitor — pinned above the scroll area so it stays visible
           while messages flow underneath during /plan-execute. */}
-      <PlanCard containerId={sessionKey} />
+      {!shared && <PlanCard containerId={sessionKey} />}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto py-3">
@@ -719,11 +784,11 @@ function ChatContent({
           <div className="mt-12 text-center">
             <MessageSquare className="mx-auto h-8 w-8 text-zinc-700" />
             <p className="mt-2 text-sm text-zinc-500">Send a message to start chatting with this agent.</p>
-            <p className="mt-1 text-xs text-zinc-600">You can drag & drop files or paste images from clipboard.</p>
+            {!shared && <p className="mt-1 text-xs text-zinc-600">You can drag & drop files or paste images from clipboard.</p>}
           </div>
         )}
 
-        {!session.connected && (
+        {!session.connected && !closed && (
           <div className="mt-12 text-center">
             <AlertCircle className="mx-auto h-8 w-8 text-zinc-700" />
             <p className="mt-2 text-sm text-zinc-500">Connecting to agent...</p>
@@ -765,7 +830,7 @@ function ChatContent({
       )}
 
       {/* Attachments strip */}
-      {attachments.length > 0 && (
+      {attachments.length > 0 && !shared && (
         <div className="border-t border-zinc-800/50 px-3 py-2">
           <div className="flex flex-wrap gap-2">
             {attachments.map((att) => (
@@ -782,7 +847,7 @@ function ChatContent({
       <div className="border-t border-zinc-800 p-3">
         <div className="flex items-end gap-2">
           {/* Attach button */}
-          <div className="flex gap-0.5">
+          {!shared && <div className="flex gap-0.5">
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={!session.connected}
@@ -799,8 +864,8 @@ function ChatContent({
             >
               <Clipboard className="h-4 w-4" />
             </button>
-          </div>
-          <input
+          </div>}
+          {!shared && <input
             ref={fileInputRef}
             type="file"
             multiple
@@ -811,15 +876,15 @@ function ChatContent({
                 e.target.value = ''
               }
             }}
-          />
+          />}
           <textarea
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            onPaste={handlePasteEvent}
-            placeholder={session.connected ? 'Message, paste image, or drop files...' : 'Connecting...'}
-            disabled={!session.connected}
+            onPaste={shared ? undefined : handlePasteEvent}
+            placeholder={closed ? 'Disconnected' : !session.connected ? 'Connecting...' : shared ? 'Message…' : 'Message, paste image, or drop files...'}
+            disabled={!session.connected || closed}
             rows={1}
             className="max-h-32 min-h-[38px] min-w-0 flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none disabled:opacity-40"
             style={{ height: 'auto', overflow: 'hidden' }}
@@ -840,7 +905,7 @@ function ChatContent({
           ) : (
             <button
               onClick={handleSend}
-              disabled={(!input.trim() && attachments.filter((a) => a.status === 'uploaded').length === 0) || !session.connected || pendingUploads > 0}
+              disabled={(!input.trim() && attachments.filter((a) => a.status === 'uploaded').length === 0) || !session.connected || closed || pendingUploads > 0}
               className="flex h-[38px] items-center gap-1.5 rounded-lg bg-violet-600 px-3 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
               title={pendingUploads > 0 ? 'Waiting for uploads...' : 'Send'}
             >
@@ -989,7 +1054,7 @@ function LaneStrip({ agentId, activeLane, agentName }: {
 
 // `queueOnly` (simple layout): skip the files + datastore sections — the
 // layout shows them in its own right-hand column — and keep just the queue.
-function QueueSidebar({ sessionKey, agentId, queueOnly = false }: { sessionKey: string; agentId: string; queueOnly?: boolean }) {
+function QueueSidebar({ sessionKey, agentId, queueOnly = false, shared = false }: { sessionKey: string; agentId: string; queueOnly?: boolean; shared?: boolean }) {
   const width = usePersistedSize('fd:queue-sidebar-width', 288, 220, 640, 'x')
   const filesH = usePersistedSize('fd:queue-sidebar-files-height', 260, 96, 900, 'y')
   const dsH = usePersistedSize('fd:queue-sidebar-datastore-height', 200, 96, 900, 'y')
@@ -1025,7 +1090,7 @@ function QueueSidebar({ sessionKey, agentId, queueOnly = false }: { sessionKey: 
       )}
       {/* Bottom: queue */}
       <div className="min-h-0 flex-1">
-        <QueuePanel sessionKey={sessionKey} agentId={agentId} />
+        <QueuePanel sessionKey={sessionKey} agentId={agentId} shared={shared} />
       </div>
       {/* Right edge (drag to resize the whole column) */}
       <div
@@ -1037,7 +1102,8 @@ function QueueSidebar({ sessionKey, agentId, queueOnly = false }: { sessionKey: 
   )
 }
 
-function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: string }) {
+// `shared`: an agent shared with you — text items only, no task planner.
+function QueuePanel({ sessionKey, agentId, shared = false }: { sessionKey: string; agentId: string; shared?: boolean }) {
   // Queue state is per lane; uploads go to the agent that owns every lane.
   const containerId = sessionKey
   const session = useChatStore((s) => s.sessions.get(containerId))
@@ -1105,6 +1171,11 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
     setDragOver(false)
     if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files)
   }
+  const dropHandlers = shared ? { onDragOver: swallowDrop, onDrop: swallowDrop } : {
+    onDragOver: (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDragOver(true) },
+    onDragLeave: (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); setDragOver(false) },
+    onDrop: handleDrop,
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -1120,14 +1191,14 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
           )}
         </div>
         <div className="flex items-center gap-1">
-        <button
+        {!shared && <button
           onClick={() => setShowPlanner(true)}
           title="Plan tasks — turn one description into a batched queue"
           className="flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400 transition-colors hover:border-violet-500/40 hover:text-violet-300"
         >
           <Wand2 className="h-3 w-3" />
           Plan
-        </button>
+        </button>}
         <button
           onClick={() => toggleAuto(containerId)}
           title={auto ? 'Auto-progress: ON — items marked done when agent replies' : 'Auto-progress: OFF — mark items done manually'}
@@ -1142,7 +1213,7 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
         </div>
       </div>
 
-      {showPlanner && conn && (
+      {showPlanner && conn && !shared && (
         <QueuePlannerModal
           agentId={agentId}
           agentName={session.containerName}
@@ -1205,12 +1276,10 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
       {/* Input */}
       <div
         className={`border-t border-zinc-800 p-2 ${dragOver ? 'bg-violet-500/10 ring-1 ring-inset ring-violet-500/50' : ''}`}
-        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true) }}
-        onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setDragOver(false) }}
-        onDrop={handleDrop}
+        {...dropHandlers}
       >
         {/* Attachment chips */}
-        {attachments.length > 0 && (
+        {attachments.length > 0 && !shared && (
           <div className="mb-1.5 flex flex-wrap gap-1.5">
             {attachments.map((att) => (
               <AttachmentChip key={att.id} attachment={att} onRemove={removeAttachment} />
@@ -1222,13 +1291,13 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={handleKey}
-          onPaste={handlePasteEvent}
+          onPaste={shared ? undefined : handlePasteEvent}
           rows={5}
-          placeholder="Queue a message, paste image, or drop files…"
+          placeholder={shared ? 'Queue a message…' : 'Queue a message, paste image, or drop files…'}
           className="w-full resize-y overflow-y-auto rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
           style={{ minHeight: QUEUE_INPUT_MIN_PX }}
         />
-        <input
+        {!shared && <input
           ref={fileInputRef}
           type="file"
           multiple
@@ -1239,9 +1308,10 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
               e.target.value = ''
             }
           }}
-        />
+        />}
         <div className="mt-1.5 flex items-center justify-between">
           <div className="flex items-center gap-0.5">
+            {!shared && <>
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={!conn}
@@ -1258,6 +1328,7 @@ function QueuePanel({ sessionKey, agentId }: { sessionKey: string; agentId: stri
             >
               <Clipboard className="h-3.5 w-3.5" />
             </button>
+            </>}
           </div>
           <button
             onClick={handleAdd}

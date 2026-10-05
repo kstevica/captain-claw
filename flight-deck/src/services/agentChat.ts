@@ -3,7 +3,8 @@
  * Connects to CC's /ws endpoint on the agent's web port.
  */
 
-import { useAuthStore } from '../stores/authStore'
+import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+import { sharedWsUrl } from '../utils/sharedAgent'
 
 export interface TokenUsage {
   prompt_tokens?: number
@@ -51,8 +52,19 @@ export class AgentChatWS {
   readonly port: number
   readonly auth: string
   readonly lane: string
+  /** Shared mode: an agent another deck user shared with us, reached only
+   *  through Flight Deck's member route by its agent_ref — no host, port or
+   *  access token ever leaves the browser. Empty for our own agents. */
+  readonly sharedRef: string
+  // Shared mode: the `fd_close` frame Flight Deck sends right before it
+  // closes the socket — its reason is the one to show.
+  private _lastFdClose: { code: number; reason: string } | null = null
+  // Shared mode: a 4001 (FD token expired) gets ONE refresh-and-reopen per
+  // welcome; a second one is final.
+  private _authRetried = false
+  private _unsubAuth: (() => void) | null = null
 
-  constructor(agentId: string, host: string, port: number, auth: string, lane: string = '') {
+  constructor(agentId: string, host: string, port: number, auth: string, lane: string = '', opts?: { sharedRef?: string }) {
     this.agentId = agentId
     this.host = host
     this.port = port
@@ -61,17 +73,41 @@ export class AgentChatWS {
     // means the agent's main context, so nothing about existing callers
     // changes — see docs/queue-lanes-plan.md.
     this.lane = lane
+    this.sharedRef = opts?.sharedRef || ''
   }
 
   get connected() { return this._connected }
 
+  /** A socket is open (or opening) but not yet usable. Shared mode only
+   *  becomes usable on the agent's `welcome`, after Flight Deck's checks. */
+  get connecting() { return !!this.ws && !this._connected }
+
   connect() {
     if (this.ws) this._teardownSocket()
     this._shouldReconnect = true
+    // An explicit (re)connect is a fresh start for the one-refresh budget.
+    this._authRetried = false
+    if (this.sharedRef) this._watchToken()
     this._openSocket()
   }
 
+  // Shared mode: Flight Deck re-checks the FD token's expiry on live member
+  // sockets, so hand it every rotated token while the socket is open.
+  private _watchToken() {
+    if (this._unsubAuth) return
+    this._unsubAuth = useAuthStore.subscribe((state, prev) => {
+      if (!state.token || state.token === prev.token) return
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'fd_auth', fd_token: state.token }))
+      }
+    })
+  }
+
   private _openSocket() {
+    if (this.sharedRef) {
+      this._openSharedSocket()
+      return
+    }
     // Route through FD backend proxy to avoid CORS
     const params = new URLSearchParams()
     if (this.auth) params.set('token', this.auth)
@@ -118,6 +154,67 @@ export class AgentChatWS {
     }
   }
 
+  private _openSharedSocket() {
+    const fdToken = useAuthStore.getState().token || ''
+    this._lastFdClose = null
+    const ws = new WebSocket(sharedWsUrl(this.sharedRef, this.lane || 'A', fdToken, window.location))
+    this.ws = ws
+
+    // Flight Deck accepts first and only then checks membership, the agent and
+    // its handshake — so the socket counts as connected once the agent's
+    // welcome arrives, not on open.
+    ws.onclose = (ev) => {
+      const wasConnected = this._connected
+      this._connected = false
+      this.ws = null
+      this.emit('_disconnected', { wasConnected })
+      if (ev.code < 4000 || ev.code > 4999) {
+        // Network blip, laptop sleep: reconnect as for our own agents.
+        if (this._shouldReconnect) this._scheduleReconnect()
+        return
+      }
+      const fdClose = this._lastFdClose
+      this._lastFdClose = null
+      if (ev.code === 4001 && !this._authRetried && this._shouldReconnect) {
+        // FD token expired: refresh it and reopen — once.
+        this._authRetried = true
+        void refreshAccessToken().then((ok) => {
+          if (!this._shouldReconnect || this.ws) return  // closed or reopened meanwhile
+          if (ok) { this._openSocket(); return }
+          this._shouldReconnect = false
+          this.emit('_closed', { code: ev.code, reason: fdClose?.reason || ev.reason || '' })
+        })
+        return
+      }
+      // Anything else Flight Deck decided is final — no backoff loop.
+      this._shouldReconnect = false
+      this.emit('_closed', { code: ev.code, reason: fdClose?.reason || ev.reason || '' })
+    }
+
+    ws.onerror = () => {
+      this.emit('_error', { message: 'WebSocket connection failed' })
+    }
+
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data)
+        const type = data.type || 'unknown'
+        if (type === 'fd_close') {
+          this._lastFdClose = { code: Number(data.code) || 0, reason: String(data.reason || '') }
+        } else if (type === 'welcome' && !this._connected) {
+          this._connected = true
+          this._reconnectAttempt = 0
+          this._authRetried = false
+          this.emit('_connected', {})
+        }
+        this.emit(type, data)
+        this.emit('_any', data)
+      } catch {
+        // ignore non-JSON messages
+      }
+    }
+  }
+
   private _scheduleReconnect() {
     if (this._reconnectTimer) return
     // Exponential backoff capped at 15s. The first retry fires fast (~500ms)
@@ -150,6 +247,7 @@ export class AgentChatWS {
     this._reconnectAttempt = 0
     this._teardownSocket()
     this._connected = false
+    if (this._unsubAuth) { this._unsubAuth(); this._unsubAuth = null }
   }
 
   send(content: string, opts?: { noNextSteps?: boolean }) {

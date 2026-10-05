@@ -158,7 +158,14 @@ class PlaybooksTool(Tool):
             if action == "search":
                 return await self._search(sm, query, task_type)
             if action == "info":
-                return await self._info(sm, playbook_id)
+                # A shared-agent member must not learn which conversation a
+                # playbook came from (sessions are private per member).
+                from captain_claw.speaker import principal_for
+
+                return await self._info(
+                    sm, playbook_id,
+                    hide_source=principal_for(kwargs.get("_agent")) is not None,
+                )
             if action == "update":
                 return await self._update(
                     sm, playbook_id, name, task_type, rating, do_pattern,
@@ -255,7 +262,7 @@ class PlaybooksTool(Tool):
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod
-    async def _info(sm: Any, playbook_id: str | None) -> ToolResult:
+    async def _info(sm: Any, playbook_id: str | None, hide_source: bool = False) -> ToolResult:
         if not playbook_id:
             return ToolResult(success=False, error="'playbook_id' is required for info.")
         item = await sm.select_playbook(playbook_id)
@@ -279,8 +286,9 @@ class PlaybooksTool(Tool):
             parts.append(f"\nReasoning: {item.reasoning}")
         if item.tags:
             parts.append(f"Tags: {item.tags}")
-        # Resolve linked scripts.
-        if item.script_ids:
+        # Resolve linked scripts (the owner's script registry — not shown to
+        # a shared-agent member).
+        if item.script_ids and not hide_source:
             script_lines = ["\n--- LINKED SCRIPTS ---"]
             for sid in (s.strip() for s in item.script_ids.split(",") if s.strip()):
                 script = await sm.load_script(sid)
@@ -296,7 +304,7 @@ class PlaybooksTool(Tool):
         if item.last_used_at:
             parts.append(f"Last used: {item.last_used_at}")
         parts.append(f"Created: {item.created_at}")
-        if item.source_session:
+        if item.source_session and not hide_source:
             parts.append(f"Source session: {item.source_session}")
         return ToolResult(success=True, content="\n".join(parts))
 
