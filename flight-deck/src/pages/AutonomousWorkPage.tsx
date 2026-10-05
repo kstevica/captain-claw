@@ -11,6 +11,9 @@ const LEVEL_LABEL: Record<string, string> = {
   off: 'Off', propose: 'Propose only', act_low_risk: 'Act (low risk)', act: 'Act (all)',
 }
 const RISK_LEVELS = ['low', 'normal', 'high']
+// Reset leaves server-owned keys alone, and the WhatsApp nudge binding, which
+// lives on the Connections card.
+const RESET_SKIP = new Set(['max_autonomy_level', 'db_path', 'notify_waid', 'nudge_to_whatsapp'])
 const JUDGE_MODES = [
   { v: 'auto', label: 'Auto (LLM judges)' },
   { v: 'human', label: 'Human only' },
@@ -624,7 +627,7 @@ export function AutonomousWorkPage() {
               {savedAt && <span className="text-xs text-emerald-600 dark:text-emerald-400">Saved</span>}
               {defaults && (
                 <button
-                  onClick={() => { Object.entries(defaults).forEach(([k, v]) => { if (k !== 'max_autonomy_level' && k !== 'db_path') setField(k as keyof AutonomyConfig, v as never) }); setSavedAt(false) }}
+                  onClick={() => { Object.entries(defaults).forEach(([k, v]) => { if (!RESET_SKIP.has(k)) setField(k as keyof AutonomyConfig, v as never) }); setSavedAt(false) }}
                   className="ml-auto text-xs text-zinc-500 hover:text-zinc-300"
                 >
                   Reset to defaults

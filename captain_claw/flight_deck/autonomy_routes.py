@@ -15,13 +15,16 @@ Approve/reject already move ledger rows; wiring them through to ``follow_through
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from captain_claw.flight_deck.auth import get_optional_user
 from captain_claw.flight_deck.autonomy import (
+    _norm_user,
     global_defaults,
     get_store,
     record_human_feedback,
@@ -30,6 +33,7 @@ from captain_claw.flight_deck.autonomy import (
 )
 
 router = APIRouter(prefix="/fd/autonomy", tags=["autonomy"])
+_log = logging.getLogger(__name__)
 
 
 def _auth_enabled() -> bool:
@@ -45,6 +49,16 @@ def _user_id(request: Request) -> str:
     return uid
 
 
+def _public_defaults() -> dict[str, Any]:
+    """The global defaults as shown to a user. With auth on a deck-wide WhatsApp
+    number is someone's personal phone and applies to nobody (see
+    ``resolve_config``), so it is blanked rather than shown to everyone."""
+    defaults = global_defaults()
+    if _auth_enabled():
+        defaults["notify_waid"] = ""
+    return defaults
+
+
 @router.get("/config")
 async def get_config_route(
     request: Request,
@@ -56,7 +70,7 @@ async def get_config_route(
     effective = resolve_config(uid)
     return {
         "config": effective,
-        "defaults": global_defaults(),
+        "defaults": _public_defaults(),
         "max_autonomy_level": effective.get("max_autonomy_level", "propose"),
     }
 
@@ -67,27 +81,94 @@ async def put_config_route(
     _user: dict | None = Depends(get_optional_user),
 ):
     """Save per-user overrides. Body is a partial config dict; unknown and
-    server-owned keys (the ceiling) are ignored. Returns the new effective config."""
+    server-owned keys (the ceiling) are ignored. Returns the new effective config.
+
+    The WhatsApp keys are owned by PUT /fd/autonomy/whatsapp (validated there):
+    a whole-config save from the Autonomous Work page — its Reset, or a stale
+    tab — keeps the stored number and switch instead of wiping or overwriting them."""
     uid = _user_id(request)
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Body must be an object")
-    overrides = body.get("config") if isinstance(body.get("config"), dict) else body
+    overrides = dict(body.get("config") if isinstance(body.get("config"), dict) else body)
+    stored = get_store().get_overrides(uid)
+    for key in _WHATSAPP_KEYS:
+        overrides.pop(key, None)
+        if key in stored:
+            overrides[key] = stored[key]
     effective = save_config(uid, overrides)
-    return {"config": effective, "defaults": global_defaults()}
+    return {"config": effective, "defaults": _public_defaults()}
 
 
 # ── WhatsApp nudge delivery (the Connections card) ──────────────────
 
+_WHATSAPP_KEYS = ("notify_waid", "nudge_to_whatsapp")
+_MAX_NOTIFY_WAIDS = 3
+_TEST_COOLDOWN_S = 60.0
+_last_test_at: dict[str, float] = {}  # user → monotonic time of their last test send
+# Number changes per user per hour — each attempt answers "can this number be
+# used?", so cap how fast anyone can ask.
+_MAX_NUMBER_CHANGES_PER_HOUR = 10
+_number_changes: dict[str, list[float]] = {}
 
-def _waid_list(raw: Any) -> list[str]:
-    """Normalise typed numbers: ``"+385 91 123-4567, 111"`` → ``["385911234567", "111"]``."""
+# One message for "not on the allowlist" and "linked to another account", so the
+# form can't be used to tell the two apart.
+_UNAVAILABLE = ("That number can't be used for your nudges — it isn't on this deck's "
+                "WhatsApp allowlist, or it's linked to another account. Ask an admin.")
+
+
+def _parse_waids(raw: Any) -> list[str]:
+    """Digits-only numbers from a comma list (``"+385 91 123-4567"`` → ``"385911234567"``)."""
     out: list[str] = []
     for part in str(raw or "").split(","):
         digits = "".join(ch for ch in part if ch.isdigit())
         if digits and digits not in out:
             out.append(digits)
     return out
+
+
+def _validated_waids(raw: Any) -> list[str]:
+    """``_parse_waids`` for user input: a part with no digits is an error, not
+    silently dropped (which would clear the binding), and the list is capped."""
+    if not isinstance(raw, str):
+        raise HTTPException(status_code=400, detail="notify_waid must be a string")
+    for part in raw.split(","):
+        if part.strip() and not any(ch.isdigit() for ch in part):
+            raise HTTPException(status_code=400, detail=f"'{part.strip()[:40]}' isn't a phone number.")
+    waids = _parse_waids(raw)
+    if len(waids) > _MAX_NOTIFY_WAIDS:
+        raise HTTPException(status_code=400, detail=f"At most {_MAX_NOTIFY_WAIDS} numbers.")
+    return waids
+
+
+async def _holder_of(uid: str, waids: list[str]) -> str:
+    """Another current user who already receives nudges on one of ``waids`` ('' if
+    none). The auth-off ``local`` bucket and deleted users don't hold numbers."""
+    from captain_claw.flight_deck.auth import get_db
+
+    me = _norm_user(uid)
+    wanted = set(waids)
+    for other, ov in get_store().all_overrides().items():
+        if other in (me, "local") or not wanted & set(_parse_waids(ov.get("notify_waid"))):
+            continue
+        try:
+            if await get_db().get_user_by_id(other):
+                return other
+        except Exception:  # noqa: BLE001 — can't tell: err on the side of holding
+            return other
+    return ""
+
+
+def _number_change_allowed(uid: str) -> bool:
+    """Sliding one-hour window of number changes for this user."""
+    key = _norm_user(uid)
+    now = time.monotonic()
+    recent = [t for t in _number_changes.get(key, []) if now - t < 3600.0]
+    if len(recent) >= _MAX_NUMBER_CHANGES_PER_HOUR:
+        _number_changes[key] = recent
+        return False
+    _number_changes[key] = recent + [now]
+    return True
 
 
 def _whatsapp_state(uid: str) -> dict[str, Any]:
@@ -103,6 +184,9 @@ def _whatsapp_state(uid: str) -> dict[str, Any]:
         "bridge_configured": bool(_allowed_waids() and _env("WHATSAPP_ACCESS_TOKEN") and _send_url()),
         "auth_enabled": _auth_enabled(),
         "autonomy_enabled": bool(cfg.get("enabled")),
+        # The arbiter only runs (and so only nudges) with all three.
+        "autonomy_active": bool(cfg.get("enabled") and cfg.get("arbiter_on_pulse")
+                                and str(cfg.get("autonomy_level") or "off") != "off"),
         "nudge_to_whatsapp": bool(cfg.get("nudge_to_whatsapp", True)),
         "notify_waid": str(cfg.get("notify_waid") or ""),
         "recipients": recipients,
@@ -125,7 +209,8 @@ async def put_whatsapp_route(
     _user: dict | None = Depends(get_optional_user),
 ):
     """Set ``notify_waid`` and/or ``nudge_to_whatsapp``, merged into the user's
-    other overrides. Every number must be on the bridge allowlist."""
+    other overrides. Each number must be on the bridge allowlist and not already
+    another user's (with auth on)."""
     from captain_claw.flight_deck.whatsapp_bridge import _allowed_waids
 
     uid = _user_id(request)
@@ -134,20 +219,26 @@ async def put_whatsapp_route(
         raise HTTPException(status_code=400, detail="Body must be an object")
     overrides = get_store().get_overrides(uid)
     if "notify_waid" in body:
-        waids = _waid_list(body.get("notify_waid"))
-        allowed = _allowed_waids()
-        if waids and not allowed:
-            raise HTTPException(status_code=400,
-                                detail="WhatsApp isn't set up on this deck (WHATSAPP_ALLOWED_WAIDS is empty).")
-        missing = [w for w in waids if w not in allowed]
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"{', '.join(missing)} is not on this deck's WhatsApp allowlist — "
-                       "ask an admin to add it to WHATSAPP_ALLOWED_WAIDS.")
+        waids = _validated_waids(body.get("notify_waid"))
+        if ",".join(waids) != str(overrides.get("notify_waid") or ""):
+            if not _number_change_allowed(uid):
+                raise HTTPException(status_code=429,
+                                    detail="Too many number changes — try again in an hour.")
+            allowed = _allowed_waids()
+            if waids and not allowed:
+                raise HTTPException(status_code=400, detail="WhatsApp isn't set up on this deck.")
+            if any(w not in allowed for w in waids):
+                raise HTTPException(status_code=400, detail=_UNAVAILABLE)
+            holder = await _holder_of(uid, waids) if (_auth_enabled() and waids) else ""
+            if holder:
+                _log.warning("WhatsApp nudge number refused for %s: already linked to user %s",
+                             _norm_user(uid), holder)
+                raise HTTPException(status_code=400, detail=_UNAVAILABLE)
         overrides["notify_waid"] = ",".join(waids)
     if "nudge_to_whatsapp" in body:
-        overrides["nudge_to_whatsapp"] = bool(body.get("nudge_to_whatsapp"))
+        if not isinstance(body.get("nudge_to_whatsapp"), bool):
+            raise HTTPException(status_code=400, detail="nudge_to_whatsapp must be true or false")
+        overrides["nudge_to_whatsapp"] = body["nudge_to_whatsapp"]
     save_config(uid, overrides)
     return _whatsapp_state(uid)
 
@@ -157,21 +248,31 @@ async def test_whatsapp_route(
     request: Request,
     _user: dict | None = Depends(get_optional_user),
 ):
-    """Send a test message to wherever this user's nudges would go."""
-    from captain_claw.flight_deck.whatsapp_bridge import push_to_waid
+    """Send one test message to wherever this user's nudges go, and report what
+    WhatsApp said for each number. At most one test a minute per user."""
+    from captain_claw.flight_deck.whatsapp_bridge import send_text_checked
 
-    state = _whatsapp_state(_user_id(request))
+    uid = _user_id(request)
+    state = _whatsapp_state(uid)
     recipients = state["recipients"]
     if not state["bridge_configured"]:
         raise HTTPException(status_code=400, detail="WhatsApp isn't set up on this deck.")
     if not recipients:
         raise HTTPException(status_code=400,
-                            detail=state["issue"] or "WhatsApp isn't set up on this deck.")
-    sent = 0
+                            detail=state["issue"] or "No WhatsApp number to send to.")
+    key = _norm_user(uid)
+    now = time.monotonic()
+    last = _last_test_at.get(key)
+    if last is not None and now - last < _TEST_COOLDOWN_S:
+        wait = int(_TEST_COOLDOWN_S - (now - last)) + 1
+        raise HTTPException(status_code=429, detail=f"Wait {wait}s before sending another test.")
+    _last_test_at[key] = now
+    results = []
     for waid in recipients:
-        if await push_to_waid(waid, "Captain Claw: test nudge — autonomous nudges will reach you here."):
-            sent += 1
-    return {"sent": sent, "total": len(recipients)}
+        ok, why = await send_text_checked(
+            waid, "Captain Claw: test nudge — autonomous nudges will reach you here.")
+        results.append({"to": waid, "ok": ok, "error": why})
+    return {"sent": sum(1 for r in results if r["ok"]), "total": len(results), "results": results}
 
 
 @router.get("/actions")

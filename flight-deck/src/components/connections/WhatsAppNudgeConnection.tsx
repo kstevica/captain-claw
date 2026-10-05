@@ -4,10 +4,17 @@ import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 import { useUIStore } from '../../stores/uiStore'
 
 // Mirrors captain_claw/flight_deck/autonomy_routes.py (/fd/autonomy/whatsapp)
+interface TestResult {
+  sent: number
+  total: number
+  results: { to: string; ok: boolean; error: string }[]
+}
+
 interface NudgeState {
   bridge_configured: boolean
   auth_enabled: boolean
   autonomy_enabled: boolean
+  autonomy_active: boolean
   nudge_to_whatsapp: boolean
   notify_waid: string
   recipients: string[]
@@ -78,12 +85,15 @@ export default function WhatsAppNudgeConnection() {
   useEffect(() => { load() }, [])
 
   const save = async () => {
+    if (!state) return
     setSaving(true); setError(null); setNotice(null)
+    // Only what changed — switching nudges off must work even if the saved
+    // number has since left the allowlist.
+    const body: Record<string, unknown> = {}
+    if (number.trim() !== state.notify_waid) body.notify_waid = number
+    if (enabled !== state.nudge_to_whatsapp) body.nudge_to_whatsapp = enabled
     try {
-      const res = await api('/fd/autonomy/whatsapp', {
-        method: 'PUT',
-        body: JSON.stringify({ notify_waid: number, nudge_to_whatsapp: enabled }),
-      })
+      const res = await api('/fd/autonomy/whatsapp', { method: 'PUT', body: JSON.stringify(body) })
       if (!res.ok) throw new Error(await _detail(res))
       apply(await res.json())
       setNotice('Saved.')
@@ -99,15 +109,16 @@ export default function WhatsAppNudgeConnection() {
     try {
       const res = await api('/fd/autonomy/whatsapp/test', { method: 'POST' })
       if (!res.ok) throw new Error(await _detail(res))
-      const r: { sent: number; total: number } = await res.json()
+      const r: TestResult = await res.json()
       if (r.sent === r.total) {
         setNotice(
-          `Test message sent to ${r.sent} number${r.sent === 1 ? '' : 's'}. If it doesn't arrive, ` +
-            'send the bot any message first — WhatsApp only lets it write to you within 24 hours ' +
-            'of your last message.',
+          `WhatsApp accepted the test for ${r.sent} number${r.sent === 1 ? '' : 's'}. If it doesn't ` +
+            'arrive, send the bot any message first — WhatsApp only lets it write to you within ' +
+            '24 hours of your last message.',
         )
+      } else {
+        setError(r.results.filter((x) => !x.ok).map((x) => `+${x.to}: ${x.error}`).join(' · '))
       }
-      else setError(`Sent to ${r.sent} of ${r.total}. A number that got nothing may be muted — send /unmute to the bot in WhatsApp.`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -124,20 +135,26 @@ export default function WhatsAppNudgeConnection() {
   const label = 'block text-[11px] font-medium uppercase tracking-wider text-zinc-500 mb-1'
 
   let status: ReactNode
-  if (loading || !state) {
+  if (!state && error && !loading) {
+    status = (
+      <span className={`${pill} bg-red-500/15 text-red-600 dark:text-red-500 border-red-500/30`}>
+        <AlertCircle className="h-3 w-3" /> Unavailable
+      </span>
+    )
+  } else if (loading || !state) {
     status = (
       <span className={`${pill} bg-zinc-800 text-zinc-400 border-zinc-700`}>
         <Loader2 className="h-3 w-3 animate-spin" /> Checking
       </span>
     )
-  } else if (deliverable && state.autonomy_enabled) {
+  } else if (deliverable && state.autonomy_active) {
     status = (
       <span className={`${pill} bg-emerald-500/15 text-emerald-600 dark:text-emerald-500 border-emerald-500/30`}>
         <Check className="h-3 w-3" /> Active
       </span>
     )
   } else if (deliverable) {
-    // Delivery is set up; Autonomous Work itself is off (the note below says so).
+    // Delivery is set up; Autonomous Work isn't running (the note below says so).
     status = (
       <span className={`${pill} bg-zinc-800 text-zinc-300 border-zinc-700`}>
         <Check className="h-3 w-3" /> Ready
@@ -147,6 +164,13 @@ export default function WhatsAppNudgeConnection() {
     status = <span className={`${pill} bg-zinc-800 text-zinc-400 border-zinc-700`}>WhatsApp not set up</span>
   } else if (!state.nudge_to_whatsapp) {
     status = <span className={`${pill} bg-zinc-800 text-zinc-400 border-zinc-700`}>Off</span>
+  } else if (state.notify_waid) {
+    // A saved number that the allowlist no longer includes.
+    status = (
+      <span className={`${pill} bg-amber-500/15 text-amber-600 dark:text-amber-500 border-amber-500/30`}>
+        <AlertCircle className="h-3 w-3" /> Number not allowed
+      </span>
+    )
   } else {
     status = (
       <span className={`${pill} bg-amber-500/15 text-amber-600 dark:text-amber-500 border-amber-500/30`}>
@@ -193,9 +217,9 @@ export default function WhatsAppNudgeConnection() {
               nudges can go to WhatsApp.
             </div>
           )}
-          {state.bridge_configured && !state.autonomy_enabled && (
+          {state.bridge_configured && !state.autonomy_active && (
             <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-              Autonomous Work is off for you, so no nudges are sent yet.{' '}
+              Autonomous Work isn't running for you, so no nudges are sent yet.{' '}
               <button
                 type="button"
                 onClick={() => setView('autonomous-work')}
@@ -229,7 +253,7 @@ export default function WhatsAppNudgeConnection() {
             />
             <p className="mt-1 text-[11px] text-zinc-500">
               International format without the +, e.g. 385911234567. Separate several numbers with
-              commas. Each must be on this deck's WhatsApp allowlist.
+              commas (up to 3). Each must be on this deck's WhatsApp allowlist.
               {!state.auth_enabled && ' Leave empty to use every allowlisted number.'}
             </p>
           </div>
@@ -244,7 +268,7 @@ export default function WhatsAppNudgeConnection() {
             </button>
             <button
               onClick={test}
-              disabled={testing || dirty || state.recipients.length === 0}
+              disabled={testing || dirty || !state.bridge_configured || state.recipients.length === 0}
               title={dirty ? 'Save first' : undefined}
               className="flex items-center gap-1.5 rounded-md bg-zinc-800 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-700 disabled:opacity-40"
             >
