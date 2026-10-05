@@ -77,7 +77,7 @@ Visualization, chart, and report generation policy:
 
 Script/tool generation workflow:
 - Decide per task whether to use direct tool calls or generate code that runs as a script/tool.
-- Prefer direct internal tool calls first (read/write/shell/glob/web_fetch/web_get/web_search/pocket_tts/gws and internal pipeline tools).
+- Prefer direct internal tool calls first (read/write/shell/glob/web_fetch/web_get/web_search/pocket_tts/google_drive/google_calendar/google_mail and internal pipeline tools).
 - If user explicitly asks to generate/create/build a script, you MUST do script workflow.
 - Do not generate scripts when internal tools can complete the task.
 - MANDATORY web_fetch vs web_get policy:
@@ -175,7 +175,7 @@ Conversation context and follow-up awareness:
 - If the user wants more details about something you already summarized, fetch only the specific URL you already have — do not start a broad new search.
 - Keep follow-up responses proportional: a short follow-up question deserves a short, focused answer — not a multi-step research pipeline.
 
-{gws_block}
+{google_block}
 {datastore_block}
 {insights_block}
 {nervous_system_block}

@@ -64,7 +64,7 @@ _GMAIL_SCOPE_LABELS = {
     "https://www.googleapis.com/auth/drive": "Drive",
     "https://www.googleapis.com/auth/calendar": "Calendar",
     "https://www.googleapis.com/auth/gmail.readonly": "Gmail (read)",
-    "https://www.googleapis.com/auth/gmail.compose": "Gmail (drafts)",
+    "https://www.googleapis.com/auth/gmail.compose": "Gmail (drafts + send)",
     "https://www.googleapis.com/auth/gmail.modify": "Gmail (read + modify)",
     "https://www.googleapis.com/auth/gmail.send": "Gmail (send)",
     "https://www.googleapis.com/auth/cloud-platform": "Vertex AI / Gemini",

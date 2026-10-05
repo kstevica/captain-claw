@@ -1,19 +1,18 @@
 """Build compact file-tree listings for context injection.
 
 Produces Unicode tree strings for local directories and Google Drive folders
-(via the ``gws`` CLI) so the LLM can see available files without calling
-``glob`` or ``gws drive_list`` first.
+(via the Drive API, as the agent owner) so the LLM can see available files
+without calling ``glob`` or ``google_drive list`` first.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import shutil
 import time
 from pathlib import Path
 from typing import Any
 
+from captain_claw import drive_client
+from captain_claw.drive_client import DriveClient, DriveError, DriveNotConnected
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -131,96 +130,47 @@ def build_local_tree(
     return header + "\n" + "\n".join(lines), entry_count
 
 
-# ── GWS helper ────────────────────────────────────────────────────────
+# ── Drive client (the agent owner's identity) ────────────────────────
 
-_GWS_TIMEOUT = 30  # seconds per call
+# The picker shows folders only; children come back folders-first, so one
+# capped page covers any realistic folder (Flight Deck's picker does the same).
+_BROWSE_MAX_CHILDREN = 500
 
 
-def resolve_gws_binary() -> str | None:
-    """Find the ``gws`` binary (mirrors ``GwsTool._resolve_binary``)."""
+def _owner_drive_client() -> DriveClient:
+    """A Drive client whose Google identity is resolved once, then reused.
+
+    The identity is :func:`drive_client.global_token_provider` — the one every
+    agent-side Google tool uses: standalone, this instance's own connection;
+    under Flight Deck, the agent OWNER's token, so a listing can only ever
+    show that owner's Drive. The client asks its provider on every request;
+    memoising it makes a whole tree one Flight Deck token round-trip, not one
+    per folder. No identity → the first request raises
+    :class:`DriveNotConnected` before any HTTP call (fail closed).
+    """
+    resolved: tuple[str, str] | None = None
+
+    async def _once() -> tuple[str, str]:
+        nonlocal resolved
+        if resolved is None:
+            resolved = await drive_client.global_token_provider()
+        return resolved
+
+    return drive_client.make_client(_once)
+
+
+async def _close_quietly(client: DriveClient) -> None:
     try:
-        from captain_claw.config import get_config
-
-        cfg = get_config()
-        custom = getattr(cfg.tools, "gws", None)
-        if custom and hasattr(custom, "binary_path") and custom.binary_path:
-            p = Path(custom.binary_path).expanduser()
-            if p.exists():
-                return str(p)
-    except Exception:
+        await client.close()
+    except Exception:  # never let cleanup turn a listing into an exception
         pass
 
-    found = shutil.which("gws")
-    return found
+
+def _error_text(exc: Exception) -> str:
+    return str(exc) or "could not resolve this agent's Google identity"
 
 
-_RESOLVE = object()  # _run_gws(env=...) default: resolve the env itself
-
-
-async def _gws_env() -> tuple[dict[str, str] | None, str]:
-    """``(env, error)`` for a gws subprocess — the gws tool's identity rules.
-
-    Standalone: ``(None, "")`` — inherit; gws keeps its ``gws auth login``.
-    Under Flight Deck: FD's env with the ambient gws / ADC credentials scrubbed
-    and the agent OWNER's access token injected, so a tree listing can only
-    ever show that owner's Drive — never an operator credential every tenant's
-    agent inherited. No token for the owner → ``(None, <the tool's "not
-    connected" text>)``: fail closed, the caller must not run gws. Any other
-    failure to resolve the identity fails closed the same way.
-    """
-    from captain_claw.tools._gws_runtime import gws_subprocess_env
-
-    try:
-        return await gws_subprocess_env(), ""
-    except Exception as exc:  # GwsNotConnected, or anything unexpected
-        return None, str(exc) or "gws: could not resolve this agent's Google identity"
-
-
-async def _run_gws(
-    binary: str, args: list[str], env: Any = _RESOLVE,
-) -> dict[str, Any] | str:
-    """Run a ``gws`` command and return parsed JSON or error string.
-
-    ``env`` is the env :func:`_gws_env` resolved (callers making several calls
-    resolve it once); left out, it is resolved here — never skipped.
-    """
-    if env is _RESOLVE:
-        env, error = await _gws_env()
-        if error:
-            return error
-
-    cmd = [binary] + args + ["--format", "json"]
-    log.debug("file_tree_builder gws", cmd=" ".join(cmd))
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=_GWS_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        return "gws command timed out"
-
-    stdout_str = stdout.decode("utf-8", errors="replace").strip()
-    stderr_str = stderr.decode("utf-8", errors="replace").strip()
-
-    if proc.returncode != 0:
-        return stderr_str or stdout_str or f"gws exited with code {proc.returncode}"
-
-    try:
-        return json.loads(stdout_str)  # type: ignore[return-value]
-    except (json.JSONDecodeError, TypeError):
-        return stdout_str
-
-
-# ── Google Drive file tree (via gws) ─────────────────────────────────
+# ── Google Drive file tree ───────────────────────────────────────────
 
 async def build_gdrive_tree(
     folder_id: str,
@@ -228,14 +178,12 @@ async def build_gdrive_tree(
     max_entries: int = 50,
     max_depth: int = 2,
 ) -> tuple[str, int]:
-    """List a Google Drive folder via ``gws`` CLI and return ``(tree_string, entry_count)``."""
-    binary = resolve_gws_binary()
-    if binary is None:
-        return "[gws CLI not available]", 0
-    env, error = await _gws_env()
-    if error:
-        return f"Google Drive: {folder_name} [error: {error}]", 0
+    """List a Google Drive folder via the Drive API and return ``(tree_string, entry_count)``.
 
+    Never raises. No usable Google identity → the error text and no listing;
+    a folder that fails to list renders an ``[error: ...]`` line in place.
+    """
+    client = _owner_drive_client()
     lines: list[str] = []
     entry_count = 0
 
@@ -244,28 +192,17 @@ async def build_gdrive_tree(
         if entry_count >= max_entries:
             return
 
-        escaped = fid.replace("'", "\\'")
-        params: dict[str, Any] = {
-            "q": f"'{escaped}' in parents and trashed = false",
-            "pageSize": min(max_entries - entry_count, 100),
-            "fields": "files(id,name,mimeType,size,modifiedTime)",
-            "orderBy": "folder,name",
-            "corpora": "allDrives",
-            "supportsAllDrives": "true",
-            "includeItemsFromAllDrives": "true",
-        }
-        result = await _run_gws(
-            binary,
-            ["drive", "files", "list", "--params", json.dumps(params)],
-            env=env,
-        )
-
-        if isinstance(result, str):
-            # Error.
-            lines.append(f"{prefix}[error: {result[:80]}]")
+        try:
+            # allDrives: only the id is configured, and the folder may live
+            # in a shared drive (the default corpus would read it back empty).
+            files, _ = await client.list_folder(
+                fid, all_drives=True, max_files=max_entries - entry_count,
+            )
+        except DriveNotConnected:
+            raise  # no identity at all — the whole tree fails closed
+        except DriveError as exc:
+            lines.append(f"{prefix}[error: {str(exc)[:80]}]")
             return
-
-        files = result.get("files", [])
 
         for i, f in enumerate(files):
             if entry_count >= max_entries:
@@ -275,53 +212,31 @@ async def build_gdrive_tree(
                 return
 
             is_last = i == len(files) - 1
-            connector = "\u2514\u2500\u2500 " if is_last else "\u251c\u2500\u2500 "
-            child_prefix = prefix + ("    " if is_last else "\u2502   ")
-            is_folder = f.get("mimeType") == "application/vnd.google-apps.folder"
+            connector = "└── " if is_last else "├── "
+            child_prefix = prefix + ("    " if is_last else "│   ")
 
             entry_count += 1
 
-            if is_folder:
-                lines.append(f"{prefix}{connector}{f['name']}/ [id:{f['id']}]")
+            if f.is_folder:
+                lines.append(f"{prefix}{connector}{f.name}/ [id:{f.id}]")
                 if depth < max_depth:
-                    await _list_folder(f["id"], depth + 1, child_prefix)
+                    await _list_folder(f.id, depth + 1, child_prefix)
             else:
-                size = f.get("size", "")
-                size_str = f" ({_format_size(int(size))})" if size else ""
-                lines.append(
-                    f"{prefix}{connector}{f['name']}{size_str} [id:{f['id']}]"
-                )
+                size_str = f" ({_format_size(f.size)})" if f.size is not None else ""
+                lines.append(f"{prefix}{connector}{f.name}{size_str} [id:{f.id}]")
 
-    await _list_folder(folder_id, 1, "  ")
+    try:
+        await _list_folder(folder_id, 1, "  ")
+    except Exception as exc:  # DriveNotConnected / FD refusal / anything else
+        return f"Google Drive: {folder_name} [error: {_error_text(exc)}]", 0
+    finally:
+        await _close_quietly(client)
 
     header = f"Google Drive: {folder_name} ({entry_count} entries)"
     if entry_count >= max_entries:
         header += f" [truncated at {max_entries} entries]"
 
     return header + "\n" + "\n".join(lines), entry_count
-
-
-# ── Shared drives helper ──────────────────────────────────────────────
-
-async def _list_shared_drives(binary: str, env: Any = _RESOLVE) -> list[dict[str, str]]:
-    """Return ``[{"id": ..., "name": ...}]`` for all accessible shared drives."""
-    params = {
-        "pageSize": 100,
-        "fields": "drives(id,name)",
-    }
-    result = await _run_gws(
-        binary,
-        ["drive", "drives", "list", "--params", json.dumps(params)],
-        env=env,
-    )
-    if isinstance(result, str):
-        log.debug("shared drives listing failed", error=result[:120])
-        return []
-    return [
-        {"id": d["id"], "name": d["name"]}
-        for d in result.get("drives", [])
-        if d.get("id") and d.get("name")
-    ]
 
 
 # ── Browse GDrive folders (for UI) ───────────────────────────────────
@@ -332,47 +247,34 @@ async def browse_gdrive_folders(folder_id: str = "root") -> dict[str, Any]:
     When *folder_id* is ``"root"`` the result also includes any shared drives
     the user has access to (returned in a separate ``shared_drives`` key).
 
-    Returns ``{"folders": [...], "shared_drives": [...], "error": ...}``.
+    Returns ``{"folders": [...], "shared_drives": [...]}``, or the same with
+    empty lists and an ``"error"`` string. Never raises.
     """
-    binary = resolve_gws_binary()
-    if binary is None:
-        return {"folders": [], "shared_drives": [], "error": "gws CLI not available"}
-    env, error = await _gws_env()
-    if error:
-        return {"folders": [], "shared_drives": [], "error": error}
+    client = _owner_drive_client()
+    try:
+        files, _ = await client.list_folder(
+            folder_id, all_drives=True, max_files=_BROWSE_MAX_CHILDREN,
+        )
+        folders = [
+            {"id": f.id, "name": f.name}
+            for f in files
+            if f.is_folder and f.id and f.name
+        ]
 
-    escaped = folder_id.replace("'", "\\'")
-    params: dict[str, Any] = {
-        "q": (
-            f"'{escaped}' in parents and trashed = false "
-            "and mimeType = 'application/vnd.google-apps.folder'"
-        ),
-        "pageSize": 100,
-        "fields": "files(id,name)",
-        "orderBy": "name",
-        "corpora": "allDrives",
-        "supportsAllDrives": "true",
-        "includeItemsFromAllDrives": "true",
-    }
-
-    result = await _run_gws(
-        binary,
-        ["drive", "files", "list", "--params", json.dumps(params)],
-        env=env,
-    )
-
-    if isinstance(result, str):
-        return {"folders": [], "shared_drives": [], "error": result}
-
-    folders = [
-        {"id": f["id"], "name": f["name"]}
-        for f in result.get("files", [])
-        if f.get("id") and f.get("name")
-    ]
-
-    # When browsing root, also fetch shared drives.
-    shared_drives: list[dict[str, str]] = []
-    if folder_id == "root":
-        shared_drives = await _list_shared_drives(binary, env=env)
+        # When browsing root, also fetch shared drives.
+        shared_drives: list[dict[str, str]] = []
+        if folder_id == "root":
+            try:
+                shared_drives = [
+                    {"id": d.id, "name": d.name}
+                    for d in await client.list_shared_drives()
+                    if d.id and d.name
+                ]
+            except DriveError as exc:
+                log.debug("shared drives listing failed", error=str(exc)[:120])
+    except Exception as exc:
+        return {"folders": [], "shared_drives": [], "error": _error_text(exc)}
+    finally:
+        await _close_quietly(client)
 
     return {"folders": folders, "shared_drives": shared_drives}

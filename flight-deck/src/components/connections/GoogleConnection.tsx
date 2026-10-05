@@ -12,9 +12,36 @@ import {
   KeyRound,
   Trash2,
   ChevronDown,
+  Send,
+  RefreshCw,
 } from 'lucide-react'
-import { useGoogleAuthStore } from '../../stores/googleAuthStore'
+import {
+  gmailSendOptInLocked,
+  useGoogleAuthStore,
+  type GmailSendPatch,
+  type GmailSendPolicy,
+} from '../../stores/googleAuthStore'
 import { useAuthStore } from '../../stores/authStore'
+
+const RECENT_SENDS = 10
+
+// The recipients box: one address or @domain per line, commas work too. The
+// backend trims, lowercases and dedupes the same way, so re-typing a saved
+// list in another case doesn't count as a change.
+function parseRecipients(text: string): string[] {
+  const seen = new Set<string>()
+  for (const raw of text.split(/[\n,]+/)) {
+    const entry = raw.trim().toLowerCase()
+    if (entry) seen.add(entry)
+  }
+  return [...seen]
+}
+
+function fmtSentAt(ts: string): string {
+  if (!ts) return ''
+  const d = new Date(ts)
+  return isNaN(d.getTime()) ? ts : d.toLocaleString()
+}
 
 export default function GoogleConnection() {
   const {
@@ -340,6 +367,10 @@ export default function GoogleConnection() {
           )}
         </div>
 
+        {/* Email sending — the signed-in user's own policy, so it shows for
+            non-admins and in the kiosk Connections dialog too. */}
+        {connected && <GmailSendSection />}
+
         {/* Credentials form — deck-wide OAuth client, admins only (the save
             endpoint is require_admin; non-admins would only get 403s). */}
         {canManageClient && (
@@ -515,6 +546,261 @@ export default function GoogleConnection() {
         </div>
         )}
       </div>
+      )}
+    </div>
+  )
+}
+
+// Whether this user's agents may send Gmail on their own (POST
+// /fd/google/gmail/send), and to whom. Off until the user opts in here — the
+// agents then only draft. The deck's FD_GMAIL_SEND=off overrides it.
+function GmailSendSection() {
+  const policy = useGoogleAuthStore((s) => s.gmailSend)
+  const sends = useGoogleAuthStore((s) => s.gmailSends)
+  const sendError = useGoogleAuthStore((s) => s.gmailSendError)
+  const fetchGmailSend = useGoogleAuthStore((s) => s.fetchGmailSend)
+  const saveGmailSend = useGoogleAuthStore((s) => s.saveGmailSend)
+  const fetchGmailSends = useGoogleAuthStore((s) => s.fetchGmailSends)
+
+  const [enabled, setEnabled] = useState(false)
+  const [recipientsText, setRecipientsText] = useState('')
+  const [limitText, setLimitText] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [reloading, setReloading] = useState(true)
+
+  const syncDraft = (p: GmailSendPolicy) => {
+    setEnabled(p.enabled)
+    setRecipientsText(p.allowed_recipients.join('\n'))
+    setLimitText(String(p.daily_limit))
+  }
+
+  const reload = async () => {
+    setReloading(true)
+    await Promise.all([fetchGmailSend(), fetchGmailSends(RECENT_SENDS)])
+    setReloading(false)
+  }
+
+  useEffect(() => {
+    reload()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Re-seed the form only when the saved settings themselves change — a
+  // Refresh that just brings a new sent-count keeps what's being typed. Done
+  // while rendering, not in an effect, so the form never paints a frame empty.
+  const savedKey = policy
+    ? JSON.stringify([policy.enabled, policy.allowed_recipients, policy.daily_limit])
+    : ''
+  const [seededKey, setSeededKey] = useState('')
+  if (policy && savedKey !== seededKey) {
+    setSeededKey(savedKey)
+    syncDraft(policy)
+  }
+
+  const recipients = parseRecipients(recipientsText)
+  const limit = Number(limitText)
+  const limitValid = limitText.trim() !== '' && Number.isInteger(limit) && limit >= 1 && limit <= 500
+  const enabledDirty = !!policy && enabled !== policy.enabled
+  const recipientsDirty = !!policy && recipients.join('\n') !== policy.allowed_recipients.join('\n')
+  const limitDirty = !!policy && (!limitValid || limit !== policy.daily_limit)
+  const dirty = enabledDirty || recipientsDirty || limitDirty
+  const canSave = !!policy && !saving && dirty && limitValid
+
+  const handleSave = async () => {
+    if (!policy || !canSave) return
+    const patch: GmailSendPatch = {}
+    if (enabledDirty) patch.enabled = enabled
+    if (recipientsDirty) patch.allowed_recipients = recipients
+    if (limitDirty) patch.daily_limit = limit
+    setSaving(true)
+    const ok = await saveGmailSend(patch)
+    setSaving(false)
+    if (!ok) return
+    // The backend may write an entry differently (a bare domain as '@b.c'),
+    // which leaves the saved key as it was — show what it stored regardless.
+    const saved = useGoogleAuthStore.getState().gmailSend
+    if (saved) syncDraft(saved)
+    fetchGmailSends(RECENT_SENDS)
+  }
+
+  const deckDisabled = !!policy?.deck_disabled
+  const optInLocked = gmailSendOptInLocked(policy)
+  const pill = "inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border"
+  const field = "w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500 focus:outline-none"
+
+  return (
+    <div className="space-y-3 rounded-md border border-zinc-800 bg-zinc-950/50 p-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <Send className="h-3.5 w-3.5 text-zinc-400" />
+        <span className="text-xs font-medium text-zinc-300">Email sending</span>
+        {policy && (
+          deckDisabled ? (
+            <span className={`${pill} bg-zinc-800 text-zinc-400 border-zinc-700`}>Off on this deck</span>
+          ) : policy.enabled ? (
+            <span className={`${pill} bg-emerald-500/15 text-emerald-500 border-emerald-500/30`}>
+              <Check className="h-2.5 w-2.5" /> Agents can send
+            </span>
+          ) : (
+            <span className={`${pill} bg-zinc-800 text-zinc-400 border-zinc-700`}>Drafts only</span>
+          )
+        )}
+        <div className="flex-1" />
+        <button
+          type="button"
+          onClick={reload}
+          disabled={reloading}
+          className="inline-flex items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
+          title="Reload the sending settings and the sent list"
+        >
+          <RefreshCw className={'h-3 w-3 ' + (reloading ? 'animate-spin' : '')} />
+          Refresh
+        </button>
+      </div>
+
+      {sendError && (
+        <div className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-500">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span className="break-words">{sendError}</span>
+        </div>
+      )}
+
+      {!policy ? (
+        !sendError && (
+          <div className="flex items-center gap-2 text-xs text-zinc-500">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
+          </div>
+        )
+      ) : (
+        <>
+          <label
+            className={
+              'flex items-start gap-2 ' +
+              (optInLocked ? 'opacity-70 cursor-not-allowed' : 'cursor-pointer')
+            }
+          >
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={saving || optInLocked}
+              onChange={(e) => setEnabled(e.target.checked)}
+              className="mt-0.5 accent-violet-600"
+            />
+            <div className="flex-1 min-w-0">
+              <div className="text-sm text-zinc-200">Let my agents send email from this account</div>
+              <div className="text-xs text-zinc-500 mt-0.5 leading-snug">
+                When on, your agents can send email (including replies) without you
+                pressing Send in Gmail. They're instructed to send only when you ask;
+                every send is listed below and in your notifications. Off = drafts only.
+              </div>
+            </div>
+          </label>
+
+          {deckDisabled && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600">
+              Sending is disabled on this Flight Deck by the administrator
+              (<code>FD_GMAIL_SEND=off</code>).
+              {policy.enabled && ' You can still turn yours off here.'}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-medium text-zinc-400 mb-1">
+                Only to these recipients <span className="text-zinc-600">(optional)</span>
+              </label>
+              <textarea
+                value={recipientsText}
+                onChange={(e) => setRecipientsText(e.target.value)}
+                rows={3}
+                disabled={saving}
+                placeholder={'alice@example.com\n@yourcompany.com'}
+                className={`${field} font-mono`}
+              />
+              <div className="mt-1 text-[11px] text-zinc-500 leading-snug">
+                One address or <span className="text-zinc-300">@domain</span> per line
+                (commas work too). Empty = anyone.
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-zinc-400 mb-1">Daily limit</label>
+              <input
+                type="number"
+                min={1}
+                max={500}
+                step={1}
+                value={limitText}
+                onChange={(e) => setLimitText(e.target.value)}
+                disabled={saving}
+                className={field}
+              />
+              {!limitValid && (
+                <div className="mt-1 text-[11px] text-red-500">A whole number from 1 to 500.</div>
+              )}
+              <div className="mt-1 text-[11px] text-zinc-500">
+                Sent in the last 24h:{' '}
+                <span className={policy.sent_last_24h >= policy.daily_limit ? 'text-amber-600' : 'text-zinc-300'}>
+                  {policy.sent_last_24h} / {policy.daily_limit}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handleSave}
+              disabled={!canSave}
+              className="inline-flex items-center gap-2 rounded-md bg-violet-600 hover:bg-violet-500 px-3 py-1.5 text-sm text-white disabled:opacity-50 shadow-sm"
+            >
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+              Save
+            </button>
+            {dirty && !saving && (
+              <span className="text-xs text-zinc-500">Unsaved changes</span>
+            )}
+          </div>
+
+          {/* Recently sent */}
+          <div>
+            <div className="text-xs text-zinc-500 mb-1.5">Recently sent by your agents</div>
+            {sends.length === 0 ? (
+              <div className="text-xs text-zinc-500">
+                {reloading ? 'Loading…' : 'Nothing sent by your agents yet.'}
+              </div>
+            ) : (
+              <div className="rounded-md border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800">
+                {sends.slice(0, RECENT_SENDS).map((s) => (
+                  <div
+                    key={String(s.id)}
+                    className="px-3 py-2 text-xs"
+                    title={[
+                      s.cc ? `Cc: ${s.cc}` : '',
+                      s.bcc ? `Bcc: ${s.bcc}` : '',
+                      s.draft_id ? `From draft ${s.draft_id}` : '',
+                    ].filter(Boolean).join('\n') || undefined}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-zinc-500 shrink-0 tabular-nums">{fmtSentAt(s.created_at)}</span>
+                      <span className="text-zinc-400 truncate">{s.agent}</span>
+                      {s.status === 'unknown' && (
+                        <span
+                          className="ml-auto shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 border border-amber-500/30"
+                          title="Gmail never confirmed this send — it may or may not have gone out."
+                        >
+                          unconfirmed — check Gmail Sent
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-baseline gap-1.5 min-w-0 mt-0.5">
+                      <span className="text-zinc-500 shrink-0">To</span>
+                      <span className="text-zinc-300 truncate">{s.to}</span>
+                    </div>
+                    <div className="text-zinc-200 truncate mt-0.5">{s.subject || '(no subject)'}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   )

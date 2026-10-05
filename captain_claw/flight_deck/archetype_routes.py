@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
+from captain_claw.config import without_retired_tools
 from captain_claw.flight_deck import auth as _auth
 from captain_claw.flight_deck.archetypes import load_base_registry, merged_registry
 from captain_claw.flight_deck.auth import get_current_user, get_db, get_optional_user
@@ -97,13 +98,24 @@ def _validate(body: ArchetypeBody) -> dict:
         "description": body.description.strip(),
         "cognitive_mode": mode,
         "tier": body.tier,
-        "tools": body.tools,
+        # Retired tools (gws) are dropped here, so a manual save, a generated
+        # draft and a forged batch can never store one.
+        "tools": without_retired_tools(body.tools),
         "fleet_instructions": body.fleet_instructions,
         "keywords": [k.strip() for k in body.keywords if k.strip()],
         "lead": bool(body.lead),
         "reliability_seed": float(body.reliability_seed),
         "runtime": body.runtime if body.runtime in ("", "classic", "mrav") else "",
     }
+
+
+def _read_back(archetype: dict) -> dict:
+    """An archetype as the Library and Forge see it. A row saved before a
+    tool's retirement (gws) still lists that tool; drop it on the way out."""
+    tools = archetype.get("tools")
+    if not isinstance(tools, list):
+        return archetype
+    return {**archetype, "tools": without_retired_tools(tools)}
 
 
 # ── Routes ───────────────────────────────────────────────────────────
@@ -130,12 +142,14 @@ async def list_archetypes(user: dict | None = Depends(_registry_user)):
         if db is None:
             reg = load_base_registry()
             reg["archetypes"] = [{**a, "source": "base"} for a in reg.get("archetypes", [])]
-            return reg
-        return await merged_registry(db, uid)
+        else:
+            reg = await merged_registry(db, uid)
     except FileNotFoundError:
         raise HTTPException(500, "Archetype registry not found")
     except json.JSONDecodeError as e:
         raise HTTPException(500, f"Archetype registry is invalid JSON: {e}")
+    reg["archetypes"] = [_read_back(a) for a in reg.get("archetypes", [])]
+    return reg
 
 
 @router.get("/mine")
@@ -149,8 +163,8 @@ async def list_mine(user: dict = Depends(get_current_user)):
             data = json.loads(r.get("data") or "{}")
         except json.JSONDecodeError:
             data = {}
-        out.append({**data, "id": r["archetype_id"], "source": "user",
-                    "updated_at": r.get("updated_at")})
+        out.append(_read_back({**data, "id": r["archetype_id"], "source": "user",
+                               "updated_at": r.get("updated_at")}))
     return out
 
 

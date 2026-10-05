@@ -139,8 +139,8 @@ confusing bug and a legible one.
 
 **FD routes** — extend `vfs_routes` rather than a new router, since this is a
 kind of link: `POST /fd/vfs/links/gdrive` (mount), `GET /fd/vfs/links/gdrive/browse`
-(folder picker — `file_tree_builder.browse_gdrive_folders()` already does this,
-though it is `gws`-CLI-only and needs porting to the OAuth path), and
+(folder picker — `file_tree_builder.browse_gdrive_folders()` already does this;
+it runs on the OAuth `DriveClient` now that the `gws` CLI is retired), and
 `POST /fd/vfs/links/gdrive/{project}/refresh`.
 
 ---
@@ -167,16 +167,15 @@ Plus FD's own `GET /fd/vfs/read` and `/download`, so the panel shows content too
 Hydration is keyed on `modifiedTime` so a stale entry refetches.
 
 **Google-native docs have no bytes** — Docs/Sheets/Slides must be *exported*, so
-even a "raw" read is a format decision. Use the best path already in the repo:
-`_gws_docs.py:25-34,137-149` exports Sheets→xlsx and Slides→pptx and then runs
-`_extract_xlsx_markdown` / `_extract_pptx_markdown`. That is markedly better than
-`google_drive.py`'s map, which sends Sheets to **CSV (first tab only)** and Slides
-to flat text. The two maps disagree today (`google_drive.py:38-44` vs
-`_gws_drive.py:413-424`); this plan standardises on the gws-quality one, ported to
-the OAuth transport.
+even a "raw" read is a format decision. Export Sheets→xlsx and Slides→pptx and
+then run `_extract_xlsx_markdown` / `_extract_pptx_markdown` — the approach the
+(now retired) `gws` CLI tool took, and markedly better than Drive's flat exports
+(Sheets to **CSV, first tab only**; Slides to plain text). `drive_client.GOOGLE_EXPORT`
+standardises on it, on the OAuth transport.
 
-Also port `_strip_base64_images` (`_gws_runtime.py:29-41`) — it exists only on the
-gws path, and a Doc with inline images will otherwise blow up the context window.
+Also strip inline base64 images from Doc exports (the retired `gws` path's
+`_strip_base64_images` did this) — a Doc with inline images will otherwise blow up
+the context window.
 
 ---
 

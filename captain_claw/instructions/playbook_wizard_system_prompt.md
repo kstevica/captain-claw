@@ -90,7 +90,7 @@ Playbooks MUST reference these real tools — never invent fictional functions o
 | `direct_api` | Execute registered HTTP API calls |
 | `cron` | Schedule recurring tasks |
 | `google_drive` | List, search, read, write Google Drive files |
-| `google_mail` | Read Gmail messages (list, search, threads) |
+| `google_mail` | Gmail: read (list, search, threads), drafts; send only when the user has enabled sending |
 | `google_calendar` | Google Calendar operations (list, create, update, delete events) |
 | `send_mail` | Send emails via Mailgun/SendGrid/SMTP |
 | `botport` | Delegate tasks to specialist agents |

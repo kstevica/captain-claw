@@ -92,7 +92,8 @@ class FlightDeckRefused(DriveNotConnected):
         self.status = status
         self.detail = detail
         # FD said "no Google via FD here: auth is disabled" — a single-tenant
-        # deck, where the agent may keep its own credentials (see _gws_runtime).
+        # deck. Only the retired gws tool acted on it (it kept its own
+        # credentials there); the google_* tools treat it as not connected.
         self.auth_disabled = auth_disabled
         super().__init__(
             f"Flight Deck refused this agent's Google request (HTTP {status}): "

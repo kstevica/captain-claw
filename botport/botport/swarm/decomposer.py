@@ -313,7 +313,9 @@ _CC_TOOL_DESCRIPTIONS: dict[str, str] = {
     "image_ocr": "OCR — extract text from images",
     "image_vision": "Vision analysis on images (describe, analyze)",
     "send_mail": "Send emails via SMTP (to, cc, bcc, subject, body, attachments)",
-    "gws": "Google Workspace: Drive, Docs, Calendar, Gmail",
+    "google_drive": "Google Drive/Docs/Sheets/Slides: list, search, read (content inline), info, download, upload, create, update",
+    "google_calendar": "Google Calendar events: list, search, get, create, update, delete",
+    "google_mail": "Gmail: read, search, threads, drafts (sends only when the user enabled sending)",
     "datastore": "Persistent relational data tables (create, query, insert, update)",
     "personality": "Read or update the agent personality profile",
     "browser": "Headless browser for web app interaction (login, forms, dynamic pages)",
@@ -331,11 +333,19 @@ _CC_TOOL_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+# Tool names CC no longer has — mirrors captain_claw.config.RETIRED_TOOLS
+# (BotPort doesn't depend on the captain_claw package). The raw YAML read
+# below bypasses CC's own config validation, so an old config.yaml can still
+# name one; never advertise it to the decomposer.
+_CC_RETIRED_TOOLS: frozenset[str] = frozenset({"gws"})
+
+
 def get_cc_enabled_tools() -> list[str]:
     """Return the list of enabled tool names from CC config."""
     cfg = _load_cc_config()
     tools_cfg = cfg.get("tools", {})
-    return tools_cfg.get("enabled", list(_CC_TOOL_DESCRIPTIONS.keys()))
+    enabled = tools_cfg.get("enabled", list(_CC_TOOL_DESCRIPTIONS.keys()))
+    return [t for t in enabled if t not in _CC_RETIRED_TOOLS]
 
 
 def _build_tools_context() -> str:

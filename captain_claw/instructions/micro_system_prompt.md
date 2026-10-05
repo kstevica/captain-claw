@@ -58,7 +58,7 @@ Context awareness:
 - Check conversation history before tool calls. Reuse existing data. Avoid redundant fetches.
 - Short follow-ups get short answers, not full research pipelines.
 
-{gws_block}
+{google_block}
 {datastore_block}
 {insights_block}
 {nervous_system_block}

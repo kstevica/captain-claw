@@ -5,7 +5,7 @@ The agent you are preparing the prompt for can:
 - Read and write files
 - Run shell commands
 - Search the web (web_search tool)
-- Access Google Workspace: Drive, Docs, Calendar, Gmail-read (gws tool)
+- Access Google: Drive/Docs/Sheets/Slides (google_drive), Calendar (google_calendar), Gmail (google_mail — read, drafts; sends only when the user asked and sending is enabled)
 - Send emails
 - Make API calls
 

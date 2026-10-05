@@ -77,17 +77,6 @@ class ReadTool(Tool):
             ToolResult with file contents
         """
         try:
-            # Block reads of gws side-effect artifact files.
-            if Path(path).name == "download.bin":
-                return ToolResult(
-                    success=False,
-                    error=(
-                        "download.bin is a temporary gws export artifact — do not read it. "
-                        "The document content was already returned inline by the docs_read "
-                        "tool call. Check the previous gws docs_read result."
-                    ),
-                )
-
             # Shared VFS paths (vfs:<project>/...) resolve into the
             # cross-agent tree; skip the workspace/cwd/registry fallbacks.
             vfs_target = resolve_vfs_path(path) if is_vfs_path(path) else None
@@ -111,9 +100,9 @@ class ReadTool(Tool):
                     file_path = raw_path.resolve()
 
             if not file_path.exists() and vfs_target is None:
-                # Some tools (gws drive_download, shell) write files
-                # relative to the process CWD which may differ from the
-                # workspace root.  Try CWD-based resolution.
+                # Some tools (e.g. shell) write files relative to the
+                # process CWD which may differ from the workspace root.
+                # Try CWD-based resolution.
                 runtime_base = kwargs.get("_runtime_base_path")
                 if not raw_path.is_absolute():
                     # Relative path: try resolving against cwd instead of

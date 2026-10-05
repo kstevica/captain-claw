@@ -117,8 +117,11 @@ SCOPE_CATALOG: list[dict[str, str]] = [
     },
     {
         "scope": "https://www.googleapis.com/auth/gmail.compose",
-        "label": "Gmail (drafts)",
-        "description": "Create draft replies. Sensitive scope.",
+        "label": "Gmail (drafts + send)",
+        "description": (
+            "Create drafts and send mail on your behalf. Sensitive scope. "
+            "Agents only send when the user turns on Email sending."
+        ),
         "sensitivity": "sensitive",
         "group": "gmail",
     },

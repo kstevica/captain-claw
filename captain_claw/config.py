@@ -313,6 +313,25 @@ class SendMailToolConfig(BaseModel):
     max_attachment_bytes: int = 26214400  # 25 MB
 
 
+class GoogleMailToolConfig(BaseModel):
+    """Gmail (google_mail) tool — sending, standalone mode only.
+
+    Under Flight Deck both knobs are IGNORED: the tool never sends itself
+    there, it asks Flight Deck (``POST /fd/google/gmail/send``), and the
+    owner's per-user policy in Connections → Google → Email sending decides
+    (on/off, recipient allowlist, daily limit). These apply only to an agent
+    that holds its own Google connection.
+    """
+
+    # The send / send_draft actions refuse unless this is true. Env form:
+    # CLAW_TOOLS__GOOGLE_MAIL__ALLOW_SEND=true.
+    allow_send: bool = False
+    # Empty = anyone. Entries: an exact address ("alice@example.com") or a
+    # domain ("@example.com" / "example.com" — that domain only, not its
+    # subdomains). See captain_claw.gmail_compose.
+    allowed_recipients: list[str] = Field(default_factory=list)
+
+
 class TypesenseToolConfig(BaseModel):
     """Typesense tool configuration."""
 
@@ -323,12 +342,6 @@ class TypesenseToolConfig(BaseModel):
     default_collection: str = ""
     timeout: int = 30
     connection_timeout: int = 5
-
-
-class GwsToolConfig(BaseModel):
-    """Google Workspace CLI (gws) tool configuration."""
-
-    binary_path: str = ""  # custom path to the gws binary; empty = find in PATH
 
 
 class EditToolConfig(BaseModel):
@@ -486,6 +499,21 @@ class WriteGuardConfig(BaseModel):
     )
 
 
+# Tool names that no longer exist. An agent config written before a tool was
+# retired (``tools.enabled`` is copied verbatim into each agent's config.yaml at
+# spawn, and archetypes store their own lists) keeps naming it, so the name is
+# stripped wherever a tool list is loaded or written — never registered again.
+#   gws — the Google Workspace CLI wrapper. Google goes through google_drive /
+#         google_calendar / google_mail only (one identity path, one Gmail send
+#         gate); nothing may shell out to the gws binary.
+RETIRED_TOOLS: frozenset[str] = frozenset({"gws"})
+
+
+def without_retired_tools(names: list[str]) -> list[str]:
+    """``names`` minus :data:`RETIRED_TOOLS`, order kept."""
+    return [n for n in names if n not in RETIRED_TOOLS]
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -513,7 +541,6 @@ class ToolsConfig(BaseModel):
         "google_drive",
         "google_calendar",
         "google_mail",
-        "gws",
         "todo",
         "contacts",
         "scripts",
@@ -539,8 +566,8 @@ class ToolsConfig(BaseModel):
     image_ocr: ImageOcrToolConfig = Field(default_factory=ImageOcrToolConfig)
     image_vision: ImageVisionToolConfig = Field(default_factory=ImageVisionToolConfig)
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
+    google_mail: GoogleMailToolConfig = Field(default_factory=GoogleMailToolConfig)
     typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
-    gws: GwsToolConfig = Field(default_factory=GwsToolConfig)
     edit: EditToolConfig = Field(default_factory=EditToolConfig)
     write: WriteGuardConfig = Field(default_factory=WriteGuardConfig)
     browser: BrowserToolConfig = Field(default_factory=BrowserToolConfig)
@@ -572,6 +599,8 @@ class ToolsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _ensure_always_enabled(self) -> "ToolsConfig":
+        # Retired tools first: an old config.yaml / archetype may still list one.
+        self.enabled = without_retired_tools(self.enabled)
         for tool in self._ALWAYS_ENABLED:
             if tool not in self.enabled:
                 self.enabled.append(tool)
@@ -1245,7 +1274,9 @@ class GoogleOAuthConfig(BaseModel):
         "https://www.googleapis.com/auth/calendar",
         # Gmail read (list / search / read_message / get_thread).
         "https://www.googleapis.com/auth/gmail.readonly",
-        # Gmail compose (create_draft only — the tool never sends).
+        # Gmail compose — drafts. Google also accepts a send with it; the
+        # google_mail tool only sends when tools.google_mail.allow_send is on
+        # (standalone) or the owner enabled sending in Flight Deck.
         "https://www.googleapis.com/auth/gmail.compose",
         "openid",
         "email",

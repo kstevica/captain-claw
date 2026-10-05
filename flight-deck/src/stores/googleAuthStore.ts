@@ -46,12 +46,53 @@ export interface GoogleAuthConfig {
   redirect_uri: string
 }
 
+// The signed-in user's Gmail sending policy (GET/PUT /fd/google/gmail-send).
+// Off until the user opts in: their agents can only draft.
+export interface GmailSendPolicy {
+  enabled: boolean
+  // Exact addresses, or whole domains written '@b.c'. Empty = anyone.
+  allowed_recipients: string[]
+  daily_limit: number
+  // The deck's FD_GMAIL_SEND=off: no agent sends, whatever the policy says.
+  deck_disabled: boolean
+  sent_last_24h: number
+}
+
+export type GmailSendPatch = Partial<Pick<GmailSendPolicy, 'enabled' | 'allowed_recipients' | 'daily_limit'>>
+
+// While the deck switch is off, the opt-in box refuses only turning sending
+// ON (it would do nothing). A user who opted in can still opt out, or their
+// agents start sending again the moment the admin turns the deck back on.
+// Keyed on the SAVED value, so unticking and re-ticking to undo still works.
+export function gmailSendOptInLocked(policy: GmailSendPolicy | null): boolean {
+  return !!policy?.deck_disabled && !policy.enabled
+}
+
+// One email an agent sent from the user's account (GET /fd/google/gmail-sends).
+export interface GmailSendRecord {
+  id: string | number
+  // 'sent', or 'unknown': Gmail never confirmed the send — it may have gone out.
+  status?: string
+  agent: string
+  to: string
+  cc: string
+  bcc: string
+  subject: string
+  gmail_message_id: string
+  thread_id: string
+  draft_id: string
+  created_at: string  // ISO 8601, UTC
+}
+
 interface GoogleAuthStore {
   status: GoogleAuthStatus | null
   config: GoogleAuthConfig | null
   loading: boolean
   error: string | null
   lastPopupMessage: string | null
+  gmailSend: GmailSendPolicy | null
+  gmailSends: GmailSendRecord[]
+  gmailSendError: string | null
 
   refresh: () => Promise<void>
   syncStatus: () => Promise<void>
@@ -66,6 +107,9 @@ interface GoogleAuthStore {
   connect: () => Promise<void>
   disconnect: () => Promise<void>
   startMessageListener: () => () => void
+  fetchGmailSend: () => Promise<void>
+  saveGmailSend: (patch: GmailSendPatch) => Promise<boolean>
+  fetchGmailSends: (limit?: number) => Promise<void>
 }
 
 const emptyStatus: GoogleAuthStatus = {
@@ -192,12 +236,32 @@ function _connectError(exc: unknown): string {
   return `Couldn't start Google sign-in: ${why}`
 }
 
+// The backend's own words when it gave some (e.g. which recipient entry it
+// couldn't read), else the status line.
+function _gmailSendError(exc: unknown): string {
+  if (exc instanceof HttpError) {
+    if (exc.status === 401) return 'Your Flight Deck session has expired — sign in again.'
+    // None of these routes answers 404 or 405 itself, so either means a deck
+    // that predates them: FastAPI's bare 404, the SPA catch-all's "No route
+    // for /fd/…" (any deck serving this UI), or 405 to the PUT (that
+    // catch-all is GET-only).
+    if (exc.status === 404 || exc.status === 405) {
+      return "This Flight Deck doesn't offer email sending yet — it needs an update and a restart."
+    }
+    if (exc.detail) return exc.detail
+  }
+  return exc instanceof Error ? exc.message : String(exc)
+}
+
 export const useGoogleAuthStore = create<GoogleAuthStore>((set, get) => ({
   status: null,
   config: null,
   loading: false,
   error: null,
   lastPopupMessage: null,
+  gmailSend: null,
+  gmailSends: [],
+  gmailSendError: null,
 
   refresh: async () => {
     // No Google via FD with sign-in off (see connect()) — nothing to ask.
@@ -373,4 +437,48 @@ export const useGoogleAuthStore = create<GoogleAuthStore>((set, get) => ({
       window.removeEventListener('focus', onFocus)
     }
   },
+
+  // Per-user, like the Google account itself: the policy and the send log
+  // are the caller's own, so no admin is needed (and none can see others').
+  fetchGmailSend: async () => {
+    set({ gmailSendError: null })
+    try {
+      const policy = (await fetchJson('/fd/google/gmail-send')) as GmailSendPolicy
+      set({ gmailSend: policy })
+    } catch (exc) {
+      set({ gmailSendError: _gmailSendError(exc) })
+    }
+  },
+
+  saveGmailSend: async (patch) => {
+    set({ gmailSendError: null })
+    try {
+      const policy = (await fetchJson('/fd/google/gmail-send', {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      })) as GmailSendPolicy
+      set({ gmailSend: policy })
+      return true
+    } catch (exc) {
+      set({ gmailSendError: _gmailSendError(exc) })
+      return false
+    }
+  },
+
+  fetchGmailSends: async (limit = 10) => {
+    set({ gmailSendError: null })
+    try {
+      const data = await fetchJson(`/fd/google/gmail-sends?limit=${limit}`)
+      set({ gmailSends: Array.isArray(data?.sends) ? (data.sends as GmailSendRecord[]) : [] })
+    } catch (exc) {
+      set({ gmailSendError: _gmailSendError(exc) })
+    }
+  },
 }))
+
+// The next person signing in at this screen must not see the outgoing user's
+// sending policy or what their agents sent, even for the moment before the
+// Connections card refetches.
+registerSignOutTeardown(() => {
+  useGoogleAuthStore.setState({ gmailSend: null, gmailSends: [], gmailSendError: null })
+})

@@ -38,6 +38,7 @@ load_dotenv()
 
 import logging
 
+from captain_claw.config import without_retired_tools
 from captain_claw.flight_deck.auth import (
     decode_access_token, get_current_user, get_managed_user, get_optional_managed_user,
     get_optional_user, get_ws_user, set_auth_db,
@@ -491,11 +492,14 @@ def _pin_fd_url(environment: dict[str, str]) -> None:
 #   never verify FD JWTs; only FD and the Lupa BFF, which FD doesn't spawn).
 # * FD_EVENTS_WEBHOOK_TOKEN — posts events into any user's event spine.
 # * GOOGLE_WORKSPACE_CLI_TOKEN / _CREDENTIALS_FILE — an operator's ambient gws
-#   identity; every tenant's `gws` would act as that one Google account. Under
-#   FD the gws tool injects the agent OWNER's token itself.
+#   identity. The gws tool is retired (agents use google_drive /
+#   google_calendar / google_mail with the OWNER's token), but a stray gws
+#   binary on PATH is still one shell call away, and with these it would act
+#   as that one Google account for every tenant — and send Gmail past the
+#   FD send gate.
 # FD_AGENT_SHARED_SECRET stays: agents send it as X-Agent-Secret. So does
 # GOOGLE_APPLICATION_CREDENTIALS (operators point non-Workspace Google client
-# libraries at it; the gws paths scrub it on their own).
+# libraries at it).
 _FD_ONLY_ENV_VARS = (
     "FD_JWT_SECRET",
     "FD_EVENTS_WEBHOOK_TOKEN",
@@ -1235,6 +1239,7 @@ from captain_claw.flight_deck.hosting_routes import router as hosting_router
 from captain_claw.flight_deck.code_routes import router as code_router
 from captain_claw.flight_deck.queue_planner import router as queue_router
 from captain_claw.flight_deck.google_oauth_routes import router as google_oauth_router
+from captain_claw.flight_deck.gmail_send_routes import router as gmail_send_router
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
 from captain_claw.flight_deck.games_routes import router as games_router
 from captain_claw.flight_deck.vastai_routes import router as vastai_router
@@ -1282,6 +1287,7 @@ app.include_router(hosting_router)
 app.include_router(code_router)
 app.include_router(queue_router)
 app.include_router(google_oauth_router)
+app.include_router(gmail_send_router)
 app.include_router(codex_oauth_router)
 app.include_router(games_router)
 app.include_router(vastai_router)
@@ -1565,7 +1571,8 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
     if config.cognitive_mode in ("", "neutra") and arch.get("cognitive_mode"):
         config.cognitive_mode = str(arch["cognitive_mode"])
     if config.tools == AgentConfig().tools and arch.get("tools"):
-        config.tools = list(arch["tools"])
+        # A stored archetype may predate a tool's retirement (gws).
+        config.tools = without_retired_tools(list(arch["tools"]))
     if not config.description:
         config.description = str(arch.get("role") or arch.get("description") or f"archetype:{aid}")
     if not config.runtime and arch.get("runtime") in ("classic", "mrav"):
@@ -1738,7 +1745,9 @@ def _build_config_yaml(c: AgentConfig) -> str:
             },
         },
         "tools": {
-            "enabled": c.tools,
+            # Retired tools (gws) never reach an agent's config, whatever an
+            # old archetype or spawn request still lists.
+            "enabled": without_retired_tools(c.tools),
             "shell": {"timeout": 120, "default_policy": "ask"},
             "browser": {"headless": True, "viewport_width": 1280, "viewport_height": 720},
             "web_search": {"provider": "brave", "max_results": 5},
@@ -2136,7 +2145,9 @@ def _build_process_config_yaml(c: AgentConfig, agent_dir: Path) -> str:
             },
         },
         "tools": {
-            "enabled": c.tools,
+            # Retired tools (gws) never reach an agent's config, whatever an
+            # old archetype or spawn request still lists.
+            "enabled": without_retired_tools(c.tools),
             "shell": {"timeout": 120, "default_policy": "ask"},
             "browser": {"headless": True, "viewport_width": 1280, "viewport_height": 720},
             "web_search": {"provider": "brave", "max_results": 5},
@@ -7658,10 +7669,12 @@ async def forge_decompose(
                 aid = a.get("id", "")
                 if aid:
                     valid_archetype_ids.add(aid)
+                # A stored archetype may predate a tool's retirement (gws);
+                # never show the model one as a tool a proven archetype uses.
                 cat_lines.append(
                     f"- id: `{aid}` — {a['role']} [{a.get('family', '')}] — {a['description']} "
                     f"(mode: {a['cognitive_mode']}, tier: {a['tier']}, "
-                    f"tools: {', '.join(a.get('tools', []))})"
+                    f"tools: {', '.join(without_retired_tools(a.get('tools') or []))})"
                 )
             if tier_names:
                 cat_lines.append(
@@ -7813,6 +7826,16 @@ async def forge_decompose(
             if agent.get("archetype") and agent.get("new_archetype"):
                 agent["new_archetype"] = None
 
+    # Retired tools (gws) never come back in a per-agent override or a forged
+    # new_archetype, so the review screen offers none.
+    forged = result.get("agents") if isinstance(result, dict) else None
+    for agent in (forged or []):
+        if not isinstance(agent, dict):
+            continue
+        for holder in (agent, agent.get("new_archetype")):
+            if isinstance(holder, dict) and isinstance(holder.get("tools"), list):
+                holder["tools"] = without_retired_tools(holder["tools"])
+
     # Tag result with project_id so spawned agents can be auto-joined.
     if body.project_id:
         result["project_id"] = body.project_id
@@ -7842,7 +7865,8 @@ OLD_MAN_TOOLS = [
     "pocket_tts", "send_mail", "clipboard",
     "screen_capture", "desktop_action",
     "scripts", "playbooks", "personality", "datastore", "insights",
-    "cron", "summarize_files", "gws", "direct_api",
+    "cron", "summarize_files", "direct_api",
+    "google_drive", "google_calendar", "google_mail",
     "flight_deck",
 ]
 

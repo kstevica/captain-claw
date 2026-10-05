@@ -59,7 +59,9 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "pocket_tts": "Convert text to local speech audio and save as MP3",
     "send_mail": "Send emails via SMTP. Supports to, cc, bcc, subject, body, and file attachments.",
     "clipboard": "Read or write the system clipboard. Supports text, images, and files.",
-    "gws": "Google Workspace CLI — access Google Drive (list, search, download, create), Docs (read, append), Calendar (list, search, create, agenda), and Gmail (list, search, read, threads). Uses the `gws` binary.",
+    "google_drive": "Google Drive/Docs/Sheets/Slides — list (folder_id), search, read (returns content inline: Docs/Sheets/Slides exported, PDF/DOCX/XLSX/PPTX extracted), info (metadata), download (saves a local copy and returns its path — for scripts/extract tools), upload (local file → Drive), create, update. Takes a file/folder ID or a full Drive/Docs URL — never web_fetch/browser/curl a Google URL.",
+    "google_calendar": "Google Calendar — list_events, search_events, get_event, create_event, update_event, delete_event, list_calendars.",
+    "google_mail": "Gmail — list_messages, search, read_message, get_thread, list_labels; create_draft / list_drafts (drafts are the default for any email writing); send / send_draft ONLY when the user explicitly asked and sending is enabled.",
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
     "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
     "insights": "Search and manage persistent cross-session insights — facts, contacts, decisions, preferences, deadlines auto-extracted from conversations. Actions: search, list, add, update, delete.",
@@ -110,7 +112,9 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "intentions": "record future actions: user notes-to-self + your own proactive intentions",
     "video_vision": "analyze/describe a video (samples frames + transcribes audio)",
     "clipboard": "read/write system clipboard",
-    "gws": "Google Workspace: Drive, Docs, Calendar, Gmail",
+    "google_drive": "Drive/Docs/Sheets/Slides: list, search, read (content inline), info, download (local copy), upload, create, update; file ID or Drive URL",
+    "google_calendar": "Calendar events: list/search/get/create/update/delete, list_calendars",
+    "google_mail": "Gmail: list/search/read/thread, labels, drafts (default); send only if user asked + enabled",
     "datastore": "persistent relational tables",
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
     "insights": "persistent cross-session insights (facts, contacts, decisions, deadlines)",
@@ -136,6 +140,11 @@ def _short_tool_desc(text: str, limit: int = 160) -> str:
         if 0 < i < limit:
             return text[:i + 1]
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+# Retired tool names already logged as skipped at registration (once per name
+# per process — _register_default_tools runs on every agent/session init).
+_RETIRED_TOOLS_LOGGED: set[str] = set()
 
 
 class AgentContextMixin:
@@ -1110,16 +1119,11 @@ class AgentContextMixin:
         if not cfg.insights.enabled or not cfg.insights.auto_extract:
             return
 
-        # Only trigger for specific high-value tool calls.
-        _GWS_TRIGGER_ACTIONS = {"mail_read", "mail_read_thread"}
+        # Only trigger for specific high-value tool calls. None is wired at
+        # the moment: the only trigger (gws mail reads) went with the
+        # retired gws tool.
         trigger = False
         trigger_label = tool_name
-
-        if tool_name == "gws":
-            action = str(arguments.get("action", "")).strip()
-            if action in _GWS_TRIGGER_ACTIONS:
-                trigger = True
-                trigger_label = f"gws:{action}"
 
         if not trigger:
             return
@@ -2187,7 +2191,6 @@ class AgentContextMixin:
         "google_drive": ["google_drive"],
         "google_calendar": ["google_calendar"],
         "google_mail": ["google_mail"],
-        "gws": ["gws"],
         "todo": ["todo"],
         "contacts": ["contacts"],
         "scripts": ["scripts"],
@@ -2221,7 +2224,6 @@ class AgentContextMixin:
             GoogleCalendarTool,
             GoogleDriveTool,
             GoogleMailTool,
-            GwsTool,
             ImageGenTool,
             ImageOcrTool,
             ImageVisionTool,
@@ -2260,9 +2262,22 @@ class AgentContextMixin:
         )
 
         config = get_config()
+        from captain_claw.config import RETIRED_TOOLS
 
         # Register enabled tools
         for tool_name in config.tools.enabled:
+            # ToolsConfig already strips retired names; this catches a list
+            # mutated after load (e.g. a runtime reload) so a retired tool is
+            # never registered again.
+            if tool_name in RETIRED_TOOLS:
+                if tool_name not in _RETIRED_TOOLS_LOGGED:
+                    _RETIRED_TOOLS_LOGGED.add(tool_name)
+                    log.info(
+                        "Retired tool ignored",
+                        tool=tool_name,
+                        use="google_drive/google_calendar/google_mail",
+                    )
+                continue
             if tool_name == "shell":
                 self.tools.register(ShellTool())
             elif tool_name == "terminal":
@@ -2332,8 +2347,6 @@ class AgentContextMixin:
                 self.tools.register(VideoVisionTool())
             elif tool_name == "cv":
                 self.tools.register(CvTool())
-            elif tool_name == "gws":
-                self.tools.register(GwsTool())
             elif tool_name == "todo":
                 self.tools.register(TodoTool())
             elif tool_name == "contacts":
@@ -2715,14 +2728,17 @@ class AgentContextMixin:
             return "\n".join(lines)
 
     def _build_conditional_section(
-        self, tool_name: str, section_file: str, **variables: object,
+        self, tool_name: str | tuple[str, ...], section_file: str,
+        **variables: object,
     ) -> str:
-        """Load a section file only when *tool_name* is registered.
+        """Load a section file only when *tool_name* is registered (a tuple:
+        when ANY of the names is).
 
         Returns the section content prefixed with ``\\n\\n`` when active,
         or an empty string when the tool is not present.
         """
-        if not self.tools.has_tool(tool_name):
+        names = (tool_name,) if isinstance(tool_name, str) else tool_name
+        if not any(self.tools.has_tool(n) for n in names):
             return ""
         if variables:
             return "\n\n" + self.instructions.render(section_file, **variables)
@@ -2940,19 +2956,22 @@ class AgentContextMixin:
                         "that are not in the workspace):\n" + dirs_list
                     )
 
-            # 2. Google Drive folder references (for gws tool usage).
-            if gdrive_folders:
+            # 2. Google Drive folder references (for google_drive tool usage).
+            # Only steered when the tool is registered — never point the model
+            # at a tool it cannot call.
+            has_gdrive = self.tools.has_tool("google_drive")
+            if gdrive_folders and has_gdrive:
                 gd_list = "\n".join(
                     f"  - {gf.name} (folder_id: {gf.id})" for gf in gdrive_folders
                 )
                 parts.append(
-                    "- Google Drive folders — ALWAYS use the gws tool for ALL Google Drive "
-                    "operations. NEVER use browser, web_fetch, curl, or wget for Google "
-                    "Drive/Docs/Sheets/Slides files — the gws tool handles authentication "
-                    "and export automatically. "
-                    "Actions: drive_list (list files), drive_info (metadata), docs_read "
-                    "(read Google Docs — returns content inline), drive_download "
-                    "(download/export files). "
+                    "- Google Drive folders — ALWAYS use the google_drive tool for ALL "
+                    "Google Drive operations. NEVER use browser, web_fetch, curl, or wget "
+                    "for Google Drive/Docs/Sheets/Slides files — google_drive handles "
+                    "authentication and export automatically. "
+                    "Actions: list (folder_id — list files), read (file_id — returns the "
+                    "content inline), info (file_id — metadata), download (file_id — saves "
+                    "a local copy). "
                     "Folder IDs:\n" + gd_list
                 )
 
@@ -2993,7 +3012,8 @@ class AgentContextMixin:
                 tokens_used += tree_tokens
 
             # GDrive trees — use cached only (_build_system_prompt is sync).
-            for gf in (gdrive_folders or []):
+            gd_trees = 0
+            for gf in ((gdrive_folders or []) if has_gdrive else []):
                 if tokens_used >= token_budget:
                     break
                 cache_key = f"gdrive:{gf.id}"
@@ -3004,11 +3024,16 @@ class AgentContextMixin:
                         break
                     tree_parts.append(cached)
                     tokens_used += tree_tokens
+                    gd_trees += 1
 
             if tree_parts:
+                gd_hint = (
+                    "; for GDrive files use google_drive read with file_id = the "
+                    "[id:...] shown" if gd_trees else ""
+                )
                 parts.append(
                     "- File listings in configured folders (use these to locate files "
-                    "without glob; for GDrive files use gws tool with the [id:...] shown):\n"
+                    f"without glob{gd_hint}):\n"
                     + "\n\n".join(tree_parts)
                 )
 
@@ -3028,8 +3053,9 @@ class AgentContextMixin:
         termux_policy_block = self._build_conditional_section(
             "termux", "section_termux_policy.md",
         )
-        gws_block = self._build_conditional_section(
-            "gws", "section_gws.md", session_id=session_id,
+        google_block = self._build_conditional_section(
+            ("google_drive", "google_calendar", "google_mail"),
+            "section_google.md",
         )
         datastore_block = self._build_conditional_section(
             "datastore", "section_datastore.md",
@@ -3066,7 +3092,7 @@ class AgentContextMixin:
             browser_policy_block=browser_policy_block,
             direct_api_block=direct_api_block,
             termux_policy_block=termux_policy_block,
-            gws_block=gws_block,
+            google_block=google_block,
             datastore_block=datastore_block,
             insights_block=insights_block,
             nervous_system_block=nervous_system_block,
