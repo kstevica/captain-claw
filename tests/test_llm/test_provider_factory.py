@@ -99,14 +99,13 @@ def test_create_provider_rejects_unsupported_provider():
         create_provider(provider="cohere", model="command-r")
 
 
-def test_create_provider_normalizes_gpt5_temperature_to_one():
+def test_create_provider_routes_codex_to_chatgpt_subscription():
     provider = create_provider(
         provider="openai",
         model="gpt-5-codex",
         temperature=0.2,
     )
-    assert isinstance(provider, LiteLLMProvider)
-    assert provider.temperature == 1.0
+    assert isinstance(provider, llm_mod.ChatGPTResponsesProvider)
 
 
 def test_litellm_request_kwargs_force_temp_one_for_gpt5_family():

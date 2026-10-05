@@ -80,7 +80,8 @@ const LLM_PROVIDERS = [
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'ollama', label: 'Ollama' },
   { value: 'openai', label: 'OpenAI' },
-  { value: 'gemini', label: 'Gemini' },
+  { value: 'gemini', label: 'Gemini (API)' },
+  { value: 'antigravity-cli', label: 'Google (Antigravity subscription, text only)' },
   { value: 'openrouter', label: 'OpenRouter' },
   { value: 'xai', label: 'xAI' },
   { value: 'litert', label: 'LiteRT (local Gemma)' },
@@ -386,7 +387,9 @@ export function SpawnerPage() {
     setConfig((prev) => ({
       ...prev,
       provider,
-      providerApiKey: providerKeys[provider] || (systemKeys[provider]?.configured ? '@system' : prev.providerApiKey),
+      providerApiKey: provider === 'antigravity-cli' ? '' : providerKeys[provider] || (systemKeys[provider]?.configured ? '@system' : prev.providerApiKey),
+      baseUrl: provider === 'antigravity-cli' ? '' : prev.baseUrl,
+      ...(provider === 'antigravity-cli' ? { tools: [] } : {}),
     }))
   }
 
@@ -694,6 +697,7 @@ export function SpawnerPage() {
                   />
                 </Field>
               </div>
+              {config.provider === 'antigravity-cli' ? <p className="text-xs text-zinc-400">Uses local Antigravity sign-in. Text only; no agent tools, API keys or extra credits. Sampling and output limits are controlled by the CLI. See Connections for setup and model IDs.</p> : <>
               <Field label="API Key" hint={config.providerApiKey === '@system' ? `Using the system ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key (set by admin) — resolved securely at spawn` : providerKeys[config.provider] ? `Auto-filled from your saved ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key` : systemKeys[config.provider]?.configured ? `A system ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key is available (${systemKeys[config.provider]?.hint || 'set by admin'}) — leave blank to use it` : 'Save keys in Provider API Keys section below, or ask admin to set system-wide keys.'}>
                 <input type="password" value={config.providerApiKey === '@system' ? '' : config.providerApiKey} onChange={(e) => update('providerApiKey', e.target.value)} placeholder={config.providerApiKey === '@system' ? '(using system key)' : 'sk-...'} className="input font-mono text-xs" />
               </Field>
@@ -718,6 +722,7 @@ export function SpawnerPage() {
                   className="input font-mono text-xs"
                 />
               </Field>
+              </>}
               <Field label="Cognitive Mode" hint="How the agent thinks — reasoning strategy">
                 <select value={config.cognitiveMode} onChange={(e) => update('cognitiveMode', e.target.value)} className="input">
                   <option value="neutra">Neutra — Default (balanced)</option>
@@ -741,7 +746,7 @@ export function SpawnerPage() {
             {/* Provider API Keys */}
             <Section title="Provider API Keys" expanded={expandedSections.providerKeys} onToggle={() => toggleSection('providerKeys')}>
               <p className="text-xs text-zinc-500 mb-3">Save API keys per provider. When you select a provider above, the key is auto-filled into the spawn form.</p>
-              {LLM_PROVIDERS.filter((p) => p.value !== 'ollama').map((p) => (
+              {LLM_PROVIDERS.filter((p) => p.value !== 'ollama' && p.value !== 'antigravity-cli').map((p) => (
                 <div key={p.value} className="mb-3">
                   <label className="mb-1.5 flex items-center gap-2 text-sm font-medium text-zinc-300">
                     <Key className="h-3.5 w-3.5 text-zinc-500" />

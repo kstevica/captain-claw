@@ -450,7 +450,7 @@ class AgentGuardMixin:
         try:
             response = await self.provider.complete_with_callback(
                 messages=messages,
-                tools=tools,
+                tools=tools if getattr(self.provider, "supports_tools", True) else None,
                 max_tokens=max_tokens,
                 on_chunk=_on_chunk,
             )

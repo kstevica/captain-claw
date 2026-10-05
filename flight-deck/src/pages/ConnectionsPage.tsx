@@ -1,6 +1,7 @@
 import { Plug } from 'lucide-react'
 import GoogleConnection from '../components/connections/GoogleConnection'
 import CodexConnection from '../components/connections/CodexConnection'
+import AntigravityConnection from '../components/connections/AntigravityConnection'
 import MCPConnection from '../components/connections/MCPConnection'
 import MCPAgentAccess from '../components/connections/MCPAgentAccess'
 import TypesenseConnection from '../components/connections/TypesenseConnection'
@@ -27,6 +28,7 @@ export default function ConnectionsPage({ kiosk = false }: { kiosk?: boolean }) 
         <div className="space-y-4">
           <GoogleConnection />
           {!kiosk && <CodexConnection />}
+          {!kiosk && <AntigravityConnection />}
           <MCPConnection />
           <MCPAgentAccess />
           {!kiosk && <TypesenseConnection />}

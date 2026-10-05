@@ -104,7 +104,7 @@ interface SetsBlob { sets: TierSet[]; activeSetId: string }
 
 // ── Constants ────────────────────────────────────────────────────────
 
-export const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter', 'litert', 'browser']
+export const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'antigravity-cli', 'xai', 'openrouter', 'litert', 'browser']
 
 // Fixed context-size menus — every panel that edits input/output context
 // uses these (no freeform token counts). Powers of two where natural,
