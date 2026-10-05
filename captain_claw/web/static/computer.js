@@ -70,7 +70,7 @@ const _DATA_EXTS = ["csv", "xlsx", "xls", "pdf", "docx", "doc", "pptx", "ppt", "
 
 // Folder browser state.
 let folderCurrentPath = null;
-let _gwsAvailable = false;
+let _gdriveAvailable = false;
 let _gdriveCurrent = { id: "root", name: "My Drive" };
 let _gdriveBcStack = [{ id: "root", name: "My Drive" }];
 
@@ -5030,12 +5030,12 @@ async function initFolderTabs() {
 
   // Check for GDrive availability.
   try {
-    const res = await fetch("/api/gws-status");
+    const res = await fetch("/api/gdrive-status");
     const data = await res.json();
-    _gwsAvailable = !!data.available;
-    $("#folder-tab-gdrive-btn").style.display = _gwsAvailable ? "" : "none";
+    _gdriveAvailable = !!data.available;
+    $("#folder-tab-gdrive-btn").style.display = _gdriveAvailable ? "" : "none";
   } catch (_) {
-    _gwsAvailable = false;
+    _gdriveAvailable = false;
     $("#folder-tab-gdrive-btn").style.display = "none";
   }
 

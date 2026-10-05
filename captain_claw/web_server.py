@@ -2561,9 +2561,9 @@ class WebServer:
         from captain_claw.web.rest_skills import list_drives
         return await list_drives(self, request)
 
-    async def _gws_status(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_skills import gws_status
-        return await gws_status(self, request)
+    async def _gdrive_status(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import gdrive_status
+        return await gdrive_status(self, request)
 
     async def _list_gdrive_folders(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_skills import list_gdrive_folders
@@ -2586,8 +2586,19 @@ class WebServer:
         return await get_folder_trees(self, request)
 
     async def _llm_complete(self, request: web.Request) -> web.Response:
-        """Expose the local LLM provider for remote agent seats."""
-        provider = getattr(getattr(self, "agent", None), "provider", None)
+        """Expose the local LLM provider for remote agent seats.
+
+        Runs on a scoped copy (``_scoped_provider``) so a side completion — a
+        seat, the WhatsApp bridge's reaction classifier — arriving mid-turn
+        can't consume the agent's one-shot ``_tool_choice_override``.
+
+        What the copy learns about the MODEL is carried back to the shared
+        provider: Ollama's ``think = False`` after the model rejects thinking.
+        Left on the throwaway copy, every later call would repeat the doomed
+        think request (a 400 + retry) until the agent's own turn relearned it.
+        """
+        base = getattr(getattr(self, "agent", None), "provider", None)
+        provider = self._scoped_provider()
         if provider is None:
             return web.json_response({"ok": False, "error": "no LLM provider"}, status=503)
         try:
@@ -2616,6 +2627,16 @@ class WebServer:
             })
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        finally:
+            # Learned even when the retry then failed. Same model only: the
+            # agent may have switched models while this call was in flight.
+            if (
+                base is not None and provider is not base
+                and getattr(provider, "think", None) is False
+                and getattr(base, "think", None)
+                and getattr(provider, "model", None) == getattr(base, "model", None)
+            ):
+                base.think = False
 
     # ── App setup ────────────────────────────────────────────────────
 
@@ -2648,7 +2669,7 @@ class WebServer:
         app.router.add_delete("/api/read-folders", self._remove_read_folder)
         app.router.add_get("/api/browse", self._browse_directory)
         app.router.add_get("/api/drives", self._list_drives)
-        app.router.add_get("/api/gws-status", self._gws_status)
+        app.router.add_get("/api/gdrive-status", self._gdrive_status)
         app.router.add_get("/api/read-folders/gdrive", self._list_gdrive_folders)
         app.router.add_post("/api/read-folders/gdrive", self._add_gdrive_folder)
         app.router.add_delete("/api/read-folders/gdrive", self._remove_gdrive_folder)

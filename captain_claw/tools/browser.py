@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from captain_claw.config import get_config
+from captain_claw.google_ids import (
+    google_drive_redirect,
+    is_google_drive_url,
+    is_public_google_page,
+)
 from captain_claw.logging import get_logger
 from captain_claw.tools.browser_accessibility import AccessibilityExtractor
 from captain_claw.tools.browser_api_replay import ApiReplayEngine, ApiReplayResult
@@ -411,34 +416,34 @@ class BrowserTool(Tool):
     @staticmethod
     def _is_google_drive_url(url: str) -> bool:
         """Return True if URL is a Google Drive/Docs/Sheets/Slides URL."""
-        _gdrive_hosts = (
-            "docs.google.com", "drive.google.com",
-            "sheets.google.com", "slides.google.com",
-        )
-        try:
-            from urllib.parse import urlparse
-            host = urlparse(url).hostname or ""
-            return any(host == h or host.endswith("." + h) for h in _gdrive_hosts)
-        except Exception:
-            return False
+        return is_google_drive_url(url)
 
-    _GDRIVE_BLOCK_MSG = (
-        "Cannot open Google Drive/Docs URLs in the browser (requires authentication). "
-        "Use the gws tool instead:\n"
-        "  - gws(action='docs_read', file_id='...') to read document content\n"
-        "  - gws(action='drive_download', file_id='...') to download files\n"
-        "  - gws(action='drive_info', file_id='...') for file metadata\n"
-        "The docs_read action returns the full document text inline."
-    )
+    @staticmethod
+    def _blocks_drive_url(url: str) -> bool:
+        """Drive/Docs URLs go to google_drive — except Forms and published
+        (/d/e/) pages: they open without signing in, and google_drive can't
+        read them."""
+        return is_google_drive_url(url) and not is_public_google_page(url)
+
+    @staticmethod
+    def _gdrive_block_msg(url: str) -> str:
+        """Point a blocked Drive/Docs URL at google_drive, with its id."""
+        from captain_claw.google_oauth_manager import is_google_connected_cached
+
+        return google_drive_redirect(
+            url,
+            "Cannot open Google Drive/Docs URLs in the browser (requires authentication).",
+            connected=is_google_connected_cached(),
+        )
 
     async def _open(self, **kwargs: Any) -> ToolResult:
         """Launch the browser."""
         log.info("browser._open called", headless=kwargs.get("headless"), url=kwargs.get("url"))
 
-        # Block Google Drive URLs — gws tool should be used instead.
+        # Block Google Drive URLs — the google_drive tool reads them instead.
         url = str(kwargs.get("url", "")).strip()
-        if url and self._is_google_drive_url(url):
-            return ToolResult(success=False, error=self._GDRIVE_BLOCK_MSG)
+        if url and self._blocks_drive_url(url):
+            return ToolResult(success=False, error=self._gdrive_block_msg(url))
 
         session = self._get_session(self._session_key(kwargs))
 
@@ -479,9 +484,9 @@ class BrowserTool(Tool):
         if not url:
             return ToolResult(success=False, error="'url' parameter is required for navigate.")
 
-        # Block Google Drive URLs — gws tool should be used instead.
-        if self._is_google_drive_url(url):
-            return ToolResult(success=False, error=self._GDRIVE_BLOCK_MSG)
+        # Block Google Drive URLs — the google_drive tool reads them instead.
+        if self._blocks_drive_url(url):
+            return ToolResult(success=False, error=self._gdrive_block_msg(url))
 
         session = self._get_session(self._session_key(kwargs))
         nav_info = await session.navigate(url)

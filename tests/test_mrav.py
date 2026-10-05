@@ -214,12 +214,12 @@ def test_compact_definition_enum_and_first_sentence():
 
 
 def test_build_toolpack_core_index_and_pinning():
-    defs = [_defn(n) for n in ("read", "shell", "browser", "gws")]
+    defs = [_defn(n) for n in ("read", "shell", "browser", "google_drive")]
     pack = build_toolpack(defs)
     assert set(pack.visible) == {"read", "shell"}  # only registered cores are visible
-    assert pack.index_names == ["browser", "gws"]
+    assert pack.index_names == ["browser", "google_drive"]
     assert "browser —" in pack.index_text
-    assert pack.all_names == {"read", "shell", "browser", "gws"}
+    assert pack.all_names == {"read", "shell", "browser", "google_drive"}
 
     pinned = build_toolpack(defs, pinned=["browser"])
     assert "browser" in pinned.visible

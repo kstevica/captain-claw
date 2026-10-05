@@ -60,7 +60,8 @@ Return **only** a single JSON object — no prose, no markdown fences — of thi
 - **tools** — start from the base set and add the specialized tools the role needs. Base tools:
   `shell, read, write, glob, edit, web_fetch, web_search, personality, playbooks, scripts`.
   Common extras: `browser, pdf_extract, docx_extract, xlsx_extract, pptx_extract, summarize_files,
-  datastore, insights, send_mail, contacts, google_calendar, gws, cron, direct_api, apis`.
+  datastore, insights, send_mail, contacts, google_drive, google_calendar, google_mail, cron,
+  direct_api, apis`.
 - **fleet_instructions** — the heart of each archetype and the reason to be detailed. Write a clear,
   concrete SOP that becomes the spawned agent's system instructions. It MUST include:
   1. The agent's job and scope (specific to the domain in the instructions/documents).

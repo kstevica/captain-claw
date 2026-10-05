@@ -561,7 +561,7 @@ class TestPollersArePerUser:
             return {"ok": True, "content": ""}
 
         monkeypatch.setattr(autonomy, "resolve_config", lambda uid: {"custom_sources": [
-            {"name": "gm", "tool": "gws", "enabled": True, "requires_google": True}]})
+            {"name": "gm", "tool": "google_mail", "enabled": True, "requires_google": True}]})
         monkeypatch.setattr(fd_dispatch, "_strongest_agent", lambda uid: {"owner": uid})
         monkeypatch.setattr(actions, "run_tool_on_agent", run_tool)
         await es._poll_custom_sources(ALICE, time.time(), _FakeStore())
@@ -705,8 +705,8 @@ class TestAuthDisabledDeck:
             assert r.status_code == 403, path  # the agent's tools surface 401/403
             assert "auth is disabled" in r.json()["detail"]
             assert "LOCAL" not in r.text and "csecret" not in r.text
-            # The marker that lets gws keep its own credentials on this
-            # single-tenant deck (every other refusal fails closed).
+            # The machine-readable "auth is off on this single-tenant deck"
+            # marker (the retired gws tool kept its own credentials on it).
             assert r.headers.get(gr.AUTH_OFF_HEADER) == gr.AUTH_OFF_VALUE == "auth-disabled"
 
     async def test_every_route_says_not_available(self, db, agents, monkeypatch):

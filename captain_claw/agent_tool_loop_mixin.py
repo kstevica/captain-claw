@@ -976,10 +976,28 @@ class AgentToolLoopMixin:
                 "import_file", "create_table", "drop_table", "rename_table",
                 "add_column", "rename_column", "drop_column", "change_column_type",
             }
+            # Google actions that send or create something the user sees. A
+            # byte-identical repeat is a second email / event / file, not a
+            # re-read, so these keep the plain limit instead of the stateful
+            # headroom below.
+            _GOOGLE_WRITE_ACTIONS = {
+                "google_mail": {"send", "send_draft", "create_draft"},
+                "google_calendar": {"create_event", "update_event", "delete_event"},
+                "google_drive": {"upload", "create", "update"},
+            }
             _tool_lower = str(tc.name or "").strip().lower()
+            _call_action = (
+                str(arguments.get("action", "")).strip().lower()
+                if isinstance(arguments, dict) else ""
+            )
+            _google_write = _call_action in _GOOGLE_WRITE_ACTIONS.get(_tool_lower, ())
             # Stateful tools that modify data between calls — allow more
             # repeated calls (CRUD patterns) but still catch infinite loops.
-            _STATEFUL_TOOLS = {"typesense", "todo", "contacts", "scripts", "apis", "send_mail", "browser", "gws", "datastore"}
+            _STATEFUL_TOOLS = {
+                "typesense", "todo", "contacts", "scripts", "apis", "send_mail",
+                "browser", "google_drive", "google_calendar", "google_mail",
+                "datastore",
+            }
             # During scale-progress tasks, give extra headroom so the LLM
             # can recover from a failed first attempt or a write-before-read
             # situation without being permanently locked out of a file.
@@ -1010,7 +1028,7 @@ class AgentToolLoopMixin:
             # Stateful tools (index→search, CRUD operations) get a higher
             # threshold — repeated calls with *different* args are normal,
             # but identical args 3+ times is almost certainly a loop.
-            if _tool_lower in _STATEFUL_TOOLS:
+            if _tool_lower in _STATEFUL_TOOLS and not _google_write:
                 _dup_max = max(_dup_max, 3)
             # web_get answers differently on the second call for a URL: the first
             # returns stripped readable text, the repeat returns the raw HTML the
@@ -1037,6 +1055,16 @@ class AgentToolLoopMixin:
                         "to write it again. You are DONE writing. Now respond with a "
                         "brief TEXT summary of what you created (file name, description). "
                         "Do NOT call any more tools."
+                    )
+                elif _google_write:
+                    # A failed call rolls its count back, so the earlier one
+                    # went through — repeating it would do it again.
+                    dup_msg = (
+                        f"DUPLICATE CALL BLOCKED: `{tc.name}` action={_call_action} "
+                        f"already ran with these exact arguments {_dup_count} time(s) "
+                        "this turn and succeeded. Running it again would send or "
+                        "create it a second time. Do NOT repeat it — use the result "
+                        "of the first call and tell the user it is done."
                     )
                 elif _tool_lower in _STATEFUL_TOOLS:
                     # Don't claim "the content has not changed" about a store
@@ -1350,7 +1378,8 @@ class AgentToolLoopMixin:
                         # shell, glob, edit, image_vision — those are
                         # action tools whose output is not "data to embed".
                         _DATA_FETCH_TOOLS = frozenset({
-                            "gws", "read_file", "scrape", "scrape_url",
+                            "google_drive", "google_mail", "google_calendar",
+                            "read_file", "scrape", "scrape_url",
                             "web_fetch", "fetch_url", "read", "curl",
                         })
                         _data_in_context = 0

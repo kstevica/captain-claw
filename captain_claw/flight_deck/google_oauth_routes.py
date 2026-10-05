@@ -58,10 +58,14 @@ _AUTH_OFF_DETAIL = (
     "disabled (FD_AUTH_ENABLED=false). Enable auth to connect Google."
 )
 # Machine-readable twin of _AUTH_OFF_DETAIL: an agent that sees it knows it is
-# on a single-tenant deck and may keep its own Google credentials (gws), as on
-# main — unlike every other refusal, which must fail closed.
+# on a single-tenant deck (auth off), not refused as someone else's agent. Its
+# one consumer was the retired gws tool, which kept its own Google credentials
+# there; the google_* tools fail closed on every refusal, this one included.
 AUTH_OFF_HEADER = "X-FD-Google-Unavailable"
 AUTH_OFF_VALUE = "auth-disabled"
+
+# Agent-facing routes under /fd/google (this router's and gmail_send_routes').
+_AGENT_ROUTE_SUFFIXES = ("/access_token", "/credentials", "/gmail/send")
 
 
 def _require_auth_deck(request: Request) -> None:
@@ -75,7 +79,7 @@ def _require_auth_deck(request: Request) -> None:
     """
     if _fd_auth_enabled():
         return
-    agent_route = request.url.path.rsplit("/", 1)[-1] in ("access_token", "credentials")
+    agent_route = request.url.path.rstrip("/").endswith(_AGENT_ROUTE_SUFFIXES)
     raise HTTPException(
         status_code=403 if agent_route else 503,
         detail=_AUTH_OFF_DETAIL,

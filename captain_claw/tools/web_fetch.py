@@ -4,15 +4,15 @@ import asyncio
 import hashlib
 import os
 import re
-import shutil
 import time
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 import httpx
 
 from captain_claw.config import get_config
+from captain_claw.google_ids import google_drive_can_open, google_drive_redirect
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
@@ -82,31 +82,31 @@ except ImportError:  # pragma: no cover
     _HAS_PLAYWRIGHT = False
     async_playwright = None  # type: ignore[assignment,misc]
 
-# ── Google Drive URL blocking ─────────────────────────────────────────
-
-_GDRIVE_HOSTS = (
-    "docs.google.com", "drive.google.com",
-    "sheets.google.com", "slides.google.com",
-)
-
-
-def _is_google_drive_url(url: str) -> bool:
-    """Return True if *url* points to Google Drive/Docs/Sheets/Slides."""
-    try:
-        host = urlparse(url).hostname or ""
-        return any(host == h or host.endswith("." + h) for h in _GDRIVE_HOSTS)
-    except Exception:
-        return False
+# ── Google Drive URL redirect ─────────────────────────────────────────
+# A Drive/Docs URL naming a file goes through the google_drive tool (the
+# owner's connection, exports, shared drives) instead of an anonymous fetch
+# that lands on a sign-in page — when google_drive can open it: Google
+# connected with a scope that reaches shared links (not drive.file alone).
+# Otherwise the fetch proceeds as before, so public links still work; so do
+# Forms and published (/d/e/) pages, which google_drive cannot read at all.
 
 
-_GDRIVE_FETCH_BLOCK_MSG = (
-    "Cannot fetch Google Drive/Docs URLs via web_fetch (requires authentication). "
-    "Use the gws tool instead:\n"
-    "  - gws(action='docs_read', file_id='...') to read Google Docs content\n"
-    "  - gws(action='drive_download', file_id='...') to download files\n"
-    "  - gws(action='drive_info', file_id='...') for file metadata\n"
-    "The docs_read action returns the full document text inline."
-)
+async def _gdrive_fetch_block(url: str, agent: Any = None) -> str | None:
+    """The redirect message when *url* must go through google_drive, else None."""
+    if not google_drive_can_open(url):
+        return None
+    from captain_claw.tools.google_drive import (
+        agent_offers_google_drive,
+        google_drive_reads_links,
+    )
+
+    if not agent_offers_google_drive(agent) or not await google_drive_reads_links():
+        return None
+    return google_drive_redirect(
+        url,
+        "Google Drive/Docs URLs are read with your Google connection, not web_fetch.",
+        connected=True,
+    )
 
 
 def _make_http_client() -> httpx.AsyncClient:
@@ -355,9 +355,9 @@ class WebFetchTool(Tool):
     ) -> ToolResult:
         """Fetch a web page and extract readable text via BeautifulSoup.
 
-        Google Drive/Docs URLs are blocked when the ``gws`` CLI is
-        available because they require authentication that web_fetch
-        cannot provide.
+        Google Drive/Docs file URLs are redirected to the ``google_drive`` tool
+        while Google is connected — it authenticates as the owner, which
+        web_fetch cannot.
 
         Args:
             url: URL to fetch
@@ -370,9 +370,10 @@ class WebFetchTool(Tool):
         # Hard guard: strip any extract_mode — web_fetch ALWAYS returns text.
         kwargs.pop("extract_mode", None)
 
-        # Block Google Drive URLs when gws is available.
-        if _is_google_drive_url(url) and shutil.which("gws"):
-            return ToolResult(success=False, error=_GDRIVE_FETCH_BLOCK_MSG)
+        # Redirect Google Drive URLs to google_drive while Google is connected.
+        gdrive_block = await _gdrive_fetch_block(url, kwargs.get("_agent"))
+        if gdrive_block:
+            return ToolResult(success=False, error=gdrive_block)
 
         try:
             cfg = get_config()
@@ -501,9 +502,10 @@ class WebGetTool(Tool):
         Returns:
             ToolResult with readable text (first call) or raw HTML (repeat call)
         """
-        # Block Google Drive URLs when gws is available.
-        if _is_google_drive_url(url) and shutil.which("gws"):
-            return ToolResult(success=False, error=_GDRIVE_FETCH_BLOCK_MSG)
+        # Redirect Google Drive URLs to google_drive while Google is connected.
+        gdrive_block = await _gdrive_fetch_block(url, kwargs.get("_agent"))
+        if gdrive_block:
+            return ToolResult(success=False, error=gdrive_block)
 
         url_key = str(url or "").strip()
         raw_allowed = url_key in self._seen_urls
@@ -683,6 +685,16 @@ class WebFetchBatchTool(Tool):
 
         outcomes = {u: _Outcome(u) for u in targets}
 
+        # Drive/Docs URLs go to google_drive while Google is connected — before
+        # either phase, so a forced deep fetch can't route around it.
+        blocked: set[str] = set()
+        for u in targets:
+            gdrive_block = await _gdrive_fetch_block(u, kwargs.get("_agent"))
+            if gdrive_block:
+                outcomes[u].error = gdrive_block
+                blocked.add(u)
+        fetchable = [u for u in targets if u not in blocked]
+
         # ── Phase 1: fast HTTP (skipped when deep is forced) ──
         if not force_deep:
             fast_sem = asyncio.Semaphore(fast_conc)
@@ -690,9 +702,6 @@ class WebFetchBatchTool(Tool):
             async def _fast(u: str) -> None:
                 async with fast_sem:
                     oc = outcomes[u]
-                    if _is_google_drive_url(u) and shutil.which("gws"):
-                        oc.error = _GDRIVE_FETCH_BLOCK_MSG
-                        return
                     try:
                         resp = await self.client.get(u, timeout=fast_timeout)
                         oc.status = resp.status_code
@@ -708,10 +717,10 @@ class WebFetchBatchTool(Tool):
                         oc.error = str(e)
                         oc.needs_deep = True
 
-            await asyncio.gather(*[_fast(u) for u in targets])
+            await asyncio.gather(*[_fast(u) for u in fetchable])
 
         # ── Phase 2: deep (forced, or the thin ones) ──
-        deep_urls = targets if force_deep else [u for u in targets if outcomes[u].needs_deep]
+        deep_urls = fetchable if force_deep else [u for u in fetchable if outcomes[u].needs_deep]
         # "deep unavailable" = Playwright python pkg missing, OR present but its
         # browser binary isn't installed (launch fails). Either way we surface
         # the actionable install signal so the agent can self-heal and retry.

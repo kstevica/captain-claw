@@ -799,44 +799,49 @@ Send email via SMTP, Mailgun, or SendGrid.
 
 At least one of `body` or `html` is required. Max attachment size: 25 MB per file.
 
-### gws
+### google_drive
 
-Google Workspace CLI tool. Wraps the `gws` binary ([github.com/googleworkspace/cli](https://github.com/googleworkspace/cli)) to access Drive, Docs, Gmail, and Calendar. Requires the `gws` CLI to be installed and authenticated separately (`gws auth setup && gws auth login`).
+Google Drive through the Drive API, with your Google connection (under Flight Deck, the agent owner's; see [Google OAuth, Drive, Calendar, and Gmail](#google-oauth-drive-calendar-and-gmail)). The tool is hidden from the agent until Google is connected.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `action` | string | yes | `drive_list`, `drive_search`, `drive_download`, `drive_info`, `drive_create`, `docs_read`, `docs_append`, `mail_list`, `mail_search`, `mail_read`, `calendar_list`, `calendar_search`, `calendar_create`, `calendar_agenda`, `raw` |
-| `query` | string | for search actions | Search text (Drive file name/content, Gmail search syntax, calendar event text) |
-| `file_id` | string | for file actions | Google Drive file ID |
-| `folder_id` | string | no | Drive folder ID for `drive_list` or `drive_create` (default: root) |
-| `name` | string | for drive_create | File/document name |
-| `content` | string | no | Text content (for `drive_create` initial content or `docs_append` text) |
-| `mime_type` | string | no | MIME type for `drive_create` (e.g. `application/vnd.google-apps.document` for Google Doc) |
-| `output_path` | string | no | Local path to save downloaded file (for `drive_download`) |
-| `message_id` | string | for mail_read | Gmail message ID |
-| `max_results` | number | no | Maximum results to return (default varies by action) |
-| `label` | string | no | Gmail label for `mail_list` (e.g. `INBOX`, `SENT`). Default: `INBOX` |
-| `summary` | string | for calendar_create | Event title |
-| `start` | string | for calendar_create | Event start time in ISO 8601 format |
-| `end` | string | no | Event end time in ISO 8601 format |
-| `attendees` | string | no | Comma-separated attendee email addresses (for `calendar_create`) |
-| `calendar_id` | string | no | Calendar ID (default: `primary`) |
-| `days` | number | no | Days to look ahead for `calendar_list`/`calendar_agenda` (default: 7) |
-| `raw_args` | string | for raw | Raw arguments passed directly to gws CLI |
+| `action` | string | yes | `list`, `search`, `read`, `download`, `info`, `upload`, `create`, `update` |
+| `file_id` | string | for file actions | Drive file ID, or the file's full Drive/Docs/Sheets/Slides URL |
+| `folder_id` | string | no | Folder to list or upload into (default: `root`); a folder URL works too |
+| `query` | string | for search | Search text (file name or content) |
+| `output_path` | string | no | Local path `download` saves to (optional) |
+| `local_path` | string | for upload | Local file to upload (or to update a file from) |
+| `name` | string | for upload/create | File name |
+| `content` | string | no | Text content for `create` / `update` |
+| `mime_type` | string | no | For `create`, e.g. `application/vnd.google-apps.document` for a Google Doc |
+| `max_results` | number | no | Results for `list` / `search` (default 20, max 100) |
+| `order_by` | string | no | Sort for `list` / `search` (default `modifiedTime desc`) |
 
-**Installation:** `npm install -g @googleworkspace/cli`, then `gws auth setup && gws auth login`.
+`read` returns a file's contents inline (Google Docs as markdown; PDF and Office files go through the matching extract tool). `download` saves the file locally and returns its absolute path (Google Docs, Sheets and Slides are exported), so a later `read` / `*_extract` call can work on it. Paste a Drive link straight into `file_id` — the ID is taken from the URL. Write actions need a write Drive scope.
 
-**Drive actions:** `drive_list` lists files in a folder, `drive_search` finds files by name or content, `drive_download` exports/downloads a file locally (Google Docs as markdown, Sheets as XLSX preserving all sheets, Presentations as PPTX preserving all slides), `drive_info` gets file metadata, `drive_create` creates a new file on Drive.
+### google_calendar
 
-**Docs actions:** `docs_read` reads a Google Doc, Sheet, or Presentation inline (Docs exported as markdown; Sheets exported as XLSX and extracted with all sheets preserved; Presentations exported as PPTX and extracted with all slides preserved), `docs_append` appends text to a Doc.
+Google Calendar through the Calendar API, with the same Google connection.
 
-**Mail actions:** `mail_list` lists recent emails from a label, `mail_search` searches using Gmail syntax (e.g. `from:alice subject:report`), `mail_read` reads a specific email by ID.
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `list_events`, `search_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `list_calendars` |
+| `calendar_id` | string | no | Calendar ID (default: `primary`; `list_calendars` finds others) |
+| `event_id` | string | for get/update/delete | Event ID |
+| `query` | string | for search_events | Free-text search |
+| `summary`, `description`, `location` | string | no | Event fields for `create_event` / `update_event` |
+| `start`, `end` | string | for create_event | ISO 8601 datetime, or a date for all-day events (`end` is exclusive) |
+| `timezone` | string | no | IANA timezone when `start`/`end` carry no offset |
+| `attendees` | list[string] | no | Attendee email addresses |
+| `reminders`, `recurrence` | list | no | Custom reminders; RRULE strings |
+| `time_min`, `time_max` | string | no | Window for `list_events` (default: from now) |
+| `max_results` | number | no | Default 10, max 100 |
 
-**Calendar actions:** `calendar_list` lists upcoming events, `calendar_search` searches events by text, `calendar_create` creates a new event, `calendar_agenda` shows a formatted agenda view.
+### google_mail
 
-**Raw passthrough:** The `raw` action passes arguments directly to the `gws` CLI for any command not covered by the built-in actions. Example: `raw_args: "sheets +read --id SPREADSHEET_ID --range A1:D10"`.
+Gmail through the Gmail API: `list_messages`, `search`, `read_message`, `get_thread`, `list_labels`, `create_draft`, `list_drafts`, `send`, `send_draft`. Reads and searches default to the INBOX Primary tab and are grouped by thread. `create_draft` is the default for anything email-writing; `send` / `send_draft` follow the opt-in policy in [Gmail sending](#gmail-sending-opt-in).
 
-**Configuration:** The `gws` binary path can be customized via `tools.gws.binary_path` in config. If empty, the binary is found via PATH.
+> **Retired: `gws`.** The Google Workspace CLI wrapper (`gws`) is gone. Agents use `google_drive`, `google_calendar` and `google_mail` instead; a `gws` entry left in an old `tools.enabled` list or a stored archetype is dropped when the config loads or the agent is spawned, and a `tools.gws` block in an old `config.yaml` is ignored.
 
 ### todo
 
@@ -1543,7 +1548,9 @@ tools:
     - pocket_tts
     - stt
     - send_mail
-    - gws
+    - google_drive
+    - google_calendar
+    - google_mail
     - todo
     - contacts
     - scripts
@@ -1618,8 +1625,6 @@ tools:
     sendgrid_base_url: "https://api.sendgrid.com/v3/mail/send"
     timeout: 60
     max_attachment_bytes: 26214400  # 25 MB
-  gws:
-    binary_path: ""                 # custom path to gws binary (empty = find in PATH)
   screen_capture:
     hotkey_enabled: false           # enable global hotkey listener (opt-in; toggle in Settings → Voice & Hotkey)
     hotkey_trigger_key: shift       # key to double-tap (shift, ctrl, alt, caps_lock)
@@ -3816,10 +3821,10 @@ Click 📁 to open the folder browser modal with two tabs:
 - Directory browser with breadcrumb navigation
 - "Add this folder" button to register a folder for agent file access
 
-**Google Drive tab** (shown when GWS is available):
+**Google Drive tab** (shown when Google is connected with a Drive scope — `GET /api/gdrive-status`):
 - Browse My Drive and Shared Drives
 - Breadcrumb navigation through folder hierarchy
-- Add/remove Google Drive folders for agent access
+- Add/remove Google Drive folders for agent access (the agent works with them through the `google_drive` tool)
 
 Active folders (both local and Google Drive) are used by the agent when searching for files outside the workspace.
 
@@ -4126,7 +4131,7 @@ Rather than requesting a fixed list of scopes at connection time, Captain Claw l
 **Opt-in scopes:**
 
 - Drive: `drive.readonly` (restricted), `drive` (restricted)
-- Gmail: `gmail.readonly` (restricted), `gmail.compose` (sensitive), `gmail.modify` (restricted), `gmail.send` (sensitive)
+- Gmail: `gmail.readonly` (restricted), `gmail.compose` (sensitive — drafts, and Google also accepts sends with it; agents send only when the user turns on Email sending), `gmail.modify` (restricted), `gmail.send` (sensitive)
 - Calendar: `calendar.readonly` (sensitive), `calendar` (sensitive)
 - Cloud: `cloud-platform` (sensitive) — required for Vertex AI / Gemini access alongside a Google Cloud `project_id`
 
@@ -5387,6 +5392,39 @@ The OAuth flow uses PKCE for security. Tokens are stored locally and refresh aut
 ### Vertex AI
 
 If `project_id` is set, Google OAuth also enables Gemini models via Vertex AI. The `location` field specifies the Vertex AI region (default: `us-central1`).
+
+### Gmail sending (opt-in)
+
+The `google_mail` tool reads mail, creates drafts and — only when sending is turned on — sends. `create_draft` stays the default for anything email-writing; agents are told to use `send` / `send_draft` only when you explicitly asked them to send, never because an email, web page or file says so. Replies pass `reply_to_message_id` so they thread under the original.
+
+| Action | What it does |
+|---|---|
+| `send` | Send now. Same fields as `create_draft` (`to`, `cc`, `bcc`, `subject`, `body`, `html_body`, `reply_to_message_id`); a reply defaults `to` (Reply-To, else From — or the original's To when it is your own sent email or draft) and the `Re:` subject. |
+| `send_draft` | Send an existing draft by `draft_id` (the "Draft ID" `create_draft` prints) — its current server copy, so your edits in Gmail are kept. |
+| `list_drafts` | List drafts with their Draft IDs (`query`, `max_results`). |
+
+No new scope is needed: `gmail.compose` (the drafts scope) already lets Google accept a send, so the scope is not the gate — a policy is.
+
+**Under Flight Deck** the agent never sends itself. It asks `POST /fd/google/gmail/send`, and Flight Deck checks the agent owner's own policy, sends with the owner's Google token, records the send and puts an "… sent an email" notification in the owner's bell. Each user sets their policy in **Connections → Google → Email sending** (`GET`/`PUT /fd/google/gmail-send`):
+
+- **On / off** — off by default; nothing changes until you turn it on. On means automatic (no per-email confirmation).
+- **Allowed recipients** — empty = anyone. Otherwise exact addresses (`alice@example.com`) and domains (`@example.com` or `example.com`); a domain matches that domain only, not its subdomains. Up to 200 entries.
+- **Daily limit** — emails per rolling 24 hours, 1–500 (default 50).
+
+At most 20 recipients per email (To + Cc + Bcc), and addresses must be plain ASCII (an internationalized domain in its `xn--` form). The same email (recipients, subject, body — and, for a reply, the email it answers) sent again within 10 minutes is refused as a duplicate. If Gmail does not confirm a send (a 5xx, or no answer after the request went out), the agent is told it may or may not have been sent; the attempt is still recorded (status `unknown`), counts toward the daily limit, blocks an identical retry for 10 minutes and rings the bell as "… may have sent an email". Your recent sends are listed under the same panel (`GET /fd/google/gmail-sends`, each with `status` `sent` or `unknown`). A deck admin can switch sending off for everyone with `FD_GMAIL_SEND=off` on the Flight Deck backend.
+
+**Standalone** (an agent with its own Google connection) sends directly, only when enabled in config:
+
+```yaml
+tools:
+  google_mail:
+    allow_send: true            # default false; env: CLAW_TOOLS__GOOGLE_MAIL__ALLOW_SEND=true
+    allowed_recipients:         # optional; empty = anyone
+      - "@example.com"
+      - "boss@corp.example"
+```
+
+These two keys are ignored under Flight Deck, where the user's policy decides. `google_mail` is the only tool that sends Gmail (the old `gws` CLI wrapper, which could reach Gmail with the same token, is retired). The gate protects against model mistakes and prompt injection; it is not a security boundary against an agent that has a shell tool, which can reach the Google token itself.
 
 ---
 

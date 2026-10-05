@@ -152,9 +152,28 @@ WHATSAPP_ALLOWED_WAIDS=<your phone, no '+', e.g. 385976707736>
 WHATSAPP_DEFAULT_CHANNEL=skchannel
 WHATSAPP_DEFAULT_AGENT_SLUG=<from FD UI: the cyan pill on the agent card>
 WHATSAPP_DEFAULT_AGENT_AUTH=<from agent's config.yaml web.auth_token>
+
+# Optional — emoji reactions on your messages (on by default)
+# WHATSAPP_REACTIONS=off           # off / 0 / false / no disables them
+# WHATSAPP_REACTION_TIMEOUT=8      # seconds for the classifier call, 1..30
 ```
 
 Multiple WAIDs: comma-separate. Leading `+` is tolerated/stripped.
+
+**Reactions**: before your message reaches the agent, the bridge makes one
+short side call to that agent's own LLM (`POST /api/llm/complete`: the
+agent's provider, model and key, with no agent loop) and asks for one emoji
+from a fixed list, or none. When one fits (thanks → 🙏, good news → 🎉, a
+joke → 😂, …), it lands as a WhatsApp reaction on your message. Most
+messages get none. The call runs in parallel, so it never delays the reply,
+and any failure simply means no reaction. The reaction is posted only once
+your message has actually reached the agent, so an "Agent not ready" or
+"Send failed" never comes with an emoji. Only a terse answer counts: a reply
+cut off at the token budget, or longer than 40 characters (typically a
+thinking model's recovered reasoning), means no reaction. Slash commands,
+flows and photos never get one. On a single-slot local model (e.g. Ollama with
+`OLLAMA_NUM_PARALLEL=1`) the side call queues with the agent's own turn, so
+consider `WHATSAPP_REACTIONS=off` there.
 
 **Gotcha**: Do **not** also set `WHATSAPP_DEFAULT_AGENT_PORT` — slug-based
 binding survives port reassignment and wins by priority. A stale port
@@ -284,7 +303,8 @@ Channel rebind survives until FD restarts (in-memory state).
 
 1. HMAC-verify the request body against `WHATSAPP_APP_SECRET`. Reject 401 if mismatch.
 2. Parse the payload; extract the message and the sender WAID.
-3. Drop if WAID isn't in `WHATSAPP_ALLOWED_WAIDS` (silent).
+3. Drop if WAID isn't in `WHATSAPP_ALLOWED_WAIDS` (silent). A `reaction`
+   message (you reacting to one of the bot's messages) also stops here.
 4. Fire `_mark_read_and_typing()` — best-effort: blue tick + "typing…".
 5. If text starts with `/c`, handle the slash command and stop.
 6. Resolve target channel (default or per-PSID rebound).
@@ -294,9 +314,13 @@ Channel rebind survives until FD restarts (in-memory state).
 8. If photo: download via 2-step Cloud API media fetch, run
    `face_index.recognize()` (broadcasts person card to the channel), then
    forward photo to the agent's `/api/image/upload`.
-9. Broadcast a `type: "user"` event to the channel bus (glasses HUD sees
-   it instantly).
-10. Send to the agent over WS as a `chat` message, with the
+9. Text or voice-note transcript that no command or flow claimed: with
+   `WHATSAPP_REACTIONS` on (the default), start the background emoji
+   classifier (`_maybe_react`). It is not awaited; it posts its emoji only
+   after step 11's send succeeds.
+10. Broadcast a `type: "user"` event to the channel bus (glasses HUD sees
+    it instantly).
+11. Send to the agent over WS as a `chat` message, with the
     glasses-rendering system prompt prepended on the first message of
     this binding.
 

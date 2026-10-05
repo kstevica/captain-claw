@@ -414,6 +414,28 @@ class FlightDeckDB:
             );
             CREATE INDEX IF NOT EXISTS idx_notifications_user
                 ON notifications(user_id, read, created_at);
+            -- Gmail sends made through Flight Deck (POST /fd/google/gmail/send):
+            -- the audit trail the owner sees, and what the daily limit and the
+            -- duplicate check count. One row per message Gmail accepted
+            -- (status 'sent') or may have sent: the send call got a 5xx or no
+            -- answer (status 'unknown').
+            CREATE TABLE IF NOT EXISTS gmail_sends (
+                id               TEXT PRIMARY KEY,
+                owner_id         TEXT NOT NULL,
+                agent            TEXT NOT NULL DEFAULT '',
+                to_addrs         TEXT NOT NULL DEFAULT '',
+                cc_addrs         TEXT NOT NULL DEFAULT '',
+                bcc_addrs        TEXT NOT NULL DEFAULT '',
+                subject          TEXT NOT NULL DEFAULT '',
+                gmail_message_id TEXT NOT NULL DEFAULT '',
+                thread_id        TEXT NOT NULL DEFAULT '',
+                draft_id         TEXT NOT NULL DEFAULT '',
+                content_hash     TEXT NOT NULL DEFAULT '',
+                status           TEXT NOT NULL DEFAULT 'sent',
+                created_at       TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_gmail_sends_owner
+                ON gmail_sends(owner_id, created_at);
             CREATE TABLE IF NOT EXISTS personal_access_tokens (
                 id           TEXT PRIMARY KEY,
                 user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -470,6 +492,7 @@ class FlightDeckDB:
             ("basna_sessions", "files", "TEXT NOT NULL DEFAULT '[]'"),
             ("basna_sessions", "analysis", "TEXT NOT NULL DEFAULT '{}'"),
             ("basna_sessions", "title", "TEXT NOT NULL DEFAULT ''"),
+            ("gmail_sends", "status", "TEXT NOT NULL DEFAULT 'sent'"),
         ]:
             try:
                 await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
@@ -2212,6 +2235,66 @@ class FlightDeckDB:
         ) as cur:
             await self._db.commit()
             return cur.rowcount or 0
+
+    # ── Gmail sends (audit for /fd/google/gmail/send) ─────────────────
+
+    async def add_gmail_send(
+        self, owner_id: str, agent: str = "", to_addrs: str = "",
+        cc_addrs: str = "", bcc_addrs: str = "", subject: str = "",
+        gmail_message_id: str = "", thread_id: str = "", draft_id: str = "",
+        content_hash: str = "", status: str = "sent",
+    ) -> str:
+        """Record one email Gmail accepted (`status` 'sent') — or may have
+        sent ('unknown') — for `owner_id`; returns its id."""
+        assert self._db is not None
+        sid = _uuid()
+        await self._db.execute(
+            "INSERT INTO gmail_sends (id, owner_id, agent, to_addrs, cc_addrs,"
+            " bcc_addrs, subject, gmail_message_id, thread_id, draft_id,"
+            " content_hash, status, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (sid, owner_id, agent, to_addrs, cc_addrs, bcc_addrs, subject,
+             gmail_message_id, thread_id, draft_id, content_hash, status, _utcnow()),
+        )
+        await self._db.commit()
+        return sid
+
+    async def count_gmail_sends_since(self, owner_id: str, since_iso: str) -> int:
+        """How many emails `owner_id` sent (or may have sent) at or after
+        `since_iso` (ISO UTC)."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT COUNT(*) FROM gmail_sends WHERE owner_id = ? AND created_at >= ?",
+            (owner_id, since_iso),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+    async def list_gmail_sends(self, owner_id: str, limit: int = 20) -> list[dict]:
+        """`owner_id`'s sends, newest first."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM gmail_sends WHERE owner_id = ?"
+            " ORDER BY created_at DESC LIMIT ?",
+            (owner_id, limit),
+        )
+        return [dict(r) for r in rows]
+
+    async def find_gmail_send_by_hash(
+        self, owner_id: str, content_hash: str, since_iso: str,
+    ) -> dict | None:
+        """The newest send by `owner_id` with this content hash at or after
+        `since_iso`, else None — the duplicate check."""
+        assert self._db is not None
+        if not content_hash:
+            return None
+        async with self._db.execute(
+            "SELECT * FROM gmail_sends WHERE owner_id = ? AND content_hash = ?"
+            " AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
+            (owner_id, content_hash, since_iso),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
     async def list_shares_for_resource(
         self, resource_type: str, resource_id: str, owner_id: str,

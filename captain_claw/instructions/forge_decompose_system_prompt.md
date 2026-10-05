@@ -104,10 +104,9 @@ Agents have access to these Captain Claw tools. Select the most relevant ones pe
 
 ### Communication & Integration
 - `send_mail` — Send emails via SMTP/Mailgun/SendGrid
-- `google_drive` — List, search, read, write Google Drive files
+- `google_drive` — Google Drive/Docs/Sheets/Slides: list, search, read, info, download, upload, create, update
 - `google_calendar` — Google Calendar operations (list, create, update, delete events)
-- `google_mail` — Read Gmail messages (list, search, threads)
-- `gws` — Google Workspace CLI (Drive, Docs, Calendar, Gmail with auth)
+- `google_mail` — Gmail: read (list, search, threads), drafts; send only when the user has enabled sending
 
 ### Media & Vision
 - `image_gen` — Generate images from text prompts
@@ -139,7 +138,7 @@ Agents have access to these Captain Claw tools. Select the most relevant ones pe
 - **Content/Writing agents**: read, write, edit, web_fetch, image_gen, send_mail
 - **Data agents**: shell, read, write, glob, xlsx_extract, datastore, direct_api, apis
 - **Coordination agents**: read, write, todo, contacts, send_mail, google_calendar, insights, playbooks
-- **Communication agents**: send_mail, google_mail, google_calendar, gws, contacts
+- **Communication agents**: send_mail, google_mail, google_calendar, google_drive, contacts
 - **Automation agents**: shell, scripts, cron, apis, direct_api, playbooks
 
 All agents should have at minimum: `shell`, `read`, `write`, `glob`, `edit`, `web_fetch`, `web_search`, `personality`, `playbooks`, `scripts`.

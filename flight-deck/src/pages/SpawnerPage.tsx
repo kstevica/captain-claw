@@ -104,7 +104,7 @@ const ALL_TOOLS = [
   'todo', 'contacts', 'scripts', 'apis', 'playbooks',
   'typesense', 'datastore', 'personality', 'insights',
   'screen_capture', 'desktop_action', 'direct_api',
-  'cron', 'twitter', 'summarize_files', 'termux', 'pinchtab', 'gws',
+  'cron', 'twitter', 'summarize_files', 'termux', 'pinchtab',
   'botport',
 ]
 

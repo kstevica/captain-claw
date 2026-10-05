@@ -12,7 +12,7 @@ FD's own records, never from a request body or an unrelated agent:
   web_auth pinning.
 * ``POST /fd/spawn-process`` end to end (Popen faked): the audited forgery,
   web_auth collisions, and the child env (owner + FD_URL pinned to THIS deck,
-  FD-only secrets and ambient gws credentials dropped).
+  FD-only secrets dropped).
 * Deck scoping: Docker labels are host-global, so every label-based identity /
   ownership lookup ignores containers another deck on the host spawned
   (``_resolve_agent_identity_by_auth`` and friends; Docker faked).

@@ -18,7 +18,7 @@ Rules:
 - Requirements: verifiable by critic. For list tasks, require all members covered.
 - IDs: short, snake_case, stable.
 - prefetch_urls: only user-mentioned or strictly necessary URLs. Never memory-context URLs. Never Google Drive/Calendar/Gmail URLs.
-- Google Workspace ops (Drive, Docs, Calendar, Gmail) → plan gws tool tasks, not web_fetch.
+- Google ops → plan google_drive (Drive/Docs/Sheets/Slides), google_calendar, google_mail tasks, not web_fetch.
 
 Context-aware:
 - Check conversation history. If user references existing data, use it — don't re-research.

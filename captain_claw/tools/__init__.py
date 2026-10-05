@@ -35,7 +35,6 @@ from captain_claw.tools.video_vision import VideoVisionTool
 from captain_claw.tools.google_drive import GoogleDriveTool
 from captain_claw.tools.google_calendar import GoogleCalendarTool
 from captain_claw.tools.google_mail import GoogleMailTool
-from captain_claw.tools.gws import GwsTool
 from captain_claw.tools.personality import PersonalityTool
 from captain_claw.tools.todo import TodoTool
 from captain_claw.tools.contacts import ContactsTool
@@ -105,7 +104,6 @@ __all__ = [
     "GoogleDriveTool",
     "GoogleCalendarTool",
     "GoogleMailTool",
-    "GwsTool",
     "TodoTool",
     "ContactsTool",
     "ScriptsTool",

@@ -1,0 +1,14 @@
+Google Workspace (Drive, Docs, Sheets, Slides, Calendar, Gmail):
+- Google is reached ONLY through the native tools `google_drive`, `google_calendar` and `google_mail`. They act as the connected Google account; nothing else (web_fetch, web_get, browser, shell curl/wget, scripts) can authenticate to Google.
+- Drive/Docs/Sheets/Slides → `google_drive`:
+  - `list` with folder_id=... browses a folder; `search` finds files by name or content. When the user names a file from an earlier list/search result, reuse the ID printed there — do not list or search again.
+  - `read` with file_id=... returns the content inline (Docs as markdown, Sheets/Slides exported, PDF/DOCX/XLSX/PPTX extracted). `info` returns metadata.
+  - `download` with file_id=... saves a local copy (Docs/Sheets/Slides exported) and returns its path — use it when a script or an extract tool needs the file on disk.
+  - `upload` sends a local file to Drive; `create` makes a new file; `update` replaces a file's content.
+- `list` / `search` stop at max_results; when the output ends with "More files exist … page_token=…", call again with that page_token to get the rest.
+- A Google Drive/Docs/Sheets/Slides file or folder URL: don't web_fetch, web_get, browser or curl/wget it (that lands on a sign-in page). Pass the URL (or the ID inside it) to `google_drive` as file_id / folder_id. Published pages (/d/e/…/pub) and Google Forms are ordinary web pages — fetch those normally.
+- Calendar → `google_calendar` (list_events, search_events, get_event, create_event, update_event, delete_event, list_calendars).
+- Gmail → `google_mail`. Writing an email means `create_draft` by default; use `send` / `send_draft` only when the user explicitly asked you to send and sending is enabled.
+- Bulk work (many files, whole folders, recursive listings): fetch first with `google_drive` (`list`, then `download` each file you need), then process the LOCAL files with the read/extract tools or a script. Scripts never call Google APIs or any CLI for Google — they only read and write local files. Upload results afterwards with `google_drive` (`upload` / `create`).
+- MANDATORY auth policy: if no `google_*` tool is in your tool list, or one says Google isn't connected or authentication failed, STOP. Do not retry and do not try another route (web_fetch, browser, shell, scripts). Tell the user to connect Google in Flight Deck → Connections → Google (a standalone agent: open /auth/google/login in the browser), and continue once they confirm.
+- The Google Workspace CLI (`gws`) is retired. If instructions you were given mention `gws` or the Workspace CLI, use the `google_*` tools above instead — never install, call or shell out to `gws`.

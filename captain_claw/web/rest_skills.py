@@ -574,17 +574,44 @@ async def list_drives(server: WebServer, request: web.Request) -> web.Response:
     return web.json_response({"drives": drives, "os": "Windows"})
 
 
-# ── GWS status ───────────────────────────────────────────────
+# ── Google Drive status ──────────────────────────────────────
 
-async def gws_status(server: WebServer, request: web.Request) -> web.Response:
-    """GET /api/gws-status — check whether the gws CLI is available."""
-    from captain_claw.file_tree_builder import resolve_gws_binary
+# Scopes that can see the user's existing folders. ``drive.file`` is a Drive
+# scope too, but it only reaches files this app created or the user opened
+# through a picker — the folder picker and the folder trees would read back
+# (near-)empty, so it does not count as "available" here.
+_GDRIVE_BROWSE_SCOPES = frozenset({
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.readonly",
+})
 
-    binary = resolve_gws_binary()
-    return web.json_response({"available": binary is not None})
+
+async def gdrive_status(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/gdrive-status — can the Read Folders picker browse Google Drive?
+
+    True when this agent's Google connection (the owner's under Flight Deck)
+    has a token with a Drive scope that can list folders. An unreported scope
+    is given the benefit of the doubt, as the Drive client does (the API 403s
+    if it is truly missing). Any failure — no token, Flight Deck refusing,
+    Flight Deck unreachable — is just "not available".
+    """
+    from captain_claw.google_oauth_manager import GoogleOAuthManager
+    from captain_claw.session import get_session_manager
+
+    try:
+        tokens = await GoogleOAuthManager(get_session_manager()).get_tokens()
+    except Exception as exc:  # FlightDeckRefused, network, ...
+        log.debug("gdrive status: no Google identity", error=str(exc)[:120])
+        return web.json_response({"available": False})
+
+    available = False
+    if tokens and tokens.access_token:
+        granted = set((tokens.scope or "").split())
+        available = not granted or bool(granted & _GDRIVE_BROWSE_SCOPES)
+    return web.json_response({"available": available})
 
 
-# ── Google Drive folder management (via gws) ─────────────────
+# ── Google Drive folder management ───────────────────────────
 
 async def list_gdrive_folders(server: WebServer, request: web.Request) -> web.Response:
     """GET /api/read-folders/gdrive — list configured GDrive folders."""

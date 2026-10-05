@@ -74,7 +74,7 @@ Each forged agent receives:
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 33 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, STT, image gen/OCR/vision, screen capture + voice commands, desktop automation, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Flight Deck fleet discovery, Termux (Android) |
+| 33 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, STT, image gen/OCR/vision, screen capture + voice commands, desktop automation, Google Drive / Calendar / Gmail, todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Flight Deck fleet discovery, Termux (Android) |
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Self-reflection | Periodic self-assessment — reviews recent interactions, memory, and tasks to generate improvement directives injected into the system prompt |
 | Insights | Persistent knowledge base auto-extracted from conversations — facts, contacts, decisions, deadlines — with FTS search, dedup, and context injection |
@@ -312,7 +312,9 @@ Captain Claw ships with 33 built-in tools. The agent picks the right tool for ea
 | `pocket_tts` | Generate speech audio (MP3) locally with 8 built-in voices |
 | `stt` | Speech-to-text transcription (Soniox realtime, OpenAI Whisper, Gemini) |
 | `send_mail` | Send email via SMTP, Mailgun, or SendGrid |
-| `gws` | Google Workspace CLI — Drive, Docs, Sheets, Slides, Gmail (read), and Calendar via the `gws` binary |
+| `google_drive` | Google Drive — list, search, read, download, upload, create and update files (Docs/Sheets/Slides exported); accepts Drive URLs |
+| `google_calendar` | Google Calendar — list, search, create, update and delete events |
+| `google_mail` | Gmail — read, search, threads, drafts, and opt-in sending |
 | `todo` | Persistent cross-session to-do list with auto-capture |
 | `contacts` | Persistent cross-session address book with auto-capture |
 | `scripts` | Persistent cross-session script/file memory with auto-capture |
@@ -365,7 +367,8 @@ tools:
   enabled: ["shell", "read", "write", "glob", "web_fetch", "web_search",
             "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
             "image_gen", "image_ocr", "image_vision",
-            "pocket_tts", "stt", "send_mail", "gws", "todo", "contacts",
+            "pocket_tts", "stt", "send_mail", "google_drive", "google_calendar",
+            "google_mail", "todo", "contacts",
             "scripts", "apis", "datastore", "playbooks", "personality",
             "botport", "termux", "screen_capture", "desktop_action"]
 
@@ -418,7 +421,7 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[OpenAI-compatible API](USAGE.md#openai-compatible-api-proxy)** — `POST /v1/chat/completions` endpoint proxied through the Captain Claw agent pool. Streaming supported.
 
-- **[Google Workspace CLI (gws)](USAGE.md#gws)** — Access Google Drive, Docs, Sheets, Slides, Gmail (read), and Calendar through the `gws` CLI binary. Search and download Drive files, read Google Docs/Sheets/Slides inline (Sheets exported as XLSX with all sheets, Presentations as PPTX with all slides), create Google Docs, list and search emails, view calendar agenda and create events. The scale loop automatically processes Google Drive file lists without manual file-ID handling. Supports a `raw` passthrough mode for any `gws` command. Requires separate `gws` CLI installation and authentication.
+- **[Google Drive, Calendar and Gmail](USAGE.md#google_drive)** — The `google_drive`, `google_calendar` and `google_mail` tools call the Google APIs directly with your Google connection (under Flight Deck, the agent owner's). Search, read and download Drive files (Google Docs/Sheets/Slides exported; a Drive URL works wherever a file ID does), create and update files, list and create calendar events, read and search Gmail, write drafts, and send only when sending is turned on. The scale loop processes `google_drive` file lists without manual file-ID handling. The old `gws` CLI wrapper is retired: a `gws` entry in an old config is ignored.
 
 - **[Datastore](USAGE.md#datastore)** — SQLite-backed relational data tables managed entirely by the agent. 19 tool actions cover schema management, CRUD operations, raw SELECT queries, CSV/XLSX import and export, and a four-level protection system (table, column, row, cell). Includes a [web dashboard](USAGE.md#datastore-dashboard) for browsing tables, editing rows, running SQL, uploading files, and exporting tables as CSV/XLSX/JSON.
 

@@ -186,15 +186,15 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
      frozenset({"image_gen", "image_ocr", "image_vision", "screen_capture"})),
     # Email
     (_re.compile(r"\bemail\b|\bmail\b|\bgmail\b|\bdraft\b|\bsend\s+(?:a\s+)?message\b", _re.I),
-     frozenset({"send_mail", "google_mail", "gws"})),
+     frozenset({"send_mail", "google_mail"})),
     # Calendar
     (_re.compile(r"\bcalendar\b|\bschedule\b|\bmeeting\b|\bagenda\b|\bevent\b", _re.I),
-     frozenset({"google_calendar", "gws"})),
+     frozenset({"google_calendar"})),
     # NOTE: cron is intentionally NOT matched here — it lives in _ECO_CORE_TOOLS
     # so scheduling works in any language, not just the English cues above.
     # Google Drive
     (_re.compile(r"\bdrive\b|\bgoogle\s+d(oc|rive)\b|\bshared\s+folder\b", _re.I),
-     frozenset({"google_drive", "gws"})),
+     frozenset({"google_drive"})),
     # Data & database
     (_re.compile(r"\bdatastore\b|\bdatabase\b|\btable\b|\bsql\b|\binsert\b|\bquery\b", _re.I),
      frozenset({"datastore", "direct_api"})),
@@ -1045,22 +1045,23 @@ class AgentOrchestrationMixin:
                 "  Step 3: Report results from stdout.\n\n"
                 "FORBIDDEN (will cause errors):\n"
                 "- shell() for anything other than python3 <script>\n"
-                "- Any interactive commands (mkdir, cat, gws, curl, ls, "
+                "- Any interactive commands (mkdir, cat, curl, ls, "
                 "grep, python3 -c)\n"
                 "- Reading or downloading content into the conversation\n"
                 "- Multiple shell calls before writing a script\n\n"
                 "The script must contain ALL logic: data fetching, "
                 "processing, file I/O, API calls. Nothing happens outside "
                 "the script.\n\n"
-                "GOOGLE SERVICES (inside the script only):\n"
-                "Use `gws` CLI via subprocess.run(). It is pre-installed "
-                "and authenticated. Example: "
-                "subprocess.run(['gws', 'drive_list', '--folder-id', "
-                "'...'], capture_output=True, text=True). "
-                "Actions: drive_list, drive_search, drive_download, "
-                "drive_info, drive_create, docs_read, docs_append, "
-                "mail_list, mail_search, mail_read, calendar_list, "
-                "calendar_search, calendar_create, calendar_agenda, raw.\n"
+                "GOOGLE DATA (Drive/Docs/Sheets/Slides, Gmail, Calendar):\n"
+                "Scripts never call Google APIs or any gws CLI — they have "
+                "no Google credentials. Fetch Google data BEFORE Step 1 "
+                "with the native tools — google_drive (action='download' "
+                "saves a local file and returns its path; action='list' "
+                "gives a folder's file IDs), google_mail, google_calendar "
+                "— and have the script read those local files. To put "
+                "results on Drive, upload them AFTER Step 2 with "
+                "google_drive (action='upload'). These are the only tool "
+                "calls allowed outside the write → shell sequence.\n"
                 "==============================================\n"
             )
             if _credentials_block:
@@ -1655,7 +1656,13 @@ class AgentOrchestrationMixin:
             # Instruction alone is insufficient (Haiku ignores it).
             # Keep only tools needed for writing & running a script.
             if _force_script and tool_defs:
-                _SCRIPT_MODE_TOOLS = {"shell", "write", "read", "edit", "glob"}
+                # The google_* tools fetch Google data before the script and
+                # upload after it (scripts get no Google credentials); the
+                # registry already hides them while Google isn't connected.
+                _SCRIPT_MODE_TOOLS = {
+                    "shell", "write", "read", "edit", "glob",
+                    "google_drive", "google_calendar", "google_mail",
+                }
                 _before = len(tool_defs)
                 tool_defs = [
                     td for td in tool_defs
@@ -2697,7 +2704,9 @@ class AgentOrchestrationMixin:
                     _nudge_msg = (
                         "STOP. You have the google_mail tool available with create_draft action. "
                         "Do NOT output email drafts as text. Call google_mail with action=create_draft "
-                        "for EACH recipient right now. Use the to, subject, and body parameters."
+                        "for EACH recipient right now. Use the to, subject, and body parameters. "
+                        "(Use action=send instead only if the user explicitly asked you to send "
+                        "and sending is enabled; otherwise always create drafts.)"
                     )
                 if _nudge_msg:
                     log.warning("Tool-avoidance detected, nudging LLM", tool="google_mail")

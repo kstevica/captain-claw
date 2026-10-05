@@ -2353,7 +2353,7 @@
     // ── Folder Browser ─────────────────────────────────────
 
     var folderCurrentPath = null;
-    var _gwsAvailable = false;
+    var _gdriveAvailable = false;
 
     function openFolderModal() {
         $('#folderModal').classList.remove('hidden');
@@ -2390,14 +2390,14 @@
             $('#folderDriveBar').classList.add('hidden');
         }
 
-        // Check for gws availability → show/hide GDrive tab.
+        // Check for a Google connection with Drive access → show/hide GDrive tab.
         try {
-            var gRes = await fetch('/api/gws-status');
+            var gRes = await fetch('/api/gdrive-status');
             var gData = await gRes.json();
-            _gwsAvailable = !!gData.available;
-            $('#folderTabGdriveBtn').style.display = _gwsAvailable ? '' : 'none';
+            _gdriveAvailable = !!gData.available;
+            $('#folderTabGdriveBtn').style.display = _gdriveAvailable ? '' : 'none';
         } catch (e) {
-            _gwsAvailable = false;
+            _gdriveAvailable = false;
             $('#folderTabGdriveBtn').style.display = 'none';
         }
 

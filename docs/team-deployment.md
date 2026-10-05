@@ -110,6 +110,37 @@ so the OAuth discovery documents advertise the right URLs (it also honors an
 signed with it. Backend-only; the `personal_access_tokens` and `oauth_*` tables
 auto-create on restart.
 
+## Gmail sending (opt-in, per user)
+
+Agents can send Gmail on a user's behalf only after that user turns it on in
+**Connections → Google → Email sending** — off by default, so deploying this
+build changes nothing until someone opts in. Each user sets their own policy:
+on/off, an optional allowed-recipients list (addresses or `@domain`), and a
+daily limit (default 50 per 24 hours). No admin step and no new Google scope:
+the `gmail.compose` scope decks already grant for drafts lets Google accept a
+send, so the gate is Flight Deck's policy, not the scope.
+
+Flight Deck is the single enforcement and audit point: agents ask
+`POST /fd/google/gmail/send` (same agent gate as `/fd/google/access_token`),
+and FD re-checks the owner's policy, sends with the owner's token, records the
+send in the `gmail_sends` table (auto-created on restart; its `status` column
+is added on restart too) and notifies the owner's bell. A send Gmail never
+confirmed (5xx / no answer) is recorded as `status = 'unknown'` — counted, shown
+and duplicate-checked like a send. Users see their recent sends in the same
+panel. The `gws` Workspace CLI tool is retired (never registered, stripped from
+every tools list, refused by the shell tool), so agents' tools can't send around
+this gate.
+
+| Variable | Set to | Effect |
+| --- | --- | --- |
+| `FD_GMAIL_SEND` | `off` (or `0` / `false` / `no`) | Deck-wide kill switch: every agent send is refused regardless of user policies. Unset = users decide. |
+
+The gate stops model mistakes and prompt injection ("send this to …" inside an
+email or page). It is not a boundary against an agent with a shell tool, which
+can fetch its owner's Google token and call Gmail directly — as with every
+shell-capable agent. Deploy = backend restart (plus the frontend bundle for the
+Connections panel).
+
 ## Known follow-ups (not blockers)
 
 - Flows and scheduler jobs are authenticated but **not yet per-user isolated**

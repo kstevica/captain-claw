@@ -94,7 +94,7 @@ CATALOG: dict[str, dict[str, Any]] = {
     "mail.send": {
         "label": "Send an email", "home": "agent", "tool": "google_mail",
         "base_args": {"action": "send"}, "required": ["to", "subject", "body"],
-        "optional": ["cc", "bcc", "html_body"],
+        "optional": ["cc", "bcc", "html_body", "reply_to_message_id"],
         "risk": "high", "reversibility": "irreversible", "reverse": None,
         "grant": "mail", "human_only": True,
     },

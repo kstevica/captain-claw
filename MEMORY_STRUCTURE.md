@@ -374,7 +374,7 @@ CREATE TABLE insights (
     category TEXT NOT NULL,       -- contact, decision, preference, fact, deadline, project, workflow
     entity_key TEXT,              -- Dedup key (e.g., "contact:john@example.com")
     importance INTEGER DEFAULT 5, -- 1-10 scale (5=useful, 8=important, 10=critical)
-    source_tool TEXT,             -- Which tool extracted it (e.g., "gws:mail_read")
+    source_tool TEXT,             -- What triggered extraction (tool label, "memory_import"; NULL = periodic)
     source_session TEXT,          -- Session ID that created it
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -389,7 +389,7 @@ FTS5 virtual table `insights_fts` enables semantic search + prefix matching.
 
 **Triggers:**
 1. **Periodic**: After every 8 messages (configurable), with 60-second cooldown
-2. **Tool-specific**: After `gws:mail_read` or `gws:mail_read_thread` tool calls
+2. **Tool-specific**: Post-tool hook (`_maybe_extract_insights_from_tool`); no tool triggers it today — the only trigger, `gws` mail reads, went with the retired `gws` tool
 3. **Manual**: Via insights tool or slash command
 
 **Flow (`extract_insights`):**

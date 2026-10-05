@@ -243,6 +243,7 @@ class DriveClient:
         folder_id: str = "root",
         *,
         drive_id: str = "",
+        all_drives: bool = False,
         order_by: str = "folder,name",
         max_files: int | None = None,
         sleep=asyncio.sleep,
@@ -258,7 +259,10 @@ class DriveClient:
         ``user`` corpus does not include shared-drive items, so without it a
         shared-drive folder reads back empty. A shared drive's top level is
         ``list_folder(drive_id, drive_id=drive_id)`` (its root folder id equals
-        the drive id).
+        the drive id). When only the folder id is known (a configured
+        ``{id, name}`` pair), pass *all_drives* instead: it searches the
+        ``allDrives`` corpus, so the folder lists whichever drive it lives in.
+        *drive_id* wins when both are given.
         """
         q = f"'{escape_query_value(folder_id)}' in parents and trashed = false"
         files: list[DriveFile] = []
@@ -284,6 +288,8 @@ class DriveClient:
             if drive_id:
                 params["corpora"] = "drive"
                 params["driveId"] = drive_id
+            elif all_drives:
+                params["corpora"] = "allDrives"
             if page_token:
                 params["pageToken"] = page_token
             resp = await self._request("GET", f"{_DRIVE_API}/files", params=params, sleep=sleep)

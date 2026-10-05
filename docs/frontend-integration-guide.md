@@ -1076,7 +1076,9 @@ Query: ?status=pending&responsible=human&session_id=...
 | POST | `/api/read-folders/gdrive` | Authorize Drive folder |
 | DELETE | `/api/read-folders/gdrive?folder_id=...` | Revoke folder access |
 | GET | `/api/read-folders/gdrive/browse?folder_id=...` | Browse Drive folder |
-| GET | `/api/gws-status` | Google Workspace connectivity status |
+| GET | `/api/gdrive-status` | `{"available": bool}` — Google connected with a Drive scope; gates the Drive tab |
+
+`/api/gdrive-status` replaces `/api/gws-status`, which went with the retired `gws` CLI tool. Agents reach Drive, Calendar and Gmail through the `google_drive`, `google_calendar` and `google_mail` tools.
 
 ### 5.14 Skills
 
