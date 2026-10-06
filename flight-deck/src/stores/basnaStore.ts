@@ -526,6 +526,61 @@ async function apiFeedback(runId: number, success: boolean): Promise<void> {
   })
 }
 
+// ── Judge calibration: judge-vs-human label agreement + eval export ──
+
+export interface LabelAgreement {
+  n: number
+  agreement: number | null
+  expected_agreement: number | null
+  kappa: number | null
+  judge_success_rate: number | null
+  human_success_rate: number | null
+  confusion: {
+    both_success: number
+    both_fail: number
+    judge_success_human_fail: number
+    judge_fail_human_success: number
+  }
+}
+
+export type LabelAgreementGroup = LabelAgreement & { mode?: string; domain?: string; archetype_id?: string }
+
+export interface LabelAgreementSummary {
+  since: string | null
+  overall: LabelAgreement
+  unpaired: number
+  by_mode: LabelAgreementGroup[]
+  by_domain: LabelAgreementGroup[]
+  by_archetype: LabelAgreementGroup[]
+}
+
+export async function apiLabelAgreement(since: string): Promise<LabelAgreementSummary> {
+  const q = since ? `?since=${encodeURIComponent(since)}` : ''
+  const res = await _authedFetch(`/fd/basna/eval/agreement${q}`)
+  if (!res.ok) throw new Error((await res.text()) || 'failed to load agreement')
+  return res.json()
+}
+
+/** Download the judge/human label pairs as an eval set file (JSONL or CSV). */
+export async function apiExportLabelPairs(opts: {
+  format: 'jsonl' | 'csv'; since: string; includeUnpaired: boolean; includeText: boolean
+}): Promise<void> {
+  const q = new URLSearchParams({ format: opts.format })
+  if (opts.since) q.set('since', opts.since)
+  if (opts.includeUnpaired) q.set('include_unpaired', 'true')
+  if (opts.includeText) q.set('include_text', 'true')
+  const res = await _authedFetch(`/fd/basna/eval/label-pairs?${q}`)
+  if (!res.ok) throw new Error((await res.text()) || 'export failed')
+  const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1]
+    || `basna-label-pairs.${opts.format}`
+  const url = URL.createObjectURL(await res.blob())
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 export function parseRoute(s?: string): RoutePlan | null {
   if (!s) return null
   try {

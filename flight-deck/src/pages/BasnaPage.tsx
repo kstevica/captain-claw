@@ -3,7 +3,7 @@ import {
   Network, Play, Sparkles, Check, X, Paperclip, FileText, Image as ImageIcon,
   SlidersHorizontal, ScanSearch, RefreshCw, CornerDownRight, Users, HelpCircle,
   Gauge, ListChecks, Brain, FolderSearch, Loader2, ChevronDown, ChevronRight,
-  Folder, ChevronLeft, ClipboardList, Database, Trash2,
+  Folder, ChevronLeft, ClipboardList, Database, Trash2, Scale,
 } from 'lucide-react'
 import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type FolderMode, type BasnaSession, type Group0Plan } from '../stores/basnaStore'
 import { ShareModal } from '../components/common/ShareModal'
@@ -27,6 +27,7 @@ import { ProjectPicker } from '../components/basna/ProjectPicker'
 import { ProjectDetails } from '../components/basna/ProjectDetails'
 import { ProjectFiles, type ProjectSource } from '../components/basna/ProjectFiles'
 import { ProjectDatastore } from '../components/basna/ProjectDatastore'
+import { JudgeCalibrationModal } from '../components/basna/JudgeCalibrationModal'
 
 // A run's project bundle id (config.project_id), '' when unfiled.
 function projectIdOf(config?: string): string {
@@ -309,6 +310,16 @@ export function BasnaPage() {
   const [deepening, setDeepening] = useState(false)
   const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
   const viewFull = (t: string, content: string) => setModal({ title: t, content, mode: 'markdown' })
+  const [calibrationOpen, setCalibrationOpen] = useState(false)
+  const calibrationButton = (
+    <button
+      onClick={() => setCalibrationOpen(true)}
+      title="How often the automatic judge agrees with your thumbs votes — and export the pairs"
+      className="ml-auto flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+    >
+      <Scale className="h-3.5 w-3.5" /> Judge calibration
+    </button>
+  )
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
 
@@ -541,10 +552,11 @@ export function BasnaPage() {
             <h1 className="text-sm font-semibold text-zinc-100">Basna</h1>
             <p className="text-[11px] text-zinc-500">Bundle runs into projects — one theme, one shared folder</p>
           </div>
+          {calibrationButton}
           <button
             onClick={() => viewFull('Basna, Vatra & Deep mode', HELP_MD)}
             title="What are Basna, Vatra and Deep mode?"
-            className="ml-auto flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
           >
             <HelpCircle className="h-3.5 w-3.5" /> Help
           </button>
@@ -563,6 +575,7 @@ export function BasnaPage() {
           />
         </div>
         {modal && <FileModal title={modal.title} content={modal.content} mode={modal.mode} onClose={() => setModal(null)} />}
+        {calibrationOpen && <JudgeCalibrationModal onClose={() => setCalibrationOpen(false)} />}
       </div>
     )
   }
@@ -613,10 +626,11 @@ export function BasnaPage() {
             })}
           </div>
         )}
+        {calibrationButton}
         <button
           onClick={() => viewFull('Basna, Vatra & Deep mode', HELP_MD)}
           title="What are Basna, Vatra and Deep mode?"
-          className="ml-auto flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+          className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
         >
           <HelpCircle className="h-3.5 w-3.5" /> Help
         </button>
@@ -1440,6 +1454,7 @@ export function BasnaPage() {
       </div>
 
       {modal && <FileModal title={modal.title} content={modal.content} mode={modal.mode} onClose={() => setModal(null)} />}
+      {calibrationOpen && <JudgeCalibrationModal onClose={() => setCalibrationOpen(false)} />}
     </div>
   )
 }

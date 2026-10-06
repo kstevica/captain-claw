@@ -1593,6 +1593,30 @@ class FlightDeckDB:
         await self._db.commit()
         return cur.rowcount > 0
 
+    async def list_labeled_basna_runs(
+        self, user_id: str, since: str | None = None, include_text: bool = False,
+    ) -> list[dict]:
+        """Runs in this user's sessions that a human has voted on, with the judge's
+        label alongside (`judge_success`, NULL when the judge left it unscored) —
+        the raw material for judge-vs-human agreement. `since` keeps only runs
+        created at/after that ISO date or timestamp."""
+        assert self._db is not None
+        cols = ("r.id, r.session_id, r.archetype_id, r.role, r.tier, r.model,"
+                " r.weight_at_run, r.latency_ms, r.created_at,"
+                " r.success AS judge_success, r.human_success, r.human_feedback_at,"
+                " s.domain, s.merge_kind, s.config")
+        if include_text:
+            cols += ", s.intent, s.truth, r.output"
+        query = (f"SELECT {cols} FROM basna_runs r JOIN basna_sessions s ON r.session_id = s.id"
+                 " WHERE s.user_id = ? AND r.human_success IS NOT NULL")
+        params: list = [user_id]
+        if since:
+            query += " AND r.created_at >= ?"
+            params.append(since)
+        query += " ORDER BY r.id ASC"
+        async with self._db.execute(query, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
     # ── Vatra blackboard (cross-agent asks) ──────────────────────────
 
     async def create_vatra_ask(

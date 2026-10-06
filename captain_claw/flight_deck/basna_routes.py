@@ -45,6 +45,7 @@ from captain_claw.flight_deck.horizon_worker import (
     run_worker_horizon,
 )
 from captain_claw.flight_deck import facts_ledger
+from captain_claw.flight_deck import label_eval
 from captain_claw.flight_deck import quality_findings
 from captain_claw.flight_deck import research_map
 from captain_claw.flight_deck import research_brief
@@ -4706,3 +4707,67 @@ async def run_feedback(
     return {"changed": True, "run_id": run_id, "archetype_id": run["archetype_id"],
             "domain": domain, "success": body.success,
             "judge_success": run["judge_success"], "reliability": rel}
+
+
+# ── Judge calibration: judge-vs-human label pairs ─────────────────────
+
+
+def _since_param(since: str) -> str | None:
+    """Normalise a `since` filter to the UTC ISO form runs are stored in, so the
+    string comparison in SQL is a real time comparison. A bare date stays a date."""
+    from datetime import date, datetime, timezone
+    since = (since or "").strip()
+    if not since:
+        return None
+    try:
+        if len(since) == 10:
+            return date.fromisoformat(since).isoformat()
+        ts = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, "since must be an ISO date or timestamp")
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc).isoformat()
+
+
+@router.get("/eval/agreement")
+async def label_agreement(since: str = "", user: dict = Depends(get_current_user)):
+    """How far the LLM judge agrees with human thumbs votes on this user's runs:
+    Cohen's kappa + confusion counts, overall and per mode / domain / archetype."""
+    rows = await get_db().list_labeled_basna_runs(user["id"], since=_since_param(since))
+    return {"since": since or None,
+            **label_eval.summarize([label_eval.export_row(r) for r in rows])}
+
+
+@router.get("/eval/label-pairs")
+async def export_label_pairs(
+    format: str = "jsonl", since: str = "", include_unpaired: bool = False,
+    include_text: bool = False, user: dict = Depends(get_current_user),
+):
+    """Download the judge/human label pairs as an eval set (JSONL or CSV).
+
+    One row per run a human voted on and the judge also scored. `include_unpaired`
+    adds runs the judge left unscored (judge_success empty); `include_text` adds
+    the session intent, compiled truth and the run's output.
+    """
+    import csv
+    import io
+    from fastapi.responses import Response
+    if format not in ("jsonl", "csv"):
+        raise HTTPException(400, f"Unsupported format: {format}")
+    rows = await get_db().list_labeled_basna_runs(
+        user["id"], since=_since_param(since), include_text=include_text)
+    out = [label_eval.export_row(r, include_text) for r in rows]
+    if not include_unpaired:
+        out = [r for r in out if r["judge_success"] is not None]
+    fname = f"basna-label-pairs-{time.strftime('%Y%m%d')}.{format}"
+    headers = {"Content-Disposition": f'attachment; filename="{fname}"'}
+    if format == "jsonl":
+        body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in out)
+        return Response(body.encode("utf-8"), media_type="application/x-ndjson", headers=headers)
+    cols = label_eval.EXPORT_COLUMNS + (label_eval.TEXT_COLUMNS if include_text else [])
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=cols)
+    w.writeheader()
+    w.writerows(out)
+    return Response(buf.getvalue().encode("utf-8"), media_type="text/csv", headers=headers)
