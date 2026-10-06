@@ -18,7 +18,7 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from captain_claw.flight_deck import agent_sharing
+from captain_claw.flight_deck import agent_sharing, speaker_grants
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.logging import get_logger
 
@@ -90,15 +90,20 @@ async def list_resource_shares(
     if not await owns_resource(db, user["id"], resource_type, resource_id):
         raise HTTPException(404, "Resource not found")
     shares = await db.list_shares_for_resource(resource_type, resource_id, user["id"])
-    return {"shares": [
-        {
+    rows = []
+    for s in shares:
+        row = {
             "grantee_id": s["grantee_id"],
             "grantee_email": s.get("grantee_email", ""),
             "grantee_name": s.get("grantee_name", ""),
             "permission": s["permission"],
         }
-        for s in shares
-    ]}
+        if resource_type == agent_sharing.AGENT_RESOURCE:
+            # Has this member let the agent use their Google during their chats?
+            row["google_enabled"] = await speaker_grants.google_opted_in(
+                db, s["grantee_id"], resource_id, user["id"])
+        rows.append(row)
+    return {"shares": rows}
 
 
 @router.get("/mine")
@@ -192,9 +197,21 @@ async def _agent_name(ref: str) -> str:
 
 
 async def _revoke_agent_member(ref: str, member_id: str, reason: str) -> None:
-    """A member lost access: forget their cached membership and close their
-    live sockets now (the socket watchdog would only notice on its next tick)."""
+    """A member lost access: forget their cached membership, close their open
+    turn grants, drop their Google opt-in for the agent (a re-share starts with
+    it off) and close their live sockets now (the socket watchdog would only
+    notice on its next tick). In that order: the generation bump comes first,
+    so no membership check in flight can re-cache them."""
     agent_sharing.invalidate_member_cache(ref, member_id)
+    try:
+        speaker_grants.revoke(ref, member_id)
+    except Exception as exc:
+        log.warning("Could not close a member's shared-agent grants", error=type(exc).__name__)
+    try:
+        await speaker_grants.clear_google_optins(get_db(), ref, member_id)
+    except Exception as exc:
+        log.warning("Could not clear a member's shared-agent Google opt-in",
+                    error=type(exc).__name__)
     try:
         await agent_sharing.close_member_sockets(ref, member_id, code=4403, reason=reason)
     except Exception as exc:

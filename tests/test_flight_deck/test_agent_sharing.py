@@ -728,7 +728,10 @@ class TestSharedAgentsList:
             "agent_ref": REF, "runtime": "process", "slug": "helper", "name": "Helper",
             "description": "Answers questions", "status": "running", "owner_id": OWNER,
             "owner_name": "Olga Owner", "owner_email": f"{OWNER}@x.co",
-            "shared_at": helper["shared_at"]}
+            "shared_at": helper["shared_at"],
+            # A2 (test_agent_sharing_grants.py covers these in depth)
+            "capabilities": {"google": True, "deep_memory": True, "files": True},
+            "google_enabled": False, "google_connected": False}
         assert helper["shared_at"]
         assert rows[_ref("sleepy", "4444444444444444")]["status"] == "stopped"
         for row in body["agents"]:
@@ -1175,6 +1178,8 @@ class TestMemberSocketFrames:
             assert [f["type"] for f in frames] == ["fd_speaker_context", "chat", "cancel"]
             chat = frames[1]
             turn = chat.pop("_fd_turn")
+            # A2: FD's own per-turn grant on a process agent (test_agent_sharing_grants.py)
+            assert len(chat.pop("_fd_grant")) == 43
             assert chat == {"type": "chat", "content": "hi", "no_next_steps": True,
                             "rewind_to": "2026-10-05T10:00:00"}
             assert len(turn) == 16 and turn != "aaaaaaaaaaaaaaaa"

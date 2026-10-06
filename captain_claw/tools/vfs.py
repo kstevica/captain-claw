@@ -92,6 +92,19 @@ class VfsTool(Tool):
                 return ToolResult(success=False, error=f"Unknown action: {action}. Valid: {', '.join(_ACTIONS)}")
 
             if action == "info":
+                from captain_claw import speaker as _speaker
+
+                if _speaker.member_bound():
+                    # A shared-agent member: their own folders only — no user
+                    # id, root, base, env names or host paths.
+                    projects = list_projects()
+                    return ToolResult(success=True, content=(
+                        "Your VFS folders (shared chat)\n"
+                        f"  default project: {default_project()}\n"
+                        f"  projects ({len(projects)}): {', '.join(projects) or '(none yet)'}\n"
+                        "Address files as vfs:<project>/<path> with read/write/edit/glob/grep."
+                    ))
+
                 import os as _os
 
                 root = user_root()

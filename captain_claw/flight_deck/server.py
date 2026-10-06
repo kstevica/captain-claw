@@ -49,6 +49,7 @@ from captain_claw.flight_deck.endpoints import same_endpoint as _same_endpoint
 from captain_claw.flight_deck import origin_guard
 from captain_claw.flight_deck import tenant_profile
 from captain_claw.flight_deck import agent_sharing
+from captain_claw.flight_deck import speaker_grants
 
 
 # ── Console logging: timestamps + ANSI colors ──────────────────────────
@@ -361,6 +362,22 @@ def _load_process_registry() -> dict[str, dict]:
     except (json.JSONDecodeError, OSError) as exc:
         log.warning("process registry read failed", error=str(exc))
         return {}
+
+
+def _load_process_registry_strict() -> dict[str, dict]:
+    """Like :func:`_load_process_registry`, but raises (OSError / ValueError)
+    when the file exists and can't be read or parsed, so a caller that acts
+    destructively on "no such agent" can tell a missing agent from a failed read."""
+    if not PROCESS_REGISTRY_FILE.is_file():
+        return {}
+    import fcntl as _fcntl
+    with PROCESS_REGISTRY_FILE.open("r") as _f:
+        try:
+            _fcntl.flock(_f.fileno(), _fcntl.LOCK_SH)
+        except OSError:
+            pass
+        data = _f.read()
+    return json.loads(data) if data else {}
 
 
 def _save_process_registry(registry: dict[str, dict]):
@@ -1202,6 +1219,10 @@ async def _hardening_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# A2: a shared-agent member's request (X-FD-Speaker-Grant header or the
+# fd_member marker) reaches only the grant-aware routes; anywhere else it is
+# refused (403 / WebSocket 4403). Just inside the browser guard.
+app.add_middleware(speaker_grants.GrantGuardMiddleware)
 # Host allowlist + cross-site browser guard for every HTTP and WebSocket route
 # (see origin_guard). Added last so it runs outermost — before CORS and the
 # hardening middleware — and WebSockets, which neither of those covers, pass
@@ -2795,8 +2816,9 @@ async def _remove_replaced_container(existing) -> None:
 
 
 async def _forget_shared_agent(agent_ref: str, owner_id: str) -> None:
-    """An agent was removed: drop its member grants and close its members'
-    sockets (4404). Best-effort — a removal never fails over it."""
+    """An agent was removed: drop its member grants, close its members' turn
+    grants, drop their Google opt-ins for it and close their sockets (4404).
+    Best-effort — a removal never fails over it."""
     if not agent_ref:
         return
     try:
@@ -2807,6 +2829,17 @@ async def _forget_shared_agent(agent_ref: str, owner_id: str) -> None:
                 agent_sharing.AGENT_RESOURCE, agent_ref, owner_id)
     except Exception as exc:
         log.warning("Could not drop a removed agent's shares", error=str(exc))
+    try:
+        speaker_grants.revoke(agent_ref)
+    except Exception as exc:
+        log.warning("Could not close a removed agent's member grants", error=type(exc).__name__)
+    try:
+        if AUTH_ENABLED:
+            from captain_claw.flight_deck.auth import get_db
+
+            await speaker_grants.clear_google_optins(get_db(), agent_ref)
+    except Exception as exc:
+        log.warning("Could not clear a removed agent's Google opt-ins", error=type(exc).__name__)
     try:
         agent_sharing.invalidate_member_cache(agent_ref)
         await agent_sharing.close_member_sockets(agent_ref, code=4404, reason="Agent removed")

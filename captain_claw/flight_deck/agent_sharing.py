@@ -67,7 +67,10 @@ AGENT_RESOURCE = "agent"
 INSTANCE_LABEL = "flight-deck.instance-id"
 HOST_TRUST_WARNING = (
     "Anyone on this deck who runs their own shell-capable process agent can act as "
-    "any agent on this host, including this one."
+    "any agent on this host, including this one, and can read every user's Flight Deck "
+    "files at any time. While a member's message is being answered (up to 20 minutes), "
+    "they can also use that member's deep memory and, if the member turned it on, their "
+    "Google account."
 )
 MEMBER_LANES = ("A", "B", "C")
 MAX_MEMBER_SOCKETS_PER_AGENT = 6        # per member, per agent
@@ -245,9 +248,17 @@ def ensure_process_instance_persisted(slug: str) -> None:
     _srv._save_process_registry(registry)
 
 
-def resolve_agent_record(ref: str) -> AgentRecord | None:
+class RecordUnavailable(Exception):
+    """FD's agent records couldn't be read right now — not the same as "no such agent"."""
+
+
+def resolve_agent_record(ref: str, *, strict: bool = False) -> AgentRecord | None:
     """The agent ``ref`` names, from FD's own records; None when there is none
-    (or the instance doesn't match — a recreated agent is a different agent)."""
+    (or the instance doesn't match — a recreated agent is a different agent).
+
+    ``strict``: raise :class:`RecordUnavailable` when the records can't be read
+    (a damaged registry file, Docker unreachable) instead of answering None, for
+    callers that revoke or clear consent on "gone"."""
     try:
         runtime, slug, instance = parse_ref(ref)
     except ValueError:
@@ -256,9 +267,13 @@ def resolve_agent_record(ref: str) -> AgentRecord | None:
 
     if runtime == "process":
         try:
-            entry = _srv._load_process_registry().get(slug)
-        except Exception:
+            registry = (_srv._load_process_registry_strict() if strict
+                        else _srv._load_process_registry())
+        except Exception as exc:
+            if strict:
+                raise RecordUnavailable("process registry unreadable") from exc
             return None
+        entry = registry.get(slug) if isinstance(registry, dict) else None
         if not isinstance(entry, dict):
             return None
         inst = process_instance_id(slug, entry)
@@ -279,7 +294,9 @@ def resolve_agent_record(ref: str) -> AgentRecord | None:
 
     try:
         containers = _srv._deck_containers(all=True)
-    except Exception:  # Docker unavailable
+    except Exception as exc:  # Docker unavailable
+        if strict:
+            raise RecordUnavailable("docker unavailable") from exc
         return None
     for c in containers:
         if _docker_slug(c) != slug:
@@ -423,13 +440,38 @@ async def close_member_sockets(ref: str, user_id: str | None = None, *, code: in
 # (ref, owner, user) → monotonic time a True result was cached. False is never cached.
 _MEMBER_CACHE: dict[tuple[str, str, str], float] = {}
 _MEMBER_CACHE_MAX = 4096
+# Invalidation generations: (ref, user) and per ref. ``member_check`` snapshots
+# both before its DB read and caches a True only if neither moved meanwhile, so
+# a result computed across a revocation is returned once but never re-cached.
+# Values come from one ever-increasing counter, so a generation never repeats;
+# trimming the maps (bounded by _MEMBER_CACHE_MAX) bumps the epoch, which makes
+# every check in flight skip its caching rather than risk a stale match.
+_MEMBER_GEN: dict[tuple[str, str], int] = {}
+_MEMBER_GEN_REF: dict[str, int] = {}
+_MEMBER_GEN_COUNTER = 0
+_MEMBER_GEN_EPOCH = 0
+
+
+def _member_generation(ref: str, user_id: str) -> tuple[int, int, int]:
+    return _MEMBER_GEN_EPOCH, _MEMBER_GEN.get((ref, user_id), 0), _MEMBER_GEN_REF.get(ref, 0)
+
+
+def _next_member_generation() -> int:
+    global _MEMBER_GEN_COUNTER, _MEMBER_GEN_EPOCH
+    if len(_MEMBER_GEN) + len(_MEMBER_GEN_REF) >= _MEMBER_CACHE_MAX:
+        _MEMBER_GEN.clear()
+        _MEMBER_GEN_REF.clear()
+        _MEMBER_GEN_EPOCH += 1
+    _MEMBER_GEN_COUNTER += 1
+    return _MEMBER_GEN_COUNTER
 
 
 async def member_check(db, ref: str, owner_id: str, user_id: str, *,
                        max_age: float = MEMBERSHIP_CACHE_TTL_S) -> bool:
     """Is ``user_id`` (still a user of this deck) a member of ``owner_id``'s
     agent ``ref``? A True result is reused for at most ``max_age`` seconds
-    (``max_age=0`` always asks the DB); False is never cached. Fails closed."""
+    (``max_age=0`` always asks the DB); False is never cached, nor is a True
+    whose DB read overlapped an ``invalidate_member_cache`` for it. Fails closed."""
     if not (ref and owner_id and user_id):
         return False
     key = (ref, owner_id, user_id)
@@ -438,13 +480,14 @@ async def member_check(db, ref: str, owner_id: str, user_id: str, *,
     if cached_at is not None and max_age > 0 and now - cached_at < max_age:
         return True
     _MEMBER_CACHE.pop(key, None)
+    generation = _member_generation(ref, user_id)
     try:
         ok = bool(await db.get_user_by_id(user_id)) and bool(
             await db.is_agent_member(ref, owner_id, user_id))
     except Exception as exc:
         log.warning("Shared-agent membership check failed", error=type(exc).__name__)
         ok = False
-    if ok:
+    if ok and _member_generation(ref, user_id) == generation:
         if len(_MEMBER_CACHE) >= _MEMBER_CACHE_MAX:
             horizon = time.monotonic() - MEMBERSHIP_CACHE_TTL_S
             for k in [k for k, t in _MEMBER_CACHE.items() if t < horizon]:
@@ -454,5 +497,14 @@ async def member_check(db, ref: str, owner_id: str, user_id: str, *,
 
 
 def invalidate_member_cache(ref: str, user_id: str | None = None) -> None:
+    """Forget cached memberships on ``ref`` (one user's, or everyone's) and bump
+    their generation, so a ``member_check`` already in flight can't re-cache."""
     for key in [k for k in _MEMBER_CACHE if k[0] == ref and (user_id is None or k[2] == user_id)]:
         _MEMBER_CACHE.pop(key, None)
+    generation = _next_member_generation()
+    if user_id is None:
+        _MEMBER_GEN_REF[ref] = generation
+        for gkey in [k for k in _MEMBER_GEN if k[0] == ref]:
+            _MEMBER_GEN[gkey] = generation
+    else:
+        _MEMBER_GEN[(ref, user_id)] = generation

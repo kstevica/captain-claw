@@ -100,7 +100,8 @@ class ConversationTopicsManager:
                     channel   TEXT NOT NULL DEFAULT '',
                     excerpt   TEXT NOT NULL DEFAULT '',
                     msg_id    TEXT NOT NULL DEFAULT '',   -- session message_id (dedup/backfill)
-                    ts        TEXT NOT NULL
+                    ts        TEXT NOT NULL,
+                    speaker   TEXT NOT NULL DEFAULT ''    -- shared-agent member id; '' = owner
                 );
                 CREATE INDEX IF NOT EXISTS idx_tm_topic ON topic_messages(topic_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_tm_msgid ON topic_messages(msg_id);
@@ -127,6 +128,12 @@ class ConversationTopicsManager:
             )
             if tm_cols and "msg_id" not in tm_cols:  # migrate pre-existing tables
                 self._c().execute("ALTER TABLE topic_messages ADD COLUMN msg_id TEXT NOT NULL DEFAULT ''")
+            if tm_cols and "speaker" not in tm_cols:
+                self._c().execute("ALTER TABLE topic_messages ADD COLUMN speaker TEXT NOT NULL DEFAULT ''")
+            # After the ALTER: a pre-A2 table has no speaker column before it.
+            self._c().execute(
+                "CREATE INDEX IF NOT EXISTS idx_tm_speaker ON topic_messages(topic_id, speaker, id DESC)"
+            )
             if t_cols and "starred" not in t_cols:
                 self._c().execute("ALTER TABLE topics ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
             self._c().commit()
@@ -167,7 +174,11 @@ class ConversationTopicsManager:
                 ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_topic(self, topic_id: str, *, max_excerpts: int = 40) -> dict[str, Any] | None:
+    def get_topic(self, topic_id: str, *, max_excerpts: int = 40,
+                  speaker: str | None = None) -> dict[str, Any] | None:
+        """One topic with its recent excerpts. *speaker* (a str) narrows the
+        excerpts to that speaker's (``''`` = the owner's); ``msg_count`` stays
+        the topic total."""
         with self._lock:
             r = self._c().execute("SELECT * FROM topics WHERE id = ?", (topic_id,)).fetchone()
             if not r:
@@ -175,11 +186,18 @@ class ConversationTopicsManager:
                 r = self._c().execute("SELECT * FROM topics WHERE id = ?", (_slug(topic_id),)).fetchone()
             if not r:
                 return None
-            msgs = self._c().execute(
-                "SELECT id, role, channel, excerpt, msg_id, ts FROM topic_messages"
-                " WHERE topic_id = ? ORDER BY id DESC LIMIT ?",
-                (r["id"], max(1, min(200, max_excerpts))),
-            ).fetchall()
+            if speaker is None:
+                msgs = self._c().execute(
+                    "SELECT id, role, channel, excerpt, msg_id, ts FROM topic_messages"
+                    " WHERE topic_id = ? ORDER BY id DESC LIMIT ?",
+                    (r["id"], max(1, min(200, max_excerpts))),
+                ).fetchall()
+            else:
+                msgs = self._c().execute(
+                    "SELECT id, role, channel, excerpt, msg_id, ts FROM topic_messages"
+                    " WHERE topic_id = ? AND speaker = ? ORDER BY id DESC LIMIT ?",
+                    (r["id"], str(speaker), max(1, min(200, max_excerpts))),
+                ).fetchall()
         d = dict(r)
         d["messages"] = [dict(m) for m in reversed(msgs)]  # oldest→newest
         d["groups"] = self.groups_for_topic(d["id"])
@@ -334,29 +352,37 @@ class ConversationTopicsManager:
         return tid
 
     def add_messages(self, topic_id: str, messages: list[dict[str, Any]], *, cap: int = 40) -> None:
-        """Append message excerpts to a topic, bump its count, prune to ``cap``."""
+        """Append message excerpts to a topic, bump its count, prune to ``cap``.
+
+        Pruning is per ``(topic, speaker)`` (``''`` = the owner), so one
+        shared-agent member's messages never evict the owner's or another
+        member's excerpts. ``msg_count`` still counts every message.
+        """
         if not messages:
             return
         now = _utcnow()
+        rows = [(topic_id, str(m.get("role") or ""), str(m.get("channel") or ""),
+                 str(m.get("excerpt") or "")[:_MAX_EXCERPT_CHARS], str(m.get("msg_id") or ""),
+                 str(m.get("ts") or now), str(m.get("speaker") or "")) for m in messages]
         with self._lock:
             conn = self._c()
             conn.executemany(
-                "INSERT INTO topic_messages (topic_id, role, channel, excerpt, msg_id, ts)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                [(topic_id, str(m.get("role") or ""), str(m.get("channel") or ""),
-                  str(m.get("excerpt") or "")[:_MAX_EXCERPT_CHARS], str(m.get("msg_id") or ""),
-                  str(m.get("ts") or now)) for m in messages],
+                "INSERT INTO topic_messages (topic_id, role, channel, excerpt, msg_id, ts, speaker)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
             )
             conn.execute(
                 "UPDATE topics SET msg_count = msg_count + ?, last_seen = ? WHERE id = ?",
                 (len(messages), now, topic_id),
             )
-            # Prune oldest excerpts beyond the cap.
-            conn.execute(
-                "DELETE FROM topic_messages WHERE topic_id = ? AND id NOT IN ("
-                " SELECT id FROM topic_messages WHERE topic_id = ? ORDER BY id DESC LIMIT ?)",
-                (topic_id, topic_id, max(1, cap)),
-            )
+            # Prune oldest excerpts beyond the cap, per speaker.
+            for spk in sorted({row[-1] for row in rows}):
+                conn.execute(
+                    "DELETE FROM topic_messages WHERE topic_id = ? AND speaker = ? AND id NOT IN ("
+                    " SELECT id FROM topic_messages WHERE topic_id = ? AND speaker = ?"
+                    " ORDER BY id DESC LIMIT ?)",
+                    (topic_id, spk, topic_id, spk, max(1, cap)),
+                )
             conn.commit()
 
     def classified_msg_ids(self) -> set[str]:
@@ -658,6 +684,12 @@ def _collect_new_messages(agent: Any, last_idx: int, cap: int) -> tuple[list[dic
     items: list[dict[str, Any]] = []
     msgs = agent.session.messages if agent.session else []
     new_idx = len(msgs)
+    # A shared-agent member instance stamps its member's id on every excerpt
+    # (the owner's are ''), so the topics tool shows a member only theirs.
+    from captain_claw.speaker import principal_for
+
+    _p = principal_for(agent)
+    speaker_id = _p.speaker_id if _p is not None else ""
     try:
         _mgr = get_topics_manager()
         done_ids = _mgr.classified_msg_ids() | _mgr.seen_msg_ids()
@@ -679,13 +711,15 @@ def _collect_new_messages(agent: Any, last_idx: int, cap: int) -> tuple[list[dic
             "excerpt": content[:_MAX_EXCERPT_CHARS],
             "msg_id": mid,
             "ts": str(m.get("timestamp") or _utcnow()),
+            "speaker": speaker_id,
         })
     # Narration buffered this window (cleared after).
     from captain_claw.config import get_config
     if get_config().conversation_topics.include_narration:
         buf = getattr(agent, _ATTR_NARRATION, None) or []
         for t in buf:
-            items.append({"role": "narration", "channel": "", "excerpt": t[:_MAX_EXCERPT_CHARS], "ts": _utcnow()})
+            items.append({"role": "narration", "channel": "", "excerpt": t[:_MAX_EXCERPT_CHARS],
+                          "ts": _utcnow(), "speaker": speaker_id})
         setattr(agent, _ATTR_NARRATION, [])
     if len(items) > cap:
         items = items[-cap:]

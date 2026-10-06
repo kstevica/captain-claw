@@ -1,4 +1,5 @@
-"""Shared-agent UI logic (A1: chat-only shared agent), run in Node.
+"""Shared-agent UI logic (A1: chat-only shared agent; A2: members' own
+Google, deep memory and files on process agents), run in Node.
 
 The Flight Deck frontend has no JS test runner, so — as in
 test_gmail_send_ui.py and test_profile_ui.py — these tests lift named
@@ -24,6 +25,19 @@ Pinned here:
   Desktop shows "Shared with me" above your own fleet;
 * a shared chat never runs the peer_agents handshake, and the shared socket
   never touches the agent's host, port or token.
+
+A2 (part 3) adds:
+
+* what a member chat can use comes from Flight Deck's `capabilities`, and
+  anything but an explicit `true` (a Docker agent, an older deck) is chat-only;
+* the member notice tells process-agent members about their own files, deep
+  memory and Google (and keeps A1's text, byte for byte, for chat-only
+  agents); its dismissal key is bumped so everyone sees it once;
+* the member's Google switch: hidden for chat-only agents, a confirm with the
+  token-lifetime warning before turning it ON, none for OFF, the store's
+  optimistic update rolled back on failure;
+* the owner's Share dialog marks members who turned their Google on, and
+  the owner's own cards show "shared · N" when Flight Deck reports it.
 """
 
 from __future__ import annotations
@@ -48,6 +62,13 @@ _SHARED_STORE = _FD / "src" / "stores" / "sharedAgentStore.ts"
 _NOTIF_STORE = _FD / "src" / "stores" / "notificationStore.ts"
 _NOTIF_CENTER = _FD / "src" / "components" / "common" / "NotificationCenter.tsx"
 _DESKTOP = _FD / "src" / "pages" / "DesktopPage.tsx"
+_TOGGLE = _FD / "src" / "components" / "agents" / "SharedAgentGoogleToggle.tsx"
+_COUNT_BADGE = _FD / "src" / "components" / "agents" / "SharedCountBadge.tsx"
+_CHAT_PANEL = _FD / "src" / "components" / "agents" / "ChatPanel.tsx"
+_SHARED_CARD = _FD / "src" / "components" / "agents" / "SharedAgentCard.tsx"
+_PROCESS_CARD = _FD / "src" / "components" / "agents" / "ProcessCard.tsx"
+_CONTAINER_CARD = _FD / "src" / "components" / "agents" / "ContainerCard.tsx"
+_SHARE_MODAL = _FD / "src" / "components" / "common" / "ShareModal.tsx"
 _SERVER = _ROOT / "captain_claw" / "flight_deck" / "server.py"
 _TS = _FD / "node_modules" / "typescript"
 
@@ -56,14 +77,32 @@ pytestmark = pytest.mark.skipif(
     reason="needs node and flight-deck/node_modules (npm install)",
 )
 
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    # These tests only read sources and run them in a Node vm, but the Node
+    # subprocesses inherit this env: never let one see the real ~/.captain-claw.
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+# The deck's host-trust warning as Flight Deck sends it (part 0 §9). The UI
+# renders whatever FD sends — it is only an argument here.
 HOST_TRUST_WARNING = (
-    "Anyone on this deck who runs their own shell-capable process agent can act as any agent "
-    "on this host, including this one."
+    "Anyone on this deck who runs their own shell-capable process agent can act as any agent on "
+    "this host, including this one, and can read every user's Flight Deck files at any time. "
+    "While a member's message is being answered (up to 20 minutes), they can also use that "
+    "member's deep memory and, if the member turned it on, their Google account."
 )
 
-# argv: typescript dir. stdin: {"decls": [{"src", "names"}], "body": js}.
+# The owner note's own closing paragraph (part 3 §4).
+OWNER_HOST_NOTE = (
+    "Anyone on this deck who runs their own shell-capable process agent can act as any agent on "
+    "this host, including this one, and can read every user's Flight Deck files."
+)
+
+# argv: typescript dir. stdin: {"decls": [{"src", "names"}], "body": js, "tsx"}.
 # Runs the named top-level declarations + body in a vm; body sets out (and
-# may set done to a promise, awaited before out is printed).
+# may set done to a promise, awaited before out is printed). With "tsx", JSX
+# compiles to `React.createElement(...)` — the body stubs `React`.
 _LIFT = r"""
 const ts = require(process.argv[1]);
 const fs = require('fs');
@@ -89,7 +128,9 @@ for (const d of req.decls) {
   }
 }
 const js = ts.transpileModule(parts.join('\n') + '\n' + req.body, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  fileName: req.tsx ? 'lift.tsx' : 'lift.ts',
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020,
+    jsx: ts.JsxEmit.React },
 }).outputText;
 const ctx = vm.createContext({ exports: {}, out: null, done: null, URLSearchParams });
 vm.runInContext(js, ctx);
@@ -118,8 +159,11 @@ const all = [];
 """
 
 
-def _lift(decls: list[tuple[Path, list[str]]], body: str):
-    req = {"decls": [{"src": str(src), "names": names} for src, names in decls], "body": body}
+def _lift(decls: list[tuple[Path, list[str]]], body: str, *, tsx: bool = False):
+    req = {
+        "decls": [{"src": str(src), "names": names} for src, names in decls],
+        "body": body, "tsx": tsx,
+    }
     proc = subprocess.run(
         ["node", "-e", _LIFT, str(_TS)],
         input=json.dumps(req), capture_output=True, text=True, timeout=60,
@@ -320,19 +364,24 @@ def test_shared_container_id_survives_the_lane_key_round_trip():
 def test_owner_note_ends_with_the_host_trust_warning():
     note = _lift([(_SHARED, ["OWNER_SHARE_NOTE"])], "out = OWNER_SHARE_NOTE;")
     assert note.startswith("Members chat with this agent in their own private conversations")
-    assert "no shell, files, Google, deep memory, MCP servers, scheduled jobs or your fleet" in note
+    # A2: process-agent members bring THEIR data; Docker members stay chat-only.
+    assert "no shell, files, Google, deep memory" not in note
+    assert "THEIR Google account" in note
+    assert "never yours" in note
+    assert "On a Docker agent" in note
     assert "Member chats use your LLM keys." in note
-    # An agent started before sharing was on answers members 4426 until it
-    # restarts — the owner is the one who can act on that.
+    # An agent started before sharing (or A2) was on can't serve members until
+    # it restarts — the owner is the one who can act on that.
     assert (
-        "If this agent was running before sharing was turned on, restart it once so "
-        "members can connect." in note
+        "If this agent was running before sharing (or this update) was turned on, restart it "
+        "once so members can connect." in note
     )
-    assert note.endswith("\n\n" + HOST_TRUST_WARNING)
+    assert note.endswith("\n\n" + OWNER_HOST_NOTE)
+    assert "read every user's Flight Deck files" in note
 
 
 def test_member_notice_names_agent_owner_and_appends_the_warning():
-    out = _lift([(_SHARED, ["memberNoticeText"])], (
+    out = _lift([(_SHARED, ["CHAT_ONLY_CAPS", "memberNoticeText"])], (
         f"out = {{ withWarning: memberNoticeText('Helper', 'Olga', {json.dumps(HOST_TRUST_WARNING)}),"
         " without: memberNoticeText('Helper', 'Olga', '') };"
     ))
@@ -657,7 +706,7 @@ def test_sign_out_purges_shared_slices_only():
         ['fd.queue.proc-helper', '{}'],
         ['fd.plan.proc-helper', '{}'],
         ['fd.queue.plan.shared:process:x:0123456789abcdef', '{}'],
-        ['fd.sharedAgentAck.u-ana.process:x:0123456789abcdef', '1'],
+        ['fd.sharedAgentAck.v2.u-ana.process:x:0123456789abcdef', '1'],
       ]) store.set(k, v);
       purgeSharedSlices();
       out = [...store.keys()].sort();
@@ -666,7 +715,7 @@ def test_sign_out_purges_shared_slices_only():
         "fd.queue.proc-helper",
         "fd.plan.proc-helper",
         "fd.queue.plan.shared:process:x:0123456789abcdef",
-        "fd.sharedAgentAck.u-ana.process:x:0123456789abcdef",
+        "fd.sharedAgentAck.v2.u-ana.process:x:0123456789abcdef",
     ])
 
 
@@ -745,7 +794,7 @@ def test_notice_dismissal_is_per_deck_user():
       writeAck(R);
       out = { before, ana, bob, anon, otherAgent, keys, blocked: readAck(R) };
     """)
-    assert out["keys"] == ["fd.sharedAgentAck.u-ana.process:x:0123456789abcdef"]
+    assert out["keys"] == ["fd.sharedAgentAck.v2.u-ana.process:x:0123456789abcdef"]
     assert out["before"] is False
     assert out["ana"] is True
     assert out["bob"] is False
@@ -910,3 +959,550 @@ def test_desktop_shows_shared_with_me_above_your_own_agents():
     assert found["section"] > 0
     assert found["section"] < found["cards"]
     assert found["cards"] < found["botport"] < found["own"]
+
+
+# ══ A2: members' own Google, deep memory and files (part 3) ═══════════
+
+_ALL_CAPS = {"google": True, "deep_memory": True, "files": True}
+_NO_CAPS = {"google": False, "deep_memory": False, "files": False}
+
+
+def _a1_notice(agent: str, owner: str) -> str:
+    """A1's member notice, byte for byte (chat-only agents keep it)."""
+    return (
+        f"**{agent} belongs to {owner}.** Your conversations here are private from other members, "
+        f"but not from {owner} or this deck's admins. The agent can see the profile you set in "
+        "Flight Deck. What it learns from your chats becomes shared knowledge for everyone using "
+        f"it, including {owner}'s own chats with it. In shared chats it can only search the web, "
+        "read public pages and use its shared insights, playbooks and topics."
+    )
+
+
+def _a2_notice(agent: str, owner: str) -> str:
+    """The process-agent member notice (part 3 §4)."""
+    return (
+        f"**{agent} belongs to {owner}.** Your conversations here are private from other members, "
+        f"but not from {owner} or this deck's admins. The agent can see the profile you set in "
+        "Flight Deck. What it learns from your chats becomes shared knowledge for everyone using "
+        f"it, including {owner}'s own chats with it — and that includes anything it reads from "
+        "your mail, calendar, Drive, files or deep memory during a chat. During your chats it "
+        "can read, change and delete your own files (your VFS folders) and use your deep memory "
+        f"— never {owner}'s — and it uses your Google account, including your Drive folders in "
+        "Flight Deck, only if you turn that on below (Drive files you indexed into deep memory "
+        "can still turn up in its deep-memory searches with Google off). While it is answering "
+        "you (up to 20 minutes), "
+        f"{owner}'s agent process acts with those; your VFS folders are files on this computer, "
+        f"so {owner}, who controls the agent, can read them at any time. It can't run commands, "
+        "use MCP servers or other agents, or schedule anything."
+    )
+
+
+_OWNER_NOTE = (
+    "Members chat with this agent in their own private conversations — private from each other, "
+    "not from you or the deck's admins. On a process agent, during a member's chat the agent "
+    "works with THEIR deep memory, THEIR own files and, only if they turn it on, THEIR Google "
+    "account — never yours. On a Docker agent, member chats can only search the web, read public "
+    "pages and use the shared insights, playbooks and topics. In member chats it can't use the "
+    "shell, your files or accounts, MCP servers, scheduled jobs or your fleet. What it learns "
+    "from anyone's chats — yours, and what it reads from members' own mail, files and deep "
+    "memory — becomes shared knowledge for everyone using it. Member chats use your LLM keys. "
+    "If this agent was running before sharing (or this update) was turned on, restart it once "
+    "so members can connect.\n\n" + OWNER_HOST_NOTE
+)
+
+_GOOGLE_WARNING = (
+    "Let Helper use your Google account (Gmail, Calendar, Drive) during your chats with it?\n\n"
+    "It acts as you, through Olga's agent: while one of your messages is being answered (up to "
+    "20 minutes), that agent can read your mail, calendar and Drive — including the Drive "
+    "folders you added to Flight Deck — and act in them as you: write drafts and, if your Gmail "
+    "send settings allow it, send email as you; create, change or delete calendar events; and "
+    "upload or overwrite Drive files. A Google access token it gets covers everything you "
+    "allowed when you connected Google and stays valid for about an hour, so Olga, who controls "
+    "the agent, could keep using your account for up to about an hour and a half after your "
+    "message.\n\n"
+    "Anything the agent reads from your mail, calendar or Drive can also become shared "
+    "knowledge that other members and Olga see.\n\n"
+    "Turn this on only if you trust Olga. You can turn it off at any time."
+)
+
+_CONNECT_HINT = "Connect your Google account in Connections first — until then this has no effect."
+
+
+# ── capabilities: only an explicit true counts ──────────────────────
+
+
+def test_shared_caps_take_only_an_explicit_true():
+    out = _lift([(_SHARED, ["CHAT_ONLY_CAPS", "sharedCaps"])], """
+      out = {
+        none: sharedCaps(undefined),
+        empty: sharedCaps({}),
+        nulled: sharedCaps({ capabilities: null }),
+        partial: sharedCaps({ capabilities: { google: true, files: 'yes' } }),
+        truthy: sharedCaps({ capabilities: { google: 'true', deep_memory: 1, files: {} } }),
+        docker: sharedCaps({ runtime: 'docker', capabilities: { google: false, deep_memory: false, files: false } }),
+        process: sharedCaps({ capabilities: { google: true, deep_memory: true, files: true } }),
+        constant: CHAT_ONLY_CAPS,
+      };
+    """)
+    for key in ("none", "empty", "nulled", "truthy", "docker", "constant"):
+        assert out[key] == _NO_CAPS, key
+    assert out["partial"] == {"google": True, "deep_memory": False, "files": False}
+    assert out["process"] == _ALL_CAPS
+
+
+# ── the member notice ───────────────────────────────────────────────
+
+
+def test_member_notice_on_a_process_agent_tells_what_it_uses():
+    out = _lift([(_SHARED, ["CHAT_ONLY_CAPS", "memberNoticeText"])], f"""
+      const caps = {json.dumps(_ALL_CAPS)};
+      out = {{
+        withWarning: memberNoticeText('Helper', 'Olga', {json.dumps(HOST_TRUST_WARNING)}, caps),
+        without: memberNoticeText('Helper', 'Olga', '', caps),
+        defaults: memberNoticeText('  ', '', '', caps),
+      }};
+    """)
+    text = out["without"]
+    for want in (
+        "your own files", "deep memory", "only if you turn that on",
+        "anything it reads from your mail", "can read them at any time", "Olga",
+    ):
+        assert want in text, want
+    assert text == _a2_notice("Helper", "Olga")
+    # The deck's warning comes last, verbatim; none → no trailing blank paragraph.
+    assert out["withWarning"] == text + "\n\n" + HOST_TRUST_WARNING
+    assert "\n" not in text
+    assert out["defaults"] == _a2_notice("This agent", "another user")
+
+
+def test_member_notice_is_a2_when_any_one_capability_is_on():
+    # Part 3 §4: the A2 text whenever files OR deep memory OR Google is on —
+    # any single one means the member's own data can be in play.
+    out = _lift([(_SHARED, ["CHAT_ONLY_CAPS", "memberNoticeText"])], """
+      const one = (k) => memberNoticeText('Helper', 'Olga', '',
+        { google: false, deep_memory: false, files: false, [k]: true });
+      out = { google: one('google'), deep_memory: one('deep_memory'), files: one('files') };
+    """)
+    for key, text in out.items():
+        assert text == _a2_notice("Helper", "Olga"), key
+
+
+def test_member_notice_stays_a1_for_chat_only_agents():
+    out = _lift([(_SHARED, ["CHAT_ONLY_CAPS", "sharedCaps", "memberNoticeText"])], f"""
+      const w = {json.dumps(HOST_TRUST_WARNING)};
+      out = {{
+        three: memberNoticeText('Helper', 'Olga', w),
+        chatOnly: memberNoticeText('Helper', 'Olga', w, CHAT_ONLY_CAPS),
+        docker: memberNoticeText('Helper', 'Olga', w,
+          sharedCaps({{ runtime: 'docker', capabilities: {json.dumps(_NO_CAPS)} }})),
+        olderDeck: memberNoticeText('Helper', 'Olga', w, sharedCaps({{}})),
+        noRow: memberNoticeText('Helper', 'Olga', w, sharedCaps(undefined)),
+        bare: memberNoticeText('Helper', 'Olga', ''),
+      }};
+    """)
+    a1 = _a1_notice("Helper", "Olga")
+    assert out["bare"] == a1
+    for key in ("three", "chatOnly", "docker", "olderDeck", "noRow"):
+        assert out[key] == a1 + "\n\n" + HOST_TRUST_WARNING, key
+
+
+def test_ack_key_is_bumped_so_everyone_sees_the_a2_notice():
+    out = _lift([(_SHARED, ["SHARED_ACK_PREFIX", "sliceUser", "sharedAckKey"])], """
+      out = { prefix: SHARED_ACK_PREFIX, key: sharedAckKey('u1', 'process:x:0123456789abcdef'),
+              anon: sharedAckKey(null, 'process:x:0123456789abcdef') };
+    """)
+    assert out["prefix"] == "fd.sharedAgentAck.v2."
+    assert out["key"] == "fd.sharedAgentAck.v2.u1.process:x:0123456789abcdef"
+    assert out["anon"] == "fd.sharedAgentAck.v2.local.process:x:0123456789abcdef"
+    # A dismissal of A1's notice doesn't hide A2's.
+    assert not out["key"].startswith("fd.sharedAgentAck.u1.")
+
+
+# ── the Google opt-in texts ─────────────────────────────────────────
+
+
+def test_google_opt_in_label_and_warning():
+    out = _lift([(_SHARED, ["agentInSentence", "googleOptInLabel", "googleOptInWarning"])], """
+      out = { label: googleOptInLabel('Helper'), warning: googleOptInWarning('Helper', 'Olga'),
+              blankLabel: googleOptInLabel(''), blankWarning: googleOptInWarning('', '') };
+    """)
+    assert out["label"] == "Let Helper use my Google during my chats"
+    warning = out["warning"]
+    for want in (
+        "Olga", "about an hour and a half", "send email as you", "shared knowledge",
+        "Turn this on only if you trust Olga",
+    ):
+        assert want in warning, want
+    assert warning == _GOOGLE_WARNING
+    assert out["blankLabel"] == "Let this agent use my Google during my chats"
+    assert "through another user's agent" in out["blankWarning"]
+
+
+def test_google_opt_in_hint_until_google_is_connected():
+    out = _lift([(_SHARED, ["googleOptInHint"])], """
+      out = [googleOptInHint({ google_connected: false }), googleOptInHint({ google_connected: true }),
+             googleOptInHint({}), googleOptInHint({ google_enabled: true })];
+    """)
+    assert out == [_CONNECT_HINT, "", _CONNECT_HINT, _CONNECT_HINT]
+
+
+# ── what the owner is told ──────────────────────────────────────────
+
+
+def test_owner_note_is_the_a2_text():
+    note = _lift([(_SHARED, ["OWNER_SHARE_NOTE"])], "out = OWNER_SHARE_NOTE;")
+    assert note == _OWNER_NOTE
+
+
+def test_owner_badge_texts():
+    out = _lift([(_SHARED, ["ownerGoogleBadgeTitle", "sharedCountLabel", "sharedCountTitle"])], """
+      out = { title: ownerGoogleBadgeTitle('Ana'), blank: ownerGoogleBadgeTitle(''),
+              label: sharedCountLabel(3),
+              titles: [sharedCountTitle(1, 0), sharedCountTitle(3, 0), sharedCountTitle(3, 2)] };
+    """)
+    assert out["title"] == "Ana lets this agent use their Google account during their chats"
+    assert out["blank"] == "This member lets this agent use their Google account during their chats"
+    assert out["label"] == "shared · 3"
+    assert out["titles"] == [
+        "Shared with 1 member", "Shared with 3 members", "Shared with 3 members, 2 with Google on",
+    ]
+
+
+# ── the member's Google switch, rendered against stubs ──────────────
+
+_REF = "process:helper:0123456789abcdef"
+
+_TOGGLE_HARNESS = r"""
+const React = { createElement: (type, props, ...children) =>
+  ({ type, props: props || {}, children: children.flat(Infinity) }) };
+const states = [];
+const useState = (init) => [typeof init === 'function' ? init() : init, (v) => states.push(v)];
+const Loader2 = 'Loader2';
+const confirms = [];
+let answer = true;
+const window = { confirm: (m) => { confirms.push(m); return answer; } };
+const calls = [];
+let fail = '';
+const useSharedAgentStore = { getState: () => ({ setGoogle: async (ref, on) => {
+  calls.push([ref, on]); if (fail) throw new Error(fail);
+} }) };
+const notes = [];
+const useNotificationStore = { getState: () => ({ add: (...a) => notes.push(a) }) };
+const find = (n, pred) => {
+  if (!n || typeof n !== 'object') return null;
+  if (pred(n)) return n;
+  for (const c of n.children || []) { const f = find(c, pred); if (f) return f; }
+  return null;
+};
+const text = (n) => (n == null || n === false || n === true) ? ''
+  : typeof n === 'object' ? (n.children || []).map(text).join('') : String(n);
+const row = (over) => ({
+  agent_ref: 'process:helper:0123456789abcdef', runtime: 'process', slug: 'helper', name: 'Helper',
+  description: '', status: 'running', owner_id: 'u-olga', owner_name: 'Olga',
+  owner_email: 'olga@example.com', shared_at: '',
+  capabilities: { google: true, deep_memory: true, files: true },
+  google_enabled: false, google_connected: true, ...over,
+});
+const switchOf = (el) => find(el, (n) => n.props && n.props.role === 'switch');
+"""
+
+_TOGGLE_DECLS = [
+    (_SHARED, [
+        "sharedCaps", "agentInSentence", "googleOptInLabel", "googleOptInWarning", "googleOptInHint",
+    ]),
+    (_TOGGLE, ["SharedAgentGoogleToggle"]),
+]
+
+
+def _toggle(body: str):
+    return _lift(_TOGGLE_DECLS, _TOGGLE_HARNESS + "done = (async () => {" + body + "})();", tsx=True)
+
+
+def test_google_toggle_is_hidden_for_chat_only_agents():
+    out = _toggle("""
+      out = {
+        docker: SharedAgentGoogleToggle({ agent: row({ runtime: 'docker',
+          capabilities: { google: false, deep_memory: false, files: false } }) }),
+        olderDeck: SharedAgentGoogleToggle({ agent: row({ capabilities: undefined }) }),
+        compactNull: SharedAgentGoogleToggle({ agent: row({ capabilities: null }), compact: true }),
+        process: !!SharedAgentGoogleToggle({ agent: row({}) }),
+      };
+    """)
+    assert out == {"docker": None, "olderDeck": None, "compactNull": None, "process": True}
+
+
+def test_google_toggle_on_asks_first_and_off_does_not():
+    out = _toggle("""
+      // Turning ON, then cancelling the warning: nothing happens.
+      answer = false;
+      let sw = switchOf(SharedAgentGoogleToggle({ agent: row({}) }));
+      const label = sw.props['aria-label'];
+      const checkedOff = sw.props['aria-checked'];
+      await sw.props.onClick();
+      const cancelled = { confirms: confirms.length, calls: calls.length, states: states.length };
+      // Confirmed: the store is asked, busy around the call.
+      answer = true;
+      await sw.props.onClick();
+      const turnedOn = { calls: [...calls], states: [...states] };
+      // Turning OFF never asks.
+      confirms.length = 0; calls.length = 0;
+      sw = switchOf(SharedAgentGoogleToggle({ agent: row({ google_enabled: true }) }));
+      const checkedOn = sw.props['aria-checked'];
+      await sw.props.onClick();
+      out = { label, checkedOff, checkedOn, cancelled, turnedOn, offConfirms: confirms.length,
+              offCalls: calls };
+    """)
+    assert out["label"] == "Let Helper use my Google during my chats"
+    assert out["checkedOff"] is False and out["checkedOn"] is True
+    assert out["cancelled"] == {"confirms": 1, "calls": 0, "states": 0}
+    assert out["turnedOn"] == {"calls": [[_REF, True]], "states": [True, False]}
+    assert out["offConfirms"] == 0
+    assert out["offCalls"] == [[_REF, False]]
+
+
+def test_google_toggle_confirm_shows_the_warning():
+    out = _toggle("""
+      answer = false;
+      await switchOf(SharedAgentGoogleToggle({ agent: row({}) })).props.onClick();
+      await switchOf(SharedAgentGoogleToggle({ agent: row({ name: '', owner_name: '' }) })).props.onClick();
+      out = confirms;
+    """)
+    assert out[0] == _GOOGLE_WARNING
+    # Falls back to the slug and the owner's email, as the card does.
+    assert out[1].startswith("Let helper use your Google account")
+    assert "through olga@example.com's agent" in out[1]
+
+
+def test_google_toggle_reports_a_failure():
+    out = _toggle("""
+      fail = 'Not a member';
+      await switchOf(SharedAgentGoogleToggle({ agent: row({ google_enabled: true }) })).props.onClick();
+      out = { notes, states };
+    """)
+    assert out["notes"] == [["error", "Could not change Google access", "Not a member"]]
+    # Not left spinning.
+    assert out["states"] == [True, False]
+
+
+def test_google_toggle_hint_until_google_is_connected():
+    out = _toggle("""
+      const full = SharedAgentGoogleToggle({ agent: row({ google_connected: false }) });
+      const compact = SharedAgentGoogleToggle({ agent: row({ google_connected: false }), compact: true });
+      const connected = SharedAgentGoogleToggle({ agent: row({}) });
+      const compactConnected = SharedAgentGoogleToggle({ agent: row({}), compact: true });
+      out = {
+        full: text(full), compactTitle: compact.props.title, compactText: text(compact),
+        connected: text(connected), compactConnectedTitle: compactConnected.props.title ?? null,
+        hintClass: (find(full, (n) => n.type === 'p') || { props: {} }).props.className,
+      };
+    """)
+    assert _CONNECT_HINT in out["full"]
+    assert out["hintClass"] == "text-[11px] text-zinc-500"
+    assert out["compactTitle"] == _CONNECT_HINT
+    assert _CONNECT_HINT not in out["compactText"]
+    assert _CONNECT_HINT not in out["connected"]
+    assert out["compactConnectedTitle"] is None
+
+
+# ── the store: optimistic switch, rolled back on failure; owner counts ──
+
+_STORE_HARNESS = r"""
+function create(init) {
+  let state;
+  const set = (p) => { state = { ...state, ...(typeof p === 'function' ? p(state) : p) }; };
+  const get = () => state;
+  state = init(set, get);
+  return { getState: get };
+}
+const A = 'process:helper:0123456789abcdef';
+const B = 'docker:scout:fedcba9876543210';
+let server = {
+  enabled: true, host_warning: 'W',
+  agents: [
+    { agent_ref: A, name: 'Helper', google_enabled: false, google_connected: true,
+      capabilities: { google: true, deep_memory: true, files: true } },
+    { agent_ref: B, name: 'Scout', google_enabled: false, google_connected: true,
+      capabilities: { google: false, deep_memory: false, files: false } },
+  ],
+  mine: { 'process:mine:1111111111111111': { members: 2, google: 1 } },
+};
+const getSharedAgents = async () => JSON.parse(JSON.stringify(server));
+const puts = [];
+const seen = [];
+let fail = '';
+const setSharedAgentGoogle = async (ref, on) => {
+  seen.push(useSharedAgentStore.getState().agents.find((a) => a.agent_ref === ref).google_enabled);
+  puts.push([ref, on]);
+  if (fail) throw new Error(fail);
+  server.agents = server.agents.map((a) => (a.agent_ref === ref ? { ...a, google_enabled: on } : a));
+  return { agent_ref: ref, google_enabled: on };
+};
+const leaveShare = async () => {};
+const sharedContainerId = (r) => 'shared:' + r;
+const clearSharedSlices = () => {};
+const useChatStore = { getState: () => ({ sessions: new Map(), disconnectChat: () => {} }) };
+const st = () => useSharedAgentStore.getState();
+const g = (ref) => st().agents.find((a) => a.agent_ref === ref).google_enabled;
+"""
+
+
+def _store(body: str):
+    return _lift(
+        [(_SHARED_STORE, ["useSharedAgentStore"])],
+        _STORE_HARNESS + "done = (async () => {" + body + "})();",
+    )
+
+
+def test_store_set_google_is_optimistic_and_rolls_back():
+    out = _store("""
+      await st().fetch();
+      await st().setGoogle(A, true);
+      const on = { seen: [...seen], g: g(A), other: g(B) };
+      fail = 'Denied';
+      let err = null;
+      try { await st().setGoogle(A, false); } catch (e) { err = e.message; }
+      out = { on, err, seenOff: seen[seen.length - 1], after: g(A), other: g(B), puts };
+    """)
+    # The switch flips before the PUT answers, then the list is re-read.
+    assert out["on"] == {"seen": [True], "g": True, "other": False}
+    # A failed PUT puts the old value back and rethrows for the caller.
+    assert out["err"] == "Denied"
+    assert out["seenOff"] is False
+    assert out["after"] is True
+    assert out["other"] is False
+    assert out["puts"] == [[_REF, True], [_REF, False]]
+
+
+def test_store_keeps_owner_counts_and_their_identity():
+    out = _store("""
+      const initial = st().mine;
+      await st().fetch();
+      const first = st().mine;
+      await st().fetch();
+      const stable = st().mine === first;
+      server = { ...server, mine: undefined };
+      await st().fetch();
+      const absent = st().mine;
+      server = { ...server, enabled: false, mine: { x: { members: 1, google: 0 } } };
+      await st().fetch();
+      out = { initial, first, stable, absent, off: st().mine };
+    """)
+    assert out["initial"] == {}
+    assert out["first"] == {"process:mine:1111111111111111": {"members": 2, "google": 1}}
+    assert out["stable"] is True
+    # An older Flight Deck (no `mine`) or sharing off: no counts, no badge.
+    assert out["absent"] == {}
+    assert out["off"] == {}
+
+
+def test_owner_count_badge_shows_only_with_members():
+    out = _lift([
+        (_SHARED, ["sharedCountLabel", "sharedCountTitle"]),
+        (_COUNT_BADGE, ["SharedCountBadge"]),
+    ], r"""
+      const React = { createElement: (type, props, ...children) =>
+        ({ type, props: props || {}, children: children.flat(Infinity) }) };
+      const Users = 'Users';
+      let state = { mine: {} };
+      const useSharedAgentStore = (sel) => sel(state);
+      const text = (n) => (n == null || n === false) ? ''
+        : typeof n === 'object' ? (n.children || []).map(text).join('') : String(n);
+      const none = SharedCountBadge({ agentRef: 'process:mine:1111111111111111' });
+      const noRef = SharedCountBadge({});
+      state = { mine: { 'process:mine:1111111111111111': { members: 2, google: 1 },
+                        'process:zero:2222222222222222': { members: 0, google: 0 } } };
+      const two = SharedCountBadge({ agentRef: 'process:mine:1111111111111111' });
+      const zero = SharedCountBadge({ agentRef: 'process:zero:2222222222222222' });
+      out = { none, noRef, zero, label: text(two), title: two.props.title };
+    """, tsx=True)
+    assert out["none"] is None and out["noRef"] is None and out["zero"] is None
+    assert out["label"] == "shared · 2"
+    assert out["title"] == "Shared with 2 members, 1 with Google on"
+
+
+# ── wiring ──────────────────────────────────────────────────────────
+
+_JSX_HELPERS = r"""
+const tag = (n) => (ts.isJsxSelfClosingElement(n) ? n : ts.isJsxElement(n) ? n.openingElement : null);
+const tagName = (n) => { const t = tag(n); return t ? t.tagName.getText(sf) : null; };
+const attr = (n, name) => {
+  const t = tag(n);
+  const a = t && t.attributes.properties.find((p) => ts.isJsxAttribute(p) && p.name.getText(sf) === name);
+  return a ? (a.initializer ? a.initializer.getText(sf) : true) : null;
+};
+const guard = (n) => {
+  for (let p = n.parent; p; p = p.parent) if (ts.isJsxExpression(p)) return p.expression.getText(sf);
+  return null;
+};
+const named = (name) => all.filter((n) => tagName(n) === name);
+"""
+
+
+def test_chat_panel_wires_caps_notice_and_switch():
+    found = _query(_CHAT_PANEL, _JSX_HELPERS + r"""
+      const notices = named('SharedAgentNotice');
+      const toggles = named('SharedAgentGoogleToggle');
+      const decl = (name) => all.find((n) => ts.isVariableDeclaration(n) && n.name.getText(sf) === name);
+      const storeCalls = all.filter((n) => ts.isCallExpression(n)
+          && n.expression.getText(sf) === 'useSharedAgentStore');
+      const closeAt = sf.getFullText().indexOf('sharedClose.message');
+      const chip = all.find((n) => ts.isJsxAttribute(n) && n.name.getText(sf) === 'title'
+          && n.getText(sf).includes('Your chats are private from other members'));
+      return {
+        noticeCaps: notices.map((n) => attr(n, 'caps')),
+        toggles: toggles.map((n) => ({ agent: attr(n, 'agent'), compact: attr(n, 'compact'), guard: guard(n) })),
+        order: notices.length === 1 && toggles.length === 1
+          && notices[0].getStart(sf) < toggles[0].getStart(sf) && toggles[0].getStart(sf) < closeAt,
+        caps: decl('caps') ? decl('caps').initializer.getText(sf) : null,
+        sharedRow: decl('sharedRow') ? decl('sharedRow').initializer.getText(sf) : null,
+        storeArgs: storeCalls.map((c) => c.arguments.length),
+        chip: chip ? chip.getText(sf) : null,
+      };
+    """)
+    assert found["noticeCaps"] == ["{caps}"]
+    assert len(found["toggles"]) == 1
+    t = found["toggles"][0]
+    assert t["agent"] == "{sharedRow}" and t["compact"] is True
+    for cond in ("shared", "sharedRow", "caps.google", "!session.closed"):
+        assert cond in t["guard"], cond
+    assert found["order"] is True
+    assert found["caps"] == "sharedCaps(sharedRow)"
+    # Only this chat's row — never a whole-store subscription.
+    assert "s.agents.find(" in found["sharedRow"]
+    assert found["storeArgs"] and all(n == 1 for n in found["storeArgs"])
+    assert "caps.files || caps.deep_memory" in found["chip"]
+    assert (
+        " During your chats it uses your own files and deep memory, and your Google only if you "
+        "turned it on." in found["chip"]
+    )
+
+
+def test_cards_and_share_dialog_wiring():
+    card = _query(_SHARED_CARD, _JSX_HELPERS + r"""
+      const text = sf.getFullText();
+      const desc = text.indexOf('{agent.description}</p>');
+      const chat = text.indexOf('openSharedChat(agent.agent_ref');
+      return named('SharedAgentGoogleToggle').map((n) => ({ agent: attr(n, 'agent'),
+        compact: attr(n, 'compact'), between: desc > 0 && desc < n.getStart(sf) && n.getStart(sf) < chat }));
+    """)
+    assert card == [{"agent": "{agent}", "compact": None, "between": True}]
+
+    modal = _query(_SHARE_MODAL, _JSX_HELPERS + r"""
+      const spans = all.filter((n) => ts.isJsxElement(n) && tagName(n) === 'span'
+          && n.children.some((c) => ts.isJsxText(c) && c.getText(sf).trim() === 'Google on'));
+      const canChat = sf.getFullText().indexOf('>Can chat<');
+      return spans.map((n) => ({ guard: guard(n), title: attr(n, 'title'),
+        beforeCanChat: n.getStart(sf) < canChat }));
+    """)
+    assert len(modal) == 1
+    assert "resourceType === 'agent'" in modal[0]["guard"]
+    assert "s.google_enabled" in modal[0]["guard"]
+    assert modal[0]["title"] == "{ownerGoogleBadgeTitle(s.grantee_name || s.grantee_email)}"
+    assert modal[0]["beforeCanChat"] is True
+
+    for src, ref in ((_PROCESS_CARD, "{proc.agent_ref}"), (_CONTAINER_CARD, "{container.agent_ref}")):
+        badges = _query(src, _JSX_HELPERS + r"""
+          return named('SharedCountBadge').map((n) => attr(n, 'agentRef'));
+        """)
+        # Compact and expanded views, next to the name.
+        assert badges == [ref, ref], src.name

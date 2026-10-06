@@ -84,11 +84,33 @@ def _proj_path(project: str, subdir: str) -> str:
     return f"{project}/{sub}"
 
 
+def _in_deck_internals(owner: str, base: Path) -> bool:
+    """Is ``base`` FD's data dir, an ancestor of it, or inside it outside the
+    owner's own VFS root? A published folder can only land there through a
+    linked project whose registry entry ``POST /fd/vfs/links`` would have
+    refused (a ``.vfs-links.json`` edited on disk) — and serving is public. The
+    same read-time rule as ``vfs_routes.safe_link_target``."""
+    from captain_claw.flight_deck.vfs_routes import path_within
+    from captain_claw.vfs import user_root_of
+
+    try:
+        data = _data_dir().resolve()
+        own = user_root_of(owner).resolve()
+        b = base.resolve()
+        if path_within(b, own):
+            return False
+        return path_within(b, data) or path_within(data, b)
+    except (OSError, RuntimeError):
+        return True
+
+
 def entry_dir(entry: dict) -> Path | None:
     """Resolve a published entry's on-disk base directory (owner-scoped, sandboxed)."""
     base = resolve_under(entry.get("owner", ""), entry.get("project", ""),
                          _proj_path(entry.get("project", ""), entry.get("subdir", "")))
     if base is None or not base.is_dir():
+        return None
+    if _in_deck_internals(str(entry.get("owner", "") or ""), base):
         return None
     return base
 

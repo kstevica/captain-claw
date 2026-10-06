@@ -51,15 +51,45 @@ log = get_logger(__name__)
 # context and can't await). Updated by every GoogleOAuthManager call
 # that inspects or mutates token state. Treat as a hint: callers that
 # need a definitive answer should still `await mgr.is_connected()`.
-_GOOGLE_CONNECTED: bool = False
-_GOOGLE_CONNECTED_AT: float = 0.0
+#
+# Per principal (A2): "" is the owner's entry, "spk:<speaker_id>" a shared-
+# agent member's (their OWN Google for this agent, written only by
+# speaker_status()). An unverified member or a thread that lost the speaker
+# context has no key: never read, never written (→ not connected).
+_GOOGLE_CONNECTED: dict[str, tuple[bool, float]] = {}
 _GOOGLE_CACHE_MAX_AGE: float = 120.0  # seconds
 
 
+def _cache_key() -> str | None:
+    """The cache key for whoever this code runs for (see above)."""
+    from captain_claw import speaker as _speaker
+
+    p = _speaker.current()
+    if p is None:
+        return None if _speaker.identity_lost() else ""
+    if not p.speaker_id:
+        return None
+    return f"spk:{p.speaker_id}"
+
+
 def _mark_google_connected(connected: bool) -> None:
-    global _GOOGLE_CONNECTED, _GOOGLE_CONNECTED_AT
-    _GOOGLE_CONNECTED = bool(connected)
-    _GOOGLE_CONNECTED_AT = time.time()
+    key = _cache_key()
+    if key is None:
+        return
+    _GOOGLE_CONNECTED[key] = (bool(connected), time.time())
+
+
+def _cache_entry(max_age: float) -> tuple[bool, float] | None:
+    key = _cache_key()
+    if key is None:
+        return None
+    entry = _GOOGLE_CONNECTED.get(key)
+    if entry is None:
+        return None
+    _connected, at = entry
+    if at <= 0.0 or (time.time() - at) > max_age:
+        return None
+    return entry
 
 
 def is_google_connected_cached(max_age: float | None = None) -> bool:
@@ -68,13 +98,15 @@ def is_google_connected_cached(max_age: float | None = None) -> bool:
     Returns *True* only when an async call has recently confirmed tokens
     are present. Stale caches are reported as *False* so callers err on
     the side of hiding Google-dependent features until freshly checked.
+    Per principal: a member never reads the owner's flag.
     """
-    age_limit = _GOOGLE_CACHE_MAX_AGE if max_age is None else max_age
-    if _GOOGLE_CONNECTED_AT <= 0.0:
-        return False
-    if (time.time() - _GOOGLE_CONNECTED_AT) > age_limit:
-        return False
-    return _GOOGLE_CONNECTED
+    entry = _cache_entry(_GOOGLE_CACHE_MAX_AGE if max_age is None else max_age)
+    return bool(entry and entry[0])
+
+
+def google_cache_fresh(max_age: float) -> bool:
+    """Whether this principal's cached status is younger than *max_age*."""
+    return _cache_entry(max_age) is not None
 
 
 class FlightDeckRefused(DriveNotConnected):
@@ -122,6 +154,9 @@ class GoogleOAuthManager:
     def __init__(self, session_manager: SessionManager) -> None:
         self._sm = session_manager
         self._cached_tokens: GoogleOAuthTokens | None = None
+        # Whose tokens `_cached_tokens` are (FD mode): reused only for the
+        # same principal (see _cache_key).
+        self._cached_tokens_key: str | None = None
         # Cache the Flight-Deck-provided credentials JSON briefly so
         # hot paths (per-request LLM calls) don't re-hit Flight Deck
         # on every invocation.
@@ -150,7 +185,15 @@ class GoogleOAuthManager:
         return url
 
     @staticmethod
-    def _flight_deck_headers() -> dict[str, str]:
+    def _member_call() -> bool:
+        """A shared-agent member's call (or one from a thread that lost the
+        speaker context while member work is live) — never the owner's."""
+        from captain_claw import speaker as _speaker
+
+        return _speaker.member_bound() or _speaker.identity_lost()
+
+    @staticmethod
+    def _flight_deck_headers(*, as_speaker: bool = True) -> dict[str, str]:
         """This agent's credentials for FD's Google endpoints — sent only to
         :meth:`_flight_deck_base`, which comes from config / the env FD pins at
         spawn, never from a session or a websocket message.
@@ -160,6 +203,12 @@ class GoogleOAuthManager:
         file (as ``tools.flight_deck._fd_agent_headers`` sends). Under
         FD_LOCKDOWN FD refuses (401) an agent call without it, even from
         loopback.
+
+        *as_speaker* (default): for a shared-agent member's call, add the
+        turn's ``X-FD-Speaker-Grant`` — raises
+        :class:`~captain_claw.speaker.SpeakerGrantMissing` when the member
+        has none (never sent as the owner). Every request with these headers
+        also sends ``params=speaker.grant_params()``.
         """
         headers: dict[str, str] = {}
         secret = (get_config().google_oauth.flight_deck_secret or "").strip()
@@ -182,22 +231,35 @@ class GoogleOAuthManager:
         token = str(getattr(getattr(get_config(), "web", None), "auth_token", "") or "").strip()
         if token:
             headers["X-Agent-Auth"] = token
+        if as_speaker:
+            from captain_claw import speaker as _speaker
+
+            headers.update(_speaker.grant_headers())
         return headers
 
     def _is_flight_deck_client(self) -> bool:
         return bool(self._flight_deck_base())
 
     async def _fd_get_access_token(self) -> GoogleOAuthTokens | None:
-        """The owner's access token from Flight Deck; None when FD is
+        """The access token from Flight Deck — the owner's, or (with the
+        turn's grant) a shared-agent member's own; None when FD is
         unreachable or has none (404 — not configured / not connected).
-        Raises :class:`FlightDeckRefused` on a 401/403, keeping FD's reason."""
+        Raises :class:`FlightDeckRefused` on a 401/403, keeping FD's reason,
+        and — with NO request — for a member without a usable grant."""
+        from captain_claw import speaker as _speaker
+
         base = self._flight_deck_base()
         if not base:
             return None
         url = f"{base}/fd/google/access_token"
         try:
+            headers = self._flight_deck_headers()
+            params = _speaker.grant_params()
+        except _speaker.SpeakerGrantMissing:
+            raise FlightDeckRefused(403, _speaker.NO_GRANT_MESSAGE) from None
+        try:
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(url, headers=self._flight_deck_headers())
+                resp = await client.get(url, headers=headers, params=params)
         except Exception as exc:
             log.warning("Flight Deck access_token fetch failed: %s", exc)
             return None
@@ -231,8 +293,10 @@ class GoogleOAuthManager:
             return None
         url = f"{base}/fd/google/credentials"
         try:
+            # Vertex LLM credentials are the owner's (the owner pays for
+            # member turns too) — never the grant header or marker.
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(url, headers=self._flight_deck_headers())
+                resp = await client.get(url, headers=self._flight_deck_headers(as_speaker=False))
                 if resp.status_code == 404:
                     return None
                 refusal = _fd_refusal(resp)
@@ -259,22 +323,41 @@ class GoogleOAuthManager:
         when Flight Deck refuses this agent — the google_* tools surface that
         reason. In local mode it reads from ``app_state`` and refreshes
         in-process.
+
+        A shared-agent member's call never reads this agent's own tokens
+        (they are the owner's): outside Flight Deck it is refused. Under
+        Flight Deck it carries the turn's grant (see _fd_get_access_token);
+        the member's status cache is written only by :meth:`speaker_status`.
         """
+        member = self._member_call()
+        if member and not self._is_flight_deck_client():
+            from captain_claw.speaker import NO_GRANT_MESSAGE
+
+            raise FlightDeckRefused(403, NO_GRANT_MESSAGE)
+
         if self._is_flight_deck_client():
-            if self._cached_tokens and not self._cached_tokens.is_expired():
-                _mark_google_connected(True)
+            key = _cache_key()
+            if (self._cached_tokens and not self._cached_tokens.is_expired()
+                    and key is not None and self._cached_tokens_key == key):
+                if not member:
+                    _mark_google_connected(True)
                 return self._cached_tokens
             try:
                 tokens = await self._fd_get_access_token()
             except FlightDeckRefused:
                 self._cached_tokens = None
-                _mark_google_connected(False)
+                self._cached_tokens_key = None
+                if not member:
+                    _mark_google_connected(False)
                 raise
-            if tokens:
+            if tokens and key is not None:
                 self._cached_tokens = tokens
-                _mark_google_connected(True)
+                self._cached_tokens_key = key
             else:
-                _mark_google_connected(False)
+                self._cached_tokens = None
+                self._cached_tokens_key = None
+            if not member:
+                _mark_google_connected(bool(tokens))
             return tokens
 
         if self._cached_tokens and not self._cached_tokens.is_expired():
@@ -383,8 +466,53 @@ class GoogleOAuthManager:
 
     # ── status ─────────────────────────────────────────────
 
+    async def speaker_status(self) -> bool:
+        """A shared-agent member's Google status for THIS agent, from Flight
+        Deck's grant-aware ``/fd/google/agent_status`` (never a token fetch).
+
+        Not an FD client, no usable grant, a non-JSON-object 200, a 403, a
+        404 from an older Flight Deck or a network error → not connected and
+        not enabled. Marks the member's cache entry, records the status for
+        :func:`captain_claw.speaker.member_google_enabled` and returns
+        ``connected``.
+        """
+        from captain_claw import speaker as _speaker
+
+        connected = enabled = False
+        base = self._flight_deck_base()
+        if base:
+            try:
+                headers = self._flight_deck_headers(as_speaker=True)
+                params = _speaker.grant_params()
+            except _speaker.SpeakerGrantMissing:
+                headers = None
+                params = {}
+            if headers is not None:
+                try:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        resp = await client.get(
+                            f"{base}/fd/google/agent_status", headers=headers, params=params,
+                        )
+                    if resp.status_code == 200:
+                        try:
+                            data = resp.json()
+                        except Exception:
+                            data = None
+                        if isinstance(data, dict):
+                            connected = bool(data.get("connected"))
+                            enabled = bool(data.get("enabled"))
+                except Exception as exc:
+                    log.warning("Flight Deck agent_status fetch failed: %s", exc)
+        _mark_google_connected(connected)
+        _speaker.note_member_google(connected, enabled)
+        return connected
+
     async def is_connected(self) -> bool:
         """Return *True* when a valid access token can be obtained."""
+        if self._member_call():
+            # A member's status comes from Flight Deck (their own Google, only
+            # with their opt-in for this agent) — never a token fetch.
+            return await self.speaker_status()
         if self._is_flight_deck_client():
             try:
                 tokens = await self.get_tokens()

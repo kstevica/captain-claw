@@ -16,10 +16,16 @@ import pytest
 from captain_claw.agent import Agent
 from captain_claw.config import get_config
 from captain_claw.llm import LLMProvider, LLMResponse, ToolCall
-from captain_claw.speaker import SPEAKER_MODE_NOTE, SPEAKER_TOOL_ALLOWLIST, Principal
+from captain_claw.speaker import (
+    SPEAKER_MODE_NOTE,
+    SPEAKER_MODE_NOTE_FULL,
+    SPEAKER_TOOL_ALLOWLIST,
+    Principal,
+)
 from captain_claw.tools.registry import Tool, ToolResult
 
 PRINCIPAL = Principal("u-member", "Ana", "Olga", "A", "process:helper:0123456789abcdef")
+DOCKER = Principal("u-member", "Ana", "Olga", "A", "docker:helper:0123456789abcdef")
 MEMBER_META = {"speaker_id": "u-member", "speaker_lane": "A", "speaker_name": "Ana"}
 
 # Each one trips an owner-store auto-capture pattern on a normal turn.
@@ -97,10 +103,28 @@ def capture_on(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolated_home(monkeypatch, tmp_path):
-    """Nothing here may reach the real ~/.captain-claw."""
+    """Nothing here may reach the real ~/.captain-claw: HOME, FD_DATA_DIR,
+    every config DB path (the session DB default is resolved at import, so
+    HOME alone doesn't move it) and the global session / topic managers."""
+    import captain_claw.conversation_topics as _ct
+    from captain_claw import session as _session
+
     home = tmp_path / "home"
     (home / ".captain-claw").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("FD_DATA_DIR", str(tmp_path / "fd-data"))
+    for var in ("CLAW_VFS_ROOT", "CLAW_VFS_USER", "FD_OWNER_ID", "FD_URL"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = get_config()
+    for section, attr in (
+        ("memory", "path"), ("session", "path"), ("insights", "db_path"),
+        ("conversation_topics", "db_path"), ("nervous_system", "db_path"),
+        ("sister_session", "db_path"), ("cognitive_metrics", "db_path"),
+        ("datastore", "path"), ("autonomous_work", "db_path"),
+    ):
+        monkeypatch.setattr(getattr(cfg, section), attr, str(home / ".captain-claw" / f"{section}.db"))
+    monkeypatch.setattr(_session, "_manager", _session.SessionManager(home / ".captain-claw" / "s.db"))
+    monkeypatch.setattr(_ct, "_MANAGER", None)
     return home
 
 
@@ -123,9 +147,9 @@ def _agent(monkeypatch, tmp_path, provider=None):
     return agent
 
 
-def _make_member(agent):
+def _make_member(agent, principal=PRINCIPAL):
     agent._speaker_scoped = True
-    agent._speaker_principal = PRINCIPAL
+    agent._speaker_principal = principal
     agent._speaker_profile = ("", "")
     return agent
 
@@ -251,15 +275,40 @@ def test_member_tool_list_is_only_the_allowlist(monkeypatch, tmp_path, use_micro
         assert name not in member_list and f"DESC-{name}" not in member_list
 
 
-def test_member_prompt_has_no_owner_tools_mcp_note_or_skills(monkeypatch, tmp_path):
+@pytest.mark.parametrize("principal", [PRINCIPAL, DOCKER], ids=["process", "docker"])
+def test_member_tool_list_names_their_file_tools_but_never_google(monkeypatch, tmp_path,
+                                                                  principal):
+    """A2: the cached member prompt names a process member's file / deep-memory
+    tools; Google tools arrive only with the API definitions (when connected),
+    and a docker member stays at A1."""
+    agent = _agent_with_owner_tools(monkeypatch, tmp_path)
+    for name in ("read", "vfs", "typesense", "google_drive"):
+        agent.tools.register(_Rec(name, description=f"DESC-{name}"))
+    _make_member(agent, principal)
+    listed = _listed_tools(agent._build_tool_list())
+    assert "google_mail" not in listed and "google_drive" not in listed
+    if principal is PRINCIPAL:
+        assert {"read", "vfs", "typesense"} <= listed
+    else:
+        assert listed == set(SPEAKER_TOOL_ALLOWLIST)
+
+
+@pytest.mark.parametrize("principal,note", [
+    (PRINCIPAL, SPEAKER_MODE_NOTE_FULL),        # A2: a process member's own things
+    (DOCKER, SPEAKER_MODE_NOTE),                # docker stays A1 (chat-only)
+], ids=["process", "docker"])
+def test_member_prompt_has_no_owner_tools_mcp_note_or_skills(monkeypatch, tmp_path, principal,
+                                                             note):
     agent = _agent_with_owner_tools(monkeypatch, tmp_path)
     owner_prompt = agent._build_system_prompt()
     assert "mcp_fric_list_fund_investments" in owner_prompt
     assert MCP_POLICY_MARK in owner_prompt and "OWNER-SKILL-crm-sync" in owner_prompt
 
-    _make_member(agent)
+    _make_member(agent, principal)
     prompt = agent._build_system_prompt()
-    assert SPEAKER_MODE_NOTE in prompt
+    assert note in prompt
+    other = SPEAKER_MODE_NOTE if note is SPEAKER_MODE_NOTE_FULL else SPEAKER_MODE_NOTE_FULL
+    assert other not in prompt
     for name in OWNER_TOOLS:
         assert f"DESC-{name}" not in prompt and f"- {name}:" not in prompt, name
     assert "mcp_fric_list_fund_investments" not in prompt

@@ -116,7 +116,20 @@ def vfs_user() -> str:
     2. ``FD_OWNER_ID`` — injected by Flight Deck into spawned agents.
     3. ``local`` — matches FD's no-auth user, so the standalone main agent and
        the panel agree out of the box.
+
+    A shared-agent member's call (A2) is the MEMBER, never the owner's env:
+    their own root, or ``PermissionError`` when files aren't theirs to use
+    here (docker / unverified member, or a thread that lost the speaker
+    context while member work is live).
     """
+    from captain_claw import speaker as _speaker
+
+    seg = _speaker.vfs_member_segment()          # may raise PermissionError (fail closed)
+    if seg is not None:
+        safe = _sanitize(seg, fallback="")
+        if not safe:
+            raise PermissionError(_speaker.FILES_UNAVAILABLE_MESSAGE)
+        return safe
     explicit = os.environ.get("CLAW_VFS_USER", "").strip()
     if explicit:
         return _sanitize(explicit, fallback=_DEFAULT_USER)
@@ -124,7 +137,15 @@ def vfs_user() -> str:
 
 
 def default_project() -> str:
-    """Return the auto-bound project for this run (or the shared default)."""
+    """Return the auto-bound project for this run (or the shared default).
+
+    A shared-agent member always gets the shared default: the owner's run
+    project (``CLAW_VFS_PROJECT``) names nothing in the member's root.
+    """
+    from captain_claw import speaker as _speaker
+
+    if _speaker.member_bound():
+        return _DEFAULT_PROJECT
     return _sanitize(os.environ.get("CLAW_VFS_PROJECT", ""), fallback=_DEFAULT_PROJECT)
 
 
@@ -160,7 +181,16 @@ _LINKS_FILE = ".vfs-links.json"
 
 
 def read_links_at(root: Path) -> dict:
-    """Parse the link registry under *root* (a user root). Never raises."""
+    """Parse the link registry under *root* (a user root). Never raises.
+
+    Empty for a shared-agent member: linked folders are external host paths,
+    and a member's VFS is only their own root (Drive mounts still resolve
+    physically, read-only).
+    """
+    from captain_claw import speaker as _speaker
+
+    if _speaker.member_bound():
+        return {}
     try:
         data = json.loads((root / _LINKS_FILE).read_text())
         return data if isinstance(data, dict) else {}
@@ -181,6 +211,51 @@ def link_target_at(root: Path, name: str) -> Path | None:
         if p.is_absolute():
             return p.resolve()
     return None
+
+
+def _fs_id(p: Path) -> tuple[int, int] | None:
+    try:
+        st = p.stat()
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
+def path_within(p: Path, base: Path) -> bool:
+    """``p`` is ``base`` or inside it — compared by path AND by filesystem
+    identity. Both must be resolved. ``resolve()`` keeps the caller's spelling,
+    so on a case-insensitive volume (macOS' default) ``…/FD-DATA`` is the same
+    directory as ``…/fd-data`` without being equal to it, and a firmlinked
+    ``/System/Volumes/Data/Users/…`` is ``/Users/…``: a path-only comparison
+    would wave such a spelling through."""
+    if p == base or base in p.parents:
+        return True
+    bid = _fs_id(base)
+    if bid is None:
+        return False
+    return any(_fs_id(q) == bid for q in (p, *p.parents))
+
+
+def safe_link_target_at(root: Path, name: str, data_dir: Path | None = None) -> Path | None:
+    """:func:`link_target_at`, or None when the target is Flight Deck's data
+    dir, an ancestor of it, or inside it outside *root* (a Drive mount's target
+    lives under the user's own root). The link registry is a plain file in the
+    user's root — one edited on disk is re-checked here, at read time, and a
+    refused link behaves exactly like a missing one."""
+    tgt = link_target_at(root, name)
+    if tgt is None:
+        return None
+    try:
+        data = Path(data_dir if data_dir is not None else vfs_base().parent).resolve()
+        base = Path(root).resolve()
+        t = tgt.resolve()
+        if path_within(t, base):
+            return tgt
+        if path_within(t, data) or path_within(data, t):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return tgt
 
 
 # Google Drive mounts live under this dotdir at the user root, each a
@@ -286,7 +361,11 @@ def _known_projects() -> list[str]:
             if p.is_dir() and not p.name.startswith("."):
                 names.add(p.name)
     names.update(read_links_at(root).keys())
-    names.update(_drive_mount_names(root))  # physical Drive mounts, link or not
+    from captain_claw import speaker as _speaker
+
+    # A member's Drive mounts follow their Google opt-in for this agent.
+    if not (_speaker.member_bound() and not _speaker.member_google_enabled()):
+        names.update(_drive_mount_names(root))  # physical Drive mounts, link or not
     return sorted(names)
 
 
@@ -474,7 +553,7 @@ def resolve_under(user_id: str, default_proj: str, path: str) -> Path | None:
     proj_name = _sanitize(proj or default_proj, fallback=_DEFAULT_PROJECT)
     # A linked project resolves to its external root; sandbox under whichever
     # root actually backs the project so ``..`` can't climb out of it.
-    tgt = link_target_at(user_root_p, proj_name)
+    tgt = safe_link_target_at(user_root_p, proj_name)
     base = tgt if tgt is not None else (user_root_p / proj_name)
     candidate = base
     for part in (p for p in rel.split("/") if p not in ("", ".")):

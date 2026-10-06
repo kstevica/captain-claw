@@ -47,6 +47,7 @@ from pydantic import BaseModel
 
 from captain_claw import gmail_compose
 from captain_claw.flight_deck import google_oauth_routes as _google
+from captain_claw.flight_deck import speaker_grants, tenant_profile
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.flight_deck.google_oauth_routes import _require_auth_deck
@@ -509,7 +510,10 @@ async def gmail_send(request: Request) -> dict[str, Any]:
     existing draft as it is now. Same agent gate as ``/access_token``.
     """
     _google._authorize_agent_call(request)
-    owner = await _google._agent_owner(request)
+    # On a shared-agent member's turn the send is the MEMBER's — their opt-in
+    # for this agent, policy, token, limits, audit row and bell — never the owner's.
+    acting = await speaker_grants.acting_member(request, google=True)
+    owner = acting.user_id if acting else await _google._agent_owner(request)
 
     # The enforcement point. It stops model mistakes and prompt injection (an
     # email, page or file telling the agent to "send this to …"). It is NOT a
@@ -647,7 +651,11 @@ async def gmail_send(request: Request) -> dict[str, Any]:
                 send_body = {"raw": raw}
                 if thread_id:
                     send_body["threadId"] = thread_id
-            agent = _agent_label(request)
+            agent = (
+                f"{acting.name} (shared by "
+                f"{await tenant_profile.owner_name(db, acting.owner)})"
+                if acting else _agent_label(request)
+            )
             try:
                 resp = await client.post(
                     url, json=send_body, headers={"Authorization": f"Bearer {token}"},

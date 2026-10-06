@@ -3,12 +3,14 @@ which finds files by name). Sandboxed to the workspace, skips binaries, and is
 tracked by the duplicate-call guard — unlike shell `grep`."""
 
 import asyncio
+import contextvars
 import fnmatch
 import os
 import re
 from pathlib import Path
 from typing import Any
 
+from captain_claw import speaker
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, project_root, resolve_vfs_path, split_scheme
@@ -148,6 +150,11 @@ class GrepTool(Tool):
                     if len(files) >= _MAX_FILES:
                         break
 
+            # A shared-agent member: os.walk lists symlinked files (and reads
+            # them) — keep only files whose realpath stays in their roots.
+            if speaker.member_bound():
+                files = [f for f in files if speaker.path_allowed(f)]
+
             # Google Drive mounts: a placeholder has only a marker on disk, so
             # searching it would silently miss content that is really there.
             # Skip those and say how many, rather than returning a confident but
@@ -160,9 +167,12 @@ class GrepTool(Tool):
             except Exception as _e:
                 log.debug("Drive grep filter skipped", error=str(_e))
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
+            # A fresh context copy per call: the member's identity travels
+            # into the worker thread (speaker.identity_lost).
+            ctx = contextvars.copy_context()
             lines, matched, scanned, truncated = await loop.run_in_executor(
-                None, lambda: self._scan(files, rx, rel_base, limit)
+                None, ctx.run, lambda: self._scan(files, rx, rel_base, limit)
             )
 
             drive_note = ""

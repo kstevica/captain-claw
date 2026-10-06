@@ -22,8 +22,11 @@ PROVIDER_KEYS_SETTING = "fd:provider-keys"
 # identity (e.g. to make another user's Disconnect skip the revoke) or clear
 # their connection without the revoke. ``fd:tenant-profile`` (the owner profile
 # every agent of the user receives) is written only through /fd/profile, which
-# enforces its caps and rewrites the agents' copies.
-_SERVER_OWNED_PREFIXES = ("google_oauth:", "fd:tenant-profile")
+# enforces its caps and rewrites the agents' copies. ``fd:shared-agent-*`` (a
+# member's per-agent "Let this agent use my Google during my chats" opt-in) is
+# written only through PUT /fd/shared-agents/google, which checks membership and
+# stamps the agent's current owner.
+_SERVER_OWNED_PREFIXES = ("google_oauth:", "fd:tenant-profile", "fd:shared-agent-")
 
 
 def _server_owned(key: str) -> bool:

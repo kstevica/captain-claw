@@ -180,6 +180,10 @@ class EditTool(Tool):
 
             # Handle undo specially (doesn't need to read the file first)
             if action == "undo":
+                from captain_claw import speaker as _speaker
+
+                if _speaker.member_bound():
+                    return ToolResult(success=False, error=_speaker.EDIT_UNDO_MESSAGE)
                 return self._undo(file_path, kwargs)
 
             # Read current contents
@@ -206,12 +210,20 @@ class EditTool(Tool):
             if new_string is not None:
                 new_string = self._normalize_line_endings(new_string, line_ending)
 
-            # Create backup
-            backup_path = self._create_backup(file_path, kwargs)
+            # Create backup — never for a shared-agent member: backups of every
+            # user share one folder per file name in the owner's workspace (and
+            # pruning could drop the owner's); undo is refused for members.
+            from captain_claw import speaker as _speaker
+
+            member = _speaker.member_bound()
+            backup_path = None if member else self._create_backup(file_path, kwargs)
+            shown = self._member_display(file_path) if member else str(file_path)
 
             # Batch mode: apply every edit in one read/write cycle.
             if batch_mode:
-                return self._apply_batch(file_path, content, line_ending, edits, backup_path)
+                return self._apply_batch(
+                    file_path, content, line_ending, edits, backup_path, shown=shown,
+                )
 
             # Dispatch to action handler
             result = self._dispatch(action, content, line_ending, old_string, new_string, start_line, end_line)
@@ -226,13 +238,34 @@ class EditTool(Tool):
             summary = result.summary
             if backup_path:
                 summary += f"\nBackup: {backup_path}"
-            summary += f"\nFile: {file_path}"
+            summary += f"\nFile: {shown}"
 
             return ToolResult(success=True, content=summary)
 
         except Exception as e:
             log.error("Edit failed", path=path, action=action, error=str(e))
             return ToolResult(success=False, error=str(e))
+
+    @staticmethod
+    def _member_display(file_path: Path) -> str:
+        """A shared-agent member's view of *file_path*: ``vfs:<project>/…`` for
+        a VFS file, else relative to the saved/ base — never a host path."""
+        from captain_claw import speaker as _speaker
+        from captain_claw.vfs import to_display, user_root
+
+        real = Path(file_path).resolve()
+        try:
+            real.relative_to(Path(user_root()).resolve())
+            return to_display(real)
+        except (ValueError, PermissionError, OSError):
+            pass
+        roots = _speaker.current_roots()
+        if roots is not None:
+            try:
+                return "saved/" + real.relative_to(roots.saved_base).as_posix()
+            except ValueError:
+                pass
+        return Path(file_path).name
 
     # ── Path resolution (mirrors ReadTool) ──────────────────────────
 
@@ -406,6 +439,8 @@ class EditTool(Tool):
         line_ending: str,
         edits: list[dict[str, Any]],
         backup_path: str | None,
+        *,
+        shown: str | None = None,
     ) -> ToolResult:
         """Apply many edits to one file in a single read/write cycle.
 
@@ -458,7 +493,7 @@ class EditTool(Tool):
             lines.append(f"  [{i}] {'OK  ' if ok else 'FAIL'} {msg}")
         if backup_path:
             lines.append(f"Backup: {backup_path}")
-        lines.append(f"File: {file_path}")
+        lines.append(f"File: {shown if shown is not None else file_path}")
         summary = "\n".join(lines)
 
         # Success when at least one edit applied; failures are surfaced in the

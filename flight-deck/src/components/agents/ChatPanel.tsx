@@ -50,8 +50,9 @@ import { useTraceStore, selectSpanCount } from '../../stores/traceStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useAuthStore, selectKioskLocked } from '../../stores/authStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
-import { sharedCloseInfo } from '../../utils/sharedAgent'
+import { sharedCaps, sharedCloseInfo } from '../../utils/sharedAgent'
 import { SharedAgentNotice } from './SharedAgentNotice'
+import { SharedAgentGoogleToggle } from './SharedAgentGoogleToggle'
 import { SendContextModal } from './SendContextModal'
 import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
@@ -297,6 +298,11 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   // The active session, keyed — its object identity changes only when THIS
   // session mutates, so other agents' events don't re-render the transcript.
   const session = useChatStore((s) => (s.activeChatId ? s.sessions.get(s.activeChatId) ?? null : null))
+  // A shared chat's row in the "shared with me" list — only that row, so the
+  // list's 10s poll doesn't re-render this pane: what member chats on it can
+  // use, and the member's own Google switch.
+  const sharedRef = session?.shared?.agentRef
+  const sharedRow = useSharedAgentStore((s) => (sharedRef ? s.agents.find((a) => a.agent_ref === sharedRef) : undefined))
 
   // One tab per AGENT. A lane is a context inside an agent, not another agent,
   // so lane sessions don't get their own top-level tab. Subscribe to a PRIMITIVE
@@ -323,6 +329,9 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   const sharedClose = shared && session.closed
     ? sharedCloseInfo(session.closed.code, shared.ownerName, session.closed.reason)
     : null
+  // Process agents: member chats use the member's own files and deep memory,
+  // and their Google if they turned it on. Docker / older deck: chat-only.
+  const caps = sharedCaps(sharedRow)
 
   // Build target list for context transfer (all reachable agents except the
   // current one). Compare against the AGENT id — `activeChatId` is a lane key,
@@ -369,7 +378,8 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
         {shared && (
           <span
             className="mr-1 flex shrink-0 items-center gap-1 rounded border border-sky-500/25 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300"
-            title={`${session.containerName} belongs to ${shared.ownerName || 'another user'}. Your chats are private from other members, not from ${shared.ownerName || 'its owner'} or this deck's admins.`}
+            title={`${session.containerName} belongs to ${shared.ownerName || 'another user'}. Your chats are private from other members, not from ${shared.ownerName || 'its owner'} or this deck's admins.`
+              + (caps.files || caps.deep_memory ? ' During your chats it uses your own files and deep memory, and your Google only if you turned it on.' : '')}
           >
             <Users className="h-3 w-3" />
             Shared · {shared.ownerName || 'another user'}
@@ -550,7 +560,14 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
           agentName={session.containerName}
           ownerName={shared.ownerName}
           hostWarning={sharedHostWarning}
+          caps={caps}
         />
+      )}
+
+      {shared && sharedRow && caps.google && !session.closed && (
+        <div className="border-b border-zinc-800 px-3 py-1.5">
+          <SharedAgentGoogleToggle agent={sharedRow} compact />
+        </div>
       )}
 
       {shared && sharedClose && (

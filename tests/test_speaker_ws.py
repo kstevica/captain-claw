@@ -216,6 +216,35 @@ def fresh_nonces():
 
 
 @pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    """Nothing here may reach the real ~/.captain-claw or a real FD data dir
+    (real Agents are built below): HOME, FD_DATA_DIR, every config DB path and
+    the global session / topic managers point at tmp first."""
+    import captain_claw.conversation_topics as _ct
+    from captain_claw import session as _session
+
+    home = tmp_path / "isolated-home"
+    (home / ".captain-claw").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("FD_DATA_DIR", str(tmp_path / "fd-data"))
+    for var in ("CLAW_VFS_ROOT", "CLAW_VFS_USER", "FD_OWNER_ID", "FD_URL"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = get_config()
+    for section, attr in (
+        ("memory", "path"), ("session", "path"), ("insights", "db_path"),
+        ("conversation_topics", "db_path"), ("nervous_system", "db_path"),
+        ("sister_session", "db_path"), ("cognitive_metrics", "db_path"),
+        ("datastore", "path"), ("autonomous_work", "db_path"),
+    ):
+        monkeypatch.setattr(getattr(cfg, section), attr, str(home / ".captain-claw" / f"{section}.db"))
+    monkeypatch.setattr(_session, "_manager", _session.SessionManager(home / ".captain-claw" / "s.db"))
+    monkeypatch.setattr(_ct, "_MANAGER", None)
+    monkeypatch.setattr(speaker, "_IN_FLIGHT", 0)
+    monkeypatch.setattr(speaker, "_MAIN_LOOP", None)
+    return home
+
+
+@pytest.fixture(autouse=True)
 def agent_config(monkeypatch):
     cfg = get_config()
     monkeypatch.setattr(cfg.web, "auth_token", WEB_AUTH)
@@ -515,7 +544,13 @@ async def test_welcome_ack_and_member_only_replay(server, monkeypatch, sm):
     assert welcome["speaker"] == {"id": "u-member", "name": "Ana",
                                   "owner_name": "Olga", "lane": "A"}
     assert welcome["session"]["id"] == mine.id
-    assert set(welcome["session"]["tools"]) == set(SPEAKER_TOOL_ALLOWLIST)
+    # A2: the member's own allowlist (process agent: + their file tools) ∩
+    # what is registered — never the owner's roster.
+    registered = {"shell", "history", "read", *SPEAKER_TOOL_ALLOWLIST}
+    p_ws = ws._speaker_principal
+    assert set(welcome["session"]["tools"]) == speaker.allowed_tools(p_ws) & registered
+    assert "shell" not in welcome["session"]["tools"]
+    assert "history" not in welcome["session"]["tools"]
     assert welcome["session"]["skills"] == []
     replayed = json.dumps(frames[1])
     assert "MEMBER EARLIER QUESTION" in replayed
@@ -1156,7 +1191,12 @@ def test_member_messages_skip_owner_notes(monkeypatch, tmp_path):
 
 
 async def test_member_turn_skips_owner_cache_refresh_and_google(monkeypatch):
-    """agent_orchestration_mixin: owner caches + Google probe are owner-only."""
+    """agent_orchestration_mixin: owner caches + Google probe are owner-only.
+
+    A2: a member's per-iteration Google refresh is their own status from
+    Flight Deck (speaker_status), in the `is True` branch; the owner's
+    is_connected() sits in its `else`.
+    """
     import inspect
 
     from captain_claw.agent_orchestration_mixin import AgentOrchestrationMixin
@@ -1165,9 +1205,12 @@ async def test_member_turn_skips_owner_cache_refresh_and_google(monkeypatch):
     gate = 'if getattr(self, "_speaker_scoped", False) is not True:'
     block = src[src.index(gate):]
     assert block.index("_refresh_todo_context_cache") < block.index("_refresh_datastore_context_cache")
-    assert src.count(gate) >= 2
     google = src.index("GoogleOAuthManager(self.session_manager).is_connected()")
-    assert src.rfind(gate, 0, google) > src.rfind("def ", 0, google)
+    member_gate = 'if getattr(self, "_speaker_scoped", False) is True:'
+    member = src.rfind(member_gate, 0, google)
+    assert member > src.rfind("def ", 0, google)
+    status = src.index("GoogleOAuthManager(self.session_manager).speaker_status()", member)
+    assert member < status < google and "else:" in src[status:google]
 
 
 # ── a member session can never become the owner's lane / default session ──

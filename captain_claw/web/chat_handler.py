@@ -153,6 +153,7 @@ async def handle_chat(
     no_next_steps: bool = False,
     no_rephrase: bool = False,
     speaker_turn: str | None = None,
+    speaker_grant: str | None = None,
 ) -> bool:
     """Process a chat message through the agent.
 
@@ -190,6 +191,7 @@ async def handle_chat(
             no_next_steps=no_next_steps,
             no_rephrase=no_rephrase,
             speaker_turn=speaker_turn or "",
+            speaker_grant=speaker_grant or "",
         )
 
     # ── Resolve the agent to use ─────────────────────────────────
@@ -499,12 +501,15 @@ async def _handle_speaker_chat(
     no_next_steps: bool,
     no_rephrase: bool,
     speaker_turn: str,
+    speaker_grant: str = "",
 ) -> bool:
     """A shared-agent member's chat turn on their own instance.
 
     Returns True iff ``_run_agent`` was launched (it then sends the single
     ``ready``/``turn_end`` frame). Busy/capacity/instance errors go out as
     ``error`` frames and return False — the speaker gate sends turn_end.
+    Those early returns never touch ``agent._turn_grant``: a rejected
+    second chat must not overwrite the running turn's grant.
     """
     from captain_claw.speaker import speaker_error
     from captain_claw.web_server import SpeakerCapacityError
@@ -563,6 +568,7 @@ async def _handle_speaker_chat(
             flow_text=content,
             speaker_key=speaker_key,
             speaker_turn=speaker_turn,
+            speaker_grant=speaker_grant,
         ))
         agent._public_task = task  # type: ignore[attr-defined]
         return True
@@ -781,6 +787,7 @@ async def _run_agent(
     flow_attach: dict | None = None,
     speaker_key: tuple[str, str] | None = None,
     speaker_turn: str = "",
+    speaker_grant: str = "",
 ) -> None:
     """Background coroutine that drives the agent and finalises the turn.
 
@@ -788,6 +795,11 @@ async def _run_agent(
     is bound for the whole turn, output goes only to that member's sockets,
     flows never run, and the final ``ready`` frame carries
     ``turn_end=speaker_turn`` — exactly one per launched turn, on every path.
+
+    A2: *speaker_grant* (Flight Deck's per-turn grant for this message) is
+    bound for the turn only — cleared before the post-turn jobs and again in
+    ``finally`` before the lane is freed — and the turn and its post-turn
+    jobs count as member work in flight (``speaker.identity_lost``).
     """
     import json as _json
 
@@ -823,10 +835,16 @@ async def _run_agent(
 
     _video_policy_slug = None  # set when a video turn restricts script/shell tools
     _speaker_tok = None
+    _grant_tok = None
+    _counted = False
     try:
         if speaker_key:
             from captain_claw import speaker as _speaker
             _speaker_tok = _speaker.bind(getattr(agent, "_speaker_principal", None))
+            _grant_tok = _speaker.bind_grant(speaker_grant)
+            agent._turn_grant = _speaker.sanitize_grant(speaker_grant)  # type: ignore[attr-defined]
+            _speaker.turn_started()
+            _counted = True
             # Commons caches (insights, intuitions) are refreshed for member
             # turns when stale; the owner's caches never are.
             import time as _time
@@ -994,6 +1012,22 @@ async def _run_agent(
             else:
                 server._broadcast(_info)
 
+        # A member turn's grant ends HERE: the post-turn jobs below copy this
+        # context (create_task) and carry the principal but never the grant —
+        # they can't reach the member's Google or deep memory.
+        if speaker_key:
+            _speaker.clear_grant()
+            agent._turn_grant = ""  # type: ignore[attr-defined]
+
+        def _post_turn(coro: Any) -> asyncio.Task:
+            """create_task for a post-turn job; a member turn's jobs count as
+            member work in flight until they finish (fail closed on a lost
+            context in any bare thread they spawn)."""
+            task = asyncio.create_task(coro)
+            if speaker_key:
+                _speaker.track_member_task(task)
+            return task
+
         # Consciousness background jobs — each an EXTRA, CONCURRENT LLM call
         # fired after the turn (create_task, not awaited).
         import os as _os_w
@@ -1006,38 +1040,35 @@ async def _run_agent(
         # OWN memory and would just be parallel generations for a headless worker
         # — skip for ALL FD workers (Basna/Vatra/Council/Code + beings). A being
         # already dreams and reflects through its tick engine.
+        # On a member's turn these still run (open commons, A2 part 0 N8).
         if not _worker:
             # Auto-reflection (admin only).
             if not is_public:
                 try:
-                    import asyncio as _asyncio
                     from captain_claw.reflections import maybe_auto_reflect
-                    _asyncio.create_task(maybe_auto_reflect(agent))
+                    _post_turn(maybe_auto_reflect(agent))
                 except Exception:
                     pass
 
             # Auto-extract insights (periodic trigger).
             try:
-                import asyncio as _asyncio2
                 from captain_claw.insights import maybe_extract_insights
-                _asyncio2.create_task(maybe_extract_insights(agent, trigger="periodic"))
+                _post_turn(maybe_extract_insights(agent, trigger="periodic"))
             except Exception:
                 pass
 
             # Nervous system dreaming (background synthesis).
             try:
-                import asyncio as _asyncio3
                 from captain_claw.nervous_system import maybe_dream
-                _asyncio3.create_task(maybe_dream(agent))
+                _post_turn(maybe_dream(agent))
             except Exception:
                 pass
 
             # Conversation topic classification (background; clusters comms
             # traffic into persistent topics recalled via the `topics` tool).
             try:
-                import asyncio as _asyncio_tc
                 from captain_claw.conversation_topics import maybe_classify_topics
-                _asyncio_tc.create_task(maybe_classify_topics(agent))
+                _post_turn(maybe_classify_topics(agent))
             except Exception:
                 pass
 
@@ -1092,6 +1123,19 @@ async def _run_agent(
                 agent.tools.clear_session_policy(_video_policy_slug)
             except Exception:
                 pass
+        # A member turn's grant and in-flight count end BEFORE the lane is
+        # freed: once it is, a new chat may set `_turn_grant` for its turn.
+        if speaker_key:
+            from captain_claw import speaker as _spk_end
+
+            try:
+                agent._turn_grant = ""  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            if _grant_tok is not None:
+                _spk_end.reset_grant(_grant_tok)
+            if _counted:
+                _spk_end.turn_ended()
         if is_public:
             agent._public_busy = False  # type: ignore[attr-defined]
         elif _is_side_lane:

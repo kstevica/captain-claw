@@ -317,10 +317,17 @@ class GoogleMailTool(Tool):
 
             mgr = GoogleOAuthManager(get_session_manager())
             if mgr._is_flight_deck_client():
-                # Flight Deck owns the decision: it re-checks the owner's
-                # policy, sends with the owner's token, audits and notifies.
-                # No agent-side token is fetched for a send.
+                # Flight Deck owns the decision: it re-checks the sender's
+                # policy, sends with the sender's token (the owner's, or a
+                # shared-agent member's own with the turn's grant), audits
+                # and notifies. No agent-side token is fetched for a send.
                 return await self._send_via_flight_deck(mgr, action, **kwargs)
+            if mgr._member_call():
+                # Local mode sends with THIS agent's tokens — the owner's.
+                # Never for a shared-agent member.
+                from captain_claw.speaker import NO_GRANT_MESSAGE
+
+                return ToolResult(success=False, error=f"Email not sent: {NO_GRANT_MESSAGE}")
             if not get_config().tools.google_mail.allow_send:
                 return ToolResult(success=False, error=_LOCAL_SEND_OFF)
 
@@ -1105,9 +1112,18 @@ class GoogleMailTool(Tool):
                 # A model may pass recipients as a list; FD wants the header text.
                 payload[k] = ", ".join(map(str, v)) if isinstance(v, (list, tuple)) else str(v)
         url = f"{mgr._flight_deck_base()}/fd/google/gmail/send"
+        from captain_claw import speaker as _speaker
+
+        try:
+            # A shared-agent member's send carries the turn's grant and the
+            # marker; without a usable grant nothing is sent (no request).
+            headers = mgr._flight_deck_headers()
+            params = _speaker.grant_params()
+        except _speaker.SpeakerGrantMissing:
+            return ToolResult(success=False, error=f"Email not sent: {_speaker.NO_GRANT_MESSAGE}")
         try:
             async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(url, json=payload, headers=mgr._flight_deck_headers())
+                resp = await client.post(url, json=payload, headers=headers, params=params)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             return ToolResult(
                 success=False,

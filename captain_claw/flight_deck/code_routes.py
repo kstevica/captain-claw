@@ -56,9 +56,9 @@ from captain_claw.flight_deck.dubina_agents import (
     spawn_archetype_agent,
     stop_archetype_agent,
 )
-from captain_claw.flight_deck.vfs_routes import _user_root, _eff_owner
+from captain_claw.flight_deck.vfs_routes import _user_root, _eff_owner, safe_link_target
 from captain_claw.logging import get_logger
-from captain_claw.vfs import link_target_at, read_links_at, safe_name
+from captain_claw.vfs import read_links_at, safe_name
 
 log = get_logger(__name__)
 
@@ -325,7 +325,7 @@ def _folder_repo(user_id: str, project: str, folder: str) -> Path:
     proj = _proj_dir(user_id, project)
     kind = meta.get("kind")
     if kind == "link":
-        tgt = link_target_at(_user_root(user_id), meta.get("link", ""))
+        tgt = safe_link_target(_user_root(user_id), meta.get("link", ""))
         if tgt is None:
             raise HTTPException(404, "linked folder source is missing")
         return tgt
@@ -2465,7 +2465,7 @@ async def add_link_folder(project: str, body: LinkFolderReq, user: dict = Depend
     if body.path.strip():
         from captain_claw.flight_deck.vfs_routes import LinkBody, add_link
         await add_link(LinkBody(name=link_name, path=body.path, mode=body.mode), user=user)
-    if link_target_at(_user_root(uid), link_name) is None:
+    if safe_link_target(_user_root(uid), link_name) is None:
         raise HTTPException(404, f"no VFS link named '{link_name}'")
     data = _read_project(uid, project)
     if any(f.get("name") == name for f in data["folders"]):

@@ -22,6 +22,7 @@ import { ModelSelector } from '../common/ModelSelector'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
 import { ShareModal } from '../common/ShareModal'
+import { SharedCountBadge } from './SharedCountBadge'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { dockerSlug, isManagedAgent } from '../../utils/managedAgents'
 import { OWNER_SHARE_NOTE } from '../../utils/sharedAgent'
@@ -427,6 +428,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
                   >
                     <Pencil className="h-2.5 w-2.5" />
                   </button>
+                  <SharedCountBadge agentRef={container.agent_ref} />
                 </>
               )}
             </div>
@@ -622,6 +624,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
                     >
                       <Pencil className="h-3 w-3" />
                     </button>
+                    <SharedCountBadge agentRef={container.agent_ref} />
                   </>
                 )}
               </div>
