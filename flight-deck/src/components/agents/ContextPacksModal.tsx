@@ -9,6 +9,7 @@ import {
   type PackRow,
 } from '../../services/contextPacks'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
+import { SwitchTrack } from '../common/SwitchTrack'
 import {
   PACKS_TITLE,
   PROFILE_PACK_LABEL,
@@ -84,11 +85,9 @@ function Switch({ on, label, busy, disabled, onClick }: {
         aria-label={label}
         onClick={onClick}
         disabled={disabled}
-        className={`relative h-4 w-7 shrink-0 rounded-full transition-colors disabled:cursor-wait disabled:opacity-60 ${
-          on ? 'bg-sky-500' : 'bg-zinc-700'}`}
+        className="flex shrink-0 rounded-full disabled:cursor-wait disabled:opacity-60"
       >
-        <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-transform ${
-          on ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+        <SwitchTrack on={on} />
       </button>
       <span className="min-w-0 flex-1 font-medium">{label}</span>
       {busy && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-zinc-500" />}

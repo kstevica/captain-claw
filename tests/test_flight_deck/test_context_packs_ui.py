@@ -51,6 +51,7 @@ _SERVICE = _SRC / "services" / "contextPacks.ts"
 _SHARED_SERVICE = _SRC / "services" / "sharedAgents.ts"
 _SHARED_STORE = _SRC / "stores" / "sharedAgentStore.ts"
 _MODAL = _SRC / "components" / "agents" / "ContextPacksModal.tsx"
+_SWITCH_TRACK = _SRC / "components" / "common" / "SwitchTrack.tsx"
 _MY_PACKS = _SRC / "components" / "profile" / "MyContextPacks.tsx"
 _PROCESS_CARD = _SRC / "components" / "agents" / "ProcessCard.tsx"
 _CONTAINER_CARD = _SRC / "components" / "agents" / "ContainerCard.tsx"
@@ -610,6 +611,7 @@ const gets = () => calls.filter((c) => c[0] === 'get').length;
 """
 
 _MODAL_DECLS = _ALL_UTILS + [
+    (_SWITCH_TRACK, ["SwitchTrack"]),
     (_MODAL, ["sectionLabel", "Publisher", "errorText", "Switch", "ContextPacksModal"]),
 ]
 
