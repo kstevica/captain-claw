@@ -22,6 +22,7 @@ import { ModelSelector } from '../common/ModelSelector'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
 import { ShareModal } from '../common/ShareModal'
+import { SharedCountBadge } from './SharedCountBadge'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { isManagedAgent } from '../../utils/managedAgents'
 import { OWNER_SHARE_NOTE } from '../../utils/sharedAgent'
@@ -406,6 +407,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                     className="rounded p-0.5 text-zinc-600 opacity-0 transition-opacity group-hover/name:opacity-100 hover:text-zinc-300">
                     <Pencil className="h-2.5 w-2.5" />
                   </button>
+                  <SharedCountBadge agentRef={proc.agent_ref} />
                 </>
               )}
             </div>
@@ -549,6 +551,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                       className="rounded p-0.5 text-zinc-600 opacity-0 transition-opacity group-hover/name:opacity-100 hover:bg-zinc-800 hover:text-zinc-300">
                       <Pencil className="h-3 w-3" />
                     </button>
+                    <SharedCountBadge agentRef={proc.agent_ref} />
                   </>
                 )}
               </div>

@@ -230,9 +230,11 @@ def resolve(owner_id: str, project: str, rel_path: str = "") -> Path | None:
     folders still resolve to their external target and ``..`` still cannot climb
     out of whichever root actually backs the project.
     """
+    from captain_claw.flight_deck.vfs_routes import safe_link_target
+
     root = user_root(owner_id)
     name = vfs._sanitize(project or "", fallback="shared")
-    target = vfs.link_target_at(root, name)
+    target = safe_link_target(root, name)
     base = (target if target is not None else (root / name)).resolve()
     candidate = base
     for part in (p for p in str(rel_path or "").replace("\\", "/").split("/") if p not in ("", ".")):

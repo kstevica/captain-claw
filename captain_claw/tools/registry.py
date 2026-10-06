@@ -433,11 +433,17 @@ class ToolRegistry:
 
         # A member's call: the speaker allowlist is the LAST step and has no
         # also_allow, so no session/task policy (or per-turn set/clear) can
-        # widen it.
+        # widen it. A2: the bound principal's own set (process members get
+        # their Google / deep memory / file tools); a session-key-only signal
+        # with nothing bound gets A1's set (fail closed) — `execute` evaluates
+        # this chain inside the tool context, where the principal is bound.
         if self._is_speaker_call(session_id):
-            from captain_claw.speaker import SPEAKER_TOOL_ALLOWLIST
+            from captain_claw import speaker as _speaker
 
-            steps.append(("principal", ToolPolicy(allow=sorted(SPEAKER_TOOL_ALLOWLIST))))
+            steps.append((
+                "principal",
+                ToolPolicy(allow=sorted(_speaker.allowed_tools(_speaker.current()))),
+            ))
         return ToolPolicyChain(steps=steps)
 
     def _resolve_tools(
@@ -454,6 +460,20 @@ class ToolRegistry:
             task_policy=task_policy,
         )
         tools = chain.resolve(list(self._tools.values()))
+
+        # A member recognised by its session key alone (nothing bound): the
+        # Google flag below is per principal, and with no principal it would
+        # read the OWNER's — never show a member Google tools on that.
+        try:
+            from captain_claw import speaker as _speaker
+
+            if self._is_speaker_call(session_id) and _speaker.current() is None:
+                tools = [
+                    t for t in tools
+                    if not self._tool_metadata.get(t.name, {}).get("requires_google")
+                ]
+        except Exception:
+            pass
 
         # Auto-hide Google tools when Google OAuth isn't connected. Tools
         # are registered eagerly (so they can reappear mid-session the
@@ -604,49 +624,83 @@ class ToolRegistry:
             ToolBlockedError if tool is blocked
             ToolExecutionError if execution fails
         """
-        # Shared-agent member: only the speaker allowlist, narrowed per tool.
-        # Checked before anything else (classic loop, run_tool-style paths and
-        # Mrav all land here).
-        tool_context = None  # None → the tool task copies the current context
-        if self._is_speaker_call(session_id, arguments):
-            from captain_claw import speaker as _speaker
+        import contextvars
 
-            if name not in _speaker.SPEAKER_TOOL_ALLOWLIST:
-                raise ToolBlockedError(name, _speaker.NOT_ALLOWED_MESSAGE)
-            arguments, rule_error = _speaker.apply_tool_rules(
-                name, arguments, (arguments or {}).get("_agent"),
-            )
-            if rule_error:
-                raise ToolBlockedError(name, rule_error)
-            if _speaker.current() is None:
-                # Recognised by the session key or `_agent` alone: bind a
-                # principal for the tool task, so the tool's own member rules
-                # (public-only web_fetch, hidden sources/excerpts) apply on
-                # every signal, not only on the contextvar.
-                import contextvars
-
-                principal = (
-                    _speaker.principal_for(arguments.get("_agent"))
-                    or _speaker.UNKNOWN_PRINCIPAL
-                )
-                tool_context = contextvars.copy_context()
-                tool_context.run(_speaker.bind, principal)
+        from captain_claw import speaker as _speaker
 
         # Resolve per-call overrides (fall back to instance defaults).
-        effective_base_path = runtime_base_path or self._runtime_base_path
+        effective_base_path = Path(runtime_base_path or self._runtime_base_path)
         effective_approval = approval_callback or self._approval_callback
+        effective_saved_base = (effective_base_path / self._saved_dir_name).resolve()
+        try:
+            effective_saved_base.relative_to(effective_base_path)
+        except ValueError:
+            effective_saved_base = (effective_base_path / "saved").resolve()
+
+        # Every tool task runs in its own context copy, marked as a tool
+        # context: code there (and threads that copy it) has an authoritative
+        # speaker contextvar (speaker.identity_lost()).
+        tool_context = contextvars.copy_context()
+        tool_context.run(_speaker.mark_tool_context)
+
+        # Shared-agent member: only the principal's allowlist, narrowed per
+        # tool, paths confined. Checked before anything else (classic loop,
+        # run_tool-style paths and Mrav all land here).
+        if self._is_speaker_call(session_id, arguments):
+            agent = (arguments or {}).get("_agent")
+            bound = _speaker.current()
+            principal = bound or _speaker.principal_for(agent) or _speaker.UNKNOWN_PRINCIPAL
+            if name not in _speaker.allowed_tools(principal):
+                raise ToolBlockedError(
+                    name,
+                    _speaker.FILES_UNAVAILABLE_MESSAGE
+                    if name in _speaker.SPEAKER_FILE_TOOLS else _speaker.NOT_ALLOWED_MESSAGE,
+                )
+            arguments, rule_error = _speaker.apply_tool_rules(name, arguments, agent)
+            if rule_error:
+                raise ToolBlockedError(name, rule_error)
+            # The turn's grant: the contextvar when the principal is bound,
+            # else the one recorded on the member's own instance.
+            if bound is not None:
+                grant = _speaker.current_grant()
+            elif _speaker.is_speaker_agent(agent):
+                grant = _speaker.sanitize_grant(getattr(agent, "_turn_grant", ""))
+            else:
+                grant = ""
+            if (name in (_speaker.SPEAKER_GOOGLE_TOOLS | _speaker.SPEAKER_DEEP_MEMORY_TOOLS)
+                    and not grant):
+                raise ToolBlockedError(name, _speaker.NO_GRANT_MESSAGE)
+            if bound is None:
+                # Recognised by the session key or `_agent` alone: bind the
+                # principal (and its grant) for the tool task, so the tool's
+                # own member rules apply on every signal.
+                tool_context.run(_speaker.bind, principal)
+                tool_context.run(_speaker.bind_grant, grant)
+            roots = tool_context.run(
+                _speaker.speaker_roots, agent, principal, session_id=session_id,
+                runtime_base=effective_base_path, saved_base=effective_saved_base,
+            )
+            arguments, path_error = tool_context.run(
+                _speaker.check_tool_paths, name, arguments, roots,
+            )
+            if path_error:
+                raise ToolBlockedError(name, path_error)
+            # Disables read/edit/glob's workflow-dir and registry fallbacks.
+            file_registry = None
 
         # Check if tool exists
         tool = self.get(name)
 
-        allowed_names = {
+        # The chain inside the tool context: the speaker step and the Google
+        # gate see the resolved principal, never None (A1) or the owner.
+        allowed_names = tool_context.run(lambda: {
             _normalize_tool_name(item)
             for item in self.list_tools(
                 session_id=session_id,
                 session_policy=session_policy,
                 task_policy=task_policy,
             )
-        }
+        })
         if _normalize_tool_name(name) not in allowed_names:
             raise ToolBlockedError(name, "Blocked by tool policy chain")
 
@@ -715,12 +769,6 @@ class ToolRegistry:
                     self._bridge_abort_event(abort_event, tool_abort_event)
                 )
 
-            effective_saved_base = (effective_base_path / self._saved_dir_name).resolve()
-            try:
-                effective_saved_base.relative_to(effective_base_path)
-            except ValueError:
-                effective_saved_base = (effective_base_path / "saved").resolve()
-
             # Extract workflow_started_at from the shared file registry
             # so tools like glob can filter to files created during this run.
             _workflow_started_at = None
@@ -729,9 +777,7 @@ class ToolRegistry:
                 _workflow_started_at = getattr(file_registry, "workflow_started_at", None)
                 _workflow_run_dir = getattr(file_registry, "workflow_run_dir", None)
 
-            _task_kwargs: dict[str, Any] = {}
-            if tool_context is not None:
-                _task_kwargs["context"] = tool_context
+            _task_kwargs: dict[str, Any] = {"context": tool_context}
             execute_task = asyncio.create_task(
                 tool.execute(
                     **arguments,

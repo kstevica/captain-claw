@@ -8,7 +8,12 @@ Two families of caller, one tenancy chokepoint:
   it proves it is an FD-spawned process with ``X-Agent-Secret`` and identifies
   *which* agent with its unique ``web_auth`` token, from which FD looks the
   owner up in the process registry. The owner is therefore never something the
-  agent asserts.
+  agent asserts. During a shared-agent member's turn (``X-FD-Speaker-Grant``,
+  see ``speaker_grants``) the pool is the MEMBER's instead — no grid tags or
+  narrowing, and deletes only by reference.
+
+Every caller-supplied ``filter_by`` goes through ``deep_memory_filter`` first,
+so it can't regroup the expression around the tenant scope.
 """
 
 from __future__ import annotations
@@ -21,7 +26,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from captain_claw.flight_deck import deep_memory_service as svc
+from captain_claw.flight_deck import speaker_grants
 from captain_claw.flight_deck.auth import get_current_user, get_db
+from captain_claw.flight_deck.deep_memory_filter import FilterByError, validate_filter_by
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -86,6 +93,15 @@ def _agent_owner(request: Request) -> str:
     if not owner:
         raise HTTPException(403, "could not resolve calling agent's owner")
     return owner
+
+
+def _checked_filter(raw: str) -> str:
+    """A caller's ``filter_by``, stripped, or 400 when it is outside the grammar
+    ``deep_memory_filter`` accepts (it would be ANDed with the tenant scope)."""
+    try:
+        return validate_filter_by(raw)
+    except FilterByError as exc:
+        raise HTTPException(400, f"Invalid filter_by: {exc}") from None
 
 
 def _agent_grid(request: Request) -> tuple[list[str], str]:
@@ -329,6 +345,7 @@ async def search(
     user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
     oid = await _eff_owner(user["id"], "", owner, write=False)
+    filter_by = _checked_filter(filter_by)
     return {"results": svc.search(oid, q, max_results=max_results, filter_by=filter_by)}
 
 
@@ -354,18 +371,21 @@ def _require_connection() -> None:
 
 @router.post("/agent/search")
 async def agent_search(body: AgentSearchBody, request: Request) -> dict[str, Any]:
-    owner = _agent_owner(request)
+    acting = await speaker_grants.acting_member(request)
+    owner = acting.user_id if acting else _agent_owner(request)
     _require_connection()
-    # Narrow recall by the agent's grid recall_mode (pool → no narrowing). ANDed
-    # onto any caller-supplied filter; the owner scope is ANDed again inside the
-    # index, so this can only narrow within the tenant, never widen past it.
-    from captain_claw.flight_deck.archetype_compose import recall_filter
+    combined = _checked_filter(body.filter_by)
+    if acting is None:
+        # Narrow recall by the agent's grid recall_mode (pool → no narrowing).
+        # ANDed onto any caller-supplied filter; the owner scope is ANDed again
+        # inside the index, so this can only narrow within the tenant, never
+        # widen past it. A member's own pool is never narrowed by the owner's grid.
+        from captain_claw.flight_deck.archetype_compose import recall_filter
 
-    tags, recall = _agent_grid(request)
-    rf = recall_filter(recall, tags)
-    combined = (body.filter_by or "").strip()
-    if rf:
-        combined = f"({combined}) && {rf}" if combined else rf
+        tags, recall = _agent_grid(request)
+        rf = recall_filter(recall, tags)
+        if rf:
+            combined = f"({combined}) && {rf}" if combined else rf
     return {
         "results": svc.search(
             owner, body.query, max_results=body.max_results, filter_by=combined
@@ -377,7 +397,8 @@ async def agent_search(body: AgentSearchBody, request: Request) -> dict[str, Any
 async def agent_index(body: AgentIndexBody, request: Request) -> dict[str, Any]:
     """Index free text an agent produced (not a VFS file — that path is
     automatic). Stamped with the resolved owner, never a claimed one."""
-    owner = _agent_owner(request)
+    acting = await speaker_grants.acting_member(request)
+    owner = acting.user_id if acting else _agent_owner(request)
     _require_connection()
     index = svc.get_index()
     if not body.text.strip():
@@ -393,9 +414,11 @@ async def agent_index(body: AgentIndexBody, request: Request) -> dict[str, Any]:
         grid_enabled,
     )
 
-    tags, _recall = _agent_grid(request)
-    if grid_enabled() and not any(str(t).startswith("domain:") for t in tags):
-        tags = [*tags, GENERAL_DOMAIN_TAG]
+    tags: list[str] = []
+    if acting is None:  # a member's own pool carries no owner-grid tags
+        tags, _recall = _agent_grid(request)
+        if grid_enabled() and not any(str(t).startswith("domain:") for t in tags):
+            tags = [*tags, GENERAL_DOMAIN_TAG]
     digest = hashlib.sha256(body.text.encode()).hexdigest()
     reference = body.reference or f"agent:{digest[:16]}"
     index.delete_by_reference(reference, owner_id=owner)
@@ -419,15 +442,21 @@ async def agent_delete(body: AgentDeleteBody, request: Request) -> dict[str, Any
 
     The owner filter is applied inside ``DeepMemoryIndex``, so a caller-supplied
     ``filter_by`` can narrow the deletion but never widen it past its own tenant.
+    During a member's turn only a delete by reference is allowed (their pool
+    can't be wiped by a filter).
     """
-    owner = _agent_owner(request)
+    acting = await speaker_grants.acting_member(request)
+    owner = acting.user_id if acting else _agent_owner(request)
+    if acting is not None and not body.reference.strip():
+        raise HTTPException(400, speaker_grants.MEMBER_DELETE_DETAIL)
     _require_connection()
     index = svc.get_index()
     if body.reference.strip():
         deleted = index.delete_by_reference(body.reference.strip(), owner_id=owner)
     elif body.filter_by.strip():
+        filter_by = _checked_filter(body.filter_by)
         scope = f"owner_id:={index.escape_filter_value(owner)}"
-        deleted = index.delete_by_filter(f"({body.filter_by.strip()}) && {scope}")
+        deleted = index.delete_by_filter(f"({filter_by}) && {scope}")
     else:
         raise HTTPException(400, "reference or filter_by is required")
     return {"ok": True, "deleted": deleted}

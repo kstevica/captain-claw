@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
+from captain_claw.flight_deck import speaker_grants
 from captain_claw.flight_deck.auth import (
     _LOCAL_USER,
     _fd_auth_enabled,
@@ -65,7 +66,7 @@ AUTH_OFF_HEADER = "X-FD-Google-Unavailable"
 AUTH_OFF_VALUE = "auth-disabled"
 
 # Agent-facing routes under /fd/google (this router's and gmail_send_routes').
-_AGENT_ROUTE_SUFFIXES = ("/access_token", "/credentials", "/gmail/send")
+_AGENT_ROUTE_SUFFIXES = ("/access_token", "/agent_status", "/credentials", "/gmail/send")
 
 
 def _require_auth_deck(request: Request) -> None:
@@ -1117,10 +1118,16 @@ async def _refresh_if_needed(
 
 @router.get("/access_token")
 async def google_access_token(request: Request) -> dict[str, Any]:
-    """Return a currently-valid access token for the calling agent's owner."""
+    """Return a currently-valid access token for the calling agent's owner —
+    or, during a shared-agent member's turn (``X-FD-Speaker-Grant``), for that
+    MEMBER, if they turned Google on for this agent (never the owner then)."""
     _authorize_agent_call(request)
+    acting = await speaker_grants.acting_member(request, google=True)
     db = get_db()
-    owner = await _agent_owner(request)
+    owner = acting.user_id if acting else await _agent_owner(request)
+    if acting is not None:
+        log.info("Google token issued for a shared-agent member's turn",
+                 agent=acting.slug, owner=acting.owner, member=acting.user_id)
     client = await _token_client(db)
     if not client:
         raise HTTPException(status_code=404, detail="Google OAuth not configured")
@@ -1136,6 +1143,27 @@ async def google_access_token(request: Request) -> dict[str, Any]:
         "expires_at": tokens.expires_at,
         "scope": tokens.scope,
     }
+
+
+@router.get("/agent_status")
+async def google_agent_status(request: Request) -> dict[str, Any]:
+    """Can the calling agent use Google right now — ``{"connected", "enabled"}``.
+
+    No network, no tokens, no scopes. On a shared-agent member's turn it answers
+    for the MEMBER: ``enabled`` is their opt-in for this agent, ``connected``
+    whether they connected their own Google (only looked at when enabled).
+    Otherwise for the agent's owner, always enabled.
+    """
+    _authorize_agent_call(request)
+    acting = await speaker_grants.acting_member(request, google=False)
+    db = get_db()
+    if acting is not None:
+        enabled = await speaker_grants.google_opted_in(
+            db, acting.user_id, acting.agent_ref, acting.owner)
+        connected = enabled and await is_google_connected(acting.user_id)
+        return {"connected": bool(connected), "enabled": bool(enabled)}
+    owner = await _agent_owner(request)
+    return {"connected": bool(await is_google_connected(owner)), "enabled": True}
 
 
 @router.get("/credentials")

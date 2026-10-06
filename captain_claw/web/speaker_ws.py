@@ -263,8 +263,12 @@ async def _speaker_chat(server: WebServer, ws: Any, data: dict) -> None:
             return
         # Attachments, origin, whatsapp_waid, deny_tools, no_tools and
         # no_broadcast are never read for a member; flows never run.
+        from captain_claw.speaker import CHAT_GRANT_FIELD, sanitize_grant
         from captain_claw.web.chat_handler import handle_chat
 
+        # The per-turn grant Flight Deck minted for THIS message (A2). Read
+        # only here, on a verified speaker socket; never logged.
+        grant = sanitize_grant(data.get(CHAT_GRANT_FIELD))
         owned = bool(await handle_chat(
             server, ws, content,
             rewind_to=str(data.get("rewind_to", "")).strip() or None,
@@ -272,6 +276,7 @@ async def _speaker_chat(server: WebServer, ws: Any, data: dict) -> None:
             no_next_steps=bool(data.get("no_next_steps", False)),
             no_rephrase=bool(data.get("no_rephrase", False)),
             speaker_turn=tid,
+            speaker_grant=grant,
         ))
     except SpeakerCapacityError:
         await server._send(ws, speaker_error("capacity", "This agent is at member capacity."))

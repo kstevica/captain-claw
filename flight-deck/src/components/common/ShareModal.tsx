@@ -10,6 +10,7 @@ import {
   type ShareUser,
   type ResourceShare,
 } from '../../services/shares'
+import { ownerGoogleBadgeTitle } from '../../utils/sharedAgent'
 
 interface Props {
   resourceType: ResourceType
@@ -124,6 +125,14 @@ export function ShareModal({ resourceType, resourceId, resourceName, allowEdit =
                       <div className="truncate text-sm text-zinc-200">{s.grantee_name || s.grantee_email}</div>
                       <div className="truncate text-[11px] text-zinc-500">{s.grantee_email}</div>
                     </div>
+                    {resourceType === 'agent' && s.google_enabled && (
+                      <span
+                        className="shrink-0 rounded border border-sky-500/25 bg-sky-500/15 px-1 py-0.5 text-[9px] font-medium text-sky-700 dark:text-sky-300"
+                        title={ownerGoogleBadgeTitle(s.grantee_name || s.grantee_email)}
+                      >
+                        Google on
+                      </span>
+                    )}
                     {!allowEdit && resourceType === 'agent' && (
                       <span className="shrink-0 text-[11px] text-zinc-500">Can chat</span>
                     )}

@@ -55,6 +55,8 @@ export interface ResourceShare {
   grantee_email: string
   grantee_name: string
   permission: Permission
+  /** Agent shares only: this member lets the agent use their Google during their chats. */
+  google_enabled?: boolean
 }
 
 export interface SharedWithMe {

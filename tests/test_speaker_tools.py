@@ -1,10 +1,14 @@
-"""Shared-agent member tool enforcement (contract part 2b §7).
+"""Shared-agent member tool enforcement (contract part 2b §7; A2 part 2 §3).
 
-A member turn may only run ``SPEAKER_TOOL_ALLOWLIST`` — enforced inside
-``ToolRegistry.execute`` (so the classic loop, ``run_tool``-style paths and
-Mrav all hit it) from three independent signals: the speaker contextvar, a
-registered speaker session key, and a speaker-scoped ``_agent``. Each signal
-alone is enough, and no session/task policy can widen the allowlist.
+A member turn may only run ``speaker.allowed_tools(principal)`` — A1's
+``SPEAKER_TOOL_ALLOWLIST`` for a docker / unverified member, up to
+``SPEAKER_TOOL_ALLOWLIST_MAX`` (their own Google, deep memory and files, with
+a grant and confined paths) for a verified member of a process agent —
+enforced inside ``ToolRegistry.execute`` (so the classic loop,
+``run_tool``-style paths and Mrav all hit it) from three independent signals:
+the speaker contextvar, a registered speaker session key, and a
+speaker-scoped ``_agent``. Each signal alone is enough, and no session/task
+policy can widen the allowlist.
 """
 
 from __future__ import annotations
@@ -20,15 +24,56 @@ import pytest
 from captain_claw import speaker
 from captain_claw.exceptions import ToolBlockedError
 from captain_claw.llm import LLMProvider, LLMResponse
-from captain_claw.speaker import SPEAKER_TOOL_ALLOWLIST, Principal
+from captain_claw.speaker import (
+    SPEAKER_TOOL_ALLOWLIST,
+    SPEAKER_TOOL_ALLOWLIST_MAX,
+    Principal,
+)
 from captain_claw.tools.registry import Tool, ToolRegistry, ToolResult
 
 PRINCIPAL = Principal("u-member", "Ana", "Olga", "A", "process:helper:0123456789abcdef")
+DOCKER = Principal("u-member", "Ana", "Olga", "A", "docker:helper:0123456789abcdef")
 SPK_SESSION = "spk-session-1"
+GRANT = "g" * 43
 
-BLOCKED = ["shell", "read", "history", "google_mail", "typesense", "vfs",
-           "flight_deck", "cron", "mcp_x_y", "web_get", "web_fetch_batch", "write"]
+# Never for a member, under any signal or widening policy (A1 and A2).
+BLOCKED = ["shell", "history", "flight_deck", "cron", "mcp_x_y", "web_get", "web_fetch_batch"]
+# A2: a process member's own Google / deep memory / files — still blocked for
+# a docker or unverified member, and without a grant or confined paths.
+A2_TOOLS = ["read", "write", "vfs", "google_mail", "typesense"]
 SIGNALS = ["contextvar", "session_key", "agent"]
+
+_DB_FIELDS = (
+    ("memory", "path"), ("session", "path"), ("insights", "db_path"),
+    ("conversation_topics", "db_path"), ("nervous_system", "db_path"),
+    ("sister_session", "db_path"), ("cognitive_metrics", "db_path"),
+    ("datastore", "path"), ("autonomous_work", "db_path"),
+)
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    """Nothing here may reach the real ~/.captain-claw or a real FD data dir
+    (a real Agent is built below): HOME, FD_DATA_DIR, every config DB path and
+    the global session / topic managers point at tmp first."""
+    import captain_claw.conversation_topics as _ct
+    from captain_claw import session as _session
+    from captain_claw.config import get_config
+
+    home = tmp_path / "home"
+    (home / ".captain-claw").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("FD_DATA_DIR", str(tmp_path / "fd-data"))
+    for var in ("CLAW_VFS_ROOT", "CLAW_VFS_USER", "FD_OWNER_ID", "FD_URL"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = get_config()
+    for section, attr in _DB_FIELDS:
+        monkeypatch.setattr(getattr(cfg, section), attr, str(home / ".captain-claw" / f"{section}.db"))
+    monkeypatch.setattr(_session, "_manager", _session.SessionManager(home / ".captain-claw" / "s.db"))
+    monkeypatch.setattr(_ct, "_MANAGER", None)
+    monkeypatch.setattr(speaker, "_IN_FLIGHT", 0)
+    monkeypatch.setattr(speaker, "_MAIN_LOOP", None)
+    return home
 
 
 class _Rec(Tool):
@@ -45,9 +90,9 @@ class _Rec(Tool):
         return ToolResult(success=True, content=f"{self.name} ran")
 
 
-def _speaker_agent(session=None):
+def _speaker_agent(session=None, principal=PRINCIPAL, grant=""):
     return types.SimpleNamespace(
-        _speaker_scoped=True, _speaker_principal=PRINCIPAL,
+        _speaker_scoped=True, _speaker_principal=principal, _turn_grant=grant,
         session=session or types.SimpleNamespace(id=SPK_SESSION),
     )
 
@@ -60,23 +105,33 @@ def _registry(names) -> tuple[ToolRegistry, dict[str, _Rec]]:
     return reg, tools
 
 
-async def _call(reg: ToolRegistry, name: str, signal: str, args: dict | None = None, **kw):
+async def _call(reg: ToolRegistry, name: str, signal: str, args: dict | None = None,
+                principal: Principal = PRINCIPAL, grant: str = "", **kw):
     """Run *name* through the registry as a member, by exactly ONE signal."""
     arguments = dict(args or {})
     session_id = kw.pop("session_id", "owner-session")
-    tok = None
+    tok = gtok = None
     if signal == "contextvar":
-        tok = speaker.bind(PRINCIPAL)
+        tok = speaker.bind(principal)
+        gtok = speaker.bind_grant(grant)
     elif signal == "session_key":
         reg.register_speaker_session(SPK_SESSION)
         session_id = SPK_SESSION
     elif signal == "agent":
-        arguments["_agent"] = _speaker_agent()
+        arguments["_agent"] = _speaker_agent(principal=principal, grant=grant)
     try:
         return await reg.execute(name, arguments, session_id=session_id, **kw)
     finally:
+        if gtok is not None:
+            speaker.reset_grant(gtok)
         if tok is not None:
             speaker.reset(tok)
+
+
+def _expected_names(signal: str, principal: Principal = PRINCIPAL) -> frozenset[str]:
+    """What a member may run by this signal alone: the session key carries no
+    principal (A1's set, fail closed); the contextvar / `_agent` carry one."""
+    return speaker.allowed_tools(None if signal == "session_key" else principal)
 
 
 # ── the allowlist itself ─────────────────────────────────────────────
@@ -86,22 +141,58 @@ def test_allowlist_is_exactly_the_contract():
     assert SPEAKER_TOOL_ALLOWLIST == frozenset(
         {"insights", "playbooks", "topics", "web_search", "web_fetch"}
     )
+    assert SPEAKER_TOOL_ALLOWLIST_MAX == SPEAKER_TOOL_ALLOWLIST | {
+        "google_mail", "google_drive", "google_calendar", "typesense", "read", "write",
+        "edit", "glob", "grep", "vfs", "pdf_extract", "docx_extract", "xlsx_extract",
+        "pptx_extract",
+    }
+
+
+@pytest.mark.parametrize("principal", [PRINCIPAL, DOCKER], ids=["process", "docker"])
+@pytest.mark.parametrize("signal", SIGNALS)
+@pytest.mark.parametrize("name", BLOCKED)
+async def test_blocked_tools_are_refused_for_a_member(name, signal, principal):
+    reg, tools = _registry(BLOCKED + A2_TOOLS + sorted(SPEAKER_TOOL_ALLOWLIST))
+    with pytest.raises(ToolBlockedError):
+        await _call(reg, name, signal, principal=principal, grant=GRANT)
+    assert tools[name].calls == []
 
 
 @pytest.mark.parametrize("signal", SIGNALS)
-@pytest.mark.parametrize("name", BLOCKED)
-async def test_blocked_tools_are_refused_for_a_member(name, signal):
-    reg, tools = _registry(BLOCKED + sorted(SPEAKER_TOOL_ALLOWLIST))
+@pytest.mark.parametrize("name", A2_TOOLS)
+async def test_a2_tools_are_refused_for_docker_and_unverified_members(name, signal):
+    """Docker / unknown-runtime members stay A1 even with a grant; the session
+    key alone is an unverified member (A1)."""
+    reg, tools = _registry(BLOCKED + A2_TOOLS + sorted(SPEAKER_TOOL_ALLOWLIST))
     with pytest.raises(ToolBlockedError):
-        await _call(reg, name, signal)
+        await _call(reg, name, signal, {"action": "search", "path": "vfs:p/a.md"},
+                    principal=DOCKER, grant=GRANT)
+    assert tools[name].calls == []
+
+
+@pytest.mark.parametrize("signal", ["contextvar", "agent"])
+@pytest.mark.parametrize("name,why", [
+    ("google_mail", speaker.NO_GRANT_MESSAGE), ("typesense", speaker.NO_GRANT_MESSAGE),
+    ("read", speaker.FILES_UNAVAILABLE_MESSAGE), ("write", speaker.FILES_UNAVAILABLE_MESSAGE),
+    ("vfs", speaker.FILES_UNAVAILABLE_MESSAGE),
+])
+async def test_a2_tools_need_a_grant_or_confined_paths(name, why, signal):
+    """A process member without a grant (Google / deep memory) or without
+    their own instance + session (files) is refused before the tool runs."""
+    reg, tools = _registry(BLOCKED + A2_TOOLS + sorted(SPEAKER_TOOL_ALLOWLIST))
+    args = {"action": "ls" if name == "vfs" else "search", "path": "vfs:p/a.md",
+            "content": "x", "query": "q"}
+    with pytest.raises(ToolBlockedError) as info:
+        await _call(reg, name, signal, args, principal=PRINCIPAL, grant="")
+    assert info.value.reason == why
     assert tools[name].calls == []
 
 
 @pytest.mark.parametrize("signal", SIGNALS)
 @pytest.mark.parametrize("widen", ["task_also_allow", "session_policy_arg", "per_turn_policy"])
-@pytest.mark.parametrize("name", ["shell", "history", "google_mail", "mcp_x_y", "vfs"])
+@pytest.mark.parametrize("name", BLOCKED)
 async def test_no_policy_can_widen_the_member_allowlist(name, signal, widen):
-    reg, tools = _registry(BLOCKED + sorted(SPEAKER_TOOL_ALLOWLIST))
+    reg, tools = _registry(BLOCKED + A2_TOOLS + sorted(SPEAKER_TOOL_ALLOWLIST))
     kw: dict = {}
     if widen == "task_also_allow":
         kw["task_policy"] = {"also_allow": [name]}
@@ -119,7 +210,8 @@ async def test_no_policy_can_widen_the_member_allowlist(name, signal, widen):
 async def test_the_chain_step_alone_also_blocks(signal):
     """Even past the top-of-execute check, the policy chain carries the
     principal step last (list_tools / get_definitions use it)."""
-    reg, _ = _registry(BLOCKED + sorted(SPEAKER_TOOL_ALLOWLIST))
+    registered = BLOCKED + A2_TOOLS + sorted(SPEAKER_TOOL_ALLOWLIST)
+    reg, _ = _registry(registered)
     if signal == "agent":
         pytest.skip("listing carries no arguments; covered by execute()")
     tok = speaker.bind(PRINCIPAL) if signal == "contextvar" else None
@@ -134,18 +226,19 @@ async def test_the_chain_step_alone_also_blocks(signal):
     finally:
         if tok is not None:
             speaker.reset(tok)
-    assert set(names) == set(SPEAKER_TOOL_ALLOWLIST)
+    assert set(names) == _expected_names(signal) & set(registered)
+    assert not set(names) & set(BLOCKED)
 
 
 @pytest.mark.parametrize("signal", SIGNALS)
 async def test_allowlisted_tools_still_run_for_a_member(signal):
-    reg, tools = _registry(BLOCKED + sorted(SPEAKER_TOOL_ALLOWLIST))
+    reg, tools = _registry(BLOCKED + A2_TOOLS + sorted(SPEAKER_TOOL_ALLOWLIST))
     result = await _call(reg, "web_search", signal, {"query": "weather"})
     assert result.success and len(tools["web_search"].calls) == 1
 
 
 async def test_without_any_signal_nothing_changes():
-    reg, tools = _registry(BLOCKED + sorted(SPEAKER_TOOL_ALLOWLIST))
+    reg, tools = _registry(BLOCKED + A2_TOOLS + sorted(SPEAKER_TOOL_ALLOWLIST))
     assert reg._is_speaker_call("owner-session", {}) is False
     result = await reg.execute("read", {}, session_id="owner-session")
     assert result.success and len(tools["read"].calls) == 1
@@ -168,7 +261,7 @@ def test_speaker_session_keys_unregister():
 
 
 def test_definitions_for_a_member_session_are_only_the_allowlist():
-    reg, _ = _registry(BLOCKED + sorted(SPEAKER_TOOL_ALLOWLIST))
+    reg, _ = _registry(BLOCKED + A2_TOOLS + sorted(SPEAKER_TOOL_ALLOWLIST))
     reg.register_speaker_session(SPK_SESSION)
     names = {d["name"] for d in reg.get_definitions(session_id=SPK_SESSION)}
     assert names == set(SPEAKER_TOOL_ALLOWLIST)
@@ -177,14 +270,18 @@ def test_definitions_for_a_member_session_are_only_the_allowlist():
     assert "shell" in owner and "history" in owner
 
 
-def test_definitions_under_the_contextvar_are_only_the_allowlist():
-    reg, _ = _registry(BLOCKED + sorted(SPEAKER_TOOL_ALLOWLIST))
-    tok = speaker.bind(PRINCIPAL)
+@pytest.mark.parametrize("principal", [PRINCIPAL, DOCKER], ids=["process", "docker"])
+def test_definitions_under_the_contextvar_are_only_the_allowlist(principal):
+    registered = BLOCKED + A2_TOOLS + sorted(SPEAKER_TOOL_ALLOWLIST)
+    reg, _ = _registry(registered)
+    tok = speaker.bind(principal)
     try:
         names = {d["name"] for d in reg.get_definitions()}
     finally:
         speaker.reset(tok)
-    assert names == set(SPEAKER_TOOL_ALLOWLIST)
+    assert names == speaker.allowed_tools(principal) & set(registered)
+    if principal is DOCKER:
+        assert names == set(SPEAKER_TOOL_ALLOWLIST)
 
 
 # ── every tool there is ──────────────────────────────────────────────
@@ -204,16 +301,19 @@ def _every_tool_name() -> list[str]:
     return sorted(names)
 
 
+@pytest.mark.parametrize("principal", [PRINCIPAL, DOCKER], ids=["process", "docker"])
 @pytest.mark.parametrize("signal", SIGNALS)
-async def test_every_known_tool_outside_the_allowlist_is_blocked(signal):
+async def test_every_known_tool_outside_the_allowlist_is_blocked(signal, principal):
     names = _every_tool_name()
     assert len(names) > 40
     reg, tools = _registry(names)
+    allowed = _expected_names(signal, principal)
     for name in names:
-        if name in SPEAKER_TOOL_ALLOWLIST:
+        if name in allowed:
             continue
         with pytest.raises(ToolBlockedError):
-            await _call(reg, name, signal, task_policy={"also_allow": [name]})
+            await _call(reg, name, signal, principal=principal, grant=GRANT,
+                        task_policy={"also_allow": [name]})
         assert tools[name].calls == [], name
 
 
@@ -247,11 +347,13 @@ async def test_every_default_registered_tool_is_blocked(monkeypatch):
             return ToolResult(success=True)
         object.__setattr__(tool, "execute", _never)
     for name, _tool in registered:
-        if name in SPEAKER_TOOL_ALLOWLIST:
-            continue
-        for signal in SIGNALS:
-            with pytest.raises(ToolBlockedError):
-                await _call(reg, name, signal, task_policy={"also_allow": [name]})
+        for principal in (PRINCIPAL, DOCKER):
+            for signal in SIGNALS:
+                if name in _expected_names(signal, principal):
+                    continue
+                with pytest.raises(ToolBlockedError):
+                    await _call(reg, name, signal, principal=principal, grant=GRANT,
+                                task_policy={"also_allow": [name]})
     assert ran == []
 
 
@@ -418,12 +520,22 @@ async def test_playbooks_info_hides_the_source_session_from_a_member(sm):
 
 
 class _Topics:
-    def get_topic(self, topic, max_excerpts=40):
+    """A1 hid every excerpt from members; A2 shows a member only THEIR OWN
+    (`speaker=` narrows the rows, as ConversationTopicsManager.get_topic)."""
+
+    MESSAGES = [
+        {"ts": "2026-10-01T10:00", "role": "user", "speaker": "",
+         "excerpt": "SECRET EXCERPT from someone's chat"},
+        {"ts": "2026-10-01T10:05", "role": "user", "speaker": "u-member",
+         "excerpt": "ANA OWN EXCERPT"},
+    ]
+
+    def get_topic(self, topic, max_excerpts=40, speaker=None):
+        rows = [m for m in self.MESSAGES if speaker is None or m["speaker"] == speaker]
         return {
             "id": "t1", "label": "Munich trip", "summary": "Planning the Munich trip",
             "keywords": "travel,munich", "msg_count": 2,
-            "messages": [{"ts": "2026-10-01T10:00", "role": "user",
-                          "excerpt": "SECRET EXCERPT from someone's chat"}],
+            "messages": rows,
         }
 
 
@@ -443,6 +555,7 @@ async def test_topics_get_shows_no_excerpts_to_a_member(monkeypatch, member_via)
     assert res.success
     assert "Munich trip" in res.content and "Planning the Munich trip" in res.content
     assert "SECRET EXCERPT" not in res.content
+    assert "ANA OWN EXCERPT" in res.content            # A2: their own excerpts
 
 
 async def test_topics_get_still_shows_excerpts_to_the_owner(monkeypatch):

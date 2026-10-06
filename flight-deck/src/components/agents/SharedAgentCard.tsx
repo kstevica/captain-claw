@@ -4,9 +4,11 @@ import type { SharedAgent } from '../../services/sharedAgents'
 import { useChatStore } from '../../stores/chatStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { useNotificationStore } from '../../stores/notificationStore'
+import { SharedAgentGoogleToggle } from './SharedAgentGoogleToggle'
 
-// An agent another deck user shared with you, on the Agent Desktop. Chat only:
-// no power, config, files or memory — those stay with its owner.
+// An agent another deck user shared with you, on the Agent Desktop. No power,
+// config or the owner's files and memory — those stay with its owner. On a
+// process agent the member's own Google switch lives here (and in the chat).
 
 export function SharedAgentCard({ agent }: { agent: SharedAgent }) {
   const openSharedChat = useChatStore((s) => s.openSharedChat)
@@ -50,6 +52,7 @@ export function SharedAgentCard({ agent }: { agent: SharedAgent }) {
       {agent.description && (
         <p className="line-clamp-2 text-xs text-zinc-400">{agent.description}</p>
       )}
+      <SharedAgentGoogleToggle agent={agent} />
       <div className="mt-1 flex items-center gap-2">
         <button
           onClick={() => openSharedChat(agent.agent_ref, name, agent.owner_name || owner)}

@@ -4,6 +4,9 @@
 // port or access token: chats go through Flight Deck's member route.
 
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+import type { SharedCaps } from '../utils/sharedAgent'
+
+export type { SharedCaps }
 
 const FD_BASE = '/fd'
 
@@ -55,6 +58,14 @@ export interface SharedAgent {
   owner_name: string
   owner_email: string
   shared_at: string
+  /** What a member chat on this agent can use (FD: all true for process agents,
+   *  all false for docker). Absent (an older Flight Deck): chat-only — read it
+   *  through `sharedCaps(row)`. */
+  capabilities?: SharedCaps
+  /** The member (me) lets this agent use my Google during my chats. */
+  google_enabled: boolean
+  /** I have connected my own Google account in Flight Deck. */
+  google_connected: boolean
 }
 
 export interface SharedAgentsResponse {
@@ -62,9 +73,18 @@ export interface SharedAgentsResponse {
   enabled: boolean
   host_warning: string
   agents: SharedAgent[]
+  /** My own agents that have members: agent_ref → how many, and how many of
+   *  them turned their Google on. Absent → no owner badge. */
+  mine?: Record<string, { members: number; google: number }>
 }
 
 // ── Endpoints ──
 
 export const getSharedAgents = (): Promise<SharedAgentsResponse> =>
   fdFetch<SharedAgentsResponse>('/shared-agents')
+
+/** Turn my Google on or off for one agent shared with me (my choice, not the owner's). */
+export const setSharedAgentGoogle = (agentRef: string, enabled: boolean) =>
+  fdFetch<{ agent_ref: string; google_enabled: boolean }>('/shared-agents/google', {
+    method: 'PUT', body: JSON.stringify({ agent_ref: agentRef, enabled }),
+  })

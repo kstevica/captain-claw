@@ -4462,6 +4462,29 @@ Endpoints under `/fd/vatra`: `plan/approve`, `plan/cancel`, `plan/replan` (the g
 
 **Multi-tenant note.** Spawned workers write their VFS output under the **run owner's** root (not whatever the server's `CLAW_VFS_USER` happens to be), so on a shared deck a user's run folders always land under their own account. The **Code project rail** is also wider by default, **collapsible**, and **drag-to-resize** (persisted).
 
+### Shared agents (A2: members' own Google, deep memory, files)
+
+An owner can share one of their agents with other users of the deck ("members"). Each member chats with it in their own private conversations through Flight Deck, which connects on their behalf — a member never gets the agent's token, host or port. It is off unless Flight Deck runs with **`FD_AGENT_SHARING=1`** on an auth-enabled deck (with auth off there is nobody to share with).
+
+**What a member's turn can use.** On a **process** agent, while one of a member's messages is being answered, the agent acts with that **member's own** data, never the owner's:
+
+- **Google** (Gmail, including sending under the member's own Email-sending policy, limits and history; Calendar; Drive) — only after the member turns on **"Let this agent use my Google during my chats"** for that agent. It is **off by default**, per member and per agent, and it lapses if the agent changes owner (a re-share also starts with it off). The member's cloned **Google Drive folders** in their VFS follow the same switch: readable only while it is on, never writable. Drive files the member indexed into their deep memory can still turn up in deep-memory searches with the switch off. With the switch on, the agent can act in the member's Google as them — write drafts, send email (under their sending policy), create, change or delete calendar events, upload or overwrite Drive files — and the token covers every scope they granted when connecting Google.
+- **Deep memory** — the member's own pool (searches, notes and deletes by reference; no filter-wide deletes during a shared chat).
+- **Files** — the member's own VFS folders (addressed as `vfs:<project>/…`) and the shared chat's saved folders. VFS links and cross-user shares are not available to members.
+
+Flight Deck enforces this with a **per-turn grant**: minted for one member message, closed when that turn ends, when access is revoked (share removed, member left, agent removed or re-owned, membership lost), 20 minutes after the message, or 2 minutes after the browser tab that sent it closes. A request without a valid grant is refused; it never falls back to the owner's Google or deep memory.
+
+**Docker agents stay chat-only for members.** A containerised agent isn't wired to Flight Deck's Google and deep-memory service (it keeps its own local Google connection, which is the owner's) and has no Flight Deck VFS mount, so members get only what they had before A2 (chat with web search, web pages and the shared insights, playbooks and topics) and see no Google switch.
+
+**Things to know (shown to members too):**
+
+- While a member's message is being answered (up to 20 minutes), the owner's agent process acts with that member's deep memory, their own VFS folders and, if they turned it on, their Google account. A Google access token handed out during that turn stays valid for about an hour, so the owner — who controls the process — could keep using it for **up to about an hour and a half** after the message.
+- A member's VFS folders are plain files on the host: the owner's process, and any shell-capable process agent on the host, can read them at any time.
+- Learnings stay an **open commons**: what the agent distils after a member's turns (insights, reflections, topics) is shared with the owner and every member — and it can include facts the agent read in that member's mail, calendar, Drive, files or deep memory during the turn.
+- Anyone on the deck who runs their own shell-capable process agent can act as any agent on the host.
+
+**Deploy.** (1) Restart Flight Deck with `FD_AGENT_SHARING=1`; (2) restart every shared agent; (3) rebuild the Flight Deck frontend (`npm run build` in `flight-deck/`) and hard-refresh. The order doesn't matter: an agent never asks Flight Deck to act for a member without a grant, and an older Flight Deck never mints one. Restarting Flight Deck drops open grants — turns in flight lose the member's Google and deep memory and carry on. No database migration: the Google switches are per-user settings rows (inert after a rollback).
+
 ### Basna (NEW in 0.5.7)
 
 Basna (sidebar: **Basna**) is a **network-source ensemble** — a one-shot, selective alternative to Council. You describe a task; Basna routes it to the smallest set of specialist archetypes, runs them in parallel, and merges their answers weighted by learned reliability.

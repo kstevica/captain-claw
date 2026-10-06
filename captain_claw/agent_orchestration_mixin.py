@@ -1624,8 +1624,22 @@ class AgentOrchestrationMixin:
             # the user connects or disconnects via Flight Deck. Cheap:
             # flight-deck client mode re-uses the in-process access-token
             # cache; local mode hits SQLite app_state.
-            # (Not for a shared-agent member: Google isn't theirs to use.)
-            if getattr(self, "_speaker_scoped", False) is not True:
+            # A shared-agent member: THEIR status for this agent (opt-in +
+            # connected) from Flight Deck — never a token fetch, never the
+            # owner's connection; refreshed at most every 30 s.
+            if getattr(self, "_speaker_scoped", False) is True:
+                try:
+                    from captain_claw.google_oauth_manager import (
+                        GoogleOAuthManager,
+                        google_cache_fresh,
+                    )
+                    from captain_claw.speaker import SPEAKER_GOOGLE_STATUS_REFRESH_S
+
+                    if not google_cache_fresh(SPEAKER_GOOGLE_STATUS_REFRESH_S):
+                        await GoogleOAuthManager(self.session_manager).speaker_status()
+                except Exception:
+                    pass
+            else:
                 try:
                     from captain_claw.google_oauth_manager import GoogleOAuthManager
                     await GoogleOAuthManager(self.session_manager).is_connected()

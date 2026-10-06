@@ -159,9 +159,45 @@ class TypesenseTool(Tool):
         the caller is an FD-spawned process. The per-agent token is what lets FD
         resolve *which* owner's archive this is — and it resolves it from the
         registry, so the agent never gets to assert a tenant.
+
+        A shared-agent member's call adds the turn's ``X-FD-Speaker-Grant``
+        (FD then acts on the MEMBER's own pool); raises
+        :class:`~captain_claw.speaker.SpeakerGrantMissing` when the member has
+        no usable grant. Every call also sends ``params=speaker.grant_params()``.
         """
+        from captain_claw import speaker as _speaker
+
         token = str(getattr(getattr(get_config(), "web", None), "auth_token", "") or "")
-        return {"X-Agent-Auth": token} if token else {}
+        headers = {"X-Agent-Auth": token} if token else {}
+        headers.update(_speaker.grant_headers())
+        return headers
+
+    @staticmethod
+    def _fd_params() -> dict[str, str]:
+        from captain_claw import speaker as _speaker
+
+        return _speaker.grant_params()
+
+    @staticmethod
+    def _default_reference(path: str) -> str:
+        """The reference an indexed file gets when none is given: its path for
+        the owner; for a shared-agent member (whose ``file_path`` arrives
+        rewritten to an absolute host path) its ``vfs:`` address, else just
+        the file name — never a host path in their pool."""
+        from pathlib import Path
+
+        from captain_claw import speaker as _speaker
+
+        if not _speaker.member_bound():
+            return path
+        try:
+            from captain_claw.vfs import to_display, user_root
+
+            real = Path(path).resolve()
+            real.relative_to(Path(user_root()).resolve())
+            return to_display(real)
+        except Exception:
+            return Path(path).name
 
     # ------------------------------------------------------------------
     # Collection resolution & bootstrap
@@ -291,6 +327,30 @@ class TypesenseTool(Tool):
         ):
             kwargs.pop(k, None)
 
+        # A shared-agent member's deep memory is THEIR OWN pool, reachable only
+        # through Flight Deck with the turn's grant — never the local
+        # Typesense key / index below (the owner's).
+        from captain_claw import speaker as _speaker
+
+        member = (_speaker.member_bound()
+                  or _speaker.principal_for(kwargs.get("_agent")) is not None
+                  or _speaker.identity_lost())
+        if member and self._fd_client() is None:
+            return ToolResult(
+                success=False, error="Deep memory isn't available in shared chats here.",
+            )
+        if member and not _speaker.member_bound():
+            # A member recognised only by `_agent` here (the registry binds the
+            # principal + grant for every member call): no grant in context —
+            # never a request that would go out as the owner.
+            return ToolResult(success=False, error=_speaker.NO_GRANT_MESSAGE)
+        if member and action == "delete":
+            # Same rule as the registry's (speaker.apply_tool_rules): by
+            # reference / document id only, never a filter.
+            _args, _err = _speaker.apply_tool_rules("typesense", {"action": action, **kwargs}, None)
+            if _err:
+                return ToolResult(success=False, error=_err)
+
         # Under Flight Deck the agent is *supposed* to have no key — FD holds it,
         # and EVERY action goes through the proxy. From the agent's side deep
         # memory is simply always there; if Flight Deck has no Typesense
@@ -309,6 +369,8 @@ class TypesenseTool(Tool):
                 )
             try:
                 return await proxied(**kwargs)
+            except _speaker.SpeakerGrantMissing:
+                return ToolResult(success=False, error=_speaker.NO_GRANT_MESSAGE)
             except Exception as exc:
                 log.warning("Deep memory proxy call failed", action=action, error=str(exc))
                 return ToolResult(
@@ -398,6 +460,7 @@ class TypesenseTool(Tool):
                 "filter_by": filter_by or "",
             },
             headers=self._fd_headers(),
+            params=self._fd_params(),
         )
         if resp.status_code != 200:
             return ToolResult(
@@ -441,7 +504,7 @@ class TypesenseTool(Tool):
                     text = f.read()
             except OSError as exc:
                 return ToolResult(success=False, error=f"Cannot read file {file_path}: {exc}")
-            reference = reference or file_path.strip()
+            reference = reference or self._default_reference(file_path.strip())
         if not text or not text.strip():
             return ToolResult(
                 success=False, error="'text' or 'file_path' is required for indexing."
@@ -457,6 +520,7 @@ class TypesenseTool(Tool):
                 "summarize": False,
             },
             headers=self._fd_headers(),
+            params=self._fd_params(),
         )
         if resp.status_code != 200:
             return ToolResult(
@@ -489,6 +553,7 @@ class TypesenseTool(Tool):
             "/fd/deep-memory/agent/delete",
             json={"reference": ref, "filter_by": filter_by or ""},
             headers=self._fd_headers(),
+            params=self._fd_params(),
         )
         if resp.status_code != 200:
             return ToolResult(

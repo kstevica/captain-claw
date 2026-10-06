@@ -32,7 +32,9 @@ export function sharedSliceId(chatKey: string, userId: string | null | undefined
   return chatKey.startsWith(SHARED_PREFIX) ? `${chatKey}@${sliceUser(userId)}` : chatKey
 }
 
-export const SHARED_ACK_PREFIX = 'fd.sharedAgentAck.'
+/** Bumped with A2 (members use their own files, deep memory and Google):
+ *  everybody sees the new notice once, even if they dismissed the old one. */
+export const SHARED_ACK_PREFIX = 'fd.sharedAgentAck.v2.'
 
 /** localStorage key recording that this user dismissed this agent's notice. */
 export function sharedAckKey(userId: string | null | undefined, agentRef: string): string {
@@ -142,26 +144,117 @@ export function sharedCloseInfo(
   }
 }
 
+// ── What a member chat on this agent can use ──
+//
+// Flight Deck says, per shared agent, what a member's own chats may use:
+// all on for a process agent (their own Google if they opt in, their deep
+// memory, their own VFS folders), all off for a Docker agent — that one stays
+// chat-only. A row from an older Flight Deck has no capabilities: chat-only.
+
+export interface SharedCaps { google: boolean; deep_memory: boolean; files: boolean }
+
+export const CHAT_ONLY_CAPS: SharedCaps = { google: false, deep_memory: false, files: false }
+
+/** A row's capabilities: each one only when Flight Deck says exactly `true`. */
+export function sharedCaps(row?: { capabilities?: Partial<SharedCaps> | null }): SharedCaps {
+  const c: Partial<SharedCaps> = (row && row.capabilities) || {}
+  return { google: c.google === true, deep_memory: c.deep_memory === true, files: c.files === true }
+}
+
 /** Shown to the owner in the Share dialog of an agent. */
 export const OWNER_SHARE_NOTE: string =
   'Members chat with this agent in their own private conversations — private from each other, '
-  + "not from you or the deck's admins. During member chats the agent can only search the web, read "
-  + 'public pages and use its shared insights, playbooks and topics: no shell, files, Google, deep '
-  + 'memory, MCP servers, scheduled jobs or your fleet. What it learns from anyone\'s chats, including '
-  + 'yours, becomes shared knowledge for everyone using it. Member chats use your LLM keys. '
-  + 'If this agent was running before sharing was turned on, restart it once so members can '
+  + "not from you or the deck's admins. On a process agent, during a member's chat the agent works "
+  + 'with THEIR deep memory, THEIR own files and, only if they turn it on, THEIR Google account — '
+  + 'never yours. On a Docker agent, member chats can only search the web, read public pages and '
+  + "use the shared insights, playbooks and topics. In member chats it can't use the shell, your "
+  + "files or accounts, MCP servers, scheduled jobs or your fleet. What it learns from anyone's "
+  + "chats — yours, and what it reads from members' own mail, files and deep memory — becomes "
+  + 'shared knowledge for everyone using it. Member chats use your LLM keys. If this agent was '
+  + 'running before sharing (or this update) was turned on, restart it once so members can '
   + 'connect.\n\n'
   + 'Anyone on this deck who runs their own shell-capable process agent can act as any agent on '
-  + 'this host, including this one.'
+  + "this host, including this one, and can read every user's Flight Deck files."
 
-/** Shown to a member the first time they open a shared agent. `**…**` is bold. */
-export function memberNoticeText(agentName: string, ownerName: string, hostWarning: string): string {
+/** Shown to a member the first time they open a shared agent. `**…**` is bold.
+ *  `caps` is what their chats on it can use (`sharedCaps(row)`); chat-only —
+ *  a Docker agent, an older Flight Deck, no row yet — keeps the A1 text. */
+export function memberNoticeText(
+  agentName: string,
+  ownerName: string,
+  hostWarning: string,
+  caps: SharedCaps = CHAT_ONLY_CAPS,
+): string {
   const agent = (agentName || '').trim() || 'This agent'
   const owner = (ownerName || '').trim() || 'another user'
-  return `**${agent} belongs to ${owner}.** Your conversations here are private from other members, `
+  const ownData = !!caps && (caps.files || caps.deep_memory || caps.google)
+  const head = `**${agent} belongs to ${owner}.** Your conversations here are private from other members, `
     + `but not from ${owner} or this deck's admins. The agent can see the profile you set in Flight Deck. `
     + 'What it learns from your chats becomes shared knowledge for everyone using it, including '
-    + `${owner}'s own chats with it. In shared chats it can only search the web, read public pages and use its `
-    + 'shared insights, playbooks and topics.'
-    + (hostWarning ? `\n\n${hostWarning}` : '')
+  const body = ownData
+    ? `${owner}'s own chats with it — and that includes anything it reads from your mail, calendar, `
+      + 'Drive, files or deep memory during a chat. During your chats it can read, change and delete '
+      + `your own files (your VFS folders) and use your deep memory — never ${owner}'s — and it uses `
+      + 'your Google account, including your Drive folders in Flight Deck, only if you turn that on '
+      + 'below (Drive files you indexed into deep memory can still turn up in its deep-memory '
+      + 'searches with Google off). While it is '
+      + `answering you (up to 20 minutes), ${owner}'s agent process acts with those; your VFS folders `
+      + `are files on this computer, so ${owner}, who controls the agent, can read them at any time. `
+      + "It can't run commands, use MCP servers or other agents, or schedule anything."
+    : `${owner}'s own chats with it. In shared chats it can only search the web, read public pages and use its `
+      + 'shared insights, playbooks and topics.'
+  return head + body + (hostWarning ? `\n\n${hostWarning}` : '')
+}
+
+// ── A member's Google, per shared agent (off until they turn it on) ──
+
+/** An agent name in the middle of a sentence. */
+function agentInSentence(agentName: string): string {
+  return (agentName || '').trim() || 'this agent'
+}
+
+/** The switch's label. */
+export function googleOptInLabel(agentName: string): string {
+  return `Let ${agentInSentence(agentName)} use my Google during my chats`
+}
+
+/** Shown in the confirm dialog when a member turns their Google ON. */
+export function googleOptInWarning(agentName: string, ownerName: string): string {
+  const agent = agentInSentence(agentName)
+  const owner = (ownerName || '').trim() || 'another user'
+  return `Let ${agent} use your Google account (Gmail, Calendar, Drive) during your chats with it?\n\n`
+    + `It acts as you, through ${owner}'s agent: while one of your messages is being answered (up to 20 `
+    + 'minutes), that agent can read your mail, calendar and Drive — including the Drive folders you '
+    + 'added to Flight Deck — and act in them as you: write drafts and, if your Gmail send settings '
+    + 'allow it, send email as you; create, change or delete calendar events; and upload or overwrite '
+    + 'Drive files. A Google access token it gets covers everything you allowed when you connected '
+    + `Google and stays valid for about an hour, so ${owner}, who controls the agent, could `
+    + 'keep using your account for up to about an hour and a half after your message.\n\n'
+    + 'Anything the agent reads from your mail, calendar or Drive can also become shared knowledge '
+    + `that other members and ${owner} see.\n\n`
+    + `Turn this on only if you trust ${owner}. You can turn it off at any time.`
+}
+
+/** Under the switch while the member has no Google account connected. */
+export function googleOptInHint(row: { google_enabled?: boolean; google_connected?: boolean }): string {
+  return row && row.google_connected === true
+    ? ''
+    : 'Connect your Google account in Connections first — until then this has no effect.'
+}
+
+/** The owner's Share dialog: on a member who turned their Google on. */
+export function ownerGoogleBadgeTitle(memberName: string): string {
+  const member = (memberName || '').trim() || 'This member'
+  return `${member} lets this agent use their Google account during their chats`
+}
+
+/** The owner's badge on an agent of theirs that has members. */
+export function sharedCountLabel(n: number): string {
+  return `shared · ${n}`
+}
+
+/** That badge's tooltip. */
+export function sharedCountTitle(members: number, google: number): string {
+  return `Shared with ${members} member${members === 1 ? '' : 's'}`
+    + (google > 0 ? `, ${google} with Google on` : '')
 }

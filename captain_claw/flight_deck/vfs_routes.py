@@ -22,7 +22,9 @@ import json
 
 from captain_claw.vfs import (
     META_FILENAME,
+    _fs_id,  # noqa: F401 — re-exported for callers of vfs_routes
     link_target_at,
+    path_within,
     read_authors,
     read_links_at,
     safe_join,
@@ -51,10 +53,44 @@ def _user_root(user_id: str) -> Path:
     return (DATA_DIR / "vfs" / safe_name(user_id, fallback="local")).resolve()
 
 
+
+
+def safe_link_target(root: Path, name: str) -> Path | None:
+    """link_target_at(root, name), or None when the target is FD's DATA_DIR, an
+    ancestor of it, or inside it — except inside ``root`` itself (a Drive
+    mount's target is <DATA_DIR>/vfs/<user>/.drive/<name>, vfs_drive.py:641).
+
+    ``POST /fd/vfs/links`` already refuses such targets, but the registry is a
+    plain file in the user's VFS root: one edited on disk (or by an agent) is
+    re-checked here, at read time, and a refused link behaves exactly like a
+    missing one. Containment is checked by filesystem identity too
+    (:func:`path_within`), so another spelling of the data dir is refused.
+    """
+    tgt = link_target_at(root, name)
+    if tgt is None:
+        return None
+    from captain_claw.flight_deck.server import DATA_DIR
+
+    try:
+        data = Path(DATA_DIR).resolve()
+        base = Path(root).resolve()
+        t = tgt.resolve()
+        if path_within(t, base):
+            return tgt
+        refused = path_within(t, data) or path_within(data, t)
+    except (OSError, RuntimeError):
+        return None
+    if refused:
+        log.warning("Ignored a VFS link that points into Flight Deck's data directory",
+                    user=base.name, link=str(name)[:100])
+        return None
+    return tgt
+
+
 def _project_root(user_id: str, project: str) -> Path:
     """On-disk root for a project — the external path if it's a linked folder."""
     name = safe_name(project, fallback="shared")
-    tgt = link_target_at(_user_root(user_id), name)
+    tgt = safe_link_target(_user_root(user_id), name)
     if tgt is not None:
         return tgt
     return (_user_root(user_id) / name).resolve()
@@ -243,7 +279,7 @@ async def list_projects(user: dict = Depends(get_current_user)):
                 drive_meta["uncloned"] = total_f - cloned_f
             except Exception:  # noqa: BLE001 — counts are a nicety
                 pass
-        tgt = link_target_at(root, name)
+        tgt = safe_link_target(root, name)
         if tgt is None or not tgt.is_dir():
             out.append({"name": name, "files": 0, "bytes": 0, "mtime": 0.0,
                         "kind": kind, "run_id": "", "title": "",
@@ -317,8 +353,9 @@ async def add_link(body: LinkBody, user: dict = Depends(get_current_user)):
         raise HTTPException(400, "path must be an existing directory")
     p = p.resolve()
     data = Path(DATA_DIR).resolve()
-    # Never link the FD data tree itself or an ancestor of it (recursion / self-mount).
-    if p == data or data in p.parents or p in data.parents:
+    # Never link the FD data tree itself or an ancestor of it (recursion / self-mount),
+    # whatever its spelling (path_within also compares filesystem identity).
+    if path_within(p, data) or path_within(data, p):
         raise HTTPException(400, "cannot link the Flight Deck data directory or its ancestors")
     root = _user_root(user["id"])
     if (root / name).exists():

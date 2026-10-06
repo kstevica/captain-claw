@@ -50,33 +50,49 @@ class TopicsTool(Tool):
         **kwargs: Any,
     ) -> ToolResult:
         try:
+            from captain_claw.speaker import principal_for
+
+            # A shared-agent member (None = the owner, unchanged): labels,
+            # summaries and keywords are the shared commons; excerpts are
+            # transcripts — a member sees only their OWN, and no counts.
+            p = principal_for(kwargs.get("_agent"))
             mgr = get_topics_manager()
             n = int(limit) if limit else 15
             if action == "list":
                 rows = mgr.list_topics(limit=n)
-                return ToolResult(success=True, content=_fmt_overview(rows, "Recent topics"))
+                return ToolResult(success=True, content=_fmt_overview(
+                    rows, "Recent topics", show_counts=p is None))
             if action == "search":
                 rows = mgr.search_topics(query or "", limit=n)
-                return ToolResult(success=True, content=_fmt_overview(rows, f"Topics matching {query!r}"))
+                return ToolResult(success=True, content=_fmt_overview(
+                    rows, f"Topics matching {query!r}", show_counts=p is None))
             if action == "get":
                 if not topic:
                     return ToolResult(success=False, error="'topic' (id or label) is required for get.")
-                t = mgr.get_topic(topic, max_excerpts=n if limit else 40)
+                max_excerpts = n if limit else 40
+                if p is None:
+                    t = mgr.get_topic(topic, max_excerpts=max_excerpts)
+                    if not t:
+                        return ToolResult(success=False, error=f"No topic found for {topic!r}.")
+                    return ToolResult(success=True, content=_fmt_topic(t))
+                if not p.speaker_id:
+                    # Unverified member: never query speaker='' (the owner's rows).
+                    t = mgr.get_topic(topic, max_excerpts=1)
+                    if not t:
+                        return ToolResult(success=False, error=f"No topic found for {topic!r}.")
+                    return ToolResult(success=True, content=_fmt_topic(
+                        t, include_messages=False, show_count=False))
+                t = mgr.get_topic(topic, max_excerpts=max_excerpts, speaker=p.speaker_id)
                 if not t:
                     return ToolResult(success=False, error=f"No topic found for {topic!r}.")
-                # Labels, summaries and keywords are the shared commons; the
-                # excerpts are transcripts — never shown to a shared-agent member.
-                from captain_claw.speaker import principal_for
-
-                speaker = principal_for(kwargs.get("_agent")) is not None
-                return ToolResult(success=True, content=_fmt_topic(t, include_messages=not speaker))
+                return ToolResult(success=True, content=_fmt_topic(t, own_messages=True))
             return ToolResult(success=False, error=f"Unknown action: {action}")
         except Exception as e:
             log.error("Topics tool error", action=action, error=str(e))
             return ToolResult(success=False, error=str(e))
 
 
-def _fmt_overview(rows: list[dict[str, Any]], header: str) -> str:
+def _fmt_overview(rows: list[dict[str, Any]], header: str, *, show_counts: bool = True) -> str:
     if not rows:
         return f"{header}: (none yet)"
     lines = [f"{header} ({len(rows)}):"]
@@ -84,14 +100,15 @@ def _fmt_overview(rows: list[dict[str, Any]], header: str) -> str:
         kw = (r.get("keywords") or "").replace(",", ", ")
         lines.append(
             f"- [{r['id']}] {r['label']} — {r.get('summary', '')[:160]}"
-            + (f"  · {r.get('msg_count', 0)} msgs" if r.get("msg_count") else "")
+            + (f"  · {r.get('msg_count', 0)} msgs" if show_counts and r.get("msg_count") else "")
             + (f"  · tags: {kw}" if kw else "")
         )
     lines.append("\nUse action='get' with the [id] in brackets to see a topic's messages.")
     return "\n".join(lines)
 
 
-def _fmt_topic(t: dict[str, Any], include_messages: bool = True) -> str:
+def _fmt_topic(t: dict[str, Any], include_messages: bool = True, *,
+               show_count: bool = True, own_messages: bool = False) -> str:
     lines = [
         f"Topic: {t['label']}  [{t['id']}]",
         f"Summary: {t.get('summary', '') or '(none)'}",
@@ -99,9 +116,16 @@ def _fmt_topic(t: dict[str, Any], include_messages: bool = True) -> str:
     if t.get("keywords"):
         lines.append(f"Tags: {t['keywords'].replace(',', ', ')}")
     if not include_messages:
-        lines.append(f"Messages: {t.get('msg_count', 0)} total (excerpts are private).")
+        if show_count:
+            lines.append(f"Messages: {t.get('msg_count', 0)} total (excerpts are private).")
+        else:
+            lines.append("Messages: excerpts are private.")
         return "\n".join(lines)
-    lines.append(f"Messages ({t.get('msg_count', 0)} total, showing recent):")
+    if own_messages:
+        # A shared-agent member: only their own excerpts, with their own count.
+        lines.append(f"Your messages in this topic ({len(t.get('messages', []))}):")
+    else:
+        lines.append(f"Messages ({t.get('msg_count', 0)} total, showing recent):")
     for m in t.get("messages", []):
         ts = str(m.get("ts", ""))[:16].replace("T", " ")
         lines.append(f"  [{ts}] ({m.get('role', '')}) {m.get('excerpt', '')[:280]}")

@@ -2721,10 +2721,13 @@ class AgentContextMixin:
         registered = self.tools.list_tools()
         if getattr(self, "_speaker_scoped", False) is True:
             # A shared-agent member sees only the tools they can call — never
-            # the owner's roster (MCP servers, Google, shell, plugins).
-            from captain_claw.speaker import SPEAKER_TOOL_ALLOWLIST
+            # the owner's roster (MCP servers, shell, plugins). Their Google
+            # tools arrive with the API tool definitions only when connected;
+            # this cached prompt never names them.
+            from captain_claw.speaker import principal_for, prompt_tools
 
-            registered = [n for n in registered if n in SPEAKER_TOOL_ALLOWLIST]
+            _member_tools = prompt_tools(principal_for(self))
+            registered = [n for n in registered if n in _member_tools]
         use_nano = self.instructions.use_nano
         use_micro = self.instructions.use_micro
 
@@ -2794,9 +2797,10 @@ class AgentContextMixin:
         names = (tool_name,) if isinstance(tool_name, str) else tool_name
         if getattr(self, "_speaker_scoped", False) is True:
             # A shared-agent member can't call these tools; don't describe them.
-            from captain_claw.speaker import SPEAKER_TOOL_ALLOWLIST
+            from captain_claw.speaker import principal_for, prompt_tools
 
-            names = tuple(n for n in names if n in SPEAKER_TOOL_ALLOWLIST)
+            _member_tools = prompt_tools(principal_for(self))
+            names = tuple(n for n in names if n in _member_tools)
         if not any(self.tools.has_tool(n) for n in names):
             return ""
         if variables:
@@ -3211,7 +3215,7 @@ class AgentContextMixin:
         # same slot — never the owner's block.
         if getattr(self, "_speaker_scoped", False) is True:
             try:
-                from captain_claw.speaker import SPEAKER_MODE_NOTE
+                from captain_claw.speaker import principal_for, speaker_mode_note
                 from captain_claw.tenant_context import (
                     insert_tenant_block,
                     use_compact_tenant_context,
@@ -3229,9 +3233,10 @@ class AgentContextMixin:
                     _member_block = _compact or _full
                 else:
                     _member_block = _full or _compact
+                _mode_note = speaker_mode_note(principal_for(self))
                 _member_block = (
-                    f"{_member_block}\n\n{SPEAKER_MODE_NOTE}" if _member_block
-                    else SPEAKER_MODE_NOTE
+                    f"{_member_block}\n\n{_mode_note}" if _member_block
+                    else _mode_note
                 )
                 base_prompt = insert_tenant_block(base_prompt, _member_block)
             except Exception:
@@ -3258,8 +3263,10 @@ class AgentContextMixin:
         # (Council/Basna/Vatra), it is bound to ONE shared filesystem project.
         # Surface it so every teammate writes to the same folder instead of each
         # inventing its own (game-suite, the bare session id, …).
+        # Not for a shared-agent member: their default project is `shared` in
+        # their OWN VFS root; the owner's run project isn't theirs.
         _vfs_project = os.environ.get("CLAW_VFS_PROJECT", "").strip()
-        if _vfs_project:
+        if _vfs_project and getattr(self, "_speaker_scoped", False) is not True:
             base_prompt = base_prompt.rstrip() + (
                 "\n\n## Shared filesystem (this run)\n"
                 f"You are part of a multi-agent run bound to ONE shared VFS project: `{_vfs_project}`. "

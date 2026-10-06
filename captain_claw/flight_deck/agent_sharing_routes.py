@@ -1,8 +1,12 @@
 """Member-facing routes for chat-only shared agents (A1) — see ``agent_sharing``.
 
 * ``GET /fd/shared-agents`` — the agents shared with me that still exist and
-  are still their sharer's. Never an agent's token, port, host, pid or
-  container id.
+  are still their sharer's, with what a member gets on each (A2: process
+  agents act with the member's own Google — after their opt-in —, deep memory
+  and files during their turns; docker agents stay chat-only). Never an
+  agent's token, port, host, pid or container id.
+* ``PUT /fd/shared-agents/google`` — a member turns "Let this agent use my
+  Google during my chats" on or off for one shared process agent.
 * ``WS /fd/agent-ws-shared?ref=&lane=&fd_token=`` — a member's chat socket.
   The browser names the agent by ref only; FD resolves it from its own records,
   connects to ``ws://localhost:{recorded port}/ws`` with the recorded token and a
@@ -11,6 +15,9 @@
   owner), then relays only the allowlisted member frames (``chat``, ``btw`` and
   the session settings size-capped, ``btw`` at most one a second). Membership,
   the sharer and the member's session are re-checked while the socket is open.
+  Each member chat turn on a process agent carries a per-turn grant
+  (``speaker_grants``) the agent uses to act as the member; it closes with the
+  turn, on revocation, and shortly after the socket that sent the message.
 
 Every rejection happens after ``accept()`` and is preceded by an ``fd_close``
 frame, so the browser always sees why (a close before accept surfaces as 1006).
@@ -27,9 +34,10 @@ import time
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket
+from pydantic import BaseModel
 
 from captain_claw.flight_deck import agent_sharing as sharing
-from captain_claw.flight_deck import tenant_profile
+from captain_claw.flight_deck import speaker_grants, tenant_profile
 from captain_claw.flight_deck.auth import decode_access_token, get_current_user, get_db
 from captain_claw.logging import get_logger
 
@@ -51,13 +59,45 @@ def _email_local(email: str) -> str:
 # ── Listing ───────────────────────────────────────────────────────────────
 
 
+async def _google_connected(user_id: str) -> bool:
+    """Has this user connected their own Google on this deck? (no network)"""
+    try:
+        from captain_claw.flight_deck import google_oauth_routes
+
+        return bool(await google_oauth_routes.is_google_connected(user_id))
+    except Exception:
+        return False
+
+
+async def _mine(db, uid: str) -> dict:
+    """O1 — the caller's own shared agents: members and Google opt-ins per ref."""
+    mine: dict[str, dict[str, int]] = {}
+    try:
+        rows = await db.list_shares_for_owner(uid, sharing.AGENT_RESOURCE)
+    except Exception as exc:
+        log.warning("Could not list the caller's shared agents", error=type(exc).__name__)
+        return mine
+    for row in rows:
+        ref = str(row.get("resource_id") or "")
+        grantee = str(row.get("grantee_id") or "")
+        if not ref or not grantee:
+            continue
+        entry = mine.setdefault(ref, {"members": 0, "google": 0})
+        entry["members"] += 1
+        if await speaker_grants.google_opted_in(db, grantee, ref, uid):
+            entry["google"] += 1
+    return mine
+
+
 @router.get("/fd/shared-agents")
 async def list_shared_agents(user: dict = Depends(get_current_user)):
-    """Agents other users shared with me (chat-only)."""
+    """Agents other users shared with me, and what I get on each."""
     if not sharing.sharing_active():
         return {"enabled": False, "host_warning": "", "agents": []}
     db = get_db()
-    rows = await db.list_shares_for_grantee(user["id"], sharing.AGENT_RESOURCE)
+    uid = str(user["id"])
+    rows = await db.list_shares_for_grantee(uid, sharing.AGENT_RESOURCE)
+    google_connected = await _google_connected(uid)
     agents = []
     for row in rows:
         ref = str(row.get("resource_id") or "")
@@ -66,6 +106,7 @@ async def list_shared_agents(user: dict = Depends(get_current_user)):
         if rec is None or rec.owner != owner_id or sharing.check_shareable(rec, owner_id):
             continue
         email = str(row.get("owner_email") or "")
+        process = rec.runtime == "process"
         agents.append({
             "agent_ref": ref,
             "runtime": rec.runtime,
@@ -77,8 +118,52 @@ async def list_shared_agents(user: dict = Depends(get_current_user)):
             "owner_name": str(row.get("owner_name") or "") or _email_local(email),
             "owner_email": email,
             "shared_at": str(row.get("created_at") or ""),
+            "capabilities": {"google": process, "deep_memory": process, "files": process},
+            "google_enabled": bool(process and await speaker_grants.google_opted_in(
+                db, uid, ref, owner_id)),
+            "google_connected": google_connected,
         })
-    return {"enabled": True, "host_warning": sharing.HOST_TRUST_WARNING, "agents": agents}
+    return {"enabled": True, "host_warning": sharing.HOST_TRUST_WARNING, "agents": agents,
+            "mine": await _mine(db, uid)}
+
+
+class GoogleOptInBody(BaseModel):
+    agent_ref: str
+    enabled: bool
+
+
+@router.put("/fd/shared-agents/google")
+async def set_shared_agent_google(body: GoogleOptInBody,
+                                  user: dict = Depends(get_current_user)) -> dict:
+    """A member turns "Let this agent use my Google during my chats" on or off.
+    Stored in the member's own settings with the agent's CURRENT owner, so the
+    consent lapses if the agent changes hands. Turning it off needs no grant
+    revocation: every grant-aware Google request re-reads it."""
+    if not sharing.sharing_active():
+        raise HTTPException(400, "Agent sharing is off on this Flight Deck")
+    ref = body.agent_ref
+    try:
+        sharing.parse_ref(ref)
+    except ValueError:
+        raise HTTPException(400, "Invalid agent reference") from None
+    rec = await asyncio.to_thread(sharing.resolve_agent_record, ref)
+    if rec is None or sharing.check_shareable(rec, rec.owner):
+        raise HTTPException(404, "Agent not found")
+    uid = str(user["id"])
+    db = get_db()
+    if uid == rec.owner or not await sharing.member_check(db, ref, rec.owner, uid, max_age=0):
+        raise HTTPException(404, "This agent isn't shared with you")
+    if rec.runtime != "process":
+        raise HTTPException(400, "Google isn't available for this agent in shared chats")
+    await speaker_grants.set_google_optin(db, uid, ref, rec.owner, body.enabled)
+    # A revoke that landed between the check and the write cleared opt-ins
+    # before this one was written: undo it so a later re-share starts off.
+    if body.enabled and not await sharing.member_check(db, ref, rec.owner, uid, max_age=0):
+        await speaker_grants.clear_google_optins(db, ref, uid)
+        raise HTTPException(404, "This agent isn't shared with you")
+    log.info("Shared-agent Google opt-in changed", agent=rec.slug, member=uid,
+             enabled=bool(body.enabled))
+    return {"agent_ref": ref, "google_enabled": body.enabled}
 
 
 # ── Member socket ─────────────────────────────────────────────────────────
@@ -120,6 +205,8 @@ class _MemberConn:
         self.jwt_exp = 0
         self.outstanding: set[str] = set()
         self.last_btw: float | None = None  # monotonic time the last `btw` went upstream
+        # Set once the socket is registered (A2: the grant tuple of its turns).
+        self.ref = self.sub = self.lane = self.conn_id = self.owner = self.runtime = ""
 
     async def send(self, frame: dict) -> None:
         await self.ws.send_text(json.dumps(frame))
@@ -226,6 +313,8 @@ async def agent_ws_shared(ws: WebSocket, ref: str = "", lane: str = "", fd_token
         await conn.close(4429, "Too many open connections to this agent")
         return
     conn_id = sharing.register_member_socket(ref, sub, lane, conn.close)
+    conn.ref, conn.sub, conn.lane, conn.conn_id = ref, sub, lane, conn_id
+    conn.owner, conn.runtime = rec.owner, rec.runtime
     try:
         await _serve_member(conn, db, user, rec, ref, lane, conn_id)
     except Exception as exc:
@@ -233,6 +322,8 @@ async def agent_ws_shared(ws: WebSocket, ref: str = "", lane: str = "", fd_token
         await conn.close(4502, "Agent connection lost")
     finally:
         sharing.unregister_member_socket(conn_id)
+        # The grants of this socket's turns outlive it by ORPHAN_GRACE_S at most.
+        speaker_grants.conn_dropped(conn_id)
         await conn.wait_client_closed()
         await conn.shutdown()  # the upstream never outlives the member socket
 
@@ -379,9 +470,11 @@ async def _client_to_agent(conn: _MemberConn, db, rec: sharing.AgentRecord,
             continue
         if not await sharing.member_check(db, ref, rec.owner, sub):
             sharing.invalidate_member_cache(ref, sub)
+            speaker_grants.revoke(ref, sub)
             await conn.close(4403, "Access removed")
             return
         frame = {k: data[k] for k in keys if k in data}
+        token = ""
 
         # The agent keeps every `btw` until its next turn ends and persists the
         # session settings into every prompt: both are bounded here, not forwarded
@@ -415,11 +508,30 @@ async def _client_to_agent(conn: _MemberConn, db, rec: sharing.AgentRecord,
             tid = secrets.token_hex(8)
             frame["_fd_turn"] = tid
             conn.outstanding.add(tid)
+            # A2: a member turn on a process agent may act as the member (their
+            # Google after opt-in, deep memory, files) through this per-turn
+            # grant. Not for slash commands, empty messages or docker agents.
+            # A revocation landing during member_check above either closed the
+            # conn or bumped the membership generation, so a grant minted anyway
+            # is refused (and revoked) on its first use.
+            stripped = content.strip()
+            if (rec.runtime == "process" and stripped and not stripped.startswith("/")
+                    and not conn.closed):
+                token = speaker_grants.mint(agent_ref=ref, owner=rec.owner, speaker=sub,
+                                            lane=conn.lane, turn=tid, conn_id=conn.conn_id)
+                if token:
+                    frame[speaker_grants.CHAT_GRANT_FIELD] = token
 
         try:
             await conn.upstream.send(json.dumps(frame))
         except ConnectionClosed:
+            if token:
+                speaker_grants.end_turn(ref, sub, conn.lane, frame["_fd_turn"])
             return  # the agent→client side reports the lost connection
+        except Exception:
+            if token:
+                speaker_grants.end_turn(ref, sub, conn.lane, frame["_fd_turn"])
+            raise
 
 
 def _btw_refusal(conn: _MemberConn, frame: dict) -> dict | None:
@@ -464,6 +576,7 @@ async def _agent_to_client(conn: _MemberConn) -> None:
                 tid = data.get("turn_end") if isinstance(data, dict) else None
                 if isinstance(tid, str):
                     conn.outstanding.discard(tid)
+                    speaker_grants.end_turn(conn.ref, conn.sub, conn.lane, tid)
             try:
                 await conn.ws.send_text(text)
             except Exception:
@@ -487,15 +600,34 @@ async def _watchdog(conn: _MemberConn, db, rec: sharing.AgentRecord, ref: str, s
         if time.time() > conn.jwt_exp + sharing.JWT_GRACE_S:
             await conn.close(4001, "Session expired")
             return
-        current = await asyncio.to_thread(sharing.resolve_agent_record, ref)
+        try:
+            current = await asyncio.to_thread(sharing.resolve_agent_record, ref, strict=True)
+        except sharing.RecordUnavailable:
+            continue  # a failed read isn't a removed agent: check again next tick
         if current is None:
+            await _forget_agent_grants(db, ref)
             await conn.close(4404, "Agent no longer exists")
             return
         if current.owner != rec.owner or sharing.check_shareable(current, rec.owner):
             sharing.invalidate_member_cache(ref)
+            if current.owner != rec.owner:  # the members consented for the old owner
+                await _forget_agent_grants(db, ref)
+            else:
+                speaker_grants.revoke(ref)
             await conn.close(4403, "Access removed")
             return
         if not await sharing.member_check(db, ref, rec.owner, sub, max_age=0):
             sharing.invalidate_member_cache(ref, sub)
+            speaker_grants.revoke(ref, sub)
             await conn.close(4403, "Access removed")
             return
+
+
+async def _forget_agent_grants(db, ref: str) -> None:
+    """The agent is gone or changed hands: close every member's grants on it and
+    drop their Google opt-ins (given for the old owner). Never raises."""
+    speaker_grants.revoke(ref)
+    try:
+        await speaker_grants.clear_google_optins(db, ref)
+    except Exception as exc:
+        log.warning("Could not clear a shared agent's Google opt-ins", error=type(exc).__name__)

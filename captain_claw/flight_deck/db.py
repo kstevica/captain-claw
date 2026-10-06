@@ -838,6 +838,14 @@ class FlightDeckDB:
         await self._db.commit()
         return cur.rowcount > 0
 
+    async def delete_setting_for_all_users(self, key: str) -> int:
+        """Drop one setting key from every user (e.g. a removed shared agent's
+        per-member opt-in). Returns how many rows went."""
+        assert self._db is not None
+        cur = await self._db.execute("DELETE FROM user_settings WHERE key = ?", (key,))
+        await self._db.commit()
+        return int(cur.rowcount or 0)
+
     # ── Chat sessions ────────────────────────────────────────────────
 
     async def list_chat_sessions(self, user_id: str) -> list[dict]:
@@ -2335,6 +2343,16 @@ class FlightDeckDB:
             " WHERE s.resource_type = ? AND s.resource_id = ? AND s.owner_id = ?"
             " ORDER BY s.created_at",
             (resource_type, resource_id, owner_id),
+        )
+        return [dict(r) for r in rows]
+
+    async def list_shares_for_owner(self, owner_id: str, resource_type: str) -> list[dict]:
+        """Every grant ``owner_id`` made on resources of one type."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT resource_id, grantee_id, created_at FROM resource_shares"
+            " WHERE owner_id = ? AND resource_type = ? ORDER BY created_at",
+            (owner_id, resource_type),
         )
         return [dict(r) for r in rows]
 

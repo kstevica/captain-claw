@@ -1,6 +1,7 @@
 """Glob tool for finding files by pattern."""
 
 import asyncio
+import contextvars
 import fnmatch
 import os
 from pathlib import Path
@@ -8,11 +9,29 @@ from typing import Any
 
 import glob
 
+from captain_claw import speaker
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, project_root, split_scheme, to_display
 
 log = get_logger(__name__)
+
+
+async def _in_executor(fn: Any) -> Any:
+    """Run *fn* in the default executor with a fresh copy of this context,
+    so a shared-agent member's identity (vfs root, path checks) travels into
+    the worker thread instead of being lost (speaker.identity_lost)."""
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(None, ctx.run, fn)
+
+
+def _member_filter(paths: list[str]) -> list[str]:
+    """A member's results: only paths whose realpath stays in their roots
+    (directory symlinks are followed by ``**``). Owner calls: unchanged."""
+    if not speaker.member_bound():
+        return paths
+    return [p for p in paths if speaker.path_allowed(p)]
 
 
 def _case_insensitive_walk(directory: str, pattern: str) -> list[str]:
@@ -98,7 +117,6 @@ class GlobTool(Tool):
                 from captain_claw.vfs import list_projects
 
                 project, rel = split_scheme(pattern)
-                loop = asyncio.get_event_loop()
                 # A glob in the PROJECT position ("vfs:**/*", "vfs:*leyr*") means
                 # "search EVERY project" — a caller shouldn't have to know the
                 # mount name to find something. Without this, "**" parsed as a
@@ -158,8 +176,8 @@ class GlobTool(Tool):
                         out.append(m)
                     return out
 
-                vfs_matches = await loop.run_in_executor(None, _cross if cross else _single)
-                vfs_matches = sorted(set(vfs_matches))[:limit]
+                vfs_matches = await _in_executor(_cross if cross else _single)
+                vfs_matches = sorted(set(_member_filter(vfs_matches)))[:limit]
                 if not vfs_matches:
                     return ToolResult(success=True, content=f"No files found matching: {pattern}")
                 disp = [to_display(Path(m)) for m in vfs_matches]
@@ -219,11 +237,8 @@ class GlobTool(Tool):
             )
 
             # Find files (sync, but run in executor to not block)
-            loop = asyncio.get_event_loop()
-            matches = await loop.run_in_executor(
-                None,
-                lambda: glob.glob(pattern, recursive=True)
-            )
+            matches = await _in_executor(lambda: glob.glob(pattern, recursive=True))
+            matches = _member_filter(matches)
 
             # When running inside an orchestrator workflow, apply the
             # timestamp filter ONLY to the workflow-run/ output directory
@@ -286,10 +301,10 @@ class GlobTool(Tool):
                         log.warning("Extra read folder not a directory", path=str(edir))
                         continue
                     try:
-                        edir_matches = await loop.run_in_executor(
-                            None,
+                        edir_matches = await _in_executor(
                             lambda d=str(edir), p=raw_pattern: _case_insensitive_walk(d, p),
                         )
+                        edir_matches = _member_filter(edir_matches)
                     except Exception as exc:
                         log.warning("Glob extra dir failed", path=str(edir), error=str(exc))
                         continue
@@ -308,10 +323,10 @@ class GlobTool(Tool):
                 hint = ""
                 if scope != "workflow" and workflow_run_dir is not None:
                     wrd_pattern = str(Path(workflow_run_dir) / raw_pattern)
-                    wrd_matches = await loop.run_in_executor(
-                        None,
+                    wrd_matches = await _in_executor(
                         lambda p=wrd_pattern: glob.glob(p, recursive=True),
                     )
+                    wrd_matches = _member_filter(wrd_matches)
                     if wrd_matches:
                         hint = (
                             f"\n\nHint: {len(wrd_matches)} file(s) matching "

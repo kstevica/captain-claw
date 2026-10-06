@@ -695,6 +695,9 @@ class WebServer:
             agent._active_personality_id = None
             agent._recent_prompts = []
             agent._lane_busy = False
+            # A2: Flight Deck's grant for the member message being answered
+            # (set/cleared by _run_agent only).
+            agent._turn_grant = ""
             agent._peer_agents = []
             agent._speaker_cache_refreshed_at = time.monotonic()
             main = self.agent
@@ -1222,13 +1225,16 @@ class WebServer:
     @staticmethod
     def _session_tools(agent: Any) -> list[str]:
         """Tool names shown in a session header: a speaker instance shows only
-        the speaker allowlist (the registry itself is process-global)."""
+        its member's allowlist (the registry itself is process-global)."""
         if not agent:
             return []
         if _is_speaker_agent(agent):
-            from captain_claw.speaker import SPEAKER_TOOL_ALLOWLIST
+            from captain_claw.speaker import allowed_tools
 
-            return sorted(n for n in SPEAKER_TOOL_ALLOWLIST if agent.tools.has_tool(n))
+            return sorted(
+                n for n in allowed_tools(getattr(agent, "_speaker_principal", None))
+                if agent.tools.has_tool(n)
+            )
         return agent.tools.list_tools()
 
     def _session_info(self, agent: Any = None) -> dict[str, Any]:
