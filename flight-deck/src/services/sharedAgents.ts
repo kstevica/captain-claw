@@ -76,6 +76,10 @@ export interface SharedAgentsResponse {
   /** My own agents that have members: agent_ref → how many, and how many of
    *  them turned their Google on. Absent → no owner badge. */
   mine?: Record<string, { members: number; google: number }>
+  /** Context packs: users can share their own profile, folders and deep
+   *  memory with everyone who uses an agent. Absent (an older Flight Deck) or
+   *  false → every "Shared context" affordance hides. */
+  context_packs?: boolean
 }
 
 // ── Endpoints ──

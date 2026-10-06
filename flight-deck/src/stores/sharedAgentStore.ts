@@ -17,6 +17,9 @@ interface SharedAgentState {
   /** My own agents that have members (agent_ref → counts), for the owner's
    *  "shared · N" badge. Empty when Flight Deck doesn't say. */
   mine: Record<string, { members: number; google: number }>
+  /** Flight Deck offers context packs ("Shared context"). False on an older
+   *  deck or with sharing off — every pack affordance hides. */
+  contextPacks: boolean
   loaded: boolean
   fetch: () => Promise<void>
   /** A member turns their Google on/off for one agent shared with them.
@@ -33,6 +36,7 @@ export const useSharedAgentStore = create<SharedAgentState>((set, get) => ({
   hostWarning: '',
   agents: [],
   mine: {},
+  contextPacks: false,
   loaded: false,
 
   fetch: async () => {
@@ -51,6 +55,7 @@ export const useSharedAgentStore = create<SharedAgentState>((set, get) => ({
         hostWarning: enabled ? String(r.host_warning || '') : '',
         agents: same ? cur.agents : agents,
         mine: sameMine ? cur.mine : mine,
+        contextPacks: enabled && r.context_packs === true,
         loaded: true,
       })
     } catch {

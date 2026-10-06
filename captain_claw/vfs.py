@@ -25,9 +25,12 @@ Path scheme (case-insensitive prefix)::
     vfs:myproj               -> <user>/myproj          (the project root)
     vfs:/notes.md            -> <user>/<default>/notes.md
     vfs:myproj/**/*.py       -> glob within a project
+    vfs:@ana-notes/a.md      -> a shared folder (context pack), read-only
 
 All paths are sandboxed under the user root — ``..`` traversal that would
-escape it is rejected.
+escape it is rejected. A ``@<alias>`` project is never one of the user's own
+projects: it resolves only inside the shared folder Flight Deck returned for
+the running tool call (``pack_access``), else to nothing.
 """
 
 from __future__ import annotations
@@ -304,7 +307,11 @@ def project_is_readonly(project: str = "") -> bool:
     agent-side write/edit tools resolve a ``vfs:`` path with no mode check and
     a "read-only" mount is writable.
     """
+    from captain_claw import pack_access as _packs
+
     raw = project or default_project()
+    if _packs.is_pack_project(raw):
+        return True  # a shared folder (vfs:@alias) is never writable
     proj = _sanitize(raw, fallback=_DEFAULT_PROJECT)
     root = user_root()
     links = read_links_at(root)
@@ -366,7 +373,9 @@ def _known_projects() -> list[str]:
     # A member's Drive mounts follow their Google opt-in for this agent.
     if not (_speaker.member_bound() and not _speaker.member_google_enabled()):
         names.update(_drive_mount_names(root))  # physical Drive mounts, link or not
-    return sorted(names)
+    # A name starting with "@" was never addressable (`_sanitize` drops the
+    # "@") and `vfs:@…` now names a shared folder: never list one as a project.
+    return sorted(n for n in names if not str(n).startswith("@"))
 
 
 def _normalize_project_key(name: str) -> str:
@@ -387,6 +396,8 @@ def resolve_project_name(name: str) -> str | None:
     """
     if not str(name or "").strip():
         return None
+    if str(name).strip().startswith("@"):
+        return None  # a shared folder (vfs:@alias), never fuzzy-matched to a project
     known = [k for k in _known_projects() if _scope_allows(_sanitize(k, fallback=""))]
     if name in known:
         return name
@@ -425,7 +436,20 @@ def project_root(project: str = "", *, create: bool = False) -> Path:
     a new project is made under exactly the name asked for, never folded into a
     look-alike.
     """
+    from captain_claw import pack_access as _packs
+
     raw = project or default_project()
+    if _packs.is_pack_project(raw):
+        # A shared folder (vfs:@alias): the call's pack root, never created and
+        # never the caller's own project of the same name (`_sanitize` would
+        # strip the "@").
+        if create:
+            raise PermissionError(_packs.PACKS_READ_ONLY_MESSAGE)
+        alias = _packs.alias_of(raw)
+        pack_root = _packs.call_pack_root(alias) if alias else None
+        if pack_root is None:
+            raise PermissionError("not a shared folder here")
+        return pack_root
     proj = _sanitize(raw, fallback=_DEFAULT_PROJECT)
     if not _scope_allows(proj):
         raise PermissionError(
@@ -504,6 +528,17 @@ def resolve_vfs_path(path: str, *, create_parents: bool = False) -> Path | None:
     if not is_vfs_path(path):
         return None
     project, rel = split_scheme(path)
+    from captain_claw import pack_access as _packs
+
+    if _packs.is_pack_project(project):
+        # vfs:@alias/… — only inside the call's shared folder (read-only;
+        # nothing without a call table), never the caller's own project.
+        if create_parents:
+            return None
+        alias = _packs.alias_of(project)
+        if alias is None:
+            return None
+        return _packs.resolve_in_pack(alias, rel)
     if not _scope_allows(_sanitize(project, fallback=_DEFAULT_PROJECT)):
         return None  # outside this process's wall — same as unresolvable
     base = project_root(project).resolve()
@@ -567,7 +602,13 @@ def resolve_under(user_id: str, default_proj: str, path: str) -> Path | None:
 
 
 def to_display(path: Path) -> str:
-    """Render an absolute VFS path back as a ``vfs:<project>/...`` URI."""
+    """Render an absolute VFS path back as a ``vfs:<project>/...`` URI
+    (``vfs:@alias/...`` for a file in one of the call's shared folders)."""
+    from captain_claw import pack_access as _packs
+
+    shown = _packs.display(path)
+    if shown:
+        return shown
     try:
         rel = Path(path).resolve().relative_to(user_root().resolve())
     except ValueError:

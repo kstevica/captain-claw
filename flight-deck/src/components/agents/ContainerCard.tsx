@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift, Bug, Users } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift, Bug, Users, Layers } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -25,7 +25,9 @@ import { ShareModal } from '../common/ShareModal'
 import { SharedCountBadge } from './SharedCountBadge'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { dockerSlug, isManagedAgent } from '../../utils/managedAgents'
-import { OWNER_SHARE_NOTE } from '../../utils/sharedAgent'
+import { ownerShareNote } from '../../utils/sharedAgent'
+import { PACKS_MENU_LABEL } from '../../utils/contextPacks'
+import { ContextPacksModal } from './ContextPacksModal'
 
 // Cap log buffer to avoid unbounded browser memory growth during long polling sessions
 const LOG_TAIL_LINES = 100
@@ -176,6 +178,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const sharingEnabled = useSharedAgentStore((s) => s.enabled)
   const canShare = sharingEnabled && !!container.agent_ref
     && !isManagedAgent(dockerSlug(container.agent_name || container.name), container.description || '')
+  // Context packs ("Shared context…"): wherever the agent can be shared, on a
+  // deck whose Flight Deck offers them.
+  const packsEnabled = useSharedAgentStore((s) => s.contextPacks)
+  const canPacks = canShare && packsEnabled
+  const [showPacks, setShowPacks] = useState(false)
 
   const memory = useAgentMemoryTransfer({
     host: 'localhost',
@@ -249,6 +256,8 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     },
     onShare: () => setShowShare(true),
     canShare,
+    onPacks: () => setShowPacks(true),
+    canPacks,
     onClone: () => {
       const newName = prompt(`Clone '${agentName}'\n\nEnter a name for the cloned agent:`, `${agentName}-clone`)
       if (newName?.trim())
@@ -287,10 +296,13 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         resourceId={container.agent_ref!}
         resourceName={agentName}
         allowEdit={false}
-        note={OWNER_SHARE_NOTE}
+        note={ownerShareNote(packsEnabled, 'docker')}
         onClose={() => setShowShare(false)}
       />,
       document.body
+    )}
+    {showPacks && canPacks && (
+      <ContextPacksModal agentRef={container.agent_ref!} agentName={agentName} onClose={() => setShowPacks(false)} />
     )}
   </>)
 
@@ -1039,7 +1051,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   )
 }
 
-function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onShare, canShare, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, freebie, onRefreshFreeModels, memoryState, memoryBusy, canMemory, iconOnly }: {
+function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onShare, canShare, onPacks, canPacks, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, freebie, onRefreshFreeModels, memoryState, memoryBusy, canMemory, iconOnly }: {
   isRunning: boolean
   actionLoading: string | null
   onStart: () => void
@@ -1048,6 +1060,8 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
   onRebuild: () => void
   onShare: () => void
   canShare: boolean
+  onPacks: () => void
+  canPacks: boolean
   onClone: () => void
   onRemove: () => void
   onConfig: () => void
@@ -1105,6 +1119,7 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
     { icon: Inbox,     label: 'Pending Insights…', onClick: onReviewPending, show: isRunning && canMemory },
     { icon: RefreshCw, label: 'Rebuild', onClick: onRebuild, loading: actionLoading === 'rebuild' },
     { icon: Users,     label: 'Share…',  onClick: onShare,   show: canShare },
+    { icon: Layers,    label: PACKS_MENU_LABEL, onClick: onPacks, show: canPacks },
     { icon: Copy,      label: 'Clone',   onClick: onClone,   loading: actionLoading === 'clone' },
     { icon: Trash2,    label: 'Remove',  onClick: onRemove,  loading: actionLoading === 'remove',  danger: true },
   ]

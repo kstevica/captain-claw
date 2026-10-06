@@ -38,6 +38,10 @@ A2 (part 3) adds:
   optimistic update rolled back on failure;
 * the owner's Share dialog marks members who turned their Google on, and
   the owner's own cards show "shared · N" when Flight Deck reports it.
+
+PR B (context packs) adds: with packs on, the owner's Share note says members
+can publish their own context to the agent and that it runs on every turn,
+the owner's channels and automations included.
 """
 
 from __future__ import annotations
@@ -1152,6 +1156,33 @@ def test_google_opt_in_hint_until_google_is_connected():
 def test_owner_note_is_the_a2_text():
     note = _lift([(_SHARED, ["OWNER_SHARE_NOTE"])], "out = OWNER_SHARE_NOTE;")
     assert note == _OWNER_NOTE
+
+
+# PR B: with context packs on, the owner is told — before the host-trust
+# paragraph — that members can publish their own context to the agent and that
+# it runs on every turn, the owner's channels and automations included.
+_OWNER_PACKS_NOTE = (
+    "Members can also share their own profile, folders and deep memory with this agent. That "
+    "is used on every turn, including your channels and automations. You're notified and can "
+    "remove any of it under Shared context."
+)
+
+
+def test_owner_note_with_context_packs_tells_the_owner_about_members_packs():
+    out = _lift([(_SHARED, ["OWNER_SHARE_NOTE", "ownerShareNote"])], """
+      out = { off: ownerShareNote(false), offDocker: ownerShareNote(false, 'docker'),
+              process: ownerShareNote(true, 'process'), dflt: ownerShareNote(true),
+              docker: ownerShareNote(true, 'docker') };
+    """)
+    assert out["off"] == _OWNER_NOTE and out["offDocker"] == _OWNER_NOTE
+    main = _OWNER_NOTE[: -len("\n\n" + OWNER_HOST_NOTE)]
+    assert out["process"] == main + "\n\n" + _OWNER_PACKS_NOTE + "\n\n" + OWNER_HOST_NOTE
+    assert out["dflt"] == out["process"]
+    # A Docker agent takes members' profiles only.
+    assert out["docker"] == out["process"].replace(
+        "their own profile, folders and deep memory", "their own profile")
+    for note in (out["process"], out["docker"]):
+        assert note.endswith("\n\n" + OWNER_HOST_NOTE)
 
 
 def test_owner_badge_texts():

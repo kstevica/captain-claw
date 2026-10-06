@@ -626,6 +626,7 @@ class ToolRegistry:
         """
         import contextvars
 
+        from captain_claw import pack_access as _pack_access
         from captain_claw import speaker as _speaker
 
         # Resolve per-call overrides (fall back to instance defaults).
@@ -646,7 +647,8 @@ class ToolRegistry:
         # Shared-agent member: only the principal's allowlist, narrowed per
         # tool, paths confined. Checked before anything else (classic loop,
         # run_tool-style paths and Mrav all land here).
-        if self._is_speaker_call(session_id, arguments):
+        speaker_call = self._is_speaker_call(session_id, arguments)
+        if speaker_call:
             agent = (arguments or {}).get("_agent")
             bound = _speaker.current()
             principal = bound or _speaker.principal_for(agent) or _speaker.UNKNOWN_PRINCIPAL
@@ -676,6 +678,18 @@ class ToolRegistry:
                 # own member rules apply on every signal.
                 tool_context.run(_speaker.bind, principal)
                 tool_context.run(_speaker.bind_grant, grant)
+
+        # Shared folders (context packs, vfs:@alias/…), owner and member calls
+        # alike: refuse them outside read-class arguments, resolve the named
+        # aliases through Flight Deck and leave the roots in the tool context
+        # (vfs.py and the file tools read them there). No vfs:@ value → no
+        # HTTP, no table.
+        pack_error = await _pack_access.prepare_call(
+            name, arguments or {}, (arguments or {}).get("_agent"), tool_context)
+        if pack_error:
+            raise ToolBlockedError(name, pack_error)
+
+        if speaker_call:
             roots = tool_context.run(
                 _speaker.speaker_roots, agent, principal, session_id=session_id,
                 runtime_base=effective_base_path, saved_base=effective_saved_base,

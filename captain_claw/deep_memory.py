@@ -53,6 +53,7 @@ class DeepMemoryResult:
     updated_at: int  # unix timestamp
     text_l1: str = ""
     text_l2: str = ""
+    owner_id: str = ""  # the tenant the hit belongs to ("" for pre-tenancy documents)
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +684,42 @@ class DeepMemoryIndex:
             log.debug("Unowned-document count failed", error=str(exc))
             return 0
 
+    def tag_facets(self, owner_id: str, *, limit: int = 50) -> list[tuple[str, int]]:
+        """``(tag, count)`` pairs of *owner_id*'s pool, most frequent first.
+
+        One faceted query, like :meth:`unowned_count`. Counts are chunks, not
+        documents. An empty owner, an HTTP error or an unparseable answer → ``[]``.
+        """
+        if not owner_id:
+            return []
+        try:
+            self.ensure_collection()
+            resp = self._get_client().post(
+                f"{self._base_url}/multi_search",
+                json={"searches": [{
+                    "collection": self._collection_name,
+                    "q": "*", "query_by": "text",
+                    "filter_by": f"owner_id:={self.escape_filter_value(owner_id)}",
+                    "facet_by": "tags", "per_page": 0,
+                    "max_facet_values": int(limit),
+                }]},
+            )
+            resp.raise_for_status()
+            result = (resp.json().get("results") or [{}])[0]
+            pairs: list[tuple[str, int]] = []
+            for facet in result.get("facet_counts") or []:
+                if facet.get("field_name") != "tags":
+                    continue
+                for c in facet.get("counts") or []:
+                    value = c.get("value")
+                    if isinstance(value, str) and value:
+                        pairs.append((value, int(c.get("count", 0) or 0)))
+            pairs.sort(key=lambda p: -p[1])
+            return pairs
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+            log.debug("Deep memory tag facets failed", error=str(exc))
+            return []
+
     def claim_unowned(self, owner_id: str) -> int:
         """Stamp *owner_id* onto every document that has none. Returns the count.
 
@@ -872,17 +909,38 @@ class DeepMemoryIndex:
         vector_query: str = "",
         min_score: float | None = None,
         owner_id: str = "",
+        owner_scopes: list[tuple[str, str]] | None = None,
     ) -> list[DeepMemoryResult]:
         """Hybrid search (BM25 + optional vector) over deep memory.
 
         *owner_id* scopes the search to one tenant.  It is ANDed onto any
         caller-supplied *filter_by* rather than replacing it, so a caller
         cannot widen its own scope by passing a filter of its own.
+
+        *owner_scopes* (Flight Deck context packs) scopes it to several
+        tenants instead: ``[(owner_id, extra_filter), …]`` becomes one
+        parenthesised disjunction of ``owner_id:=… && extra`` clauses, ANDed
+        onto *filter_by* the same way. Empty (or only empty owners) → no hits
+        and no request. Exclusive with *owner_id*.
         """
+        if owner_id and owner_scopes is not None:
+            raise ValueError("pass owner_id or owner_scopes, not both")
+        scope = ""
+        if owner_scopes is not None:
+            clauses: list[str] = []
+            for oid, extra in owner_scopes:
+                if not oid:
+                    continue
+                c = f"owner_id:={self.escape_filter_value(oid)}"
+                clauses.append(f"({c} && {extra})" if extra else c)
+            if not clauses:
+                return []  # fail closed: nobody to search, no request
+            scope = "(" + " || ".join(clauses) + ")"
+        elif owner_id:
+            scope = f"owner_id:={self.escape_filter_value(owner_id)}"
         self.ensure_collection()
         client = self._get_client()
-        if owner_id:
-            scope = f"owner_id:={self.escape_filter_value(owner_id)}"
+        if scope:
             filter_by = f"({filter_by}) && {scope}" if filter_by else scope
 
         params: dict[str, Any] = {
@@ -953,6 +1011,7 @@ class DeepMemoryIndex:
                     updated_at=int(doc.get("updated_at", 0)),
                     text_l1=doc.get("text_l1", ""),
                     text_l2=doc.get("text_l2", ""),
+                    owner_id=str(doc.get("owner_id", "") or ""),
                 )
             )
         if dropped:

@@ -161,6 +161,13 @@ async def update_user(
             await tenant_profile.refresh_agents(db, user_id)
         except Exception:
             pass
+        # …and the shared-context labels that name them (context packs).
+        try:
+            from captain_claw.flight_deck import context_packs
+
+            await context_packs.refresh_for_user(db, user_id)
+        except Exception:
+            pass
     return {"ok": True, "user_id": user_id}
 
 
@@ -170,6 +177,12 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
     if user_id == admin["id"]:
         raise HTTPException(400, "Cannot delete your own account")
     db = get_db()
+    # The agents where they publish or own context packs, captured before the
+    # delete cascades the rows away.
+    try:
+        pack_refs = await db.list_context_pack_refs(user_id)
+    except Exception:
+        pack_refs = []
     deleted = await db.delete_user(user_id)
     if not deleted:
         raise HTTPException(404, "User not found")
@@ -178,6 +191,12 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
         from captain_claw.flight_deck import tenant_profile
 
         await tenant_profile.refresh_agents(db, user_id)
+    except Exception:
+        pass
+    try:
+        from captain_claw.flight_deck import context_packs
+
+        await context_packs.refresh_refs(db, pack_refs)
     except Exception:
         pass
     return {"ok": True}

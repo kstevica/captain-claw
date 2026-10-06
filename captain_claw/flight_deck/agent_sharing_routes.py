@@ -124,7 +124,9 @@ async def list_shared_agents(user: dict = Depends(get_current_user)):
             "google_connected": google_connected,
         })
     return {"enabled": True, "host_warning": sharing.HOST_TRUST_WARNING, "agents": agents,
-            "mine": await _mine(db, uid)}
+            "mine": await _mine(db, uid),
+            # PR B: this deck serves /fd/context-packs* (absent = an older FD).
+            "context_packs": True}
 
 
 class GoogleOptInBody(BaseModel):
@@ -624,10 +626,19 @@ async def _watchdog(conn: _MemberConn, db, rec: sharing.AgentRecord, ref: str, s
 
 
 async def _forget_agent_grants(db, ref: str) -> None:
-    """The agent is gone or changed hands: close every member's grants on it and
-    drop their Google opt-ins (given for the old owner). Never raises."""
+    """The agent is gone or changed hands: close every member's grants on it,
+    drop their Google opt-ins (given for the old owner) and every context pack
+    on it (published for the old owner's agent; alias reservations too), then
+    rewrite its shared-context files. Never raises."""
     speaker_grants.revoke(ref)
     try:
         await speaker_grants.clear_google_optins(db, ref)
     except Exception as exc:
         log.warning("Could not clear a shared agent's Google opt-ins", error=type(exc).__name__)
+    try:
+        from captain_claw.flight_deck import context_packs
+
+        await db.delete_context_packs_for_agent(ref)
+        await context_packs.refresh_agent(db, ref)
+    except Exception as exc:
+        log.warning("Could not drop a shared agent's context packs", error=type(exc).__name__)

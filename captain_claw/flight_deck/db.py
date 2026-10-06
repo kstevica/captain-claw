@@ -484,6 +484,39 @@ class FlightDeckDB:
                 ON oauth_refresh_tokens(token_hash);
             CREATE INDEX IF NOT EXISTS idx_oauth_refresh_user
                 ON oauth_refresh_tokens(user_id, revoked_at);
+
+            -- Shared-agent context packs (PR B, see context_packs.py): a user
+            -- publishes one of their own resources (profile / VFS folder /
+            -- deep-memory pool) to an agent they own or are a member of.
+            -- Whether a row is in effect is computed per request (current
+            -- owner, live membership, the folder still being the same one).
+            CREATE TABLE IF NOT EXISTS context_packs (
+                id           TEXT PRIMARY KEY,
+                agent_ref    TEXT NOT NULL,
+                agent_owner  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                pack_owner   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                kind         TEXT NOT NULL,
+                resource_id  TEXT NOT NULL DEFAULT '',
+                resource_key TEXT NOT NULL DEFAULT '',
+                alias        TEXT NOT NULL DEFAULT '',
+                slice        TEXT NOT NULL DEFAULT '{}',
+                created_at   TEXT NOT NULL,
+                UNIQUE(agent_ref, pack_owner, kind, resource_id)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packs_alias
+                ON context_packs(agent_ref, alias) WHERE alias != '';
+            CREATE INDEX IF NOT EXISTS idx_context_packs_owner
+                ON context_packs(pack_owner);
+            -- Alias tombstones: an alias, once used on an agent, stays that
+            -- publisher's there for good. No FK on pack_owner on purpose: the
+            -- reservation outlives the user.
+            CREATE TABLE IF NOT EXISTS context_pack_aliases (
+                agent_ref  TEXT NOT NULL,
+                alias      TEXT NOT NULL,
+                pack_owner TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (agent_ref, alias)
+            );
         """)
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
@@ -2137,6 +2170,188 @@ class FlightDeckDB:
     async def list_agent_members(self, agent_ref: str, owner_id: str) -> list[dict]:
         """Members of one of ``owner_id``'s shared agents."""
         return await self.list_shares_for_resource("agent", agent_ref, owner_id)
+
+    # ── Context packs (shared-agent shared context, PR B) ─────────────
+
+    async def create_context_pack(
+        self, *, agent_ref: str, agent_owner: str, pack_owner: str, kind: str,
+        resource_id: str = "", resource_key: str = "", alias: str = "",
+        slice_json: str = "{}", max_per_agent: int = 32, max_vfs_per_owner: int = 5,
+    ) -> dict | str:
+        """Insert one pack; the row dict, or ``"alias_taken"`` / ``"limit"`` /
+        ``"vfs_limit"``. Single statements, no explicit transaction (FD shares
+        one connection, so a ROLLBACK would undo other coroutines' work): every
+        check sits inside the statement that writes. ``sqlite3.IntegrityError``
+        (duplicate, alias clash, a deleted user) propagates after a commit."""
+        assert self._db is not None
+        now = _utcnow()
+        if alias:
+            # Reserve the alias for this publisher (a no-op when it already is).
+            await self._db.execute(
+                "INSERT INTO context_pack_aliases (agent_ref, alias, pack_owner, created_at)"
+                " VALUES (?, ?, ?, ?) ON CONFLICT(agent_ref, alias) DO NOTHING",
+                (agent_ref, alias, pack_owner, now),
+            )
+            async with self._db.execute(
+                "SELECT pack_owner FROM context_pack_aliases WHERE agent_ref = ? AND alias = ?",
+                (agent_ref, alias),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None or row[0] != pack_owner:
+                await self._db.commit()
+                return "alias_taken"
+        pid = _uuid()
+        try:
+            async with self._db.execute(
+                "INSERT INTO context_packs (id, agent_ref, agent_owner, pack_owner, kind,"
+                " resource_id, resource_key, alias, slice, created_at)"
+                " SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+                " WHERE (SELECT COUNT(*) FROM context_packs WHERE agent_ref = ?) < ?"
+                " AND (? != 'vfs' OR (SELECT COUNT(*) FROM context_packs WHERE agent_ref = ?"
+                " AND pack_owner = ? AND kind = 'vfs') < ?)",
+                (pid, agent_ref, agent_owner, pack_owner, kind, resource_id, resource_key,
+                 alias, slice_json, now,
+                 agent_ref, int(max_per_agent),
+                 kind, agent_ref, pack_owner, int(max_vfs_per_owner)),
+            ) as cur:
+                inserted = int(cur.rowcount or 0)
+        except Exception:
+            await self._db.commit()  # keeps the caller's own alias reservation — harmless
+            raise
+        await self._db.commit()
+        if inserted == 0:
+            if kind == "vfs":
+                async with self._db.execute(
+                    "SELECT COUNT(*) FROM context_packs WHERE agent_ref = ? AND pack_owner = ?"
+                    " AND kind = 'vfs'", (agent_ref, pack_owner),
+                ) as cur:
+                    row = await cur.fetchone()
+                if row and int(row[0]) >= int(max_vfs_per_owner):
+                    return "vfs_limit"
+            return "limit"
+        return {"id": pid, "agent_ref": agent_ref, "agent_owner": agent_owner,
+                "pack_owner": pack_owner, "kind": kind, "resource_id": resource_id,
+                "resource_key": resource_key, "alias": alias, "slice": slice_json,
+                "created_at": now}
+
+    async def get_context_pack(self, pack_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM context_packs WHERE id = ?", (pack_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def list_context_packs_for_agent(self, agent_ref: str) -> list[dict]:
+        """Every pack on one agent, with its publisher's display name and email,
+        oldest first."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT p.*, u.display_name AS owner_display_name, u.email AS owner_email"
+            " FROM context_packs p JOIN users u ON u.id = p.pack_owner"
+            " WHERE p.agent_ref = ? ORDER BY p.created_at, p.id",
+            (agent_ref,),
+        )
+        return [dict(r) for r in rows]
+
+    async def list_context_packs_for_owner(self, pack_owner: str) -> list[dict]:
+        """Every pack one user published, on any agent, oldest first."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM context_packs WHERE pack_owner = ? ORDER BY created_at, id",
+            (pack_owner,),
+        )
+        return [dict(r) for r in rows]
+
+    async def has_context_packs(self, kind: str) -> bool:
+        """Whether any agent has a pack of ``kind`` — a cheap gate the per-call
+        agent routes check before identifying their caller."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT 1 FROM context_packs WHERE kind = ? LIMIT 1", (kind,),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def count_context_packs_for_agent(self, agent_ref: str) -> int:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT COUNT(*) FROM context_packs WHERE agent_ref = ?", (agent_ref,),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+    async def list_pack_aliases(self, agent_ref: str) -> dict[str, str]:
+        """The alias reservations on one agent: alias → publisher."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT alias, pack_owner FROM context_pack_aliases WHERE agent_ref = ?",
+            (agent_ref,),
+        )
+        return {str(r[0]): str(r[1]) for r in rows}
+
+    async def delete_context_pack(self, pack_id: str) -> bool:
+        assert self._db is not None
+        async with self._db.execute(
+            "DELETE FROM context_packs WHERE id = ?", (pack_id,),
+        ) as cur:
+            await self._db.commit()
+            return (cur.rowcount or 0) > 0
+
+    async def delete_context_packs_for_agent(self, agent_ref: str) -> int:
+        """The agent is gone or changed hands: its packs AND its alias
+        reservations. Returns how many packs were deleted."""
+        assert self._db is not None
+        async with self._db.execute(
+            "DELETE FROM context_packs WHERE agent_ref = ?", (agent_ref,),
+        ) as cur:
+            deleted = int(cur.rowcount or 0)
+        await self._db.execute(
+            "DELETE FROM context_pack_aliases WHERE agent_ref = ?", (agent_ref,))
+        await self._db.commit()
+        return deleted
+
+    async def delete_context_packs_for_member(self, agent_ref: str, pack_owner: str) -> int:
+        """A member lost access: their packs on the agent (their alias
+        reservations stay)."""
+        assert self._db is not None
+        async with self._db.execute(
+            "DELETE FROM context_packs WHERE agent_ref = ? AND pack_owner = ?",
+            (agent_ref, pack_owner),
+        ) as cur:
+            await self._db.commit()
+            return int(cur.rowcount or 0)
+
+    async def delete_context_packs_for_project(self, pack_owner: str, project: str) -> list[str]:
+        """``pack_owner`` deleted their VFS folder ``project``: drop their folder
+        packs of it on every agent (matched case-insensitively — Unicode
+        casefold, a superset of SQL NOCASE). Returns the agent refs touched."""
+        assert self._db is not None
+        folded = str(project or "").casefold()
+        rows = await self._db.execute_fetchall(
+            "SELECT id, agent_ref, resource_id FROM context_packs"
+            " WHERE pack_owner = ? AND kind = 'vfs'",
+            (pack_owner,),
+        )
+        hit = [(str(r[0]), str(r[1])) for r in rows if str(r[2]).casefold() == folded]
+        for pid, _ref in hit:
+            await self._db.execute("DELETE FROM context_packs WHERE id = ?", (pid,))
+        await self._db.commit()
+        return sorted({ref for _pid, ref in hit})
+
+    async def list_context_pack_refs(self, user_id: str | None = None) -> list[str]:
+        """Agents that have packs — every one, or those where ``user_id`` is a
+        publisher or the owner recorded when a pack was created."""
+        assert self._db is not None
+        if user_id is None:
+            rows = await self._db.execute_fetchall(
+                "SELECT DISTINCT agent_ref FROM context_packs ORDER BY agent_ref")
+        else:
+            rows = await self._db.execute_fetchall(
+                "SELECT DISTINCT agent_ref FROM context_packs"
+                " WHERE pack_owner = ? OR agent_owner = ? ORDER BY agent_ref",
+                (user_id, user_id),
+            )
+        return [str(r[0]) for r in rows]
 
     # ── Cost ledger (persisted run costs) ─────────────────────────────
 

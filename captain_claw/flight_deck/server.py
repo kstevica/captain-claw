@@ -49,6 +49,7 @@ from captain_claw.flight_deck.endpoints import same_endpoint as _same_endpoint
 from captain_claw.flight_deck import origin_guard
 from captain_claw.flight_deck import tenant_profile
 from captain_claw.flight_deck import agent_sharing
+from captain_claw.flight_deck import context_packs
 from captain_claw.flight_deck import speaker_grants
 
 
@@ -824,6 +825,14 @@ async def lifespan(app: FastAPI):
     # Bring every agent's owner-profile files in line with the DB (an auth-mode
     # switch, edits made while FD was down) — in the background, best-effort.
     app.state.tenant_profile_reconcile = asyncio.create_task(tenant_profile.reconcile(_fd_db))
+    # Shared-agent context packs: the same for the shared-context files (with
+    # sharing off it removes leftovers), then — sharing on — a reconcile loop
+    # for what FD only learns by polling (direct DB edits, removed agents).
+    app.state.context_packs_reconcile = asyncio.create_task(context_packs.reconcile(_fd_db))
+    if agent_sharing.sharing_active():
+        app.state.context_packs_stop = asyncio.Event()
+        app.state.context_packs_task = asyncio.create_task(
+            context_packs.reconcile_loop(_fd_db, app.state.context_packs_stop))
     if AUTH_ENABLED:
         app.state.fd_db = _fd_db
         # Persist the owning user id into the project-local .env so the
@@ -1050,6 +1059,14 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.wait_for(app.state.consciousness_task, timeout=5.0)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+    # Stop the context-pack reconcile loop.
+    if hasattr(app.state, "context_packs_stop"):
+        app.state.context_packs_stop.set()
+        if hasattr(app.state, "context_packs_task"):
+            try:
+                await asyncio.wait_for(app.state.context_packs_task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
@@ -1298,6 +1315,7 @@ from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck.agent_sharing_routes import router as agent_sharing_router
+from captain_claw.flight_deck.context_pack_routes import router as context_pack_router
 from captain_claw.flight_deck.notification_routes import router as notification_router
 from captain_claw.flight_deck.mcp_server_routes import router as mcp_inbound_router
 from captain_claw.flight_deck.mcp_oauth_routes import router as mcp_oauth_router
@@ -1354,6 +1372,7 @@ app.include_router(agents_fs_router)
 app.include_router(system_router)
 app.include_router(share_router)
 app.include_router(agent_sharing_router)
+app.include_router(context_pack_router)
 app.include_router(notification_router)
 app.include_router(mcp_inbound_router)
 app.include_router(mcp_oauth_router)
@@ -2619,6 +2638,8 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     _write_eco_flag_on_spawn(agent_dir)
     # …and know who they work for (the owner profile — see tenant_profile).
     await tenant_profile.write_on_spawn(agent_dir, owner_id, "docker")
+    # A new container is a new agent: no other agent's shared context (packs).
+    await context_packs.remove_files_locked(agent_dir, "docker")
 
     # Build volume mounts
     # CC WORKDIR is /app — it loads ./config.yaml from CWD (/app/config.yaml)
@@ -2845,6 +2866,20 @@ async def _forget_shared_agent(agent_ref: str, owner_id: str) -> None:
         await agent_sharing.close_member_sockets(agent_ref, code=4404, reason="Agent removed")
     except Exception as exc:
         log.warning("Could not close a removed agent's member sockets", error=str(exc))
+    # Its context packs (and alias reservations) and its shared-context files.
+    if AUTH_ENABLED:
+        try:
+            from captain_claw.flight_deck.auth import get_db
+
+            await get_db().delete_context_packs_for_agent(agent_ref)
+        except Exception as exc:
+            log.warning("Could not drop a removed agent's context packs",
+                        error=type(exc).__name__)
+        try:
+            context_packs.remove_files_for_ref(agent_ref)
+        except Exception as exc:
+            log.warning("Could not remove a removed agent's shared-context files",
+                        error=type(exc).__name__)
 
 
 class RebuildRequest(BaseModel):
@@ -3182,6 +3217,8 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
     # The clone works for the source's owner: their profile, not whatever an
     # earlier agent of this slug left in the folder.
     await tenant_profile.write_on_spawn(new_agent_dir, str(labels.get(OWNER_LABEL, "") or ""), "docker")
+    # …and no shared context (packs) left by an earlier agent of this slug.
+    await context_packs.remove_files_locked(new_agent_dir, "docker")
 
     hostname = new_slug
 
@@ -7316,6 +7353,9 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     _write_eco_flag_on_spawn(agent_dir)
     # …and know who they work for (the owner profile — see tenant_profile).
     await tenant_profile.write_on_spawn(agent_dir, owner_id, "process")
+    # Never another agent's shared context (packs); a re-spawn of the same
+    # agent gets its own back once the registry entry is saved (below).
+    await context_packs.remove_files_locked(agent_dir, "process")
 
     # Open log file
     log_file = agent_dir / "process.log"
@@ -7354,6 +7394,16 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         "grid_recall": config.grid_recall_mode or "",
     }
     _save_process_registry(registry)
+    # A re-spawn keeps its ref, so its context packs: rewrite their files.
+    if agent_sharing.sharing_active():
+        try:
+            from captain_claw.flight_deck.auth import get_db as _get_db
+
+            context_packs.schedule_refresh(
+                _get_db(), agent_sharing.process_ref(slug, registry[slug]))
+        except Exception as _cp_exc:
+            log.warning("Could not schedule a shared-context refresh",
+                        error=type(_cp_exc).__name__)
 
     try:
         proc = subprocess.Popen(
@@ -7827,6 +7877,8 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
                                    str(replaced.get("owner") or ""))
     # Its owner's profile, not whatever an earlier agent of this slug left.
     await tenant_profile.write_on_spawn(new_agent_dir, str(entry.get("owner") or ""), "process")
+    # …and no shared context (packs): a clone is a new agent.
+    await context_packs.remove_files_locked(new_agent_dir, "process")
 
     return ProcessActionResult(ok=True, slug=new_slug, message=f"Cloned '{slug}' → '{new_slug}' (port {new_port})")
 

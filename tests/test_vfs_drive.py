@@ -5,6 +5,7 @@ network, no tokens. Verifies the mount is a real filesystem tree of honest
 placeholders and that a refresh reflects upstream adds/removes.
 """
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -54,6 +55,9 @@ def _file(fid, name, *, size=100, modified="2026-07-20T10:00:00Z", mime="text/pl
 def mount(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         monkeypatch.setattr(vfs_drive, "user_root", lambda uid: Path(tmp) / uid)
+        # The VFS base the user roots hang off: find_mount honours a mount only
+        # at <base>/<user>/.drive/<name>/.
+        monkeypatch.setenv("CLAW_VFS_ROOT", tmp)
         yield Path(tmp)
 
 
@@ -248,6 +252,75 @@ class TestFindMount:
 
     async def test_outside_any_mount_is_none(self, mount):
         assert vfs_drive.find_mount(mount / "nowhere.txt") is None
+
+    @staticmethod
+    def _plant(folder: Path) -> Path:
+        folder.mkdir(parents=True)
+        (folder / vfs_drive.MANIFEST_NAME).write_text(json.dumps({
+            "folder_id": "X", "dirs": {"": "X"},
+            "files": {"r.md": {"state": "placeholder", "file_id": "VICTIM"}}}))
+        (folder / "r.md").write_text("marker")
+        return folder
+
+    @pytest.mark.parametrize("rel", [
+        "alice/proj/.drive/evil",            # a `.drive/<x>/` inside a project
+        "alice/proj/sub/deeper/.drive/evil",
+        "alice/.drive/acme/sub/.drive/evil",  # …or inside a real mount's tree
+    ])
+    async def test_manifest_planted_below_a_user_root_is_ignored(self, mount, rel):
+        planted = self._plant(mount / rel)
+        found = vfs_drive.find_mount(planted / "r.md")
+        assert found is None or found[0] != planted.resolve()
+        calls: list = []
+
+        async def factory():
+            calls.append(1)
+            raise AssertionError("no Drive client for a planted manifest")
+
+        if found is None:
+            assert await vfs_drive.read_through(planted / "r.md", client_factory=factory) is None
+            assert await vfs_drive.materialize(planted / "r.md", client_factory=factory) is None
+        assert calls == [] and not (planted / vfs_drive.CACHE_DIRNAME).exists()
+        searchable, skipped = vfs_drive.filter_searchable([planted / "r.md"])
+        assert skipped == 0 and searchable == [planted / "r.md"]
+
+    async def test_mount_dir_outside_the_vfs_base_is_ignored(self, mount, tmp_path):
+        # A `<x>/.drive/<name>/` with the right shape but under no VFS base (a
+        # linked external folder, say) is not a mount either.
+        planted = self._plant(tmp_path / "someone" / ".drive" / "evil")
+        assert vfs_drive.find_mount(planted / "r.md") is None
+
+    async def test_flight_decks_data_dir_is_a_base(self, mount, tmp_path, monkeypatch):
+        # Inside Flight Deck the routes resolve user roots under server.DATA_DIR,
+        # which may differ from the agent-side cascade; both count. (Read only
+        # when the server module is already loaded — faked here.)
+        import sys
+        from types import SimpleNamespace
+
+        data = tmp_path / "fd-data"
+        real = self._plant(data / "vfs" / "bob" / ".drive" / "gd")
+        assert vfs_drive.find_mount(real / "r.md") is None
+        monkeypatch.setitem(sys.modules, "captain_claw.flight_deck.server",
+                            SimpleNamespace(DATA_DIR=data))
+        assert vfs_drive.find_mount(real / "r.md") == (real.resolve(), "r.md")
+        planted = self._plant(data / "vfs" / "bob" / "proj" / ".drive" / "x")
+        assert vfs_drive.find_mount(planted / "r.md") is None
+
+    def test_find_mount_never_imports_flight_deck(self, tmp_path):
+        # Agents call find_mount on every read; it must not drag the FD server in.
+        import subprocess
+        import sys
+
+        code = ("import sys; from pathlib import Path; import captain_claw.vfs_drive as v; "
+                "v.find_mount(Path(sys.argv[1])); "
+                "print('captain_claw.flight_deck.server' in sys.modules)")
+        planted = self._plant(tmp_path / "u" / ".drive" / "gd")
+        out = subprocess.run([sys.executable, "-c", code, str(planted / "r.md")],
+                             capture_output=True, text=True, timeout=120,
+                             env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
+                                  "CLAW_VFS_ROOT": str(tmp_path)})
+        assert out.returncode == 0, out.stderr[-2000:]
+        assert out.stdout.strip().splitlines()[-1] == "False"
 
 
 def _text_drive():

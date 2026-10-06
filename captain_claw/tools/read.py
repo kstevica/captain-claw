@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from captain_claw import pack_access
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, resolve_vfs_path
@@ -176,7 +177,9 @@ class ReadTool(Tool):
             # demand and returns it as if the file were local. Only for vfs:
             # paths, so ordinary reads pay nothing. On a Drive outage this falls
             # through to reading the marker file below rather than failing.
-            if vfs_target is not None:
+            # Never for a shared folder's file or another user's: those are
+            # always read as plain local bytes (no fetch, no cache written).
+            if vfs_target is not None and pack_access.drive_hooks_ok(file_path):
                 try:
                     from captain_claw.vfs_drive import read_through
 
@@ -234,7 +237,8 @@ class ReadTool(Tool):
                     return ToolResult(
                         success=True,
                         content=(
-                            f"[{file_path} UNCHANGED — content omitted]\n"
+                            f"[{pack_access.display(file_path) or file_path} "
+                            "UNCHANGED — content omitted]\n"
                             f"You already read this file in full ({prev[2]} lines, "
                             f"{file_size} bytes) and it has not changed on disk since. "
                             "Use the copy already in your context. To see a specific "
@@ -296,7 +300,11 @@ class ReadTool(Tool):
 
             # Add metadata
             end_line = start_line + len(selected_lines) - 1 if selected_lines else start_line - 1
-            info = f"[{file_path} {len(content)} chars]"
+            # A shared folder's file: shown as vfs:@alias/…, never a host path,
+            # and attributed to whoever shared it.
+            pack_shown = pack_access.display(file_path)
+            pack_header = pack_access.read_header(file_path) if pack_shown else None
+            info = f"[{pack_shown or file_path} {len(content)} chars]"
             if truncated:
                 info += (
                     f" [lines {start_line}-{end_line} of {total_lines} — TRUNCATED at "
@@ -305,6 +313,8 @@ class ReadTool(Tool):
             elif offset is not None or limit is not None:
                 info += f" [lines {start_line}-{end_line}]"
 
+            if pack_header:
+                return ToolResult(success=True, content=f"{info}\n{pack_header}\n{content}")
             return ToolResult(
                 success=True,
                 content=f"{info}\n{content}",
@@ -312,6 +322,9 @@ class ReadTool(Tool):
             
         except Exception as e:
             log.error("Read failed", path=path, error=str(e))
+            if pack_access.is_pack_value(path):
+                # Never a host path for a shared folder's file.
+                return ToolResult(success=False, error=pack_access.scrub_roots(str(e)))
             return ToolResult(
                 success=False,
                 error=str(e),

@@ -86,7 +86,8 @@ GOOGLE_ROUTES = [("GET", "/fd/google/access_token"), ("GET", "/fd/google/agent_s
 DM_ROUTES = [("POST", "/fd/deep-memory/agent/search"), ("POST", "/fd/deep-memory/agent/index"),
              ("POST", "/fd/deep-memory/agent/delete")]
 ALL_ROUTES = GOOGLE_ROUTES + DM_ROUTES
-assert {p for _, p in ALL_ROUTES} == sg.GRANT_AWARE_PATHS
+# PR B added the context-pack VFS route (pinned in test_context_packs.py).
+assert {p for _, p in ALL_ROUTES} | {"/fd/context-packs/agent/vfs"} == sg.GRANT_AWARE_PATHS
 BODIES = {
     "/fd/google/gmail/send": {"to": "Bob <bob@x.co>", "subject": "Hello", "body": "Hi Bob"},
     "/fd/deep-memory/agent/search": {"query": "q"},

@@ -34,6 +34,7 @@ import {
   ListTodo,
   Users,
   RefreshCw,
+  Layers,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -53,6 +54,8 @@ import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { sharedCaps, sharedCloseInfo } from '../../utils/sharedAgent'
 import { SharedAgentNotice } from './SharedAgentNotice'
 import { SharedAgentGoogleToggle } from './SharedAgentGoogleToggle'
+import { ContextPacksModal } from './ContextPacksModal'
+import { PACKS_BUTTON } from '../../utils/contextPacks'
 import { SendContextModal } from './SendContextModal'
 import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
@@ -272,6 +275,8 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   )
   // Shared agents: the deck's host-trust warning, for the member notice.
   const sharedHostWarning = useSharedAgentStore((s) => s.hostWarning)
+  // Context packs: a member opens "Shared context" from the shared chat's bar.
+  const packsEnabled = useSharedAgentStore((s) => s.contextPacks)
   const localAgents = useLocalAgentStore((s) => s.agents)
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
@@ -303,6 +308,13 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   // use, and the member's own Google switch.
   const sharedRef = session?.shared?.agentRef
   const sharedRow = useSharedAgentStore((s) => (sharedRef ? s.agents.find((a) => a.agent_ref === sharedRef) : undefined))
+  // The member's "Shared context" dialog for this chat's agent; closed when
+  // the chat switches to another agent, and when this chat ends or the agent
+  // is no longer shared with me (left, revoked, sharing turned off) — so it
+  // never lingers on stale data or pops back open after a re-share.
+  const [showPacks, setShowPacks] = useState(false)
+  const sharedLive = !!sharedRow && !session?.closed
+  useEffect(() => { setShowPacks(false) }, [sharedRef, sharedLive])
 
   // One tab per AGENT. A lane is a context inside an agent, not another agent,
   // so lane sessions don't get their own top-level tab. Subscribe to a PRIMITIVE
@@ -564,10 +576,32 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
         />
       )}
 
-      {shared && sharedRow && caps.google && !session.closed && (
-        <div className="border-b border-zinc-800 px-3 py-1.5">
-          <SharedAgentGoogleToggle agent={sharedRow} compact />
+      {shared && sharedRow && !session.closed && (caps.google || packsEnabled) && (
+        <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-1.5">
+          {/* The member's Google switch renders only when caps.google (it hides itself otherwise). */}
+          <div className="min-w-0 flex-1">
+            <SharedAgentGoogleToggle agent={sharedRow} compact />
+          </div>
+          {packsEnabled && (
+            <button
+              onClick={() => setShowPacks(true)}
+              title={`What you share with everyone who uses ${session.containerName}`}
+              className="ml-auto flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <Layers className="h-3 w-3" />
+              {PACKS_BUTTON}
+            </button>
+          )}
         </div>
+      )}
+
+      {shared && packsEnabled && showPacks && sharedLive && (
+        <ContextPacksModal
+          key={shared.agentRef}
+          agentRef={shared.agentRef}
+          agentName={session.containerName}
+          onClose={() => setShowPacks(false)}
+        />
       )}
 
       {shared && sharedClose && (

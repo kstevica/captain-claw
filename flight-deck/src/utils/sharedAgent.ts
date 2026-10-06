@@ -176,6 +176,21 @@ export const OWNER_SHARE_NOTE: string =
   + 'Anyone on this deck who runs their own shell-capable process agent can act as any agent on '
   + "this host, including this one, and can read every user's Flight Deck files."
 
+/** The owner's Share dialog note. On a deck with context packs ("Shared
+ *  context") it also says, before the closing host-trust paragraph, that
+ *  members can publish their own context to the agent and that it is used on
+ *  every turn — the owner's channels and automations too. A Docker agent takes
+ *  members' profiles only. */
+export function ownerShareNote(contextPacks: boolean, runtime: 'process' | 'docker' = 'process'): string {
+  if (!contextPacks) return OWNER_SHARE_NOTE
+  const what = runtime === 'docker' ? 'their own profile' : 'their own profile, folders and deep memory'
+  const packs = `Members can also share ${what} with this agent. That is used on every turn, `
+    + "including your channels and automations. You're notified and can remove any of it under "
+    + 'Shared context.'
+  const cut = OWNER_SHARE_NOTE.lastIndexOf('\n\n')
+  return `${OWNER_SHARE_NOTE.slice(0, cut)}\n\n${packs}${OWNER_SHARE_NOTE.slice(cut)}`
+}
+
 /** Shown to a member the first time they open a shared agent. `**…**` is bold.
  *  `caps` is what their chats on it can use (`sharedCaps(row)`); chat-only —
  *  a Docker agent, an older Flight Deck, no row yet — keeps the A1 text. */

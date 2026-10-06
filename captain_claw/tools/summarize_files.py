@@ -515,8 +515,13 @@ class SummarizeFilesTool(Tool):
         A non-Drive file (the common case) returns unchanged after a couple of
         stat calls. A Drive fetch failure is reported so the file is skipped with
         a clear reason rather than a downstream parse error; any other hiccup
-        fails open to the original path.
+        fails open to the original path. Never for a file in another user's VFS
+        tree (or a shared folder): those are always read as plain local files.
         """
+        from captain_claw import pack_access
+
+        if not pack_access.drive_hooks_ok(file_path):
+            return file_path, None
         try:
             from captain_claw.drive_client import DriveError
             from captain_claw.vfs_drive import materialize

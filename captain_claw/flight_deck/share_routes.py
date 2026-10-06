@@ -212,6 +212,16 @@ async def _revoke_agent_member(ref: str, member_id: str, reason: str) -> None:
     except Exception as exc:
         log.warning("Could not clear a member's shared-agent Google opt-in",
                     error=type(exc).__name__)
+    # PR B: their context packs on the agent go too (a re-share starts with
+    # none; their alias reservations stay), and the agent's shared-context
+    # files are rewritten before this returns.
+    try:
+        from captain_claw.flight_deck import context_packs
+
+        await get_db().delete_context_packs_for_member(ref, member_id)
+        await context_packs.refresh_agent(get_db(), ref)
+    except Exception as exc:
+        log.warning("Could not drop a member's context packs", error=type(exc).__name__)
     try:
         await agent_sharing.close_member_sockets(ref, member_id, code=4403, reason=reason)
     except Exception as exc:

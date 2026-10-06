@@ -74,8 +74,14 @@ class MravRuntime:
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
         llm_observer: Callable[[str, Any, list[Any], int, int], None] | None = None,
         file_registry_provider: Callable[[], Any] | None = None,
+        agent: Any | None = None,
     ):
         self.provider = provider
+        # The Agent this runtime works for: passed to every tool call as
+        # `_agent` (as the classic loop does), so tools and the registry see
+        # the same instance rules — e.g. which instances may use shared
+        # context packs (pack_access.packs_allowed(None) is False).
+        self.agent = agent
         self.tools = tools
         self.cfg = config
         self.session_key = session_key or "default"
@@ -296,10 +302,13 @@ class MravRuntime:
                 file_registry = self.file_registry_provider()
             except Exception:
                 file_registry = None
+        args = action.args
+        if self.agent is not None:
+            args = {**action.args, "_agent": self.agent}
         try:
             result = await self.tools.execute(
                 action.tool,
-                action.args,
+                args,
                 session_id=self.session_id,
                 abort_event=self._cancel_event,
                 file_registry=file_registry,

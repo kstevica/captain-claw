@@ -70,6 +70,37 @@ def load_tenant_context(compact: bool) -> str:
     return ""
 
 
+# Shared context (PR B context packs): what the agent's owner and members chose
+# to share with everyone who uses the agent — composed by Flight Deck into the
+# same config home, read by every instance (owner lanes and member instances)
+# and inserted after the owner/member block on instances that may use packs
+# (pack_access.packs_allowed).
+SHARED_FULL_FILENAME = "shared_context.md"
+SHARED_COMPACT_FILENAME = "shared_context.compact.md"
+
+
+def load_shared_context(compact: bool) -> str:
+    """Return the shared-context block for the system prompt ("" when none).
+
+    Same home lookup, mtime cache, size guard and fallback order as
+    :func:`load_tenant_context`: the compact file when *compact* is true, else
+    the full one, falling back to the other when the chosen one is missing or
+    empty. Flight Deck rewrites the files on every pack change and deletes them
+    when nothing is shared, so a change applies on the next prompt build.
+    """
+    try:
+        base = Path.home() / ".captain-claw"
+    except RuntimeError:  # no resolvable home directory
+        return ""
+    order = ((SHARED_COMPACT_FILENAME, SHARED_FULL_FILENAME) if compact
+             else (SHARED_FULL_FILENAME, SHARED_COMPACT_FILENAME))
+    for name in order:
+        text = _read_cached(base / name)
+        if text:
+            return text
+    return ""
+
+
 def use_compact_tenant_context(*, micro: bool, nano: bool) -> bool:
     """Compact block for the micro/nano templates and for orchestrated
     workers (Council/Basna/Vatra teammates, bound via ``CLAW_VFS_PROJECT``)."""

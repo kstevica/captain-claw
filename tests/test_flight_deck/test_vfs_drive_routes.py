@@ -60,8 +60,23 @@ async def env(monkeypatch):
 
     monkeypatch.setattr(vr, "_user_root", lambda uid: tmp / "vfs" / uid)
     monkeypatch.setattr(vfs_drive, "user_root", lambda uid: tmp / "vfs" / uid)
+    # The VFS base the user roots hang off (find_mount honours a mount only at
+    # <base>/<user>/.drive/<name>/).
+    monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp / "vfs"))
     fake = FakeDrive()
-    monkeypatch.setattr(vr, "_drive_client", lambda: fake)
+    fake.fetch_calls = []
+    real_fetch = fake.fetch
+
+    async def _fetch(f, *, sleep=None):
+        fake.fetch_calls.append(f.id)
+        return await real_fetch(f, sleep=sleep)
+
+    fake.fetch = _fetch
+
+    async def _client(user_id=""):  # per-user, like the real _drive_client(user_id)
+        return fake
+
+    monkeypatch.setattr(vr, "_drive_client", _client)
 
     db = FlightDeckDB(str(tmp / "fd.db"))
     await db.init()
@@ -259,3 +274,115 @@ class TestDriveMountRoutes:
         with pytest.raises(HTTPException) as exc:
             await vr.mount_drive(vr.DriveMountBody(name="taken", folder_id="ROOT"), USER)
         assert exc.value.status_code == 409
+
+
+class TestPlantedMountIsInert:
+    """A Drive manifest is honoured only at <user root>/.drive/<name>/: a copy
+    planted inside a project (a shared folder's editor, an agent's own write)
+    can never make the owner's Google account fetch a file or fill a cache."""
+
+    def _plant(self, tmp, project="proj"):
+        import json as _json
+
+        planted = tmp / "vfs" / "local" / project / ".drive" / "evil"
+        planted.mkdir(parents=True)
+        (planted / ".drive-manifest.json").write_text(_json.dumps({
+            "folder_id": "X", "dirs": {"": "X"},
+            "files": {"a.txt": {"state": "placeholder", "file_id": "f1", "name": "a.txt",
+                                "mime_type": "text/plain", "size": 10,
+                                "modified": "2026-07-20T00:00:00Z"}}}))
+        (planted / "a.txt").write_text("MARKER")
+        return planted
+
+    async def test_read_and_download_serve_the_bytes_on_disk(self, env, monkeypatch):
+        vr, _, tmp, fake = env
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: fake)
+        fake.content = {"f1": (b"SECRET OF THE OWNER", ".txt")}
+        planted = self._plant(tmp)
+        r = await vr.read_file(project="proj", path=".drive/evil/a.txt", user=USER)
+        assert r["text"] == "MARKER"
+        resp = await vr.download_file(project="proj", path=".drive/evil/a.txt", user=USER)
+        assert Path(resp.path).read_bytes() == b"MARKER"
+        assert fake.fetch_calls == []
+        assert not (planted / ".drive-cache").exists()
+
+    async def test_the_real_mount_still_hydrates(self, env, monkeypatch):
+        vr, _, tmp, fake = env
+        monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: fake)
+        fake.content = {"f1": (b"the real content", ".txt")}
+        await vr.mount_drive(vr.DriveMountBody(name="acme", folder_id="ROOT"), USER)
+        r = await vr.read_file(project="acme", path="a.txt", user=USER)
+        assert r["text"] == "the real content"
+        assert fake.fetch_calls == ["f1"]
+
+
+class TestReservedDriveNames:
+    """FD's file routes never create a Drive mount's bookkeeping names inside a
+    folder (nor move anything onto one), in any case."""
+
+    @pytest.fixture
+    async def proj(self, env):
+        vr, _, tmp, _ = env
+        (tmp / "vfs" / "local" / "proj").mkdir(parents=True)
+        (tmp / "vfs" / "local" / "proj" / "ok.md").write_text("ok")
+        return env
+
+    BAD = [".drive/evil/.drive-manifest.json", ".drive/evil/r.md", "x/.drive-cache/blob",
+           ".drive-manifest.json", "sub/.DRIVE/x.md", "a\\.drive\\b.md", ".Drive-Manifest.JSON"]
+
+    @pytest.mark.parametrize("path", BAD)
+    async def test_write_refused(self, proj, path):
+        from fastapi import HTTPException
+
+        vr, _, tmp, _ = proj
+        with pytest.raises(HTTPException) as exc:
+            await vr.write_file(vr.WriteBody(project="proj", path=path, content="{}"), USER)
+        assert exc.value.status_code == 400 and "reserved" in exc.value.detail
+        assert not any(".drive" in p.name.lower()
+                       for p in (tmp / "vfs" / "local" / "proj").rglob("*"))
+
+    @pytest.mark.parametrize("path", [".drive", ".drive/evil", "a/.drive-cache"])
+    async def test_mkdir_refused(self, proj, path):
+        from fastapi import HTTPException
+
+        vr, _, tmp, _ = proj
+        with pytest.raises(HTTPException) as exc:
+            await vr.make_dir(vr.MkdirBody(project="proj", path=path), USER)
+        assert exc.value.status_code == 400
+        assert not (tmp / "vfs" / "local" / "proj" / ".drive").exists()
+
+    async def test_upload_into_a_reserved_folder_refused(self, proj):
+        import io
+
+        from fastapi import HTTPException, UploadFile
+
+        vr, _, tmp, _ = proj
+        up = UploadFile(file=io.BytesIO(b"x"), filename="r.md")
+        with pytest.raises(HTTPException) as exc:
+            await vr.upload_files(project="proj", path=".drive/evil", owner="", files=[up],
+                                  user=USER)
+        assert exc.value.status_code == 400
+        assert not (tmp / "vfs" / "local" / "proj" / ".drive").exists()
+
+    async def test_rename_onto_a_reserved_name_refused_away_allowed(self, proj):
+        from fastapi import HTTPException
+
+        vr, _, tmp, _ = proj
+        root = tmp / "vfs" / "local" / "proj"
+        for to in (".drive-manifest.json", ".drive/evil/ok.md", "d/.drive-cache"):
+            with pytest.raises(HTTPException) as exc:
+                await vr.rename_entry(vr.RenameBody(project="proj", path="ok.md", to=to), USER)
+            assert exc.value.status_code == 400
+        assert (root / "ok.md").is_file()
+        # Cleaning up something planted before (e.g. by an agent) still works.
+        (root / ".drive").mkdir()
+        await vr.rename_entry(vr.RenameBody(project="proj", path=".drive", to="was-drive"), USER)
+        assert (root / "was-drive").is_dir() and not (root / ".drive").exists()
+
+    async def test_ordinary_dot_names_still_work(self, proj):
+        vr, _, tmp, _ = proj
+        root = tmp / "vfs" / "local" / "proj"
+        for path in (".env.example", "notes/.drivers.md", "drive/x.md", ".drive-notes/a.md"):
+            await vr.write_file(vr.WriteBody(project="proj", path=path, content="x"), USER)
+            assert (root / path).is_file()
+

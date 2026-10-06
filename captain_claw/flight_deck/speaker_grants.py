@@ -65,6 +65,7 @@ GRANT_AWARE_PATHS = frozenset({
     "/fd/google/access_token", "/fd/google/agent_status", "/fd/google/gmail/send",
     "/fd/deep-memory/agent/search", "/fd/deep-memory/agent/index",
     "/fd/deep-memory/agent/delete",
+    "/fd/context-packs/agent/vfs",
 })  # exact match on the path with root_path removed, rstrip("/")
 
 NO_TURN_DETAIL = "No active shared-agent turn for this request"

@@ -70,14 +70,19 @@ async def _mount(tmp_path, monkeypatch, tree, content, *, drive_cls=FakeDrive,
     too (env + a .vfs-links.json entry), so ``vfs:acme/…`` paths resolve.
     """
     monkeypatch.setattr(vfs_drive, "user_root", lambda uid: tmp_path / uid)
+    # tmp_path is the VFS base: find_mount honours a mount only at
+    # <base>/<user>/.drive/<name>/.
+    monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path))
+    # The mount belongs to "local": pin this process's VFS user to it (a test
+    # that imported Flight Deck may have loaded a CLAW_VFS_USER from .env, and
+    # Drive hooks only run on the caller's own mounts).
+    monkeypatch.setenv("CLAW_VFS_USER", "local")
+    monkeypatch.delenv("FD_OWNER_ID", raising=False)
     drive = drive_cls(tree, content)
     await vfs_drive.create_mount(drive, "local", "acme", "ROOT")
     monkeypatch.setattr("captain_claw.drive_client.make_client", lambda: drive)
     root = vfs_drive.mount_root("local", "acme")
     if with_vfs_env:
-        monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path))
-        monkeypatch.setenv("CLAW_VFS_USER", "local")
-        monkeypatch.delenv("FD_OWNER_ID", raising=False)
         (tmp_path / "local" / ".vfs-links.json").write_text(json.dumps({
             "acme": vfs_drive.link_entry("local", "acme", "ROOT"),
         }))

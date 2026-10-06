@@ -101,7 +101,12 @@ async def _resolve_readable_file(
     # Google Drive mount: fetch the real bytes for a placeholder and hand back the
     # cached real file. A non-Drive path returns None (used unchanged). The Drive
     # subsystem is imported lazily so a deployment without it still resolves
-    # ordinary files.
+    # ordinary files. Never for a shared folder's file or another user's: those
+    # are always parsed as the plain local file (no fetch, no cache written).
+    from captain_claw import pack_access
+
+    if not pack_access.drive_hooks_ok(file_path):
+        return file_path, None
     try:
         from captain_claw.drive_client import DriveError
         from captain_claw.vfs_drive import materialize
@@ -118,6 +123,24 @@ async def _resolve_readable_file(
         log.debug("Drive materialize skipped", path=str(path), error=str(exc))
         return file_path, None
     return (real or file_path), None
+
+
+def _with_pack_header(file_path: Path, content: str) -> str:
+    """Prefix what was extracted from a shared folder's file (vfs:@alias) with
+    the attribution line; any other file's text is returned unchanged."""
+    from captain_claw import pack_access
+
+    header = pack_access.read_header(file_path)
+    return f"{header}\n{content}" if header else content
+
+
+def _pack_error(path: str, exc: Exception) -> str:
+    """``str(exc)``, but never a host path for a shared folder's file."""
+    from captain_claw import pack_access
+
+    if pack_access.is_pack_value(path):
+        return pack_access.scrub_roots(str(exc))
+    return str(exc)
 
 
 def _local_name(tag: str) -> str:
@@ -442,10 +465,11 @@ class PdfExtractTool(Tool):
             if pdf_error:
                 return ToolResult(success=False, error=pdf_error)
             assert content is not None
-            return ToolResult(success=True, content=_truncate_markdown(content, max(1, int(max_chars))))
+            return ToolResult(success=True, content=_with_pack_header(
+                file_path, _truncate_markdown(content, max(1, int(max_chars)))))
         except Exception as e:
             log.error("PDF extraction failed", path=path, error=str(e))
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=_pack_error(path, e))
 
 
 class DocxExtractTool(Tool):
@@ -477,14 +501,15 @@ class DocxExtractTool(Tool):
             )
         try:
             content = await asyncio.to_thread(_extract_docx_markdown, file_path)
-            return ToolResult(success=True, content=_truncate_markdown(content, max(1, int(max_chars))))
+            return ToolResult(success=True, content=_with_pack_header(
+                file_path, _truncate_markdown(content, max(1, int(max_chars)))))
         except KeyError:
             return ToolResult(success=False, error="Invalid DOCX: missing word/document.xml")
         except zipfile.BadZipFile:
             return ToolResult(success=False, error="Invalid DOCX: file is not a valid ZIP package")
         except Exception as e:
             log.error("DOCX extraction failed", path=path, error=str(e))
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=_pack_error(path, e))
 
 
 class XlsxExtractTool(Tool):
@@ -527,14 +552,15 @@ class XlsxExtractTool(Tool):
                 file_path,
                 max(1, int(max_rows)),
             )
-            return ToolResult(success=True, content=_truncate_markdown(content, max(1, int(max_chars))))
+            return ToolResult(success=True, content=_with_pack_header(
+                file_path, _truncate_markdown(content, max(1, int(max_chars)))))
         except KeyError as e:
             return ToolResult(success=False, error=f"Invalid XLSX: missing required part ({e})")
         except zipfile.BadZipFile:
             return ToolResult(success=False, error="Invalid XLSX: file is not a valid ZIP package")
         except Exception as e:
             log.error("XLSX extraction failed", path=path, error=str(e))
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=_pack_error(path, e))
 
 
 class PptxExtractTool(Tool):
@@ -577,9 +603,10 @@ class PptxExtractTool(Tool):
                 file_path,
                 max(1, int(max_slides)),
             )
-            return ToolResult(success=True, content=_truncate_markdown(content, max(1, int(max_chars))))
+            return ToolResult(success=True, content=_with_pack_header(
+                file_path, _truncate_markdown(content, max(1, int(max_chars)))))
         except zipfile.BadZipFile:
             return ToolResult(success=False, error="Invalid PPTX: file is not a valid ZIP package")
         except Exception as e:
             log.error("PPTX extraction failed", path=path, error=str(e))
-            return ToolResult(success=False, error=str(e))
+            return ToolResult(success=False, error=_pack_error(path, e))
