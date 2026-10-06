@@ -139,6 +139,8 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   // deck whose Flight Deck offers them.
   const packsEnabled = useSharedAgentStore((s) => s.contextPacks)
   const canPacks = canShare && packsEnabled
+  // Members open this agent's saved/ folder and datastore: the Share note says so.
+  const workspaceEnabled = useSharedAgentStore((s) => s.memberWorkspace)
   const [showPacks, setShowPacks] = useState(false)
   const cognitiveMode = getCognitiveMode(proc.slug)
   const [modeSaved, setModeSaved] = useState(false)
@@ -283,7 +285,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         resourceId={proc.agent_ref!}
         resourceName={agentName}
         allowEdit={false}
-        note={ownerShareNote(packsEnabled, 'process')}
+        note={ownerShareNote(packsEnabled, 'process', workspaceEnabled)}
         onClose={() => setShowShare(false)}
       />,
       document.body

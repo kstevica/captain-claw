@@ -3,20 +3,53 @@ import {
   X, Download, Loader2, AlertCircle, Maximize2, Minimize2,
   ChevronLeft, ChevronRight, Copy, Check, Pencil, Save,
 } from 'lucide-react'
-import Markdown from 'react-markdown'
+import Markdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AgentFile } from '../../services/fileTransfer'
 import { getViewUrl, getDownloadUrl, formatSize, getFileTypeGroup, saveFileContent } from '../../services/fileTransfer'
+import { isMemberCreated } from '../../utils/sharedWorkspace'
 import { CodeEditor } from './CodeEditor'
 
 // File groups whose text content can be edited in place.
 const EDITABLE_GROUPS = new Set(['markdown', 'code', 'data', 'text', 'html'])
 
+// Markdown somebody else wrote (another member's file, or a member's file in
+// the owner's panels) must not make the viewer's browser fetch remote images —
+// a tracking pixel would tell its author who opened it, and when. An image
+// src that can reach another host (any scheme, `//`, or the `/\` spelling
+// browsers read as `//`) is dropped; links still render. Browsers drop tab/LF/CR
+// anywhere and every leading C0 control or space (`<\x01//host>` is a valid
+// markdown destination and loads from `host`), so the check does too.
+function untrustedUrlTransform(url: string, key: string): string {
+  // eslint-disable-next-line no-control-regex
+  if (key === 'src' && /^([a-z][a-z0-9+.-]*:|[\\/]{2})/i.test(url.replace(/[\t\n\r]/g, '').replace(/^[\x00-\x20\s]+/, ''))) return ''
+  return defaultUrlTransform(url)
+}
+
+// HTML somebody else wrote renders inert: no scripts (an empty sandbox), and a
+// CSP that lets it load nothing from anywhere — no remote image, stylesheet or
+// font that would tell its author who opened it. Inline styles and data:
+// images still show. The viewer's own (or, in the owner's panels, the owner's)
+// HTML keeps running scripts — never same-origin.
+const INERT_HTML_CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">`
+
+function htmlFrame(content: string, untrusted: boolean): { srcDoc: string; sandbox: string } {
+  return untrusted
+    ? { srcDoc: INERT_HTML_CSP + content, sandbox: '' }
+    : { srcDoc: content, sandbox: 'allow-scripts' }
+}
+
 interface FileViewerProps {
   file: AgentFile
-  host: string
-  port: number
-  auth: string
+  /** The owner's agent endpoint (owner routes). Not needed with `urls`. */
+  host?: string
+  port?: number
+  auth?: string
+  /** Ready-made view/download URLs (a member's shared-agent routes), used
+   *  instead of building owner URLs from host/port/auth. */
+  urls?: { view: string; download: string }
+  /** No Edit/Save (and `startInEdit` is ignored) — a member's panel. */
+  readOnly?: boolean
   onClose: () => void
   /** Open straight into edit mode (e.g. the file-list Edit button) */
   startInEdit?: boolean
@@ -27,7 +60,7 @@ interface FileViewerProps {
   hasNext?: boolean
 }
 
-export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPrev, onNext, hasPrev, hasNext }: FileViewerProps) {
+export function FileViewer({ file, host = '', port = 0, auth = '', urls, readOnly, startInEdit, onClose, onPrev, onNext, hasPrev, hasNext }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -41,13 +74,27 @@ export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPre
   const [savedTick, setSavedTick] = useState(false)
 
   const group = getFileTypeGroup(file)
-  const editable = content !== null && EDITABLE_GROUPS.has(group)
+  const editable = !readOnly && content !== null && EDITABLE_GROUPS.has(group)
   const dirty = editing && draft !== content
   // Consume startInEdit once (on the file it was opened for) — file nav inside
   // the viewer shouldn't re-trigger edit mode.
-  const autoEditRef = useRef(!!startInEdit)
-  const viewUrl = getViewUrl(host, port, file.physical, auth)
-  const downloadUrl = getDownloadUrl(host, port, file.physical, auth)
+  const autoEditRef = useRef(!!startInEdit && !readOnly)
+  const viewUrl = urls ? urls.view : getViewUrl(host, port, file.physical, auth)
+  const downloadUrl = urls ? urls.download : getDownloadUrl(host, port, file.physical, auth)
+  const sharedRoutes = !!urls
+  // Another file (Prev/Next): drop the last one's content in this same render.
+  // The fetch effect below runs only after a commit, so for one render the old
+  // text would show under the new file's trust — someone else's HTML running,
+  // or their markdown's remote images loading, as if it were the viewer's own.
+  const [contentFor, setContentFor] = useState(viewUrl)
+  if (contentFor !== viewUrl) {
+    setContentFor(viewUrl)
+    setContent(null)
+    setLoading(true)
+  }
+  // Someone else's file: in a member's panel anything not theirs, in the
+  // owner's panels what a member added. Its markdown loads no remote images.
+  const untrusted = file.source === 'shared' ? file.created_by?.kind !== 'me' : isMemberCreated(file.created_by)
 
   // Fetch text content for text-based files
   useEffect(() => {
@@ -67,7 +114,13 @@ export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPre
 
     fetch(viewUrl)
       .then(async (resp) => {
-        if (!resp.ok) throw new Error(`Failed to load: ${resp.status}`)
+        if (!resp.ok) {
+          // A member's routes explain a refusal (e.g. the agent needs a restart).
+          const detail = sharedRoutes
+            ? await resp.json().then((b) => (typeof b?.detail === 'string' ? b.detail : ''), () => '')
+            : ''
+          throw new Error(detail || `Failed to load: ${resp.status}`)
+        }
         const text = await resp.text()
         setContent(text)
         // Opened via the Edit button → drop straight into edit mode (once).
@@ -79,13 +132,13 @@ export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPre
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false))
-  }, [file.physical, viewUrl, group])
+  }, [file.physical, viewUrl, group, sharedRoutes])
 
   const startEdit = () => { setDraft(content ?? ''); setSaveError(''); setEditing(true) }
   const cancelEdit = () => { setEditing(false); setSaveError('') }
 
   const handleSave = useCallback(async () => {
-    if (saving) return
+    if (saving || readOnly) return
     setSaving(true)
     setSaveError('')
     try {
@@ -99,17 +152,19 @@ export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPre
     } finally {
       setSaving(false)
     }
-  }, [saving, host, port, auth, file.physical, draft])
+  }, [saving, readOnly, host, port, auth, file.physical, draft])
 
   // Keyboard: while editing, Esc cancels and ⌘/Ctrl+S saves (arrows type, not
-  // navigate). Otherwise Esc closes and arrows move between files.
+  // navigate). Otherwise Esc closes and arrows move between files. Esc is
+  // marked handled, so a dialog hosting the viewer (a member's Files overlay)
+  // knows not to close as well.
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (editing) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); handleSave() }
       else if (e.key === 'Escape') { e.preventDefault(); cancelEdit() }
       return
     }
-    if (e.key === 'Escape') onClose()
+    if (e.key === 'Escape') { e.preventDefault(); onClose() }
     if (e.key === 'ArrowLeft' && onPrev && hasPrev) onPrev()
     if (e.key === 'ArrowRight' && onNext && hasNext) onNext()
   }, [editing, handleSave, onClose, onPrev, onNext, hasPrev, hasNext])
@@ -301,18 +356,26 @@ export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPre
           {!loading && !error && content !== null && group === 'html' && (
             <div className="bg-white min-h-[300px]">
               <iframe
-                srcDoc={content}
+                srcDoc={htmlFrame(content, untrusted).srcDoc}
                 title={file.filename}
                 className="w-full border-0"
                 style={{ height: maximized ? 'calc(95vh - 52px)' : 'calc(85vh - 52px)' }}
-                sandbox="allow-scripts allow-same-origin"
+                // Never same-origin, for any file: a srcdoc frame would
+                // otherwise run in Flight Deck's origin, with its storage and
+                // the viewer's token — and a shared agent's saved/ folder holds
+                // files other people wrote. Theirs get no scripts at all.
+                sandbox={htmlFrame(content, untrusted).sandbox}
               />
             </div>
           )}
 
           {!loading && !error && content !== null && group === 'markdown' && (
             <div className="fd-file-markdown p-6">
-              <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+              {untrusted ? (
+                <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform}>{content}</Markdown>
+              ) : (
+                <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+              )}
             </div>
           )}
 

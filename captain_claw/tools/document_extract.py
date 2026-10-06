@@ -126,11 +126,12 @@ async def _resolve_readable_file(
 
 
 def _with_pack_header(file_path: Path, content: str) -> str:
-    """Prefix what was extracted from a shared folder's file (vfs:@alias) with
-    the attribution line; any other file's text is returned unchanged."""
-    from captain_claw import pack_access
+    """Prefix what was extracted from a shared folder's file (vfs:@alias) — or
+    from a saved/ file someone other than the caller created (PR C, J12) —
+    with the attribution line; any other file's text is returned unchanged."""
+    from captain_claw import pack_access, saved_attribution
 
-    header = pack_access.read_header(file_path)
+    header = pack_access.read_header(file_path) or saved_attribution.read_header(file_path)
     return f"{header}\n{content}" if header else content
 
 

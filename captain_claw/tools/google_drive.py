@@ -1025,8 +1025,22 @@ class GoogleDriveTool(Tool):
             if len(stripped) < len(text):
                 body = stripped.encode("utf-8")
 
+        # PR C: a member never downloads over a saved/ file someone else
+        # created; the creator is recorded after the write.
+        from captain_claw import saved_attribution
+        from captain_claw import speaker as _speaker
+
+        prior = saved_attribution.prior_creator(dest)
+        member = _speaker.current()
+        if (member is not None and dest.exists()
+                and not saved_attribution.member_may_change(dest, member.speaker_id)):
+            return ToolResult(
+                success=False,
+                error=_speaker.PATH_REFUSED_PREFIX + _speaker.FILE_NOT_YOURS_WHY,
+            )
         dest.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(dest.write_bytes, body)
+        saved_attribution.note_write(dest, prior)
 
         registry = runtime.get("_file_registry")
         if registry is not None:

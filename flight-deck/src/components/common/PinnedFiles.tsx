@@ -7,6 +7,7 @@ import { usePinnedFilesStore, type PinnedFile } from '../../stores/pinnedFilesSt
 import { getDownloadUrl, getViewUrl, formatSize, getFileTypeGroup, isViewable } from '../../services/fileTransfer'
 import { FileViewer } from '../agents/FileViewer'
 import type { AgentFile } from '../../services/fileTransfer'
+import { CreatorBadge } from '../agents/CreatorBadge'
 
 const TYPE_ICONS: Record<string, typeof FileText> = {
   image: Image, video: Film, audio: Music,
@@ -17,6 +18,28 @@ const TYPE_COLORS: Record<string, string> = {
   image: 'text-blue-400', video: 'text-pink-400', audio: 'text-amber-400',
   code: 'text-emerald-400', data: 'text-cyan-400', archive: 'text-orange-400',
   html: 'text-orange-300', markdown: 'text-violet-400', pdf: 'text-red-400',
+}
+
+/** A pin as the FileViewer opens it — with where it was listed and who
+ *  created it, so a member's file keeps the viewer's guards (inert HTML, no
+ *  remote images in markdown). A pin with no creator: from a member's context
+ *  (`source: 'shared'`) the viewer treats it as someone else's; from the
+ *  owner's panels it opens as before — such pins predate member files, and
+ *  the owner's listings send `created_by` on every saved/ file a pin copies. */
+function pinViewerFile(pin: PinnedFile): AgentFile {
+  return {
+    logical: pin.logical,
+    physical: pin.physical,
+    filename: pin.filename,
+    extension: pin.extension,
+    exists: true,
+    size: pin.size,
+    modified: 0,
+    mime_type: pin.mime_type,
+    is_text: false,
+    source: pin.source || '',
+    created_by: pin.created_by ?? null,
+  }
 }
 
 export function PinnedFiles({ onClose }: { onClose: () => void }) {
@@ -153,18 +176,7 @@ export function PinnedFiles({ onClose }: { onClose: () => void }) {
       {/* File Viewer */}
       {viewingFile && (
         <FileViewer
-          file={{
-            logical: viewingFile.file.logical,
-            physical: viewingFile.file.physical,
-            filename: viewingFile.file.filename,
-            extension: viewingFile.file.extension,
-            exists: true,
-            size: viewingFile.file.size,
-            modified: 0,
-            mime_type: viewingFile.file.mime_type,
-            is_text: false,
-            source: '',
-          }}
+          file={pinViewerFile(viewingFile.file)}
           host={viewingFile.file.host}
           port={viewingFile.file.port}
           auth={viewingFile.file.auth}
@@ -220,7 +232,10 @@ function PinnedFileCard({
         <Icon className={`h-4 w-4 mt-0.5 shrink-0 ${color}`} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-sm text-zinc-200 truncate font-medium">{pin.filename}</span>
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="text-sm text-zinc-200 truncate font-medium">{pin.filename}</span>
+              <CreatorBadge mode="owner" creator={pin.created_by} />
+            </div>
             <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
               {canView && (
                 <button onClick={onView} className="rounded p-0.5 text-zinc-600 hover:text-zinc-300" title="View">

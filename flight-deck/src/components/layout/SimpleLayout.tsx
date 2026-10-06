@@ -36,11 +36,14 @@ import { useProcessStore } from '../../stores/processStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { isManagedAgent } from '../../utils/managedAgents'
-import { SHARED_PREFIX, sharedContainerId } from '../../utils/sharedAgent'
+import { SHARED_PREFIX, sharedCaps, sharedContainerId } from '../../utils/sharedAgent'
+import { CHAT_ONLY_TEXT, workspaceVisible } from '../../utils/sharedWorkspace'
 import { usePersistedSize } from '../../hooks/usePersistedSize'
 import { ChatPanel } from '../agents/ChatPanel'
 import { AgentFilesPanel } from '../agents/AgentFilesPanel'
 import { AgentDatastorePanel } from '../agents/AgentDatastorePanel'
+import { SharedFilesPanel } from '../agents/SharedFilesPanel'
+import { SharedDatastorePanel } from '../agents/SharedDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
 import { ArchetypeSpawnDialog } from './ArchetypeSpawnDialog'
 import ConnectionsPage from '../../pages/ConnectionsPage'
@@ -894,8 +897,15 @@ function EmptyChat({ hasAgents, onSpawn, locked = false }: { hasAgents: boolean;
 // ── Right: files + datastore of the active agent ─────────────────────
 
 function ContextColumn({ agentId, agentName, onOptions }: { agentId: string | null; agentName: string; onOptions?: () => void }) {
-  // A shared agent is chat only: its files and datastore stay its owner's.
+  // A shared agent: on a process agent, on a deck that serves them, the
+  // member's commons panels (the agent's saved/ files and datastore, read
+  // through Flight Deck's member routes); otherwise chat only — a Docker
+  // agent, an older Flight Deck.
   const shared = !!agentId && agentId.startsWith(SHARED_PREFIX)
+  const memberWorkspace = useSharedAgentStore((s) => s.memberWorkspace)
+  const sharedRow = useSharedAgentStore((s) =>
+    shared ? s.agents.find((a) => sharedContainerId(a.agent_ref) === agentId) : undefined)
+  const vis = workspaceVisible(memberWorkspace, sharedCaps(sharedRow))
   const open = useUIStore((s) => s.simpleRightOpen)
   const setOpen = useUIStore((s) => s.setSimpleRightOpen)
   // The handle is on the LEFT edge of a right-docked column, so dragging left
@@ -905,6 +915,9 @@ function ContextColumn({ agentId, agentName, onOptions }: { agentId: string | nu
   // pane can never be taller than (region − a datastore minimum).
   const regionRef = useRef<HTMLDivElement>(null)
   const [regionH, setRegionH] = useState(0)
+  // Which region is mounted (own split, a member's panels, chat-only): the
+  // observer follows it when the chat or the member panels change.
+  const region = !agentId ? '' : !shared ? 'own' : sharedRow && (vis.files || vis.datastore) ? 'member' : 'chat'
   useEffect(() => {
     const el = regionRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
@@ -912,7 +925,7 @@ function ContextColumn({ agentId, agentName, onOptions }: { agentId: string | nu
     ro.observe(el)
     setRegionH(el.clientHeight)
     return () => ro.disconnect()
-  }, [open])
+  }, [open, region])
   const DATASTORE_MIN = 140
   const filesLiveMax = regionH > 0 ? Math.max(120, regionH - DATASTORE_MIN) : undefined
   const filesH = usePersistedSize('fd:simple-right-files-height', 360, 120, 1400, 'y', 'forward', filesLiveMax)
@@ -967,9 +980,56 @@ function ContextColumn({ agentId, agentName, onOptions }: { agentId: string | nu
         </div>
       </div>
 
-      {agentId && shared ? (
+      {agentId && shared && sharedRow && (vis.files || vis.datastore) ? (
+        <div ref={regionRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {vis.files && vis.datastore ? (
+            <>
+              {/* Same split as the owner's: files on top, datastore below. */}
+              <div className="min-h-[120px] overflow-hidden" style={{ height: filesH.size }}>
+                <SharedFilesPanel
+                  key={agentId}
+                  agentRef={sharedRow.agent_ref}
+                  agentName={agentName}
+                  ownerName={sharedRow.owner_name || sharedRow.owner_email}
+                />
+              </div>
+              <div
+                onMouseDown={filesH.onResizeStart}
+                title="Drag to resize"
+                className="h-1 shrink-0 cursor-row-resize border-y border-zinc-800 bg-zinc-900 transition-colors hover:bg-violet-500/40"
+              />
+              <div className="min-h-[120px] flex-1 overflow-hidden">
+                <SharedDatastorePanel
+                  key={agentId}
+                  agentRef={sharedRow.agent_ref}
+                  agentName={agentName}
+                  ownerName={sharedRow.owner_name || sharedRow.owner_email}
+                />
+              </div>
+            </>
+          ) : vis.files ? (
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <SharedFilesPanel
+                key={agentId}
+                agentRef={sharedRow.agent_ref}
+                agentName={agentName}
+                ownerName={sharedRow.owner_name || sharedRow.owner_email}
+              />
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <SharedDatastorePanel
+                key={agentId}
+                agentRef={sharedRow.agent_ref}
+                agentName={agentName}
+                ownerName={sharedRow.owner_name || sharedRow.owner_email}
+              />
+            </div>
+          )}
+        </div>
+      ) : agentId && shared ? (
         <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-zinc-500">
-          A shared agent is chat only — its files and datastore stay with its owner.
+          {CHAT_ONLY_TEXT}
         </div>
       ) : agentId ? (
         <div ref={regionRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">

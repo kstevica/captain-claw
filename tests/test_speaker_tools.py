@@ -144,7 +144,7 @@ def test_allowlist_is_exactly_the_contract():
     assert SPEAKER_TOOL_ALLOWLIST_MAX == SPEAKER_TOOL_ALLOWLIST | {
         "google_mail", "google_drive", "google_calendar", "typesense", "read", "write",
         "edit", "glob", "grep", "vfs", "pdf_extract", "docx_extract", "xlsx_extract",
-        "pptx_extract",
+        "pptx_extract", "datastore",
     }
 
 

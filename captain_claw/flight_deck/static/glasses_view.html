@@ -551,6 +551,7 @@
     background: rgba(95,255,159,0.05); border-radius: 0 8px 8px 0;
   }
   .file-md ul, .file-md ol { padding-left: 1.4em; }
+  .file-plain p { word-break: break-word; }
   .file-frame {
     display: block; width: 100%; border: 0; background: #fff;
     border-radius: 10px;
@@ -1429,11 +1430,27 @@
   if (hasMarked) {
     try { marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false }); } catch (_) {}
   }
-  function renderMd(src) {
-    if (hasMarked) { try { return marked.parse(String(src || '')); } catch (_) {} }
+  function escapeText(src) {
     return String(src || '')
       .replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
       .replace(/\n/g, '<br>');
+  }
+  function renderMd(src) {
+    if (hasMarked) { try { return marked.parse(String(src || '')); } catch (_) {} }
+    return escapeText(src);
+  }
+  // Escaped plain text, one <p> per blank-line block (each a focus stop).
+  // Never marked: its output isn't sanitized.
+  function renderPlain(src) {
+    return String(src || '').split(/\n{2,}/).map(b => '<p>' + escapeText(b) + '</p>').join('');
+  }
+  // PR C: a file a member of a shared agent added (or any creator that isn't
+  // the owner — fail closed) is shown as escaped text, never rendered as
+  // markup on this origin. No creator (older agent, outside saved/) = owner.
+  function isMemberFile(f, data) {
+    const cb = data && data.created_by;
+    return !!((data && data.member_file) || (f && f.member_file) ||
+      (cb && cb.kind !== 'owner'));
   }
 
   // Injected into every .html file shown in the iframe. Two jobs:
@@ -1909,6 +1926,12 @@
       item.setAttribute('tabindex', '0');
       const name = f.filename || f.logical || '(file)';
       item.textContent = name;
+      if (isMemberFile(f, null)) {
+        const by = document.createElement('span');
+        by.className = 'count';
+        by.textContent = 'by ' + ((f.created_by && f.created_by.name) || 'a member');
+        item.appendChild(by);
+      }
       item.title = f.logical || f.filename || '';
       onActivate(item, () => { showFilesContent(name); openFile(f); });
       filesListEl.appendChild(item);
@@ -1931,10 +1954,12 @@
     const content = (data && data.content) || '';
     const ext = (f.extension || '').toLowerCase();
     const isHtml = (ext === '.html' || ext === '.htm');
+    const memberFile = isMemberFile(f, data);
     // Present remote only makes sense for an HTML deck — show the controls then
     // (⧉ loads THIS file onto the Flight Deck big screen; ◀/▶ step it). We do
     // NOT auto-open on selection — the user picks the deck here, then taps ⧉.
-    if (filesPresentEl) filesPresentEl.hidden = !isHtml;
+    // A member's file is never presented (/deck/view refuses it too).
+    if (filesPresentEl) filesPresentEl.hidden = !isHtml || memberFile;
     filesFrame = null;   // drop any prior frame so stale height messages no-op
     // One file = one .record-page inside the pager, exactly like a datastore
     // record. The .record-page is the proven-on-glasses vertical scroller.
@@ -1956,7 +1981,9 @@
     topCard.setAttribute('role', 'button');
     const topK = document.createElement('div');
     topK.className = 'field-k';
-    topK.textContent = 'FILE';
+    topK.textContent = memberFile
+      ? 'FILE · added by ' + ((((data && data.created_by) || f.created_by) || {}).name || 'a member') + ' · shown as text'
+      : 'FILE';
     const topV = document.createElement('div');
     topV.className = 'field-v';
     topV.textContent = f.filename || f.logical || '';
@@ -1969,7 +1996,14 @@
     contentCard.className = 'card';
     contentCard.tabIndex = 0;
     contentCard.setAttribute('role', 'button');
-    if (ext === '.html' || ext === '.htm') {
+    if (memberFile) {
+      // Escaped source / text only — see isMemberFile.
+      const div = document.createElement('div');
+      div.className = 'file-md file-plain';
+      div.innerHTML = renderPlain(content);
+      for (const child of div.children) { child.tabIndex = 0; child.setAttribute('role', 'button'); }
+      contentCard.appendChild(div);
+    } else if (ext === '.html' || ext === '.htm') {
       // Sandboxed iframe so the document renders with its own markup/styles
       // in isolation and can't reach into (or restyle) the HUD. allow-scripts
       // (without allow-same-origin) keeps it on a unique origin — it can run

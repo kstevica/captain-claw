@@ -1252,9 +1252,10 @@ class TestListings:
             body = (await c.get("/fd/shared-agents", headers=_hdr(MEMBER))).json()
             rows = {a["agent_ref"]: a for a in body["agents"]}
             assert set(rows) == {REF, BOX_REF}
-            assert rows[REF]["capabilities"] == {"google": True, "deep_memory": True, "files": True}
+            assert rows[REF]["capabilities"] == {"google": True, "deep_memory": True, "files": True,
+                                                 "datastore": True}
             assert rows[BOX_REF]["capabilities"] == {"google": False, "deep_memory": False,
-                                                     "files": False}
+                                                     "files": False, "datastore": False}
             assert rows[REF]["google_enabled"] is False and rows[BOX_REF]["google_enabled"] is False
             assert rows[REF]["google_connected"] is False
             assert calls == [MEMBER]                 # once per request

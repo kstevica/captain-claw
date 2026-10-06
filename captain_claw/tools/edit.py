@@ -418,7 +418,12 @@ class EditTool(Tool):
                 f.write(content)
             # Preserve original file permissions
             shutil.copymode(str(file_path), tmp_path)
+            # The replace makes a new inode: carry the saved/ creator over
+            # (PR C; a no-op outside saved/).
+            from captain_claw import saved_attribution
+            prior = saved_attribution.prior_creator(file_path)
             os.replace(tmp_path, str(file_path))
+            saved_attribution.note_write(file_path, prior)
             # Record authorship for shared VFS files (self-guards on non-VFS paths).
             from captain_claw.vfs import record_author
             record_author(file_path)

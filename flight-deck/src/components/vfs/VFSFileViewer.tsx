@@ -176,7 +176,7 @@ export function VFSFileViewer({ onClose, onPrev, onNext, hasPrev, hasNext }: Pro
 
             {!s.fileLoading && !s.fileError && !f.binary && !f.truncated && group === 'html' && (
               <div className="min-h-[300px] bg-white">
-                <iframe srcDoc={f.text} title={f.name} className="w-full border-0" style={{ height: frameH }} sandbox="allow-scripts allow-same-origin" />
+                <iframe srcDoc={f.text} title={f.name} className="w-full border-0" style={{ height: frameH }} sandbox="allow-scripts" />
               </div>
             )}
 

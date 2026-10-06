@@ -245,3 +245,79 @@ def test_errors_never_carry_the_header():
 def test_display_name_falls_back_when_empty():
     p = verify_assertion(sign_assertion(_payload(name="  "), WEB_AUTH), WEB_AUTH, now=NOW)
     assert p.display_name == "Member"
+
+
+# ── PR C: HTTP assertions (aud / m / p) ──────────────────────────────
+
+HTTP_PATH = "/api/speaker/files"
+
+
+def _http_header(**over) -> str:
+    return sign_assertion(_payload(aud="http", m="GET", p=HTTP_PATH, **over), WEB_AUTH)
+
+
+def test_http_constants_are_the_contract():
+    assert speaker.HTTP_ASSERTION_AUD == "http"
+    assert speaker.SPEAKER_ACK_HEADER == "X-FD-Speaker-Ack"
+    assert speaker.SPEAKER_HTTP_PREFIX == "/api/speaker/"
+
+
+def test_an_http_assertion_never_opens_a_socket():
+    """The WS handshake passes no audience: an HTTP assertion is refused."""
+    with pytest.raises(SpeakerAuthError, match="wrong audience"):
+        verify_assertion(_http_header(), WEB_AUTH, now=NOW)
+
+
+@pytest.mark.parametrize("aud", ["ws", "HTTP", 7, None, "x" * 600])
+def test_any_other_audience_is_refused_on_the_socket(aud):
+    header = sign_assertion(_payload(aud=aud), WEB_AUTH)
+    with pytest.raises(SpeakerAuthError):
+        verify_assertion(header, WEB_AUTH, now=NOW)
+
+
+def test_http_assertion_verifies_for_its_own_request_only():
+    p = speaker.verify_http_assertion(_http_header(), WEB_AUTH, "get", HTTP_PATH, now=NOW)
+    assert p == Principal(
+        speaker_id="u-member", display_name="Ana", owner_name="Olga",
+        lane="A", agent_ref="process:helper:0123456789abcdef",
+    )
+
+
+@pytest.mark.parametrize("method,path", [
+    ("POST", HTTP_PATH), ("GET", "/api/speaker/files/raw"), ("GET", HTTP_PATH + "/"),
+    ("GET", "/api/files"),
+])
+def test_http_assertion_bound_to_method_and_path(method, path):
+    header = _http_header()
+    with pytest.raises(SpeakerAuthError, match="wrong request"):
+        speaker.verify_http_assertion(header, WEB_AUTH, method, path, now=NOW)
+    # The mismatch never burned the nonce: the right request still passes.
+    speaker.verify_http_assertion(header, WEB_AUTH, "GET", HTTP_PATH, now=NOW)
+
+
+@pytest.mark.parametrize("drop", ["aud", "m", "p"])
+def test_http_assertion_needs_aud_m_and_p(drop):
+    payload = _payload(aud="http", m="GET", p=HTTP_PATH)
+    payload.pop(drop)
+    header = sign_assertion(payload, WEB_AUTH)
+    with pytest.raises(SpeakerAuthError):
+        speaker.verify_http_assertion(header, WEB_AUTH, "GET", HTTP_PATH, now=NOW)
+
+
+def test_a_socket_assertion_is_refused_on_http():
+    with pytest.raises(SpeakerAuthError, match="wrong audience"):
+        speaker.verify_http_assertion(HEADER, WEB_AUTH, "GET", HTTP_PATH, now=NOW)
+    # ...and was not consumed: the socket still accepts it.
+    verify_assertion(HEADER, WEB_AUTH, now=NOW)
+
+
+def test_http_assertion_is_single_use():
+    header = _http_header()
+    speaker.verify_http_assertion(header, WEB_AUTH, "GET", HTTP_PATH, now=NOW)
+    with pytest.raises(SpeakerAuthError, match="replayed"):
+        speaker.verify_http_assertion(header, WEB_AUTH, "GET", HTTP_PATH, now=NOW)
+
+
+def test_the_a1_vector_still_verifies_after_pr_c():
+    assert verify_assertion(HEADER, WEB_AUTH, now=NOW).speaker_id == "u-member"
+    assert speaker_ack_for(HEADER) == ACK
