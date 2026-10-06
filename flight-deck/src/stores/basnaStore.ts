@@ -196,7 +196,10 @@ export interface BasnaRun {
   weight_at_run: number
   output: string
   actions: string         // JSON array of { tool, detail }
-  success: number | null  // 1 / 0 / null
+  success: number | null  // effective label 1 / 0 / null: the human vote when set, else the judge's
+  judge_success: number | null      // the judge's automatic label (kept after a human vote)
+  human_success: number | null      // the human thumbs vote
+  human_feedback_at: string | null
   latency_ms: number
   created_at: string
 }
