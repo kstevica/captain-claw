@@ -67,6 +67,7 @@ _NOTIF_STORE = _FD / "src" / "stores" / "notificationStore.ts"
 _NOTIF_CENTER = _FD / "src" / "components" / "common" / "NotificationCenter.tsx"
 _DESKTOP = _FD / "src" / "pages" / "DesktopPage.tsx"
 _TOGGLE = _FD / "src" / "components" / "agents" / "SharedAgentGoogleToggle.tsx"
+_SWITCH_TRACK = _FD / "src" / "components" / "common" / "SwitchTrack.tsx"
 _COUNT_BADGE = _FD / "src" / "components" / "agents" / "SharedCountBadge.tsx"
 _CHAT_PANEL = _FD / "src" / "components" / "agents" / "ChatPanel.tsx"
 _SHARED_CARD = _FD / "src" / "components" / "agents" / "SharedAgentCard.tsx"
@@ -1241,7 +1242,8 @@ _TOGGLE_DECLS = [
     (_SHARED, [
         "sharedCaps", "agentInSentence", "googleOptInLabel", "googleOptInWarning", "googleOptInHint",
     ]),
-    (_TOGGLE, ["SharedAgentGoogleToggle"]),
+    (_SWITCH_TRACK, ["SwitchTrack"]),
+    (_TOGGLE, ["GoogleMark", "SharedAgentGoogleToggle"]),
 ]
 
 
@@ -1333,6 +1335,77 @@ def test_google_toggle_hint_until_google_is_connected():
     assert _CONNECT_HINT not in out["compactText"]
     assert _CONNECT_HINT not in out["connected"]
     assert out["compactConnectedTitle"] is None
+
+
+
+def test_compact_google_switch_is_one_labelled_pill():
+    out = _toggle("""
+      const off = SharedAgentGoogleToggle({ agent: row({}), compact: true });
+      const on = SharedAgentGoogleToggle({ agent: row({ google_enabled: true }), compact: true });
+      const swOff = switchOf(off), swOn = switchOf(on);
+      // The pill's own words (its first text span) — what a voice-control user says.
+      const words = (sw) => text(find(sw, (n) => n.type === 'span' && typeof n.children[0] === 'string'));
+      out = {
+        offText: text(swOff), onText: text(swOn),
+        offWords: words(swOff), onWords: words(swOn), offLabel: swOff.props['aria-label'],
+        offChecked: swOff.props['aria-checked'], onChecked: swOn.props['aria-checked'],
+        label: swOn.props['aria-label'], title: swOn.props.title,
+        // The track inside the pill shows the same state.
+        track: [find(swOff, (n) => n.type === SwitchTrack).props.on,
+                find(swOn, (n) => n.type === SwitchTrack).props.on],
+        mark: !!find(swOn, (n) => n.type === GoogleMark),
+        hintTitle: switchOf(SharedAgentGoogleToggle({ agent: row({ google_connected: false }),
+                                                       compact: true })).props.title,
+      };
+    """)
+    # The agent's name lives in the accessible name and tooltip, not the pill;
+    # the words don't change with the state (aria-checked and the track do).
+    assert out["offText"] == out["onText"] == "Use my GoogleGmail · Calendar · Drive"
+    # WCAG 2.5.3: the visible label is part of the accessible name, on and off.
+    assert out["offWords"] == out["onWords"] == "Use my Google"
+    for words, name in ((out["offWords"], out["offLabel"]), (out["onWords"], out["label"])):
+        assert words.lower() in name.lower()
+    assert (out["offChecked"], out["onChecked"]) == (False, True)
+    assert out["label"] == out["title"] == "Let Helper use my Google during my chats"
+    assert out["track"] == [False, True]
+    assert out["mark"] is True
+    assert out["hintTitle"] == _CONNECT_HINT
+
+
+def test_full_google_switch_keeps_the_sentence_and_track():
+    out = _toggle("""
+      const sw = switchOf(SharedAgentGoogleToggle({ agent: row({ google_enabled: true }) }));
+      out = { text: text(sw), track: find(sw, (n) => n.type === SwitchTrack).props.on };
+    """)
+    assert out == {"text": "Let Helper use my Google during my chats", "track": True}
+
+
+def test_switch_knob_stays_on_its_track():
+    # Regression: the knob had no left inset, so inside a <button> it started at
+    # the button's centre and the "on" knob slid off the track over the label.
+    out = _lift([(_SWITCH_TRACK, ["SwitchTrack"])], _TOGGLE_HARNESS + """
+      const cls = (on) => { const t = SwitchTrack({ on }); return [t.props, t.children[0].props.className]; };
+      const [offTrack, offKnob] = cls(false), [onTrack, onKnob] = cls(true);
+      out = { hidden: offTrack['aria-hidden'], offTrack: offTrack.className, onTrack: onTrack.className,
+              offKnob, onKnob };
+    """, tsx=True)
+    assert out["hidden"] == "true"
+    for knob in (out["offKnob"], out["onKnob"]):
+        assert "absolute" in knob.split() and "left-0.5" in knob.split()
+    # h-4 w-7 track (28px), h-3 w-3 knob (12px): left 2px, on = 2 + 12 → 2px each side.
+    assert "translate-x-0" in out["offKnob"].split() and "translate-x-3" in out["onKnob"].split()
+    assert "h-4" in out["onTrack"].split() and "w-7" in out["onTrack"].split()
+    assert "bg-sky-500" in out["onTrack"].split() and "bg-zinc-600" in out["offTrack"].split()
+
+
+def test_every_member_switch_uses_the_shared_track():
+    quality = _FD / "src" / "components" / "QualityControls.tsx"
+    packs = _FD / "src" / "components" / "agents" / "ContextPacksModal.tsx"
+    for src in (_TOGGLE, quality, packs):
+        body = src.read_text(encoding="utf-8")
+        assert "<SwitchTrack on={on} />" in body, src.name
+        # No hand-rolled knob left behind.
+        assert "translate-x-3.5" not in body and "translate-x-0.5" not in body, src.name
 
 
 # ── the store: optimistic switch, rolled back on failure; owner counts ──

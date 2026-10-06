@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ChevronDown, ChevronRight, Gauge } from 'lucide-react'
 import { LEVERS, COST_STYLE, applyPreset, setFlag } from '../services/quality'
 import type { QualityProfile, Scope, BoolFlag } from '../services/quality'
+import { SwitchTrack } from './common/SwitchTrack'
 
 const PRESET_STYLE: Record<string, string> = {
   off: 'bg-slate-500 text-white',   // fixed neutral (zinc + text-white washes out in light theme)
@@ -21,11 +22,9 @@ function Switch({ on, onClick, disabled }: { on: boolean; onClick: () => void; d
   return (
     <button
       type="button" role="switch" aria-checked={on} onClick={onClick} disabled={disabled}
-      className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${
-        disabled ? 'cursor-not-allowed opacity-40' : ''} ${on ? 'bg-sky-500' : 'bg-zinc-700'}`}
+      className={`flex shrink-0 rounded-full ${disabled ? 'cursor-not-allowed opacity-40' : ''}`}
     >
-      <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-transform ${
-        on ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+      <SwitchTrack on={on} />
     </button>
   )
 }
