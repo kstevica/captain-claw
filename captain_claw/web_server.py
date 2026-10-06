@@ -2215,10 +2215,14 @@ class WebServer:
 
     async def _get_version(self, request: web.Request) -> web.Response:
         from captain_claw import __version__, __build_date__
+        from captain_claw.pack_access import PACKS_CAPABILITY
         return web.json_response({
             "version": __version__,
             "build_date": __build_date__,
             "name": "Captain Claw",
+            # Flight Deck probes this to tell an agent that understands shared
+            # context packs from one that would ignore them (PR B, J15).
+            "capabilities": [PACKS_CAPABILITY],
         })
 
     # ── Public session API ──────────────────────────────────────────

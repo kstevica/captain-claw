@@ -25,8 +25,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from captain_claw.flight_deck import context_packs, speaker_grants
 from captain_claw.flight_deck import deep_memory_service as svc
-from captain_claw.flight_deck import speaker_grants
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck.deep_memory_filter import FilterByError, validate_filter_by
 from captain_claw.logging import get_logger
@@ -173,6 +173,9 @@ class AgentSearchBody(BaseModel):
     query: str
     max_results: int = 10
     filter_by: str = ""
+    # Context packs: also search the deep memory others shared on this agent
+    # (new agents only; default False keeps old agents on the A2 response).
+    packs: bool = False
 
 
 class AgentIndexBody(BaseModel):
@@ -375,6 +378,7 @@ async def agent_search(body: AgentSearchBody, request: Request) -> dict[str, Any
     owner = acting.user_id if acting else _agent_owner(request)
     _require_connection()
     combined = _checked_filter(body.filter_by)
+    own_extra = ""
     if acting is None:
         # Narrow recall by the agent's grid recall_mode (pool → no narrowing).
         # ANDed onto any caller-supplied filter; the owner scope is ANDed again
@@ -383,14 +387,28 @@ async def agent_search(body: AgentSearchBody, request: Request) -> dict[str, Any
         from captain_claw.flight_deck.archetype_compose import recall_filter
 
         tags, recall = _agent_grid(request)
-        rf = recall_filter(recall, tags)
-        if rf:
-            combined = f"({combined}) && {rf}" if combined else rf
-    return {
-        "results": svc.search(
-            owner, body.query, max_results=body.max_results, filter_by=combined
-        )
-    }
+        own_extra = recall_filter(recall, tags)
+    packs, vfs_packs = [], []
+    if body.packs:
+        # Context packs: the deep memory others shared on this agent, computed
+        # live (never raises — no packs on any error).
+        packs, vfs_packs = await context_packs.deep_memory_packs(get_db(), request, acting, owner)
+    if not packs:  # the A2 path: byte-identical query and response
+        if own_extra:
+            combined = f"({combined}) && {own_extra}" if combined else own_extra
+        return {
+            "results": svc.search(
+                owner, body.query, max_results=body.max_results, filter_by=combined
+            )
+        }
+    # The grid narrowing applies to the caller's own pool only; each shared
+    # pool is narrowed to its slice; the caller's filter is ANDed onto all.
+    scopes = [(owner, own_extra)] + [
+        (p.pack_owner, context_packs.slice_filter(p.tags)) for p in packs]
+    hits = svc.search_scoped(scopes, body.query, max_results=body.max_results,
+                             filter_by=combined)
+    log.info("Deep-memory search with shared packs", owner=owner, packs=len(packs))
+    return {"results": context_packs.decorate_hits(hits, owner, packs, vfs_packs)}
 
 
 @router.post("/agent/index")

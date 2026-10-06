@@ -20,6 +20,10 @@ import {
 } from '../services/profile'
 import { CappedTextarea } from '../components/profile/CappedTextarea'
 import { DeckProfileDefaults } from '../components/profile/DeckProfileDefaults'
+import { MyContextPacks } from '../components/profile/MyContextPacks'
+import { useSharedAgentStore } from '../stores/sharedAgentStore'
+import type { MyPackRow } from '../services/contextPacks'
+import { MY_PACKS_HEADING, MY_PACKS_ID, profilePackAgents, profileSharedNote } from '../utils/contextPacks'
 
 const FIELDS: (keyof ProfileFields)[] = ['about_me', 'company', 'instructions']
 const PREVIEW_MODES: PreviewMode[] = ['compact', 'full']
@@ -39,6 +43,13 @@ export function ProfilePage({ kiosk = false, onDirtyChange }: {
   const authEnabled = useAuthStore((s) => s.authEnabled)
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const setView = useUIStore((s) => s.setView)
+  // Context packs: what I share with agents' people (only on a deck that offers it).
+  const contextPacks = useSharedAgentStore((s) => s.contextPacks)
+  // Known only once the shared-agent list has loaded: before that a deck with
+  // sharing on would look like one with it off.
+  const sharedLoaded = useSharedAgentStore((s) => s.loaded)
+  // My packs, as the "Shared with agents’ people" card last loaded them.
+  const [myPacks, setMyPacks] = useState<MyPackRow[]>([])
   const [data, setData] = useState<ProfileResponse | null>(null)
   const [draft, setDraft] = useState<ProfileFields>(EMPTY_PROFILE)
   const [loading, setLoading] = useState(true)
@@ -69,6 +80,13 @@ export function ProfilePage({ kiosk = false, onDirtyChange }: {
   }, [])
 
   useEffect(() => { load() }, [load])
+  // The shared-agent list is polled by the Agent Desktop and the simple
+  // layout; opened straight onto this page, ask once whether the deck offers
+  // context packs.
+  useEffect(() => {
+    const shared = useSharedAgentStore.getState()
+    if (!shared.loaded) void shared.fetch()
+  }, [])
 
   const dirty = !!data && FIELDS.some((k) => draft[k] !== data.profile[k])
   useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
@@ -106,6 +124,11 @@ export function ProfilePage({ kiosk = false, onDirtyChange }: {
   const deckEmpty = !deck || (!deck.company.trim() && !deck.instructions.trim())
   const usingDeckCompany = !!deck?.company.trim() && !draft.company.trim()
   const preview = data ? data.preview[previewMode] : ''
+  // About me and My company also go to every agent my profile is shared on.
+  const sharedNote = contextPacks ? profileSharedNote(profilePackAgents(myPacks)) : ''
+  const showMyPacks = () => {
+    document.getElementById(MY_PACKS_ID)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
   const card = 'rounded-lg border border-zinc-800 bg-zinc-900/60 p-5 space-y-4'
 
   // Admin is another page: leaving drops the draft, so ask first.
@@ -156,6 +179,18 @@ export function ProfilePage({ kiosk = false, onDirtyChange }: {
             {/* Your profile */}
             <div className={card}>
               <p className="text-[11px] text-zinc-500">{ECO_SHORTENED_HINT}</p>
+              {sharedNote && (
+                <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-800 dark:text-amber-200">
+                  {sharedNote}{' '}
+                  <button
+                    type="button"
+                    onClick={showMyPacks}
+                    className="font-medium underline underline-offset-2 hover:no-underline"
+                  >
+                    {`See “${MY_PACKS_HEADING}”`}
+                  </button>
+                </div>
+              )}
               <CappedTextarea
                 label="About me"
                 value={draft.about_me}
@@ -298,6 +333,15 @@ export function ProfilePage({ kiosk = false, onDirtyChange }: {
                 </p>
               )}
             </div>
+
+            {/* What I share with agents' people (context packs), on every
+                agent — also with sharing off (paused, still stoppable) while
+                Flight Deck lists any; hidden only on a deck without packs. */}
+            <MyContextPacks
+              sharingOff={sharedLoaded && !contextPacks}
+              showEmpty={contextPacks}
+              onPacks={setMyPacks}
+            />
           </div>
         )}
       </div>

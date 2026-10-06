@@ -1,19 +1,24 @@
 import { useState } from 'react'
-import { Users, MessageSquare, LogOut, Loader2 } from 'lucide-react'
+import { Users, MessageSquare, LogOut, Loader2, Layers } from 'lucide-react'
 import type { SharedAgent } from '../../services/sharedAgents'
 import { useChatStore } from '../../stores/chatStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { SharedAgentGoogleToggle } from './SharedAgentGoogleToggle'
+import { ContextPacksModal } from './ContextPacksModal'
+import { PACKS_BUTTON } from '../../utils/contextPacks'
 
 // An agent another deck user shared with you, on the Agent Desktop. No power,
 // config or the owner's files and memory — those stay with its owner. On a
 // process agent the member's own Google switch lives here (and in the chat).
+// "Shared context" opens what the member shares with the agent's people.
 
 export function SharedAgentCard({ agent }: { agent: SharedAgent }) {
   const openSharedChat = useChatStore((s) => s.openSharedChat)
   const leave = useSharedAgentStore((s) => s.leave)
+  const contextPacks = useSharedAgentStore((s) => s.contextPacks)
   const [leaving, setLeaving] = useState(false)
+  const [showPacks, setShowPacks] = useState(false)
   const running = agent.status === 'running'
   const owner = agent.owner_name || agent.owner_email || 'another user'
   const name = agent.name || agent.slug
@@ -63,6 +68,16 @@ export function SharedAgentCard({ agent }: { agent: SharedAgent }) {
           <MessageSquare className="h-3.5 w-3.5" />
           Chat
         </button>
+        {contextPacks && (
+          <button
+            onClick={() => setShowPacks(true)}
+            title={`What you share with everyone who uses ${name}`}
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+          >
+            <Layers className="h-3.5 w-3.5" />
+            {PACKS_BUTTON}
+          </button>
+        )}
         <button
           onClick={handleLeave}
           disabled={leaving}
@@ -73,6 +88,9 @@ export function SharedAgentCard({ agent }: { agent: SharedAgent }) {
           Leave
         </button>
       </div>
+      {contextPacks && showPacks && (
+        <ContextPacksModal agentRef={agent.agent_ref} agentName={name} onClose={() => setShowPacks(false)} />
+      )}
     </div>
   )
 }

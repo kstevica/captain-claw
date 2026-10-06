@@ -17,6 +17,8 @@ Nothing is ever written back to Drive. Nothing is mirrored until asked for.
 from __future__ import annotations
 
 import json
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath as PurePosix
@@ -201,19 +203,80 @@ def find_mount(abs_path: Path) -> tuple[Path, str] | None:
     Walks up looking for a ``.drive-manifest.json``. This is how the read/grep
     hooks recognise a Drive placeholder without threading mount state through
     every tool — an absolute path is all they have.
+
+    A manifest is honoured only in a mount directory, ``<user root>/.drive/<name>/``
+    with that ``.drive`` folder DIRECTLY under a VFS user root (one level below
+    a VFS base, :func:`_vfs_bases`) — the only place :func:`create_mount` /
+    :func:`mount_root` ever put one. A ``.drive-manifest.json`` anywhere else
+    (e.g. planted in an ordinary project folder, even under a ``.drive/<x>/``
+    folder there, through a file route that accepts dot names) is ignored by
+    every caller, so it can never make a reader's Google account fetch a file
+    or write a cache into that folder.
     """
     try:
         p = abs_path.resolve()
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
         return None
+    bases: frozenset[Path] | None = None
     for anc in [p, *p.parents]:
-        if (anc / MANIFEST_NAME).is_file():
-            try:
-                rel = p.relative_to(anc).as_posix()
-            except ValueError:
-                return None
-            return anc, ("" if rel == "." else rel)
+        if anc.parent.name != MOUNTS_DIRNAME:
+            continue
+        if not (anc / MANIFEST_NAME).is_file():
+            continue
+        if bases is None:
+            bases = _vfs_bases()
+        if anc.parent.parent.parent not in bases:
+            continue  # a `.drive/<x>/` inside a project, not at a user root
+        try:
+            rel = p.relative_to(anc).as_posix()
+        except ValueError:
+            return None
+        return anc, ("" if rel == "." else rel)
     return None
+
+
+# (inputs of vfs.vfs_base and FD's DATA_DIR) → the resolved bases. Bounded.
+_BASES_CACHE: dict[tuple, frozenset[Path]] = {}
+_FD_SERVER_MODULE = "captain_claw.flight_deck.server"
+
+
+def _vfs_bases() -> frozenset[Path]:
+    """The VFS base(s) user roots hang off in this process — a mount's
+    ``.drive`` folder may only sit one level below one of them.
+
+    Both implementations of the ``<root>/vfs/<user>`` layout count (see
+    :func:`user_root`): the agent-side cascade (:func:`vfs.vfs_base`) and,
+    inside Flight Deck, ``server.DATA_DIR / "vfs"``. The server is consulted
+    only when this process has already imported it — an agent never imports
+    Flight Deck from here. Memoised on what the answer depends on, because grep
+    asks once per file of a mount. Any error → no base (no mount honoured).
+    """
+    srv = sys.modules.get(_FD_SERVER_MODULE)
+    data_dir = getattr(srv, "DATA_DIR", None) if srv is not None else None
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = ""
+    key = (vfs.vfs_base, os.environ.get("CLAW_VFS_ROOT", ""),
+           os.environ.get("FD_DATA_DIR", ""), cwd, str(data_dir or ""))
+    hit = _BASES_CACHE.get(key)
+    if hit is not None:
+        return hit
+    found: set[Path] = set()
+    try:
+        found.add(vfs.vfs_base().resolve())
+    except (OSError, RuntimeError, ValueError):
+        pass
+    if data_dir is not None:
+        try:
+            found.add((Path(data_dir) / "vfs").resolve())
+        except (OSError, RuntimeError, ValueError, TypeError):
+            pass
+    out = frozenset(found)
+    if len(_BASES_CACHE) >= 16:
+        _BASES_CACHE.clear()
+    _BASES_CACHE[key] = out
+    return out
 
 
 # ---------------------------------------------------------------------------
