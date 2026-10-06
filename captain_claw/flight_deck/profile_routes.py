@@ -77,6 +77,14 @@ async def put_profile(body: Any = Body(...), user: dict = Depends(get_current_us
     profile.update(updates)
     await tp.save_profile(db, uid, profile)
     updated = await tp.refresh_agents(db, uid)
+    # A profile shared on agents (context packs) is rewritten there too — not
+    # counted in agents_updated, which is about the user's own agents.
+    try:
+        from captain_claw.flight_deck import context_packs
+
+        await context_packs.refresh_for_user(db, uid)
+    except Exception:
+        pass
     return {**await _profile_payload(db, uid), "agents_updated": updated}
 
 

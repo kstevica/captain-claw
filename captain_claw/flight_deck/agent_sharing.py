@@ -273,24 +273,7 @@ def resolve_agent_record(ref: str, *, strict: bool = False) -> AgentRecord | Non
             if strict:
                 raise RecordUnavailable("process registry unreadable") from exc
             return None
-        entry = registry.get(slug) if isinstance(registry, dict) else None
-        if not isinstance(entry, dict):
-            return None
-        inst = process_instance_id(slug, entry)
-        if not inst or not hmac.compare_digest(inst, instance):
-            return None
-        try:
-            port = int(entry.get("web_port") or 0)
-        except (TypeError, ValueError):
-            port = 0
-        return AgentRecord(
-            runtime="process", slug=slug, instance=inst,
-            owner=str(entry.get("owner") or ""),
-            name=str(entry.get("name") or slug),
-            description=str(entry.get("description") or ""),
-            port=port, web_auth=str(entry.get("web_auth") or ""),
-            running=bool(_srv._process_is_alive(slug)),
-        )
+        return _process_record(slug, instance, registry)
 
     try:
         containers = _srv._deck_containers(all=True)
@@ -298,7 +281,83 @@ def resolve_agent_record(ref: str, *, strict: bool = False) -> AgentRecord | Non
         if strict:
             raise RecordUnavailable("docker unavailable") from exc
         return None
-    for c in containers:
+    return _docker_record(slug, instance, containers)
+
+
+def resolve_agent_records(refs, *, strict: bool = False) -> dict[str, AgentRecord | None]:
+    """:func:`resolve_agent_record` for many refs off ONE read of FD's records:
+    the process registry read once and this deck's containers listed once
+    (each only when a ref of that runtime is asked for), instead of a read and
+    a full Docker listing — one inspect per container — per ref. For a caller
+    resolving a batch, such as the shared-context reconcile round.
+
+    A malformed ref → None. A ref whose records couldn't be read (a damaged
+    registry, Docker unreachable) → None, or with ``strict`` it is left OUT of
+    the answer: can't tell right now, which is not "gone"."""
+    from captain_claw.flight_deck import server as _srv
+
+    out: dict[str, AgentRecord | None] = {}
+    parsed: dict[str, tuple[str, str, str]] = {}
+    for ref in {str(r) for r in (refs or ()) if r}:
+        try:
+            parsed[ref] = parse_ref(ref)
+        except ValueError:
+            out[ref] = None
+    runtimes = {runtime for runtime, _slug, _inst in parsed.values()}
+    registry: dict = {}
+    containers: list = []
+    unreadable: set[str] = set()
+    if "process" in runtimes:
+        try:
+            registry = (_srv._load_process_registry_strict() if strict
+                        else _srv._load_process_registry())
+        except Exception:
+            unreadable.add("process")
+    if runtimes - {"process"}:
+        try:
+            containers = list(_srv._deck_containers(all=True))
+        except Exception:  # Docker unavailable
+            unreadable.add("docker")
+    for ref, (runtime, slug, instance) in parsed.items():
+        kind = "process" if runtime == "process" else "docker"
+        if kind in unreadable:
+            if not strict:
+                out[ref] = None
+            continue
+        out[ref] = (_process_record(slug, instance, registry) if kind == "process"
+                    else _docker_record(slug, instance, containers))
+    return out
+
+
+def _process_record(slug: str, instance: str, registry) -> AgentRecord | None:
+    """The process agent ``slug`` with ``instance`` in a registry already read."""
+    from captain_claw.flight_deck import server as _srv
+
+    entry = registry.get(slug) if isinstance(registry, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    inst = process_instance_id(slug, entry)
+    if not inst or not hmac.compare_digest(inst, instance):
+        return None
+    try:
+        port = int(entry.get("web_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    return AgentRecord(
+        runtime="process", slug=slug, instance=inst,
+        owner=str(entry.get("owner") or ""),
+        name=str(entry.get("name") or slug),
+        description=str(entry.get("description") or ""),
+        port=port, web_auth=str(entry.get("web_auth") or ""),
+        running=bool(_srv._process_is_alive(slug)),
+    )
+
+
+def _docker_record(slug: str, instance: str, containers) -> AgentRecord | None:
+    """The Docker agent ``slug`` with ``instance`` in a container list already read."""
+    from captain_claw.flight_deck import server as _srv
+
+    for c in containers or ():
         if _docker_slug(c) != slug:
             continue
         inst = docker_instance_id(c)

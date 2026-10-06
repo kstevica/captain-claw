@@ -255,6 +255,13 @@ async def _refresh_owner_profile(db, user_id: str) -> None:
         await tenant_profile.refresh_agents(db, user_id)
     except Exception:
         pass
+    # …and the shared-context labels that name them (context packs).
+    try:
+        from captain_claw.flight_deck import context_packs
+
+        await context_packs.refresh_for_user(db, user_id)
+    except Exception:
+        pass
 
 
 @router.put("/me")

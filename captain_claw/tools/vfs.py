@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from captain_claw import pack_access
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import (
@@ -130,8 +131,23 @@ class VfsTool(Tool):
 
             if action == "list_projects":
                 projects = list_projects()
+                # Shared folders (context packs) live under other people's
+                # roots: listed by alias, never by host path.
+                packs = await pack_access.list_vfs_packs(kwargs.get("_agent"))
+                pack_lines = [
+                    f"  vfs:@{p['alias']}  ·  folder “{p['project']}” shared by {p['owner_name']}"
+                    for p in (packs or [])
+                ]
+                pack_section = (
+                    "\n\nShared with everyone who uses this agent (read-only):\n"
+                    + "\n".join(pack_lines)
+                ) if pack_lines else ""
                 if not projects:
-                    return ToolResult(success=True, content="No projects yet. Writing vfs:<project>/<file> creates one.")
+                    return ToolResult(
+                        success=True,
+                        content="No projects yet. Writing vfs:<project>/<file> creates one."
+                        + pack_section,
+                    )
                 from captain_claw.vfs import read_links
 
                 links = read_links()
@@ -162,10 +178,17 @@ class VfsTool(Tool):
                         note = (f"  ·  Google Drive: {sp.replace('/', ' / ')}"
                                 if sp else "  ·  Google Drive")
                     lines.append(f"  {proj}  ({n} file{'s' if n != 1 else ''}){note}")
-                return ToolResult(success=True, content="Projects:\n" + "\n".join(lines))
+                return ToolResult(success=True, content="Projects:\n" + "\n".join(lines) + pack_section)
+
+            # Shared folders are read-only (belt: the registry refused already).
+            if action in ("mkdir", "mv", "rm") and (
+                    pack_access.is_pack_value(_as_vfs(path))
+                    or (action == "mv" and pack_access.is_pack_value(_as_vfs(to)))):
+                return ToolResult(success=False, error=pack_access.PACKS_READ_ONLY_MESSAGE)
 
             # Remaining actions need a resolved path.
             target = resolve_vfs_path(_as_vfs(path))
+            in_pack = pack_access.pack_of_path(target) is not None if target is not None else False
             if target is None:
                 return ToolResult(success=False, error=f"Invalid vfs path (escapes user root): {path}")
 
@@ -175,6 +198,10 @@ class VfsTool(Tool):
                 if target.is_file():
                     return ToolResult(success=True, content=self._fmt_entry(target))
                 entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+                if in_pack:
+                    # Hidden / bookkeeping names and symlinks leading out of
+                    # the shared folder (or onto a hidden file) aren't shared.
+                    entries = [e for e in entries if pack_access.result_ok(e)]
                 if not entries:
                     return ToolResult(success=True, content=f"{to_display(target)} is empty.")
                 body = "\n".join(self._fmt_entry(e) for e in entries)
@@ -184,7 +211,7 @@ class VfsTool(Tool):
                 if not target.exists():
                     return ToolResult(success=False, error=self._not_found(path, target))
                 lines: list[str] = []
-                self._tree(target, target, lines)
+                self._tree(target, target, lines, pack=in_pack)
                 more = "\n  … (truncated)" if len(lines) >= _TREE_MAX else ""
                 return ToolResult(success=True, content=f"{to_display(target)}:\n" + "\n".join(lines[:_TREE_MAX]) + more)
 
@@ -225,6 +252,9 @@ class VfsTool(Tool):
 
         except Exception as e:
             log.error("vfs tool failed", action=action, path=path, error=str(e))
+            if pack_access.is_pack_value(_as_vfs(path)) or pack_access.is_pack_value(_as_vfs(to)):
+                # Never str(e) for a shared folder: it can carry a host path.
+                return ToolResult(success=False, error=pack_access.PACK_PATH_MESSAGE)
             return ToolResult(success=False, error=str(e))
 
     # ── helpers ──────────────────────────────────────────────────────
@@ -263,7 +293,8 @@ class VfsTool(Tool):
             label += f"  modified {mtime}\n  path: {to_display(p)}"
         return label
 
-    def _tree(self, base: Path, node: Path, out: list[str], prefix: str = "") -> None:
+    def _tree(self, base: Path, node: Path, out: list[str], prefix: str = "",
+              *, pack: bool = False) -> None:
         if len(out) >= _TREE_MAX:
             return
         try:
@@ -273,6 +304,15 @@ class VfsTool(Tool):
         for e in entries:
             if len(out) >= _TREE_MAX:
                 return
-            out.append(f"  {prefix}{e.name}{'/' if e.is_dir() else ''}")
-            if e.is_dir():
-                self._tree(base, e, out, prefix + "  ")
+            if pack:
+                # A shared folder: hidden / bookkeeping names and symlinks
+                # leading out aren't listed, and a symlinked directory is
+                # never descended into (nor shown as one).
+                if not pack_access.result_ok(e):
+                    continue
+                is_dir = e.is_dir() and not e.is_symlink()
+            else:
+                is_dir = e.is_dir()
+            out.append(f"  {prefix}{e.name}{'/' if is_dir else ''}")
+            if is_dir:
+                self._tree(base, e, out, prefix + "  ", pack=pack)

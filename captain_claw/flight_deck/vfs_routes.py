@@ -153,6 +153,24 @@ def _stats(root: Path, cap: int = 20000) -> tuple[int, int, float]:
     return files, total, latest
 
 
+# Google Drive mount bookkeeping (vfs_drive.MOUNTS_DIRNAME / MANIFEST_NAME /
+# CACHE_DIRNAME). A mount lives only at <user root>/.drive/<name>/, which no
+# project path can address, so inside a project these names are never a real
+# mount: nothing here may create one or rename/move anything to one (a planted
+# manifest must not be able to pose as a mount, vfs_drive.find_mount).
+_DRIVE_RESERVED_FOLDED = frozenset({".drive", ".drive-manifest.json", ".drive-cache"})
+RESERVED_NAME_DETAIL = ("“{name}” is reserved for Google Drive mounts and can't be used "
+                        "inside a folder")
+
+
+def _refuse_reserved(path: str) -> None:
+    """400 when any component of a project-relative *path* is a Drive mount
+    bookkeeping name (any case: a case-insensitive filesystem matches it)."""
+    for part in str(path or "").replace("\\", "/").split("/"):
+        if part.casefold() in _DRIVE_RESERVED_FOLDED:
+            raise HTTPException(400, RESERVED_NAME_DETAIL.format(name=part))
+
+
 def _resolve(user_id: str, project: str, path: str) -> Path:
     """Resolve a (project, path) to an absolute path, or 400 on escape."""
     if not project.strip():
@@ -950,6 +968,7 @@ async def write_file(body: WriteBody, user: dict = Depends(get_current_user)):
     """Create or overwrite a text file (used by the in-panel editor)."""
     oid = await _eff_owner(user["id"], body.project, body.owner, write=True)
     _assert_writable(oid, body.project)
+    _refuse_reserved(body.path)
     target = _resolve(oid, body.project, body.path)
     if target.exists() and target.is_dir():
         raise HTTPException(400, "path is a directory")
@@ -963,6 +982,7 @@ async def write_file(body: WriteBody, user: dict = Depends(get_current_user)):
 async def make_dir(body: MkdirBody, user: dict = Depends(get_current_user)):
     oid = await _eff_owner(user["id"], body.project, body.owner, write=True)
     _assert_writable(oid, body.project)
+    _refuse_reserved(body.path)
     target = _resolve(oid, body.project, body.path)
     target.mkdir(parents=True, exist_ok=True)
     return {"ok": True}
@@ -984,6 +1004,7 @@ async def upload_files(
     """
     oid = await _eff_owner(user["id"], project, owner, write=True)
     _assert_writable(oid, project)
+    _refuse_reserved(path)
     dest_dir = _resolve(oid, project, path)
     if dest_dir.exists() and not dest_dir.is_dir():
         raise HTTPException(400, "target path is not a directory")
@@ -1008,6 +1029,7 @@ async def upload_files(
 async def rename_entry(body: RenameBody, user: dict = Depends(get_current_user)):
     oid = await _eff_owner(user["id"], body.project, body.owner, write=True)
     _assert_writable(oid, body.project)
+    _refuse_reserved(body.to)  # renaming one AWAY from a reserved name is fine
     src = _resolve(oid, body.project, body.path)
     dst = _resolve(oid, body.project, body.to)
     if not src.exists():
@@ -1055,6 +1077,16 @@ async def delete_project(project: str, user: dict = Depends(get_current_user)):
         raise HTTPException(404, "project not found")
     shutil.rmtree(root)
     _dm().on_delete(user["id"], project, "", is_dir=True)
+    # Shared-agent context packs: the folder is gone, so are its folder packs
+    # on every agent (the folder that was deleted is the sanitised name).
+    try:
+        from captain_claw.flight_deck import context_packs
+
+        await context_packs.forget_project(
+            get_db(), user["id"], safe_name(project, fallback="shared"))
+    except Exception as exc:
+        log.warning("Could not drop the context packs of a deleted folder",
+                    error=type(exc).__name__)
     return {"ok": True}
 
 

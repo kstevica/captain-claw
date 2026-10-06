@@ -508,6 +508,20 @@ def on_rename(owner_id: str, project: str, old_rel: str, new_rel: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _hit(r) -> dict[str, Any]:
+    return {
+        "reference": r.reference,
+        "source": r.source,
+        "score": round(r.score, 4),
+        "snippet": r.snippet,
+        "summary": r.text_l2 or r.text_l1 or "",
+        "chunk_index": r.chunk_index,
+        "start_line": r.start_line,
+        "end_line": r.end_line,
+        "updated_at": r.updated_at,
+    }
+
+
 def search(
     owner_id: str, query: str, *, max_results: int = 10, filter_by: str = ""
 ) -> list[dict[str, Any]]:
@@ -519,17 +533,31 @@ def search(
     results = index.search(
         query, max_results=max_results, filter_by=filter_by, owner_id=owner_id
     )
-    return [
-        {
-            "reference": r.reference,
-            "source": r.source,
-            "score": round(r.score, 4),
-            "snippet": r.snippet,
-            "summary": r.text_l2 or r.text_l1 or "",
-            "chunk_index": r.chunk_index,
-            "start_line": r.start_line,
-            "end_line": r.end_line,
-            "updated_at": r.updated_at,
-        }
-        for r in results
-    ]
+    return [_hit(r) for r in results]
+
+
+def search_scoped(
+    scopes: list[tuple[str, str]], query: str, *, max_results: int = 10,
+    filter_by: str = "",
+) -> list[dict[str, Any]]:
+    """Search several pools at once (context packs): ``scopes`` is
+    ``[(owner_id, extra_filter), …]``, each pool narrowed by its own extra
+    filter, the caller's *filter_by* ANDed onto all of them (inside
+    ``DeepMemoryIndex``). Every hit carries the ``owner_id`` it came from."""
+    if not scopes:
+        return []
+    index = get_index()
+    if index is None:
+        return []
+    results = index.search(
+        query, max_results=max_results, filter_by=filter_by, owner_scopes=list(scopes)
+    )
+    return [{**_hit(r), "owner_id": r.owner_id} for r in results]
+
+
+def tag_facets(owner_id: str, *, limit: int = 50) -> list[tuple[str, int]]:
+    """``(tag, count)`` of *owner_id*'s pool, most frequent first; [] without an index."""
+    index = get_index()
+    if index is None:
+        return []
+    return index.tag_facets(owner_id, limit=limit)

@@ -7,10 +7,11 @@ import contextvars
 import fnmatch
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Any
 
-from captain_claw import speaker
+from captain_claw import pack_access, speaker
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, project_root, resolve_vfs_path, split_scheme
@@ -31,6 +32,47 @@ _SKIP_DIRS = frozenset({".git", "node_modules", "__pycache__", ".venv", ".captai
 _MAX_FILE_BYTES = 5_000_000   # skip files larger than ~5 MB
 _MAX_FILES = 5000             # bound a worst-case directory scan
 _MAX_LINE_LEN = 400           # trim very long matched lines in output
+
+
+def _realpaths(paths: list[Path]) -> list[Path | None]:
+    """``Path.resolve()`` of each path (None where it raises), resolving each
+    directory once: a file that isn't a symlink resolves to its directory's
+    realpath plus its name — what ``os.path.realpath`` computes, one
+    ``lstat`` per file instead of one per path component."""
+    dirs: dict[str, Path] = {}
+    out: list[Path | None] = []
+    for f in paths:
+        try:
+            p = Path(f)
+            if p.name in ("", ".", ".."):
+                out.append(p.resolve())
+                continue
+            key = str(p.parent)
+            real_dir = dirs.get(key)
+            if real_dir is None:
+                real_dir = dirs[key] = p.parent.resolve()
+            try:
+                is_link = stat.S_ISLNK(os.lstat(p).st_mode)
+            except OSError:
+                is_link = False                  # realpath's rule for a missing name
+            out.append(p.resolve() if is_link else real_dir / p.name)
+        except Exception:
+            out.append(None)
+    return out
+
+
+def _mount_candidates(paths: list[Path], mounts_dirname: str) -> tuple[list[Path], list[Path | None]]:
+    """The files that could lie in a Google Drive mount (a ``.drive``
+    component in their realpath — the only place ``vfs_drive.find_mount``
+    honours a manifest), with those realpaths (None for a file whose realpath
+    can't be told: it stays a candidate, so the Drive checks decide)."""
+    cands: list[Path] = []
+    reals: list[Path | None] = []
+    for f, real in zip(paths, _realpaths(paths)):
+        if real is None or mounts_dirname in real.parts:
+            cands.append(f)
+            reals.append(real)
+    return cands, reals
 
 
 class GrepTool(Tool):
@@ -150,6 +192,9 @@ class GrepTool(Tool):
                     if len(files) >= _MAX_FILES:
                         break
 
+            # A shared folder (vfs:@alias), for every caller: no hidden or
+            # bookkeeping file, nothing a symlink leads to outside it.
+            files = [f for f in files if pack_access.result_ok(f)]
             # A shared-agent member: os.walk lists symlinked files (and reads
             # them) — keep only files whose realpath stays in their roots.
             if speaker.member_bound():
@@ -158,12 +203,24 @@ class GrepTool(Tool):
             # Google Drive mounts: a placeholder has only a marker on disk, so
             # searching it would silently miss content that is really there.
             # Skip those and say how many, rather than returning a confident but
-            # incomplete "no matches". Cloned files search normally.
+            # incomplete "no matches". Cloned files search normally. Only files
+            # whose Drive hooks may run go through the filter: a shared folder's
+            # or another user's file is always plain local bytes (kept in order).
             drive_skipped = 0
             try:
-                from captain_claw.vfs_drive import filter_searchable
+                from captain_claw.vfs_drive import MOUNTS_DIRNAME, filter_searchable
 
-                files, drive_skipped = filter_searchable(files)
+                # Only a file under a `.drive/<name>/` mount dir can be a Drive
+                # placeholder (vfs_drive.find_mount), so the Drive-hook check
+                # runs on those only — once for the whole list, reusing their
+                # realpaths; every other file is searched as is either way.
+                cands, reals = _mount_candidates(files, MOUNTS_DIRNAME)
+                hooked = pack_access.drive_hooks_filter(cands, reals) if cands else []
+                if hooked:
+                    hooked_ids = {id(f) for f in hooked}
+                    kept, drive_skipped = filter_searchable(hooked)
+                    kept_ids = {id(f) for f in kept}
+                    files = [f for f in files if id(f) not in hooked_ids or id(f) in kept_ids]
             except Exception as _e:
                 log.debug("Drive grep filter skipped", error=str(_e))
 
@@ -216,10 +273,14 @@ class GrepTool(Tool):
             except (OSError, UnicodeDecodeError):
                 continue  # missing, binary, or unreadable — skip quietly
             scanned += 1
-            try:
-                rel = str(fp.resolve().relative_to(rel_base))
-            except Exception:
-                rel = str(fp)
+            shown = pack_access.display(fp)
+            if shown is not None:
+                rel = shown           # vfs:@alias/… — never a host path
+            else:
+                try:
+                    rel = str(fp.resolve().relative_to(rel_base))
+                except Exception:
+                    rel = str(fp)
             for i, line in enumerate(text.splitlines(), 1):
                 if rx.search(line):
                     matched += 1

@@ -152,7 +152,12 @@ def _resolve_input(path: str, kwargs: dict[str, Any]) -> tuple[Path | None, str 
         file_path = fp
 
     # Google Drive placeholder → fetch its real bytes so OpenCV decodes the
-    # actual image, not the marker text.
+    # actual image, not the marker text. Never for a file in another user's
+    # VFS tree (or a shared folder): those are always plain local files.
+    from captain_claw import pack_access
+
+    if not pack_access.drive_hooks_ok(file_path):
+        return file_path, None
     try:
         from captain_claw.drive_client import DriveError
         from captain_claw.vfs_drive import materialize_sync

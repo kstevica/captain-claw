@@ -3213,6 +3213,28 @@ class AgentContextMixin:
         # A shared-agent member's instance gets the MEMBER's profile (sent by
         # Flight Deck in fd_speaker_context) plus the speaker-mode note in the
         # same slot — never the owner's block.
+        #
+        # Shared context (context packs): what this agent's owner and members
+        # shared with everyone who uses it, composed by Flight Deck into
+        # shared_context*.md. On every instance that may use packs (member
+        # instances and every owner instance, every turn — never a public-
+        # session, BotPort-dispatch, Iskra-body, public_run or CLAW_VFS_SCOPE
+        # agent) it follows the owner / member block, before CACHE_SPLIT.
+        _shared = ""
+        if not _is_being_body():
+            try:
+                from captain_claw import pack_access
+                from captain_claw.tenant_context import (
+                    load_shared_context,
+                    use_compact_tenant_context,
+                )
+                if pack_access.packs_allowed(self):
+                    _shared = load_shared_context(use_compact_tenant_context(
+                        micro=self.instructions.use_micro,
+                        nano=self.instructions.use_nano,
+                    ))
+            except Exception:
+                _shared = ""
         if getattr(self, "_speaker_scoped", False) is True:
             try:
                 from captain_claw.speaker import principal_for, speaker_mode_note
@@ -3234,11 +3256,17 @@ class AgentContextMixin:
                 else:
                     _member_block = _full or _compact
                 _mode_note = speaker_mode_note(principal_for(self))
+                if _shared:
+                    from captain_claw.speaker import SHARED_CONTEXT_MEMBER_NOTE
+
+                    _mode_note = f"{_mode_note} {SHARED_CONTEXT_MEMBER_NOTE}"
                 _member_block = (
                     f"{_member_block}\n\n{_mode_note}" if _member_block
                     else _mode_note
                 )
                 base_prompt = insert_tenant_block(base_prompt, _member_block)
+                if _shared:
+                    base_prompt = insert_tenant_block(base_prompt, _shared)
             except Exception:
                 pass
         elif (not _is_being_body()
@@ -3256,6 +3284,8 @@ class AgentContextMixin:
                 ))
                 if _tenant_block:
                     base_prompt = insert_tenant_block(base_prompt, _tenant_block)
+                if _shared:
+                    base_prompt = insert_tenant_block(base_prompt, _shared)
             except Exception:
                 pass
 
@@ -3609,8 +3639,17 @@ class AgentContextMixin:
         # token coding run). Render it once per turn and reuse it for every
         # LLM call in the turn; `complete()`/`stream()` clear the cache at
         # turn start, and a TTL bounds clock staleness on any path that
-        # skips the reset. A mid-turn `planning_enabled` flip re-renders.
-        _sp_key = bool(getattr(self, "planning_enabled", False))
+        # skips the reset. A mid-turn `planning_enabled` flip re-renders, and
+        # so does a change in whether this instance may use shared context
+        # packs (process-wide settings such as web.public_run): a frozen prompt
+        # carrying the shared block is never reused once packs are off.
+        try:
+            from captain_claw import pack_access as _pack_access
+
+            _packs_ok = bool(_pack_access.packs_allowed(self))
+        except Exception:
+            _packs_ok = False
+        _sp_key = (bool(getattr(self, "planning_enabled", False)), _packs_ok)
         _sp_cache = getattr(self, "_turn_system_prompt", None)
         if (
             isinstance(_sp_cache, tuple)

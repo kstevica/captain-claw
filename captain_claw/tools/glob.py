@@ -9,7 +9,7 @@ from typing import Any
 
 import glob
 
-from captain_claw import speaker
+from captain_claw import pack_access, speaker
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, project_root, split_scheme, to_display
@@ -27,8 +27,11 @@ async def _in_executor(fn: Any) -> Any:
 
 
 def _member_filter(paths: list[str]) -> list[str]:
-    """A member's results: only paths whose realpath stays in their roots
-    (directory symlinks are followed by ``**``). Owner calls: unchanged."""
+    """Every caller: a path in a shared folder of this call (vfs:@alias) only
+    when its realpath stays in that folder on visible names. A member's
+    results also only where the realpath stays in their roots (directory
+    symlinks are followed by ``**``). Owner calls without packs: unchanged."""
+    paths = [p for p in paths if pack_access.result_ok(p)]
     if not speaker.member_bound():
         return paths
     return [p for p in paths if speaker.path_allowed(p)]
@@ -159,6 +162,10 @@ class GlobTool(Tool):
                 def _single() -> list[str]:
                     base_dir = project_root(project)
                     full = str(Path(base_dir) / (rel or "**/*"))
+                    # A shared folder's glob never lists anything outside it
+                    # (an absolute rest, vfs:@alias//elsewhere/*, would
+                    # otherwise be joined literally).
+                    in_pack = pack_access.is_pack_project(project)
                     out: list[str] = []
                     for m in glob.glob(full, recursive=True):
                         mp = Path(m)
@@ -167,6 +174,8 @@ class GlobTool(Tool):
                         try:
                             parts = mp.relative_to(base_dir).parts
                         except ValueError:
+                            if in_pack:
+                                continue
                             parts = ()
                         # Exclude mount internals by their in-project path (the
                         # mount's own dir is .drive/<name>, so checking the
