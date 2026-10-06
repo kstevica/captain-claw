@@ -18,6 +18,19 @@ def _uuid() -> str:
     return uuid.uuid4().hex
 
 
+def _with_run_labels(row: dict) -> dict:
+    """Shape a basna_runs row for readers: the raw column `success` is the judge's
+    automatic label, kept as `judge_success`; `success` becomes the effective label
+    (the human thumbs vote when there is one, else the judge's), so every consumer
+    keeps seeing the human override while the judge verdict survives for calibration.
+    """
+    judge = row.get("success")
+    human = row.get("human_success")
+    row["judge_success"] = judge
+    row["success"] = human if human is not None else judge
+    return row
+
+
 class FlightDeckDB:
     """Async SQLite store for Flight Deck multi-tenant data."""
 
@@ -212,7 +225,9 @@ class FlightDeckDB:
                 weight_at_run  REAL NOT NULL DEFAULT 0.0,
                 output         TEXT NOT NULL DEFAULT '',
                 actions        TEXT NOT NULL DEFAULT '[]',  -- JSON: per-agent tool actions
-                success        INTEGER,            -- NULL until scored; 1 = success, 0 = fail
+                success        INTEGER,            -- judge/auto label: NULL until scored; 1 = success, 0 = fail
+                human_success  INTEGER,            -- human thumbs label: NULL until voted; 1 / 0
+                human_feedback_at TEXT,            -- when the human last voted
                 latency_ms     INTEGER NOT NULL DEFAULT 0,
                 created_at     TEXT NOT NULL
             );
@@ -488,6 +503,8 @@ class FlightDeckDB:
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
             ("basna_runs", "actions", "TEXT NOT NULL DEFAULT '[]'"),
+            ("basna_runs", "human_success", "INTEGER"),
+            ("basna_runs", "human_feedback_at", "TEXT"),
             ("basna_sessions", "progress", "TEXT NOT NULL DEFAULT '[]'"),
             ("basna_sessions", "files", "TEXT NOT NULL DEFAULT '[]'"),
             ("basna_sessions", "analysis", "TEXT NOT NULL DEFAULT '{}'"),
@@ -1511,18 +1528,34 @@ class FlightDeckDB:
             "SELECT * FROM basna_runs WHERE session_id = ? ORDER BY id ASC",
             (session_id,),
         ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+            return [_with_run_labels(dict(r)) for r in await cur.fetchall()]
 
     async def score_basna_run(
         self, run_id: int, user_id: str, success: bool,
     ) -> bool:
-        """Mark a run success/fail, ownership-checked via the parent session."""
+        """Record the judge's automatic success/fail label, ownership-checked via
+        the parent session. Never touches the human label."""
         assert self._db is not None
         cur = await self._db.execute(
             "UPDATE basna_runs SET success = ?"
             " WHERE id = ? AND session_id IN"
             " (SELECT id FROM basna_sessions WHERE user_id = ?)",
             (1 if success else 0, run_id, user_id),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def set_basna_run_human_label(
+        self, run_id: int, user_id: str, success: bool,
+    ) -> bool:
+        """Record a human thumbs vote on a run, ownership-checked via the parent
+        session. Leaves the judge's `success` intact so the pair stays comparable."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "UPDATE basna_runs SET human_success = ?, human_feedback_at = ?"
+            " WHERE id = ? AND session_id IN"
+            " (SELECT id FROM basna_sessions WHERE user_id = ?)",
+            (1 if success else 0, _utcnow(), run_id, user_id),
         )
         await self._db.commit()
         return cur.rowcount > 0
@@ -1814,7 +1847,7 @@ class FlightDeckDB:
             (run_id, user_id),
         ) as cur:
             row = await cur.fetchone()
-            return dict(row) if row else None
+            return _with_run_labels(dict(row)) if row else None
 
     async def adjust_archetype_reliability(
         self, user_id: str, archetype_id: str, domain: str,

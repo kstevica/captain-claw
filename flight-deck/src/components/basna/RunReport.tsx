@@ -20,18 +20,28 @@ import {
 
 function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (success: boolean) => void; onView: (t: string, c: string) => void }) {
   const scored = run.success !== null
+  const voted = run.human_success !== null
+  // The judge's label survives a human vote — show it when the two disagree.
+  const judgeDiffers = voted && run.judge_success !== null && run.judge_success !== run.human_success
   let actions: { tool: string; detail?: string }[] = []
   try { actions = JSON.parse(run.actions || '[]') } catch { actions = [] }
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="text-sm font-medium text-zinc-200">{run.role || run.archetype_id}</span>
           <Badge className="text-sky-700 dark:text-sky-300">{run.tier}</Badge>
           {scored && (
-            run.success === 1
-              ? <Badge className="text-emerald-700 dark:text-emerald-300">success</Badge>
-              : <Badge className="text-rose-700 dark:text-rose-300">fail</Badge>
+            <span title={voted ? 'Your vote' : 'Auto-scored by the judge'}>
+              {run.success === 1
+                ? <Badge className="text-emerald-700 dark:text-emerald-300">success</Badge>
+                : <Badge className="text-rose-700 dark:text-rose-300">fail</Badge>}
+            </span>
+          )}
+          {judgeDiffers && (
+            <span title="The judge's automatic label, kept for calibration">
+              <Badge className="whitespace-nowrap text-zinc-500">judge: {run.judge_success === 1 ? 'success' : 'fail'}</Badge>
+            </span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -78,14 +88,14 @@ function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (suc
         <span className="text-[11px] text-zinc-500">Was this contribution good?</span>
         <button
           onClick={() => onFeedback(true)}
-          className={`rounded p-1 transition-colors ${run.success === 1 ? 'text-emerald-400' : 'text-zinc-500 hover:text-emerald-400'}`}
+          className={`rounded p-1 transition-colors ${run.human_success === 1 ? 'text-emerald-400' : 'text-zinc-500 hover:text-emerald-400'}`}
           title="Mark as good"
         >
           <ThumbsUp className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={() => onFeedback(false)}
-          className={`rounded p-1 transition-colors ${run.success === 0 ? 'text-rose-400' : 'text-zinc-500 hover:text-rose-400'}`}
+          className={`rounded p-1 transition-colors ${run.human_success === 0 ? 'text-rose-400' : 'text-zinc-500 hover:text-rose-400'}`}
           title="Mark as poor"
         >
           <ThumbsDown className="h-3.5 w-3.5" />

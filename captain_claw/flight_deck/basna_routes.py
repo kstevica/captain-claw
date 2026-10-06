@@ -3593,7 +3593,8 @@ async def execute_route(
                                   ok=True, agent=role)
                         return {"ok": True, "output": prior.get("output", ""),
                                 "actions": [], "latency_ms": 0, "model": prior.get("model", ""),
-                                "usage": {}, "restored": True, "_run_id": prior.get("id")}
+                                "usage": {}, "restored": True, "_run_id": prior.get("id"),
+                                "_human_success": prior.get("human_success")}
 
                 # Tag each event with structured fields (agent / tool / detail) so the
                 # UI can group the streaming log into live per-agent panels — not just
@@ -3727,6 +3728,7 @@ async def execute_route(
                     # Resume bookkeeping: a restored agent already has a basna_runs row
                     # (reuse its id for scoring); a fresh one gets a new row below.
                     "restored": bool(d.get("restored")), "_run_id": d.get("_run_id"),
+                    "_human_success": d.get("_human_success"),
                 })
     finally:
         # 3a) Capture any files the agents generated, BEFORE teardown deletes their
@@ -4048,6 +4050,10 @@ async def execute_route(
         if succ is None:  # judge couldn't decide — don't guess
             continue
         await db.score_basna_run(rid, user["id"], succ)
+        if r.get("_human_success") is not None:
+            # Resumed run a human already voted on: their vote is the outcome
+            # reliability counts — the judge label is kept for calibration only.
+            continue
         rel = await db.record_archetype_outcome(
             user["id"], r["archetype_id"], domain, succ, seeds.get(r["archetype_id"], 0.7),
         )
@@ -4661,8 +4667,12 @@ async def run_feedback(
 ):
     """Human override of a run's success — a first-class signal over the auto-score.
 
-    Revises the learned reliability by moving the outcome between buckets (no
-    double-count), whether the run was auto-scored, unscored, or already overridden.
+    The vote lands in its own column (`human_success`); the judge's label in
+    `success` is kept, so judge-vs-human agreement stays measurable. The vote
+    still wins as the effective label: the learned reliability is revised by
+    moving the outcome between buckets (no double-count), whether the run was
+    auto-scored, unscored, or already overridden. A vote that agrees with the
+    judge is recorded but leaves reliability as it is.
     """
     db = get_db()
     run = await db.get_basna_run(run_id, user["id"])
@@ -4676,19 +4686,23 @@ async def run_feedback(
          if a["id"] == run["archetype_id"]), 0.7,
     )
 
-    old = run["success"]  # 1, 0, or None
+    old = run["success"]  # effective label: the human's vote if any, else the judge's (1, 0, None)
     new = 1 if body.success else 0
-    if old == new:
-        return {"changed": False, "run_id": run_id, "success": body.success}
+    if run["human_success"] == new:
+        return {"changed": False, "run_id": run_id, "success": body.success,
+                "judge_success": run["judge_success"]}
 
-    await db.score_basna_run(run_id, user["id"], body.success)
-    if old is None:
-        d_success, d_fail = (1, 0) if new else (0, 1)
-    else:
-        d_success = (1 if new else 0) - (1 if old else 0)
-        d_fail = (0 if new else 1) - (0 if old else 1)
-    rel = await db.adjust_archetype_reliability(
-        user["id"], run["archetype_id"], domain, d_success, d_fail, seed,
-    )
+    await db.set_basna_run_human_label(run_id, user["id"], body.success)
+    rel = None
+    if old != new:
+        if old is None:
+            d_success, d_fail = (1, 0) if new else (0, 1)
+        else:
+            d_success = (1 if new else 0) - (1 if old else 0)
+            d_fail = (0 if new else 1) - (0 if old else 1)
+        rel = await db.adjust_archetype_reliability(
+            user["id"], run["archetype_id"], domain, d_success, d_fail, seed,
+        )
     return {"changed": True, "run_id": run_id, "archetype_id": run["archetype_id"],
-            "domain": domain, "success": body.success, "reliability": rel}
+            "domain": domain, "success": body.success,
+            "judge_success": run["judge_success"], "reliability": rel}
