@@ -711,7 +711,7 @@ def test_sign_out_purges_shared_slices_only():
         ['fd.queue.proc-helper', '{}'],
         ['fd.plan.proc-helper', '{}'],
         ['fd.queue.plan.shared:process:x:0123456789abcdef', '{}'],
-        ['fd.sharedAgentAck.v2.u-ana.process:x:0123456789abcdef', '1'],
+        ['fd.sharedAgentAck.v3.u-ana.process:x:0123456789abcdef', '1'],
       ]) store.set(k, v);
       purgeSharedSlices();
       out = [...store.keys()].sort();
@@ -720,7 +720,7 @@ def test_sign_out_purges_shared_slices_only():
         "fd.queue.proc-helper",
         "fd.plan.proc-helper",
         "fd.queue.plan.shared:process:x:0123456789abcdef",
-        "fd.sharedAgentAck.v2.u-ana.process:x:0123456789abcdef",
+        "fd.sharedAgentAck.v3.u-ana.process:x:0123456789abcdef",
     ])
 
 
@@ -799,7 +799,7 @@ def test_notice_dismissal_is_per_deck_user():
       writeAck(R);
       out = { before, ana, bob, anon, otherAgent, keys, blocked: readAck(R) };
     """)
-    assert out["keys"] == ["fd.sharedAgentAck.v2.u-ana.process:x:0123456789abcdef"]
+    assert out["keys"] == ["fd.sharedAgentAck.v3.u-ana.process:x:0123456789abcdef"]
     assert out["before"] is False
     assert out["ana"] is True
     assert out["bob"] is False
@@ -968,8 +968,9 @@ def test_desktop_shows_shared_with_me_above_your_own_agents():
 
 # ══ A2: members' own Google, deep memory and files (part 3) ═══════════
 
-_ALL_CAPS = {"google": True, "deep_memory": True, "files": True}
-_NO_CAPS = {"google": False, "deep_memory": False, "files": False}
+# PR C adds `datastore` (the agent's datastore as a commons, process agents only).
+_ALL_CAPS = {"google": True, "deep_memory": True, "files": True, "datastore": True}
+_NO_CAPS = {"google": False, "deep_memory": False, "files": False, "datastore": False}
 
 
 def _a1_notice(agent: str, owner: str) -> str:
@@ -1043,16 +1044,19 @@ def test_shared_caps_take_only_an_explicit_true():
         empty: sharedCaps({}),
         nulled: sharedCaps({ capabilities: null }),
         partial: sharedCaps({ capabilities: { google: true, files: 'yes' } }),
-        truthy: sharedCaps({ capabilities: { google: 'true', deep_memory: 1, files: {} } }),
-        docker: sharedCaps({ runtime: 'docker', capabilities: { google: false, deep_memory: false, files: false } }),
-        process: sharedCaps({ capabilities: { google: true, deep_memory: true, files: true } }),
+        truthy: sharedCaps({ capabilities: { google: 'true', deep_memory: 1, files: {}, datastore: 'yes' } }),
+        docker: sharedCaps({ runtime: 'docker', capabilities: { google: false, deep_memory: false, files: false, datastore: false } }),
+        process: sharedCaps({ capabilities: { google: true, deep_memory: true, files: true, datastore: true } }),
+        // An A2-era Flight Deck says nothing about the datastore: not offered.
+        a2Deck: sharedCaps({ capabilities: { google: true, deep_memory: true, files: true } }),
         constant: CHAT_ONLY_CAPS,
       };
     """)
     for key in ("none", "empty", "nulled", "truthy", "docker", "constant"):
         assert out[key] == _NO_CAPS, key
-    assert out["partial"] == {"google": True, "deep_memory": False, "files": False}
+    assert out["partial"] == {"google": True, "deep_memory": False, "files": False, "datastore": False}
     assert out["process"] == _ALL_CAPS
+    assert out["a2Deck"] == {**_ALL_CAPS, "datastore": False}
 
 
 # ── the member notice ───────────────────────────────────────────────
@@ -1116,11 +1120,12 @@ def test_ack_key_is_bumped_so_everyone_sees_the_a2_notice():
       out = { prefix: SHARED_ACK_PREFIX, key: sharedAckKey('u1', 'process:x:0123456789abcdef'),
               anon: sharedAckKey(null, 'process:x:0123456789abcdef') };
     """)
-    assert out["prefix"] == "fd.sharedAgentAck.v2."
-    assert out["key"] == "fd.sharedAgentAck.v2.u1.process:x:0123456789abcdef"
-    assert out["anon"] == "fd.sharedAgentAck.v2.local.process:x:0123456789abcdef"
-    # A dismissal of A1's notice doesn't hide A2's.
+    assert out["prefix"] == "fd.sharedAgentAck.v3."
+    assert out["key"] == "fd.sharedAgentAck.v3.u1.process:x:0123456789abcdef"
+    assert out["anon"] == "fd.sharedAgentAck.v3.local.process:x:0123456789abcdef"
+    # A dismissal of A1's (or A2's) notice doesn't hide PR C's.
     assert not out["key"].startswith("fd.sharedAgentAck.u1.")
+    assert not out["key"].startswith("fd.sharedAgentAck.v2.")
 
 
 # ── the Google opt-in texts ─────────────────────────────────────────

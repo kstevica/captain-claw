@@ -1,4 +1,5 @@
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+import type { Creator } from '../utils/sharedWorkspace'
 
 const BASE = '/fd'
 
@@ -35,6 +36,9 @@ export interface AgentFile {
   mime_type: string
   is_text: boolean
   source: string
+  /** Who created it, for files in a shared agent's saved/ folder (the owner's
+   *  proxies send it; `null` outside saved/). Absent → no badge. */
+  created_by?: Creator | null
 }
 
 export interface AgentEndpoint {

@@ -20,6 +20,10 @@ interface SharedAgentState {
   /** Flight Deck offers context packs ("Shared context"). False on an older
    *  deck or with sharing off — every pack affordance hides. */
   contextPacks: boolean
+  /** Flight Deck serves members a process agent's saved files and datastore
+   *  (the commons panels). False on an older deck or with sharing off — every
+   *  member panel and notice paragraph hides (chat-only, as before). */
+  memberWorkspace: boolean
   loaded: boolean
   fetch: () => Promise<void>
   /** A member turns their Google on/off for one agent shared with them.
@@ -37,6 +41,7 @@ export const useSharedAgentStore = create<SharedAgentState>((set, get) => ({
   agents: [],
   mine: {},
   contextPacks: false,
+  memberWorkspace: false,
   loaded: false,
 
   fetch: async () => {
@@ -56,6 +61,7 @@ export const useSharedAgentStore = create<SharedAgentState>((set, get) => ({
         agents: same ? cur.agents : agents,
         mine: sameMine ? cur.mine : mine,
         contextPacks: enabled && r.context_packs === true,
+        memberWorkspace: enabled && r.member_workspace === true,
         loaded: true,
       })
     } catch {

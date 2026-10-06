@@ -51,6 +51,7 @@ from captain_claw.flight_deck import tenant_profile
 from captain_claw.flight_deck import agent_sharing
 from captain_claw.flight_deck import context_packs
 from captain_claw.flight_deck import speaker_grants
+from captain_claw.flight_deck import shared_workspace
 
 
 # ── Console logging: timestamps + ANSI colors ──────────────────────────
@@ -833,6 +834,10 @@ async def lifespan(app: FastAPI):
         app.state.context_packs_stop = asyncio.Event()
         app.state.context_packs_task = asyncio.create_task(
             context_packs.reconcile_loop(_fd_db, app.state.context_packs_stop))
+        # PR C: once per deck, tell owners of shared process agents that
+        # members can now open those agents' saved/ folders and datastores.
+        app.state.shared_workspace_notice = asyncio.create_task(
+            shared_workspace.notify_owners_of_commons_once(_fd_db))
     if AUTH_ENABLED:
         app.state.fd_db = _fd_db
         # Persist the owning user id into the project-local .env so the
@@ -1316,6 +1321,7 @@ from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck.agent_sharing_routes import router as agent_sharing_router
 from captain_claw.flight_deck.context_pack_routes import router as context_pack_router
+from captain_claw.flight_deck.shared_workspace_routes import router as shared_workspace_router
 from captain_claw.flight_deck.notification_routes import router as notification_router
 from captain_claw.flight_deck.mcp_server_routes import router as mcp_inbound_router
 from captain_claw.flight_deck.mcp_oauth_routes import router as mcp_oauth_router
@@ -1373,6 +1379,7 @@ app.include_router(system_router)
 app.include_router(share_router)
 app.include_router(agent_sharing_router)
 app.include_router(context_pack_router)
+app.include_router(shared_workspace_router)
 app.include_router(notification_router)
 app.include_router(mcp_inbound_router)
 app.include_router(mcp_oauth_router)
@@ -5849,7 +5856,11 @@ async def agent_datastore_tables(
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
-                return resp.json()
+                payload = resp.json()
+                if AUTH_ENABLED:  # PR C: member creators by their current name
+                    payload = await shared_workspace.decorate_owner_payload(
+                        getattr(app.state, "fd_db", None), payload)
+                return payload
             raise HTTPException(resp.status_code, resp.text)
     except httpx.ConnectError:
         raise HTTPException(502, "Cannot connect to agent")
@@ -5875,7 +5886,11 @@ async def agent_datastore_rows(
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
-                return resp.json()
+                payload = resp.json()
+                if AUTH_ENABLED:  # PR C: member creators by their current name
+                    payload = await shared_workspace.decorate_owner_payload(
+                        getattr(app.state, "fd_db", None), payload)
+                return payload
             raise HTTPException(resp.status_code, resp.text)
     except httpx.ConnectError:
         raise HTTPException(502, "Cannot connect to agent")
@@ -5974,6 +5989,11 @@ async def agent_files(host: str, port: int, token: str = "", since: str = "", re
                 agent_reachable = True
     except (httpx.ConnectError, Exception):
         pass
+    # PR C: member creators by their current name (before the workspace-scan
+    # merge below; scan entries carry no created_by).
+    if AUTH_ENABLED and registered:
+        registered = await shared_workspace.decorate_owner_payload(
+            getattr(app.state, "fd_db", None), registered)
 
     # Also scan the workspace directory for any unregistered files
     workspace_files: list[dict] = []
@@ -6419,6 +6439,20 @@ async def agent_file_download(host: str, port: int, path: str, token: str = "", 
         raise HTTPException(502, "Cannot connect to agent")
 
 
+_ACTIVE_VIEW_TYPES = frozenset({"text/html", "application/xhtml+xml", "image/svg+xml",
+                                "text/xml", "application/xml", "text/xsl"})
+
+
+def _active_view_type(content_type: str) -> bool:
+    """A response type a browser renders as a document that can run script:
+    HTML, SVG and every XML type (browsers render any ``*+xml`` type — e.g.
+    ``.rss``/``.atom``/``.xslt`` as the agent labels them — as XML, where
+    XHTML-namespaced script runs)."""
+    base = content_type.split(";", 1)[0].strip().lower()
+    return base in _ACTIVE_VIEW_TYPES or base.endswith("+xml")
+_ACTIVE_VIEW_CSP = "sandbox allow-scripts allow-popups allow-forms allow-modals allow-downloads"
+
+
 @app.get("/fd/agent-file-view/{host}/{port}")
 async def agent_file_view(host: str, port: int, path: str, token: str = "", request: Request = None, user: dict | None = _required_user_dep):
     """Proxy file view from a CC agent (inline, no download header)."""
@@ -6441,10 +6475,16 @@ async def agent_file_view(host: str, port: int, path: str, token: str = "", requ
                     raise HTTPException(resp.status_code, f"Agent returned {resp.status_code}")
             ct = resp.headers.get("content-type", "text/plain")
             from starlette.responses import Response
-            return Response(content=resp.content, headers={
+            headers = {
                 "Content-Type": ct,
                 "Content-Disposition": "inline",
-            })
+                "X-Content-Type-Options": "nosniff",
+            }
+            # PR C (J13): a file a member wrote may be active content — opened
+            # directly, it runs sandboxed (opaque origin), never as Flight Deck.
+            if _active_view_type(ct):
+                headers["Content-Security-Policy"] = _ACTIVE_VIEW_CSP
+            return Response(content=resp.content, headers=headers)
     except httpx.ConnectError:
         raise HTTPException(502, "Cannot connect to agent")
 

@@ -7,6 +7,10 @@
   agent's token, port, host, pid or container id.
 * ``PUT /fd/shared-agents/google`` — a member turns "Let this agent use my
   Google during my chats" on or off for one shared process agent.
+* ``/fd/shared-agents/files*`` and ``/fd/shared-agents/datastore*`` (PR C,
+  served by ``shared_workspace_routes``) — a member's view of a shared process
+  agent's ``saved/`` commons and datastore: browse, view and download
+  everything, upload into their own folder, delete their own files.
 * ``WS /fd/agent-ws-shared?ref=&lane=&fd_token=`` — a member's chat socket.
   The browser names the agent by ref only; FD resolves it from its own records,
   connects to ``ws://localhost:{recorded port}/ws`` with the recorded token and a
@@ -118,7 +122,8 @@ async def list_shared_agents(user: dict = Depends(get_current_user)):
             "owner_name": str(row.get("owner_name") or "") or _email_local(email),
             "owner_email": email,
             "shared_at": str(row.get("created_at") or ""),
-            "capabilities": {"google": process, "deep_memory": process, "files": process},
+            "capabilities": {"google": process, "deep_memory": process, "files": process,
+                             "datastore": process},
             "google_enabled": bool(process and await speaker_grants.google_opted_in(
                 db, uid, ref, owner_id)),
             "google_connected": google_connected,
@@ -126,7 +131,10 @@ async def list_shared_agents(user: dict = Depends(get_current_user)):
     return {"enabled": True, "host_warning": sharing.HOST_TRUST_WARNING, "agents": agents,
             "mine": await _mine(db, uid),
             # PR B: this deck serves /fd/context-packs* (absent = an older FD).
-            "context_packs": True}
+            "context_packs": True,
+            # PR C: this deck serves /fd/shared-agents/files* and
+            # /fd/shared-agents/datastore* (absent = an older FD: chat only).
+            "member_workspace": True}
 
 
 class GoogleOptInBody(BaseModel):

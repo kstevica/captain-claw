@@ -729,8 +729,9 @@ class TestSharedAgentsList:
             "description": "Answers questions", "status": "running", "owner_id": OWNER,
             "owner_name": "Olga Owner", "owner_email": f"{OWNER}@x.co",
             "shared_at": helper["shared_at"],
-            # A2 (test_agent_sharing_grants.py covers these in depth)
-            "capabilities": {"google": True, "deep_memory": True, "files": True},
+            # A2 (test_agent_sharing_grants.py covers these in depth); PR C datastore
+            "capabilities": {"google": True, "deep_memory": True, "files": True,
+                             "datastore": True},
             "google_enabled": False, "google_connected": False}
         assert helper["shared_at"]
         assert rows[_ref("sleepy", "4444444444444444")]["status"] == "stopped"

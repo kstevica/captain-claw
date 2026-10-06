@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { Database, Table2, ChevronRight, Loader2, AlertTriangle, RefreshCw, ChevronLeft, X, Download } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
+import { CreatorBadge } from './CreatorBadge'
+import { CREATED_BY_COLUMN, type Creator } from '../../utils/sharedWorkspace'
 
 interface TableInfo {
   name: string
@@ -8,10 +10,13 @@ interface TableInfo {
   row_count: number
   created_at: string
   updated_at: string
+  /** Who created it (shared agents: a badge in the list). */
+  created_by?: Creator | null
 }
 
 interface QueryResult {
   columns: string[]
+  /** A shared agent's rows also carry `_creator` (never one of `columns`). */
   rows: Record<string, any>[]
   total: number
 }
@@ -51,9 +56,14 @@ interface DatastoreBrowserProps {
   // Deep-link straight to one table (from the run artifacts panel). Optional —
   // omit to open on the table list, as every existing caller does.
   initialTable?: string
+  // OR an agent shared with me, read-only, through Flight Deck's member
+  // routes: named by its agent_ref only (never a host, port or token).
+  sharedRef?: string
+  /** The shared agent's owner, for the "(owner)" badge. */
+  ownerName?: string
 }
 
-export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, title, initialTable, onClose }: DatastoreBrowserProps) {
+export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, title, initialTable, sharedRef, ownerName = '', onClose }: DatastoreBrowserProps) {
   const [tables, setTables] = useState<TableInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -64,12 +74,18 @@ export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, titl
   const [page, setPage] = useState(0)
   const pageSize = 50
 
-  // Route to the VFS folder-bound store or the agent-proxied store.
-  const isVfs = !!vfsProject
-  const base = isVfs
-    ? `/vfs/datastore/${encodeURIComponent(vfsProject as string)}`
-    : `/agent-datastore/${host}/${port}`
-  const tokenQs = !isVfs && auth ? `&token=${encodeURIComponent(auth)}` : ''
+  // Route to a shared agent's member routes, the VFS folder-bound store or the
+  // agent-proxied store.
+  const isShared = !!sharedRef
+  const isVfs = !isShared && !!vfsProject
+  const base = isShared
+    ? '/shared-agents/datastore'
+    : isVfs
+      ? `/vfs/datastore/${encodeURIComponent(vfsProject as string)}`
+      : `/agent-datastore/${host}/${port}`
+  const tokenQs = isShared
+    ? '&ref=' + encodeURIComponent(sharedRef as string)
+    : !isVfs && auth ? `&token=${encodeURIComponent(auth)}` : ''
   const heading = isVfs ? (title || (vfsProject as string)) : `Datastore — ${agentName}`
 
   const fetchTables = async () => {
@@ -85,7 +101,7 @@ export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, titl
     }
   }
 
-  useEffect(() => { fetchTables() }, [host, port, vfsProject])
+  useEffect(() => { fetchTables() }, [host, port, vfsProject, sharedRef])
 
   // Jump straight to a requested table once, when deep-linked from elsewhere.
   const _jumped = useRef(false)
@@ -125,15 +141,23 @@ export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, titl
   const exportTable = (format: string) => {
     if (!selectedTable) return
     const { token: storeToken, authEnabled } = useAuthStore.getState()
-    const authQs = !isVfs && auth ? `&token=${encodeURIComponent(auth)}` : ''
-    const url = `/fd${base}/tables/${encodeURIComponent(selectedTable)}/export?format=${format}${authQs}`
+    // The same query as the listing: the agent's token, or a shared agent's ref.
+    const url = `/fd${base}/tables/${encodeURIComponent(selectedTable)}/export?format=${format}${tokenQs}`
     const a = document.createElement('a')
     a.href = url
     a.download = `${selectedTable}.${format}`
     // For authenticated requests we need to fetch as blob
     if (authEnabled && storeToken) {
       fetch(url, { headers: { Authorization: `Bearer ${storeToken}` }, credentials: 'include' })
-        .then(r => r.blob())
+        .then(async (r) => {
+          // A refusal (e.g. a shared agent that needs a restart) is shown, not
+          // saved as the "export".
+          if (!r.ok) {
+            const body = await r.json().catch(() => ({}))
+            throw new Error((typeof body?.detail === 'string' && body.detail) || `Export failed: ${r.status}`)
+          }
+          return r.blob()
+        })
         .then(blob => {
           const blobUrl = URL.createObjectURL(blob)
           a.href = blobUrl
@@ -142,6 +166,7 @@ export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, titl
           document.body.removeChild(a)
           URL.revokeObjectURL(blobUrl)
         })
+        .catch((e) => setError(e instanceof Error ? e.message : String(e)))
     } else {
       document.body.appendChild(a)
       a.click()
@@ -152,6 +177,10 @@ export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, titl
 
   const selectedTableInfo = tables.find((t) => t.name === selectedTable)
   const totalPages = rows ? Math.ceil(rows.total / pageSize) : 0
+  // Who added each row: always in a member's view; in the owner's only when a
+  // member added some of these rows, so tables without any look as before.
+  const rowColumns = rows ? rows.columns.filter((c) => c !== '_creator') : []
+  const showCreator = !!rows && (isShared || rows.rows.some((r) => r?._creator?.kind === 'member'))
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
@@ -212,7 +241,10 @@ export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, titl
                     >
                       <Table2 className="h-4 w-4 text-emerald-400/70 shrink-0" />
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium text-zinc-200">{table.name}</div>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="min-w-0 truncate text-sm font-medium text-zinc-200">{table.name}</span>
+                          <CreatorBadge mode={sharedRef ? 'member' : 'owner'} creator={table.created_by} ownerName={ownerName} />
+                        </div>
                         <div className="text-[11px] text-zinc-500 mt-0.5">
                           {table.columns.length} columns · {table.row_count} rows
                           {table.columns.length > 0 && (
@@ -281,21 +313,26 @@ export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, titl
 
               {/* Data table */}
               <div className="flex-1 overflow-auto">
-                {rows && rows.columns.length > 0 && rows.rows.length > 0 ? (
+                {rows && rowColumns.length > 0 && rows.rows.length > 0 ? (
                   <table className="w-full text-xs">
                     <thead className="sticky top-0 bg-zinc-900 z-10">
                       <tr>
-                        {rows.columns.map((col) => (
+                        {rowColumns.map((col) => (
                           <th key={col} className="px-3 py-2 text-left font-medium text-zinc-400 border-b border-zinc-800 whitespace-nowrap">
                             {col}
                           </th>
                         ))}
+                        {showCreator && (
+                          <th className="px-3 py-2 text-left font-medium text-zinc-400 border-b border-zinc-800 whitespace-nowrap">
+                            {CREATED_BY_COLUMN}
+                          </th>
+                        )}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/50">
                       {rows.rows.map((row, i) => (
                         <tr key={i} className="hover:bg-zinc-800/30">
-                          {rows.columns.map((col) => {
+                          {rowColumns.map((col) => {
                             const cell = row[col]
                             return (
                               <td key={col} className="px-3 py-1.5 text-zinc-300 whitespace-nowrap max-w-[300px] truncate font-mono">
@@ -303,6 +340,11 @@ export function DatastoreBrowser({ host, port, auth, agentName, vfsProject, titl
                               </td>
                             )
                           })}
+                          {showCreator && (
+                            <td className="px-3 py-1.5 whitespace-nowrap">
+                              <CreatorBadge mode={isShared ? 'member' : 'owner'} creator={row._creator} ownerName={ownerName} />
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>

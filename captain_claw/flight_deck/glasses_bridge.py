@@ -932,6 +932,9 @@ async def step_deck_and_wait(
     return (ch.deck_index or 0, ch.deck_total or 0)
 
 
+DECK_MEMBER_FILE_DETAIL = "A file added by a member of this shared agent can't be presented as a deck"
+
+
 @router.get("/deck/view", response_class=HTMLResponse)
 async def deck_view(
     request: Request, c: str = "", path: str = "",
@@ -985,7 +988,14 @@ async def deck_view(
         payload = json.loads(body_text)
         html = payload.get("content", "") if isinstance(payload, dict) else body_text
     except Exception:
+        payload = None
         html = body_text
+    # PR C: a file a member of a shared agent added (the agent reports its
+    # creator) is never served as a page at the FD origin. An older agent
+    # sends no ``created_by``: unchanged.
+    cb = payload.get("created_by") if isinstance(payload, dict) else None
+    if isinstance(cb, dict) and cb.get("kind") == "member":
+        raise HTTPException(status_code=403, detail=DECK_MEMBER_FILE_DETAIL)
     inject = (_STATIC_DIR / "deck_inject.html").read_text(encoding="utf-8")
     inject = (
         "<script>window.__DECK_CHANNEL__=" + json.dumps(c) +
@@ -1123,6 +1133,28 @@ async def _agent_get(
 _GLASSES_FILE_EXTS = {".md", ".markdown", ".html", ".htm"}
 
 
+def _glasses_member_file(created_by: Any) -> bool:
+    """PR C: whether the glasses viewer must show a file as plain text.
+
+    Fails closed: any ``created_by`` the agent sent that isn't the owner's
+    (a member's, or a kind this deck doesn't know) counts. ``None`` — outside
+    saved/, or an older agent that sends no creator — keeps the old render.
+    """
+    if created_by is None:
+        return False
+    return not (isinstance(created_by, dict) and created_by.get("kind") == "owner")
+
+
+def _glasses_creator(created_by: Any) -> dict | None:
+    """The slim creator a file-list entry carries, so the page can label it."""
+    if created_by is None:
+        return None
+    if not isinstance(created_by, dict):
+        return {"kind": "unknown", "name": ""}
+    return {"kind": str(created_by.get("kind") or "unknown"),
+            "name": str(created_by.get("name") or "")}
+
+
 @router.get("/glasses/datastore/tables")
 async def glasses_ds_tables(request: Request, c: str = "") -> Response:
     """List the bound agent's datastore tables (name, columns, row_count)."""
@@ -1192,6 +1224,8 @@ async def glasses_files(request: Request, c: str = "") -> JSONResponse:
             "extension": ext,
             "size": f.get("size", 0),
             "modified": f.get("modified", 0),
+            "created_by": _glasses_creator(f.get("created_by")),
+            "member_file": _glasses_member_file(f.get("created_by")),
         })
     out.sort(key=lambda f: float(f.get("modified") or 0), reverse=True)
     return JSONResponse(out, headers=_NO_CACHE)
@@ -1201,14 +1235,29 @@ async def glasses_files(request: Request, c: str = "") -> JSONResponse:
 async def glasses_file_content(
     request: Request, c: str = "", path: str = "",
 ) -> Response:
-    """Text content of one .md / .html file from the bound agent."""
+    """Text content of one .md / .html file from the bound agent.
+
+    PR C: like /deck/view, a file a member of a shared agent added is never
+    rendered as markup at the FD origin — the reply carries ``member_file``
+    and the page then shows it as escaped plain text.
+    """
     _check_token(request)
     if not c:
         raise HTTPException(status_code=400, detail="missing channel ?c=")
     if not path:
         raise HTTPException(status_code=400, detail="missing ?path=")
     ch = await _get_or_create_channel(c)
-    return await _agent_get(ch, "/api/files/content", {"path": path})
+    resp = await _agent_get(ch, "/api/files/content", {"path": path})
+    if resp.status_code != 200:
+        return resp
+    try:
+        payload = json.loads(resp.body)
+    except Exception:
+        return resp
+    if not isinstance(payload, dict):
+        return resp
+    payload["member_file"] = _glasses_member_file(payload.get("created_by"))
+    return JSONResponse(payload, headers=_NO_CACHE)
 
 
 # ── Image upload proxy ────────────────────────────────────────────────

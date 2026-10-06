@@ -3,6 +3,8 @@ import { Database, Table2, Loader2, AlertCircle, RefreshCw, Search } from 'lucid
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 import { useAgentEndpoint } from './AgentFilesPanel'
 import { DatastoreBrowser } from './DatastoreBrowser'
+import { CreatorBadge } from './CreatorBadge'
+import type { Creator } from '../../utils/sharedWorkspace'
 
 interface TableInfo {
   name: string
@@ -10,6 +12,8 @@ interface TableInfo {
   row_count: number
   created_at: string
   updated_at: string
+  /** Who created it (a shared agent's member tables get a badge). */
+  created_by?: Creator | null
 }
 
 async function fdFetch<T>(path: string): Promise<T> {
@@ -146,6 +150,7 @@ export function AgentDatastorePanel({ containerId }: { containerId: string }) {
                 >
                   <Table2 className="h-3.5 w-3.5 shrink-0 text-emerald-400/80" />
                   <span className="min-w-0 flex-1 truncate text-[11px] text-zinc-300">{t.name}</span>
+                  <CreatorBadge mode="owner" creator={t.created_by} />
                   <span className="shrink-0 text-[10px] text-zinc-600">
                     {t.row_count.toLocaleString()}
                   </span>

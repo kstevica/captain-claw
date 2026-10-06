@@ -80,6 +80,9 @@ export interface SharedAgentsResponse {
    *  memory with everyone who uses an agent. Absent (an older Flight Deck) or
    *  false → every "Shared context" affordance hides. */
   context_packs?: boolean
+  /** This deck serves members' files and data panels (a process agent's
+   *  saved/ folder and datastore); absent on an older Flight Deck. */
+  member_workspace?: boolean
 }
 
 // ── Endpoints ──

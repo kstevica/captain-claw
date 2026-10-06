@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from captain_claw import pack_access
+from captain_claw import pack_access, saved_attribution
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, resolve_vfs_path
@@ -301,9 +301,13 @@ class ReadTool(Tool):
             # Add metadata
             end_line = start_line + len(selected_lines) - 1 if selected_lines else start_line - 1
             # A shared folder's file: shown as vfs:@alias/…, never a host path,
-            # and attributed to whoever shared it.
+            # and attributed to whoever shared it. A saved/ file someone other
+            # than the caller created is marked as reference data (PR C, J12).
             pack_shown = pack_access.display(file_path)
-            pack_header = pack_access.read_header(file_path) if pack_shown else None
+            if pack_shown:
+                header = pack_access.read_header(file_path)
+            else:
+                header = saved_attribution.read_header(file_path)
             info = f"[{pack_shown or file_path} {len(content)} chars]"
             if truncated:
                 info += (
@@ -313,8 +317,8 @@ class ReadTool(Tool):
             elif offset is not None or limit is not None:
                 info += f" [lines {start_line}-{end_line}]"
 
-            if pack_header:
-                return ToolResult(success=True, content=f"{info}\n{pack_header}\n{content}")
+            if header:
+                return ToolResult(success=True, content=f"{info}\n{header}\n{content}")
             return ToolResult(
                 success=True,
                 content=f"{info}\n{content}",

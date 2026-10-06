@@ -14,6 +14,8 @@ import {
   getFileCategory, getFileTypeGroup, isViewable,
 } from '../../services/fileTransfer'
 import { FileViewer } from './FileViewer'
+import { CreatorBadge } from './CreatorBadge'
+import { isMemberCreated } from '../../utils/sharedWorkspace'
 import { usePinnedFilesStore } from '../../stores/pinnedFilesStore'
 
 interface FileBrowserProps {
@@ -248,7 +250,8 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
     setDeckCopied(false)
     setDeckLink({ file: f, channel: sessionStorage.getItem('deckChannel') || 'deck' })
   }
-  const isDeckable = (f: AgentFile) => getFileTypeGroup(f) === 'html'
+  // A member's HTML never runs as a deck (Flight Deck's /deck/view refuses it too).
+  const isDeckable = (f: AgentFile) => getFileTypeGroup(f) === 'html' && !isMemberCreated(f.created_by)
   const isEditable = (f: AgentFile) => EDITABLE_GROUPS.has(getFileTypeGroup(f))
   // Open the viewer straight into edit mode for this file.
   const handleEdit = (f: AgentFile) => { setViewerStartEdit(true); setViewingFile(f) }
@@ -455,7 +458,10 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
                       />
                       <span className="mt-0.5 shrink-0"><FileIcon file={f} /></span>
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm text-zinc-200">{f.filename}</div>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="min-w-0 truncate text-sm text-zinc-200">{f.filename}</span>
+                          <CreatorBadge mode="owner" creator={f.created_by} />
+                        </div>
                         <div className="truncate text-[11px] text-zinc-600 font-mono">{f.logical || f.physical}</div>
                         {/* Actions — third row, under the path */}
                         <div className="-ml-1 mt-1.5 flex flex-wrap items-center gap-0.5">
@@ -474,6 +480,8 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
                                   logical: f.logical,
                                   size: f.size,
                                   mime_type: f.mime_type,
+                                  source: f.source,
+                                  created_by: f.created_by,
                                 })
                               }
                             }}

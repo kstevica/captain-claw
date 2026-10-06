@@ -32,9 +32,10 @@ export function sharedSliceId(chatKey: string, userId: string | null | undefined
   return chatKey.startsWith(SHARED_PREFIX) ? `${chatKey}@${sliceUser(userId)}` : chatKey
 }
 
-/** Bumped with A2 (members use their own files, deep memory and Google):
+/** Bumped with A2 (members use their own files, deep memory and Google) and
+ *  again with PR C (the agent's saved files and datastore are a commons):
  *  everybody sees the new notice once, even if they dismissed the old one. */
-export const SHARED_ACK_PREFIX = 'fd.sharedAgentAck.v2.'
+export const SHARED_ACK_PREFIX = 'fd.sharedAgentAck.v3.'
 
 /** localStorage key recording that this user dismissed this agent's notice. */
 export function sharedAckKey(userId: string | null | undefined, agentRef: string): string {
@@ -148,17 +149,21 @@ export function sharedCloseInfo(
 //
 // Flight Deck says, per shared agent, what a member's own chats may use:
 // all on for a process agent (their own Google if they opt in, their deep
-// memory, their own VFS folders), all off for a Docker agent — that one stays
-// chat-only. A row from an older Flight Deck has no capabilities: chat-only.
+// memory, their own VFS folders, the agent's saved files and datastore), all
+// off for a Docker agent — that one stays chat-only. A row from an older
+// Flight Deck has no capabilities: chat-only.
 
-export interface SharedCaps { google: boolean; deep_memory: boolean; files: boolean }
+export interface SharedCaps { google: boolean; deep_memory: boolean; files: boolean; datastore: boolean }
 
-export const CHAT_ONLY_CAPS: SharedCaps = { google: false, deep_memory: false, files: false }
+export const CHAT_ONLY_CAPS: SharedCaps = { google: false, deep_memory: false, files: false, datastore: false }
 
 /** A row's capabilities: each one only when Flight Deck says exactly `true`. */
 export function sharedCaps(row?: { capabilities?: Partial<SharedCaps> | null }): SharedCaps {
   const c: Partial<SharedCaps> = (row && row.capabilities) || {}
-  return { google: c.google === true, deep_memory: c.deep_memory === true, files: c.files === true }
+  return {
+    google: c.google === true, deep_memory: c.deep_memory === true, files: c.files === true,
+    datastore: c.datastore === true,
+  }
 }
 
 /** Shown to the owner in the Share dialog of an agent. */
@@ -176,29 +181,66 @@ export const OWNER_SHARE_NOTE: string =
   + 'Anyone on this deck who runs their own shell-capable process agent can act as any agent on '
   + "this host, including this one, and can read every user's Flight Deck files."
 
+/** The owner's side of the saved/ + datastore commons (PR C). Flight Deck
+ *  sends the owner this same text once as a bell notification, so it is not
+ *  to be reworded here alone. */
+export const OWNER_WORKSPACE_NOTE: string =
+  'Members can also open everything in this agent’s saved/ folder — including what is already '
+  + 'there: files you uploaded in your own chats, screenshots and browser captures, script outputs, '
+  + 'the scripts and tools it saved for you (check them for passwords or keys), and what its '
+  + 'channels and automations saved, such as WhatsApp or email attachments — and see every table '
+  + 'and row in its datastore. They can add their own files, tables and rows, shown with their '
+  + 'name, and change or delete only what they added; you can change or delete all of it. Its '
+  + 'other files (workspace, output/, workflows/) stay yours. Your agent reads what members add, '
+  + 'so treat it as untrusted input, especially in automations.'
+
 /** The owner's Share dialog note. On a deck with context packs ("Shared
  *  context") it also says, before the closing host-trust paragraph, that
  *  members can publish their own context to the agent and that it is used on
  *  every turn — the owner's channels and automations too. A Docker agent takes
- *  members' profiles only. */
-export function ownerShareNote(contextPacks: boolean, runtime: 'process' | 'docker' = 'process'): string {
-  if (!contextPacks) return OWNER_SHARE_NOTE
-  const what = runtime === 'docker' ? 'their own profile' : 'their own profile, folders and deep memory'
-  const packs = `Members can also share ${what} with this agent. That is used on every turn, `
-    + "including your channels and automations. You're notified and can remove any of it under "
-    + 'Shared context.'
-  const cut = OWNER_SHARE_NOTE.lastIndexOf('\n\n')
-  return `${OWNER_SHARE_NOTE.slice(0, cut)}\n\n${packs}${OWNER_SHARE_NOTE.slice(cut)}`
+ *  members' profiles only. On a deck that serves members the agent's saved
+ *  files and datastore (`memberWorkspace`), a process agent's note says so
+ *  too, and that only the owner's files outside saved/ stay out of reach. */
+export function ownerShareNote(
+  contextPacks: boolean,
+  runtime: 'process' | 'docker' = 'process',
+  memberWorkspace = false,
+): string {
+  const workspace = memberWorkspace === true && runtime === 'process'
+  if (!contextPacks && !workspace) return OWNER_SHARE_NOTE
+  const base = workspace
+    ? OWNER_SHARE_NOTE.replace('the shell, your files or accounts', 'the shell, your accounts or your files outside its saved/ folder')
+    : OWNER_SHARE_NOTE
+  const paras: string[] = []
+  if (contextPacks) {
+    const what = runtime === 'docker' ? 'their own profile' : 'their own profile, folders and deep memory'
+    paras.push(`Members can also share ${what} with this agent. That is used on every turn, `
+      + "including your channels and automations. You're notified and can remove any of it under "
+      + 'Shared context.')
+  }
+  if (workspace) paras.push(OWNER_WORKSPACE_NOTE)
+  const cut = base.lastIndexOf('\n\n')
+  return `${base.slice(0, cut)}\n\n${paras.join('\n\n')}${base.slice(cut)}`
+}
+
+/** The member notice's commons paragraph (PR C): the agent's saved/ folder and
+ *  its datastore are shared with everyone who uses it, and who can change what. */
+export function memberWorkspaceNotice(ownerName: string): string {
+  const owner = (ownerName || '').trim() || 'the owner'
+  return `Files saved in your chats here (this agent’s saved/ folder) and its data tables are shared with everyone who uses this agent: ${owner} and every other member can open what you or the agent save there — including anything it saves from your mail, Drive or deep memory — and you can open theirs. Only whoever created a file, table or row, and ${owner}, can change or delete it, and everyone sees who created it.`
 }
 
 /** Shown to a member the first time they open a shared agent. `**…**` is bold.
  *  `caps` is what their chats on it can use (`sharedCaps(row)`); chat-only —
- *  a Docker agent, an older Flight Deck, no row yet — keeps the A1 text. */
+ *  a Docker agent, an older Flight Deck, no row yet — keeps the A1 text.
+ *  `workspace` (this deck serves members the agent's saved files and data)
+ *  adds the commons paragraph where the agent's files are on. */
 export function memberNoticeText(
   agentName: string,
   ownerName: string,
   hostWarning: string,
   caps: SharedCaps = CHAT_ONLY_CAPS,
+  workspace = false,
 ): string {
   const agent = (agentName || '').trim() || 'This agent'
   const owner = (ownerName || '').trim() || 'another user'
@@ -218,7 +260,10 @@ export function memberNoticeText(
       + "It can't run commands, use MCP servers or other agents, or schedule anything."
     : `${owner}'s own chats with it. In shared chats it can only search the web, read public pages and use its `
       + 'shared insights, playbooks and topics.'
-  return head + body + (hostWarning ? `\n\n${hostWarning}` : '')
+  const commons = ownData && workspace === true && caps.files === true
+    ? ' ' + memberWorkspaceNotice(owner)
+    : ''
+  return head + body + commons + (hostWarning ? `\n\n${hostWarning}` : '')
 }
 
 // ── A member's Google, per shared agent (off until they turn it on) ──

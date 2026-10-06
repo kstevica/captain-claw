@@ -12,7 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from captain_claw.datastore import ProtectedError, get_datastore_manager, get_session_datastore_manager
+from captain_claw.datastore import (
+    ProtectedError,
+    creator_dict,
+    get_datastore_manager,
+    get_session_datastore_manager,
+    neutralize_rows,
+)
 from captain_claw.logging import get_logger
 
 if TYPE_CHECKING:
@@ -50,6 +56,7 @@ async def list_tables(server: WebServer, request: web.Request) -> web.Response:
                 "row_count": t.row_count,
                 "created_at": t.created_at,
                 "updated_at": t.updated_at,
+                "created_by": creator_dict(t.created_by, t.created_by_name),
             }
             for t in tables
         ],
@@ -71,6 +78,7 @@ async def describe_table(server: WebServer, request: web.Request) -> web.Respons
             "row_count": info.row_count,
             "created_at": info.created_at,
             "updated_at": info.updated_at,
+            "created_by": creator_dict(info.created_by, info.created_by_name),
         },
         dumps=_JSON_DUMPS,
     )
@@ -102,6 +110,7 @@ async def create_table(server: WebServer, request: web.Request) -> web.Response:
             "row_count": info.row_count,
             "created_at": info.created_at,
             "updated_at": info.updated_at,
+            "created_by": creator_dict(info.created_by, info.created_by_name),
         },
         status=201,
         dumps=_JSON_DUMPS,
@@ -147,6 +156,7 @@ async def rename_table(server: WebServer, request: web.Request) -> web.Response:
             "row_count": info.row_count,
             "created_at": info.created_at,
             "updated_at": info.updated_at,
+            "created_by": creator_dict(info.created_by, info.created_by_name),
         },
         dumps=_JSON_DUMPS,
     )
@@ -188,17 +198,22 @@ async def query_rows(server: WebServer, request: web.Request) -> web.Response:
             order_by=order_param,
             limit=limit,
             offset=offset,
+            include_creator=True,
         )
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
-    # Convert rows from arrays to dicts for easier JS consumption
+    # Convert rows from arrays to dicts for easier JS consumption; each row
+    # carries its creator (PR C).
     col_names = result.get("columns", [])
-    dict_rows = [
-        {col_names[i]: val for i, val in enumerate(row)}
-        for row in result.get("rows", [])
-        if isinstance(row, (list, tuple))
-    ]
+    creators = result.pop("creators", None) or []
+    dict_rows = []
+    for idx, row in enumerate(result.get("rows", [])):
+        if not isinstance(row, (list, tuple)):
+            continue
+        item = {col_names[i]: val for i, val in enumerate(row)}
+        item["_creator"] = creators[idx] if idx < len(creators) else creator_dict("", "")
+        dict_rows.append(item)
     result["rows"] = dict_rows
 
     return web.json_response(result, dumps=_JSON_DUMPS)
@@ -605,13 +620,16 @@ async def export_table(server: WebServer, request: web.Request) -> web.Response:
     try:
         result = await mgr.query(
             table_name, limit=cfg.datastore.max_export_rows,
-            bypass_max=True,
+            bypass_max=True, include_creator=True,
         )
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
     columns = result["columns"]
     rows = result["rows"]
+    if fmt in ("csv", "xlsx"):
+        # J13: a member-created cell never runs as a spreadsheet formula.
+        rows = neutralize_rows(rows, result.get("creators"), "members")
     filename = f"{table_name}.{fmt}"
 
     if fmt == "csv":

@@ -663,6 +663,11 @@ def test_a2_constants_are_the_contract():
     assert speaker.SPEAKER_FILE_TOOLS == {"read", "write", "edit", "glob", "grep", "vfs",
                                           "pdf_extract", "docx_extract", "xlsx_extract",
                                           "pptx_extract"}
+    # PR C: the datastore is in the max allowlist but NOT a file tool (that
+    # set forces roots on every call).
+    assert speaker.SPEAKER_DATASTORE_TOOLS == {"datastore"}
+    assert "datastore" in SPEAKER_TOOL_ALLOWLIST_MAX
+    assert not speaker.SPEAKER_DATASTORE_TOOLS & speaker.SPEAKER_FILE_TOOLS
     assert SPEAKER_TOOL_ALLOWLIST == {"insights", "playbooks", "topics", "web_search", "web_fetch"}
     assert speaker.VFS_RESERVED_NAMES == {".vfs-links.json", ".vfs-meta.jsonl",
                                           ".drive-manifest.json", ".drive-cache"}
@@ -893,6 +898,8 @@ _EXTRA_MODULES = (
     "captain_claw.vfs", "captain_claw.vfs_drive", "captain_claw.drive_client",
     "captain_claw.google_oauth_manager", "captain_claw.fd_client",
     "captain_claw.file_tree_builder",
+    # PR C: the datastore (member writes, stamps) and the saved/ attribution store.
+    "captain_claw.datastore", "captain_claw.saved_attribution",
 )
 
 
@@ -981,6 +988,34 @@ def test_member_reachable_modules_propagate_the_context():
     import captain_claw.vfs_drive as vd
 
     assert "asyncio.run(" in inspect.getsource(vd.materialize_sync)
+
+
+def _task_spawns(source: str) -> list[str]:
+    """`create_task(` / `ensure_future(` calls: a task started there would
+    outlive the caller's write lock and speaker context."""
+    bad = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            f = node.func
+            fname = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
+            if fname in ("create_task", "ensure_future"):
+                bad.append(f"{fname}( at line {node.lineno}")
+    return bad
+
+
+def test_the_datastore_and_attribution_modules_spawn_no_tasks():
+    """PR C (J19): a datastore mutation runs start to commit inside its caller
+    (the write lock, the bound member) — never in a task or thread of its own."""
+    import importlib
+
+    assert _task_spawns("import asyncio\nasyncio.create_task(f())\nloop.ensure_future(g())\n") \
+        == ["create_task( at line 2", "ensure_future( at line 3"]
+    for mod_name in ("captain_claw.datastore", "captain_claw.saved_attribution"):
+        mod = importlib.import_module(mod_name)
+        source = Path(inspect.getsourcefile(mod)).read_text()
+        assert _task_spawns(source) == [], mod_name
+        assert executor_violations(source) == [], mod_name
+        assert "to_thread" not in source, mod_name
 
 
 # ── Google: the member's own account through Flight Deck, or nothing ──

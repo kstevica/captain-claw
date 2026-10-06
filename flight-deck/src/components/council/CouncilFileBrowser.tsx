@@ -290,6 +290,8 @@ export function CouncilFileBrowser({ agents, sessionCreatedAt, sessionConcludedA
                                   logical: f.logical,
                                   size: f.size,
                                   mime_type: f.mime_type,
+                                  source: f.source,
+                                  created_by: f.created_by,
                                 })
                               }
                             }}

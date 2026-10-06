@@ -10,6 +10,8 @@ import {
   getFileTypeGroup, isViewable,
 } from '../../services/fileTransfer'
 import { FileViewer } from './FileViewer'
+import { CreatorBadge } from './CreatorBadge'
+import { isMemberCreated } from '../../utils/sharedWorkspace'
 import { usePinnedFilesStore } from '../../stores/pinnedFilesStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
@@ -129,7 +131,8 @@ export function AgentFilesPanel({ containerId }: { containerId: string }) {
   }
 
   const isEditable = (f: AgentFile) => EDITABLE_GROUPS.has(getFileTypeGroup(f))
-  const isDeckable = (f: AgentFile) => getFileTypeGroup(f) === 'html'
+  // A member's HTML never runs as a deck (Flight Deck's /deck/view refuses it too).
+  const isDeckable = (f: AgentFile) => getFileTypeGroup(f) === 'html' && !isMemberCreated(f.created_by)
 
   const handleView = (f: AgentFile) => {
     if (getFileTypeGroup(f) === 'pdf') {
@@ -168,6 +171,8 @@ export function AgentFilesPanel({ containerId }: { containerId: string }) {
       logical: f.logical,
       size: f.size,
       mime_type: f.mime_type,
+      source: f.source,
+      created_by: f.created_by,
     })
   }
 
@@ -232,6 +237,7 @@ export function AgentFilesPanel({ containerId }: { containerId: string }) {
                   <span className="min-w-0 flex-1 truncate text-[11px] text-zinc-300" title={f.logical || f.physical}>
                     {f.filename}
                   </span>
+                  <CreatorBadge mode="owner" creator={f.created_by} />
                   <span className="shrink-0 text-[10px] text-zinc-600">{formatSize(f.size)}</span>
                 </div>
                 <div className="mt-0.5 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">

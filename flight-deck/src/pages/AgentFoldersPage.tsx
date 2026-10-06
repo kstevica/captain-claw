@@ -341,7 +341,7 @@ function PreviewModal() {
               {/* HTML — render in a sandboxed iframe */}
               {!s.blobUrl && !p.truncated && !p.binary && group === 'html' && (
                 <div className="min-h-[300px] bg-white">
-                  <iframe srcDoc={p.text} title={p.name} className="w-full border-0" style={{ height: '72vh' }} sandbox="allow-scripts allow-same-origin" />
+                  <iframe srcDoc={p.text} title={p.name} className="w-full border-0" style={{ height: '72vh' }} sandbox="allow-scripts" />
                 </div>
               )}
 

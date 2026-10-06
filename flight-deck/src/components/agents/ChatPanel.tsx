@@ -277,6 +277,9 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   const sharedHostWarning = useSharedAgentStore((s) => s.hostWarning)
   // Context packs: a member opens "Shared context" from the shared chat's bar.
   const packsEnabled = useSharedAgentStore((s) => s.contextPacks)
+  // The deck serves members the agent's saved files and datastore: the
+  // member notice says they are shared with everyone who uses it.
+  const memberWorkspace = useSharedAgentStore((s) => s.memberWorkspace)
   const localAgents = useLocalAgentStore((s) => s.agents)
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
@@ -573,6 +576,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
           ownerName={shared.ownerName}
           hostWarning={sharedHostWarning}
           caps={caps}
+          workspace={memberWorkspace}
         />
       )}
 

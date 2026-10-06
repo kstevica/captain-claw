@@ -81,6 +81,55 @@ def _enrich(logical: str, physical: str, source: str) -> dict[str, Any]:
     }
 
 
+async def _add_creators(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """PR C: every entry gains ``created_by`` — the wire ``Creator`` of a
+    saved/ file (member or owner), ``None`` outside saved/."""
+    from captain_claw import saved_attribution
+
+    try:
+        await saved_attribution.ensure_member_sessions()
+        creators = saved_attribution.creators_for([e.get("physical", "") for e in entries])
+    except Exception:
+        creators = {}
+    for e in entries:
+        c = creators.get(str(e.get("physical", "")))
+        e["created_by"] = (c.as_dict() if c is not None and c.source != "outside"
+                           else _vfs_member_creator(e.get("physical", "")))
+    return entries
+
+
+def _vfs_member_creator(path: Any) -> dict[str, str] | None:
+    """A file under ANOTHER user's VFS root is a shared-agent member's: they
+    write through their own ``vfs:`` folders, the file registry lists those
+    writes here, and this agent's owner only ever writes under their own root.
+    Never ``None`` for such a file — FD's /deck/view and glasses viewer would
+    render it as the owner's at FD's origin. ``None`` for anything else."""
+    import os
+
+    from captain_claw import vfs
+
+    try:
+        real = Path(os.fspath(path)).resolve()
+        rel = real.relative_to(vfs.vfs_base().resolve()).parts
+        owner = (os.environ.get("CLAW_VFS_USER", "").strip()
+                 or os.environ.get("FD_OWNER_ID", ""))
+        try:
+            real.relative_to(vfs.user_root_of(owner))
+            return None
+        except ValueError:
+            pass
+        return {"kind": "member", "user_id": rel[0] if rel else "", "name": ""}
+    except Exception:
+        return None
+
+
+def _created_by_of(path: Path) -> dict[str, str] | None:
+    from captain_claw import saved_attribution
+
+    c = saved_attribution.creator_of(path)
+    return c.as_dict() if c.source != "outside" else _vfs_member_creator(path)
+
+
 def _is_allowed_path(physical: str) -> bool:
     """Return True if the physical path is under workspace saved/, output/, or workflows/.
 
@@ -218,7 +267,7 @@ async def _collect_files(server: WebServer) -> list[dict[str, Any]]:
     except Exception:
         pass  # Best-effort; registered files are still returned.
 
-    return sorted(seen.values(), key=lambda f: f["logical"].lower())
+    return await _add_creators(sorted(seen.values(), key=lambda f: f["logical"].lower()))
 
 
 # ------------------------------------------------------------------
@@ -354,7 +403,7 @@ async def _collect_session_files(
     except Exception:
         pass
 
-    return sorted(seen.values(), key=lambda f: f["logical"].lower())
+    return await _add_creators(sorted(seen.values(), key=lambda f: f["logical"].lower()))
 
 
 async def list_session_files(server: WebServer, request: web.Request) -> web.Response:
@@ -432,12 +481,20 @@ async def get_file_content(server: WebServer, request: web.Request) -> web.Respo
         return web.json_response({"error": f"Read error: {exc}"}, status=500)
 
     mime_type = mimetypes.guess_type(str(p))[0] or "text/plain"
+    # A pre-PR C member file is attributed only through its session folder:
+    # backfill those sessions first (as _add_creators does) or it reads as
+    # the owner's until some other route happens to.
+    from captain_claw import saved_attribution
+
+    await saved_attribution.ensure_member_sessions()
     return web.json_response({
         "path": physical,
         "filename": p.name,
         "content": content,
         "size": stat.st_size,
         "mime_type": mime_type,
+        # PR C: Flight Deck's /deck/view refuses member-created files.
+        "created_by": _created_by_of(p),
     })
 
 
@@ -484,8 +541,12 @@ async def save_file_content(server: WebServer, request: web.Request) -> web.Resp
         # Editing only — refuse to create arbitrary new files via this route.
         return web.json_response({"error": "File not found on disk"}, status=404)
 
+    from captain_claw import saved_attribution
+
     try:
+        prior = saved_attribution.prior_creator(p)
         p.write_text(content, encoding="utf-8")
+        saved_attribution.note_write(p, prior)       # a member's file stays theirs
         stat = p.stat()
     except Exception as exc:
         return web.json_response({"error": f"Write error: {exc}"}, status=500)
@@ -573,8 +634,12 @@ async def delete_files(server: WebServer, request: web.Request) -> web.Response:
             errors.append(f"Not found: {p.name}")
             continue
 
+        from captain_claw import saved_attribution
+
         try:
+            rel = saved_attribution.rel_key(p)     # the on-disk name, before the unlink
             p.unlink()
+            saved_attribution.note_delete(p, rel)
             deleted.append(physical)
         except Exception as exc:
             errors.append(f"Failed to delete {p.name}: {exc}")

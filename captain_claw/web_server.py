@@ -332,6 +332,9 @@ class WebServer:
         self._speaker_building: set[tuple[str, str]] = set()
         # speaker_id → lock over that member's session list (all lanes).
         self._speaker_session_locks: dict[str, asyncio.Lock] = {}
+        # (speaker_id, lane) → lock over that lane's session lookup-or-create
+        # (PR C: a first upload racing the first socket yields one session).
+        self._speaker_lane_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     async def _init_agent(self) -> None:
         """Initialize the agent with web callbacks."""
@@ -568,19 +571,23 @@ class WebServer:
 
         sm = get_session_manager()
         state_key = self._speaker_state_key(p.speaker_id, p.lane)
-        session = None
-        try:
-            sid = await sm.get_app_state(state_key)
-            if sid:
-                session = await sm.load_session(sid)
-        except Exception as e:
-            log.debug("speaker session lookup failed", error=str(e))
+        locks = getattr(self, "_speaker_lane_locks", None)
+        if locks is None:
+            locks = self._speaker_lane_locks = {}
+        async with locks.setdefault((p.speaker_id, p.lane), asyncio.Lock()):
             session = None
-        if session is None or (session.metadata or {}).get("speaker_id") != p.speaker_id:
-            # Counted, but never refused: a member must always get a session.
-            session = await self._create_speaker_session(p, enforce_cap=False)
-            await sm.set_app_state(state_key, session.id)
-        return session
+            try:
+                sid = await sm.get_app_state(state_key)
+                if sid:
+                    session = await sm.load_session(sid)
+            except Exception as e:
+                log.debug("speaker session lookup failed", error=str(e))
+                session = None
+            if session is None or (session.metadata or {}).get("speaker_id") != p.speaker_id:
+                # Counted, but never refused: a member must always get a session.
+                session = await self._create_speaker_session(p, enforce_cap=False)
+                await sm.set_app_state(state_key, session.id)
+            return session
 
     @staticmethod
     def _speaker_sessions_key(speaker_id: str) -> str:
@@ -618,6 +625,10 @@ class WebServer:
                 name=name or self._speaker_session_name(p.display_name, p.lane),
                 metadata=self._speaker_session_metadata(p),
             )
+            # PR C: this session's saved/ folders are this member's.
+            from captain_claw import saved_attribution
+
+            saved_attribution.note_member_session(session.id, p.speaker_id, p.display_name)
             ids.append(session.id)
             await sm.set_app_state(list_key, json.dumps(ids))
             return session
@@ -674,7 +685,12 @@ class WebServer:
 
             self._speaker_building.add(key)
             try:
+                # PR C: member sessions from before the commons, recorded once.
+                from captain_claw import saved_attribution
+
+                await saved_attribution.ensure_member_sessions()
                 session = await self._speaker_session(p)
+                saved_attribution.note_member_session(session.id, p.speaker_id, p.display_name)
                 agent = await self._build_scoped_agent(
                     session, self._speaker_send(key),
                     register_tools=False, warm_owner_caches=False, approval_owner=key,
@@ -2987,6 +3003,10 @@ class WebServer:
         elif self.config.web.auth_token:
             from captain_claw.web.auth import create_auth_middleware
             app.middlewares.append(create_auth_middleware(self.config.web))
+        # Shared-agent members (PR C): X-FD-Speaker only on /api/speaker/*
+        # (and /ws, verified by its handshake) — after the owner-token check.
+        from captain_claw.web.speaker_http import create_speaker_http_middleware
+        app.middlewares.append(create_speaker_http_middleware(self))
         app.router.add_get("/ws", self.ws_handler)
         app.router.add_get("/ws/stt", self.ws_stt_handler)
         app.router.add_get("/api/instructions", self.list_instructions)
@@ -3171,6 +3191,9 @@ class WebServer:
         app.router.add_post("/api/datastore/tables/{name}/protections", self._ds_add_protection)
         app.router.add_delete("/api/datastore/tables/{name}/protections", self._ds_remove_protection)
         app.router.add_post("/api/datastore/upload", self._ds_upload_and_import)
+        # Shared-agent member panels (PR C): the saved/ commons + datastore
+        from captain_claw.web.speaker_http import register_speaker_routes
+        register_speaker_routes(app, self)
         # Insights
         app.router.add_get("/api/insights", self._ins_list)
         app.router.add_post("/api/insights", self._ins_create)

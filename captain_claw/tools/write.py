@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from captain_claw import write_guard
+from captain_claw import saved_attribution, write_guard
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, project_is_readonly, resolve_vfs_path, split_scheme
@@ -498,6 +498,9 @@ class WriteTool(Tool):
                 except Exception:
                     _append_prev = 0
 
+            # Who created this saved/ file before this write (PR C); a no-op
+            # outside saved/ (vfs, Code-agent repo writes).
+            _prior = saved_attribution.prior_creator(file_path)
             _write_once()
 
             # ── Write-then-readback verify (default-on) ──
@@ -534,6 +537,8 @@ class WriteTool(Tool):
             if is_vfs_path(path):
                 from captain_claw.vfs import record_author
                 record_author(file_path)
+            # ...and who created a saved/ file (the commons on a shared agent).
+            saved_attribution.note_write(file_path, _prior)
 
             # result_msg stays byte-identical in shape (path then an optional
             # "(requested: …)" the tool-output parser strips) — the repair note

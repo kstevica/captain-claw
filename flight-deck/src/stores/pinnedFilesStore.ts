@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { queueSave, registerHydrator } from '../services/settingsSync'
 import { useAuthStore } from './authStore'
+import type { Creator } from '../utils/sharedWorkspace'
 
 export interface PinnedFile {
   id: string
@@ -17,6 +18,11 @@ export interface PinnedFile {
   logical: string
   size: number
   mime_type: string
+  /** Where the listing got it (`'shared'` = a member's panel) and who created
+   *  it — copied from the listing so the viewer keeps its guards on a member's
+   *  file. Absent on pins made before shared agents had member files. */
+  source?: string
+  created_by?: Creator | null
   /** Pin metadata */
   pinnedAt: string
   tags: string[]

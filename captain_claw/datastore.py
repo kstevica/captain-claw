@@ -3,17 +3,33 @@
 Provides structured table management, CRUD operations, import/export,
 and read-only raw SQL queries.  Completely separate from the session
 and memory databases.
+
+PR C (shared agents): the store is a commons. Every table and row records
+its creator — ``''`` for the agent's owner (and everything from before PR C),
+else the member's Flight Deck user id — in ``_ds_tables.created_by*`` and in
+the hidden physical columns ``SYSTEM_COLUMNS`` of every ``ds_*`` table,
+stamped in the same statement that writes. A member (``current_actor()``,
+from the bound speaker principal) reads everything, adds rows to any table
+and changes only rows and tables they created; every member refusal raises
+:class:`MemberDeniedError` before anything is written. Mutations run under
+one write lock per manager, from their first check to their commit.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import csv
 import io
 import json
 import os
 import re
+import sqlite3
+import time
+import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +45,195 @@ log = get_logger(__name__)
 
 class ProtectedError(Exception):
     """Raised when an operation violates a protection rule."""
+
+
+class MemberDeniedError(ProtectedError):
+    """A shared-agent member's datastore call refused (message = a DS_* text)."""
+
+
+# ── PR C: creators, member limits, texts (contract part 0b §4, 0c §1) ─
+
+SYSTEM_COLUMNS = ("_created_by", "_created_by_name")
+MEMBER_MAX_TABLES = 10
+MEMBER_TABLE_HEADROOM = 10
+MEMBER_MAX_ROWS = 10_000
+MEMBER_NAME_MAX = 120
+MEMBER_ROW_HEADROOM_DIVISOR = 10   # member rows stop at max_rows_per_table - max_rows_per_table // 10
+MEMBER_SQL_DEADLINE_S = 2.0        # member raw SELECT, read-only connection, then interrupted
+MEMBER_IMPORT_MAX_BYTES = 25 * 1024 * 1024
+MEMBER_IMPORT_MAX_UNZIPPED_BYTES = 100 * 1024 * 1024
+# What a member's rows may STORE (an import's source caps say nothing about
+# that: one xlsx shared string can fill every cell): one value at most
+# MEMBER_MAX_VALUE_BYTES, a member's table / import at most
+# MEMBER_MAX_COLUMNS columns, everything a member added at most
+# MEMBER_MAX_STORED_BYTES across the store — counted under the write lock.
+# A name a member gives a table or column (an xlsx header is a shared string
+# too, stored in the schema) at most MEMBER_MAX_NAME_CHARS.
+MEMBER_MAX_VALUE_BYTES = 4 * 1024 * 1024
+MEMBER_MAX_COLUMNS = 100
+MEMBER_MAX_NAME_CHARS = 128
+MEMBER_MAX_STORED_BYTES = 50 * 1024 * 1024
+
+DS_NOT_YOUR_ROWS = ('Some of the rows this would change were added by someone else. You can '
+                    'change or delete only rows you added — narrow it with {"_mine": true}.')
+DS_NOT_YOUR_TABLE = ("Only the person who created this table, or the agent's owner, can change "
+                     "its structure, rename it or drop it.")
+DS_FOREIGN_ROWS = ("Other people have added rows to this table, so only the agent's owner can "
+                   "do that now.")
+DS_OWNER_ONLY = "Only the agent's owner can protect or unprotect data."
+DS_EXPRESSION_MEMBER = "In a shared chat, update_column takes a value, not an expression."
+DS_PROJECT_MEMBER = ("In a shared chat only this agent's own datastore is available — leave out "
+                     "`project`.")
+DS_MEMBER_TABLE_LIMIT = "You can create at most 10 tables on this agent."
+DS_MEMBER_NO_ROOM = "This agent's datastore has no room for more tables from members."
+DS_MEMBER_ROW_LIMIT = "You can add at most 10,000 rows on this agent."
+DS_IDENTITY_LOST = "The datastore can't tell who is asking right now — try again."
+DS_MEMBER_UNAVAILABLE = "The datastore isn't available in shared chats on this agent."
+DS_TABLE_NEARLY_FULL = ("This table is nearly full — only the agent's owner can add more rows "
+                        "to it.")
+DS_SQL_LIMITS = ("In a shared chat, sql runs plain SELECTs that finish within 2 seconds (no WITH "
+                 "RECURSIVE) — narrow it, or use query.")
+DS_IMPORT_TOO_LARGE = ("That file is too large to import in a shared chat (25 MB, or 100 MB "
+                       "unzipped, at most).")
+DS_MEMBER_VALUE_TOO_LARGE = ("In a shared chat one value can be at most 4 MB — shorten it or "
+                             "split it up.")
+DS_MEMBER_TOO_MANY_COLUMNS = "In a shared chat a table can have at most 100 columns."
+DS_MEMBER_NAME_TOO_LONG = ("In a shared chat a table or column name can be at most 128 "
+                           "characters.")
+DS_MEMBER_STORAGE_LIMIT = "You can store at most 50 MB of data on this agent."
+DS_MEMBER_TABLE_NAME = ("In a shared chat a table can't be named like a column, an SQL keyword, "
+                        "an SQL function or one of SQLite's own tables — pick another name.")
+
+# A member's raw SELECT (beyond the contract's deadline and row cap): one
+# value at most _MEMBER_SQL_VALUE_MAX bytes (what a member may store in one
+# value), the fetched result at most _MEMBER_SQL_RESULT_MAX — so a member
+# can't exhaust the agent's memory.
+_MEMBER_SQL_VALUE_MAX = MEMBER_MAX_VALUE_BYTES
+_MEMBER_SQL_RESULT_MAX = 32 * 1024 * 1024
+
+
+def _value_size(v: Any) -> int:
+    if isinstance(v, (str, bytes, bytearray, memoryview)):
+        return len(v)
+    return 16
+
+
+def _stored_size(v: Any) -> int:
+    """Bytes *v* takes in a row — what ``octet_length`` reads back."""
+    if v is None:
+        return 0
+    if isinstance(v, str):
+        return len(v) if v.isascii() else len(v.encode("utf-8", "surrogatepass"))
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return len(v)
+    return len(str(v))
+
+
+# Bytes a stored value takes, in SQL (octet_length reads only the record
+# header — never a large value's overflow pages).
+_OCTETS = ("octet_length({})" if sqlite3.sqlite_version_info >= (3, 43, 0)
+           else "length(CAST({} AS BLOB))")
+
+# Names a member's table can't take (raw_select maps table names to their
+# ds_ tables textually): SQLite's keywords, rowid aliases and core functions
+# (the connection's own function list is added at check time).
+_SQL_RESERVED = frozenset("""
+abort action add after all alter always analyze and as asc attach autoincrement before begin
+between by cascade case cast check collate column commit conflict constraint create cross current
+current_date current_time current_timestamp database default deferrable deferred delete desc
+detach distinct do drop each else end escape except exclude exclusive exists explain fail filter
+first following for foreign from full generated glob group groups having if ignore immediate in
+index indexed initially inner insert instead intersect into is isnull join key last left like
+limit match materialized natural no not nothing notnull null nulls of offset on or order others
+outer over partition plan pragma preceding primary query raise range recursive references regexp
+reindex release rename replace restrict returning right rollback row rows savepoint select set
+table temp temporary then ties to transaction trigger unbounded union unique update using vacuum
+values view virtual when where window with without true false rowid oid main
+abs avg changes char coalesce concat concat_ws count date datetime format group_concat hex
+ifnull iif instr json julianday last_insert_rowid length likelihood likely lower ltrim max min
+nullif octet_length printf quote random randomblob round rtrim sign soundex sqlite_version
+strftime string_agg substr substring sum time timediff total total_changes trim typeof unhex
+unicode unixepoch unlikely upper zeroblob acos asin atan ceil ceiling cos degrees exp floor ln
+log log10 log2 mod pi pow power radians sin sqrt tan trunc row_number rank dense_rank
+percent_rank cume_dist ntile lag lead first_value last_value nth_value
+json_each json_tree jsonb_each jsonb_tree generate_series dbstat
+""".split())
+# ... nor start like SQLite's own tables / table-valued pragmas or like an
+# internal name (an owner's SQL may name ds_<table> directly).
+_SQL_RESERVED_PREFIXES = ("sqlite_", "pragma_", "ds_")
+
+
+# Text cells an export prefixes with "'" so a spreadsheet never runs them (J13).
+_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
+
+
+@dataclass(frozen=True)
+class DatastoreActor:
+    """Who a datastore call acts for."""
+
+    kind: str       # "owner" | "member"
+    user_id: str    # "" for the owner
+    name: str       # name snapshot ("" for the owner)
+
+
+OWNER_ACTOR = DatastoreActor("owner", "", "")
+
+
+def current_actor() -> DatastoreActor:
+    """The actor of the running call, from the bound speaker principal.
+
+    No principal → the owner, unless the speaker context was lost while
+    member work is live (a bare worker thread): then nobody can be told
+    apart and every write is refused. An unverified or non-process member is
+    refused too — never treated as the owner.
+    """
+    from captain_claw import speaker
+
+    p = speaker.current()
+    if p is None:
+        if speaker.identity_lost():
+            raise MemberDeniedError(DS_IDENTITY_LOST)
+        return OWNER_ACTOR
+    if not p.speaker_id:
+        raise MemberDeniedError(DS_IDENTITY_LOST)
+    if speaker.runtime_of(p) != "process":
+        raise MemberDeniedError(DS_MEMBER_UNAVAILABLE)
+    name = " ".join(str(p.display_name or "").split())[:MEMBER_NAME_MAX] or "Member"
+    return DatastoreActor("member", p.speaker_id, name)
+
+
+def creator_dict(created_by: Any, created_by_name: Any) -> dict[str, str]:
+    """The wire ``Creator`` (contract part 0b §2.2) of a stamp."""
+    cb = str(created_by or "")
+    if cb:
+        return {"kind": "member", "user_id": cb, "name": str(created_by_name or "")}
+    return {"kind": "owner", "user_id": "", "name": ""}
+
+
+def neutralize_rows(
+    rows: list[list[Any]], creators: list[dict[str, str]] | None = None, mode: str = "all",
+) -> list[list[Any]]:
+    """Rows for an export file (J13): in every row (``"all"``) or every
+    member-created row (``"members"``), a text cell starting with ``= + - @``,
+    tab or CR gets a leading ``'``. ``"none"`` → the rows unchanged."""
+    if mode not in ("all", "members"):
+        return rows
+    out: list[list[Any]] = []
+    for i, row in enumerate(rows):
+        if mode == "members":
+            c = creators[i] if creators is not None and i < len(creators) else None
+            if not (isinstance(c, dict) and c.get("kind") == "member"):
+                out.append(row)
+                continue
+        out.append([
+            "'" + v if isinstance(v, str) and v[:1] in _FORMULA_LEADS else v
+            for v in row
+        ])
+    return out
+
+
+# The managers whose write lock the running task holds (re-entrant writes).
+_HELD: ContextVar[frozenset[int]] = ContextVar("ds_write_held", default=frozenset())
 
 # ── Column type mapping ──────────────────────────────────────────────
 # user-facing type → SQLite affinity
@@ -66,6 +271,8 @@ class TableInfo:
     row_count: int = 0
     created_at: str = ""
     updated_at: str = ""
+    created_by: str = ""          # PR C: "" = the agent's owner, else a member's FD id
+    created_by_name: str = ""     # name snapshot of that member
 
 
 # ── DatastoreManager ─────────────────────────────────────────────────
@@ -81,29 +288,55 @@ class DatastoreManager:
             self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db: aiosqlite.Connection | None = None
+        # PR C (J19): the connection is published only after the schema
+        # migration; one write lock covers every mutation from its first
+        # check to its commit; member raw SELECTs use their own read-only
+        # connection.
+        self._init_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
+        self._sys_ok: set[str] = set()   # internal names with BOTH system columns
+        self._ro_db: aiosqlite.Connection | None = None
+        self._ro_lock = asyncio.Lock()
+        self._ro_deadline = 0.0
 
     # ── lifecycle ────────────────────────────────────────────────────
 
     async def _ensure_db(self) -> None:
         if self._db is not None:
             return
-        self._db = await aiosqlite.connect(str(self.db_path))
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA foreign_keys=ON")
+        async with self._init_lock:
+            if self._db is not None:
+                return
+            db = await aiosqlite.connect(str(self.db_path))
+            try:
+                sys_ok = await self._open_schema(db)
+            except BaseException:
+                await db.close()
+                raise
+            self._sys_ok = sys_ok
+            self._db = db
+
+    async def _open_schema(self, db: aiosqlite.Connection) -> set[str]:
+        """PRAGMAs, meta tables and the eager PR C migration on a connection
+        nobody else sees yet. Returns the tables that have both system columns."""
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA foreign_keys=ON")
         # Tolerate concurrent writers: a folder-bound datastore shared by a
         # Basna/Vatra run's agents can have several processes writing at once.
         # WAL allows many readers + one writer; the busy timeout makes a blocked
         # writer wait for the lock instead of failing with "database is locked".
-        await self._db.execute("PRAGMA busy_timeout=5000")
+        await db.execute("PRAGMA busy_timeout=5000")
 
-        await self._db.execute("""
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS _ds_tables (
-                name        TEXT PRIMARY KEY,
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
+                name             TEXT PRIMARY KEY,
+                created_at       TEXT NOT NULL,
+                updated_at       TEXT NOT NULL,
+                created_by       TEXT NOT NULL DEFAULT '',
+                created_by_name  TEXT NOT NULL DEFAULT ''
             )
         """)
-        await self._db.execute("""
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS _ds_columns (
                 table_name  TEXT NOT NULL,
                 col_name    TEXT NOT NULL,
@@ -113,7 +346,7 @@ class DatastoreManager:
                 FOREIGN KEY (table_name) REFERENCES _ds_tables(name) ON DELETE CASCADE
             )
         """)
-        await self._db.execute("""
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS _ds_protections (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 table_name  TEXT NOT NULL,
@@ -126,12 +359,113 @@ class DatastoreManager:
                 UNIQUE(table_name, level, row_id, col_name)
             )
         """)
-        await self._db.commit()
+        # PR C migration: a store from before PR C reads as owner-created.
+        meta_cols = await self._column_names(db, "_ds_tables")
+        for col in ("created_by", "created_by_name"):
+            if col not in meta_cols:
+                await db.execute(
+                    f"ALTER TABLE _ds_tables ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        async with db.execute("SELECT name FROM _ds_tables") as cur:
+            names = [r[0] for r in await cur.fetchall()]
+        async with db.execute("SELECT name FROM sqlite_master WHERE type = 'table'") as cur:
+            physical = {r[0] for r in await cur.fetchall()}
+        sys_ok: set[str] = set()
+        for name in names:
+            internal = self._internal_name(name)
+            if internal not in physical:
+                continue
+            try:
+                if await self._add_system_columns(db, internal):
+                    sys_ok.add(internal)
+            except Exception as exc:
+                log.warning("Datastore creator migration skipped a table", table=name,
+                            error=type(exc).__name__)
+        await db.commit()
+        return sys_ok
+
+    @staticmethod
+    async def _column_names(db: aiosqlite.Connection, table: str) -> set[str]:
+        async with db.execute(f'PRAGMA table_info("{table}")') as cur:
+            return {r[1] for r in await cur.fetchall()}
+
+    @classmethod
+    async def _add_system_columns(cls, db: aiosqlite.Connection, internal: str) -> bool:
+        """Add the missing system columns and the creator index to *internal*;
+        True when both columns are there afterwards."""
+        have = await cls._column_names(db, internal)
+        for col in SYSTEM_COLUMNS:
+            if col not in have:
+                await db.execute(
+                    f'ALTER TABLE "{internal}" ADD COLUMN "{col}" TEXT NOT NULL DEFAULT \'\'')
+        await db.execute(
+            f'CREATE INDEX IF NOT EXISTS "ix_{internal}_created_by" ON "{internal}"("_created_by")')
+        have = await cls._column_names(db, internal)
+        return all(col in have for col in SYSTEM_COLUMNS)
+
+    async def _sys_cols_present(self, internal: str) -> bool:
+        """Whether *internal* has both system columns. Reads never ALTER, but a
+        table another process created (or migrated) after this store was
+        opened already has them on disk: trust the table, not just the cache."""
+        if internal in self._sys_ok:
+            return True
+        assert self._db is not None
+        try:
+            have = await self._column_names(self._db, internal)
+        except Exception:
+            return False
+        if all(col in have for col in SYSTEM_COLUMNS):
+            self._sys_ok.add(internal)
+            return True
+        return False
+
+    async def _ensure_system_columns(self, internal: str, actor: DatastoreActor) -> bool:
+        """Lazy fallback, only inside :meth:`_writing`: a table another process
+        created after this store was opened. False (owner only) when the
+        columns can't be added — a member write is refused instead."""
+        if internal in self._sys_ok:
+            return True
+        assert self._db is not None
+        ok = False
+        try:
+            ok = await self._add_system_columns(self._db, internal)
+            await self._db.commit()
+        except Exception as exc:
+            log.warning("Datastore creator migration failed", table=internal,
+                        error=type(exc).__name__)
+        if ok:
+            self._sys_ok.add(internal)
+            return True
+        if actor.kind == "member":
+            raise MemberDeniedError(DS_MEMBER_UNAVAILABLE)
+        return False
+
+    @contextlib.asynccontextmanager
+    async def _writing(self):
+        """Hold this store's write lock (re-entrant within one task)."""
+        if id(self) in _HELD.get():
+            yield
+            return
+        async with self._write_lock:
+            tok = _HELD.set(_HELD.get() | {id(self)})
+            try:
+                yield
+            except BaseException:
+                # A write that failed half-way must not ride along with the
+                # next one's commit (stamped with someone else's call).
+                if self._db is not None:
+                    with contextlib.suppress(Exception):
+                        await self._db.rollback()
+                raise
+            finally:
+                _HELD.reset(tok)
 
     async def close(self) -> None:
         if self._db:
             await self._db.close()
             self._db = None
+        if self._ro_db is not None:
+            await self._ro_db.close()
+            self._ro_db = None
 
     # ── helpers ──────────────────────────────────────────────────────
 
@@ -196,23 +530,213 @@ class DatastoreManager:
     def _now(self) -> str:  # noqa: PLR6301
         return datetime.now(UTC).isoformat()
 
+    # ── PR C: creators and member rules ──────────────────────────────
+
+    async def _table_creator(self, safe: str) -> str:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT created_by FROM _ds_tables WHERE name = ?", (safe,)
+        ) as cur:
+            row = await cur.fetchone()
+        return str(row[0] or "") if row else ""
+
+    async def _require_table_owner(self, safe: str, actor: DatastoreActor) -> None:
+        """A member changes the structure of tables they created only."""
+        if actor.kind != "member":
+            return
+        if await self._table_creator(safe) != actor.user_id:
+            raise MemberDeniedError(DS_NOT_YOUR_TABLE)
+
+    def _scope_where(
+        self, where_clause: str, params: Any, actor: DatastoreActor, *, foreign: bool = False,
+    ) -> tuple[str, list[Any]]:
+        """*where_clause* narrowed to the actor's own rows (or, ``foreign``, to
+        everyone else's). The ONE place a member UPDATE / DELETE / count gets
+        its creator test — keyed on the BUILT clause (``{"_all": true}``
+        builds ``""``), never on the caller's filter."""
+        if actor.kind != "member" and not foreign:
+            return where_clause, list(params)
+        test = 'NOT ("_created_by" = ?)' if foreign else '"_created_by" = ?'
+        if where_clause:
+            if not where_clause.startswith("WHERE "):
+                raise ValueError("internal: a WHERE clause must start with 'WHERE '")
+            return "WHERE (" + where_clause[6:] + ") AND " + test, [*params, actor.user_id]
+        return "WHERE " + test, [actor.user_id]
+
+    async def _foreign_count(
+        self, internal: str, actor: DatastoreActor, where_clause: str = "", params: Any = (),
+    ) -> int:
+        """Rows matching *where_clause* that someone other than *actor* added."""
+        if actor.kind != "member":
+            return 0
+        assert self._db is not None
+        clause, args = self._scope_where(where_clause, params, actor, foreign=True)
+        async with self._db.execute(f'SELECT COUNT(*) FROM "{internal}" {clause}', args) as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+    async def _require_no_foreign_rows(self, internal: str, actor: DatastoreActor) -> None:
+        if actor.kind != "member":
+            return
+        if await self._foreign_count(internal, actor) > 0:
+            raise MemberDeniedError(DS_FOREIGN_ROWS)
+
+    async def _member_row_total(self, actor: DatastoreActor) -> int:
+        """Rows *actor* added across the whole store (uses the creator index)."""
+        if actor.kind != "member":
+            return 0
+        assert self._db is not None
+        async with self._db.execute("SELECT name FROM _ds_tables") as cur:
+            names = [r[0] for r in await cur.fetchall()]
+        total = 0
+        for name in names:
+            internal = self._internal_name(name)
+            if not await self._sys_cols_present(internal):
+                continue      # no system columns → no member rows there
+            async with self._db.execute(
+                f'SELECT COUNT(*) FROM "{internal}" WHERE "_created_by" = ?', (actor.user_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            total += int(row[0]) if row else 0
+        return total
+
+    async def _stored_bytes(
+        self, internal: str, cols: list[str], where_clause: str, params: Any,
+    ) -> tuple[int, int]:
+        """``(rows, bytes)`` *cols* take in the rows matching *where_clause*."""
+        assert self._db is not None
+        sums = "".join(", SUM(" + _OCTETS.format(f'"{c}"') + ")" for c in cols)
+        async with self._db.execute(
+            f'SELECT COUNT(*){sums} FROM "{internal}" {where_clause}', list(params)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return 0, 0
+        return int(row[0] or 0), sum(int(v or 0) for v in row[1:])
+
+    async def _member_bytes_left(self, actor: DatastoreActor) -> int | None:
+        """Bytes *actor* may still store (None for the owner): their rows'
+        values across the whole store, read through the creator index."""
+        if actor.kind != "member":
+            return None
+        assert self._db is not None
+        async with self._db.execute("SELECT name FROM _ds_tables") as cur:
+            names = [r[0] for r in await cur.fetchall()]
+        used = 0
+        for name in names:
+            internal = self._internal_name(name)
+            if not await self._sys_cols_present(internal):
+                continue      # no system columns → no member rows there
+            cols = [c.name for c in await self._table_columns(name)]
+            if cols:
+                used += (await self._stored_bytes(
+                    internal, cols, 'WHERE "_created_by" = ?', [actor.user_id]))[1]
+        return MEMBER_MAX_STORED_BYTES - used
+
+    @staticmethod
+    def _member_row_bytes(values: Any) -> int:
+        """Bytes a member's row (or SET) stores; refused when one value is
+        over ``MEMBER_MAX_VALUE_BYTES``."""
+        total = 0
+        for v in values:
+            size = _stored_size(v)
+            if size > MEMBER_MAX_VALUE_BYTES:
+                raise MemberDeniedError(DS_MEMBER_VALUE_TOO_LARGE)
+            total += size
+        return total
+
+    async def _default_bytes(self, internal: str) -> dict[str, int]:
+        """Column → bytes its DEFAULT stores in a row that leaves it out."""
+        assert self._db is not None
+        async with self._db.execute(f'PRAGMA table_info("{internal}")') as cur:
+            info = await cur.fetchall()
+        return {r[1]: _stored_size(str(r[4])) for r in info
+                if r[4] is not None and r[1] not in SYSTEM_COLUMNS}
+
+    async def _member_update_budget(
+        self, actor: DatastoreActor, internal: str, new_values: dict[str, Any],
+        where_clause: str, params: Any,
+    ) -> None:
+        """A member's UPDATE (scoped to their rows) must fit their stored bytes."""
+        if actor.kind != "member":
+            return
+        per_row = self._member_row_bytes(new_values.values())
+        clause, args = self._scope_where(where_clause, params, actor)
+        n, old = await self._stored_bytes(internal, list(new_values), clause, args)
+        grow = n * per_row - old
+        if grow > 0 and grow > (await self._member_bytes_left(actor) or 0):
+            raise MemberDeniedError(DS_MEMBER_STORAGE_LIMIT)
+
+    async def _check_member_table_name(self, safe: str, actor: DatastoreActor) -> None:
+        """A member's table is never named like a column, keyword, function,
+        SQLite or internal table (raw_select must not rewrite those in someone
+        else's SQL)."""
+        if actor.kind != "member":
+            return
+        assert self._db is not None
+        self._check_member_names(actor, safe)
+        reserved = safe in _SQL_RESERVED or safe.startswith(_SQL_RESERVED_PREFIXES)
+        if not reserved:
+            async with self._db.execute(
+                "SELECT 1 FROM _ds_columns WHERE col_name = ? LIMIT 1", (safe,)
+            ) as cur:
+                reserved = await cur.fetchone() is not None
+        # The connection's functions and table-valued modules (json_each & co.).
+        for pragma in ("pragma_function_list", "pragma_module_list"):
+            if reserved:
+                break
+            with contextlib.suppress(Exception):
+                async with self._db.execute(
+                    f"SELECT 1 FROM {pragma} WHERE lower(name) = ? LIMIT 1", (safe,)
+                ) as cur:
+                    reserved = await cur.fetchone() is not None
+        if reserved:
+            raise MemberDeniedError(DS_MEMBER_TABLE_NAME)
+
+    @staticmethod
+    def _check_member_names(actor: DatastoreActor, *names: str) -> None:
+        """A member's table / column names are at most MEMBER_MAX_NAME_CHARS."""
+        if actor.kind == "member" and any(len(n) > MEMBER_MAX_NAME_CHARS for n in names):
+            raise MemberDeniedError(DS_MEMBER_NAME_TOO_LONG)
+
+    async def has_member_rows(self) -> bool:
+        """Whether any table holds a row a member added (index range scan)."""
+        await self._ensure_db()
+        assert self._db is not None
+        async with self._db.execute("SELECT name FROM _ds_tables") as cur:
+            names = [r[0] for r in await cur.fetchall()]
+        for internal in sorted(self._internal_name(n) for n in names):
+            try:
+                if not await self._sys_cols_present(internal):
+                    continue
+                async with self._db.execute(
+                    f'SELECT 1 FROM "{internal}" WHERE "_created_by" > \'\' LIMIT 1'
+                ) as cur:
+                    if await cur.fetchone():
+                        return True
+            except Exception:
+                continue
+        return False
+
     # ── table management ─────────────────────────────────────────────
 
     async def list_tables(self) -> list[TableInfo]:
         await self._ensure_db()
         assert self._db is not None
         async with self._db.execute(
-            "SELECT name, created_at, updated_at FROM _ds_tables ORDER BY name"
+            "SELECT name, created_at, updated_at, created_by, created_by_name "
+            "FROM _ds_tables ORDER BY name"
         ) as cur:
             meta_rows = await cur.fetchall()
         tables: list[TableInfo] = []
-        for name, created_at, updated_at in meta_rows:
+        for name, created_at, updated_at, created_by, created_by_name in meta_rows:
             internal = self._internal_name(name)
             row_count = await self._row_count(internal)
             columns = await self._table_columns(name)
             tables.append(TableInfo(
                 name=name, columns=columns, row_count=row_count,
                 created_at=created_at, updated_at=updated_at,
+                created_by=created_by or "", created_by_name=created_by_name or "",
             ))
         return tables
 
@@ -222,24 +746,44 @@ class DatastoreManager:
         row_count = await self._row_count(internal)
         assert self._db is not None
         async with self._db.execute(
-            "SELECT created_at, updated_at FROM _ds_tables WHERE name = ?", (safe,)
+            "SELECT created_at, updated_at, created_by, created_by_name "
+            "FROM _ds_tables WHERE name = ?", (safe,)
         ) as cur:
             meta = await cur.fetchone()
         return TableInfo(
             name=safe, columns=columns, row_count=row_count,
             created_at=meta[0] if meta else "",
             updated_at=meta[1] if meta else "",
+            created_by=(meta[2] or "") if meta else "",
+            created_by_name=(meta[3] or "") if meta else "",
         )
 
     async def create_table(
         self, name: str, columns: list[dict[str, str]],
         unique: list[str] | None = None,
     ) -> TableInfo:
+        actor = current_actor()
+        async with self._writing():
+            return await self._create_table(actor, name, columns, unique)
+
+    async def _create_table(
+        self, actor: DatastoreActor, name: str, columns: list[dict[str, str]],
+        unique: list[str] | None,
+    ) -> TableInfo:
         await self._ensure_db()
         assert self._db is not None
         cfg = get_config()
 
         existing = await self.list_tables()
+        if actor.kind == "member":
+            async with self._db.execute(
+                "SELECT COUNT(*) FROM _ds_tables WHERE created_by = ?", (actor.user_id,)
+            ) as cur:
+                own = (await cur.fetchone())[0]
+            if own >= MEMBER_MAX_TABLES:
+                raise MemberDeniedError(DS_MEMBER_TABLE_LIMIT)
+            if len(existing) >= cfg.datastore.max_tables - MEMBER_TABLE_HEADROOM:
+                raise MemberDeniedError(DS_MEMBER_NO_ROOM)
         if len(existing) >= cfg.datastore.max_tables:
             raise ValueError(f"Table limit ({cfg.datastore.max_tables}) reached")
 
@@ -252,11 +796,20 @@ class DatastoreManager:
         ) as cur:
             if await cur.fetchone():
                 raise ValueError(f"Table already exists: {safe}")
+        await self._check_member_table_name(safe, actor)
 
         if not columns:
             raise ValueError("At least one column required")
+        if actor.kind == "member" and len(columns) > MEMBER_MAX_COLUMNS:
+            raise MemberDeniedError(DS_MEMBER_TOO_MANY_COLUMNS)
+        self._check_member_names(actor, *(
+            self._safe_name(str(c.get("name", ""))) for c in columns if isinstance(c, dict)))
 
-        col_defs: list[str] = ["_id INTEGER PRIMARY KEY AUTOINCREMENT"]
+        # The creator columns sit right after _id (hidden: not in _ds_columns).
+        col_defs: list[str] = [
+            "_id INTEGER PRIMARY KEY AUTOINCREMENT",
+            *(f'"{c}" TEXT NOT NULL DEFAULT \'\'' for c in SYSTEM_COLUMNS),
+        ]
         col_objects: list[ColumnDef] = []
         seen: set[str] = set()
 
@@ -294,8 +847,11 @@ class DatastoreManager:
         now = self._now()
         await self._db.execute(f'CREATE TABLE "{internal}" ({", ".join(col_defs)})')
         await self._db.execute(
-            "INSERT INTO _ds_tables (name, created_at, updated_at) VALUES (?, ?, ?)",
-            (safe, now, now),
+            f'CREATE INDEX IF NOT EXISTS "ix_{internal}_created_by" ON "{internal}"("_created_by")')
+        await self._db.execute(
+            "INSERT INTO _ds_tables (name, created_at, updated_at, created_by, created_by_name) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (safe, now, now, actor.user_id, actor.name),
         )
         for c in col_objects:
             await self._db.execute(
@@ -304,23 +860,42 @@ class DatastoreManager:
                 (safe, c.name, c.col_type, c.position),
             )
         await self._db.commit()
-        return TableInfo(name=safe, columns=col_objects, row_count=0, created_at=now, updated_at=now)
+        self._sys_ok.add(internal)
+        return TableInfo(name=safe, columns=col_objects, row_count=0, created_at=now, updated_at=now,
+                         created_by=actor.user_id, created_by_name=actor.name)
 
     async def drop_table(self, name: str) -> bool:
-        safe, internal = await self._resolve_table(name)
-        assert self._db is not None
-        await self._check_table_protected(safe)
-        await self._db.execute(f'DROP TABLE IF EXISTS "{internal}"')
-        await self._db.execute("DELETE FROM _ds_columns WHERE table_name = ?", (safe,))
-        await self._db.execute("DELETE FROM _ds_tables WHERE name = ?", (safe,))
-        await self._db.commit()
-        return True
+        actor = current_actor()
+        async with self._writing():
+            safe, internal = await self._resolve_table(name)
+            assert self._db is not None
+            await self._check_table_protected(safe)
+            if actor.kind == "member":
+                await self._ensure_system_columns(internal, actor)
+                await self._require_table_owner(safe, actor)
+                await self._require_no_foreign_rows(internal, actor)
+            await self._db.execute(f'DROP TABLE IF EXISTS "{internal}"')
+            await self._db.execute("DELETE FROM _ds_columns WHERE table_name = ?", (safe,))
+            await self._db.execute("DELETE FROM _ds_tables WHERE name = ?", (safe,))
+            await self._db.commit()
+            self._sys_ok.discard(internal)
+            return True
 
     async def rename_table(self, old_name: str, new_name: str) -> TableInfo:
         """Rename a user table (both meta-data and the physical SQLite table)."""
+        actor = current_actor()
+        async with self._writing():
+            await self._rename_table(actor, old_name, new_name)
+        return await self.describe_table(self._safe_name(new_name))
+
+    async def _rename_table(self, actor: DatastoreActor, old_name: str, new_name: str) -> None:
         old_safe, old_internal = await self._resolve_table(old_name)
         assert self._db is not None
         await self._check_table_protected(old_safe)
+        if actor.kind == "member":
+            await self._ensure_system_columns(old_internal, actor)
+            await self._require_table_owner(old_safe, actor)
+            await self._require_no_foreign_rows(old_internal, actor)
 
         new_safe = self._safe_name(new_name)
         if not new_safe:
@@ -334,6 +909,7 @@ class DatastoreManager:
         ) as cur:
             if await cur.fetchone():
                 raise ValueError(f"Table already exists: {new_safe}")
+        await self._check_member_table_name(new_safe, actor)
 
         new_internal = self._internal_name(new_safe)
         now = self._now()
@@ -346,6 +922,14 @@ class DatastoreManager:
             await self._db.execute(
                 f'ALTER TABLE "{old_internal}" RENAME TO "{new_internal}"'
             )
+            # SQLite keeps an index's name across a rename: move the creator
+            # index to the new name, so a new table under the old name can
+            # create its own.
+            if old_internal in self._sys_ok:
+                await self._db.execute(f'DROP INDEX IF EXISTS "ix_{old_internal}_created_by"')
+                await self._db.execute(
+                    f'CREATE INDEX IF NOT EXISTS "ix_{new_internal}_created_by" '
+                    f'ON "{new_internal}"("_created_by")')
             # Update meta-tables (parent + children together)
             await self._db.execute(
                 "UPDATE _ds_tables SET name = ?, updated_at = ? WHERE name = ?",
@@ -362,8 +946,9 @@ class DatastoreManager:
             await self._db.commit()
         finally:
             await self._db.execute("PRAGMA foreign_keys=ON")
-
-        return await self.describe_table(new_safe)
+        if old_internal in self._sys_ok:
+            self._sys_ok.discard(old_internal)
+            self._sys_ok.add(new_internal)
 
     # ── schema changes ───────────────────────────────────────────────
 
@@ -371,9 +956,18 @@ class DatastoreManager:
         self, table_name: str, col_name: str, col_type: str = "text",
         default: Any = None,
     ) -> bool:
+        actor = current_actor()
+        async with self._writing():
+            return await self._add_column(actor, table_name, col_name, col_type, default)
+
+    async def _add_column(
+        self, actor: DatastoreActor, table_name: str, col_name: str, col_type: str,
+        default: Any,
+    ) -> bool:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
         await self._check_table_protected(safe)
+        await self._require_table_owner(safe, actor)
         col_name = self._safe_name(col_name)
         col_type = col_type.lower().strip()
         if col_type not in VALID_TYPES:
@@ -384,6 +978,21 @@ class DatastoreManager:
         existing = await self._table_columns(safe)
         if any(c.name == col_name for c in existing):
             raise ValueError(f"Column already exists: {col_name}")
+        if actor.kind == "member":
+            if len(existing) >= MEMBER_MAX_COLUMNS:
+                raise MemberDeniedError(DS_MEMBER_TOO_MANY_COLUMNS)
+            self._check_member_names(actor, col_name)
+            # A default is stored in every row that leaves the column out —
+            # the rows already there too (read back as theirs, written out by
+            # their next update): never in someone else's rows, and the
+            # member's own must fit their stored bytes.
+            size = self._member_row_bytes([default])
+            if default is not None:
+                await self._ensure_system_columns(internal, actor)
+                await self._require_no_foreign_rows(internal, actor)
+                if size * await self._row_count(internal) > (
+                        await self._member_bytes_left(actor) or 0):
+                    raise MemberDeniedError(DS_MEMBER_STORAGE_LIMIT)
 
         sqlite_type = TYPE_MAP[col_type]
         default_clause = ""
@@ -405,12 +1014,32 @@ class DatastoreManager:
         await self._db.commit()
         return True
 
+    async def _require_own_clean_table(
+        self, safe: str, internal: str, actor: DatastoreActor,
+    ) -> None:
+        """J4: a member renames / drops / retypes only a table they created,
+        and only while nobody else has added rows to it."""
+        if actor.kind != "member":
+            return
+        await self._ensure_system_columns(internal, actor)
+        await self._require_table_owner(safe, actor)
+        await self._require_no_foreign_rows(internal, actor)
+
     async def rename_column(self, table_name: str, old_name: str, new_name: str) -> bool:
+        actor = current_actor()
+        async with self._writing():
+            return await self._rename_column(actor, table_name, old_name, new_name)
+
+    async def _rename_column(
+        self, actor: DatastoreActor, table_name: str, old_name: str, new_name: str,
+    ) -> bool:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
         await self._check_table_protected(safe)
+        await self._require_own_clean_table(safe, internal, actor)
         old_safe = self._safe_name(old_name)
         new_safe = self._safe_name(new_name)
+        self._check_member_names(actor, new_safe)
         await self._check_column_protected(safe, old_safe)
         if new_safe.startswith("_"):
             raise ValueError(f"Column name cannot start with underscore: {new_safe}")
@@ -436,9 +1065,15 @@ class DatastoreManager:
         return True
 
     async def drop_column(self, table_name: str, col_name: str) -> bool:
+        actor = current_actor()
+        async with self._writing():
+            return await self._drop_column(actor, table_name, col_name)
+
+    async def _drop_column(self, actor: DatastoreActor, table_name: str, col_name: str) -> bool:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
         await self._check_table_protected(safe)
+        await self._require_own_clean_table(safe, internal, actor)
         col_safe = self._safe_name(col_name)
         await self._check_column_protected(safe, col_safe)
 
@@ -464,9 +1099,17 @@ class DatastoreManager:
         self, table_name: str, col_name: str, new_type: str,
     ) -> bool:
         """Change a column's type via table rebuild with CAST."""
+        actor = current_actor()
+        async with self._writing():
+            return await self._change_column_type(actor, table_name, col_name, new_type)
+
+    async def _change_column_type(
+        self, actor: DatastoreActor, table_name: str, col_name: str, new_type: str,
+    ) -> bool:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
         await self._check_table_protected(safe)
+        await self._require_own_clean_table(safe, internal, actor)
         col_safe = self._safe_name(col_name)
         await self._check_column_protected(safe, col_safe)
         new_type = new_type.lower().strip()
@@ -478,10 +1121,17 @@ class DatastoreManager:
         if not target_col:
             raise ValueError(f"Column not found: {col_safe}")
 
-        # Build new table schema
+        # Build new table schema. J17: the rebuild keeps the creator columns
+        # (and their index) and the UNIQUE key upsert depends on.
+        uniq = await self._unique_columns(internal)
+        has_sys = await self._ensure_system_columns(internal, actor)
         tmp_internal = internal + "__tmp"
-        col_defs = ["_id INTEGER PRIMARY KEY AUTOINCREMENT"]
+        col_defs = [
+            "_id INTEGER PRIMARY KEY AUTOINCREMENT",
+            *(f'"{c}" TEXT NOT NULL DEFAULT \'\'' for c in SYSTEM_COLUMNS),
+        ]
         select_parts = ["_id"]
+        select_parts += [f'"{c}"' if has_sys else "''" for c in SYSTEM_COLUMNS]
         for c in existing:
             if c.name == col_safe:
                 sqlite_type = TYPE_MAP[new_type]
@@ -491,23 +1141,45 @@ class DatastoreManager:
                 sqlite_type = TYPE_MAP.get(c.col_type, "TEXT")
                 col_defs.append(f'"{c.name}" {sqlite_type}')
                 select_parts.append(f'"{c.name}"')
+        if uniq:
+            col_defs.append("UNIQUE (" + ", ".join(f'"{u}"' for u in uniq) + ")")
 
-        await self._db.execute(f'CREATE TABLE "{tmp_internal}" ({", ".join(col_defs)})')
-        await self._db.execute(
-            f'INSERT INTO "{tmp_internal}" SELECT {", ".join(select_parts)} FROM "{internal}"'
-        )
-        await self._db.execute(f'DROP TABLE "{internal}"')
-        await self._db.execute(f'ALTER TABLE "{tmp_internal}" RENAME TO "{internal}"')
-
-        await self._db.execute(
-            "UPDATE _ds_columns SET col_type = ? WHERE table_name = ? AND col_name = ?",
-            (new_type, safe, col_safe),
-        )
-        await self._db.execute(
-            "UPDATE _ds_tables SET updated_at = ? WHERE name = ?",
-            (self._now(), safe),
-        )
+        # One explicit transaction, so a failed rebuild rolls the DDL back
+        # too (the legacy sqlite3 mode opens none for CREATE/DROP) and never
+        # leaves "<internal>__tmp" behind to break every later call.
+        # (A user table's name never holds "__", so the tmp name is ours.)
+        await self._db.execute(f'DROP TABLE IF EXISTS "{tmp_internal}"')
         await self._db.commit()
+        try:
+            await self._db.execute("BEGIN")
+            await self._db.execute(f'CREATE TABLE "{tmp_internal}" ({", ".join(col_defs)})')
+            await self._db.execute(
+                f'INSERT INTO "{tmp_internal}" SELECT {", ".join(select_parts)} FROM "{internal}"'
+            )
+            await self._db.execute(f'DROP TABLE "{internal}"')
+            await self._db.execute(f'ALTER TABLE "{tmp_internal}" RENAME TO "{internal}"')
+            await self._db.execute(
+                f'CREATE INDEX IF NOT EXISTS "ix_{internal}_created_by" ON "{internal}"("_created_by")')
+            await self._db.execute(
+                "UPDATE _ds_columns SET col_type = ? WHERE table_name = ? AND col_name = ?",
+                (new_type, safe, col_safe),
+            )
+            await self._db.execute(
+                "UPDATE _ds_tables SET updated_at = ? WHERE name = ?",
+                (self._now(), safe),
+            )
+            await self._db.commit()
+        except BaseException as exc:
+            with contextlib.suppress(Exception):
+                await self._db.rollback()
+                await self._db.execute(f'DROP TABLE IF EXISTS "{tmp_internal}"')
+                await self._db.commit()
+            if isinstance(exc, sqlite3.IntegrityError) and "UNIQUE" in str(exc):
+                raise ValueError(
+                    f"converting {col_safe} would make values of the unique key collide; "
+                    "the column was not changed") from None
+            raise
+        self._sys_ok.add(internal)
         return True
 
     # ── where clause builder ─────────────────────────────────────────
@@ -529,9 +1201,17 @@ class DatastoreManager:
         for key, val in where.items():
             if key == "_all":
                 continue
-            # _id is the auto-generated primary key — allow it directly
-            if key == "_id":
-                col = "_id"
+            if key == "_mine":
+                # PR C: rows the caller added (the owner's are stamped '').
+                if val is not True:
+                    raise ValueError('"_mine" takes true')
+                clauses.append('"_created_by" = ?')
+                params.append(current_actor().user_id)
+                continue
+            # _id is the auto-generated primary key — allow it directly;
+            # so are the creator columns (filter-only, never written by input).
+            if key == "_id" or key in SYSTEM_COLUMNS:
+                col = key
             else:
                 col = self._safe_name(key)
                 if col not in valid_columns:
@@ -743,6 +1423,16 @@ class DatastoreManager:
         reason: str | None = None,
     ) -> dict[str, Any]:
         """Add a protection rule. Returns the created protection dict."""
+        actor = current_actor()
+        async with self._writing():
+            if actor.kind == "member":
+                raise MemberDeniedError(DS_OWNER_ONLY)
+            return await self._protect(table_name, level, row_id, col_name, reason)
+
+    async def _protect(
+        self, table_name: str, level: str, row_id: int | None,
+        col_name: str | None, reason: str | None,
+    ) -> dict[str, Any]:
         valid_levels = {"table", "column", "row", "cell"}
         if level not in valid_levels:
             raise ValueError(f"Invalid protection level: {level}. Valid: {sorted(valid_levels)}")
@@ -806,6 +1496,15 @@ class DatastoreManager:
         col_name: str | None = None,
     ) -> bool:
         """Remove a protection rule. Returns True if removed, False if not found."""
+        actor = current_actor()
+        async with self._writing():
+            if actor.kind == "member":
+                raise MemberDeniedError(DS_OWNER_ONLY)
+            return await self._unprotect(table_name, level, row_id, col_name)
+
+    async def _unprotect(
+        self, table_name: str, level: str, row_id: int | None, col_name: str | None,
+    ) -> bool:
         safe, _ = await self._resolve_table(table_name)
         assert self._db is not None
 
@@ -876,6 +1575,25 @@ class DatastoreManager:
     async def insert_rows(
         self, table_name: str, rows: list[dict[str, Any]],
     ) -> int:
+        actor = current_actor()
+        async with self._writing():
+            return await self._insert_rows(actor, table_name, rows)
+
+    async def _member_row_caps(
+        self, actor: DatastoreActor, internal: str, current_count: int, adding: int,
+    ) -> None:
+        """J5: a member's store-wide row budget and the owner's 10% of every table."""
+        if actor.kind != "member":
+            return
+        if await self._member_row_total(actor) + adding > MEMBER_MAX_ROWS:
+            raise MemberDeniedError(DS_MEMBER_ROW_LIMIT)
+        cap = get_config().datastore.max_rows_per_table
+        if current_count + adding > cap - cap // MEMBER_ROW_HEADROOM_DIVISOR:
+            raise MemberDeniedError(DS_TABLE_NEARLY_FULL)
+
+    async def _insert_rows(
+        self, actor: DatastoreActor, table_name: str, rows: list[dict[str, Any]],
+    ) -> int:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
         await self._check_table_protected(safe)
@@ -884,12 +1602,18 @@ class DatastoreManager:
         if not rows:
             return 0
 
+        stamp = await self._ensure_system_columns(internal, actor)
         current_count = await self._row_count(internal)
         if current_count + len(rows) > cfg.datastore.max_rows_per_table:
             raise ValueError(
                 f"Would exceed row limit ({cfg.datastore.max_rows_per_table}). "
                 f"Current: {current_count}, inserting: {len(rows)}"
             )
+        await self._member_row_caps(actor, internal, current_count, len(rows))
+        # A member's stored bytes, counted row by row before each INSERT
+        # (a refusal rolls back the whole call).
+        left = await self._member_bytes_left(actor)
+        defaults = await self._default_bytes(internal) if left is not None else {}
 
         columns = await self._table_columns(safe)
         col_names = {c.name for c in columns}
@@ -906,9 +1630,18 @@ class DatastoreManager:
             if not filtered:
                 continue
             col_list = list(filtered.keys())
+            values = list(filtered.values())
+            if left is not None:
+                left -= self._member_row_bytes(values) + sum(
+                    b for c, b in defaults.items() if c not in filtered)
+                if left < 0:
+                    raise MemberDeniedError(DS_MEMBER_STORAGE_LIMIT)
+            if stamp:
+                # The creator travels in the SAME statement as the row.
+                col_list += list(SYSTEM_COLUMNS)
+                values += [actor.user_id, actor.name]
             placeholders = ", ".join("?" for _ in col_list)
             col_clause = ", ".join(f'"{c}"' for c in col_list)
-            values = list(filtered.values())
             await self._db.execute(
                 f'INSERT INTO "{internal}" ({col_clause}) VALUES ({placeholders})',
                 values,
@@ -949,6 +1682,14 @@ class DatastoreManager:
         of duplicating it (idempotent — a resumed run re-running the same items just
         refreshes them). Needs a unique key: create the table with unique=[...], or
         pass key_columns. Returns the number of rows written."""
+        actor = current_actor()
+        async with self._writing():
+            return await self._upsert_rows(actor, table_name, rows, key_columns)
+
+    async def _upsert_rows(
+        self, actor: DatastoreActor, table_name: str, rows: list[dict[str, Any]],
+        key_columns: list[str] | None,
+    ) -> int:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
         await self._check_table_protected(safe)
@@ -968,14 +1709,18 @@ class DatastoreManager:
                 "upsert needs a unique key — create the table with a unique key "
                 "(create_table with unique=[\"<col>\"]) or pass key_columns.")
 
+        stamp = await self._ensure_system_columns(internal, actor)
         # Worst-case (all inserts) row-limit guard.
         current_count = await self._row_count(internal)
         if current_count + len(rows) > cfg.datastore.max_rows_per_table:
             raise ValueError(
                 f"Would exceed row limit ({cfg.datastore.max_rows_per_table}). "
                 f"Current: {current_count}, upserting: {len(rows)}")
+        await self._member_row_caps(actor, internal, current_count, len(rows))
 
-        written = 0
+        # Validate every row first; a member's call is refused as a whole when
+        # any row would overwrite a row someone else added (J3).
+        prepared: list[dict[str, Any]] = []
         for i, row in enumerate(rows):
             if not isinstance(row, dict):
                 raise ValueError(
@@ -987,20 +1732,58 @@ class DatastoreManager:
             for k in keys:
                 if k not in filtered:
                     raise ValueError(f"upsert row {i} is missing key column '{k}'")
+            prepared.append(filtered)
+        if actor.kind == "member":
+            match = " AND ".join(f'"{k}" = ?' for k in keys)
+            for filtered in prepared:
+                async with self._db.execute(
+                    f'SELECT "_created_by" FROM "{internal}" WHERE {match}',
+                    [filtered[k] for k in keys],
+                ) as cur:
+                    found = await cur.fetchall()
+                if any(str(r[0] or "") != actor.user_id for r in found):
+                    raise MemberDeniedError(DS_NOT_YOUR_ROWS)
+
+        left = await self._member_bytes_left(actor)
+        defaults = await self._default_bytes(internal) if left is not None else {}
+        written = 0
+        for filtered in prepared:
             col_list = list(filtered.keys())
-            placeholders = ", ".join("?" for _ in col_list)
-            col_clause = ", ".join(f'"{c}"' for c in col_list)
+            values = list(filtered.values())
             conflict = ", ".join(f'"{k}"' for k in keys)
             update_cols = [c for c in col_list if c not in keys]
+            if left is not None:
+                # An insert stores the row; an update of the member's own
+                # row stores the difference in its updated columns.
+                grow = self._member_row_bytes(values)
+                match = " AND ".join(f'"{k}" = ?' for k in keys)
+                n, old = await self._stored_bytes(
+                    internal, update_cols, f"WHERE {match}", [filtered[k] for k in keys])
+                if n:
+                    grow = self._member_row_bytes(filtered[c] for c in update_cols) - old
+                else:
+                    grow += sum(b for c, b in defaults.items() if c not in filtered)
+                left -= grow
+                if left < 0:
+                    raise MemberDeniedError(DS_MEMBER_STORAGE_LIMIT)
+            if stamp:
+                col_list += list(SYSTEM_COLUMNS)
+                values += [actor.user_id, actor.name]
+            placeholders = ", ".join("?" for _ in col_list)
+            col_clause = ", ".join(f'"{c}"' for c in col_list)
             if update_cols:
+                # User columns only: a conflicting row keeps its creator.
                 set_clause = ", ".join(f'"{c}" = excluded."{c}"' for c in update_cols)
                 do = f"DO UPDATE SET {set_clause}"
+                if actor.kind == "member":
+                    do += ' WHERE "_created_by" = ?'
+                    values.append(actor.user_id)
             else:
                 do = "DO NOTHING"
             await self._db.execute(
                 f'INSERT INTO "{internal}" ({col_clause}) VALUES ({placeholders}) '
                 f'ON CONFLICT ({conflict}) {do}',
-                list(filtered.values()))
+                values)
             written += 1
 
         if written:
@@ -1014,6 +1797,14 @@ class DatastoreManager:
         self, table_name: str,
         set_values: dict[str, Any],
         where: dict[str, Any] | None = None,
+    ) -> int:
+        actor = current_actor()
+        async with self._writing():
+            return await self._update_rows(actor, table_name, set_values, where)
+
+    async def _update_rows(
+        self, actor: DatastoreActor, table_name: str,
+        set_values: dict[str, Any], where: dict[str, Any] | None,
     ) -> int:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
@@ -1047,6 +1838,16 @@ class DatastoreManager:
         if where:
             where_clause, where_params = self._build_where(where, col_names)
 
+        if actor.kind == "member":
+            # J3: the whole call is refused when it reaches a row someone
+            # else added (no silent narrowing).
+            await self._ensure_system_columns(internal, actor)
+            if await self._foreign_count(internal, actor, where_clause, where_params) > 0:
+                raise MemberDeniedError(DS_NOT_YOUR_ROWS)
+            await self._member_update_budget(
+                actor, internal, {self._safe_name(k): v for k, v in set_values.items()},
+                where_clause, where_params)
+
         # Check row-level and cell-level protections
         if where:
             affected_ids = await self._resolve_affected_ids(
@@ -1056,6 +1857,7 @@ class DatastoreManager:
                 await self._check_row_protection(safe, affected_ids)
                 await self._check_cell_protection(safe, affected_ids, update_col_set)
 
+        where_clause, where_params = self._scope_where(where_clause, where_params, actor)
         sql = f'UPDATE "{internal}" SET {", ".join(set_clauses)} {where_clause}'
         cursor = await self._db.execute(sql, set_params + where_params)
         affected = cursor.rowcount
@@ -1071,9 +1873,23 @@ class DatastoreManager:
         self, table_name: str, col_name: str,
         value: Any = None, expression: str | None = None,
     ) -> int:
+        actor = current_actor()
+        async with self._writing():
+            return await self._update_column(actor, table_name, col_name, value, expression)
+
+    async def _update_column(
+        self, actor: DatastoreActor, table_name: str, col_name: str,
+        value: Any, expression: str | None,
+    ) -> int:
+        if actor.kind == "member" and expression:
+            raise MemberDeniedError(DS_EXPRESSION_MEMBER)
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
         await self._check_table_protected(safe)
+        if actor.kind == "member":
+            await self._ensure_system_columns(internal, actor)
+            await self._require_table_owner(safe, actor)
+            await self._require_no_foreign_rows(internal, actor)
         col_safe = self._safe_name(col_name)
         await self._check_column_protected(safe, col_safe)
 
@@ -1090,13 +1906,15 @@ class DatastoreManager:
                 f"in table '{safe}' are row-protected"
             )
 
+        await self._member_update_budget(actor, internal, {col_safe: value}, "", [])
+        scope, scope_params = self._scope_where("", [], actor)
         if expression:
             # Raw expression -- only allow simple math/string ops
-            sql = f'UPDATE "{internal}" SET "{col_safe}" = {expression}'
-            cursor = await self._db.execute(sql)
+            sql = f'UPDATE "{internal}" SET "{col_safe}" = {expression} {scope}'
+            cursor = await self._db.execute(sql, scope_params)
         else:
-            sql = f'UPDATE "{internal}" SET "{col_safe}" = ?'
-            cursor = await self._db.execute(sql, (value,))
+            sql = f'UPDATE "{internal}" SET "{col_safe}" = ? {scope}'
+            cursor = await self._db.execute(sql, [value, *scope_params])
 
         affected = cursor.rowcount
         if affected:
@@ -1110,6 +1928,13 @@ class DatastoreManager:
     async def delete_rows(
         self, table_name: str,
         where: dict[str, Any] | None = None,
+    ) -> int:
+        actor = current_actor()
+        async with self._writing():
+            return await self._delete_rows(actor, table_name, where)
+
+    async def _delete_rows(
+        self, actor: DatastoreActor, table_name: str, where: dict[str, Any] | None,
     ) -> int:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
@@ -1125,6 +1950,11 @@ class DatastoreManager:
                 f"'where' must be a JSON object like {{\"col\": \"value\"}} or "
                 f"{{\"_all\": true}}, got {type(where).__name__}: {where!r}"
             )
+        if where.get("_all") is True and where.get("_mine") is True:
+            # {"_all": true, "_mine": true} means {"_mine": true}.
+            where = {k: v for k, v in where.items() if k != "_all"}
+        if actor.kind == "member":
+            await self._ensure_system_columns(internal, actor)
 
         if where.get("_all") is True:
             # Check if any rows in the table are row-protected
@@ -1135,17 +1965,23 @@ class DatastoreManager:
                     f"Cannot delete all rows: row(s) {ids_str} "
                     f"in table '{safe}' are row-protected"
                 )
-            cursor = await self._db.execute(f'DELETE FROM "{internal}"')
+            if await self._foreign_count(internal, actor) > 0:
+                raise MemberDeniedError(DS_NOT_YOUR_ROWS)
+            scope, scope_params = self._scope_where("", [], actor)
+            cursor = await self._db.execute(f'DELETE FROM "{internal}" {scope}', scope_params)
         else:
             where_clause, where_params = self._build_where(where, col_names)
             if not where_clause:
                 raise ValueError("Empty WHERE clause. Pass {\"_all\": true} to delete all rows.")
+            if await self._foreign_count(internal, actor, where_clause, where_params) > 0:
+                raise MemberDeniedError(DS_NOT_YOUR_ROWS)
             # Check row-level protections for targeted rows
             affected_ids = await self._resolve_affected_ids(
                 internal, where, col_names,
             )
             if affected_ids:
                 await self._check_row_protection(safe, affected_ids)
+            where_clause, where_params = self._scope_where(where_clause, where_params, actor)
             cursor = await self._db.execute(f'DELETE FROM "{internal}" {where_clause}', where_params)
 
         affected = cursor.rowcount
@@ -1167,27 +2003,38 @@ class DatastoreManager:
         limit: int | None = None,
         offset: int = 0,
         bypass_max: bool = False,
+        *,
+        include_creator: bool = False,
     ) -> dict[str, Any]:
+        """Rows of one table. ``include_creator`` (PR C) adds ``"creators"``
+        — one wire ``Creator`` per row, aligned with ``rows`` — without
+        changing ``columns``/``rows`` (the creator columns appear there only
+        when the caller names them in ``columns``)."""
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
         cfg = get_config()
 
         table_cols = await self._table_columns(safe)
         col_names = {c.name for c in table_cols}
+        passthrough = ("_id", *SYSTEM_COLUMNS)
 
         # Select clause
         if columns:
             select_cols = []
             for c in columns:
-                c_safe = "_id" if c == "_id" else self._safe_name(c)
-                if c_safe not in col_names and c_safe != "_id":
+                c_safe = c if c in passthrough else self._safe_name(c)
+                if c_safe not in col_names and c_safe not in passthrough:
                     raise ValueError(f"Unknown column: {c}")
                 select_cols.append(f'"{c_safe}"')
             select_clause = ", ".join(select_cols)
-            result_col_names = [("_id" if c == "_id" else self._safe_name(c)) for c in columns]
+            result_col_names = [(c if c in passthrough else self._safe_name(c)) for c in columns]
         else:
             select_clause = '"_id", ' + ", ".join(f'"{c.name}"' for c in table_cols)
             result_col_names = ["_id"] + [c.name for c in table_cols]
+        # Reads never ALTER: a table without creator columns reads as the owner's.
+        creator_cols = include_creator and await self._sys_cols_present(internal)
+        if creator_cols:
+            select_clause += ", " + ", ".join(f'"{c}"' for c in SYSTEM_COLUMNS)
 
         # Where
         where_clause = ""
@@ -1208,7 +2055,8 @@ class DatastoreManager:
                     raw_col = ob
                     direction = "ASC"
                 # _id is the auto-generated primary key — pass through directly
-                col = "_id" if raw_col == "_id" else self._safe_name(raw_col)
+                # (so are the creator columns).
+                col = raw_col if raw_col in passthrough else self._safe_name(raw_col)
                 parts.append(f'"{col}" {direction}')
             order_clause = "ORDER BY " + ", ".join(parts)
 
@@ -1233,19 +2081,36 @@ class DatastoreManager:
             total_row = await cur.fetchone()
             total = total_row[0] if total_row else 0
 
-        return {
+        out_rows = [list(r) for r in rows]
+        result: dict[str, Any] = {
             "columns": result_col_names,
-            "rows": [list(r) for r in rows],
+            "rows": out_rows,
             "total": total,
             "offset": offset,
             "limit": effective_limit,
         }
+        if include_creator:
+            if creator_cols:
+                result["creators"] = [creator_dict(r[-2], r[-1]) for r in out_rows]
+                result["rows"] = [r[:-2] for r in out_rows]
+            else:
+                result["creators"] = [creator_dict("", "") for _ in out_rows]
+        return result
 
     async def raw_select(self, sql: str) -> dict[str, Any]:
-        """Execute a read-only SQL query. Only SELECT is allowed."""
+        """Execute a read-only SQL query. Only SELECT is allowed.
+
+        PR C: the creator columns are dropped from the result unless the SQL
+        names them (J17). A member's statement (J19) runs on a separate
+        read-only connection, at most ``MEMBER_SQL_DEADLINE_S`` and
+        ``max_query_rows`` rows, without ``WITH RECURSIVE``.
+        """
         await self._ensure_db()
         assert self._db is not None
         cfg = get_config()
+        from captain_claw import speaker
+
+        member = speaker.current() is not None
 
         stripped = sql.strip()
         # Validate it's a SELECT
@@ -1259,37 +2124,109 @@ class DatastoreManager:
         )
         if danger:
             raise ValueError(f"Mutation keyword '{danger.group()}' not allowed in raw SELECT")
+        if member and re.search(r"\bRECURSIVE\b", sql, re.IGNORECASE):
+            raise ValueError(DS_SQL_LIMITS)
+        if member and re.search(r"\bpragma_\w+", sql, re.IGNORECASE):
+            # pragma_database_list & co. name host paths — plain SELECTs only.
+            raise ValueError(DS_SQL_LIMITS)
 
         # Replace user table names with internal names.
         # Users may reference tables as-is; we need to add the ds_ prefix.
-        async with self._db.execute("SELECT name FROM _ds_tables") as cur:
-            known_tables = [r[0] for r in await cur.fetchall()]
+        async with self._db.execute("SELECT name, created_by FROM _ds_tables") as cur:
+            known_tables = [(r[0], r[1] or "") for r in await cur.fetchall()]
 
         processed = stripped
-        for tbl in sorted(known_tables, key=len, reverse=True):
+        # Comments blanked, for spotting a CTE named like a member's table.
+        uncommented = re.sub(r"/\*.*?\*/|--[^\n]*", " ", stripped, flags=re.DOTALL)
+        for tbl, created_by in sorted(known_tables, key=lambda t: len(t[0]), reverse=True):
             internal = self._internal_name(tbl)
-            # Replace table name when it appears as a word boundary
-            processed = re.sub(
-                rf'\b{re.escape(tbl)}\b', f'"{internal}"', processed,
-            )
+            name = re.escape(tbl)
+            cte = (rf'\b{name}["`\]]?\s*(\([^()]*\))?\s*AS\s*(NOT\s+)?'
+                   rf'(MATERIALIZED\s*)?\(')
+            if not created_by:
+                # Replace table name when it appears as a word boundary
+                processed = re.sub(rf'\b{name}\b', f'"{internal}"', processed)
+            elif not any(re.search(cte, text, re.IGNORECASE)
+                         for text in (processed, uncommented)):
+                # A member's table only where it is one — right after FROM or
+                # JOIN, outside a '...' literal — so it never rewrites a
+                # column, function, keyword, string (or a CTE of that name)
+                # in someone else's SQL.
+                parts = re.split(r"('(?:[^']|'')*')", processed)
+                parts[::2] = [re.sub(
+                    rf'\b(FROM|JOIN)\b(\s*)(["`]?){name}\3(?!\w)',
+                    lambda m, i=internal: f'{m.group(1)}{m.group(2) or " "}"{i}"',
+                    code, flags=re.IGNORECASE,
+                ) for code in parts[::2]]
+                processed = "".join(parts)
 
         # Enforce LIMIT
         max_rows = cfg.datastore.max_query_rows
         if not re.search(r"\bLIMIT\b", processed, re.IGNORECASE):
             processed = processed.rstrip(";") + f" LIMIT {max_rows}"
 
-        async with self._db.execute(processed) as cur:
-            if cur.description:
-                col_names = [d[0] for d in cur.description]
-            else:
-                col_names = []
-            rows = await cur.fetchall()
+        if member:
+            col_names, rows = await self._member_select(processed, max_rows)
+        else:
+            async with self._db.execute(processed) as cur:
+                if cur.description:
+                    col_names = [d[0] for d in cur.description]
+                else:
+                    col_names = []
+                rows = await cur.fetchall()
+
+        out_rows = [list(r) for r in rows]
+        if not re.search(r"_created_by", sql, re.IGNORECASE):
+            hidden = [i for i, c in enumerate(col_names) if c in SYSTEM_COLUMNS]
+            if hidden:
+                col_names = [c for i, c in enumerate(col_names) if i not in hidden]
+                out_rows = [[v for i, v in enumerate(r) if i not in hidden] for r in out_rows]
 
         return {
             "columns": col_names,
-            "rows": [list(r) for r in rows],
-            "total": len(rows),
+            "rows": out_rows,
+            "total": len(out_rows),
         }
+
+    async def _member_select(self, processed: str, max_rows: int) -> tuple[list[str], list[Any]]:
+        """Run a member's SELECT on the read-only connection, interrupted at
+        the deadline; ``ValueError(DS_SQL_LIMITS)`` when it runs over."""
+        async with self._ro_lock:
+            if self._ro_db is None:
+                uri = "file:" + urllib.parse.quote(str(self.db_path)) + "?mode=ro"
+                ro = await aiosqlite.connect(uri, uri=True)
+                await ro.execute("PRAGMA query_only=ON")
+                with contextlib.suppress(Exception):
+                    # One value (zeroblob(1e9), printf padding, …) can't
+                    # allocate more than this on the member connection.
+                    await ro._execute(
+                        ro._conn.setlimit, sqlite3.SQLITE_LIMIT_LENGTH, _MEMBER_SQL_VALUE_MAX)
+                self._ro_db = ro
+            ro = self._ro_db
+            self._ro_deadline = time.monotonic() + MEMBER_SQL_DEADLINE_S
+            await ro.set_progress_handler(
+                lambda: 1 if time.monotonic() > self._ro_deadline else 0, 10_000)
+            try:
+                async with ro.execute(processed) as cur:
+                    col_names = [d[0] for d in cur.description] if cur.description else []
+                    rows: list[Any] = []
+                    size = 0
+                    while len(rows) < max_rows:
+                        batch = await cur.fetchmany(min(50, max_rows - len(rows)))
+                        if not batch:
+                            break
+                        rows.extend(batch)
+                        size += sum(_value_size(v) for r in batch for v in r)
+                        if size > _MEMBER_SQL_RESULT_MAX or time.monotonic() > self._ro_deadline:
+                            raise ValueError(DS_SQL_LIMITS)
+            except (sqlite3.OperationalError, sqlite3.DataError) as exc:
+                text = str(exc).lower()
+                if "interrupted" in text or "too big" in text:
+                    raise ValueError(DS_SQL_LIMITS) from None
+                raise
+            finally:
+                await ro.set_progress_handler(None, 0)
+        return col_names, rows
 
     # ── import helpers (upload flow) ─────────────────────────────────
 
@@ -1427,12 +2364,67 @@ class DatastoreManager:
 
     # ── import / export ──────────────────────────────────────────────
 
+    async def _member_import_budget(self, actor: DatastoreActor, file_path: Path) -> int | None:
+        """J19: a member's import source is size-capped, and its rows must fit
+        their remaining row budget — both checked before anything is created.
+        The budget (rows) for a member, None for the owner."""
+        if actor.kind != "member":
+            return None
+        if file_path.stat().st_size > MEMBER_IMPORT_MAX_BYTES:
+            raise MemberDeniedError(DS_IMPORT_TOO_LARGE)
+        await self._ensure_db()
+        return MEMBER_MAX_ROWS - await self._member_row_total(actor)
+
+    async def _member_import_bytes(
+        self, actor: DatastoreActor, headers: list[str], rows: Any,
+    ) -> None:
+        """A member's import must fit the column cap and their stored bytes —
+        measured on the parsed values (an xlsx shared string counts in every
+        cell it fills), before anything is created."""
+        if actor.kind != "member":
+            return
+        if len(headers) > MEMBER_MAX_COLUMNS:
+            raise MemberDeniedError(DS_MEMBER_TOO_MANY_COLUMNS)
+        left = await self._member_bytes_left(actor) or 0
+        for values in rows:
+            left -= self._member_row_bytes(values)
+            if left < 0:
+                raise MemberDeniedError(DS_MEMBER_STORAGE_LIMIT)
+
+    async def _import_rows(
+        self, actor: DatastoreActor, safe: str, col_defs: list[dict[str, str]] | None,
+        rows: list[dict[str, Any]], exists_hint: str,
+    ) -> int:
+        """Create the table (``col_defs``, unless appending) and insert *rows*
+        under one write lock; a member's refused insert drops the table it
+        just created, so nothing of the import is left."""
+        async with self._writing():
+            created = False
+            try:
+                if col_defs is not None:
+                    try:
+                        await self.create_table(safe, col_defs)
+                    except ValueError as e:
+                        if "already exists" in str(e):
+                            raise ValueError(exists_hint) from e
+                        raise
+                    created = True
+                return await self.insert_rows(safe, rows)
+            except BaseException:
+                if created and actor.kind == "member" and self._db is not None:
+                    with contextlib.suppress(Exception):
+                        await self._db.rollback()
+                        await self.drop_table(safe)
+                raise
+
     async def import_csv(
         self, file_path: Path, table_name: str | None = None,
         append: bool = False,
     ) -> dict[str, Any]:
+        actor = current_actor()
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
+        budget = await self._member_import_budget(actor, file_path)
 
         text = file_path.read_text(encoding="utf-8", errors="replace")
         reader = csv.DictReader(io.StringIO(text))
@@ -1440,25 +2432,24 @@ class DatastoreManager:
             raise ValueError("CSV has no headers")
 
         headers = self._dedup_headers([self._safe_name(h) for h in reader.fieldnames])
-        all_rows = list(reader)
+        if budget is None:
+            all_rows = list(reader)
+        else:
+            all_rows = []
+            for row in reader:
+                all_rows.append(row)
+                if len(all_rows) > budget:
+                    raise MemberDeniedError(DS_MEMBER_ROW_LIMIT)
+        await self._member_import_bytes(
+            actor, headers, ([v for k, v in r.items() if k is not None] for r in all_rows))
 
         if not table_name:
             table_name = file_path.stem
 
         safe = self._safe_name(table_name)
 
-        if not append:
-            # Infer types from data
-            col_defs = self._infer_column_types(headers, all_rows)
-            try:
-                await self.create_table(safe, col_defs)
-            except ValueError as e:
-                if "already exists" in str(e):
-                    raise ValueError(
-                        f"Table '{safe}' already exists. Use append=true to add data, "
-                        f"or drop the table first."
-                    ) from e
-                raise
+        # Infer types from data
+        col_defs = None if append else self._infer_column_types(headers, all_rows)
 
         # Build row dicts with safe (deduped) column names
         # Map original fieldnames (in order) to deduped headers
@@ -1471,38 +2462,48 @@ class DatastoreManager:
                 cleaned[safe_key] = self._coerce_value(val)
             rows_to_insert.append(cleaned)
 
-        inserted = await self.insert_rows(safe, rows_to_insert)
+        inserted = await self._import_rows(
+            actor, safe, col_defs, rows_to_insert,
+            f"Table '{safe}' already exists. Use append=true to add data, "
+            f"or drop the table first.")
         return {"table": safe, "rows_imported": inserted, "columns": headers}
 
     async def import_xlsx(
         self, file_path: Path, table_name: str | None = None,
         sheet_name: str | None = None, append: bool = False,
     ) -> dict[str, Any]:
+        actor = current_actor()
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
+        budget = await self._member_import_budget(actor, file_path)
+        if budget is not None:
+            try:
+                with zipfile.ZipFile(file_path) as zf:
+                    unzipped = sum(i.file_size for i in zf.infolist())
+            except zipfile.BadZipFile:
+                raise ValueError("That isn't a readable .xlsx file") from None
+            if unzipped > MEMBER_IMPORT_MAX_UNZIPPED_BYTES:
+                raise MemberDeniedError(DS_IMPORT_TOO_LARGE)
 
         headers, all_rows = self._parse_xlsx(file_path, sheet_name)
         if not headers:
             raise ValueError("XLSX sheet has no data")
+        if budget is not None and len(all_rows) > budget:
+            raise MemberDeniedError(DS_MEMBER_ROW_LIMIT)
+        await self._member_import_bytes(
+            actor, headers, (row[:len(headers)] for row in all_rows))
 
         safe_headers = self._dedup_headers([self._safe_name(h) for h in headers])
         if not table_name:
             table_name = file_path.stem
         safe = self._safe_name(table_name)
 
+        col_defs = None
         if not append:
             col_defs = self._infer_column_types(
                 safe_headers,
                 [{safe_headers[i]: v for i, v in enumerate(row) if i < len(safe_headers)} for row in all_rows[:100]],
             )
-            try:
-                await self.create_table(safe, col_defs)
-            except ValueError as e:
-                if "already exists" in str(e):
-                    raise ValueError(
-                        f"Table '{safe}' already exists. Use append=true to add data."
-                    ) from e
-                raise
 
         rows_to_insert = []
         for row in all_rows:
@@ -1512,46 +2513,61 @@ class DatastoreManager:
                     cleaned[safe_headers[i]] = self._coerce_value(val)
             rows_to_insert.append(cleaned)
 
-        inserted = await self.insert_rows(safe, rows_to_insert)
+        inserted = await self._import_rows(
+            actor, safe, col_defs, rows_to_insert,
+            f"Table '{safe}' already exists. Use append=true to add data.")
         return {"table": safe, "rows_imported": inserted, "columns": safe_headers}
+
+    async def _export_rows(
+        self, table_name: str, columns: list[str] | None, where: dict[str, Any] | None,
+        neutralize: str,
+    ) -> tuple[list[str], list[list[Any]]]:
+        """Columns and rows of a table export; ``neutralize`` (``"all"`` /
+        ``"members"``) defuses formula-leading text cells (J13)."""
+        cfg = get_config()
+        mode = neutralize if neutralize in ("all", "members") else "none"
+        result = await self.query(
+            table_name, columns=columns, where=where,
+            limit=cfg.datastore.max_export_rows,
+            bypass_max=True,
+            include_creator=mode != "none",
+        )
+        rows = neutralize_rows(result["rows"], result.get("creators"), mode)
+        return result["columns"], rows
 
     async def export_csv(
         self, table_name: str, output_path: Path,
         columns: list[str] | None = None,
         where: dict[str, Any] | None = None,
+        *,
+        neutralize: str = "none",
     ) -> Path:
-        cfg = get_config()
-        result = await self.query(
-            table_name, columns=columns, where=where,
-            limit=cfg.datastore.max_export_rows,
-            bypass_max=True,
-        )
+        cols, rows = await self._export_rows(table_name, columns, where, neutralize)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(result["columns"])
-            writer.writerows(result["rows"])
+            writer.writerow(cols)
+            writer.writerows(rows)
         return output_path
 
     async def export_xlsx(
         self, table_name: str, output_path: Path,
         columns: list[str] | None = None,
         where: dict[str, Any] | None = None,
+        *,
+        neutralize: str = "none",
     ) -> Path:
-        cfg = get_config()
-        result = await self.query(
-            table_name, columns=columns, where=where,
-            limit=cfg.datastore.max_export_rows,
-            bypass_max=True,
-        )
+        cols, rows = await self._export_rows(table_name, columns, where, neutralize)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_xlsx(output_path, result["columns"], result["rows"])
+        self._write_xlsx(output_path, cols, rows)
         return output_path
 
     async def export_json(
         self, table_name: str, output_path: Path,
         columns: list[str] | None = None,
         where: dict[str, Any] | None = None,
+        *,
+        neutralize: str = "none",   # accepted for symmetry; JSON has no formulas
     ) -> Path:
         cfg = get_config()
         result = await self.query(
@@ -1919,7 +2935,14 @@ def get_vfs_datastore_manager(project: str, *, create: bool = True) -> Datastore
     ``create=False`` is for READ-ONLY access to ANOTHER run's datastore (a
     reference/prior-knowledge folder): it returns ``None`` when that folder has
     no datastore, instead of creating an empty one.
+
+    PR C (J16): never for a shared-agent member — the cache is keyed by
+    folder name only, so it can't tell whose VFS a folder belongs to.
     """
+    from captain_claw import speaker
+
+    if speaker.current() is not None:
+        raise PermissionError(DS_PROJECT_MEMBER)
     key = (project or "").strip()
     if not key:
         return get_datastore_manager()
@@ -1946,7 +2969,14 @@ def resolve_datastore_manager(session_id: str | None = None) -> DatastoreManager
     a run binds ``CLAW_DATASTORE_VFS``, else the public-computer per-session store,
     else the global store. Used by BOTH the datastore tool and the completion-gate
     verifier so they never disagree about which database a save landed in (a
-    mismatch made the verifier report false 'save didn't persist' failures)."""
+    mismatch made the verifier report false 'save didn't persist' failures).
+
+    A shared-agent member always gets the global store (PR C, J16) — the one
+    their ``datastore`` calls use."""
+    from captain_claw import speaker
+
+    if speaker.current() is not None:
+        return get_datastore_manager()
     vfs_project = os.environ.get("CLAW_DATASTORE_VFS", "").strip()
     if vfs_project:
         return get_vfs_datastore_manager(vfs_project)
