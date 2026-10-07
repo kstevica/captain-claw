@@ -60,6 +60,17 @@ def test_live_path_imports_resolve():
     assert hasattr(pricing, "summarize")
 
 
+def test_summarize_tokens_is_a_dict_and_bat_extracts_total():
+    """pricing.summarize returns `tokens` as a breakdown DICT, not a scalar — Bat
+    must read tokens['total_tokens'], never int(tokens) (which crashed every step
+    on the first live run)."""
+    from captain_claw.flight_deck import pricing
+    cost = pricing.summarize([{"model": "x", "usage":
+                               {"total_tokens": 7, "prompt_tokens": 4, "completion_tokens": 3}, "seconds": 1}])
+    assert isinstance(cost["tokens"], dict)
+    assert int((cost.get("tokens") or {}).get("total_tokens", 0) or 0) == 7
+
+
 # ── _parse_vote (fail-closed) ──────────────────────────────────────────
 
 def test_parse_vote_reads_vote_and_reason():

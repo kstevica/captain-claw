@@ -478,13 +478,18 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
 
     store = bat_loop.get_store()
 
-    async def _on_action(ev: dict) -> None:
-        if store is not None:
-            try:
-                await store.append_event(sid, "action", str(ev.get("tool", ""))[:60],
-                                         agent=step["step_key"], detail=str(ev.get("detail", ""))[:200])
-            except Exception:
-                pass
+    def _on_action(ev: dict) -> None:
+        # _send_chat_and_collect calls this SYNCHRONOUSLY, so it must not be a
+        # coroutine — schedule the (async) event write as a background task.
+        if store is None:
+            return
+        try:
+            import asyncio
+            asyncio.get_running_loop().create_task(
+                store.append_event(sid, "action", str(ev.get("tool", ""))[:60],
+                                   agent=step["step_key"], detail=str(ev.get("detail", ""))[:200]))
+        except Exception:
+            pass
 
     try:
         prior = await store.list_steps(sid) if store else []
@@ -513,7 +518,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
             "ok": ok,
             "output": res.get("output", ""),
             "usd": float(cost.get("usd") or 0.0),
-            "tokens": int(cost.get("tokens") or 0),
+            "tokens": int((cost.get("tokens") or {}).get("total_tokens", 0) or 0),
             "error": res.get("error", "") or ("timed out" if res.get("timed_out") else ""),
         }
     finally:
@@ -584,7 +589,8 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
             cost = pricing.summarize(new)
             if cost.get("usd"):
                 try:
-                    await store.bump_cost(sid, float(cost["usd"]), int(cost.get("tokens") or 0))
+                    await store.bump_cost(sid, float(cost["usd"]),
+                                          int((cost.get("tokens") or {}).get("total_tokens", 0) or 0))
                 except Exception:
                     pass
     # Track the model-veto streak for the anti-deadlock override.
