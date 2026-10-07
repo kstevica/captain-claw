@@ -316,9 +316,20 @@ restart). Remember: `cd flight-deck && npm run build`, commit the bundle, restar
    stays allowed, non-exec tools never screened, registry wiring blocks-before-execute); 359 existing
    registry-path tests still green. **Note:** the marker is intentionally absent from the
    `basna`/`code` recursion guards so Bat workers can call Vatra.
-2. **Store + loop skeleton.** `bat.db`, supervisor loop, lease recovery, `_dispatch_one` driver,
-   checkpoints, cancel, cost metering + persisted cap. No world-actions yet. Prove a multi-step run
-   survives an FD restart.
+2. **Store + loop skeleton.** ✅ **DONE (2026-10-07).** `captain_claw/flight_deck/bat_store.py`
+   (aiosqlite+WAL, deck-isolated `bat.db`): `bat_runs` (status, origin, caps, persisted cumulative
+   spend, per-run lease columns), `bat_steps` (UPSERT checkpoints, `demote_running_steps` on adopt),
+   `bat_events` (append-only progress, replaces the volatile `_PROGRESS` dict). `bat_loop.py`:
+   `BatDriver` (plan → checkpointed steps → retry → judge → terminal; between-step checks for owner
+   cancel, lost lease, and the persisted LLM-spend cap; crash-guarded so a failure never leaves a run
+   `running`) + `BatSupervisor` (claims a per-run lease, drives each run in its own task so one long
+   run can't block another) + `bat_loop` lifespan entry (idle until a real runner is registered).
+   Handlers are **seams** (`set_attempt_runner`/`set_planner`/`set_judge`) filled in Phase 3. Wired
+   into `server.py` lifespan (init `bat.db`, start/stop the supervisor, `FD_BAT_DISABLED` kill-switch,
+   stop before `_stop_all_processes`). 11 tests in `tests/test_bat_loop.py` incl. the **restart proof**
+   (crash mid-step → fresh supervisor adopts the stale-leased run, demotes the orphaned step, finishes
+   without re-running completed work) + cancel + cap + lease takeover + retry. **No world-actions, no
+   LLM** — pure durable orchestration. Still dormant in prod: no routes/tool create a run yet (Phase 3).
 3. **Done-judge (Invariant B).** `bat_judge` Layers 1–2, contract derive+pin, anti-deadlock. Agent
    tool `bat.py` + routes + registration. Agents can now invoke Bat for build/research tasks.
 4. **Escalation + start gate.** `human_ask`, the three answer paths, `awaiting_plan` gate, secret

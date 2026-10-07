@@ -909,6 +909,20 @@ async def lifespan(app: FastAPI):
         app.state.beings_task = asyncio.create_task(
             _beings_loop(getattr(app.state, "fd_db", None), _beings_stop))
         print("Flight Deck: beings heartbeat started")
+    # ── Bat supervisor (durable stubborn-finisher runs: adopt a leased run,
+    # drive it to done, re-adopt a crashed run after restart). Disable with
+    # FD_BAT_DISABLED=true. Idle until a Bat run exists and the runner is wired. ──
+    if os.environ.get("FD_BAT_DISABLED", "").lower() not in ("true", "1", "yes"):
+        from captain_claw.flight_deck import bat_loop as _bat_loop_mod
+        from captain_claw.flight_deck.bat_store import BatStore as _BatStore
+        _bat_store = _BatStore(DATA_DIR / "bat.db")
+        await _bat_store.init()
+        app.state.bat_store = _bat_store
+        _bat_loop_mod.set_store(_bat_store)
+        _bat_stop = asyncio.Event()
+        app.state.bat_stop = _bat_stop
+        app.state.bat_task = asyncio.create_task(_bat_loop_mod.bat_loop(_bat_store, _bat_stop))
+        print("Flight Deck: Bat supervisor started")
     # ── Flow engine (process automations: trigger → steps on the agent pool) ──
     try:
         from captain_claw.flight_deck.flows_store import FlowStore
@@ -1078,6 +1092,20 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.wait_for(app.state.context_packs_task, timeout=5.0)
             except (TimeoutError, asyncio.CancelledError, Exception):
+                pass
+    # Stop the Bat supervisor (before killing worker processes). Running Bat
+    # runs go stale and are re-adopted on the next boot from their checkpoints.
+    if hasattr(app.state, "bat_stop"):
+        app.state.bat_stop.set()
+        if hasattr(app.state, "bat_task"):
+            try:
+                await asyncio.wait_for(app.state.bat_task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError, Exception):
+                pass
+        if hasattr(app.state, "bat_store"):
+            try:
+                await app.state.bat_store.close()
+            except Exception:
                 pass
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
