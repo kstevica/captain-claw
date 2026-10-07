@@ -1,0 +1,84 @@
+"""Bat Phase 3 — pure helpers in bat_routes (vote/plan parsing, worker tool
+strip, prompt + deliverable assembly). The spawn/dispatch/panel live paths are
+FD-coupled and verified on a running deck; these cover the deterministic logic.
+
+Importing bat_routes registers the real handlers into bat_loop as a side effect;
+that's fine here (test_bat_loop pins its own defaults)."""
+
+from __future__ import annotations
+
+from captain_claw.flight_deck.bat_routes import (
+    _assemble_deliverable, _bat_worker_tools, _build_step_prompt, _parse_plan, _parse_vote,
+)
+
+
+# ── _parse_vote (fail-closed) ──────────────────────────────────────────
+
+def test_parse_vote_reads_vote_and_reason():
+    v = _parse_vote("VOTE: AGREE\nREASON: everything checks out")
+    assert v["vote"] == "agree" and "checks out" in v["reason"]
+    assert _parse_vote("vote: disagree")["vote"] == "disagree"
+    assert _parse_vote("VOTE:ABSTAIN")["vote"] == "abstain"
+
+
+def test_parse_vote_missing_is_abstain():
+    # No parseable VOTE line → abstain (which the judge tally treats as non-agree).
+    assert _parse_vote("I think it's probably fine?")["vote"] == "abstain"
+    assert _parse_vote("")["vote"] == "abstain"
+
+
+# ── _parse_plan ────────────────────────────────────────────────────────
+
+def test_parse_plan_array_of_strings():
+    steps = _parse_plan('["find the data", "write the report"]', "task")
+    assert [s["title"] for s in steps] == ["find the data", "write the report"]
+    assert [s["step_key"] for s in steps] == ["step-1", "step-2"]
+    assert [s["seq"] for s in steps] == [0, 1]
+
+
+def test_parse_plan_objects_and_fences_and_steps_key():
+    assert _parse_plan('```json\n[{"step": "a"}, {"title": "b"}]\n```', "t")[0]["title"] == "a"
+    assert [s["title"] for s in _parse_plan('{"steps": ["x", "y"]}', "t")] == ["x", "y"]
+
+
+def test_parse_plan_invalid_is_empty_and_caps_at_12():
+    assert _parse_plan("not json", "t") == []
+    assert _parse_plan("", "t") == []
+    big = "[" + ",".join(f'"s{i}"' for i in range(20)) + "]"
+    assert len(_parse_plan(big, "t")) == 12
+
+
+# ── _bat_worker_tools (Bat keeps the full toolset) ─────────────────────
+
+def test_worker_tools_strip_only_bat():
+    tools = ["read", "write", "shell", "browser", "vatra", "basna", "bat"]
+    out = _bat_worker_tools(tools, default_tools=[])
+    assert "bat" not in out
+    # the whole point of Bat: it CAN delegate to Vatra/Basna and use everything else
+    assert "vatra" in out and "basna" in out and "browser" in out and "shell" in out
+
+
+def test_worker_tools_uses_default_when_none():
+    assert _bat_worker_tools(None, default_tools=["read", "bat"]) == ["read"]
+
+
+# ── assembly + prompt ──────────────────────────────────────────────────
+
+def test_assemble_deliverable_joins_done_outputs_only():
+    steps = [
+        {"status": "done", "title": "A", "output": "alpha"},
+        {"status": "failed", "title": "B", "output": "should be skipped"},
+        {"status": "done", "title": "C", "output": "   "},  # empty → skipped
+        {"status": "done", "title": "D", "output": "delta"},
+    ]
+    out = _assemble_deliverable(steps)
+    assert "alpha" in out and "delta" in out
+    assert "should be skipped" not in out and "## A" in out and "## D" in out
+
+
+def test_build_step_prompt_includes_goal_step_and_prior():
+    run = {"task": "build the thing"}
+    step = {"step_key": "step-2", "title": "write tests"}
+    prior = [{"status": "done", "title": "step-1", "output": "wrote the code"}]
+    p = _build_step_prompt(run, step, prior)
+    assert "build the thing" in p and "write tests" in p and "wrote the code" in p

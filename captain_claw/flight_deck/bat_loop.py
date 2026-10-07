@@ -80,6 +80,13 @@ _ATTEMPT_RUNNER: AttemptRunner = _default_attempt_runner
 _PLANNER: Planner = _default_planner
 _JUDGE: Judge = _default_judge
 _STORE: BatStore | None = None
+# Called once with the final run dict when a run reaches a terminal state
+# (done/error/cancelled). Phase 3 sets this to deliver the result back to the
+# caller / origin channel. Optional.
+_ON_FINISH: Callable[[dict], Awaitable[None]] | None = None
+# The live supervisor, published while the lifespan loop runs so a route can
+# kick a freshly created run immediately instead of waiting for the next tick.
+_SUPERVISOR: "BatSupervisor | None" = None
 
 
 def set_attempt_runner(fn: AttemptRunner) -> None:
@@ -104,6 +111,19 @@ def set_store(store: BatStore) -> None:
 
 def get_store() -> BatStore | None:
     return _STORE
+
+
+def set_on_finish(fn: Callable[[dict], Awaitable[None]] | None) -> None:
+    global _ON_FINISH
+    _ON_FINISH = fn
+
+
+async def kick() -> int:
+    """Ask the live supervisor to scan now (so a just-created run starts without
+    waiting for the periodic tick). No-op if the loop isn't running yet."""
+    if _SUPERVISOR is None:
+        return 0
+    return await _SUPERVISOR.tick()
 
 
 def handlers_ready() -> bool:
@@ -383,8 +403,9 @@ class BatSupervisor:
         return launched
 
     async def _drive_and_release(self, run_id: str) -> None:
+        status = "error"
         try:
-            await self.driver.drive(run_id)
+            status = await self.driver.drive(run_id)
         finally:
             try:
                 await self.store.release_lease(run_id)
@@ -392,6 +413,16 @@ class BatSupervisor:
                 pass
             if self._running.get(run_id) is asyncio.current_task():
                 self._running.pop(run_id, None)
+        # Deliver the result once, after the lease is freed, on a terminal
+        # outcome. ('running' is returned only when the driver stood down after
+        # losing its lease — not terminal, so no delivery.)
+        if _ON_FINISH is not None and status in TERMINAL_STATES:
+            try:
+                run = await self.store.get_run(run_id)
+                if run:
+                    await _ON_FINISH(run)
+            except Exception as e:  # noqa: BLE001 — delivery must never crash the loop
+                log.warning("bat on_finish failed", run_id=run_id, error=str(e))
 
     async def drain(self, timeout: float = 5.0) -> None:
         tasks = [t for t in self._running.values() if not t.done()]
@@ -402,8 +433,10 @@ class BatSupervisor:
 async def bat_loop(store: BatStore, stop_event: asyncio.Event) -> None:
     """Supervisor loop, started from the FD lifespan. Idle until a real
     attempt_runner is registered (Phase 3)."""
+    global _SUPERVISOR
     set_store(store)
     sup = BatSupervisor(store)
+    _SUPERVISOR = sup
     log.info("bat supervisor loop started")
     while not stop_event.is_set():
         if handlers_ready():
@@ -416,4 +449,5 @@ async def bat_loop(store: BatStore, stop_event: asyncio.Event) -> None:
         except asyncio.TimeoutError:
             pass
     await sup.drain()
+    _SUPERVISOR = None
     log.info("bat supervisor loop stopped")

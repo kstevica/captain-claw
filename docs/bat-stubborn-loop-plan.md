@@ -330,8 +330,28 @@ restart). Remember: `cd flight-deck && npm run build`, commit the bundle, restar
    (crash mid-step → fresh supervisor adopts the stale-leased run, demotes the orphaned step, finishes
    without re-running completed work) + cancel + cap + lease takeover + retry. **No world-actions, no
    LLM** — pure durable orchestration. Still dormant in prod: no routes/tool create a run yet (Phase 3).
-3. **Done-judge (Invariant B).** `bat_judge` Layers 1–2, contract derive+pin, anti-deadlock. Agent
-   tool `bat.py` + routes + registration. Agents can now invoke Bat for build/research tasks.
+3. **Done-judge (Invariant B) + agent-invocable.** ✅ **DONE (2026-10-07).**
+   - `flight_deck/bat_judge.py` — the fail-closed verdict: Layer 1 deterministic criticals block done
+     with no panel call; a missing deliverable is never done; Layer 2 independent vote panel
+     (abstentions dropped, exceptions/timeouts → disagree, agree-majority required); anti-deadlock
+     override only when the deterministic layer is all-green AND the model-veto streak hits the ceiling
+     (recorded as `overridden`). Pure, model calls injected. 12 tests.
+   - `flight_deck/bat_routes.py` — `/fd/bat/agent/{start,status,get,list,cancel}` (same loopback/
+     X-Agent-Secret guard as Basna/Vatra) + the three handler seams wired into `bat_loop` at import:
+     planner (LLM decompose with a single-step fallback so a run always progresses), attempt_runner
+     (spawns an ephemeral Bat worker via `_spawn_bat_worker` → `_dispatch_one`, meters spend into the
+     persisted cap), judge (`bat_judge` + an independent panel on a tier resolved separately from the
+     workers), and `on_finish` (bell / origin channel / caller-agent delivery). **Bat workers keep the
+     full toolset — only `bat` is stripped (`_bat_worker_tools`), so a worker may delegate to Vatra.**
+   - `tools/bat.py` — the agent tool (hardened Basna transport); recursion-guarded against starting a
+     Bat run from inside any ensemble worker. Registered in `agent_context_mixin` + `tools/__init__`;
+     router + `/fd/bat/agent/` guard prefix wired in `server.py`.
+   - Tests: `test_bat_judge.py` (12), `test_bat_routes.py` (pure helpers), `test_bat_tool.py`
+     (recursion/validation/routing). **Bat suites: 98 passing**; 275 tool-registration tests green.
+   - **Scope boundary:** world-action grants — the run-scoped email exception (Phase 5), capped
+     real-money spend (Phase 6), account creation (Phase 7) — are NOT in this phase. A Phase-3 Bat
+     worker runs under the Phase-1 hard floor with the owner's normal toolset. The pure logic is
+     unit-tested; the live spawn/dispatch/panel path is verified on a running deck (prod).
 4. **Escalation + start gate.** `human_ask`, the three answer paths, `awaiting_plan` gate, secret
    redaction.
 5. **Email exception.** `bat` automation kind + marker, FD Gmail-gate routing, child-propagation

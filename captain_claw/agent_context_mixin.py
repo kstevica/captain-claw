@@ -77,6 +77,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "google_mail": "Gmail — list_messages, search, read_message, get_thread, list_labels; create_draft / update_draft / list_drafts — write only when the user asked for that email (a draft is then the default; reading or summarizing mail never implies replying); send / send_draft ONLY when the user explicitly asked and sending is enabled; check list_drafts + search in:sent first — never repeat an email already drafted/sent.",
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
     "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
+    "bat": "Bat — the stubborn finisher: start a long-running autonomous run that keeps working a goal across retries and strategy changes until an independent judge says it's genuinely done (survives restarts, reports back when finished); also status/get/list/cancel.",
     "insights": "Search and manage persistent cross-session insights — facts, contacts, decisions, preferences, deadlines auto-extracted from conversations. Actions: search, list, add, update, delete.",
     "personality": "Read or update the agent personality profile (name, description, background, expertise)",
     "browser": "Control a headless browser for web app interaction. Supports observe/act (page understanding), click/type with nth-match disambiguation, login with encrypted credentials + cookie persistence, network capture for API discovery, API replay (execute captured APIs directly — skip the browser!), and multi-app sessions. Use for login flows, form filling, and interacting with dynamic/React web apps.",
@@ -130,6 +131,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "google_mail": "Gmail: list/search/read/thread, labels; drafts only when the user asked (then default); send only if user asked + enabled; check list_drafts + in:sent first, no repeats",
     "datastore": "persistent relational tables",
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
+    "bat": "start/inspect a Bat run (stubborn finisher: works a goal until an independent judge says it's done)",
     "insights": "persistent cross-session insights (facts, contacts, decisions, deadlines)",
     "personality": "agent personality profile",
     "browser": "headless browser for dynamic web apps",
@@ -2509,6 +2511,11 @@ class AgentContextMixin:
             # outside a Vatra run, so registration cost is negligible.
             from captain_claw.tools.vatra import VatraTool
             self.tools.register(VatraTool())
+            # Bat — the stubborn finisher. Always registered; starts/inspects a
+            # long-running finish-at-any-cost run (clear error when FD_URL is
+            # unavailable; the tool refuses recursion from inside any run).
+            from captain_claw.tools.bat import BatTool
+            self.tools.register(BatTool())
             # Code studio access — always registered; starts/reads autonomous coding
             # sessions (clear error when FD_URL is unavailable; the tool itself
             # refuses recursion from coding/ensemble workers).

@@ -1171,7 +1171,7 @@ def _lockdown_enabled() -> bool:
     return os.environ.get("FD_LOCKDOWN", "").lower() in ("true", "1", "yes")
 
 
-_AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/")
+_AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/", "/fd/bat/agent/")
 
 # Agent routes whose handlers treat a verified bearer as authoritative (caller
 # may act only as itself). A valid bearer is an accepted caller here in
@@ -1321,6 +1321,7 @@ from captain_claw.flight_deck.profile_routes import router as profile_router
 from captain_claw.flight_deck.council_routes import router as council_router
 from captain_claw.flight_deck.basna_routes import router as basna_router
 from captain_claw.flight_deck.vatra_routes import router as vatra_router
+from captain_claw.flight_deck.bat_routes import router as bat_router
 from captain_claw.flight_deck.dubina_routes import router as dubina_router
 from captain_claw.flight_deck.vfs_routes import router as vfs_router
 from captain_claw.flight_deck.deep_memory_routes import router as deep_memory_router
@@ -1375,6 +1376,7 @@ app.include_router(profile_router)
 app.include_router(council_router)
 app.include_router(basna_router)
 app.include_router(vatra_router)
+app.include_router(bat_router)
 app.include_router(dubina_router)
 app.include_router(vfs_router)
 app.include_router(deep_memory_router)
