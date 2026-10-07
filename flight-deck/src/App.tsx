@@ -21,6 +21,7 @@ import { LoginPage } from './pages/LoginPage'
 import { AdminPage } from './pages/AdminPage'
 import { CouncilPage } from './pages/CouncilPage'
 import { BasnaPage } from './pages/BasnaPage'
+import { BatPage } from './pages/BatPage'
 import { CodePage } from './pages/CodePage'
 import { DubinaPage } from './pages/DubinaPage'
 import { TodayPage } from './pages/TodayPage'
@@ -337,6 +338,7 @@ function AppContent() {
       {view === 'admin' && <AdminPage />}
       {view === 'council' && <CouncilPage />}
       {view === 'basna' && <BasnaPage />}
+      {view === 'bat' && <BatPage />}
       {view === 'code' && <CodePage />}
       {view === 'dubina' && <DubinaPage />}
       {view === 'vfs' && <VFSPage />}

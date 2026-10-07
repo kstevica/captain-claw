@@ -11,6 +11,9 @@ const isServerId = (id: string) => !id.startsWith('notif-')
 function mapServerType(t: string): NotificationType {
   if (t === 'run_error') return 'error'
   if (t === 'run') return 'success'
+  if (t === 'bat_error') return 'error'
+  if (t === 'bat_done') return 'success'
+  if (t === 'bat_ask') return 'warning'
   if (t === 'share' || t === 'info') return 'info'
   if (t === 'success' || t === 'warning' || t === 'error') return t
   return 'info'

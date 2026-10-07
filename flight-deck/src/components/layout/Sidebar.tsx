@@ -23,6 +23,7 @@ import {
   Workflow,
   Brain,
   Network,
+  Hammer,
   Library,
   Cpu,
   FolderTree,
@@ -61,6 +62,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
     items: [
       { id: 'council', icon: Users, label: 'Council' },
       { id: 'basna', icon: Network, label: 'Basna' },
+      { id: 'bat', icon: Hammer, label: 'Bat' },
       { id: 'code', icon: Code2, label: 'Code' },
     ],
   },

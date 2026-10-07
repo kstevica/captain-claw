@@ -445,7 +445,22 @@ restart). Remember: `cd flight-deck && npm run build`, commit the bundle, restar
      suites: 149 passing**; 421 with tool-reg.
    - Deck-only: the signup/login browsing itself, and reading verification mail, run on a live deck
      with the browser + the owner's Google connected.
-8. **UI.** `BatPage`, `batStore`, `BatAskCard`, budget meter, nav + notifications; build + commit.
+8. **UI.** ✅ **DONE (2026-10-07).** The Bat page — monitor runs and, crucially, answer asks / approve
+   plans without a raw HTTP call.
+   - Backend owner-auth routes: `GET /fd/bat/runs`, `GET /fd/bat/runs/{id}` (run+steps+events+spend),
+     `GET /fd/bat/runs/{id}/events?since=`, `POST /fd/bat/runs/{id}/cancel`, `POST /fd/bat/start` (start
+     from the UI). Events are flattened (`_ui_event`) into the frontend `ProgressEvent` shape.
+   - Frontend: `stores/batStore.ts` (list/detail/asks/poll/start/answer/approve/cancel, basnaStore's
+     auth/fetch style), `pages/BatPage.tsx` (compose box with an optional spend cap, runs list, a
+     "Bat needs you" ask banner, and a detail pane reusing `ProgressFeed`/`LiveAgentsPanel`/
+     `ResizableSplit`/`RunFilesPanel` + a budget line showing LLM $ and real-money committed/cap and the
+     per-run grants), `components/bat/BatAskCard.tsx` (approve/cancel a plan or spend, a text field, or a
+     masked field for a secret — with the "kept private" note). Nav item (Hammer icon) in the
+     Multi-Agent section; `bat_ask`/`bat_done`/`bat_error` mapped in `notificationStore` so the existing
+     30s bell poll surfaces them.
+   - `npm run build` green (tsc -b type-checked the whole page/store/card); bundle committed (stale
+     hashes pruned). Backend: `test_bat_ui.py` (owner-scoped list/detail/events). **Bat suites: 152
+     passing.** The live page is deck-verified (needs FD running + login).
 
 Each phase is a PR; ship 1–3 before any world-action phase.
 

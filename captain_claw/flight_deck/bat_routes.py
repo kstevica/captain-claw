@@ -1025,6 +1025,99 @@ class _ApproveReq(BaseModel):
     approve: bool = True
 
 
+def _ui_event(ev: dict) -> dict:
+    """Flatten a stored bat_event into the frontend ProgressEvent shape (the
+    extra fields live in `data`; the UI reads agent/tool/ok/… at the top level)."""
+    d = ev.get("data") or {}
+    return {"i": ev.get("i", 0), "ts": ev.get("ts"), "stage": ev.get("stage", ""),
+            "message": ev.get("message", ""), **d}
+
+
+class _UiStartReq(BaseModel):
+    task: str = ""
+    title: str = ""
+    llm_usd_cap: float = 0.0
+    real_usd_cap: float = 0.0
+    per_item_usd: float = 0.0
+    steps: list[str] = Field(default_factory=list)
+
+
+def _run_summary(r: dict) -> dict:
+    cfg = r.get("config") or {}
+    return {"id": r["id"], "title": r.get("title", ""), "task": r.get("task", ""),
+            "status": r["status"], "created_at": r.get("created_at", 0),
+            "updated_at": r.get("updated_at", 0),
+            "cumulative_usd": r.get("cumulative_usd", 0.0),
+            "llm_usd_cap": r.get("llm_usd_cap", 0.0),
+            "real_usd_cap": cfg.get("real_usd_cap", 0.0),
+            "stopped_reason": r.get("stopped_reason", "")}
+
+
+@router.get("/runs")
+async def list_runs_ui(user: dict = Depends(get_current_user)):
+    runs = await _store().list_runs(user["id"], limit=60)
+    return {"runs": [_run_summary(r) for r in runs]}
+
+
+@router.get("/runs/{run_id}")
+async def get_run_ui(run_id: str, user: dict = Depends(get_current_user)):
+    run = await _store().get_run(run_id)
+    if not run or run["owner_id"] != user["id"]:
+        raise HTTPException(404, "run not found")
+    spend = await _store().list_spend(run_id)
+    return {
+        "run": {**_run_summary(run), "truth": run.get("truth", ""),
+                "vfs_project": f"bat-{run_id[:8]}",
+                "email_allowed": (run.get("config") or {}).get("email_allowed", False),
+                "spend_allowed": (run.get("config") or {}).get("spend_allowed", False),
+                "account_allowed": (run.get("config") or {}).get("account_allowed", False)},
+        "steps": await _store().list_steps(run_id),
+        "events": [_ui_event(e) for e in await _store().list_events(run_id, limit=1000)],
+        "spend": {"items": spend, "committed_usd": await _store().committed_usd(run_id),
+                  "cap": (run.get("config") or {}).get("real_usd_cap", 0.0)},
+    }
+
+
+@router.get("/runs/{run_id}/events")
+async def get_events_ui(run_id: str, since: int = 0, user: dict = Depends(get_current_user)):
+    run = await _store().get_run(run_id)
+    if not run or run["owner_id"] != user["id"]:
+        raise HTTPException(404, "run not found")
+    return {"events": [_ui_event(e) for e in await _store().list_events(run_id, since=since)],
+            "status": run["status"], "cumulative_usd": run.get("cumulative_usd", 0.0)}
+
+
+@router.post("/start")
+async def ui_start(body: _UiStartReq, user: dict = Depends(get_current_user)):
+    """Start a Bat run from the UI (owner-authenticated), mirroring the agent
+    start path but with the owner from the session."""
+    owner = user["id"]
+    task = (body.task or "").strip()
+    if not task:
+        raise HTTPException(400, "task is required")
+    store = _store()
+    active = sum(1 for r in await store.list_runs(owner, limit=100) if r["status"] in RUNNING_STATES)
+    if active >= _BAT_MAX_RUNS_PER_OWNER:
+        raise HTTPException(429, f"You already have {active} Bat run(s) in progress (limit {_BAT_MAX_RUNS_PER_OWNER}).")
+    run_id = f"bat_{uuid.uuid4().hex[:12]}"
+    title = (body.title or task[:60]).strip()
+    await store.create_run(
+        run_id=run_id, owner_id=owner, title=title, task=task,
+        config={"source": "ui", "origin_platform": "web",
+                "steps": [str(s) for s in (body.steps or []) if str(s).strip()],
+                "real_usd_cap": float(body.real_usd_cap or 0.0),
+                "per_item_usd": float(body.per_item_usd or 0.0)},
+        origin={"platform": "web", "kind": "", "address": ""},
+        source_host="localhost", source_port=0,
+        llm_usd_cap=float(body.llm_usd_cap or 0.0), status="planning")
+    await store.append_event(run_id, "note", "run created from the Bat page")
+    try:
+        await bat_loop.kick()
+    except Exception:
+        pass
+    return {"run_id": run_id, "title": title}
+
+
 @router.get("/asks")
 async def list_asks(user: dict = Depends(get_current_user)):
     """The owner's open asks (what Bat is waiting on). Secret asks show their
@@ -1049,6 +1142,16 @@ async def answer_ask(ask_id: str, body: _AnswerReq, user: dict = Depends(get_cur
     except Exception:
         pass
     return {"ok": True, "run_id": res["run_id"]}
+
+
+@router.post("/runs/{run_id}/cancel")
+async def cancel_run_ui(run_id: str, user: dict = Depends(get_current_user)):
+    store = _store()
+    run = await store.get_run(run_id)
+    if not run or run["owner_id"] != user["id"]:
+        raise HTTPException(404, "run not found")
+    ok = await bat_loop.cancel_run(store, run_id)
+    return {"ok": ok}
 
 
 @router.post("/runs/{run_id}/approve-plan")
