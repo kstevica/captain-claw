@@ -126,6 +126,38 @@ def looks_like_purchase(text: str) -> bool:
     return bool(_PURCHASE_RE.search(text or ""))
 
 
+def credential_encryption_ready() -> bool:
+    """True when stored browser credentials will be Fernet-encrypted rather than
+    base64-obfuscated. A Bat run that creates accounts / logs in should not store
+    near-plaintext passwords, so we require a key to be configured."""
+    if (os.environ.get("CLAW_BROWSER_CREDENTIAL_KEY") or "").strip():
+        return True
+    try:
+        from captain_claw.config import get_config
+        return bool((get_config().tools.browser.credential_encryption_key or "").strip())
+    except Exception:
+        return False
+
+
+# A verification link or a short numeric/alphanumeric code in a signup email.
+_VERIFY_URL_RE = re.compile(
+    r"https?://[^\s\"'<>]+(?:verify|confirm|activate|validation|verify-email|confirm-email)[^\s\"'<>]*",
+    re.IGNORECASE)
+_VERIFY_CODE_RE = re.compile(
+    r"(?:verification code|one[- ]?time (?:code|password|pin)|\bcode\b|\botp\b|\bpin\b)\b"
+    r".{0,20}?\b((?=[A-Za-z0-9]*\d)[A-Za-z0-9]{4,8})\b",
+    re.IGNORECASE)
+
+
+def extract_verification(text: str) -> dict:
+    """Pull a verification link and/or code out of an email body. (html_to_text
+    strips <a href>, so a worker should pass the raw HTML or plain-text part.)"""
+    t = text or ""
+    url = _VERIFY_URL_RE.search(t)
+    code = _VERIFY_CODE_RE.search(t)
+    return {"url": url.group(0) if url else "", "code": code.group(1) if code else ""}
+
+
 def _spend_enabled() -> bool:
     """Deck kill-switch. Real-money spend is OFF unless FD_BAT_SPEND is on."""
     return (os.environ.get("FD_BAT_SPEND", "") or "").strip().lower() in ("1", "true", "yes", "on")
@@ -236,6 +268,9 @@ _STEP_SYSTEM = (
     "approaches it takes; retry, change tactics, and use any tool available to you (including the "
     "browser, computer use, and starting a `vatra` run for a sub-problem). Be honest: only report "
     "what you actually accomplished and verified — never claim a step is done when it isn't. "
+    "If you are blocked on something only the human can provide (a verification code, a 2FA/OTP, a "
+    "CAPTCHA, a credential), call the `ask_human` tool (kind='secret' for codes/passwords) and STOP — "
+    "never guess or fabricate it, and never try to bypass or solve a CAPTCHA yourself. "
     "Absolutely never run anything that could harm the host or its drives."
 )
 
@@ -249,9 +284,19 @@ def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: st
             lines.append(f"\n## {s.get('title') or s.get('step_key')}\n{(s.get('output') or '')[:2000]}")
     if human_input:
         lines.append(f"\n# The human just provided this (use it to continue)\n{human_input}")
+    if (run.get("config") or {}).get("account_allowed"):
+        note = ("\n# Accounts (approved for this run)\nYou may sign up for and log into sites. To get a "
+                "verification link/code, read the owner's inbox with the google_mail tool (the plain-text "
+                "or raw-HTML part — the rendered text drops link URLs). For a 2FA/OTP, a CAPTCHA, or a "
+                "credential you don't have, use `ask_human` and stop.")
+        if not credential_encryption_ready():
+            note += (" NOTE: no browser credential-encryption key is configured, so do NOT store "
+                     "passwords in the browser credential store — ask the human to set "
+                     "CLAW_BROWSER_CREDENTIAL_KEY first, or keep credentials out of storage.")
+        lines.append(note)
     lines.append("\nDo this step fully and report the concrete result. If you are truly blocked on "
-                 "something only the human can give you (a verification code, a credential, a CAPTCHA), "
-                 "say so clearly and stop — do not guess or fabricate it.")
+                 "something only the human can give you, use the `ask_human` tool and stop — do not "
+                 "guess or fabricate it.")
     return "\n".join(lines)
 
 
@@ -635,9 +680,12 @@ async def _gate_check(store, run: dict) -> str:
                     cfg["email_allowed"] = True
                 if "spend money" in reason:
                     cfg["spend_allowed"] = True
+                if "create an account" in reason:
+                    cfg["account_allowed"] = True
                 await store.set_config(run_id, cfg)
                 grants = [g for g, on in (("email", cfg.get("email_allowed")),
-                                          ("spend", cfg.get("spend_allowed"))) if on]
+                                          ("spend", cfg.get("spend_allowed")),
+                                          ("accounts", cfg.get("account_allowed"))) if on]
                 await store.append_event(
                     run_id, "note",
                     "plan approved — proceeding" + (f" ({'+'.join(grants)} enabled for this run)"
@@ -837,7 +885,17 @@ class _SpendReq(_BatAgentReq):
     order_ref: str = ""
 
 
-async def _spend_run(body: _SpendReq) -> tuple[str, dict]:
+class _AskReq(_BatAgentReq):
+    session_id: str = ""              # the Bat run (worker's CLAW_BAT_SESSION)
+    step_key: str = ""                # the worker's CLAW_BAT_SUBTASK
+    kind: str = "input"               # input | secret
+    question: str = ""
+    options: list[str] = Field(default_factory=list)
+
+
+async def _owner_run(body) -> tuple[str, dict]:
+    """Resolve the calling worker's owner and load its run (body.session_id =
+    the worker's CLAW_BAT_SESSION), refusing a mismatch."""
     owner = _resolve(body)
     run = await _store().get_run(body.session_id)
     if not run or run["owner_id"] != owner:
@@ -847,7 +905,7 @@ async def _spend_run(body: _SpendReq) -> tuple[str, dict]:
 
 @router.post("/agent/spend/authorize")
 async def spend_authorize(body: _SpendReq):
-    owner, run = await _spend_run(body)
+    owner, run = await _owner_run(body)
     store = _store()
     sid = body.session_id
     domain = (body.merchant_domain or body.merchant or "").strip().lower()
@@ -888,7 +946,7 @@ async def spend_authorize(body: _SpendReq):
 
 @router.post("/agent/spend/settle")
 async def spend_settle(body: _SpendReq):
-    owner, run = await _spend_run(body)
+    owner, run = await _owner_run(body)
     store = _store()
     row = await store.get_spend(body.spend_id)
     if not row or row["owner_id"] != owner or row["run_id"] != body.session_id:
@@ -907,7 +965,7 @@ async def spend_settle(body: _SpendReq):
 
 @router.post("/agent/spend/void")
 async def spend_void(body: _SpendReq):
-    owner, run = await _spend_run(body)
+    owner, run = await _owner_run(body)
     store = _store()
     row = await store.get_spend(body.spend_id)
     if not row or row["owner_id"] != owner:
@@ -918,7 +976,7 @@ async def spend_void(body: _SpendReq):
 
 @router.post("/agent/spend/status")
 async def spend_status(body: _SpendReq):
-    owner, run = await _spend_run(body)
+    owner, run = await _owner_run(body)
     store = _store()
     policy = _spend_policy(run)
     return {
@@ -930,6 +988,29 @@ async def spend_status(body: _SpendReq):
                    "actual_usd": s["actual_usd"], "status": s["status"]}
                   for s in await store.list_spend(body.session_id)],
     }
+
+
+# ── worker → human escalation (2FA code, CAPTCHA, a credential) ────────
+
+@router.post("/agent/ask")
+async def agent_ask(body: _AskReq):
+    """A Bat worker raises a question only the human can answer and the run
+    stands down until they reply. The worker must stop after calling this."""
+    owner, run = await _owner_run(body)
+    kind = body.kind if body.kind in ("input", "secret") else "input"
+    question = (body.question or "").strip()[:1000]
+    if not question:
+        raise HTTPException(400, "question is required")
+    ask_id = await human_ask.raise_ask(
+        _store(), run_id=body.session_id, owner=owner, kind=kind,
+        question=question, options=body.options or [], step_key=body.step_key or "",
+        secret=(kind == "secret"))
+    await _store().set_status(body.session_id, "awaiting_human")
+    await _store().append_event(
+        body.session_id, "awaiting_human",
+        "awaiting a private value" if kind == "secret" else question[:200],
+        agent=body.step_key or "")
+    return {"status": "requested", "ask_id": ask_id}
 
 
 # ── owner-authenticated human-in-the-loop (answer path A) ──────────────

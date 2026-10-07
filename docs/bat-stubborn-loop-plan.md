@@ -424,8 +424,27 @@ restart). Remember: `cd flight-deck && npm run build`, commit the bundle, restar
    - **Honest limit (as discussed):** this is a software cap. A shell-capable worker could in principle
      bypass it (e.g. curl a payment API). The only issuer-hard cap is a virtual card per authorization
      (documented option). The pre-auth ledger is the owner's chosen default.
-7. **Accounts/logins.** signup flow, inbox-verification read, credential-key requirement; 2FA/CAPTCHA
-   route to the ask.
+7. **Accounts/logins.** ✅ **DONE (2026-10-07).** Account creation / login is browser+LLM driven
+   (prompt-guided); this phase builds the enforceable scaffolding around it.
+   - **Worker→human escalation:** `ask_human` tool + `/fd/bat/agent/ask`. A worker blocked on a value
+     only the owner can give (2FA/OTP, CAPTCHA, a credential) calls it; the run stands down
+     `awaiting_human` and resumes on the answer, which is injected into the step's next attempt (secret
+     via the in-memory holder, redacted in the row/bell/channel). The tool refuses outside a Bat run.
+     **No CAPTCHA solver** — the worker is told to ask, never to bypass.
+   - **Account grant:** the start gate already flags "create an account"; approving sets
+     `config.account_allowed` (like email/spend). `_build_step_prompt` then adds account guidance
+     (sign up / log in, read the owner's inbox for the verification link/code via `google_mail` — the
+     raw/plain part, since rendered text drops URLs — and `ask_human` for 2FA/CAPTCHA/credentials).
+   - **Credential-encryption-key requirement:** `credential_encryption_ready()` checks
+     `CLAW_BROWSER_CREDENTIAL_KEY` / config; when account creation is granted but no key is set, the
+     step prompt warns the worker NOT to store passwords in the browser credential store (which would
+     fall back to base64 obfuscation) and to ask the owner to set the key.
+   - **`extract_verification`**: pulls a verification link/code out of an email body (tested).
+   - Tests: `test_bat_accounts.py` (grant via gate, key requirement + prompt warning, verification
+     extraction, the ask endpoint pausing + secret resume kept out of config, tool refusal). **Bat
+     suites: 149 passing**; 421 with tool-reg.
+   - Deck-only: the signup/login browsing itself, and reading verification mail, run on a live deck
+     with the browser + the owner's Google connected.
 8. **UI.** `BatPage`, `batStore`, `BatAskCard`, budget meter, nav + notifications; build + commit.
 
 Each phase is a PR; ship 1–3 before any world-action phase.
