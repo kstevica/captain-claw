@@ -121,6 +121,7 @@ async def evaluate(
     panel_size: int = 3,
     prior_model_veto_rounds: int = 0,
     max_model_veto_rounds: int = 2,
+    work_remaining: bool = True,
 ) -> Verdict:
     """Decide whether the task is genuinely done.
 
@@ -130,10 +131,15 @@ async def evaluate(
       2. If a deliverable is required but empty/missing → NOT done.
       3. Run the independent panel (``panel_size`` members, each fail-closed) and
          tally. An agree-majority → done.
-      4. Anti-deadlock: if the deterministic layer is all-green (at least one
-         check, no criticals failing) but the panel refused, and the caller's
-         model-veto streak has reached ``max_model_veto_rounds`` → done,
-         ``overridden=True``.
+      4. Anti-deadlock: when the deterministic layer is all-green (at least one
+         check, no criticals failing) but the panel refused, the veto is
+         overridden — the panel may demand *more work* only while more work is
+         possible. The override fires when the model-veto streak reaches
+         ``max_model_veto_rounds``, OR immediately when ``work_remaining`` is
+         False (every step is done and there is nothing left to retry, so a
+         deterministically-complete deliverable must not be blocked forever).
+         ``overridden=True`` records it. A critical deterministic failure (e.g. a
+         failed step) is NEVER overridden — the run still fails closed.
     """
     deterministic = deterministic or []
     det_criticals = [c.name + (f" ({c.detail})" if c.detail else "")
@@ -173,13 +179,15 @@ async def evaluate(
         return Verdict(done=True, reason=f"panel agrees ({t['counts']['agree']}/{t['total']} with margin {t['margin']})",
                        det_advisories=det_advisories, panel=panel)
 
-    # Panel refused. Anti-deadlock override only when deterministic evidence is
-    # fully green AND the model has vetoed for long enough.
-    if det_all_green and (prior_model_veto_rounds + 1) >= max_model_veto_rounds:
+    # Panel refused. Anti-deadlock override when the deterministic layer is fully
+    # green AND either the model has vetoed long enough OR there's no more work to
+    # do (nothing the loop could change to satisfy the panel).
+    if det_all_green and (not work_remaining or (prior_model_veto_rounds + 1) >= max_model_veto_rounds):
+        why = ("no steps left to try" if not work_remaining
+               else f"overridden after {prior_model_veto_rounds + 1} round(s)")
         return Verdict(
             done=True, overridden=True,
-            reason=(f"deterministic checks all green; model veto ({t['verdict']}) overridden after "
-                    f"{prior_model_veto_rounds + 1} round(s)"),
+            reason=f"deterministic checks all green; model veto ({t['verdict']}) {why}",
             det_advisories=det_advisories, panel=panel,
         )
 

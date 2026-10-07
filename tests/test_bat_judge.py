@@ -128,6 +128,37 @@ async def test_model_veto_overridden_only_when_green_and_streak_reached():
     assert v2.done and v2.overridden and "overridden" in v2.reason
 
 
+async def test_override_immediately_when_no_work_remains_and_green():
+    # A complete run (every step done → no work left) whose panel is picky must
+    # finish done, not error — the panel can demand more work only if more work
+    # is possible.
+    green = [Check("all steps done", True)]
+    reject = _panel({"vote": "disagree"}, {"vote": "disagree"})
+    v = await evaluate(task="t", deliverable="the finished answer", deterministic=green,
+                       panel_vote_fn=reject, panel_size=2, prior_model_veto_rounds=0,
+                       max_model_veto_rounds=2, work_remaining=False)
+    assert v.done and v.overridden and "no steps left" in v.reason
+
+
+async def test_no_override_while_work_remains_even_if_green():
+    green = [Check("some check", True)]
+    reject = _panel({"vote": "disagree"}, {"vote": "disagree"})
+    v = await evaluate(task="t", deliverable="r", deterministic=green, panel_vote_fn=reject,
+                       panel_size=2, prior_model_veto_rounds=0, max_model_veto_rounds=2,
+                       work_remaining=True)
+    assert not v.done  # streak not reached AND work still remains → keep going
+
+
+async def test_failed_critical_is_never_overridden_even_with_no_work():
+    # A failed step (critical) blocks done regardless of work_remaining — the run
+    # still fails closed; only a deterministically-COMPLETE deliverable is let
+    # through over a panel veto.
+    v = await evaluate(task="t", deliverable="r",
+                       deterministic=[Check("all steps done", passed=False, critical=True, detail="step-3 failed")],
+                       panel_vote_fn=_panel({"vote": "agree"}), work_remaining=False)
+    assert not v.done and v.det_criticals
+
+
 async def test_no_override_without_green_deterministic():
     # Deterministic layer empty → not "all green" → a model veto is never
     # overridden, no matter the streak.

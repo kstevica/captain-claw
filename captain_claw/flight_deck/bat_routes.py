@@ -298,6 +298,19 @@ def _assemble_deliverable(steps: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _final_deliverable(steps: list[dict]) -> str:
+    """What the judge evaluates for 'done': the LAST completed step's output (the
+    final answer/summary) — not the concatenation of every step's working notes,
+    which reads as unfinished. Falls back to the full assembly only when the
+    final step's output is too thin to stand alone."""
+    done = [s for s in steps if s.get("status") == "done" and (s.get("output") or "").strip()]
+    if not done:
+        return ""
+    last = max(done, key=lambda s: int(s.get("seq", 0)))
+    out = (last.get("output") or "").strip()
+    return out if len(out) >= 200 else _assemble_deliverable(steps)
+
+
 _STEP_SYSTEM = (
     "You are a Bat worker — the stubborn finisher. Complete the assigned step no matter how many "
     "approaches it takes; retry, change tactics, and use any tool available to you (including the "
@@ -651,11 +664,17 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
     from captain_claw.llm import Message
 
     sid = run["id"]
-    deliverable = _assemble_deliverable(steps)
+    deliverable = _final_deliverable(steps)
     all_done = bool(steps) and all(s.get("status") == "done" for s in steps)
     failed = [s["step_key"] for s in steps if s.get("status") == "failed"]
     det = [Check("all planned steps completed", passed=all_done, critical=True,
                  detail=(f"failed: {', '.join(failed)}" if failed else "pending steps remain"))]
+    # The panel may hold out for MORE work only while more work is possible; once
+    # every step is done (and none can retry), a deterministically-complete
+    # deliverable must not be blocked by a picky panel.
+    work_remaining = any(s.get("status") == "pending" for s in steps) or any(
+        s.get("status") == "failed" and int(s.get("attempt", 0)) < bat_loop._DEFAULT_MAX_STEP_ATTEMPTS
+        for s in steps)
 
     panel_fn = None
     try:
@@ -699,6 +718,7 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
         task=run.get("task", ""), deliverable=deliverable, deterministic=det,
         panel_vote_fn=panel_fn, panel_size=_PANEL_SIZE,
         prior_model_veto_rounds=prior, max_model_veto_rounds=_MAX_MODEL_VETO_ROUNDS,
+        work_remaining=work_remaining,
     )
     # Count judge spend against the run's persisted cap.
     store = bat_loop.get_store()

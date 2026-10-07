@@ -8,9 +8,32 @@ that's fine here (test_bat_loop pins its own defaults)."""
 from __future__ import annotations
 
 from captain_claw.flight_deck.bat_routes import (
-    _assemble_deliverable, _bat_worker_tools, _build_step_prompt, _norm_worker_mode,
-    _parse_archetype_plan, _parse_plan, _parse_vote, plan_needs_gate,
+    _assemble_deliverable, _bat_worker_tools, _build_step_prompt, _final_deliverable,
+    _norm_worker_mode, _parse_archetype_plan, _parse_plan, _parse_vote, plan_needs_gate,
 )
+
+
+# ── the judge sees the final answer, not the pile of working notes ─────
+
+def test_final_deliverable_prefers_the_last_step():
+    steps = [
+        {"status": "done", "seq": 0, "title": "A", "output": "early working notes " * 20},
+        {"status": "done", "seq": 1, "title": "B", "output": "FINAL ANSWER: " + "x" * 300},
+    ]
+    assert _final_deliverable(steps).startswith("FINAL ANSWER")
+
+
+def test_final_deliverable_falls_back_when_last_step_is_thin():
+    steps = [
+        {"status": "done", "seq": 0, "title": "A", "output": "a substantial first step " * 20},
+        {"status": "done", "seq": 1, "title": "B", "output": "ok"},  # too thin to stand alone
+    ]
+    out = _final_deliverable(steps)
+    assert "## A" in out and "## B" in out  # fell back to the full assembly
+
+
+def test_final_deliverable_empty_when_nothing_done():
+    assert _final_deliverable([{"status": "failed", "seq": 0, "output": "x"}]) == ""
 
 
 # ── hybrid worker mode (plain | archetype) ─────────────────────────────
