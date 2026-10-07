@@ -602,9 +602,11 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
             return
         try:
             import asyncio
+            tool = str(ev.get("tool", ""))
+            stage = "narration" if tool == "narration" else "action"
             asyncio.get_running_loop().create_task(
-                store.append_event(sid, "action", str(ev.get("tool", ""))[:60],
-                                   agent=step["step_key"], detail=str(ev.get("detail", ""))[:200]))
+                store.append_event(sid, stage, tool[:60],
+                                   agent=step["step_key"], detail=str(ev.get("detail", ""))[:300]))
         except Exception:
             pass
 

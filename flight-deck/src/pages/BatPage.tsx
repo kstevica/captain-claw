@@ -3,7 +3,7 @@
 // agent cards, VFS files) over Bat's own store.
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Hammer, Loader2, Square } from 'lucide-react'
+import { ChevronDown, ChevronRight, Hammer, Loader2, Square } from 'lucide-react'
 import { useBatStore } from '../stores/batStore'
 import type { BatRun } from '../stores/batStore'
 import { ProgressFeed, LiveAgentsPanel, ResizableSplit } from '../components/basna/RunWorkspace'
@@ -152,12 +152,14 @@ function Detail() {
   const active = useBatStore((s) => s.active)
   const asks = useBatStore((s) => s.asks)
   const cancel = useBatStore((s) => s.cancel)
+  const [showAgents, setShowAgents] = useState(true)
   if (!active) {
     return <p className="p-4 text-sm text-zinc-500">Select a run to watch it work.</p>
   }
   const { run, steps, events, spend } = active
   const running = RUNNING.includes(run.status)
   const myAsks = asks.filter((a) => a.run_id === run.id)
+  const agents = buildLiveAgents(events)
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-3">
@@ -184,7 +186,18 @@ function Detail() {
 
       {myAsks.length > 0 && <BatAskCard asks={myAsks} />}
 
-      <LiveAgentsPanel agents={buildLiveAgents(events)} />
+      {agents.length > 0 && (
+        <div>
+          <button
+            onClick={() => setShowAgents((v) => !v)}
+            className="mb-1 flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200"
+          >
+            {showAgents ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            Live agents ({agents.length}) — {agents.filter((a) => a.done).length} done
+          </button>
+          {showAgents && <LiveAgentsPanel agents={agents} />}
+        </div>
+      )}
 
       {steps.length > 0 && (
         <div className="rounded-md border border-zinc-800">

@@ -44,15 +44,22 @@ function LiveAgentCard({ a, onSkip }: { a: LiveAgent; onSkip?: (role: string) =>
         Activity ({a.actions.length})
       </div>
       <div className="mt-1 max-h-48 space-y-0.5 overflow-auto">
-        {a.actions.slice(-14).map((ev) => (
-          <div key={ev.i} className="flex items-baseline gap-2 text-[11px]">
-            {ev.stage === 'narration'
-              ? <Sparkles className="h-3 w-3 shrink-0 text-zinc-500" />
-              : <Wrench className="h-3 w-3 shrink-0 text-zinc-600" />}
-            <span className="shrink-0 font-mono text-zinc-400">{ev.tool}</span>
-            {ev.detail && <span className="truncate text-zinc-600">{ev.detail}</span>}
-          </div>
-        ))}
+        {a.actions.slice(-14).map((ev) => {
+          const isNarr = ev.stage === 'narration' || ev.tool === 'narration'
+          return (
+            <div key={ev.i} className="flex items-baseline gap-2 text-[11px]">
+              {isNarr
+                ? <Sparkles className="h-3 w-3 shrink-0 text-amber-400" />
+                : <Wrench className="h-3 w-3 shrink-0 text-zinc-600" />}
+              {isNarr
+                ? <span className="font-semibold text-zinc-100">{ev.detail || ev.tool}</span>
+                : <>
+                    <span className="shrink-0 font-mono text-zinc-400">{ev.tool}</span>
+                    {ev.detail && <span className="truncate text-zinc-600">{ev.detail}</span>}
+                  </>}
+            </div>
+          )
+        })}
         {a.actions.length === 0 && <div className="text-[11px] text-zinc-600">working…</div>}
       </div>
     </div>
