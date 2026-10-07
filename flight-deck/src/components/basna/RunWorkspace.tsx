@@ -331,8 +331,8 @@ export function ResizableSplit({ storageKey, left, right }: {
 
   if (!wide) return <div className="space-y-3">{left}{right}</div>
   return (
-    <div ref={ref} className={`flex items-stretch ${dragging ? 'select-none' : ''}`}>
-      <div style={{ width: `${pct}%` }} className="min-w-0">{left}</div>
+    <div ref={ref} className={`flex h-full items-stretch ${dragging ? 'select-none' : ''}`}>
+      <div style={{ width: `${pct}%` }} className="h-full min-h-0 min-w-0">{left}</div>
       <div
         onMouseDown={onDown}
         title="Drag to resize"
@@ -341,7 +341,7 @@ export function ResizableSplit({ storageKey, left, right }: {
         <div className={`absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded ${
           dragging ? 'bg-sky-500' : 'bg-zinc-800 group-hover:bg-sky-600/60'}`} />
       </div>
-      <div style={{ width: `${100 - pct}%` }} className="min-w-0">{right}</div>
+      <div style={{ width: `${100 - pct}%` }} className="h-full min-h-0 min-w-0">{right}</div>
     </div>
   )
 }
