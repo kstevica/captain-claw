@@ -15,6 +15,7 @@ import secrets
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from captain_claw import mail_authority
 from captain_claw.instructions import InstructionLoader
 from captain_claw.logging import get_logger
 from captain_claw.session import Session, get_session_manager
@@ -951,7 +952,8 @@ async def _tg_process_with_typing(
             else:
                 turn_start_idx = len(user_agent.session.messages) if user_agent.session else 0
                 log.info("Telegram agent.complete() start", user_id=user_id, text_len=len(text))
-                response = await user_agent.complete(text)
+                with mail_authority.bound(mail_authority.interactive(text)):
+                    response = await user_agent.complete(text)
                 log.info("Telegram agent.complete() done", user_id=user_id, response_len=len(response or ""))
 
                 await _tg_send(server, chat_id, response, reply_to_message_id=reply_to_message_id)

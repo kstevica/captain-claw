@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
+from captain_claw import mail_authority
 from captain_claw.fd_client import FDClient, is_under_flight_deck
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
@@ -114,6 +116,44 @@ class MCPProxyConnector:
 # ── proxy tool ──────────────────────────────────────────────────────
 
 
+# Gmail-like MCP proxy tools that write mail (part of the automated-turn guard).
+_MCP_MAIL_VERB = re.compile(
+    r"^(create_draft|update_draft|send_draft|send_message|send_email|reply|reply_all|forward"
+    r"|compose\w*|draft(?!s?_(?:list|get|read|search|fetch|find|count|query)(?:_|$))\w*)$",
+    re.I,
+)
+_MCP_MAIL_HINT = re.compile(r"mail|gmail|outlook", re.I)
+# Upstream names vary ("gmail_send_email", "sendEmail", "users.drafts.create",
+# "create_gmail_draft", Microsoft Graph's "createReply" / "me.sendMail"):
+# normalize to snake_case, drop a leading service prefix, and also accept a
+# verb followed by more words. Read actions (list_drafts, get_draft …) never
+# start with a write verb. Graph's createReply / createReplyAll /
+# createForward and create_message (POST /me/messages) all create drafts.
+_MCP_SERVICE_PREFIX = re.compile(
+    r"^(?:(?:gmail|google|mail|email|outlook|ms|microsoft|o365|graph|users|user|me)_)+"
+)
+_MCP_MAIL_VERB_LOOSE = re.compile(
+    r"^(?:send(?:_\w+)?|reply(?:_\w+)?|forward(?:_\w+)?|compose\w*"
+    r"|draft(?!s?_(?:list|get|read|search|fetch|find|count|query)(?:_|$))\w*"
+    r"|(?:create|update|save|upsert)_\w*draft\w*"
+    r"|create_(?:reply(?:_all)?|forward|message|mail|email)(?:_draft)?"
+    r"|create_\w*_(?:reply(?:_all)?|forward)"
+    r"|(?:schedule|batch|bulk)_send\w*"
+    r"|(?:drafts?|messages?)_(?:create|update|send|reply(?:_all)?|forward"
+    r"|create_(?:reply(?:_all)?|forward)))$"
+)
+
+
+def _mcp_mail_write_name(name: str) -> bool:
+    """Is this upstream MCP tool name a mail-writing verb?"""
+    if _MCP_MAIL_VERB.match(name or ""):
+        return True
+    snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name or "")
+    snake = re.sub(r"[^A-Za-z0-9]+", "_", snake).strip("_").lower()
+    snake = _MCP_SERVICE_PREFIX.sub("", snake)
+    return bool(_MCP_MAIL_VERB.match(snake) or _MCP_MAIL_VERB_LOOSE.match(snake))
+
+
 class MCPProxyTool(Tool):
     """A captain-claw :class:`Tool` proxying execution to an upstream MCP tool."""
 
@@ -144,6 +184,19 @@ class MCPProxyTool(Tool):
         self._connector = connector
 
     async def execute(self, **kwargs: Any) -> ToolResult:
+        # A Gmail-like MCP write in an automated turn obeys the same guard as
+        # google_mail (recipients unknown → only "allow" / any-scope intent).
+        if _mcp_mail_write_name(self._mcp_tool_name or "") and _MCP_MAIL_HINT.search(
+            f"{self._server_name} {self.description}"
+        ):
+            _r = mail_authority.check_mail_write("mcp_mail", None)
+            if _r:
+                log.info(
+                    "MCP mail write refused (automated turn)",
+                    tool=self._mcp_tool_name, server=self._server_name,
+                    kind=mail_authority.current().kind,
+                )
+                return ToolResult(success=False, error=_r)
         try:
             declared = set((self.parameters.get("properties") or {}).keys())
             required = set(self.parameters.get("required") or [])

@@ -82,7 +82,10 @@ class CronTool(Tool):
                 "type": "string",
                 "description": (
                     "The prompt/instruction the agent should execute on each run "
-                    "(required for 'create').  Write it as a complete instruction."
+                    "(required for 'create').  Write it as a complete instruction. "
+                    "If the user asked for an email in this job, say so explicitly in the "
+                    "task (e.g. 'Draft a reply to Ana …', 'Email me the summary …'); "
+                    "scheduled runs may only write email when the task itself says to."
                 ),
             },
             "job_id": {
@@ -166,10 +169,32 @@ class CronTool(Tool):
         next_run = compute_next_run(schedule_dict)
         session_id = self._get_session_id()
 
+        # Written by the agent: at fire time it may write email only when
+        # both this task and what the user wrote asking for it say so — the
+        # user's last few messages, so a request confirmed with "yes, set it
+        # up" keeps its words.
+        from captain_claw import mail_authority
+
+        payload = {
+            "text": task.strip(),
+            "author": "agent",
+            "mail_intent_text": mail_authority.recent_intent_text(self._agent)[
+                :mail_authority.JOB_TEXT_MAX
+            ],
+        }
+        _mail_note = ""
+        if (mail_authority.explicit_mail_intent(payload["text"])
+                and not mail_authority.cron_job_text(payload)):
+            _mail_note = (
+                "\n  Note:     this job can't write email when it runs — the user's own "
+                "messages didn't explicitly ask for one. If they want it to, ask them to "
+                "say so in their words (e.g. 'email Ana the report every Friday'), then "
+                "re-create the job."
+            )
         sm = self._get_session_manager()
         job = await sm.create_cron_job(
             kind="prompt",
-            payload={"text": task.strip()},
+            payload=payload,
             schedule=schedule_dict,
             session_id=session_id,
             next_run_at=to_utc_iso(next_run),
@@ -186,6 +211,7 @@ class CronTool(Tool):
                 f"  Task:     {task.strip()}\n"
                 f"  Next run: {job.next_run_at}\n"
                 f"  Session:  {session_id}"
+                f"{_mail_note}"
             ),
         )
 

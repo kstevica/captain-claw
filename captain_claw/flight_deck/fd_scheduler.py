@@ -312,9 +312,21 @@ class SchedulerStore:
                 )
             except Exception:
                 pass  # column already exists
+            # Who wrote the job's prompt: "human" (the SchedulerPage / a user
+            # token) or "agent" (an internal caller such as intentions.py). Only a
+            # human-written prompt can authorize the turn to write email. Legacy
+            # rows count as human-written.
+            try:
+                self._conn_or_open().execute(
+                    "ALTER TABLE scheduler_jobs ADD COLUMN prompt_author TEXT NOT NULL DEFAULT 'human'"
+                )
+            except Exception:
+                pass  # column already exists
             self._conn_or_open().commit()
 
-    def create(self, *, owner_id: str = "", **fields: Any) -> dict[str, Any]:
+    def create(
+        self, *, owner_id: str = "", prompt_author: str = "human", **fields: Any,
+    ) -> dict[str, Any]:
         schedule = str(fields.get("schedule", "")).strip()
         validate_schedule(schedule)  # raises ScheduleError
         kind = str(fields.get("delivery_kind", "")).strip().lower()
@@ -340,6 +352,7 @@ class SchedulerStore:
             "agent_slug": str(fields.get("agent_slug", "")).strip(),
             "agent_auth": str(fields.get("agent_auth", "")).strip(),
             "prompt": prompt,
+            "prompt_author": _norm_prompt_author(prompt_author),
             "flow_id": flow_id,
             "delivery_kind": kind,
             "delivery_target": target.lstrip("+") if kind == "whatsapp" else target,
@@ -357,12 +370,13 @@ class SchedulerStore:
             conn.execute(
                 """
                 INSERT INTO scheduler_jobs
-                  (id, owner_id, name, schedule, agent_slug, agent_auth, prompt, flow_id,
-                   delivery_kind, delivery_target, enabled, ignore_quiet_hours,
+                  (id, owner_id, name, schedule, agent_slug, agent_auth, prompt, prompt_author,
+                   flow_id, delivery_kind, delivery_target, enabled, ignore_quiet_hours,
                    created_at, updated_at, next_run_at, last_run_at,
                    last_status, last_result)
                 VALUES
-                  (:id, :owner_id, :name, :schedule, :agent_slug, :agent_auth, :prompt, :flow_id,
+                  (:id, :owner_id, :name, :schedule, :agent_slug, :agent_auth, :prompt,
+                   :prompt_author, :flow_id,
                    :delivery_kind, :delivery_target, :enabled, :ignore_quiet_hours,
                    :created_at, :updated_at, :next_run_at, :last_run_at,
                    :last_status, :last_result)
@@ -405,7 +419,11 @@ class SchedulerStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def update(self, job_id: str, **fields: Any) -> dict[str, Any] | None:
+    def update(
+        self, job_id: str, *, prompt_author: str = "human", **fields: Any,
+    ) -> dict[str, Any] | None:
+        """Patch a job. A new ``prompt`` also records who wrote it
+        (``prompt_author``) — the caller decides that, never the body."""
         existing = self.get(job_id)
         if not existing:
             return None
@@ -431,6 +449,8 @@ class SchedulerStore:
                 updates[k] = str(v).strip()
         if not updates:
             return existing
+        if "prompt" in updates:
+            updates["prompt_author"] = _norm_prompt_author(prompt_author)
         updates["updated_at"] = _utcnow_iso()
         # Recompute next_run if schedule changed or job (re)enabled.
         recompute = "schedule" in updates or updates.get("enabled") == 1
@@ -543,9 +563,13 @@ async def run_prompt_and_capture(
     auth: str,
     prompt: str,
     timeout: float = _REPLY_TIMEOUT_SECONDS,
+    automation: dict[str, Any] | None = None,
 ) -> str | None:
     """Inject ``prompt`` into a fresh ephemeral channel bound to the agent
     and return the first ``agent`` reply text, or None on timeout/failure.
+
+    ``automation`` (the automated-turn marker) rides on the chat frame when
+    given, so the agent knows this turn is a scheduled job, not the user.
 
     The ephemeral channel is torn down in all cases.
     """
@@ -569,7 +593,10 @@ async def run_prompt_and_capture(
         if ch.agent_ws is None:
             return None
         async with ch.send_lock:
-            await ch.agent_ws.send(json.dumps({"type": "chat", "content": prompt}))
+            frame: dict[str, Any] = {"type": "chat", "content": prompt}
+            if automation:
+                frame["automation"] = automation
+            await ch.agent_ws.send(json.dumps(frame))
         try:
             return await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
@@ -711,9 +738,16 @@ async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str,
     if not port:
         return ("error:agent-not-running", f"agent slug '{slug}' not running")
 
+    # The turn is automated: it may write email only when the job's own
+    # human-written prompt asks for it (judged on the raw prompt, no preamble).
+    raw_prompt = str(job.get("prompt") or "")
+    human_written = str(job.get("prompt_author") or "human") == "human"
     reply = await run_prompt_and_capture(
         host=host, port=port, auth=auth,
-        prompt=_fire_time_preamble() + str(job.get("prompt") or ""),
+        prompt=_fire_time_preamble() + raw_prompt,
+        automation={"kind": "fd_scheduler",
+                    "job_text": (raw_prompt if human_written else "")[:4000],
+                    "mail_write": "intent"},
     )
     if reply is None:
         return ("error:no-reply", "agent produced no reply within timeout")
@@ -807,6 +841,17 @@ _AGENT_AUTH_MASK = "********"
 class _SchedulerCaller:
     owner: str      # owner stamped on jobs it creates ("" = system)
     sees_all: bool  # an admin, or the one trusted user of an auth-off deck
+    # A person (user JWT, or an auth-off request carrying no agent headers) —
+    # the prompts it writes are human-written; an internal caller's are not.
+    is_human: bool = True
+
+
+# Headers only an agent / internal caller sends (compared case-insensitively).
+_AGENT_HEADERS: tuple[str, ...] = ("x-agent-auth", "x-agent-secret", "x-agent-slug", "x-glasses-token")
+
+
+def _norm_prompt_author(v: Any) -> str:
+    return "agent" if str(v or "").strip().lower() == "agent" else "human"
 
 
 def _calling_agent_owner(request: Request) -> str:
@@ -847,7 +892,10 @@ def _require_scheduler_caller(request: Request) -> _SchedulerCaller:
 
     # Local/standalone mode (auth disabled) — single trusted user.
     if not _fd_auth_enabled():
-        return _SchedulerCaller(owner="", sees_all=True)
+        hdrs = {k.lower() for k in request.headers.keys()}
+        return _SchedulerCaller(
+            owner="", sees_all=True, is_human=not any(h in hdrs for h in _AGENT_HEADERS),
+        )
 
     # (a) Flight Deck user JWT.
     auth_hdr = request.headers.get("Authorization", "")
@@ -892,7 +940,7 @@ def _require_scheduler_caller(request: Request) -> _SchedulerCaller:
         internal = client_host in ("127.0.0.1", "::1", "localhost")
 
     if internal:
-        return _SchedulerCaller(owner=_calling_agent_owner(request), sees_all=False)
+        return _SchedulerCaller(owner=_calling_agent_owner(request), sees_all=False, is_human=False)
     raise HTTPException(status_code=401, detail="scheduler requires authentication")
 
 
@@ -926,6 +974,8 @@ async def _json_object(request: Request) -> dict[str, Any]:
     # The owner comes from the caller, never the body; and the redaction
     # placeholder is not a token — on update it means "unchanged".
     body.pop("owner_id", None)
+    # Who wrote the prompt is the caller's identity, never a body claim.
+    body.pop("prompt_author", None)
     if body.get("agent_auth") == _AGENT_AUTH_MASK:
         body.pop("agent_auth")
     return body
@@ -960,7 +1010,9 @@ async def create_job(request: Request) -> JSONResponse:
     caller = _require_scheduler_caller(request)
     body = await _json_object(request)
     try:
-        row = get_store().create(owner_id=caller.owner, **body)
+        row = get_store().create(
+            owner_id=caller.owner, prompt_author="human" if caller.is_human else "agent", **body,
+        )
     except (ScheduleError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return JSONResponse(_public_job(row), headers=_NO_CACHE)
@@ -979,7 +1031,12 @@ async def update_job(job_id: str, request: Request) -> JSONResponse:
     _job_for_caller(job_id, caller)
     body = await _json_object(request)
     try:
-        row = get_store().update(job_id, **body)
+        if "prompt" in body:
+            row = get_store().update(
+                job_id, prompt_author="human" if caller.is_human else "agent", **body,
+            )
+        else:
+            row = get_store().update(job_id, **body)
     except (ScheduleError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not row:

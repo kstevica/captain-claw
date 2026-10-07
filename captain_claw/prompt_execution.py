@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from captain_claw import mail_authority
 from captain_claw.config import get_config
 from captain_claw.execution_queue import (
     CommandLane,
@@ -219,7 +220,36 @@ async def run_prompt_in_active_session(
     agent = ctx.agent
     ui = ctx.ui
 
+    async def _turn_authority() -> mail_authority.Authority:
+        """Who started this turn, for the mail-write guard.
+
+        A cron run is judged on its stored job text (an agent-created job on
+        the narrower of its task and the human message that asked for it);
+        anything else here is a person typing (CLI, TUI, remote adapters) —
+        unless this process is an FD worker or a being (J7: deny default).
+        """
+        if not cron_job_id:
+            return mail_authority.interactive(prompt_text)
+        try:
+            job = await agent.session_manager.load_cron_job(cron_job_id)
+        except Exception:
+            job = None
+        if job is None:
+            return mail_authority.automated("cron", "", "deny")
+        return mail_authority.automated(
+            "cron", mail_authority.cron_job_text(getattr(job, "payload", None)), "intent",
+        )
+
     async def _execute() -> None:
+        # Bound for the whole turn and reset in the same coroutine, so it
+        # never leaks into the caller (queue=False awaits this directly).
+        _auth_tok = mail_authority.bind(await _turn_authority())
+        try:
+            await _execute_turn()
+        finally:
+            mail_authority.reset(_auth_tok)
+
+    async def _execute_turn() -> None:
         shown_prompt = display_prompt if display_prompt is not None else prompt_text
         ui.print_message("user", shown_prompt)
         ui.print_blank_line()

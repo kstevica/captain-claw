@@ -191,9 +191,15 @@ async def decompose_goal(user_id: str, goal: str) -> list[dict[str, Any]]:
     agent = _strongest_agent(user_id)
     if not agent:
         return []
-    from captain_claw.flight_deck.action_catalog import list_catalog, get_action, validate_args
-    catalog = [a for a in list_catalog(user_id=user_id) if not a["human_only"]]
-    cat_text = "\n".join(f"- {a['id']}: {a['label']} · required {a['required']}" for a in catalog)
+    from captain_claw.flight_deck.action_catalog import list_catalog, get_action, may_propose, validate_args
+    # Non-human-only actions, plus proposable human-only ones (mail.draft) — a
+    # step of those always pauses for the user's approval.
+    catalog = [a for a in list_catalog(user_id=user_id) if not a["human_only"] or a["proposable"]]
+    cat_text = "\n".join(
+        f"- {a['id']}: {a['label']} · required {a['required']}"
+        + (" · needs the user's approval" if a["human_only"] else "")
+        for a in catalog
+    )
     try:
         from captain_claw.games.remote_provider import RemoteLLMProvider
         from captain_claw.llm import Message
@@ -238,7 +244,7 @@ async def decompose_goal(user_id: str, goal: str) -> list[dict[str, Any]]:
         if kind == "tool_action":
             spec = get_action(raw.get("action_id"), user_id)
             args = raw.get("args") if isinstance(raw.get("args"), dict) else {}
-            if not spec or spec.get("human_only"):
+            if not spec or not may_propose(spec):
                 continue
             ok, _ = validate_args(spec, args)
             if not ok:
@@ -252,12 +258,19 @@ async def decompose_goal(user_id: str, goal: str) -> list[dict[str, Any]]:
 
 # ── Execution ────────────────────────────────────────────────────────
 
-async def _run_step(user_id: str, step: dict[str, Any]) -> dict[str, Any]:
-    """Execute one step via the shared rail. Returns {ok, content, reverse?}."""
+async def _run_step(
+    user_id: str, step: dict[str, Any], *, approved_by_human: bool = False, job_text: str = "",
+) -> dict[str, Any]:
+    """Execute one step via the shared rail. Returns {ok, content, reverse?}.
+
+    ``approved_by_human`` (a manual advance) lets a tool step write email;
+    nudge / run_prompt turns carry the ``plan`` automation marker judged on the
+    plan's user-written goal (``job_text``)."""
     kind = step.get("kind")
     if kind == "tool_action":
         from captain_claw.flight_deck.actions import run_action
-        res = await run_action(user_id, step.get("action_id", ""), step.get("args") or {})
+        res = await run_action(user_id, step.get("action_id", ""), step.get("args") or {},
+                               approved_by_human=approved_by_human)
         reverse = None
         if res.get("ok"):
             from captain_claw.flight_deck import action_catalog
@@ -273,7 +286,10 @@ async def _run_step(user_id: str, step: dict[str, Any]) -> dict[str, Any]:
     from captain_claw.flight_deck.basna_routes import _dispatch_one
     prompt = (f"[Plan step] {step.get('title')}" if kind == "nudge"
               else f"[Plan task] {step.get('title')}")
-    res = await _dispatch_one(int(agent.get("port") or 0), str(agent.get("auth", "")), prompt, 180.0)
+    res = await _dispatch_one(
+        int(agent.get("port") or 0), str(agent.get("auth", "")), prompt, 180.0,
+        automation={"kind": "plan", "job_text": str(job_text or "")[:4000], "mail_write": "intent"},
+    )
     return {"ok": bool(res.get("ok")), "content": str(res.get("output") or "")[:500], "reverse": None}
 
 
@@ -311,7 +327,10 @@ async def advance_one(user_id: str, plan_id: str, *, auto: bool = False) -> dict
 
     step["status"] = "running"
     store.save_plan(plan_id, steps=steps)
-    res = await _run_step(user_id, step)
+    # A manual advance IS the user's approval of this step; the plan's goal is
+    # the user's own words (POST /fd/autonomy/plans).
+    res = await _run_step(user_id, step, approved_by_human=not auto,
+                          job_text=str(plan.get("goal") or ""))
     step["result"] = str(res.get("content") or "")[:500]
     step["reverse"] = res.get("reverse")
     if res.get("ok"):

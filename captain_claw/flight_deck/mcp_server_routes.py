@@ -179,7 +179,11 @@ async def _run_agent_task(t: _MCPTask, host: str, auth: str, timeout: float) -> 
                     break
                 if msg.get("type") not in ("chat_message",) or not msg.get("replay"):
                     break
-            payload = {"type": "chat", "content": t.task, "no_broadcast": True}
+            # An MCP task can be sent unattended (a scheduled Claude routine): an
+            # automated turn that may write email only when the task text asks.
+            payload = {"type": "chat", "content": t.task, "no_broadcast": True,
+                       "automation": {"kind": "mcp_task", "job_text": str(t.task or "")[:4000],
+                                      "mail_write": "intent"}}
             await ws.send(json.dumps(payload))
             _emit("status", {"status": "sent"})
 

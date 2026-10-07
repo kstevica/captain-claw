@@ -136,6 +136,15 @@ def record_human_feedback(
         return None
     if str(cfg.get("judge_mode") or "both") not in ("human", "both"):
         return None
+    if str(action.get("kind") or "") == "tool_action":
+        # Email (and any human-only) actions never EARN trust: an approval is the
+        # user deciding this one time, not a signal to auto-fire the next one. A
+        # rejection still counts — it can only lower the weight (suppression).
+        from captain_claw.flight_deck import action_catalog
+        aid = str((action.get("payload") or {}).get("action_id") or "")
+        spec = action_catalog.get_action(aid, user_id)
+        if spec and (spec.get("human_only") or action_catalog.is_mail_write(spec)) and approved:
+            return None
     kind, domain = reliability_key(action)
     return get_store().record_outcome(
         user_id, kind, domain, bool(approved),
@@ -245,6 +254,44 @@ class AutonomyStore:
                 """
             )
             self._c().commit()
+            self._sweep_mail_trust()
+
+    def _sweep_mail_trust(self) -> None:
+        """Clear any learned trust for built-in email actions (``mail.*``).
+
+        Email actions are always human-approved now, so their trust is never
+        learned again; this removes what an older build learned. It runs on EVERY
+        start (not once-only): two decks can share this file, and an old-code deck
+        may re-learn in the meantime. Idempotent — with nothing to clear it deletes
+        and logs nothing. One log row per affected user, all in one transaction.
+        Custom email actions aren't swept (resolving them here would recurse into
+        ``get_store()``); their rows are inert since a mail-write never auto-fires.
+        """
+        with self._lock:
+            conn = self._c()
+            try:
+                users = [r["user_id"] for r in conn.execute(
+                    "SELECT DISTINCT user_id FROM autonomy_reliability"
+                    " WHERE kind = 'tool_action' AND domain LIKE 'mail.%'"
+                ).fetchall()]
+                if not users:
+                    return
+                now = _utcnow_iso()
+                conn.execute(
+                    "DELETE FROM autonomy_reliability"
+                    " WHERE kind = 'tool_action' AND domain LIKE 'mail.%'"
+                )
+                for uid in users:
+                    conn.execute(
+                        "INSERT INTO autonomy_log (user_id, ts, level, event, detail)"
+                        " VALUES (?, ?, ?, ?, ?)",
+                        (uid, now, "info", "mail trust reset",
+                         "Email actions now always wait for your approval; "
+                         "their learned trust was cleared."),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
 
     # ── live log ───────────────────────────────────────────────────────
 
@@ -480,6 +527,82 @@ class AutonomyStore:
                 (uid,),
             ).fetchall()
         return [self._row_to_action(r) for r in rows]
+
+    def claim_action(
+        self, action_id: str, from_statuses: tuple[str, ...], to_status: str,
+    ) -> bool:
+        """Compare-and-set: move the action to ``to_status`` only if it is still in
+        one of ``from_statuses``. True when this call made the move — so a double
+        click (or approving a done/rejected/expired row) can't act twice."""
+        froms = tuple(str(s) for s in (from_statuses or ()))
+        if not froms:
+            return False
+        now = _utcnow_iso()
+        sets = ["status = ?"]
+        vals: list[Any] = [to_status]
+        if to_status == "dispatched":
+            sets.append("dispatched_at = ?")
+            vals.append(now)
+        if to_status in ("done", "rejected", "expired"):
+            sets.append("completed_at = ?")
+            vals.append(now)
+        marks = ",".join("?" for _ in froms)
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute(
+                f"UPDATE autonomous_actions SET {', '.join(sets)}"
+                f" WHERE id = ? AND status IN ({marks})",
+                (*vals, action_id, *froms),
+            )
+            conn.commit()
+        return int(cur.rowcount or 0) == 1
+
+    def latest_thread_action(
+        self, user_id: str, thread_key: str, since_iso: str,
+    ) -> dict[str, Any] | None:
+        """The newest action (any status) on an email thread created at/after
+        ``since_iso`` — per-thread dedup (J4). ``thread_key`` is stamped into the
+        payload as ``"gmail:<thread_id>"``."""
+        if not thread_key:
+            return None
+        uid = _norm_user(user_id)
+        with self._lock:
+            r = self._c().execute(
+                "SELECT * FROM autonomous_actions WHERE user_id = ? AND created_at >= ?"
+                " AND json_extract(payload, '$.thread_key') = ?"
+                " ORDER BY created_at DESC LIMIT 1",
+                (uid, since_iso, thread_key),
+            ).fetchone()
+        return self._row_to_action(r) if r else None
+
+    def open_thread_action(
+        self, user_id: str, thread_key: str, since_iso: str | None = None,
+    ) -> dict[str, Any] | None:
+        """The newest unresolved action (candidate/awaiting/queued/dispatched) on
+        an email thread, or None. With ``since_iso``, only one created at/after it
+        counts — a row parked as 'queued' (approve with no reachable agent) or left
+        'dispatched' by a restart is never reconciled, and must not hide the
+        thread forever."""
+        if not thread_key:
+            return None
+        uid = _norm_user(user_id)
+        sql = ("SELECT * FROM autonomous_actions WHERE user_id = ?"
+               " AND json_extract(payload, '$.thread_key') = ?"
+               " AND status IN ('candidate','awaiting_approval','queued','dispatched')")
+        params: list[Any] = [uid, thread_key]
+        if since_iso:
+            sql += " AND created_at >= ?"
+            params.append(since_iso)
+        with self._lock:
+            r = self._c().execute(sql + " ORDER BY created_at DESC LIMIT 1", params).fetchone()
+        return self._row_to_action(r) if r else None
+
+    def has_open_thread_action(
+        self, user_id: str, thread_key: str, since_iso: str | None = None,
+    ) -> bool:
+        """Whether an unresolved action (candidate/awaiting/queued/dispatched)
+        already covers this email thread (see ``open_thread_action``)."""
+        return self.open_thread_action(user_id, thread_key, since_iso) is not None
 
     def update_payload(self, action_id: str, patch: dict[str, Any]) -> None:
         """Merge ``patch`` into an action's payload JSON (e.g. attach the reverse

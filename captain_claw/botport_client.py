@@ -24,6 +24,7 @@ import aiohttp
 
 from captain_claw.ws_utils import fire_and_forget_send
 
+from captain_claw import mail_authority
 from captain_claw.config import BotPortClientConfig, get_config
 from captain_claw.instructions import InstructionLoader
 from captain_claw.logging import get_logger
@@ -615,8 +616,9 @@ class BotPortClient:
                 context_str = json.dumps(filtered_context, indent=2, default=str)
                 effective_input = f"{effective_input}\n\nContext:\n{context_str}"
 
-            # Run the agent.
-            response = await agent.complete(effective_input)
+            # Run the agent (a BotPort task — never writes email).
+            with mail_authority.bound(mail_authority.automated("botport", "", "deny")):
+                response = await agent.complete(effective_input)
 
             # Scan agent response for file paths that exist on disk
             # (files from previous runs that weren't created in this session).
@@ -679,7 +681,8 @@ class BotPortClient:
         persona_name = self._dispatch_personas.get(concern_id, self._config.instance_name)
 
         try:
-            response = await agent.complete(message)
+            with mail_authority.bound(mail_authority.automated("botport", "", "deny")):
+                response = await agent.complete(message)
 
             if self._ws and not self._ws.closed:
                 await self._ws.send_str(json.dumps({

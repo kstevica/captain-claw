@@ -34,7 +34,7 @@ def pushed(monkeypatch):
         sent.append((waid, text))
         return True
 
-    async def fake_dispatch(port, auth, instruction, timeout):
+    async def fake_dispatch(port, auth, instruction, timeout, **kw):
         return {"ok": True, "output": "Hey — your 3pm call is in an hour."}
 
     monkeypatch.setattr(whatsapp_bridge, "push_to_waid", fake_push)

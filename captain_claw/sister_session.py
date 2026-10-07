@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
+from captain_claw import mail_authority
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
 
@@ -1085,11 +1086,12 @@ async def execute_task(task: dict[str, Any]) -> dict[str, Any] | None:
             phase="tool",
         )
 
-        # 4. Execute with timeout
-        response = await asyncio.wait_for(
-            agent.complete(full_prompt),
-            timeout=180.0,  # 3-minute hard timeout
-        )
+        # 4. Execute with timeout (a background task — never writes email)
+        with mail_authority.bound(mail_authority.automated("sister", "", "deny")):
+            response = await asyncio.wait_for(
+                agent.complete(full_prompt),
+                timeout=180.0,  # 3-minute hard timeout
+            )
 
         result_text = str(response or "")
         # PR D: the level of a sister turn that read members' private data —

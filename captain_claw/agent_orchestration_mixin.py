@@ -17,6 +17,7 @@ from captain_claw.agent_stuck import (
     MSG_RETRIES_EXHAUSTED,
     MSG_STUCK,
 )
+from captain_claw import mail_authority
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
 from captain_claw.llm import Message, is_reasoning_backfill_placeholder
@@ -554,6 +555,9 @@ def _detect_basna_run(user_input: str) -> str | None:
     # Never relay on injected system envelopes — the Basna/delegate COMPLETION
     # callbacks ("[Basna run '…' finished] … Relay it to the user …") mention
     # "Basna run" and would otherwise re-trigger an endless chain of new runs.
+    # An automated turn's provenance line isn't such an envelope — judge the
+    # job's own text under it.
+    user_input = mail_authority.strip_automated_prefix(user_input)
     stripped_lead = user_input.lstrip()
     if stripped_lead.startswith("[") or "Basna run you started" in user_input:
         return None
@@ -602,21 +606,96 @@ _MAIL_AS_TEXT_RE = _re.compile(
 # emails that already exist (the model ran its repeat check) has the same
 # shape, and that order would push it into the duplicate the no-repeat rule
 # forbids.
+# It fires only when the user asked for an email in this conversation (one
+# of their last messages, or a "yes" to the agent's offer —
+# mail_authority.nudge_mail_ok) — never in an automated turn.
 _MAIL_TOOL_AVOIDANCE_NUDGE = (
-    "STOP. You have the google_mail tool available. Do NOT output email drafts as "
-    "text for the user to copy. For each recipient that doesn't already have this "
-    "email in Drafts or Sent (check list_drafts query='to:<recipient>' and search "
-    "query='in:sent to:<recipient> newer_than:14d' if you haven't yet), call "
-    "google_mail with action=create_draft now, using the to, subject and body "
-    "parameters. If one is already drafted or sent, don't create it again — tell "
-    "the user its Draft ID or sent date. (Use action=send instead only if the user "
-    "explicitly asked you to send and sending is enabled; otherwise always create "
-    "drafts.)"
+    "STOP. The user asked you for this email and you have the google_mail tool. Do NOT output it as "
+    "text for the user to copy. For each recipient the user asked you to write to that doesn't already "
+    "have this email in Drafts or Sent (check list_drafts query='to:<recipient>' and search "
+    "query='in:sent to:<recipient> newer_than:14d' if you haven't yet), call google_mail with "
+    "action=create_draft now, using the to, subject and body parameters. If one is already drafted or "
+    "sent, don't create it again — tell the user its Draft ID or sent date. Never draft for anyone the "
+    "user didn't ask you to write to. (Use action=send instead only if the user explicitly asked you to "
+    "send and sending is enabled; otherwise always create drafts.)"
+)
+# A digest of RECEIVED mail lists "From:" lines and no "To:" line — that is a
+# summary, not an email written out as text.
+_MAIL_TO_LINE_RE = _re.compile(r"(?:\*\*To:\*\*|(?m:^\s*To:\s))")
+_MAIL_FROM_LINE_RE = _re.compile(r"(?:\*\*From:\*\*|\bFrom:\s)")
+
+# Stall nag: an intent-only reply about WRITING an email ("I'll draft the
+# reply to Ana now", "Let me send the email") — whole words, so "responds
+# with a 404", "draft chapter 3" or "check your email" are ordinary stalls.
+_STALL_MAIL_RE = _re.compile(
+    r"\b(?:draft|drafting|compose|composing|write|writing|send|sending|prepare|preparing"
+    r"|create|creating)\b(?:\W+\w+){0,4}?\W+(?:e-?mails?|mails?|gmail|repl(?:y|ies))\b"
+    r"|\b(?:create|creating|send|sending|save|saving)\b(?:\W+\w+){0,2}?\W+drafts?\b"
+    r"|\b(?:reply|replying|respond|responding)\s+to\b(?:\W+\w+){0,4}?\W+(?:e-?mails?|mails?|thread)\b"
+    r"|\be-?mail(?:ing)?\s+(?:him|her|them|back)\b"
+    r"|\b(?:napis\w*|sastav\w*|posla\w*|salj\w*|odgovor\w*)\b(?:\W+\w+){0,4}?\W+"
+    r"(?:mail\w*|mejl\w*|e-?mail\w*|nacrt\w*)\b",
+    _re.I,
+)
+# Automated turn whose job didn't ask for email: no tool forced, plain answer.
+_STALL_NO_MAIL_INSTRUCTION = (
+    "You announced intent without acting. Do NOT narrate what you're about to do. Do NOT "
+    "create, update or send any email or draft — nobody asked for one in this turn. Produce "
+    "the final answer now as plain text; if you think an email is needed, say so and ask."
+)
+# Human turn (U3: no gate) where the detector didn't see a request: neutral —
+# the model judges the conversation, and nothing tells it the user didn't ask.
+_STALL_MAIL_NEUTRAL_INSTRUCTION = (
+    "You announced intent without acting. Do NOT narrate what you're about to do. If the "
+    "user asked for this email in this conversation, create the draft now with google_mail; "
+    "if they did not ask for an email, do not draft one — answer in text."
 )
 
 
 class AgentOrchestrationMixin:
     """Core request orchestration: complete() and stream()."""
+
+    def _should_nudge_mail(
+        self, resp_text: str, avail_tool_names: set[str], turn_start_idx: int,
+    ) -> bool:
+        """Tool-avoidance nudge for email: only for a human who asked for one."""
+        return bool(
+            "google_mail" in avail_tool_names
+            and _MAIL_AS_TEXT_RE.search(resp_text)
+            # A digest of received mail (From: lines, no To:) isn't an email
+            # written out as text.
+            and (_MAIL_TO_LINE_RE.search(resp_text) or not _MAIL_FROM_LINE_RE.search(resp_text))
+            # A draft / send already went through this turn (or was refused
+            # as a repeat): the text reports it, it isn't dodging the tool —
+            # nudging would make a duplicate.
+            and not self._turn_has_mail_write(turn_start_idx)
+            # Never in an automated turn; in a human turn only when the
+            # human's own message asked for an email.
+            and mail_authority.nudge_mail_ok(self)
+        )
+
+    def _stall_retry_instruction(self, stall_text: str, has_tools: bool) -> tuple[str, bool]:
+        """The "announced intent without acting" retry and whether to force a tool.
+
+        When the stall is about writing an email nobody visibly asked for, no
+        tool is forced: an automated turn is told to answer in plain text; a
+        human turn gets neutral wording (the user may well have asked — the
+        model reads the conversation).
+        """
+        if (_STALL_MAIL_RE.search(stall_text or "")
+                and not mail_authority.stall_mail_ok(self)):
+            if mail_authority.current().mode == "human":
+                return _STALL_MAIL_NEUTRAL_INSTRUCTION, False
+            return _STALL_NO_MAIL_INSTRUCTION, False
+        return (
+            "You announced intent without acting. Do NOT narrate "
+            "what you're about to do. "
+            + (
+                "Call the appropriate tool now to produce the deliverable."
+                if has_tools
+                else "Produce the final answer now."
+            )
+        ), has_tools
 
     # ------------------------------------------------------------------
     # complete() — main entry point
@@ -2668,6 +2747,7 @@ class AgentOrchestrationMixin:
             ):
                 self._stall_retry_count += 1
                 _has_tools = bool(tool_defs)
+                _force_tool = _has_tools
                 if _false_web_claim:
                     _retry_instruction = (
                         "You claimed you searched/fetched the web, but you did NOT call "
@@ -2700,20 +2780,14 @@ class AgentOrchestrationMixin:
                         "and explain why."
                     )
                 else:
-                    _retry_instruction = (
-                        "You announced intent without acting. Do NOT narrate "
-                        "what you're about to do. "
-                        + (
-                            "Call the appropriate tool now to produce the deliverable."
-                            if _has_tools
-                            else "Produce the final answer now."
-                        )
+                    _retry_instruction, _force_tool = self._stall_retry_instruction(
+                        _stall_resp_text, _has_tools,
                     )
                 log.warning(
                     "Stall detected, silent retry",
                     attempt=self._stall_retry_count,
                     max_retries=MAX_STALL_RETRIES,
-                    force_tool=_has_tools,
+                    force_tool=_force_tool,
                     preview=_stall_resp_text[:120],
                 )
                 # Only commit the stall text when there IS text. An empty
@@ -2729,7 +2803,7 @@ class AgentOrchestrationMixin:
                 # retry can't repeat the same intent-only stall. The
                 # override is consumed inside the provider payload
                 # builder and resets to "auto" automatically.
-                if _has_tools:
+                if _force_tool:
                     try:
                         setattr(self.provider, "_tool_choice_override", "required")
                     except Exception:
@@ -2745,14 +2819,7 @@ class AgentOrchestrationMixin:
                 _resp_text = str(response.content or "")
                 _avail_tool_names = {td.get("name", "") for td in (tool_defs or [])}
                 _nudge_msg = None
-                if (
-                    "google_mail" in _avail_tool_names
-                    and _MAIL_AS_TEXT_RE.search(_resp_text)
-                    # A draft / send already went through this turn (or was
-                    # refused as a repeat): the text reports it, it isn't
-                    # dodging the tool — nudging would make a duplicate.
-                    and not self._turn_has_mail_write(turn_start_idx)
-                ):
+                if self._should_nudge_mail(_resp_text, _avail_tool_names, turn_start_idx):
                     _nudge_msg = _MAIL_TOOL_AVOIDANCE_NUDGE
                 if _nudge_msg:
                     log.warning("Tool-avoidance detected, nudging LLM", tool="google_mail")

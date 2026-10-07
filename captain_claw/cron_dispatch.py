@@ -10,6 +10,7 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from captain_claw import mail_authority
 from captain_claw.logging import get_logger
 
 from captain_claw.cron import (
@@ -520,13 +521,15 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
             if not workflow_name:
                 raise ValueError(f"Cron job {job_id} has empty orchestrate workflow name")
             variable_values = payload.get("variable_values") if isinstance(payload, dict) else None
-            await _run_orchestrate_cron(
-                ctx,
-                workflow_name=workflow_name,
-                trigger=trigger,
-                cron_job_id=job_id,
-                variable_values=variable_values,
-            )
+            # A scheduled workflow has no human-written email request.
+            with mail_authority.bound(mail_authority.automated("cron", "", "deny")):
+                await _run_orchestrate_cron(
+                    ctx,
+                    workflow_name=workflow_name,
+                    trigger=trigger,
+                    cron_job_id=job_id,
+                    variable_values=variable_values,
+                )
         else:
             raise ValueError(f"Unsupported cron job kind: {kind}")
 
@@ -591,11 +594,48 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
             ctx.ui.print_error(error_text or f"Cron job failed: {job_id}")
 
 
+_LEGACY_MAIL_WARNED = False
+
+
+async def warn_legacy_mail_cron_jobs(ctx: RuntimeContext) -> int:
+    """Log once per process each legacy prompt job that may write email.
+
+    Legacy rows (no ``author`` in the payload) count as human-written, so a
+    fired job whose text asks for an email may still write one. This lists
+    them for the deploy check; nothing is rewritten. Best-effort, never
+    raises. Returns how many were logged.
+    """
+    global _LEGACY_MAIL_WARNED
+    if _LEGACY_MAIL_WARNED:
+        return 0
+    _LEGACY_MAIL_WARNED = True
+    hits = 0
+    try:
+        jobs = await ctx.agent.session_manager.list_cron_jobs(limit=1000, active_only=True)
+        for job in jobs or []:
+            if str(getattr(job, "kind", "")) != "prompt":
+                continue
+            payload = getattr(job, "payload", None)
+            if not isinstance(payload, dict) or payload.get("author"):
+                continue
+            text = str(payload.get("text") or "")
+            if mail_authority.explicit_mail_intent(text):
+                log.warning(
+                    "legacy cron job may write email",
+                    job_id=getattr(job, "id", "?"), text=text[:120],
+                )
+                hits += 1
+    except Exception:
+        log.debug("legacy cron mail check skipped", exc_info=True)
+    return hits
+
+
 async def cron_scheduler_loop(ctx: RuntimeContext) -> None:
     """Background pseudo-cron runner."""
     import asyncio
 
     log.info("cron_scheduler_loop_started", poll_seconds=ctx.cron_poll_seconds)
+    await warn_legacy_mail_cron_jobs(ctx)
     while True:
         await asyncio.sleep(ctx.cron_poll_seconds)
         try:

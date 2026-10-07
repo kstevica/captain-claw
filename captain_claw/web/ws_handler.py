@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+from captain_claw import mail_authority
 from captain_claw.agent import Agent
 from captain_claw.logging import get_logger
 
@@ -229,7 +230,9 @@ async def _handle_telegram_delegate_result(
     async def _run() -> None:
         async with lock:
             try:
-                response = await tg_agent.complete(content)
+                # Another agent's result, not the Telegram user typing.
+                with mail_authority.bound(mail_authority.automated("peer_relay", "", "deny")):
+                    response = await tg_agent.complete(content)
                 if response and chat_id:
                     await _tg_send(server, chat_id, response)
                     log.info("Telegram delegate result sent to chat",
@@ -294,14 +297,24 @@ async def handle_ws_message(
             if v and v not in file_paths:
                 file_paths.append(v)
 
+        # Automated-turn marker (Flight Deck: autonomy, scheduler, flows,
+        # peers …). Absent = a human turn. An automated frame never runs a
+        # slash command or the plan-auto route — it goes to handle_chat,
+        # which binds it for the mail-write guard.
+        automation = (
+            mail_authority.from_wire(data.get("automation"), default_kind="unknown")
+            if "automation" in data else None
+        )
+
         if not content and not image_paths and not file_paths:
             return
-        if content.startswith("/"):
+        if automation is None and content.startswith("/"):
             from captain_claw.web.slash_commands import handle_command
             await handle_command(server, ws, content)
-        elif getattr(server.agent, "plan_mode_auto", False):
+        elif automation is None and getattr(server.agent, "plan_mode_auto", False):
             from captain_claw.web.plan_auto_route import handle_plan_auto_route
-            await handle_plan_auto_route(server, ws, content)
+            with mail_authority.bound(mail_authority.interactive(content)):
+                await handle_plan_auto_route(server, ws, content)
         else:
             from captain_claw.web.chat_handler import handle_chat
             await handle_chat(
@@ -320,6 +333,7 @@ async def handle_ws_message(
                 # Queue-dispatched turns skip the post-turn "what next?" call.
                 no_next_steps=bool(data.get("no_next_steps", False)),
                 no_rephrase=bool(data.get("no_rephrase", False)),
+                automation=automation,
             )
 
     elif msg_type == "run_tool":
@@ -347,10 +361,17 @@ async def handle_ws_message(
             # so explicitly allow the named tool past the per-session tool policy
             # (which exists to constrain the LLM mid-turn). The script_tool guard
             # still runs; if the tool lacks creds it errors normally.
-            res = await server.agent._execute_tool_with_guard(
-                tool, args, "autonomous-action",
-                task_policy={"also_allow": [tool]},
+            # No marker = deny mail writes (fail closed); FD sends
+            # mail_write="allow" only for a human-approved action.
+            _auth = (
+                mail_authority.from_wire(data.get("automation"), default_kind="autonomy_tool")
+                or mail_authority.automated("autonomy_tool", "", "deny")
             )
+            with mail_authority.bound(_auth):
+                res = await server.agent._execute_tool_with_guard(
+                    tool, args, "autonomous-action",
+                    task_policy={"also_allow": [tool]},
+                )
             await server._send(ws, {
                 "type": "tool_result", "req_id": req_id,
                 "ok": bool(getattr(res, "success", False)),

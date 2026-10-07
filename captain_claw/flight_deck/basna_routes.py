@@ -2500,7 +2500,7 @@ async def _send_chat_and_collect(
     fleet_instructions: str = "", agent_name: str = "",
     file_paths: list[str] | None = None, image_paths: list[str] | None = None,
     on_usage=None, on_status=None, usage_sink: dict | None = None,
-    error_sink: dict | None = None,
+    error_sink: dict | None = None, automation: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Connect to an agent's /ws, send one chat, return (final reply, actions).
 
@@ -2511,6 +2511,8 @@ async def _send_chat_and_collect(
     so the UI can show LLM usage as it climbs instead of only at the end.
     `fleet_instructions` are delivered via the peer_agents handshake so they land
     in the agent's system prompt (same path the UI uses), not just the message.
+    `automation` (the automated-turn marker: kind / job_text / mail_write) rides
+    on the chat frame when given, so the agent knows no user typed this turn.
     """
     import websockets
     uri = f"ws://localhost:{port}/ws" + (f"?token={token}" if token else "")
@@ -2668,6 +2670,8 @@ async def _send_chat_and_collect(
                         chat_msg["file_paths"] = file_paths
                     if image_paths:
                         chat_msg["image_paths"] = image_paths
+                    if automation:
+                        chat_msg["automation"] = automation
                     await ws.send(json.dumps(chat_msg))
                     sent = True
                     started_at = asyncio.get_event_loop().time()
@@ -2783,7 +2787,7 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
                         fleet_instructions: str = "", agent_name: str = "",
                         file_paths: list[str] | None = None,
                         image_paths: list[str] | None = None, on_usage=None,
-                        on_status=None) -> dict:
+                        on_status=None, automation: dict | None = None) -> dict:
     # Max-parallel gate: wait for a dispatch slot before doing any work. Started is
     # taken AFTER acquiring, so latency measures the turn, not the queue wait.
     gate = _run_gate.get()
@@ -2797,7 +2801,7 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
             port, token, prompt, timeout, on_action=on_action,
             fleet_instructions=fleet_instructions, agent_name=agent_name,
             file_paths=file_paths, image_paths=image_paths, on_usage=on_usage,
-            on_status=on_status, usage_sink=sink, error_sink=err)
+            on_status=on_status, usage_sink=sink, error_sink=err, automation=automation)
         usage = _finalize_usage(sink)
         _record_run_usage(sink.get("model", ""), usage, time.monotonic() - started)  # cost + agent-time
         # An agent-side error (e.g. context overflow) no longer raises: it's flagged

@@ -12,7 +12,9 @@ itself, so it no-ops cleanly when the user isn't connected.
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -105,14 +107,57 @@ def _is_automated_sender(frm: str) -> bool:
     return any(bit in f for bit in _AUTOMATED_SENDER_BITS)
 
 
+def _gmail_max_age_hours(user_id: str) -> int:
+    """The per-user Gmail event age cutoff in hours (0 = off). Best-effort."""
+    try:
+        from captain_claw.flight_deck.autonomy import resolve_config
+        return int(resolve_config(user_id).get("gmail_event_max_age_hours", 48))
+    except Exception:
+        return 48
+
+
+def _internal_date_iso(raw: Any) -> str:
+    """Gmail ``internalDate`` (ms since the epoch, as a string) → ISO UTC, or ""."""
+    try:
+        ms = int(str(raw or "").strip())
+    except (TypeError, ValueError):
+        return ""
+    if ms <= 0:
+        return ""
+    try:
+        return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def _header_addr(value: str) -> str:
+    """The bare address of a ``"Name" <addr>`` header value (first one), or ""."""
+    v = str(value or "").strip()
+    if not v:
+        return ""
+    m = re.search(r"<([^>]+)>", v)
+    addr = (m.group(1) if m else v.split(",")[0]).strip().strip('"').strip()
+    return addr if "@" in addr else ""
+
+
 async def poll_gmail(user_id: str, cursor: str) -> tuple[list[dict[str, Any]], str]:
     """Surface important + unread inbox messages. Dedup by message id (unread ones
-    persist, so re-listing them is a no-op once ingested)."""
+    persist, so re-listing them is a no-op once ingested).
+
+    A message that arrived more than ``gmail_event_max_age_hours`` ago (Gmail
+    ``internalDate``; 0 = no cutoff) is skipped — an old email never becomes an
+    event. One poll yields at most ONE event per thread: Gmail lists newest
+    first, so the newest message of each thread stands for it (per-thread dedup
+    across polls lives in the arbiter). Each event records when the email
+    arrived (``received_at``), its Reply-To address and Gmail's short snippet."""
     token = await _token(user_id)
     if not token:
         return [], cursor
     headers = {"Authorization": f"Bearer {token}"}
+    max_age: int | None = None   # resolved on first need (a dated message)
+    now = datetime.now(timezone.utc)
     out: list[dict[str, Any]] = []
+    seen_threads: set[str] = set()
     async with httpx.AsyncClient(timeout=20.0) as client:
         try:
             r = await client.get(
@@ -131,26 +176,45 @@ async def poll_gmail(user_id: str, cursor: str) -> tuple[list[dict[str, Any]], s
             if not mid:
                 continue
             tid = m.get("threadId") or mid  # for get_thread; falls back to message id
-            frm, subj = "?", "(no subject)"
+            if tid in seen_threads:
+                continue  # an older message of a thread whose newest one came first
+            seen_threads.add(tid)
+            frm, subj, reply_to, snippet, received_at = "?", "(no subject)", "", "", ""
             try:
                 rm = await client.get(
                     f"{_GMAIL}/users/me/messages/{mid}",
-                    params={"format": "metadata", "metadataHeaders": ["From", "Subject"]},
+                    params={"format": "metadata",
+                            "metadataHeaders": ["From", "Subject", "Reply-To"]},
                     headers=headers,
                 )
                 if rm.status_code == 200:
-                    hdrs = {h.get("name"): h.get("value") for h in rm.json().get("payload", {}).get("headers", [])}
+                    body = rm.json()
+                    hdrs = {h.get("name"): h.get("value") for h in body.get("payload", {}).get("headers", [])}
                     frm = hdrs.get("From", frm)
                     subj = hdrs.get("Subject", subj)
+                    reply_to = _header_addr(hdrs.get("Reply-To") or "")
+                    snippet = html.unescape(body.get("snippet") or "")[:200]
+                    received_at = _internal_date_iso(body.get("internalDate"))
             except Exception:
                 pass
+            if received_at and max_age is None:
+                max_age = _gmail_max_age_hours(user_id)
+            if received_at and max_age and max_age > 0:
+                try:
+                    age_h = (now - datetime.fromisoformat(received_at)).total_seconds() / 3600.0
+                except ValueError:
+                    age_h = 0.0
+                if age_h > max_age:
+                    continue  # too old to surface (J3)
             if _is_automated_sender(frm):
                 continue  # no-reply / notification mail — not a real person needing the user
             out.append({
                 "source": "gmail", "event_type": "new_email",
                 "summary": f"Email from {frm}: {subj}",
                 "dedup_key": f"gmail:{mid}",
-                "metadata": {"message_id": mid, "thread_id": tid, "from": frm, "subject": subj},
+                "metadata": {"message_id": mid, "thread_id": tid, "from": frm, "subject": subj,
+                             "received_at": received_at, "reply_to": reply_to,
+                             "snippet": snippet},
             })
     return out, cursor
 

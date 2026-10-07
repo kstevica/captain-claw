@@ -95,6 +95,11 @@ class Agent(
 ):
     """Main agent orchestrator."""
 
+    # The latest message handed to complete()/stream(). Only a soft fallback
+    # for mail_authority.human_turn_text (nudges) — never stored or forwarded
+    # intent, which reads the bound ContextVar only.
+    _turn_user_text: str = ""
+
     def __init__(
         self,
         provider: LLMProvider | None = None,
@@ -505,6 +510,7 @@ class Agent(
             return False
 
     async def complete(self, user_input: str) -> str:
+        self._turn_user_text = str(user_input or "")
         # PR D: every turn starts untainted (no member data read yet) and
         # marks its first user message as the turn's input. The level it
         # reaches gates tools only while the turn runs (enter/exit_turn).
@@ -519,6 +525,9 @@ class Agent(
             member_privacy.exit_turn(self)
 
     async def stream(self, user_input: str) -> AsyncIterator[str]:
+        # Not a ContextVar bind: this is an async generator (a set here would
+        # leak into the caller between yields).
+        self._turn_user_text = str(user_input or "")
         from captain_claw import member_privacy
         member_privacy.begin_turn(self)
         member_privacy.enter_turn(self)
