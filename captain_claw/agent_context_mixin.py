@@ -72,9 +72,9 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "pocket_tts": "Convert text to local speech audio and save as MP3",
     "send_mail": "Send emails via SMTP. Supports to, cc, bcc, subject, body, and file attachments.",
     "clipboard": "Read or write the system clipboard. Supports text, images, and files.",
-    "google_drive": "Google Drive/Docs/Sheets/Slides — list (folder_id), search, read (returns content inline: Docs/Sheets/Slides exported, PDF/DOCX/XLSX/PPTX extracted), info (metadata), download (saves a local copy and returns its path — for scripts/extract tools), upload (local file → Drive), create, update. Takes a file/folder ID or a full Drive/Docs URL — never web_fetch/browser/curl a Google URL.",
+    "google_drive": "Google Drive/Docs/Sheets/Slides — list (folder_id), search, read (returns content inline: Docs/Sheets/Slides exported, PDF/DOCX/XLSX/PPTX extracted), info (metadata), download (saves a local copy and returns its path — for scripts/extract tools), upload (local file → Drive), create, update. Takes a file/folder ID or a full Drive/Docs URL — never web_fetch/browser/curl a Google URL. Edit an existing Google Sheet/Doc IN PLACE — sheet_read/sheet_update/sheet_append/sheet_clear, doc_read/doc_replace_text/doc_append_text/doc_insert_text — never upload a modified copy.",
     "google_calendar": "Google Calendar — list_events, search_events, get_event, create_event, update_event, delete_event, list_calendars.",
-    "google_mail": "Gmail — list_messages, search, read_message, get_thread, list_labels; create_draft / list_drafts (drafts are the default for any email writing); send / send_draft ONLY when the user explicitly asked and sending is enabled.",
+    "google_mail": "Gmail — list_messages, search, read_message, get_thread, list_labels; create_draft / update_draft / list_drafts (drafts are the default for any email writing); send / send_draft ONLY when the user explicitly asked and sending is enabled; check list_drafts + search in:sent first — never repeat an email already drafted/sent.",
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
     "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
     "insights": "Search and manage persistent cross-session insights — facts, contacts, decisions, preferences, deadlines auto-extracted from conversations. Actions: search, list, add, update, delete.",
@@ -125,9 +125,9 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "intentions": "record future actions: user notes-to-self + your own proactive intentions",
     "video_vision": "analyze/describe a video (samples frames + transcribes audio)",
     "clipboard": "read/write system clipboard",
-    "google_drive": "Drive/Docs/Sheets/Slides: list, search, read (content inline), info, download (local copy), upload, create, update; file ID or Drive URL",
+    "google_drive": "Drive/Docs/Sheets/Slides: list, search, read (content inline), info, download (local copy), upload, create, update; file ID or Drive URL; edit Sheets/Docs IN PLACE: sheet_read/sheet_update/sheet_append/sheet_clear, doc_read/doc_replace_text/doc_append_text/doc_insert_text",
     "google_calendar": "Calendar events: list/search/get/create/update/delete, list_calendars",
-    "google_mail": "Gmail: list/search/read/thread, labels, drafts (default); send only if user asked + enabled",
+    "google_mail": "Gmail: list/search/read/thread, labels, drafts (default); send only if user asked + enabled; check list_drafts + in:sent first, no repeats",
     "datastore": "persistent relational tables",
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
     "insights": "persistent cross-session insights (facts, contacts, decisions, deadlines)",
@@ -3065,6 +3065,9 @@ class AgentContextMixin:
                     "Actions: list (folder_id — list files), read (file_id — returns the "
                     "content inline), info (file_id — metadata), download (file_id — saves "
                     "a local copy). "
+                    "To change a Google Sheet/Doc there, edit it IN PLACE (sheet_update / "
+                    "sheet_append / sheet_clear, doc_replace_text / doc_append_text / "
+                    "doc_insert_text) — never upload a modified copy. "
                     "Folder IDs:\n" + gd_list
                 )
 

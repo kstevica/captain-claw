@@ -839,7 +839,7 @@ Google Calendar through the Calendar API, with the same Google connection.
 
 ### google_mail
 
-Gmail through the Gmail API: `list_messages`, `search`, `read_message`, `get_thread`, `list_labels`, `create_draft`, `list_drafts`, `send`, `send_draft`. Reads and searches default to the INBOX Primary tab and are grouped by thread. `create_draft` is the default for anything email-writing; `send` / `send_draft` follow the opt-in policy in [Gmail sending](#gmail-sending-opt-in).
+Gmail through the Gmail API: `list_messages`, `search`, `read_message`, `get_thread`, `list_labels`, `create_draft`, `update_draft`, `list_drafts`, `send`, `send_draft`. Reads and searches default to the INBOX Primary tab and are grouped by thread. `create_draft` is the default for anything email-writing; `send` / `send_draft` follow the opt-in policy in [Gmail sending](#gmail-sending-opt-in).
 
 > **Retired: `gws`.** The Google Workspace CLI wrapper (`gws`) is gone. Agents use `google_drive`, `google_calendar` and `google_mail` instead; a `gws` entry left in an old `tools.enabled` list or a stored archetype is dropped when the config loads or the agent is spawned, and a `tools.gws` block in an old `config.yaml` is ignored.
 
@@ -5522,9 +5522,12 @@ The `google_mail` tool reads mail, creates drafts and — only when sending is t
 |---|---|
 | `send` | Send now. Same fields as `create_draft` (`to`, `cc`, `bcc`, `subject`, `body`, `html_body`, `reply_to_message_id`); a reply defaults `to` (Reply-To, else From — or the original's To when it is your own sent email or draft) and the `Re:` subject. |
 | `send_draft` | Send an existing draft by `draft_id` (the "Draft ID" `create_draft` prints) — its current server copy, so your edits in Gmail are kept. |
-| `list_drafts` | List drafts with their Draft IDs (`query`, `max_results`). |
+| `update_draft` | Revise an existing draft in place by `draft_id` (Gmail `drafts.update`) instead of making a second one. Pass the full new `body`; `to` / `cc` / `bcc` / `subject` you leave unset keep the draft's own, and so does a reply draft's threading. |
+| `list_drafts` | List drafts with their Draft IDs, recipients (To / Cc) and dates (`query`, `max_results`). |
 
 No new scope is needed: `gmail.compose` (the drafts scope) already lets Google accept a send, so the scope is not the gate — a policy is.
+
+**No repeat emails.** Agents are told to check `list_drafts` (`to:<recipient>`) and `search` (`in:sent to:<recipient> newer_than:14d`) before drafting or sending, and to tell you about an email that already exists instead of writing it again. The tool also checks by itself: `create_draft` and a composed `send` refuse ("Not created — repeat of Draft ID … / the email sent on …") when the same email — a recipient in common and the same subject, ignoring `Re:` / `Fwd:` / `AW:` / `SV:` / `Odg:` prefixes, case and small differences — is already in Drafts (any age) or in Sent within the last 14 days. For a reply, a draft in the thread or a reply already sent after the email being answered — to the same recipient — counts. Different recipients are never a repeat. The agent passes `allow_repeat: true` only when you explicitly ask for another copy. The check needs no extra scope; with `gmail.compose` but no `gmail.readonly` it still checks Drafts. Standalone, set the Sent window with `tools.google_mail.repeat_check_days` (default 14, `0` turns the check off); under Flight Deck, sends use the deck's `FD_GMAIL_REPEAT_CHECK_DAYS` (same default and meaning). An autonomous `mail.draft` that is refused this way is logged as a skipped success, not a failure.
 
 **Under Flight Deck** the agent never sends itself. It asks `POST /fd/google/gmail/send`, and Flight Deck checks the agent owner's own policy, sends with the owner's Google token, records the send and puts an "… sent an email" notification in the owner's bell. Each user sets their policy in **Connections → Google → Email sending** (`GET`/`PUT /fd/google/gmail-send`):
 
@@ -5543,9 +5546,10 @@ tools:
     allowed_recipients:         # optional; empty = anyone
       - "@example.com"
       - "boss@corp.example"
+    repeat_check_days: 14       # repeat check's Sent window; 0 = off (also applies to create_draft)
 ```
 
-These two keys are ignored under Flight Deck, where the user's policy decides. `google_mail` is the only tool that sends Gmail (the old `gws` CLI wrapper, which could reach Gmail with the same token, is retired). The gate protects against model mistakes and prompt injection; it is not a security boundary against an agent that has a shell tool, which can reach the Google token itself.
+`allow_send` and `allowed_recipients` are ignored under Flight Deck, where the user's policy decides. `google_mail` is the only tool that sends Gmail (the old `gws` CLI wrapper, which could reach Gmail with the same token, is retired). The gate protects against model mistakes and prompt injection; it is not a security boundary against an agent that has a shell tool, which can reach the Google token itself.
 
 ---
 

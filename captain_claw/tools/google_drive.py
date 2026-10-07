@@ -16,7 +16,8 @@ import re
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 import httpx
 
@@ -29,6 +30,9 @@ from captain_claw.google_ids import (
 )
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
+
+if TYPE_CHECKING:
+    from captain_claw.google_oauth import GoogleOAuthTokens
 
 log = get_logger(__name__)
 
@@ -48,7 +52,13 @@ _DRIVE_WRITE_SCOPES = frozenset({
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/drive.file",
 })
-_WRITE_ACTIONS = frozenset({"upload", "create", "update"})
+# sheet_* / doc_* edits change a native Google Sheet / Doc IN PLACE (Sheets API
+# v4 / Docs API v1, same token): cells and text, never a re-upload.
+_IN_PLACE_WRITE_ACTIONS = frozenset({
+    "sheet_update", "sheet_append", "sheet_clear",
+    "doc_replace_text", "doc_append_text", "doc_insert_text",
+})
+_WRITE_ACTIONS = frozenset({"upload", "create", "update"}) | _IN_PLACE_WRITE_ACTIONS
 # Scopes that reach a file this app did not create — a link shared with the
 # user, a colleague's Doc. drive.file alone sees only files the app created
 # or the user picked, so a pasted link 404s under it.
@@ -56,6 +66,30 @@ _DRIVE_LINK_SCOPES = frozenset({
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/drive.readonly",
 })
+
+# Sheets / Docs APIs. The `drive` scope covers both (no extra scope, no
+# reconnect); drive.file reaches only files this app created, drive.readonly
+# only the reads. Each deck's Google Cloud project must enable both APIs.
+_SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
+_DOCS_API = "https://docs.googleapis.com/v1/documents"
+_SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+_DOC_MIME = "application/vnd.google-apps.document"
+_SHEET_ACTIONS = frozenset({"sheet_read", "sheet_update", "sheet_append", "sheet_clear"})
+_DOC_ACTIONS = frozenset({"doc_read", "doc_replace_text", "doc_append_text", "doc_insert_text"})
+# sheet_read without a range: the first rows of up to this many tabs.
+_SHEET_PREVIEW_ROWS = 50
+_SHEET_PREVIEW_TABS = 20
+# What each in-place kind accepts, and the actions that edit it.
+_IN_PLACE_KINDS: dict[str, tuple[str, str, str]] = {
+    # kind → (label, native mime, actions)
+    "sheet": ("Google Sheet", _SHEET_MIME, "sheet_read / sheet_update / sheet_append / sheet_clear"),
+    "doc": ("Google Doc", _DOC_MIME, "doc_read / doc_replace_text / doc_append_text / doc_insert_text"),
+}
+_FULL_DRIVE_NEEDED = (
+    "Google is connected without full Drive access, so this Google Sheet/Doc "
+    "can't be opened or edited in place. The admin must enable Drive (full access) in "
+    "Flight Deck → Connections → Google, and everyone reconnects Google."
+)
 
 # Fields to request from the files endpoint.
 _FILE_FIELDS = "id,name,mimeType,size,modifiedTime,createdTime,parents,webViewLink,owners"
@@ -272,8 +306,259 @@ def _safe_filename(name: str, fallback: str) -> str:
     return cleaned[:200] or fallback
 
 
+def _truthy(value: Any, default: bool) -> bool:
+    """A boolean argument as models send it (true, "false", 1, None)."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+# ── Sheets: A1 addresses and cell grids ──────────────────────────────
+
+_A1_CELL_RE = re.compile(r"^\$?([A-Za-z]{0,3})\$?(\d*)$")
+_VALUES_EXAMPLE = '[["Name", "Total"], ["Ana", "=SUM(B2:B9)"]]'
+
+
+def _col_letters(n: int) -> str:
+    """1 → A, 26 → Z, 27 → AA."""
+    out = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def _col_number(letters: str) -> int:
+    """A → 1, Z → 26, AA → 27."""
+    n = 0
+    for ch in letters.upper():
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _range_start(a1: str) -> tuple[int, int]:
+    """(column, row), 1-based, of the top-left cell of an A1 range.
+
+    Meant for the range the Sheets API echoes back ("Q2!B3:D9", "'My tab'!
+    A1:Z50"): the values it returns start at that cell.
+    """
+    cells = a1.rsplit("!", 1)[-1]
+    m = _A1_CELL_RE.match(cells.split(":", 1)[0].strip())
+    if not m:
+        return 1, 1
+    col = _col_number(m.group(1)) if m.group(1) else 1
+    row = int(m.group(2)) if m.group(2) else 1
+    return col, row
+
+
+def _quote_tab(title: str) -> str:
+    """A tab name as an A1 sheet reference: Q3 plan → 'Q3 plan'."""
+    return "'" + title.replace("'", "''") + "'"
+
+
+def _cell_text(value: Any) -> str:
+    """One cell of a grid row (pipes and line breaks escaped)."""
+    text = "" if value is None else str(value)
+    return text.replace("|", "\\|").replace("\r\n", "\\n").replace("\n", "\\n")
+
+
+def _render_grid(values: list[Any], echoed_range: str, max_rows: int) -> tuple[str, int]:
+    """Rows as a grid headed by column letters, each row led by its number,
+    so any cell reads off as an exact A1 address.
+
+    Returns the grid and how many rows past *max_rows* were left out.
+    """
+    start_col, start_row = _range_start(echoed_range)
+    shown = [r if isinstance(r, list) else [] for r in values[:max_rows]]
+    width = max((len(r) for r in shown), default=0)
+    if width == 0:
+        return "(empty)", 0
+    letters = [_col_letters(start_col + i) for i in range(width)]
+    lines = ["| row | " + " | ".join(letters) + " |", "| --- |" + " --- |" * width]
+    for i, row in enumerate(shown):
+        cells = [_cell_text(row[j]) if j < len(row) else "" for j in range(width)]
+        lines.append(f"| {start_row + i} | " + " | ".join(cells) + " |")
+    return "\n".join(lines), max(0, len(values) - max_rows)
+
+
+def _coerce_rows(values: Any) -> tuple[list[list[Any]] | None, str]:
+    """``values`` as rows of cells, or why it isn't one.
+
+    Takes the shapes models send: rows of cells, one bare row, a single
+    value, or any of those as a JSON string.
+    """
+    if isinstance(values, str):
+        stripped = values.strip()
+        if not stripped.startswith("["):
+            return [[values]], ""
+        try:
+            values = json.loads(stripped)
+        except ValueError:
+            return None, f"values is not valid JSON; send rows of cells, e.g. {_VALUES_EXAMPLE}."
+    elif isinstance(values, (int, float, bool)):
+        return [[values]], ""
+    if not isinstance(values, list) or not values:
+        return None, f"values must be a non-empty list of rows, e.g. {_VALUES_EXAMPLE}."
+    if not any(isinstance(v, list) for v in values):
+        values = [values]  # one row sent bare
+    for row in values:
+        if not isinstance(row, list):
+            return None, (
+                "values must be a list of rows (each row a list of cells), "
+                f"not a mix of rows and single cells, e.g. {_VALUES_EXAMPLE}."
+            )
+        if any(isinstance(cell, (dict, list)) for cell in row):
+            return None, "each cell must be text, a number, a boolean or null — not a list or object."
+    return values, ""
+
+
+def _coerce_updates(updates: Any) -> tuple[list[dict[str, Any]], str]:
+    """``updates`` as values:batchUpdate data entries, or why it isn't one."""
+    example = '[{"range": "Sheet1!B2", "values": [["42"]]}]'
+    if isinstance(updates, str):
+        try:
+            updates = json.loads(updates)
+        except ValueError:
+            return [], f"updates must be a list of {{range, values}} objects, e.g. {example}."
+    if isinstance(updates, dict):
+        updates = [updates]
+    if not isinstance(updates, list) or not updates:
+        return [], f"updates must be a non-empty list of {{range, values}} objects, e.g. {example}."
+    data: list[dict[str, Any]] = []
+    for n, item in enumerate(updates, 1):
+        a1 = str(item.get("range") or "").strip() if isinstance(item, dict) else ""
+        if not a1:
+            return [], f"updates item {n} needs a range and values, e.g. {example}."
+        rows, err = _coerce_rows(item.get("values"))
+        if err:
+            return [], f"updates item {n} ({a1}): {err}"
+        data.append({"range": a1, "majorDimension": "ROWS", "values": rows})
+    return data, ""
+
+
+def _value_input_option(value_input: Any) -> str | None:
+    """value_input → the API's valueInputOption (None when not recognised)."""
+    choice = str(value_input or "user_entered").strip().lower()
+    return {"user_entered": "USER_ENTERED", "raw": "RAW"}.get(choice)
+
+
+# ── Docs: tabs, text runs and indexes ────────────────────────────────
+
+
+def _doc_tabs(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every tab of a documents.get(includeTabsContent=true) answer, child
+    tabs after their parent; a tab-less answer as one untitled tab."""
+    out: list[dict[str, Any]] = []
+
+    def walk(tabs: Any) -> None:
+        for tab in tabs or []:
+            if isinstance(tab, dict):
+                out.append(tab)
+                walk(tab.get("childTabs"))
+
+    walk(doc.get("tabs"))
+    if not out and isinstance(doc.get("body"), dict):
+        out.append({"tabProperties": {}, "documentTab": {"body": doc["body"]}})
+    return out
+
+
+def _tab_props(tab: dict[str, Any]) -> tuple[str, str]:
+    """(tab id, title) of a Docs tab."""
+    props = tab.get("tabProperties") or {}
+    return str(props.get("tabId") or ""), str(props.get("title") or "")
+
+
+def _tab_content(tab: dict[str, Any]) -> list[dict[str, Any]]:
+    return ((tab.get("documentTab") or {}).get("body") or {}).get("content") or []
+
+
+def _doc_runs(content: list[dict[str, Any]]):
+    """(start index, text) of every text run — table cells and tables of
+    contents included — in document order."""
+    for el in content or []:
+        if "paragraph" in el:
+            for pe in el["paragraph"].get("elements") or []:
+                run = pe.get("textRun")
+                if run and run.get("content"):
+                    yield int(pe.get("startIndex") or 0), run["content"]
+        elif "table" in el:
+            for row in el["table"].get("tableRows") or []:
+                for cell in row.get("tableCells") or []:
+                    yield from _doc_runs(cell.get("content"))
+        elif "tableOfContents" in el:
+            yield from _doc_runs(el["tableOfContents"].get("content"))
+
+
+def _doc_text(content: list[dict[str, Any]]) -> str:
+    """A tab's text as the Docs API holds it — what replaceAllText matches.
+
+    Paragraphs are exact (no markdown escaping). Only an image (``[image]``)
+    and a table row (``| cell | cell |``) are drawn rather than copied.
+    """
+    parts: list[str] = []
+    for el in content or []:
+        if "paragraph" in el:
+            for pe in el["paragraph"].get("elements") or []:
+                if "textRun" in pe:
+                    parts.append(pe["textRun"].get("content") or "")
+                elif "inlineObjectElement" in pe:
+                    parts.append("[image]")
+                elif "person" in pe:
+                    parts.append((pe["person"].get("personProperties") or {}).get("name") or "")
+                elif "richLink" in pe:
+                    parts.append((pe["richLink"].get("richLinkProperties") or {}).get("title") or "")
+        elif "table" in el:
+            for row in el["table"].get("tableRows") or []:
+                cells = [
+                    _doc_text(cell.get("content")).rstrip("\n").replace("\n", " / ")
+                    for cell in row.get("tableCells") or []
+                ]
+                parts.append("| " + " | ".join(cells) + " |\n")
+        elif "tableOfContents" in el:
+            parts.append(_doc_text(el["tableOfContents"].get("content")))
+    return "".join(parts).replace("\x0b", "\n")
+
+
+def _utf16_len(ch: str) -> int:
+    """Docs indexes count UTF-16 code units: 2 for an emoji, 1 otherwise."""
+    return 2 if ord(ch) > 0xFFFF else 1
+
+
+def _anchor_ends(content: list[dict[str, Any]], anchor: str, match_case: bool) -> list[int]:
+    """The document index just past each occurrence of *anchor* in a tab."""
+    chars: list[str] = []
+    after_index: list[int] = []  # index just past each character
+    for start, text in _doc_runs(content):
+        pos = start
+        for ch in text:
+            pos += _utf16_len(ch)
+            chars.append("\n" if ch == "\x0b" else ch)  # a soft break reads as one
+            after_index.append(pos)
+
+    def fold(s: str) -> str:
+        # Lower-case only where that keeps the length (offsets must line up).
+        return "".join(c.lower() if len(c.lower()) == 1 else c for c in s)
+
+    hay = "".join(chars)
+    needle = anchor
+    if not match_case:
+        hay, needle = fold(hay), fold(needle)
+    ends: list[int] = []
+    at = hay.find(needle)
+    while at != -1 and needle:
+        ends.append(after_index[at + len(needle) - 1])
+        at = hay.find(needle, at + 1)
+    return ends
+
+
 class _DownloadPathError(ValueError):
     """output_path points somewhere a download may not write."""
+
+
+class _ScopeMissingError(RuntimeError):
+    """The granted scopes don't cover the action (refused before any request)."""
 
 
 class GoogleDriveTool(Tool):
@@ -288,7 +573,13 @@ class GoogleDriveTool(Tool):
         "download (save a local copy and return its path), upload (send a local "
         "file to Drive), create (new file on Drive), update (replace a file's "
         "content). file_id and folder_id also accept a full Drive/Docs/Sheets/"
-        "Slides URL."
+        "Slides URL. "
+        "Edit an existing Google Sheet IN PLACE: sheet_read (tabs, or a range "
+        "shown with row numbers and column letters), sheet_update (write cells), "
+        "sheet_append (add rows), sheet_clear. Edit an existing Google Doc IN "
+        "PLACE: doc_read (exact text), doc_replace_text, doc_append_text, "
+        "doc_insert_text. Never upload a modified copy of an existing Sheet/Doc "
+        "and never update one as a whole file."
     )
     timeout_seconds = 120.0
     parameters = {
@@ -299,6 +590,8 @@ class GoogleDriveTool(Tool):
                 "enum": [
                     "list", "search", "read", "info", "download",
                     "upload", "create", "update",
+                    "sheet_read", "sheet_update", "sheet_append", "sheet_clear",
+                    "doc_read", "doc_replace_text", "doc_append_text", "doc_insert_text",
                 ],
                 "description": "The action to perform.",
             },
@@ -306,7 +599,8 @@ class GoogleDriveTool(Tool):
                 "type": "string",
                 "description": (
                     "Google Drive file ID or the file's Drive/Docs/Sheets/Slides "
-                    "URL (for read, info, download, update actions)."
+                    "URL (for read, info, download, update and the sheet_* / "
+                    "doc_* actions)."
                 ),
             },
             "folder_id": {
@@ -372,6 +666,102 @@ class GoogleDriveTool(Tool):
                     "'name', 'createdTime desc'). Default: 'modifiedTime desc'."
                 ),
             },
+            "overwrite": {
+                "type": "boolean",
+                "description": (
+                    "update only: true replaces the WHOLE content of a native "
+                    "Google Doc/Sheet/Slides file. Refused without it — edit "
+                    "Sheets/Docs in place with sheet_* / doc_* instead."
+                ),
+            },
+            "range": {
+                "type": "string",
+                "description": (
+                    "sheet_*: A1 range, e.g. 'Sheet1!B2', 'Sheet1!A1:C10', "
+                    "'Sheet1!A:F' or just 'Sheet1' (quote tab names with spaces: "
+                    "\"'Q3 plan'!B2\"). sheet_read without a range lists the tabs "
+                    "and shows the first rows of each; sheet_append adds rows "
+                    "below the table in this range."
+                ),
+            },
+            "values": {
+                "type": "array",
+                "items": {"type": "array", "items": {"type": "string"}},
+                "description": (
+                    "sheet_update / sheet_append: rows of cell values, e.g. "
+                    "[[\"Name\", \"Total\"], [\"Ana\", \"=SUM(B2:B9)\"]]. Entered "
+                    "as if typed (formulas, numbers and dates are parsed) unless "
+                    "value_input='raw'."
+                ),
+            },
+            "updates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "range": {"type": "string"},
+                        "values": {
+                            "type": "array",
+                            "items": {"type": "array", "items": {"type": "string"}},
+                        },
+                    },
+                    "required": ["range", "values"],
+                },
+                "description": (
+                    "sheet_update: several ranges in one call, "
+                    "[{\"range\": \"Sheet1!B2\", \"values\": [[\"42\"]]}, ...]."
+                ),
+            },
+            "value_input": {
+                "type": "string",
+                "enum": ["user_entered", "raw"],
+                "description": (
+                    "sheet_update / sheet_append: 'user_entered' (default — parsed "
+                    "as if typed) or 'raw' (stored exactly as given)."
+                ),
+            },
+            "render": {
+                "type": "string",
+                "enum": ["values", "formulas"],
+                "description": "sheet_read: show the displayed 'values' (default) or the 'formulas'.",
+            },
+            "find": {
+                "type": "string",
+                "description": (
+                    "doc_replace_text: the exact text to replace, copied from "
+                    "doc_read (within one paragraph)."
+                ),
+            },
+            "replace_with": {
+                "type": "string",
+                "description": "doc_replace_text: the new text ('' deletes the found text).",
+            },
+            "match_case": {
+                "type": "boolean",
+                "description": "doc_replace_text / doc_insert_text: case-sensitive match (default true).",
+            },
+            "text": {
+                "type": "string",
+                "description": (
+                    "doc_append_text: text added as a new paragraph at the end. "
+                    "doc_insert_text: text inserted exactly as given right after "
+                    "`after`."
+                ),
+            },
+            "after": {
+                "type": "string",
+                "description": (
+                    "doc_insert_text: existing text, copied exactly from doc_read, "
+                    "that the new text goes right after; it must occur once."
+                ),
+            },
+            "tab": {
+                "type": "string",
+                "description": (
+                    "doc_* on a Doc with several tabs: the tab title or id to work "
+                    "in (default: all tabs; doc_append_text: the first tab)."
+                ),
+            },
         },
         "required": ["action"],
     }
@@ -426,6 +816,14 @@ class GoogleDriveTool(Tool):
             "upload": self._action_upload,
             "create": self._action_create,
             "update": self._action_update,
+            "sheet_read": self._action_sheet_read,
+            "sheet_update": self._action_sheet_update,
+            "sheet_append": self._action_sheet_append,
+            "sheet_clear": self._action_sheet_clear,
+            "doc_read": self._action_doc_read,
+            "doc_replace_text": self._action_doc_replace_text,
+            "doc_append_text": self._action_doc_append_text,
+            "doc_insert_text": self._action_doc_insert_text,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -437,15 +835,22 @@ class GoogleDriveTool(Tool):
             kwargs["runtime"] = runtime
 
         try:
-            token = await self._get_access_token(write=action in _WRITE_ACTIONS)
+            tokens = await self._get_tokens(write=action in _WRITE_ACTIONS)
+        except _ScopeMissingError as e:
+            # A read-only connection can't edit a Sheet/Doc in place either:
+            # that is the deck's scope set, not this user's reconnect.
+            error = _FULL_DRIVE_NEEDED if action in _IN_PLACE_WRITE_ACTIONS else str(e)
+            return ToolResult(success=False, error=error)
         except RuntimeError as e:
             return ToolResult(success=False, error=str(e))
+        token = tokens.access_token
+        granted = frozenset(tokens.scope.split()) if tokens.scope else frozenset()
 
         key_token = _RESOURCE_KEY.set(resource_key)
         try:
             return await handler(token, **kwargs)
         except httpx.HTTPStatusError as exc:
-            return self._handle_http_error(exc)
+            return self._handle_http_error(exc, action=action, granted=granted)
         except httpx.HTTPError as exc:
             log.error("Google Drive HTTP error", action=action, error=str(exc))
             return ToolResult(success=False, error=f"HTTP error: {exc}")
@@ -468,6 +873,11 @@ class GoogleDriveTool(Tool):
         The tool previously demanded full read/write ``drive`` for *everything*,
         so a read-only connection couldn't even list a folder.
         """
+        return (await self._get_tokens(write=write)).access_token
+
+    async def _get_tokens(self, *, write: bool = False) -> GoogleOAuthTokens:
+        """The checked tokens behind :meth:`_get_access_token` — their scope
+        string tells a scope 404 from a missing file."""
         from captain_claw.google_oauth_manager import GoogleOAuthManager
         from captain_claw.session import get_session_manager
 
@@ -494,14 +904,14 @@ class GoogleDriveTool(Tool):
         if granted:
             needed = _DRIVE_WRITE_SCOPES if write else _DRIVE_READ_SCOPES
             if not granted.intersection(needed):
-                raise RuntimeError(
+                raise _ScopeMissingError(
                     "Google Drive "
                     + ("write " if write else "")
                     + "scope not granted. Reconnect your Google account and "
                     + ("grant Drive edit access." if write else "grant Drive access (read-only is enough).")
                 )
 
-        return tokens.access_token
+        return tokens
 
     def _auth_headers(self, token: str) -> dict[str, str]:
         """Build authorization headers (plus the file's resource key, if any)."""
@@ -516,14 +926,25 @@ class GoogleDriveTool(Tool):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _handle_http_error(exc: httpx.HTTPStatusError) -> ToolResult:
+    def _handle_http_error(
+        exc: httpx.HTTPStatusError,
+        *,
+        action: str = "",
+        granted: frozenset[str] = frozenset(),
+    ) -> ToolResult:
         """Convert HTTP status errors into user-friendly messages."""
         status = exc.response.status_code
         try:
             body = exc.response.json()
             message = body.get("error", {}).get("message", str(exc))
         except Exception:
+            body = {}
             message = str(exc)
+
+        if action in _SHEET_ACTIONS or action in _DOC_ACTIONS:
+            in_place = GoogleDriveTool._in_place_http_error(exc, action, granted, body, message)
+            if in_place is not None:
+                return in_place
 
         if status == 401:
             return ToolResult(
@@ -550,6 +971,83 @@ class GoogleDriveTool(Tool):
                 success=False,
                 error=f"Google Drive API error ({status}): {message}",
             )
+
+    @staticmethod
+    def _in_place_http_error(
+        exc: httpx.HTTPStatusError,
+        action: str,
+        granted: frozenset[str],
+        body: Any,
+        message: str,
+    ) -> ToolResult | None:
+        """A sheet_* / doc_* failure in terms the admin can act on, or None
+        for the generic mapping (401, 429, 5xx)."""
+        status = exc.response.status_code
+        err = body.get("error") if isinstance(body, dict) else None
+        err = err if isinstance(err, dict) else {}
+        reasons = {
+            str(item.get("reason"))
+            for key in ("details", "errors")
+            for item in (err.get(key) or [])
+            if isinstance(item, dict) and item.get("reason")
+        }
+        try:
+            host = exc.request.url.host
+        except RuntimeError:  # an error built without its request
+            host = ""
+        kind = "doc" if action in _DOC_ACTIONS else "sheet"
+        if host.startswith("docs.") or (not host and kind == "doc"):
+            api = "Google Docs API"
+        elif host.startswith("sheets.") or not host:
+            api = "Google Sheets API"
+        else:  # the Drive metadata lookup that runs first
+            api = "Google Drive API"
+        label = _IN_PLACE_KINDS[kind][0]
+        lowered = message.lower()
+
+        if status == 403 and (
+            reasons & {"SERVICE_DISABLED", "accessNotConfigured"}
+            or "has not been used in project" in lowered
+        ):
+            return ToolResult(success=False, error=(
+                f"The {api} is not enabled for this deck. Enable the {api} in the "
+                "deck's Google Cloud project (APIs & Services → Library), wait a "
+                f"minute, then retry. Google said: {message}"
+            ))
+        if status == 403 and (
+            reasons & {"ACCESS_TOKEN_SCOPE_INSUFFICIENT", "insufficientPermissions"}
+            or "insufficient authentication scopes" in lowered
+        ):
+            return ToolResult(success=False, error=_FULL_DRIVE_NEEDED)
+        if status == 403:
+            need = "edit" if action in _IN_PLACE_WRITE_ACTIONS else "view"
+            return ToolResult(success=False, error=(
+                f"Permission denied: {message.rstrip('.')}. The connected Google "
+                f"account needs {need} access to this {label}."
+            ))
+        if status == 404:
+            # drive.file reaches only files this app created: anyone else's
+            # Sheet/Doc 404s, which is a scope problem, not a wrong id.
+            if granted and not granted & _DRIVE_LINK_SCOPES:
+                return ToolResult(success=False, error=_FULL_DRIVE_NEEDED)
+            return ToolResult(success=False, error=(
+                f"{label} not found. Check the file id, and that the connected "
+                "Google account can open the file."
+            ))
+        if status == 400:
+            hint = {
+                "Google Sheets API": (
+                    " Ranges are A1 notation such as 'Sheet1!A1:C10' with an existing "
+                    "tab name (quote names with spaces: \"'Q3 plan'!B2\"), inside the "
+                    "tab's grid (rows past its end: sheet_append); sheet_read without "
+                    "a range lists the tabs and their sizes."
+                ),
+                "Google Docs API": (
+                    " If the document changed since it was read, doc_read it again and retry."
+                ),
+            }.get(api, " Check the file id.")
+            return ToolResult(success=False, error=f"{api} error (400): {message}{hint}")
+        return None
 
     # ------------------------------------------------------------------
     # Action: list
@@ -734,18 +1232,20 @@ class GoogleDriveTool(Tool):
                     raise
                 result = ToolResult(success=False, error=f"export failed ({exc.response.status_code})")
             if result.success:
-                return result
+                return self._with_edit_hint(result, mime, file_id)
             log.info("Office export read failed, using flat export", file_id=file_id, error=result.error)
             note = (
                 "the XLSX export failed (Drive caps exports at 10 MB), so this "
                 "is Drive's CSV export: the FIRST TAB ONLY."
                 if mime == "application/vnd.google-apps.spreadsheet" else ""
             )
-            return await self._export_google_file(token, file_id, name, mime, note=note)
+            result = await self._export_google_file(token, file_id, name, mime, note=note)
+            return self._with_edit_hint(result, mime, file_id)
 
         # Google Workspace file → export.
         if mime in _GOOGLE_EXPORT_MAP:
-            return await self._export_google_file(token, file_id, name, mime)
+            result = await self._export_google_file(token, file_id, name, mime)
+            return self._with_edit_hint(result, mime, file_id)
 
         # Binary file with an extract tool → download + extract.
         if mime in _EXTRACTABLE_MIMES:
@@ -757,6 +1257,27 @@ class GoogleDriveTool(Tool):
 
         # Plain text / code / unknown → direct download as text.
         return await self._download_as_text(token, file_id, name, mime)
+
+    @staticmethod
+    def _with_edit_hint(result: ToolResult, mime: str, file_id: str) -> ToolResult:
+        """A read of a Google Sheet / Doc ends by pointing at the in-place edits."""
+        if not result.success:
+            return result
+        if mime == _SHEET_MIME:
+            hint = (
+                f"[To change this Sheet, edit it in place: sheet_read(file_id='{file_id}') "
+                "shows cell addresses; sheet_update / sheet_append / sheet_clear write "
+                "cells. Never upload a modified copy.]"
+            )
+        elif mime == _DOC_MIME:
+            hint = (
+                f"[To change this Doc, edit it in place: doc_read(file_id='{file_id}') "
+                "shows the exact text; doc_replace_text / doc_append_text / "
+                "doc_insert_text change it. Never upload a modified copy.]"
+            )
+        else:
+            return result
+        return result.model_copy(update={"content": f"{result.content}\n\n{hint}"})
 
     async def _export_google_file(
         self, token: str, file_id: str, name: str, mime: str, *, note: str = "",
@@ -1055,14 +1576,30 @@ class GoogleDriveTool(Tool):
 
         kind = f"{mime} → exported as {export_mime}" if native else (mime or "unknown")
         reader = _READER_BY_SUFFIX.get(dest.suffix.lower(), "read")
+        # A local copy is for analysis: the Drive original changes in place.
+        edit_note = ""
+        if mime == _SHEET_MIME:
+            edit_note = (
+                "\nThis is a local copy. To change the Google Sheet itself, edit it in "
+                f"place with sheet_update / sheet_append / sheet_clear (file_id='{file_id}') "
+                "— do not upload a modified copy."
+            )
+        elif mime == _DOC_MIME:
+            edit_note = (
+                "\nThis is a local copy. To change the Google Doc itself, edit it in "
+                f"place with doc_replace_text / doc_append_text / doc_insert_text "
+                f"(file_id='{file_id}') — do not upload a modified copy."
+            )
         return ToolResult(
             success=True,
             content=(
                 f"Downloaded '{name}' from Google Drive.\n"
+                f"  File ID: {file_id}\n"
                 f"  Path: {dest}\n"
                 f"  Type: {kind}\n"
                 f"  Size: {self._format_size(len(body))}\n"
                 f"Use {reader}(path=\"{dest}\") to view it."
+                f"{edit_note}"
             ),
         )
 
@@ -1254,6 +1791,7 @@ class GoogleDriveTool(Tool):
         file_id: str = "",
         content: str | None = None,
         local_path: str | None = None,
+        overwrite: Any = None,
         **kwargs: Any,
     ) -> ToolResult:
         """Update an existing file's content."""
@@ -1276,6 +1814,34 @@ class GoogleDriveTool(Tool):
                 error="Either 'content' or 'local_path' is required for update action.",
             )
 
+        # A native Doc/Sheet/Slides is replaced WHOLE by a media update (every
+        # tab, formula and format) — only on an explicit overwrite.
+        meta = await self._get_file_metadata(token, file_id)
+        mime = meta.get("mimeType", "")
+        name = meta.get("name") or file_id
+        if mime == FOLDER_MIME:
+            return ToolResult(success=False, error=f"'{name}' is a folder; update changes a file's content.")
+        if mime.startswith("application/vnd.google-apps.") and not _truthy(overwrite, False):
+            parts = [
+                f"Refused: '{name}' is a native Google file ({mime}), and update "
+                "would replace its WHOLE content (every tab, formula and format)."
+            ]
+            if mime == _SHEET_MIME:
+                parts.append(
+                    "Edit it in place instead: sheet_read (cell addresses), then "
+                    f"sheet_update / sheet_append / sheet_clear with file_id='{file_id}'."
+                )
+            elif mime == _DOC_MIME:
+                parts.append(
+                    "Edit it in place instead: doc_read (exact text), then "
+                    f"doc_replace_text / doc_append_text / doc_insert_text with file_id='{file_id}'."
+                )
+            parts.append(
+                "Only if the user explicitly wants the entire file replaced, repeat "
+                "update with overwrite=true."
+            )
+            return ToolResult(success=False, error=" ".join(parts))
+
         resp = await self._client.patch(
             f"{_UPLOAD_API}/files/{file_id}",
             params={"uploadType": "media", "supportsAllDrives": "true"},
@@ -1292,6 +1858,539 @@ class GoogleDriveTool(Tool):
         return ToolResult(
             success=True,
             content=f"Updated '{updated_name}' on Google Drive.\n  ID: {file_id}",
+        )
+
+    # ------------------------------------------------------------------
+    # In place: native Google Sheets / Docs (same file id, no re-upload)
+    # ------------------------------------------------------------------
+
+    async def _native_target(
+        self, token: str, file_id: str, kind: str, action: str,
+    ) -> tuple[dict[str, Any], ToolResult | None]:
+        """The file's metadata, or the refusal when it is not a native Google
+        Sheet / Doc (*kind*) — checked before any Sheets/Docs request."""
+        if not file_id:
+            return {}, ToolResult(
+                success=False,
+                error=f"file_id is required for {action} (the id or the file's URL).",
+            )
+        label, native_mime, actions = _IN_PLACE_KINDS[kind]
+        meta = await self._get_file_metadata(token, file_id)
+        mime = meta.get("mimeType", "")
+        if mime == native_mime:
+            return meta, None
+        name = meta.get("name") or file_id
+        other = next((k for k, v in _IN_PLACE_KINDS.items() if v[1] == mime), None)
+        if other:
+            other_label, _, other_actions = _IN_PLACE_KINDS[other]
+            error = f"'{name}' is a {other_label}, not a {label}: use {other_actions}."
+        elif mime.startswith("application/vnd.google-apps."):
+            error = f"'{name}' ({mime}) is not a {label}; {actions} work on {label}s only."
+        else:
+            # .xlsx / .docx / .csv kept as files on Drive: the Sheets/Docs APIs
+            # can't open them, but a media update keeps the same file id.
+            error = (
+                f"'{name}' is a {mime or 'binary'} file stored on Drive, not a native "
+                f"{label}, so it can't be edited in place. To change it and keep "
+                f"the same file id: download it, edit the local copy, then "
+                f"google_drive(action='update', file_id='{file_id}', "
+                "local_path='<edited copy>')."
+            )
+        return meta, ToolResult(success=False, error=error)
+
+    @staticmethod
+    def _range_arg(kwargs: dict[str, Any]) -> str:
+        return str(kwargs.get("range") or "").strip()
+
+    def _sheet_url(self, file_id: str, a1: str = "", suffix: str = "") -> str:
+        """A Sheets values endpoint; the A1 range travels encoded in the path."""
+        base = f"{_SHEETS_API}/{quote(file_id, safe='')}"
+        if not a1:
+            return base + suffix
+        return f"{base}/values/{quote(a1, safe='')}{suffix}"
+
+    async def _action_sheet_read(
+        self,
+        token: str,
+        file_id: str = "",
+        render: str | None = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        """Tabs + a preview of each, or one range, with A1 row/column labels."""
+        choice = str(render or "values").strip().lower()
+        value_render = {"values": "FORMATTED_VALUE", "formulas": "FORMULA"}.get(choice)
+        if value_render is None:
+            return ToolResult(success=False, error="render must be 'values' or 'formulas'.")
+        a1 = self._range_arg(kwargs)
+        meta, refusal = await self._native_target(token, file_id, "sheet", "sheet_read")
+        if refusal:
+            return refusal
+        name = meta.get("name") or file_id
+        header = f"[Google Sheet: {name} — file id {file_id}]\n"
+
+        if a1:
+            resp = await self._client.get(
+                self._sheet_url(file_id, a1),
+                params={"valueRenderOption": value_render, "majorDimension": "ROWS"},
+                headers=self._auth_headers(token),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            echoed = str(data.get("range") or a1)
+            grid, left_out = _render_grid(data.get("values") or [], echoed, _SHEET_READ_MAX_ROWS)
+            lines = [
+                header + f"[Range {echoed} ({choice}); rows numbered and columns lettered as in the Sheet]",
+                "",
+                grid,
+            ]
+            if left_out:
+                lines.append(
+                    f"\n[{left_out} more rows not shown — read a narrower range for them.]"
+                )
+            content = "\n".join(lines) + self._sheet_edit_hint(file_id)
+            return ToolResult(success=True, content=self._capped(content))
+
+        resp = await self._client.get(
+            self._sheet_url(file_id),
+            params={"fields": (
+                "sheets.properties(sheetId,title,index,sheetType,"
+                "gridProperties(rowCount,columnCount))"
+            )},
+            headers=self._auth_headers(token),
+        )
+        resp.raise_for_status()
+        tabs = [
+            s.get("properties") or {}
+            for s in resp.json().get("sheets") or []
+            if isinstance(s, dict)
+        ]
+        lines = [header + f"Tabs ({len(tabs)}):"]
+        for tab in tabs:
+            grid_props = tab.get("gridProperties") or {}
+            rows, cols = int(grid_props.get("rowCount") or 0), int(grid_props.get("columnCount") or 0)
+            size = f"{rows} rows × {cols} columns (A–{_col_letters(cols)})" if cols else "no grid"
+            lines.append(f"  - {tab.get('title', '?')} — {size}")
+
+        def preview_rows(tab: dict[str, Any]) -> int:
+            # Never past the tab's grid: a range beyond its last row is a 400
+            # ("exceeds grid limits") that would sink the whole batchGet.
+            count = (tab.get("gridProperties") or {}).get("rowCount")
+            return _SHEET_PREVIEW_ROWS if count is None else min(_SHEET_PREVIEW_ROWS, int(count or 0))
+
+        grid_tabs = [
+            t for t in tabs
+            if str(t.get("sheetType") or "GRID") == "GRID" and t.get("title") is not None
+            and preview_rows(t) > 0
+        ][:_SHEET_PREVIEW_TABS]
+        if grid_tabs:
+            ranges = [f"{_quote_tab(str(t['title']))}!1:{preview_rows(t)}" for t in grid_tabs]
+            resp = await self._client.get(
+                self._sheet_url(file_id, suffix="/values:batchGet"),
+                params=[("ranges", r) for r in ranges] + [
+                    ("valueRenderOption", value_render), ("majorDimension", "ROWS"),
+                ],
+                headers=self._auth_headers(token),
+            )
+            resp.raise_for_status()
+            value_ranges = resp.json().get("valueRanges") or []
+            for tab, vr in zip(grid_tabs, value_ranges):
+                echoed = str(vr.get("range") or "")
+                grid, _ = _render_grid(vr.get("values") or [], echoed, _SHEET_PREVIEW_ROWS)
+                lines += ["", f"## Tab: {tab['title']} (first {_SHEET_PREVIEW_ROWS} rows, {choice})", grid]
+        if len(tabs) > len(grid_tabs):
+            lines.append(
+                f"\n[Previewed {len(grid_tabs)} of {len(tabs)} tabs; sheet_read with "
+                "range='<tab name>' shows another.]"
+            )
+        content = "\n".join(lines) + self._sheet_edit_hint(file_id)
+        return ToolResult(success=True, content=self._capped(content))
+
+    @staticmethod
+    def _sheet_edit_hint(file_id: str) -> str:
+        return (
+            "\n\n[Cell addresses are column letter + row number as shown (e.g. B2). "
+            f"Write cells in place: sheet_update(file_id='{file_id}', range='<Tab>!B2', "
+            "values=[[...]]); add rows: sheet_append; empty cells: sheet_clear.]"
+        )
+
+    @staticmethod
+    def _capped(text: str) -> str:
+        if len(text) > _MAX_READ_BYTES:
+            return text[:_MAX_READ_BYTES] + "\n\n... [content truncated — read a narrower range]"
+        return text
+
+    async def _action_sheet_update(
+        self,
+        token: str,
+        file_id: str = "",
+        values: Any = None,
+        updates: Any = None,
+        value_input: Any = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        """Write cells: values.update for one range, values:batchUpdate for several."""
+        option = _value_input_option(value_input)
+        if option is None:
+            return ToolResult(success=False, error="value_input must be 'user_entered' or 'raw'.")
+        a1 = self._range_arg(kwargs)
+        data: list[dict[str, Any]] = []
+        if updates not in (None, "", []):
+            data, err = _coerce_updates(updates)
+            if err:
+                return ToolResult(success=False, error=err)
+        if a1 or values is not None:
+            if not a1:
+                return ToolResult(success=False, error="range is required with values (e.g. 'Sheet1!B2').")
+            rows, err = _coerce_rows(values)
+            if err:
+                return ToolResult(success=False, error=err)
+            data.append({"range": a1, "majorDimension": "ROWS", "values": rows})
+        if not data:
+            return ToolResult(success=False, error=(
+                "sheet_update needs range + values, or updates=[{range, values}, ...], "
+                f"e.g. range='Sheet1!A1', values={_VALUES_EXAMPLE}."
+            ))
+        meta, refusal = await self._native_target(token, file_id, "sheet", "sheet_update")
+        if refusal:
+            return refusal
+
+        if len(data) == 1:
+            resp = await self._client.put(
+                self._sheet_url(file_id, data[0]["range"]),
+                params={"valueInputOption": option},
+                json=data[0],
+                headers=self._auth_headers(token),
+            )
+            resp.raise_for_status()
+            answers = [resp.json()]
+        else:
+            resp = await self._client.post(
+                self._sheet_url(file_id, suffix="/values:batchUpdate"),
+                json={"valueInputOption": option, "data": data},
+                headers=self._auth_headers(token),
+            )
+            resp.raise_for_status()
+            answers = resp.json().get("responses") or []
+
+        name = meta.get("name") or file_id
+        lines = [f"Updated '{name}' in place (Google Sheet, file id {file_id}):"]
+        total = 0
+        for entry, answer in zip(data, answers or [{}] * len(data)):
+            cells = int(answer.get("updatedCells") or 0)
+            total += cells
+            lines.append(f"  {answer.get('updatedRange') or entry['range']} — {cells} cell(s)")
+        how = "stored as given" if option == "RAW" else "entered as typed (formulas, numbers and dates parsed)"
+        lines.append(f"{total} cell(s) {how}. Same file id; no copy was made.")
+        return ToolResult(success=True, content="\n".join(lines))
+
+    async def _action_sheet_append(
+        self,
+        token: str,
+        file_id: str = "",
+        values: Any = None,
+        value_input: Any = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        """Add rows below the table in a range (values:append, INSERT_ROWS)."""
+        option = _value_input_option(value_input)
+        if option is None:
+            return ToolResult(success=False, error="value_input must be 'user_entered' or 'raw'.")
+        a1 = self._range_arg(kwargs)
+        if not a1:
+            return ToolResult(success=False, error=(
+                "range is required for sheet_append: the tab, or the table's columns "
+                "on it (e.g. 'Sheet1' or 'Sheet1!A:F') — rows go below its last row."
+            ))
+        rows, err = _coerce_rows(values)
+        if err:
+            return ToolResult(success=False, error=err)
+        meta, refusal = await self._native_target(token, file_id, "sheet", "sheet_append")
+        if refusal:
+            return refusal
+
+        resp = await self._client.post(
+            self._sheet_url(file_id, a1, ":append"),
+            params={"valueInputOption": option, "insertDataOption": "INSERT_ROWS"},
+            json={"range": a1, "majorDimension": "ROWS", "values": rows},
+            headers=self._auth_headers(token),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        upd = data.get("updates") or {}
+        name = meta.get("name") or file_id
+        lines = [
+            f"Appended {int(upd.get('updatedRows') or len(rows))} row(s) to '{name}' in place "
+            f"(Google Sheet, file id {file_id}).",
+            f"  Written: {upd.get('updatedRange') or a1} — {int(upd.get('updatedCells') or 0)} cell(s)",
+        ]
+        if data.get("tableRange"):
+            lines.append(f"  Table found at: {data['tableRange']}")
+        return ToolResult(success=True, content="\n".join(lines))
+
+    async def _action_sheet_clear(
+        self,
+        token: str,
+        file_id: str = "",
+        **kwargs: Any,
+    ) -> ToolResult:
+        """Empty a range's values (formatting stays)."""
+        a1 = self._range_arg(kwargs)
+        if not a1:
+            return ToolResult(success=False, error="range is required for sheet_clear (e.g. 'Sheet1!B2:D9').")
+        meta, refusal = await self._native_target(token, file_id, "sheet", "sheet_clear")
+        if refusal:
+            return refusal
+        resp = await self._client.post(
+            self._sheet_url(file_id, a1, ":clear"),
+            json={},
+            headers=self._auth_headers(token),
+        )
+        resp.raise_for_status()
+        cleared = resp.json().get("clearedRange") or a1
+        name = meta.get("name") or file_id
+        return ToolResult(
+            success=True,
+            content=(
+                f"Cleared {cleared} in '{name}' in place (Google Sheet, file id "
+                f"{file_id}). Values only — formatting is kept."
+            ),
+        )
+
+    async def _get_doc(self, token: str, file_id: str) -> dict[str, Any]:
+        """documents.get with every tab's content."""
+        resp = await self._client.get(
+            f"{_DOCS_API}/{quote(file_id, safe='')}",
+            params={"includeTabsContent": "true"},
+            headers=self._auth_headers(token),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _doc_batch_update(
+        self, token: str, file_id: str, requests: list[dict[str, Any]], revision: str = "",
+    ) -> dict[str, Any]:
+        """documents.batchUpdate; with *revision*, refused if the Doc changed since."""
+        body: dict[str, Any] = {"requests": requests}
+        if revision:
+            body["writeControl"] = {"requiredRevisionId": revision}
+        resp = await self._client.post(
+            f"{_DOCS_API}/{quote(file_id, safe='')}:batchUpdate",
+            json=body,
+            headers=self._auth_headers(token),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    @staticmethod
+    def _pick_tab(
+        doc: dict[str, Any], tab: Any,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """The tabs a doc_* call works in: all of them, or the one *tab* names
+        (id, or title ignoring case). Returns the tabs, or an error."""
+        tabs = _doc_tabs(doc)
+        wanted = str(tab or "").strip()
+        if not wanted:
+            return tabs, ""
+        for t in tabs:
+            tab_id, title = _tab_props(t)
+            if wanted == tab_id or wanted.lower() == title.lower():
+                return [t], ""
+        titles = ", ".join(repr(_tab_props(t)[1]) for t in tabs) or "none"
+        return [], f"No tab {wanted!r} in this Doc. Its tabs: {titles}."
+
+    async def _action_doc_read(
+        self,
+        token: str,
+        file_id: str = "",
+        **kwargs: Any,
+    ) -> ToolResult:
+        """The exact text of every tab — what doc_replace_text / doc_insert_text match."""
+        meta, refusal = await self._native_target(token, file_id, "doc", "doc_read")
+        if refusal:
+            return refusal
+        doc = await self._get_doc(token, file_id)
+        title = doc.get("title") or meta.get("name") or file_id
+        tabs = _doc_tabs(doc)
+        parts = [
+            f"[Google Doc: {title} — file id {file_id}]\n"
+            "[Exact text: copy find / after strings from here verbatim. [image] "
+            "marks an image and table rows are drawn as | cell | cell | — neither "
+            "is text you can match.]"
+        ]
+        for tab in tabs:
+            tab_id, tab_title = _tab_props(tab)
+            if len(tabs) > 1:
+                parts.append(f"\n## Tab: {tab_title} (tab id {tab_id})")
+            parts.append("\n" + _doc_text(_tab_content(tab)))
+        parts.append(
+            "\n[Edit in place: doc_replace_text (find → replace_with), "
+            "doc_append_text (new paragraph at the end), doc_insert_text (text "
+            "right after `after`).]"
+        )
+        return ToolResult(success=True, content=self._capped("\n".join(parts)))
+
+    async def _action_doc_replace_text(
+        self,
+        token: str,
+        file_id: str = "",
+        find: str | None = None,
+        replace_with: str | None = None,
+        match_case: Any = None,
+        tab: str | None = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        """replaceAllText: every occurrence of *find*, in place."""
+        if not find:
+            return ToolResult(success=False, error=(
+                "find is required for doc_replace_text: the exact text to replace, "
+                "copied from doc_read."
+            ))
+        if replace_with is None:
+            return ToolResult(success=False, error="replace_with is required ('' deletes the found text).")
+        meta, refusal = await self._native_target(token, file_id, "doc", "doc_replace_text")
+        if refusal:
+            return refusal
+        request: dict[str, Any] = {
+            "containsText": {"text": str(find), "matchCase": _truthy(match_case, True)},
+            "replaceText": str(replace_with),
+        }
+        if str(tab or "").strip():
+            tabs, err = self._pick_tab(await self._get_doc(token, file_id), tab)
+            if err:
+                return ToolResult(success=False, error=err)
+            request["tabsCriteria"] = {"tabIds": [_tab_props(tabs[0])[0]]}
+        answer = await self._doc_batch_update(token, file_id, [{"replaceAllText": request}])
+        replies = answer.get("replies") or [{}]
+        changed = int(((replies[0] or {}).get("replaceAllText") or {}).get("occurrencesChanged") or 0)
+        name = meta.get("name") or file_id
+        if not changed:
+            return ToolResult(success=False, error=(
+                f"No occurrence of {find!r} in '{name}' — nothing changed. doc_read the "
+                "Doc and copy the exact text (spaces, punctuation, case; within one "
+                "paragraph) into find."
+            ))
+        return ToolResult(
+            success=True,
+            content=(
+                f"Replaced {changed} occurrence(s) of {find!r} with {str(replace_with)!r} "
+                f"in '{name}' in place (Google Doc, file id {file_id})."
+            ),
+        )
+
+    async def _action_doc_append_text(
+        self,
+        token: str,
+        file_id: str = "",
+        text: str | None = None,
+        tab: str | None = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        """Add *text* as a new paragraph at the end of the Doc (or of a tab)."""
+        if not text:
+            return ToolResult(success=False, error="text is required for doc_append_text.")
+        meta, refusal = await self._native_target(token, file_id, "doc", "doc_append_text")
+        if refusal:
+            return refusal
+        doc = await self._get_doc(token, file_id)
+        tabs, err = self._pick_tab(doc, tab)
+        if err:
+            return ToolResult(success=False, error=err)
+        target = tabs[0] if tabs else {}
+        tab_id, tab_title = _tab_props(target)
+        # The end of a body is its last paragraph's newline: insert before it,
+        # opening a new paragraph unless the last one is empty.
+        body = "".join(run for _, run in _doc_runs(_tab_content(target)))
+        insert = str(text)
+        if not insert.startswith("\n") and body.strip("\n") and not body.endswith("\n\n"):
+            insert = "\n" + insert
+        insert = insert[:-1] if insert.endswith("\n") and len(insert) > 1 else insert
+        location: dict[str, Any] = {"segmentId": ""}
+        if tab_id:
+            location["tabId"] = tab_id
+        await self._doc_batch_update(
+            token, file_id,
+            [{"insertText": {"endOfSegmentLocation": location, "text": insert}}],
+            revision=str(doc.get("revisionId") or ""),
+        )
+        name = meta.get("name") or file_id
+        where = f" (tab {tab_title!r})" if tab_title and len(_doc_tabs(doc)) > 1 else ""
+        return ToolResult(
+            success=True,
+            content=(
+                f"Appended {len(str(text))} characters to the end of '{name}'{where} "
+                f"in place (Google Doc, file id {file_id})."
+            ),
+        )
+
+    async def _action_doc_insert_text(
+        self,
+        token: str,
+        file_id: str = "",
+        text: str | None = None,
+        after: str | None = None,
+        match_case: Any = None,
+        tab: str | None = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        """Insert *text* right after the one occurrence of *after*."""
+        if not text:
+            return ToolResult(success=False, error="text is required for doc_insert_text.")
+        if not after:
+            return ToolResult(success=False, error=(
+                "after is required for doc_insert_text: existing text, copied exactly "
+                "from doc_read, that the new text goes right after."
+            ))
+        meta, refusal = await self._native_target(token, file_id, "doc", "doc_insert_text")
+        if refusal:
+            return refusal
+        doc = await self._get_doc(token, file_id)
+        tabs, err = self._pick_tab(doc, tab)
+        if err:
+            return ToolResult(success=False, error=err)
+        hits = [
+            (t, end)
+            for t in tabs
+            for end in _anchor_ends(_tab_content(t), str(after), _truthy(match_case, True))
+        ]
+        name = meta.get("name") or file_id
+        if not hits:
+            return ToolResult(success=False, error=(
+                f"{after!r} was not found in '{name}' — nothing changed. doc_read the "
+                "Doc and copy the exact text (spaces, punctuation, case) into after."
+            ))
+        if len(hits) > 1:
+            return ToolResult(success=False, error=(
+                f"{after!r} occurs {len(hits)} times in '{name}' — nothing changed. "
+                "Make after longer so it names exactly one place (or pass tab)."
+            ))
+        target, index = hits[0]
+        tab_id, _ = _tab_props(target)
+        content = _tab_content(target)
+        body_end = int((content[-1] or {}).get("endIndex") or 0) if content else 0
+        insert = str(text)
+        spot: dict[str, Any] = {"segmentId": ""}
+        if tab_id:
+            spot["tabId"] = tab_id
+        if body_end and index >= body_end:
+            # Past the body's final newline: nothing can go there, so the text
+            # opens a new last paragraph at the end of the body instead.
+            if not insert.startswith("\n"):
+                insert = "\n" + insert
+            if insert.endswith("\n") and len(insert) > 1:
+                insert = insert[:-1]
+            request = {"endOfSegmentLocation": spot, "text": insert}
+        else:
+            request = {"location": {**spot, "index": index}, "text": insert}
+        await self._doc_batch_update(
+            token, file_id, [{"insertText": request}],
+            revision=str(doc.get("revisionId") or ""),
+        )
+        return ToolResult(
+            success=True,
+            content=(
+                f"Inserted {len(str(text))} characters after {after[-60:]!r} in "
+                f"'{name}' in place (Google Doc, file id {file_id})."
+            ),
         )
 
     # ------------------------------------------------------------------

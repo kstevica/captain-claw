@@ -226,6 +226,20 @@ def google_drive_redirect(url_or_text: str, intro: str, *, connected: bool = Fal
             f"  - google_drive(action='download', file_id='{ref}') saves a local copy "
             "and returns its path",
         ]
+        # A Sheet / Doc link: changing it means editing it in place.
+        path = urlparse(url or "").path
+        if "/spreadsheets/" in path:
+            lines.append(
+                f"  - google_drive(action='sheet_read', file_id='{ref}') shows the cells "
+                "with A1 addresses; sheet_update / sheet_append / sheet_clear edit the "
+                "Sheet in place (never upload a modified copy)"
+            )
+        elif "/document/" in path:
+            lines.append(
+                f"  - google_drive(action='doc_read', file_id='{ref}') shows the exact "
+                "text; doc_replace_text / doc_append_text / doc_insert_text edit the "
+                "Doc in place (never upload a modified copy)"
+            )
     else:
         lines += [
             "  - google_drive(action='read', file_id='<id>') returns a file's content "

@@ -593,6 +593,28 @@ def _wants_fresh_data(text: str) -> bool:
     return bool(text and _REFRESH_INTENT_RE.search(str(text)))
 
 
+# Tool-avoidance nudge for email: a reply that writes emails out as text
+# ("**To:** … / Subject: …" more than once) while google_mail is available.
+_MAIL_AS_TEXT_RE = _re.compile(
+    r"(?:\*\*(?:To|Subject):\*\*|\bSubject:\s).+\n.*(?:\*\*(?:To|Subject):\*\*|\bSubject:\s)"
+)
+# Never "create_draft for EACH recipient" unconditionally: a reply listing
+# emails that already exist (the model ran its repeat check) has the same
+# shape, and that order would push it into the duplicate the no-repeat rule
+# forbids.
+_MAIL_TOOL_AVOIDANCE_NUDGE = (
+    "STOP. You have the google_mail tool available. Do NOT output email drafts as "
+    "text for the user to copy. For each recipient that doesn't already have this "
+    "email in Drafts or Sent (check list_drafts query='to:<recipient>' and search "
+    "query='in:sent to:<recipient> newer_than:14d' if you haven't yet), call "
+    "google_mail with action=create_draft now, using the to, subject and body "
+    "parameters. If one is already drafted or sent, don't create it again — tell "
+    "the user its Draft ID or sent date. (Use action=send instead only if the user "
+    "explicitly asked you to send and sending is enabled; otherwise always create "
+    "drafts.)"
+)
+
+
 class AgentOrchestrationMixin:
     """Core request orchestration: complete() and stream()."""
 
@@ -1064,6 +1086,10 @@ class AgentOrchestrationMixin:
                 "results on Drive, upload them AFTER Step 2 with "
                 "google_drive (action='upload'). These are the only tool "
                 "calls allowed outside the write → shell sequence.\n"
+                "To change an EXISTING Google Sheet/Doc, edit it in place "
+                "AFTER Step 2 with google_drive (sheet_update / sheet_append "
+                "/ sheet_clear, doc_replace_text / doc_append_text / "
+                "doc_insert_text) — never upload a modified copy of it.\n"
                 "==============================================\n"
             )
             if _credentials_block:
@@ -2715,17 +2741,15 @@ class AgentOrchestrationMixin:
                 _resp_text = str(response.content or "")
                 _avail_tool_names = {td.get("name", "") for td in (tool_defs or [])}
                 _nudge_msg = None
-                if "google_mail" in _avail_tool_names and _re.search(
-                    r"(?:\*\*(?:To|Subject):\*\*|\bSubject:\s).+\n.*(?:\*\*(?:To|Subject):\*\*|\bSubject:\s)",
-                    _resp_text,
+                if (
+                    "google_mail" in _avail_tool_names
+                    and _MAIL_AS_TEXT_RE.search(_resp_text)
+                    # A draft / send already went through this turn (or was
+                    # refused as a repeat): the text reports it, it isn't
+                    # dodging the tool — nudging would make a duplicate.
+                    and not self._turn_has_mail_write(turn_start_idx)
                 ):
-                    _nudge_msg = (
-                        "STOP. You have the google_mail tool available with create_draft action. "
-                        "Do NOT output email drafts as text. Call google_mail with action=create_draft "
-                        "for EACH recipient right now. Use the to, subject, and body parameters. "
-                        "(Use action=send instead only if the user explicitly asked you to send "
-                        "and sending is enabled; otherwise always create drafts.)"
-                    )
+                    _nudge_msg = _MAIL_TOOL_AVOIDANCE_NUDGE
                 if _nudge_msg:
                     log.warning("Tool-avoidance detected, nudging LLM", tool="google_mail")
                     self._tool_avoidance_nudged = True

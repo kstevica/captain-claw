@@ -24,6 +24,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from captain_claw import gmail_compose
 from captain_claw.flight_deck.autonomy import get_store, resolve_config
 
 _log = logging.getLogger(__name__)
@@ -517,6 +518,15 @@ async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[st
     res = await run_action(user_id, action_id, args)
     ok = bool(res.get("ok"))
     note = str(res.get("content") or res.get("error") or "")[:500]
+    # google_mail refused because that email is already drafted or sent (a
+    # mail.draft the arbiter proposed again, or one the user wrote themselves):
+    # the goal is met and nothing failed — a skipped success, kept out of
+    # reliability learning so a correct refusal costs the action no trust.
+    skipped = not ok and gmail_compose.is_repeat_refusal(
+        f"{res.get('error') or ''} {res.get('content') or ''}"
+    )
+    if skipped:
+        note = f"skipped — already drafted or sent: {note}"[:500]
 
     # Capture the reverse handle (for one-tap undo) from the real result.
     if ok:
@@ -527,13 +537,15 @@ async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[st
             store.update_payload(action["id"], {"reverse": reverse})
 
     cfg = resolve_config(user_id)
-    if cfg.get("learning_enabled") and str(cfg.get("judge_mode") or "both") in ("auto", "both"):
+    if (not skipped and cfg.get("learning_enabled")
+            and str(cfg.get("judge_mode") or "both") in ("auto", "both")):
         from captain_claw.flight_deck.autonomy import reliability_key
         rk, rd = reliability_key(action)  # per-action-id trust bucket
         store.record_outcome(user_id, rk, rd, ok, seed=float(cfg.get("reliability_seed", 0.6)))
     store.update_status(action["id"], "done",
-                        outcome="success" if ok else "fail", outcome_note=note)
-    store.log(user_id, f"tool_action: {action_id}", note, "info" if ok else "warn")
+                        outcome="success" if ok or skipped else "fail", outcome_note=note)
+    store.log(user_id, f"tool_action: {action_id}" + (" (skipped: repeat)" if skipped else ""),
+              note, "info" if ok or skipped else "warn")
     # ok=True means "executed" so the approve route doesn't re-queue; the ledger
     # outcome carries whether the tool itself succeeded.
     return {"ok": True, "target": action_id, "note": note}

@@ -169,6 +169,21 @@ def placeholder_text(f: DriveFile) -> str:
         bits.append(f"modified {f.modified_time[:10]}")
     bits.append(f"id {f.id}")
     head = " · ".join(bits)
+    # The mount is read-only, but a native Sheet / Doc can still be changed
+    # in place on Drive itself, by its id.
+    edit = ""
+    if f.mime_type == "application/vnd.google-apps.spreadsheet":
+        edit = (
+            " To CHANGE this Google Sheet, edit it in place with google_drive "
+            f"(sheet_update / sheet_append / sheet_clear, file_id='{f.id}') — this "
+            "folder itself is read-only."
+        )
+    elif f.mime_type == "application/vnd.google-apps.document":
+        edit = (
+            " To CHANGE this Google Doc, edit it in place with google_drive "
+            f"(doc_replace_text / doc_append_text / doc_insert_text, file_id='{f.id}') "
+            "— this folder itself is read-only."
+        )
     return (
         head
         + "\n\nThis file lives in Google Drive and has not been downloaded yet. "
@@ -176,8 +191,9 @@ def placeholder_text(f: DriveFile) -> str:
         "`read` for text/documents, the extract tools (pdf_extract/docx_extract/"
         "xlsx_extract/pptx_extract) for Office files, or the vision tools for "
         "images/video, all on THIS path. Do NOT use the google_drive tool to "
-        "re-download it and do NOT treat this marker as the file's content. To "
-        "make it a permanent local file, enable clonemd on the folder.\n"
+        "re-download it and do NOT treat this marker as the file's content."
+        + edit
+        + " To make it a permanent local file, enable clonemd on the folder.\n"
     )
 
 
