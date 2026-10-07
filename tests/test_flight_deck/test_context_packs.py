@@ -1692,6 +1692,8 @@ class TestLifecycle:
         monkeypatch.setattr(sharing, "resolve_agent_record", real)
         assert await cp.refresh_agent(db, REF) is True
         assert "Mia about." in _ctx(pdeck)
+        # PR D: helper has members, so its members file is there as well.
+        assert (tp.context_dir(pdeck.data / "helper", "process") / cp.SHARED_MEMBERS_FILE).is_file()
         assert await cp.refresh_agent(db, REF) is False          # unchanged: no write
 
     async def test_refresh_failure_removes_files(self, pdeck, monkeypatch):
@@ -1863,6 +1865,13 @@ class TestReconcile:
         await cp.reconcile_round(db)
         assert "Olga about." in _ctx(pdeck, "box", "docker")
         assert "Olga about." in _ctx(pdeck, "box2", "docker") and "Olga about." in _ctx(pdeck)
+        # PR D: the round covers pack_refs {helper, box, box2} | member_refs
+        # {helper, second, box} — second (members, no packs) is refreshed too,
+        # off the same snapshot. Its post-compose re-check reads the plain
+        # process registry, so the counts are unchanged: one strict registry
+        # read and one container listing for the snapshot, plus one listing per
+        # Docker agent's re-check (box, box2).
+        assert (tp.context_dir(pdeck.data / "second", "process") / cp.SHARED_MEMBERS_FILE).is_file()
         assert listings["n"] == 1 + 2          # the round's snapshot + one re-check per box
         assert strict_reads["n"] == 1
         listings["n"] = 0
@@ -1876,8 +1885,15 @@ class TestReconcile:
         stale = tp.context_dir(pdeck.data / "sleepy", "process") / FULL
         stale.parent.mkdir(parents=True)
         stale.write_text("stale shared context of another agent")
-        assert await cp.reconcile(db) == 1
+        # PR D: helper (packs + members), second and box (members, no packs)
+        # are refreshed — each gets its members file.
+        assert await cp.reconcile(db) == 3
         assert not stale.exists() and "Mia about." in _ctx(pdeck)
+        for slug, runtime in (("second", "process"), ("box", "docker"), ("helper", "process")):
+            members = tp.context_dir(pdeck.data / slug, runtime) / cp.SHARED_MEMBERS_FILE
+            assert members.read_text(encoding="utf-8").startswith(
+                "## People this agent is shared with\n"), slug
+        assert _ctx(pdeck, "second") is None and _ctx(pdeck, "box", "docker") is None
 
     async def test_startup_reconcile_with_sharing_off(self, pdeck, monkeypatch):
         db = pdeck.db

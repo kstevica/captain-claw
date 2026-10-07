@@ -177,12 +177,17 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
     if user_id == admin["id"]:
         raise HTTPException(400, "Cannot delete your own account")
     db = get_db()
-    # The agents where they publish or own context packs, captured before the
+    # The agents where they publish or own context packs, and the agents they
+    # own or are a member of (their members files, PR D), captured before the
     # delete cascades the rows away.
     try:
         pack_refs = await db.list_context_pack_refs(user_id)
     except Exception:
         pack_refs = []
+    try:
+        member_refs = await db.list_agent_share_refs(user_id)
+    except Exception:
+        member_refs = []
     deleted = await db.delete_user(user_id)
     if not deleted:
         raise HTTPException(404, "User not found")
@@ -196,7 +201,7 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
     try:
         from captain_claw.flight_deck import context_packs
 
-        await context_packs.refresh_refs(db, pack_refs)
+        await context_packs.refresh_refs(db, sorted(set(pack_refs) | set(member_refs)))
     except Exception:
         pass
     return {"ok": True}

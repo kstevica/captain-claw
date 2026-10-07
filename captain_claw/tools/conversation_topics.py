@@ -74,6 +74,8 @@ class TopicsTool(Tool):
                     t = mgr.get_topic(topic, max_excerpts=max_excerpts)
                     if not t:
                         return ToolResult(success=False, error=f"No topic found for {topic!r}.")
+                    if any(str(m.get("speaker") or "").strip() for m in t.get("messages", [])):
+                        return await _owner_topic_with_members(t, kwargs.get("_agent"))
                     return ToolResult(success=True, content=_fmt_topic(t))
                 if not p.speaker_id:
                     # Unverified member: never query speaker='' (the owner's rows).
@@ -90,6 +92,53 @@ class TopicsTool(Tool):
         except Exception as e:
             log.error("Topics tool error", action=action, error=str(e))
             return ToolResult(success=False, error=str(e))
+
+
+async def _owner_topic_with_members(t: dict[str, Any], agent: Any) -> ToolResult:
+    """PR D (J19): the owner's ``get`` of a topic holding members' excerpts.
+
+    A current member's excerpts from since their current ``shared_at`` are
+    shown and make this a turn that read members' private text (header +
+    level); ex-members' — and every member's when Flight Deck can't say who
+    the members are — are dropped. The owner's own excerpts always show.
+    A member excerpt shows only when its message is one ``read_conversation``
+    would show (``shared_usage.shown_message_ids``): never a reply grounded in
+    their Google or private deep memory, never the agent's own follow-up
+    prompts, never narration, never one whose message can't be found."""
+    from captain_claw import member_privacy, shared_usage
+
+    scope, ok = await shared_usage.member_scope(agent)
+    candidates: list[tuple[dict[str, Any], Any]] = []
+    for m in t.get("messages", []):
+        spk = str(m.get("speaker") or "").strip()
+        if not spk:
+            candidates.append((m, None))
+            continue
+        member = scope.get(spk) if ok else None
+        since = shared_usage.since_of(member) if member is not None else None
+        ts = shared_usage._parse_ts(m.get("ts"))
+        if since is None or ts is None or ts < since:
+            continue
+        if m.get("role") not in ("user", "agent") or not str(m.get("msg_id") or ""):
+            continue
+        candidates.append((m, member))
+    shown_ids: set[str] = set()
+    members = {mb.user_id: mb for _m, mb in candidates if mb is not None}
+    if members:
+        shown_ids = await shared_usage.shown_message_ids(list(members.values()))
+    kept: list[dict[str, Any]] = []
+    members_shown = 0
+    for m, member in candidates:
+        if member is not None:
+            if str(m.get("msg_id") or "") not in shown_ids:
+                continue
+            members_shown += 1
+        kept.append(m)
+    text = _fmt_topic({**t, "messages": kept})
+    if members_shown:
+        member_privacy.mark_private_read(agent, member_privacy.LEVEL_CONTENT)
+        text = member_privacy.PRIVATE_HEADER + "\n" + text
+    return ToolResult(success=True, content=text)
 
 
 def _fmt_overview(rows: list[dict[str, Any]], header: str, *, show_counts: bool = True) -> str:

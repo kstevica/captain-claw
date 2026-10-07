@@ -2228,6 +2228,22 @@ class FlightDeckDB:
         """Members of one of ``owner_id``'s shared agents."""
         return await self.list_shares_for_resource("agent", agent_ref, owner_id)
 
+    async def list_agent_share_refs(self, user_id: str | None = None) -> list[str]:
+        """Agents with members — every one, or those ``user_id`` owns or is a member of."""
+        assert self._db is not None
+        if user_id is None:
+            rows = await self._db.execute_fetchall(
+                "SELECT DISTINCT resource_id FROM resource_shares"
+                " WHERE resource_type = 'agent' ORDER BY resource_id")
+        else:
+            rows = await self._db.execute_fetchall(
+                "SELECT DISTINCT resource_id FROM resource_shares"
+                " WHERE resource_type = 'agent' AND (owner_id = ? OR grantee_id = ?)"
+                " ORDER BY resource_id",
+                (user_id, user_id),
+            )
+        return [str(r[0]) for r in rows]
+
     # ── Context packs (shared-agent shared context, PR B) ─────────────
 
     async def create_context_pack(

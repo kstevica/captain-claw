@@ -1678,6 +1678,10 @@ class AgentOrchestrationMixin:
                 session_policy=session_tool_policy,
                 task_policy=active_task_tool_policy,
             )
+            # PR D (J18): the registry is process-global — owner-only tools
+            # are never listed to a public, BotPort, Iskra or VFS-scoped agent.
+            from captain_claw.shared_usage import drop_unusable
+            tool_defs = drop_unusable(tool_defs, self)
             # ── Nano mode: hard-restrict to a barebone tool set ──
             # Small local models can't reliably pick from a long tool list;
             # cut to the script-writing essentials and let them shell out.
@@ -2910,6 +2914,8 @@ class AgentOrchestrationMixin:
 
         # Get tool definitions
         tool_defs = self.tools.get_definitions()
+        from captain_claw.shared_usage import drop_unusable
+        tool_defs = drop_unusable(tool_defs, self)   # PR D (J18)
 
         # For streaming, we currently don't support tool calling
         # This is a limitation - full streaming with tools needs more work

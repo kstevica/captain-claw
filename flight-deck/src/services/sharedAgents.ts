@@ -83,6 +83,9 @@ export interface SharedAgentsResponse {
   /** This deck serves members' files and data panels (a process agent's
    *  saved/ folder and datastore); absent on an older Flight Deck. */
   member_workspace?: boolean
+  /** The owners' agents can look into how members use them (`shared_agent_usage`): their activity,
+   *  what they created or shared, and their conversations. Absent on an older Flight Deck. */
+  shared_usage?: boolean
 }
 
 // ── Endpoints ──

@@ -205,6 +205,9 @@ class MravRuntime:
 
     def _toolpack(self) -> ToolpackContext:
         definitions = self.tools.get_definitions(session_id=self.session_id)
+        # PR D (J18): owner-only tools only for an owner instance (None → dropped).
+        from captain_claw.shared_usage import drop_unusable
+        definitions = drop_unusable(definitions, self.agent)
         return build_toolpack(definitions, pinned=self.board.pinned_tools)
 
     def _observations_text(self) -> str:

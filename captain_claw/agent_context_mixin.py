@@ -1153,6 +1153,10 @@ class AgentContextMixin:
         self, tool_name: str, arguments: dict[str, Any], result_content: str,
     ) -> None:
         """Post-tool-call hook: trigger insight extraction for key tools."""
+        # PR D: nothing a turn read about members feeds shared insights.
+        from captain_claw import member_privacy
+        if tool_name == member_privacy.TOOL_NAME or member_privacy.private_turn(self):
+            return
         cfg = get_config()
         if not cfg.insights.enabled or not cfg.insights.auto_extract:
             return
@@ -1776,11 +1780,22 @@ class AgentContextMixin:
             else:
                 mgr = get_sister_session_manager()
             session_id = str(self.session.id) if self.session else None
-            self._briefing_context_cache = await mgr.list_briefings(
+            items = await mgr.list_briefings(
                 session_id,
                 status="unread",
                 limit=cfg.sister_session.max_briefings_in_context,
             )
+            # PR D: a briefing from a sister turn that read members' private
+            # data (its body starts with the header) never enters the
+            # prompt — its summary would be restated by an untainted turn
+            # whose replies feed shared learnings. The owner still sees it
+            # with /briefing.
+            from captain_claw import member_privacy
+
+            self._briefing_context_cache = [
+                b for b in (items or [])
+                if not member_privacy.header_level((b or {}).get("body"))
+            ]
         except Exception:
             self._briefing_context_cache = []
 
@@ -2459,6 +2474,12 @@ class AgentContextMixin:
         # Always-on tools (registered regardless of tools.enabled).
         from captain_claw.tools.clipboard import ClipboardTool
         self.tools.register(ClipboardTool())
+        # PR D: who this agent is shared with and how members use it — owner
+        # turns only (shared_usage.usage_allowed); listed only while Flight
+        # Deck's shared_members.md exists and only to owner instances
+        # (shared_usage.drop_unusable).
+        from captain_claw.tools.shared_agent_usage import SharedAgentUsageTool
+        self.tools.register(SharedAgentUsageTool(), metadata={"requires_shared_members": True})
         # Iskra containment (Constitution: Containment + Economy physics):
         # a BEING's body below the `agent_messaging` capability must not see
         # or consult the fleet, nor reach the orchestration organs — a body
@@ -2723,6 +2744,11 @@ class AgentContextMixin:
     def _build_tool_list(self) -> str:
         """Build the textual tool list from currently registered tools."""
         registered = self.tools.list_tools()
+        # PR D (J18): owner-only tools aren't named to a public, BotPort,
+        # Iskra or VFS-scoped agent either (same rule as its API definitions).
+        from captain_claw.shared_usage import drop_unusable
+        _usable = {d["name"] for d in drop_unusable([{"name": n} for n in registered], self)}
+        registered = [n for n in registered if n in _usable]
         if getattr(self, "_speaker_scoped", False) is True:
             # A shared-agent member sees only the tools they can call — never
             # the owner's roster (MCP servers, shell, plugins). Their Google
@@ -3293,6 +3319,13 @@ class AgentContextMixin:
                     base_prompt = insert_tenant_block(base_prompt, _tenant_block)
                 if _shared:
                     base_prompt = insert_tenant_block(base_prompt, _shared)
+                # PR D: who this agent is shared with — owner instances only.
+                from captain_claw.shared_usage import usage_instance_allowed
+                from captain_claw.tenant_context import load_shared_members
+                if usage_instance_allowed(self):
+                    _members_block = load_shared_members()
+                    if _members_block:
+                        base_prompt = insert_tenant_block(base_prompt, _members_block)
             except Exception:
                 pass
 

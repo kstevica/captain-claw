@@ -516,6 +516,17 @@ class ToolRegistry:
         except Exception:
             pass
 
+        # PR D: shared_agent_usage only while Flight Deck says this agent has members.
+        try:
+            if any(self._tool_metadata.get(t.name, {}).get("requires_shared_members") for t in tools):
+                from captain_claw.tenant_context import load_shared_members
+                if not load_shared_members():
+                    tools = [t for t in tools
+                             if not self._tool_metadata.get(t.name, {}).get("requires_shared_members")]
+        except Exception:
+            tools = [t for t in tools
+                     if not self._tool_metadata.get(t.name, {}).get("requires_shared_members")]
+
         return tools
 
     def get(self, name: str) -> Tool:
@@ -688,6 +699,19 @@ class ToolRegistry:
             name, arguments or {}, (arguments or {}).get("_agent"), tool_context)
         if pack_error:
             raise ToolBlockedError(name, pack_error)
+
+        # PR D (J15): an owner turn that read members' private data can't
+        # write the stores every member reads; after reading their
+        # conversations it runs only read-only local tools until the owner's
+        # next message. Member calls are never checked (their instances never
+        # get a level); a call without `_agent` has no level.
+        if not speaker_call:
+            from captain_claw import member_privacy as _member_privacy
+
+            privacy_error = _member_privacy.tool_block(
+                name, arguments or {}, (arguments or {}).get("_agent"))
+            if privacy_error:
+                raise ToolBlockedError(name, privacy_error)
 
         if speaker_call:
             roots = tool_context.run(

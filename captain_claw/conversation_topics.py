@@ -188,13 +188,13 @@ class ConversationTopicsManager:
                 return None
             if speaker is None:
                 msgs = self._c().execute(
-                    "SELECT id, role, channel, excerpt, msg_id, ts FROM topic_messages"
+                    "SELECT id, role, channel, excerpt, msg_id, ts, speaker FROM topic_messages"
                     " WHERE topic_id = ? ORDER BY id DESC LIMIT ?",
                     (r["id"], max(1, min(200, max_excerpts))),
                 ).fetchall()
             else:
                 msgs = self._c().execute(
-                    "SELECT id, role, channel, excerpt, msg_id, ts FROM topic_messages"
+                    "SELECT id, role, channel, excerpt, msg_id, ts, speaker FROM topic_messages"
                     " WHERE topic_id = ? AND speaker = ? ORDER BY id DESC LIMIT ?",
                     (r["id"], str(speaker), max(1, min(200, max_excerpts))),
                 ).fetchall()
@@ -202,6 +202,23 @@ class ConversationTopicsManager:
         d["messages"] = [dict(m) for m in reversed(msgs)]  # oldest→newest
         d["groups"] = self.groups_for_topic(d["id"])
         return d
+
+    def labels_for_speaker(self, speaker_id: str, limit: int = 8, since: str = "") -> list[str]:
+        """Labels of the topics *speaker_id* (a member) has excerpts in, at or
+        after *since*, most recently touched first (PR D, owner-only)."""
+        if not speaker_id:
+            return []
+        try:
+            with self._lock:
+                rows = self._c().execute(
+                    "SELECT t.label FROM topic_messages m JOIN topics t ON t.id = m.topic_id"
+                    " WHERE m.speaker = ? AND m.ts >= ? GROUP BY t.id"
+                    " ORDER BY MAX(m.id) DESC LIMIT ?",
+                    (str(speaker_id), str(since or ""), max(1, int(limit))),
+                ).fetchall()
+            return [str(r[0]) for r in rows]
+        except Exception:
+            return []
 
     def search_topics(self, query: str, limit: int = 10, order: str = "recent",
                       group: str = "", tags: list[str] | None = None) -> list[dict[str, Any]]:
@@ -640,6 +657,10 @@ def get_topics_manager() -> ConversationTopicsManager:
 
 def record_narration(agent: Any, text: str) -> None:
     """Buffer a narration blurb on the agent for the next classification pass."""
+    # PR D: a turn that read members' private data narrates nothing into topics.
+    from captain_claw import member_privacy
+    if member_privacy.private_turn(agent):
+        return
     t = (text or "").strip()
     if not t:
         return
@@ -695,7 +716,11 @@ def _collect_new_messages(agent: Any, last_idx: int, cap: int) -> tuple[list[dic
         done_ids = _mgr.classified_msg_ids() | _mgr.seen_msg_ids()
     except Exception:
         done_ids = set()
+    from captain_claw import member_privacy
+
     for m in msgs[last_idx:]:
+        if member_privacy.is_private(m):
+            continue                     # PR D: members' private data
         role = m.get("role")
         if role not in ("user", "assistant"):
             continue
@@ -838,7 +863,11 @@ def refresh_topic(agent: Any, topic_id: str) -> dict[str, Any]:
     mgr = get_topics_manager()
     session_map: dict[str, str] = {}
     if agent.session and agent.session.messages:
+        from captain_claw import member_privacy
+
         for m in agent.session.messages:
+            if member_privacy.is_private(m):
+                continue                 # PR D: members' private data
             mid = str(m.get("message_id") or "")
             content = str(m.get("content") or "")
             if mid and content:
@@ -864,8 +893,12 @@ async def backfill_topics(agent: Any, hours: int = 0) -> dict[str, Any]:
     # classifier puts in no topic still counts as processed and isn't reprocessed).
     done_ids = mgr.classified_msg_ids() | mgr.seen_msg_ids()
 
+    from captain_claw import member_privacy
+
     pending: list[dict[str, Any]] = []
     for m in agent.session.messages:
+        if member_privacy.is_private(m):
+            continue                     # PR D: members' private data
         if m.get("role") not in ("user", "assistant"):
             continue
         content = str(m.get("content") or "").strip()

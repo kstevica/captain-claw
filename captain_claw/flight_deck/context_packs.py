@@ -23,7 +23,9 @@ agent's prompt through one file pair, ``shared_context.md`` and
 ``shared_context.compact.md``, next to ``tenant_context.md`` in the agent's
 config home; FD rewrites them on every route-driven change and a reconcile
 loop catches what FD only sees by polling. Folders and deep memory are
-resolved per call (the VFS route below, the deep-memory search route).
+resolved per call (the VFS route below, the deep-memory search route). The
+agent's members file (``shared_members.md``, PR D ``shared_usage``) is written
+and removed together with that pair.
 
 Off unless agent sharing is active (``FD_AGENT_SHARING`` + auth). Never logs a
 grant, a token, a pack root, a project path, a folder key or profile text.
@@ -64,6 +66,8 @@ MAX_VFS_PACKS_PER_OWNER = 5                              # per agent
 VFS_RESOLVE_MAX_ALIASES = 8
 SHARED_FULL_FILE = "shared_context.md"
 SHARED_COMPACT_FILE = "shared_context.compact.md"
+# PR D: the roster block (``shared_usage``) travels with the pack files.
+SHARED_MEMBERS_FILE = "shared_members.md"
 SHARED_FULL_MAX = 12_000
 SHARED_COMPACT_MAX = 1_200
 PROFILE_FULL_CAPS = {"about_me": 600, "company": 800}
@@ -947,13 +951,13 @@ def write_files(d: Path, full: str, compact: str) -> bool:
 
 
 def remove_files(agent_dir: Path, runtime: str) -> None:
-    """Remove the shared-context files where an agent of ``runtime`` reads
-    them. Never raises."""
+    """Remove the shared-context files (the members file included) where an
+    agent of ``runtime`` reads them. Never raises."""
     try:
         from captain_claw.flight_deck import tenant_profile
 
         d = tenant_profile.context_dir(Path(agent_dir), runtime)
-        for name in (SHARED_FULL_FILE, SHARED_COMPACT_FILE):
+        for name in (SHARED_FULL_FILE, SHARED_COMPACT_FILE, SHARED_MEMBERS_FILE):
             (d / name).unlink(missing_ok=True)
     except Exception as exc:
         log.warning("Could not remove an agent's shared-context files",
@@ -1000,7 +1004,8 @@ def slug_vacant(runtime: str, slug: str) -> bool:
 
 
 async def refresh_agent(db, ref: str, *, rec=None) -> bool:
-    """Rewrite agent ``ref``'s shared-context files from the packs in effect.
+    """Rewrite agent ``ref``'s shared-context files from the packs in effect,
+    and its members file (``shared_members.md``, PR D) from its live roster.
     An agent FD no longer knows is left alone (its slug's folder may hold
     another agent now). Fails closed: an error removes the files. True when
     anything changed.
@@ -1026,10 +1031,16 @@ async def refresh_agent(db, ref: str, *, rec=None) -> bool:
                 return False
             try:
                 full, compact = await compose(db, ref, rec)
+                from captain_claw.flight_deck import shared_usage
+
+                members = await shared_usage.compose_members_file(db, rec)
                 rec2 = await asyncio.to_thread(sharing.resolve_agent_record, ref)
                 if rec2 is None or rec2.ref != ref:
                     return False  # removed or respawned while composing: write nothing
-                return write_files(context_dir_for(rec.slug, rec.runtime), full, compact)
+                d = context_dir_for(rec.slug, rec.runtime)
+                changed = write_files(d, full, compact)
+                changed = shared_usage.write_members_file(d, members) or changed
+                return changed
             except Exception as exc:
                 remove_files(agent_dir, rec.runtime)
                 log.warning("Could not update an agent's shared context", agent=rec.slug,
@@ -1059,9 +1070,11 @@ async def refresh_refs(db, refs, *, records: dict | None = None) -> int:
 
 async def refresh_for_user(db, user_id: str) -> int:
     """A user's profile or display name changed: rewrite every agent where they
-    publish or own packs. Never raises."""
+    publish or own packs, and every agent they own or are a member of (their
+    name is in its members file, PR D). Never raises."""
     try:
-        refs = await db.list_context_pack_refs(user_id)
+        refs = (set(await db.list_context_pack_refs(user_id))
+                | set(await db.list_agent_share_refs(user_id)))
     except Exception as exc:
         log.warning("Could not list a user's shared-context agents", error=type(exc).__name__)
         return 0
@@ -1083,8 +1096,8 @@ def schedule_refresh(db, ref: str) -> None:
 
 async def reconcile(db) -> int:
     """FD startup, best-effort, never raises: remove the files of agents with
-    no packs (with sharing off: of every agent), then refresh every agent that
-    has packs."""
+    no packs and no members (with sharing off: of every agent), then refresh
+    every agent that has packs or members."""
     try:
         from captain_claw.flight_deck import agent_sharing as sharing
         from captain_claw.flight_deck import tenant_profile
@@ -1094,7 +1107,9 @@ async def reconcile(db) -> int:
             for runtime, agent_dir, _owner in agents:
                 await remove_files_locked(agent_dir, runtime)
             return 0
-        refs = await db.list_context_pack_refs()
+        # Agents with members get the members file even without packs (PR D).
+        refs = sorted(set(await db.list_context_pack_refs())
+                      | set(await db.list_agent_share_refs()))
         keep: set[tuple[str, str]] = set()
         for ref in refs:
             try:
@@ -1119,8 +1134,9 @@ _PREV_REFS: set[str] = set()
 
 async def reconcile_round(db) -> None:
     """One reconcile round: drop the packs of agents that are definitively gone
-    (or changed hands), and refresh every agent that has packs or had them last
-    round (a pack or a membership removed behind FD's back).
+    (or changed hands), and refresh every agent that has packs or members, or
+    had them last round (a pack or a membership added or removed behind FD's
+    back — the members file follows the live roster, PR D).
 
     FD's agent records are read ONCE for the round — the process registry and
     this deck's container listing — and every ref is resolved from that
@@ -1131,10 +1147,12 @@ async def reconcile_round(db) -> None:
 
     if not sharing.sharing_active():
         return
-    refs = set(await db.list_context_pack_refs())
-    records = await asyncio.to_thread(sharing.resolve_agent_records, refs | _PREV_REFS,
-                                      strict=True)
-    for ref in sorted(refs):
+    pack_refs = set(await db.list_context_pack_refs())
+    member_refs = set(await db.list_agent_share_refs())
+    records = await asyncio.to_thread(sharing.resolve_agent_records,
+                                      pack_refs | member_refs | _PREV_REFS, strict=True)
+    # Pack deletion and file removal: agents with packs only (unchanged).
+    for ref in sorted(pack_refs):
         if ref not in records:
             continue  # can't tell right now: next round
         rec = records[ref]
@@ -1149,7 +1167,7 @@ async def reconcile_round(db) -> None:
                          agent=rec.slug)
             continue
         await db.delete_context_packs_for_agent(ref)
-        refs.discard(ref)
+        pack_refs.discard(ref)
         try:
             runtime, slug, _inst = sharing.parse_ref(ref)
         except ValueError:
@@ -1157,8 +1175,8 @@ async def reconcile_round(db) -> None:
         if await asyncio.to_thread(slug_vacant, runtime, slug):
             await remove_files_locked(srv.DATA_DIR / slug, runtime)
         log.info("Dropped the shared context of a removed agent", agent=slug)
-    await refresh_refs(db, refs | _PREV_REFS, records=records)
-    _PREV_REFS = refs
+    await refresh_refs(db, pack_refs | member_refs | _PREV_REFS, records=records)
+    _PREV_REFS = pack_refs | member_refs
 
 
 async def reconcile_loop(db, stop: asyncio.Event) -> None:

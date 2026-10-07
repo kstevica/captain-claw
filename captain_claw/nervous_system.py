@@ -874,7 +874,9 @@ async def dream(agent: Agent, *, source_trigger: str = "dream") -> list[dict[str
     # 1. Sample working memory — last 10 messages.
     recent_text = ""
     if agent.session and agent.session.messages:
-        msgs = agent.session.messages[-10:]
+        # PR D: members' private data never feeds shared intuitions.
+        from captain_claw import member_privacy
+        msgs = member_privacy.learnable(agent.session.messages)[-10:]
         lines: list[str] = []
         for m in msgs:
             role = m.get("role", "unknown")
@@ -911,7 +913,8 @@ async def dream(agent: Agent, *, source_trigger: str = "dream") -> list[dict[str
             # Extract a few key phrases from recent messages for queries.
             query_text = ""
             if agent.session and agent.session.messages:
-                last_msgs = agent.session.messages[-5:]
+                from captain_claw import member_privacy
+                last_msgs = member_privacy.learnable(agent.session.messages)[-5:]
                 query_text = " ".join(
                     str(m.get("content", ""))[:100]
                     for m in last_msgs if m.get("role") == "user"

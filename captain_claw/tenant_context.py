@@ -101,6 +101,24 @@ def load_shared_context(compact: bool) -> str:
     return ""
 
 
+# Who the agent is shared with (PR D): Flight Deck composes a short roster
+# block for the OWNER's instances (never inserted on a member instance) and
+# deletes the file when the agent has no live member. Its presence also lists
+# the ``shared_agent_usage`` tool (tools/registry.py).
+SHARED_MEMBERS_FILENAME = "shared_members.md"
+
+
+def load_shared_members() -> str:
+    """Return the shared-members block for the owner's prompt ("" when none).
+
+    Same home lookup, mtime cache and size guard as the other loaders."""
+    try:
+        base = Path.home() / ".captain-claw"
+    except RuntimeError:  # no resolvable home directory
+        return ""
+    return _read_cached(base / SHARED_MEMBERS_FILENAME)
+
+
 def use_compact_tenant_context(*, micro: bool, nano: bool) -> bool:
     """Compact block for the micro/nano templates and for orchestrated
     workers (Council/Basna/Vatra teammates, bound via ``CLAW_VFS_PROJECT``)."""

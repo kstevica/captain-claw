@@ -86,6 +86,15 @@ class Session:
             msg["system_hint"] = system_hint
         if reasoning_content:
             msg["reasoning_content"] = reasoning_content
+        # PR D: text from a turn that read members' private data keeps its flag wherever it lands
+        # (delegate/consult results, sister and orchestrator output, notifications).
+        try:
+            from captain_claw import member_privacy
+            if (not str((self.metadata or {}).get("speaker_id") or "").strip()
+                    and member_privacy.header_level(content)):
+                msg[member_privacy.FLAG] = True
+        except Exception:
+            pass
         self.messages.append(msg)
         self.updated_at = _utcnow_iso()
         return message_id

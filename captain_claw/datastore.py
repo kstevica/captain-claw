@@ -718,6 +718,67 @@ class DatastoreManager:
                 continue
         return False
 
+    # ── PR D: what members created, for the owner's agent (read-only) ──
+
+    async def creator_summary(self, user_ids: Any) -> dict[str, dict]:
+        """For every id: ``{"tables": [names they created, sorted], "rows":
+        {table: n > 0}}`` — the rows counted through the creator index, only in
+        tables that carry the PR C system columns. No write lock, no actor
+        checks: read-only, for the owner's ``shared_agent_usage``."""
+        ids = [str(u) for u in (user_ids or ()) if str(u or "")]
+        out: dict[str, dict] = {u: {"tables": [], "rows": {}} for u in ids}
+        if not ids:
+            return out
+        await self._ensure_db()
+        assert self._db is not None
+        marks = ",".join("?" * len(ids))
+        async with self._db.execute(
+            f"SELECT name, created_by FROM _ds_tables WHERE created_by IN ({marks}) ORDER BY name",
+            ids,
+        ) as cur:
+            for name, created_by in await cur.fetchall():
+                out[str(created_by)]["tables"].append(str(name))
+        async with self._db.execute("SELECT name FROM _ds_tables ORDER BY name") as cur:
+            names = [str(r[0]) for r in await cur.fetchall()]
+        for name in names:
+            internal = self._internal_name(name)
+            try:
+                if not await self._sys_cols_present(internal):
+                    continue
+                async with self._db.execute(
+                    f'SELECT "_created_by", COUNT(*) FROM "{internal}" '
+                    f'WHERE "_created_by" IN ({marks}) GROUP BY "_created_by"',
+                    ids,
+                ) as cur:
+                    for uid, n in await cur.fetchall():
+                        if int(n or 0) > 0 and str(uid) in out:
+                            out[str(uid)]["rows"][name] = int(n)
+            except Exception:
+                continue
+        return out
+
+    async def rows_created_by(self, table: str, user_id: str, limit: int) -> tuple[list[dict], int]:
+        """``(rows, total)``: the newest *limit* rows *user_id* added to
+        *table* (system columns left out) and how many they added in all.
+        Raises ``ValueError`` for an unknown table (read-only, no actor checks)."""
+        safe, internal = await self._resolve_table(table)
+        assert self._db is not None
+        if not user_id or not await self._sys_cols_present(internal):
+            return [], 0
+        async with self._db.execute(
+            f'SELECT COUNT(*) FROM "{internal}" WHERE "_created_by" = ?', (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        total = int(row[0]) if row else 0
+        async with self._db.execute(
+            f'SELECT * FROM "{internal}" WHERE "_created_by" = ? ORDER BY rowid DESC LIMIT ?',
+            (user_id, max(1, int(limit))),
+        ) as cur:
+            cols = [d[0] for d in cur.description or ()]
+            rows = await cur.fetchall()
+        out = [{c: v for c, v in zip(cols, r) if c not in SYSTEM_COLUMNS} for r in rows]
+        return out, total
+
     # ── table management ─────────────────────────────────────────────
 
     async def list_tables(self) -> list[TableInfo]:

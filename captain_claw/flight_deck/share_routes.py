@@ -164,6 +164,15 @@ async def create_resource_share(body: ShareCreate, user: dict = Depends(get_curr
     share = await db.create_share(
         body.resource_type, body.resource_id, user["id"], body.grantee_id, perm
     )
+    if is_agent:
+        # PR D: the agent's members file names its current members.
+        try:
+            from captain_claw.flight_deck import context_packs
+
+            await context_packs.refresh_agent(db, body.resource_id)
+        except Exception as exc:
+            log.warning("Could not update a shared agent's member list",
+                        error=type(exc).__name__)
     # Tell the grantee (persistent bell notification).
     try:
         sharer = user.get("display_name") or user.get("email") or "A teammate"

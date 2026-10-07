@@ -838,6 +838,12 @@ async def lifespan(app: FastAPI):
         # members can now open those agents' saved/ folders and datastores.
         app.state.shared_workspace_notice = asyncio.create_task(
             shared_workspace.notify_owners_of_commons_once(_fd_db))
+        # PR D: once per deck, tell members of shared agents that the owner's
+        # agent can now look into their use of it.
+        from captain_claw.flight_deck import shared_usage as _shared_usage
+
+        app.state.shared_usage_notice = asyncio.create_task(
+            _shared_usage.notify_members_once(_fd_db))
     if AUTH_ENABLED:
         app.state.fd_db = _fd_db
         # Persist the owning user id into the project-local .env so the
@@ -1322,6 +1328,7 @@ from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck.agent_sharing_routes import router as agent_sharing_router
 from captain_claw.flight_deck.context_pack_routes import router as context_pack_router
 from captain_claw.flight_deck.shared_workspace_routes import router as shared_workspace_router
+from captain_claw.flight_deck.shared_usage_routes import router as shared_usage_router
 from captain_claw.flight_deck.notification_routes import router as notification_router
 from captain_claw.flight_deck.mcp_server_routes import router as mcp_inbound_router
 from captain_claw.flight_deck.mcp_oauth_routes import router as mcp_oauth_router
@@ -1380,6 +1387,7 @@ app.include_router(share_router)
 app.include_router(agent_sharing_router)
 app.include_router(context_pack_router)
 app.include_router(shared_workspace_router)
+app.include_router(shared_usage_router)
 app.include_router(notification_router)
 app.include_router(mcp_inbound_router)
 app.include_router(mcp_oauth_router)
@@ -4573,6 +4581,7 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
         return {
             "matched": True, "flow": _flow.get("name"),
             "run_id": _result.get("run_id"), "output": _result.get("output") or "",
+            **_flow_private_field(_result),
         }
 
     # 1. Resume a paused flow first: if one is waiting on an `input` step for
@@ -4601,7 +4610,17 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
     return {
         "matched": True, "flow": flow.get("name"),
         "run_id": result.get("run_id"), "output": result.get("output") or "",
+        **_flow_private_field(result),
     }
+
+
+def _flow_private_field(result: dict[str, Any]) -> dict[str, str]:
+    """PR D: ``{"member_private": level}`` when an inline flow run returned
+    members' private data, else ``{}``. The output stays plain (a person reads
+    it); the agent relaying it marks its reply frame with the level, so a
+    consult / delegate that triggered the flow still gets the header."""
+    _lvl = (result or {}).get("member_private")
+    return {"member_private": _lvl} if _lvl in ("data", "content") else {}
 
 
 # ── Flow DSL: text <-> flow, and agent-assisted NL -> flow ──────────────
@@ -4898,6 +4917,13 @@ async def fd_flows_synthesize(request: Request, user: dict | None = _required_us
         out["run_id"] = result.get("run_id")
         out["status"] = result.get("status")
         out["output"] = result.get("output") or ""
+        _lvl = result.get("member_private")
+        if _lvl in ("data", "content"):
+            out["member_private"] = _lvl
+            if "author" in body:
+                # PR D: the synthesize_flow tool (it always sends `author`; the
+                # UI never does) hands the output to its agent — header first.
+                out["output"] = _private_relay_header(_lvl) + "\n" + out["output"]
     return out
 
 
@@ -5388,6 +5414,26 @@ _active_consults: dict[int, str] = {}  # target_port -> source_name
 _active_delegates: set[tuple[int, int]] = set()  # (source_port, target_port) in-flight
 
 
+def _private_relay_level(current: str, marked: Any) -> str:
+    """PR D (part 0 §5.4): the privacy level of a peer's reply so far — a final
+    assistant frame marked ``"member_private": "data" | "content"`` raises it
+    (content beats data); anything else leaves it as it was."""
+    if current == "content" or (isinstance(marked, str) and marked == "content"):
+        return "content"
+    if current == "data" or (isinstance(marked, str) and marked == "data"):
+        return "data"
+    return ""
+
+
+def _private_relay_header(level: str) -> str:
+    """The header a member-private peer reply carries when FD relays it to
+    another agent (``member_privacy.header_for``; imported here so FD loads
+    without it — only a peer that marks its replies needs it)."""
+    from captain_claw import member_privacy
+
+    return member_privacy.header_for(level)
+
+
 async def _consult_peer_events(
     host: str, port: int, auth: str, message: str, *,
     source_name: str = "another agent", timeout: float = 480.0,
@@ -5396,7 +5442,10 @@ async def _consult_peer_events(
 ):
     """Consult the agent at ``host:port`` (authenticated with ``auth``) and yield
     its intermediate events, then a final ``{"ok": True, "done": True, ...}`` or
-    ``{"ok": False, "error": ...}`` dict.
+    ``{"ok": False, "error": ...}`` dict. A reply the peer marked member-private
+    adds ``"member_private": "data" | "content"`` to the final dict; the
+    response itself stays plain (callers that relay it to an agent add
+    ``_private_relay_header``; FlowRunner's outputs can reach a person).
 
     No authorization here: the caller vouches for the target. /fd/consult-peer
     resolves host/port/auth from FD's records after `_resolve_peer_caller`; the
@@ -5459,6 +5508,7 @@ async def _consult_peer_events(
 
             # Stream events until we get the final assistant response
             response_parts: list[str] = []
+            relay_level = ""  # PR D: the peer marked its reply member-private
             final_usage: dict | None = None  # trailing LLM-usage summary
             deadline = asyncio.get_event_loop().time() + timeout
             recv_interval = 15.0  # heartbeat every 15s of silence
@@ -5488,6 +5538,7 @@ async def _consult_peer_events(
                     content = msg.get("content", "")
                     if content:
                         response_parts.append(content)
+                    relay_level = _private_relay_level(relay_level, msg.get("member_private"))
                     # The agent emits a `usage` summary (model + token counts)
                     # right AFTER the final reply. Drain briefly to capture it
                     # so the done payload can carry per-turn LLM usage; bail the
@@ -5526,6 +5577,11 @@ async def _consult_peer_events(
             "done": True,
             "response": "\n".join(response_parts) if response_parts else "(no response)",
         }
+        if relay_level:
+            # PR D: the level only — the agent-facing header is added by the
+            # agent-to-agent relays (/fd/consult-peer, FlowRunner's next agent
+            # step), never to a flow output a human receives.
+            _done["member_private"] = relay_level
         if final_usage is not None:
             _done["usage"] = final_usage  # per-turn LLM token usage for the caller
         yield _done
@@ -5561,6 +5617,10 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
             deny_tools=req.deny_tools, no_broadcast=req.no_broadcast,
         )) as events:
             async for evt in events:
+                _lvl = evt.get("member_private") if evt.get("done") else ""
+                if _lvl in ("data", "content"):
+                    # Header first, so the receiving agent flags the relayed text too.
+                    evt = {**evt, "response": _private_relay_header(_lvl) + "\n" + str(evt.get("response") or "")}
                 yield json.dumps(evt) + "\n"
 
     return StreamingResponse(_event_stream(), media_type="application/x-ndjson")
@@ -5638,6 +5698,7 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
         t_params = f"?token={target_auth}" if target_auth else ""
         target_url = f"ws://{_PEER_AGENT_HOST}:{target_port}/ws{t_params}"
         response_text = ""
+        relay_level = ""  # PR D: the target marked its reply member-private
         try:
             async with websockets.connect(target_url, max_size=4 * 1024 * 1024) as ws:
                 welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
@@ -5685,6 +5746,7 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
                         msg_type = msg.get("type", "")
                         if msg_type == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
                             response_text = msg.get("content", "(no response)")
+                            relay_level = _private_relay_level(relay_level, msg.get("member_private"))
                             log.info("delegate_background: got response from target",
                                      target=peer_display, response_len=len(response_text))
                             break
@@ -5725,6 +5787,10 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
             f"Do NOT delegate again, do NOT call any tool, and do NOT say you are "
             f"still waiting — you already have the result below:\n\n{response_text}"
         )
+        if relay_level:
+            # Header first (within the receiving agent's header scan), so the
+            # source agent flags the delegated result as member-private too.
+            callback_msg = _private_relay_header(relay_level) + "\n" + callback_msg
         log.info("delegate_background: delivering result to source",
                  source=req.source_name, source_port=source_port, result_len=len(response_text))
         try:

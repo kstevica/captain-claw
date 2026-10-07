@@ -964,7 +964,9 @@ async def extract_insights(
     # 1. Gather recent session messages.
     recent_text = ""
     if agent.session and agent.session.messages:
-        msgs = agent.session.messages[-15:]
+        # PR D: members' private data never feeds shared insights.
+        from captain_claw import member_privacy
+        msgs = member_privacy.learnable(agent.session.messages)[-15:]
         lines: list[str] = []
         for m in msgs:
             role = m.get("role", "unknown")

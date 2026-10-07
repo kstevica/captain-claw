@@ -149,7 +149,9 @@ async def _generate(agent: "Agent", cap: int) -> int:
     # ── Signals ──────────────────────────────────────────────────────
     recent = ""
     try:
-        msgs = (agent.session.messages or [])[-15:]
+        # PR D: members' private data never feeds proposals.
+        from captain_claw import member_privacy
+        msgs = member_privacy.learnable(agent.session.messages or [])[-15:]
         lines = []
         for m in msgs:
             role = m.get("role", "")

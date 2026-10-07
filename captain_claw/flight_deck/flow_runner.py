@@ -42,6 +42,43 @@ class _FlowStopped(Exception):
     """Raised at a step boundary to unwind the whole frame stack on stop."""
 
 
+def _private_level(current: str, marked: Any) -> str:
+    """PR D: a run's member-private level so far — an agent step whose reply
+    the peer marked ``"data" | "content"`` raises it (content beats data);
+    anything else leaves it as it was."""
+    if current == "content" or marked == "content":
+        return "content"
+    if current == "data" or marked == "data":
+        return "data"
+    return ""
+
+
+def _private_header(level: str) -> str:
+    """The agent-facing header for *level* (``member_privacy.header_for``,
+    imported lazily as the server does). Only ever put in front of a prompt to
+    another agent — never into an output a human receives."""
+    from captain_claw import member_privacy
+
+    return member_privacy.header_for(level)
+
+
+def _take_header(text: str) -> tuple[str, str]:
+    """PR D: ``(level, text)`` for a step's raw output. A header within the
+    agent's header scan (a tool step that ran ``shared_agent_usage`` /
+    ``history``, a reply that kept one) gives its level; one at the very start
+    is cut off, so what the flow may deliver to a person carries no
+    agent-facing header — the run keeps the level for later agent steps."""
+    from captain_claw import member_privacy
+
+    level = member_privacy.header_level(text)
+    if level:
+        for h in (member_privacy.PRIVATE_HEADER, member_privacy.MEMBER_DATA_HEADER):
+            if text.startswith(h):
+                text = text[len(h):].lstrip("\n")
+                break
+    return level, text
+
+
 class _Root:
     """State shared across every frame of one logical run (the call tree).
 
@@ -50,7 +87,8 @@ class _Root:
     one ordered, depth-tagged timeline."""
 
     __slots__ = ("run_id", "control", "trace", "budget", "depth_cap", "dry",
-                 "arch_agents", "arch_slugs", "arch_lock", "owner_id", "is_admin", "scope")
+                 "arch_agents", "arch_slugs", "arch_lock", "owner_id", "is_admin", "scope",
+                 "member_private")
 
     def __init__(self, run_id: str, control: "_RunControl | None", dry: bool,
                  budget: dict[str, int], depth_cap: int, *, owner_id: str = "",
@@ -74,6 +112,11 @@ class _Root:
         self.owner_id = owner_id
         self.is_admin = is_admin
         self.scope = scope
+        # PR D: "" | "data" | "content" — an agent step of this run returned a
+        # reply its peer marked member-private. Every LATER agent step's prompt
+        # then starts with the matching header (its prompt may embed that
+        # output); deliveries to humans never carry it.
+        self.member_private = ""
 
 
 class _RunControl:
@@ -837,7 +880,9 @@ class FlowRunner:
                 return f"(tool {tool} failed: HTTP {resp.status_code} {resp.text[:200]})", agent.get("name", "")
             data = resp.json() or {}
             out = data.get("content") if data.get("success") else f"(error: {data.get('error')})"
-            return str(out or ""), agent.get("name", "")
+            _lvl, out = _take_header(str(out or ""))
+            root.member_private = _private_level(root.member_private, _lvl)
+            return out, agent.get("name", "")
         except Exception as exc:
             return f"(tool {tool} dispatch failed: {exc})", agent.get("name", "")
 
@@ -914,6 +959,11 @@ class FlowRunner:
                 f"Constraints: do NOT use these tools this turn: {', '.join(deny)}. "
                 f"Do not write or run scripts. Answer directly.\n\n{prompt}"
             )
+        if root.member_private:
+            # PR D: an earlier step returned members' private data — header
+            # first (within the receiving agent's header scan, whatever the
+            # template puts before {{step.output}}).
+            prompt = _private_header(root.member_private) + "\n" + prompt
         if self.consult_peer is None:
             return "(agent step unavailable: no consult seam)", agent.get("name", "")
         # Progress breadcrumb: name the specialist working this step so a long /
@@ -937,7 +987,9 @@ class FlowRunner:
             async with contextlib.aclosing(events):
                 async for evt in events:
                     if evt.get("done") and evt.get("ok"):
-                        final = str(evt.get("response") or "")
+                        _lvl, final = _take_header(str(evt.get("response") or ""))
+                        root.member_private = _private_level(
+                            _private_level(root.member_private, evt.get("member_private")), _lvl)
                         # Surface the peer's LLM token usage as an activity
                         # entry, attributed to the specialist (no clobbering of
                         # the origin agent's own context meter).
@@ -1040,9 +1092,15 @@ class FlowRunner:
         url = f"http://{agent['host']}:{agent['port']}/api/chat/push"
         token = agent.get("auth") or (self.resolve_auth(int(agent["port"])) if self.resolve_auth else "")
         params = {"token": token} if token else {}
+        body: dict[str, Any] = {"text": text, "role": role}
+        if root is not None and root.member_private:
+            # PR D: the level only (the person sees no header); the agent marks
+            # the pushed frame, so a consult / delegate waiting on that socket
+            # relays it with the header.
+            body["member_private"] = root.member_private
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, params=params, json={"text": text, "role": role})
+                resp = await client.post(url, params=params, json=body)
             return resp.status_code == 200
         except Exception as exc:
             log.warning("flow deliver (agent push) failed: %s", exc)
@@ -1219,10 +1277,15 @@ class FlowRunner:
     @staticmethod
     def _child_context(root: "_Root | None") -> dict[str, Any]:
         """A spawned run acts as its parent's owner (a legacy, ownerless parent
-        passes none, so the child acts as its own flow's owner)."""
+        passes none, so the child acts as its own flow's owner). It also
+        inherits the parent's member-private level (PR D): its args may embed
+        the parent's step outputs."""
         if root is None:
             return {}
-        return {"owner_id": root.owner_id or None, "is_admin": root.is_admin}
+        ctx: dict[str, Any] = {"owner_id": root.owner_id or None, "is_admin": root.is_admin}
+        if root.member_private:
+            ctx["member_private"] = root.member_private
+        return ctx
 
     def _guard_cross_space(self, caller_origin: str, target: dict[str, Any], name: str, verb: str) -> str:
         """Return a block message if a synthesized (agent) flow tries to call a
@@ -1286,6 +1349,7 @@ class FlowRunner:
             try:
                 # shield: a join timeout/stop must not cancel the spawned run.
                 result = await asyncio.wait_for(asyncio.shield(task), timeout=poll)
+                root.member_private = _private_level(root.member_private, (result or {}).get("member_private"))
                 st = str((result or {}).get("status") or "done")
                 out = str((result or {}).get("output") or "")
                 return out, f"join:{jid}", ("done" if st in ("done", "returned") else st)
@@ -1333,6 +1397,7 @@ class FlowRunner:
                     continue
                 try:
                     r = await asyncio.wait_for(asyncio.shield(tk), timeout=timeout)
+                    root.member_private = _private_level(root.member_private, (r or {}).get("member_private"))
                     results.append(str((r or {}).get("output") or ""))
                 except Exception:
                     results.append("")
@@ -1641,9 +1706,10 @@ class FlowRunner:
 
     async def run(self, flow: dict[str, Any], payload: dict[str, Any] | None = None, *, dry: bool = False,
                   run_id: str | None = None, owner_id: str | None = None,
-                  is_admin: bool = False) -> dict[str, Any]:
+                  is_admin: bool = False, member_private: str = "") -> dict[str, Any]:
         """Run *flow*. `owner_id`/`is_admin` say who the run acts as (a route's
-        user; a scheduler job's owner); omitted, it acts as the flow's owner."""
+        user; a scheduler job's owner); omitted, it acts as the flow's owner.
+        `member_private` is a spawning run's level (PR D), inherited."""
         payload = payload or {}
         owner, admin, explicit = await self._run_context(flow, owner_id, is_admin)
         scope = self._scope_for(owner, admin)
@@ -1662,6 +1728,7 @@ class FlowRunner:
         depth_cap = int(guard.get("max_depth", _DEFAULT_MAX_DEPTH))
         root = _Root(run_id=run_id, control=ctrl, dry=dry, budget=budget, depth_cap=depth_cap,
                      owner_id=owner, is_admin=admin, scope=scope)
+        root.member_private = _private_level("", member_private)
 
         status = "done"
         error = ""
@@ -1726,7 +1793,10 @@ class FlowRunner:
                         await rec(flow["id"], status == "done")
                     except Exception as exc:
                         log.warning("scratch outcome record failed: %s", exc)
-        return {"run_id": run_id, "status": status, "error": error, "steps": root.trace, "output": final_text}
+        run_result = {"run_id": run_id, "status": status, "error": error, "steps": root.trace, "output": final_text}
+        if root.member_private:
+            run_result["member_private"] = root.member_private  # a joining parent carries it on
+        return run_result
 
 
 # ── Branch condition evaluator ─────────────────────────────────────────

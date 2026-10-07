@@ -24,6 +24,10 @@ interface SharedAgentState {
    *  (the commons panels). False on an older deck or with sharing off — every
    *  member panel and notice paragraph hides (chat-only, as before). */
   memberWorkspace: boolean
+  /** Flight Deck tells members and owners that an owner's agent can look into
+   *  members' use (PR D). False on an older deck or with sharing off — the
+   *  notice paragraphs hide. */
+  sharedUsage: boolean
   loaded: boolean
   fetch: () => Promise<void>
   /** A member turns their Google on/off for one agent shared with them.
@@ -42,6 +46,7 @@ export const useSharedAgentStore = create<SharedAgentState>((set, get) => ({
   mine: {},
   contextPacks: false,
   memberWorkspace: false,
+  sharedUsage: false,
   loaded: false,
 
   fetch: async () => {
@@ -62,6 +67,7 @@ export const useSharedAgentStore = create<SharedAgentState>((set, get) => ({
         mine: sameMine ? cur.mine : mine,
         contextPacks: enabled && r.context_packs === true,
         memberWorkspace: enabled && r.member_workspace === true,
+        sharedUsage: enabled && r.shared_usage === true,
         loaded: true,
       })
     } catch {

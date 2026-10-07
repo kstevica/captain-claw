@@ -175,6 +175,18 @@ class PlaybooksTool(Tool):
             if action == "remove":
                 return await self._remove(sm, playbook_id)
             if action == "rate":
+                # PR D: the owner can't rate (and distill) a member's private
+                # conversation; a member's own call is pinned to their session
+                # by the speaker rules and keeps today's path.
+                from captain_claw.speaker import principal_for
+
+                if principal_for(kwargs.get("_agent")) is None and _session_id:
+                    target = await sm.load_session(_session_id)
+                    meta = getattr(target, "metadata", None) if target is not None else None
+                    if isinstance(meta, dict) and str(meta.get("speaker_id") or "").strip():
+                        from captain_claw.member_privacy import MEMBER_SESSION_RATE_MESSAGE
+
+                        return ToolResult(success=False, error=MEMBER_SESSION_RATE_MESSAGE)
                 return await self._rate(_session_id, rating, note)
             return ToolResult(success=False, error=f"Unknown action: {action}")
         except Exception as e:

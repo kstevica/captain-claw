@@ -60,27 +60,107 @@ class SessionHistoryTool(Tool):
         memory = getattr(getattr(self, "_agent", None), "memory", None)
         if memory is None:
             return ToolResult(success=False, error="History memory is not available in this session.")
+        agent = kwargs.get("_agent") or getattr(self, "_agent", None)
         try:
             n = int(limit) if limit else 10
             if action == "search":
                 if not (query or "").strip():
                     return ToolResult(success=False, error="'query' is required for search.")
                 results = memory.search_history(query, max_results=n)
-                return ToolResult(success=True, content=_fmt_results(results, query or ""))
+                snaps = {str(getattr(r, "reference", "")): memory.get_history(
+                    str(getattr(r, "reference", ""))) for r in results}
+                keep, private = await _member_filter(
+                    agent, {ref: s for ref, s in snaps.items() if s})
+                results = [r for r in results if str(getattr(r, "reference", "")) in keep]
+                return ToolResult(success=True, content=_private_prefix(
+                    agent, private, _fmt_results(results, query or "")))
             if action == "list":
                 rows = memory.list_history(limit=n)
-                return ToolResult(success=True, content=_fmt_list(rows))
+                keep, private = await _member_filter(
+                    agent, {str(r.get("history_id")): r for r in rows})
+                rows = [r for r in rows if str(r.get("history_id")) in keep]
+                return ToolResult(success=True, content=_private_prefix(agent, private, _fmt_list(rows)))
             if action == "get":
                 if not (history_id or "").strip():
                     return ToolResult(success=False, error="'history_id' is required for get.")
                 snap = memory.get_history(history_id)
+                if snap:
+                    keep, private = await _member_filter(agent, {str(snap.get("history_id")): snap})
+                    if str(snap.get("history_id")) not in keep:
+                        snap = None
                 if not snap:
                     return ToolResult(success=False, error=f"No snapshot found for {history_id!r}.")
-                return ToolResult(success=True, content=_fmt_snapshot(snap))
+                return ToolResult(success=True, content=_private_prefix(
+                    agent, private, _fmt_snapshot(snap)))
             return ToolResult(success=False, error=f"Unknown action: {action}")
         except Exception as e:
             log.error("History tool error", action=action, error=str(e))
             return ToolResult(success=False, error=str(e))
+
+
+async def _member_filter(agent: Any, snaps: dict[str, dict[str, Any]]) -> tuple[set[str], bool]:
+    """PR D (J19): which snapshots (history_id → row with ``session_id`` and
+    ``created_at``) the owner's ``history`` may return, and whether any of
+    them is a current member's (the turn then reads members' private text).
+
+    The owner's own snapshots are kept unchanged; a member's only while they
+    are a current member and it was archived since their current
+    ``shared_at``. Any doubt — Flight Deck unreachable, an unreadable session
+    store — drops member snapshots (every snapshot when the store fails)."""
+    from captain_claw import shared_usage
+    from captain_claw.speaker import principal_for
+
+    if principal_for(agent) is not None:
+        return set(snaps), False            # members never have this tool
+    try:
+        speakers = await shared_usage.speakers_of(
+            {str(s.get("session_id") or "") for s in snaps.values()})
+    except Exception:
+        log.warning("History snapshots hidden: session owners unknown")
+        return set(), False
+    keep: set[str] = set()
+    member_snaps: dict[str, str] = {}
+    for ref, snap in snaps.items():
+        spk = speakers.get(str(snap.get("session_id") or ""), "")
+        if spk:
+            member_snaps[ref] = spk
+        else:
+            keep.add(ref)
+    if not member_snaps:
+        return keep, False
+    scope, ok = await shared_usage.member_scope(agent)
+    private = False
+    if ok:
+        # A snapshot is the flattened text of the messages it froze, without
+        # their times: one taken after a re-share (leave → re-add, owner
+        # change) from a session that began before it may hold messages from
+        # the earlier membership. Only sessions begun since the current
+        # shared_at qualify (J16, fail closed).
+        try:
+            began = await shared_usage.sessions_created_at(
+                {str(snaps[ref].get("session_id") or "") for ref in member_snaps})
+        except Exception:
+            log.warning("History snapshots hidden: session start unknown")
+            began = {}
+        for ref, spk in member_snaps.items():
+            m = scope.get(spk)
+            since = shared_usage.since_of(m) if m is not None else None
+            created = shared_usage._parse_ts(snaps[ref].get("created_at"))
+            started = shared_usage._parse_ts(began.get(str(snaps[ref].get("session_id") or "")))
+            if (since is not None and created is not None and created >= since
+                    and started is not None and started >= since):
+                keep.add(ref)
+                private = True
+    return keep, private
+
+
+def _private_prefix(agent: Any, private: bool, text: str) -> str:
+    if not private:
+        return text
+    from captain_claw import member_privacy
+
+    member_privacy.mark_private_read(agent, member_privacy.LEVEL_CONTENT)
+    return member_privacy.PRIVATE_HEADER + "\n" + text
 
 
 def _fmt_results(results: list[Any], query: str) -> str:
