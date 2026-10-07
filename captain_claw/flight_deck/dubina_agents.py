@@ -33,6 +33,10 @@ _DEFAULT_TIMEOUT = 300.0
 # A dispatch closure: ``async (prompt) -> reply_text``.
 Dispatch = Callable[[str], Awaitable[str]]
 
+# Every Dubina step / self-consistency sample is an LLM-written prompt: an
+# automated turn that may never write email (part 0 §4, kind ``fd_worker``).
+_DUBINA_AUTOMATION: dict[str, str] = {"kind": "fd_worker", "job_text": "", "mail_write": "deny"}
+
 
 def _prompt_from_messages(messages: list[Message]) -> str:
     """Flatten the generator's system+user messages into one prompt for an agent.
@@ -67,6 +71,7 @@ async def _real_send(port: int, token: str, prompt: str, timeout: float,
         port, token, prompt, timeout,
         fleet_instructions=fleet_instructions, agent_name=agent_name,
         on_action=on_action, on_usage=on_usage, on_status=on_status, usage_sink=sink,
+        automation=dict(_DUBINA_AUTOMATION),
     )
     # Count this rollout's spend + duration toward the active run (Deep-mode samples).
     _record_run_usage(sink.get("model", ""), sink, _time.monotonic() - _t0)

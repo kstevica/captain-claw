@@ -4536,6 +4536,18 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
     if not flow_router.engine_ready():
         return {"matched": False}
     raw = await request.json()
+    # An automated agent turn (autonomy nudge, scheduler prompt, peer relay,
+    # MCP task…) started this: its text is not a person's message, so it never
+    # counts as a request to write email (flow_runner._human_trigger_text). Its
+    # own mail authority comes along too: a ``deny`` turn starts a run whose
+    # every step denies email (flow_runner._root_mail_ctx) — no escalation.
+    _auto: dict[str, str] = {}
+    if isinstance(raw.get("automated"), str) and raw.get("automated"):
+        _auto["automated"] = str(raw["automated"])[:32]
+    if raw.get("automated_mail_write") is not None:
+        _amw = str(raw["automated_mail_write"]).strip().lower()
+        # Present but malformed fails closed, like the agent's own wire parser.
+        _auto["automated_mail_write"] = _amw if _amw in ("deny", "intent", "allow") else "deny"
     payload = flow_router.classify_payload(
         channel=str(raw.get("channel") or "web"),
         text=str(raw.get("text") or ""),
@@ -4547,6 +4559,7 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
         origin_host=str(raw.get("origin_host") or "localhost"),
         origin_port=int(raw.get("origin_port") or 0),
         origin_name=str(raw.get("origin_name") or ""),
+        extra=_auto or None,
     )
     # 0. Flow control command ('/flow stop|pause|resume', slash optional) —
     #    intercept before treating the message as input or a new trigger.
@@ -4587,7 +4600,10 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
     # 1. Resume a paused flow first: if one is waiting on an `input` step for
     #    this channel+agent, this message is the reply — feed it and stop (the
     #    flow continues in the background and delivers via the channel).
-    if flow_router.deliver_pending_input(
+    #    Only a person's message is a reply: an automated turn's text (autonomy
+    #    nudge, peer relay, scheduler prompt…) never answers an `input` step or
+    #    satisfies a `wait until` gate a flow put in front of the user.
+    if not _auto and flow_router.deliver_pending_input(
         waid=payload.get("waid", ""), channel=payload.get("channel", ""),
         origin_port=int(payload.get("origin_port") or 0), text=payload.get("text", ""),
     ):
@@ -5407,6 +5423,16 @@ class ConsultPeerRequest(BaseModel):
     # reply to its own channels/UI). Prevents double-delivery when a flow step
     # runs on a channel-connected agent (e.g. the WhatsApp origin agent).
     no_broadcast: bool = False
+    # The human-written text that may authorize the target to write email this
+    # turn (the caller's narrower of its question and its originating human
+    # message / job text); "" = it may not. Stamped as the ``peer`` marker.
+    mail_intent_text: str = ""
+
+
+def _peer_automation(text: str) -> dict[str, Any]:
+    """The ``automation`` marker on a peer consult/delegate chat frame: an
+    automated turn, judged on the caller-forwarded ``mail_intent_text``."""
+    return {"kind": "peer", "job_text": str(text or "")[:4000], "mail_write": "intent"}
 
 
 # Track active consultations to prevent duplicate requests to the same target
@@ -5439,6 +5465,7 @@ async def _consult_peer_events(
     source_name: str = "another agent", timeout: float = 480.0,
     image_paths: list[str] | None = None, file_paths: list[str] | None = None,
     no_flow: bool = False, deny_tools: list[str] | None = None, no_broadcast: bool = False,
+    automation: dict[str, Any] | None = None,
 ):
     """Consult the agent at ``host:port`` (authenticated with ``auth``) and yield
     its intermediate events, then a final ``{"ok": True, "done": True, ...}`` or
@@ -5504,6 +5531,9 @@ async def _consult_peer_events(
                 _chat_payload["deny_tools"] = list(deny_tools)
             if no_broadcast:
                 _chat_payload["no_broadcast"] = True
+            if automation:
+                # Automated-turn marker: no user typed this (flow step, peer).
+                _chat_payload["automation"] = automation
             await ws.send(json.dumps(_chat_payload))
 
             # Stream events until we get the final assistant response
@@ -5615,6 +5645,7 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
             source_name=req.source_name, timeout=req.timeout,
             image_paths=_img, file_paths=_fil, no_flow=req.no_flow,
             deny_tools=req.deny_tools, no_broadcast=req.no_broadcast,
+            automation=_peer_automation(req.mail_intent_text),
         )) as events:
             async for evt in events:
                 _lvl = evt.get("member_private") if evt.get("done") else ""
@@ -5648,6 +5679,8 @@ class DelegatePeerRequest(BaseModel):
     attach_path: str = ""
     image_paths: list[str] = Field(default_factory=list)
     file_paths: list[str] = Field(default_factory=list)
+    # See ConsultPeerRequest.mail_intent_text — stamped as the ``peer`` marker.
+    mail_intent_text: str = ""
 
 
 @app.post("/fd/delegate-peer")
@@ -5725,6 +5758,7 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
                         _payload["image_paths"] = _img
                     if _fil:
                         _payload["file_paths"] = _fil
+                    _payload["automation"] = _peer_automation(req.mail_intent_text)
                     await ws.send(json.dumps(_payload))
                     log.info("delegate_background: task sent to target", target=peer_display)
 

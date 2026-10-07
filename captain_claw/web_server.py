@@ -25,6 +25,7 @@ from typing import Any
 
 from aiohttp import web
 
+from captain_claw import mail_authority
 from captain_claw.agent import Agent
 from captain_claw.agent_pool import AgentPool
 from captain_claw.config import Config, get_config, set_config
@@ -1862,7 +1863,12 @@ class WebServer:
                     None,
                 )
                 if ws is not None:
-                    await handle_chat(self, ws, content)
+                    # Another agent's result relayed in — never a request
+                    # for email (the mail-write guard denies).
+                    await handle_chat(
+                        self, ws, content,
+                        automation=mail_authority.automated("peer_relay", "", "deny"),
+                    )
                     # Let handle_chat latch _busy before we consider the next item.
                     await asyncio.sleep(0.5)
                 elif self.agent and self.agent.session:
@@ -1900,10 +1906,18 @@ class WebServer:
         args = data.get("args") or {}
         if not tool or not isinstance(args, dict):
             return web.json_response({"success": False, "error": "missing 'tool' or 'args'"}, status=400)
+        # Flow tool step: no marker = deny mail writes (fail closed); FD sends
+        # mail_write="allow" only for a literal mail-write step of a
+        # human-made flow.
+        _auth = (
+            mail_authority.from_wire(data.get("automation"), default_kind="flow_tool")
+            or mail_authority.automated("flow_tool", "", "deny")
+        )
         try:
-            result = await self.agent._execute_tool_with_guard(
-                tool, args, interaction_label="flow_step",
-            )
+            with mail_authority.bound(_auth):
+                result = await self.agent._execute_tool_with_guard(
+                    tool, args, interaction_label="flow_step",
+                )
             return web.json_response({
                 "success": bool(getattr(result, "success", False)),
                 "content": getattr(result, "content", "") or "",

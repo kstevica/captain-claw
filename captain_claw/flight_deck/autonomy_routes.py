@@ -294,17 +294,35 @@ async def approve_action_route(
     _user: dict | None = Depends(get_optional_user),
 ):
     """Approve a pending action: record the positive signal, then dispatch it to
-    the user's strongest agent. Falls back to 'queued' if no agent is reachable."""
+    the user's strongest agent. Falls back to 'queued' if no agent is reachable.
+
+    Compare-and-set (J21): only a row still ``awaiting_approval`` or ``queued`` is
+    approved — it is claimed (``dispatched``) atomically BEFORE learning and
+    dispatch, so a double click can't dispatch twice or double-count; anything
+    else is a 409."""
     uid = _user_id(request)
     store = get_store()
     action = store.get_action(action_id)
     if not action or action.get("user_id") not in (uid, "local"):
         raise HTTPException(status_code=404, detail="Action not found")
+    if not store.claim_action(action_id, ("awaiting_approval", "queued"), "dispatched"):
+        cur = store.get_action(action_id) or action
+        raise HTTPException(
+            status_code=409,
+            detail=f"action is {cur.get('status') or 'unknown'}, not awaiting approval",
+        )
     learned = record_human_feedback(uid, action, True)
 
     from captain_claw.flight_deck.fd_dispatch import dispatch_action
 
-    disp = await dispatch_action(uid, action)
+    try:
+        disp = await dispatch_action(uid, action, approved_by_human=True)
+    except Exception as exc:
+        # The row was claimed: don't strand it in 'dispatched' (that would also
+        # hold its email thread "open" forever) — park it for a retry.
+        if store.claim_action(action_id, ("dispatched",), "queued"):
+            store.update_status(action_id, "queued", outcome_note=f"dispatch error: {exc}"[:500])
+        raise
     if not disp["ok"]:
         # No agent to run it — park as queued for a later pass.
         store.update_status(action_id, "queued", outcome_note=disp["note"])
@@ -540,5 +558,6 @@ async def run_action_route(
     action_id = str(body.get("action_id") or "").strip()
     args = body.get("args") if isinstance(body.get("args"), dict) else {}
     from captain_claw.flight_deck.actions import run_action
-    result = await run_action(uid, action_id, args)
+    # A person drove this run by hand — it counts as their approval.
+    result = await run_action(uid, action_id, args, approved_by_human=True)
     return result

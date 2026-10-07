@@ -43,6 +43,24 @@ _JUDGE_SYSTEM = (
     "Be honest: partial, refused, or error results are failures."
 )
 
+# Appended to EVERY autonomy chat turn (nudge / run_prompt / materialize_schedule),
+# auto-fired or approved: Autonomous Work writes email only through an approved
+# mail.draft tool_action, never from inside a chat turn (U1, J5).
+_NO_MAIL_LINE = (
+    " Do not create, update or send any email or email draft in this turn — if a "
+    "reply seems needed, tell the user who is waiting and offer to draft it."
+)
+
+# The automation marker every autonomy chat turn carries (part 0 §4). Always
+# ``deny``: the arbiter writes these titles/rationales from the sender and the
+# subject (attacker-controlled), and approving "tell me X is waiting" is not a
+# request to write email.
+_AUTONOMY_AUTOMATION: dict[str, str] = {"kind": "autonomy", "job_text": "", "mail_write": "deny"}
+
+# The agent's google_mail / send_mail refusal tag for an unauthorized write
+# (copied as a literal; FD never imports the agent's mail_authority module).
+_MAIL_REFUSAL_TAG = "[not-authorized: mail-write]"
+
 
 def _strongest_agent(user_id: str) -> dict[str, Any] | None:
     """The user's most capable running agent, or None if none are up."""
@@ -109,22 +127,68 @@ def _grounding_suffix(action: dict[str, Any]) -> str:
     )
 
 
-def _instruction_for(action: dict[str, Any]) -> str:
-    """Render an action into a concrete instruction the agent can act on."""
+def _sender_display(frm: str) -> str:
+    """The display name from ``"Name <addr>"`` (quotes stripped), else the bare
+    address, else "Someone"."""
+    frm = str(frm or "").strip()
+    m = re.match(r'^\s*(.*?)\s*<([^>]*)>\s*$', frm)
+    if m:
+        name = m.group(1).strip().strip('"').strip("'").strip()
+        if name:
+            return name
+        addr = m.group(2).strip()
+        return addr or "Someone"
+    return frm.strip('"').strip("'").strip() or "Someone"
+
+
+def _reply_waiting_line(md: dict[str, Any]) -> str:
+    """'<sender> is waiting for a reply — "<subject>"' for a Gmail event's metadata."""
+    md = md or {}
+    sender = _sender_display(str(md.get("from") or ""))
+    subject = str(md.get("subject") or "").strip() or "(no subject)"
+    return f'{sender} is waiting for a reply — "{subject}"'
+
+
+def _gmail_event_md(action: dict[str, Any]) -> dict[str, Any] | None:
+    """The metadata of the Gmail event this action is about, or None."""
+    ref = str((action.get("payload") or {}).get("event_ref") or "")
+    if not ref:
+        return None
+    try:
+        from captain_claw.flight_deck.events import get_store as _events_store
+        ev = _events_store().get_event(ref)
+    except Exception:
+        ev = None
+    if not ev or str(ev.get("source") or "") != "gmail":
+        return None
+    md = ev.get("metadata")
+    return md if isinstance(md, dict) else {}
+
+
+def _instruction_for(action: dict[str, Any], *, approved_by_human: bool = False) -> str:
+    """Render an action into a concrete instruction the agent can act on.
+
+    Every nudge / run_prompt / materialize_schedule carries ``_NO_MAIL_LINE``,
+    approved or not (J5) — ``approved_by_human`` only matters for learning."""
     kind = str(action.get("kind") or "nudge")
     title = str(action.get("title") or "").strip()
     rationale = str(action.get("rationale") or "").strip()
     ground = _grounding_suffix(action)
     if kind == "nudge":
+        md = _gmail_event_md(action)
+        if md is not None:
+            # An email that may need a reply: TELL the user, never answer it.
+            return (f"[Autonomous nudge] Tell the user, briefly and in their language: "
+                    f"{_reply_waiting_line(md)}. {rationale}{_NO_MAIL_LINE}{ground}")
         return (f"[Autonomous nudge] Proactively reach out to the user now: {title}. "
-                f"{rationale} Keep it brief and in their language.{ground}")
+                f"{rationale} Keep it brief and in their language.{_NO_MAIL_LINE}{ground}")
     if kind == "basna":
         return f"Run a Basna on: {title}"
     if kind == "materialize_schedule":
         return (f"[Autonomous task] Set up a scheduled task: {title}. {rationale} "
-                f"Use your scheduling tool.")
+                f"Use your scheduling tool.{_NO_MAIL_LINE}")
     # run_prompt and anything else: treat as a task prompt.
-    return f"[Autonomous task] {title}\n\n{rationale}{ground}".strip()
+    return f"[Autonomous task] {title}\n\n{rationale}{_NO_MAIL_LINE}{ground}".strip()
 
 
 def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
@@ -145,16 +209,20 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
         return True
     # tool_action auto-fires only when the user has GRANTED that action (or its
     # grant category) AND it's reversible + low-risk + not human-only — the
-    # explicit trust hook. Everything else stays propose→approve.
+    # explicit trust hook. Everything else stays propose→approve. Email never
+    # auto-fires: a grant or earned trust can't promote a human-only / mail-write
+    # action (U1, J16).
     if str(action.get("kind")) == "tool_action":
         if not cfg.get("allow_auto_dispatch"):
             return False
         if str(cfg.get("autonomy_level") or "off") not in ("act_low_risk", "act"):
             return False
-        from captain_claw.flight_deck.action_catalog import get_action
+        from captain_claw.flight_deck import action_catalog
         payload = action.get("payload") or {}
         action_id = str(payload.get("action_id") or "")
-        spec = get_action(action_id, str(action.get("user_id") or ""))
+        spec = action_catalog.get_action(action_id, str(action.get("user_id") or ""))
+        if spec is None or spec.get("human_only") or action_catalog.is_mail_write(spec):
+            return False   # email never auto-fires — grant and earned trust are ignored (U1, J16)
         if (not spec or spec.get("human_only")
                 or spec.get("reversibility") not in ("read_only", "reversible")
                 or spec.get("risk") != "low"):
@@ -279,9 +347,16 @@ async def _judge_outcome(
     }
 
 
-async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[str, Any]) -> None:
+async def _execute_and_judge(
+    user_id: str, action: dict[str, Any], agent: dict[str, Any], *,
+    approved_by_human: bool = False,
+) -> None:
     """Background: run the action on ``agent``, judge the result, learn, mark done.
-    Never raises — it's fire-and-forget off the heartbeat / approve request."""
+    Never raises — it's fire-and-forget off the heartbeat / approve request.
+
+    The turn always carries the ``autonomy``/``deny`` automation marker, auto-fired
+    or approved (J5). After a human Approve only a failure is learned — the
+    approval itself already counted (J2, no double count)."""
     store = get_store()
     aid = action["id"]
     store.log(user_id, "executing", f"{action.get('kind')} · {action.get('title')} → {agent.get('slug','?')}")
@@ -290,7 +365,8 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
 
         res = await _dispatch_one(
             int(agent.get("port") or 0), str(agent.get("auth", "")),
-            _instruction_for(action), 180.0,
+            _instruction_for(action, approved_by_human=approved_by_human), 180.0,
+            automation=dict(_AUTONOMY_AUTOMATION),
         )
         output = str(res.get("output") or "").strip()
         cfg = resolve_config(user_id)
@@ -336,7 +412,7 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
             success = None  # nothing judged it; record the result, no verdict
             note = output[:500]
 
-        if learn and success is not None:
+        if learn and success is not None and not (approved_by_human and success):
             store.record_outcome(
                 user_id, str(action.get("kind") or "nudge"),
                 str(action.get("domain") or "general"), bool(success),
@@ -474,7 +550,8 @@ async def _dispatch_stop_run(user_id: str, action: dict[str, Any]) -> dict[str, 
 def _enrich_args_from_event(action_id: str, args: dict[str, Any], event_ref: str) -> dict[str, Any]:
     """Fill an action's args from the surfaced event's real handle so it acts on
     the actual item, not the arbiter's guess (Theme B). Today: a reply draft
-    targets the email's true sender + threads under its subject."""
+    threads as a reply to the real message, addressed to its Reply-To (falling
+    back to the true sender), under the original subject."""
     if action_id != "mail.draft" or not event_ref:
         return args
     try:
@@ -486,11 +563,19 @@ def _enrich_args_from_event(action_id: str, args: dict[str, Any], event_ref: str
         return args
     md = ev.get("metadata") or {}
     out = dict(args)
-    # Recipient: the real sender (parse "Name <addr>"); never overwrite an explicit to.
+    # Thread it: a reply to the real message, so the draft lands in its thread.
+    if not str(out.get("reply_to_message_id") or "").strip():
+        mid = str(md.get("message_id") or "").strip()
+        if mid:
+            out["reply_to_message_id"] = mid
+    # Recipient: Reply-To, else the real sender (parse "Name <addr>"); never
+    # overwrite an explicit to.
     if not str(out.get("to") or "").strip():
-        frm = str(md.get("from") or "")
-        m = re.search(r"<([^>]+)>", frm)
-        addr = (m.group(1) if m else frm).strip()
+        addr = str(md.get("reply_to") or "").strip()
+        if not addr:
+            frm = str(md.get("from") or "")
+            m = re.search(r"<([^>]+)>", frm)
+            addr = (m.group(1) if m else frm).strip()
         if addr:
             out["to"] = addr
     # Subject: reply form of the original, if the arbiter didn't set one.
@@ -501,13 +586,27 @@ def _enrich_args_from_event(action_id: str, args: dict[str, Any], event_ref: str
     return out
 
 
-async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
+async def _dispatch_tool_action(
+    user_id: str, action: dict[str, Any], *, approved_by_human: bool = False,
+) -> dict[str, Any]:
     """Run a catalog action via the deterministic rail and record the grounded
     outcome (the ToolResult success — no LLM judge needed). The reverse handle for
-    undo is captured in Phase 2 (this turn's follow-up)."""
+    undo is captured in Phase 2 (this turn's follow-up).
+
+    An email action only ever runs after a human Approve (``approved_by_human``):
+    reached any other way it is held as a proposal (J16, belt to
+    ``should_auto_dispatch``). Email/human-only actions never learn trust (J2)."""
+    from captain_claw.flight_deck import action_catalog
+
     store = get_store()
     payload = action.get("payload") or {}
     action_id = str(payload.get("action_id") or "")
+    spec = action_catalog.get_action(action_id, user_id)
+    if action_catalog.is_mail_write(spec) and not approved_by_human:
+        note = "email actions need your approval"
+        store.update_status(action["id"], "awaiting_approval", outcome_note=note)
+        store.log(user_id, f"held: {action_id} needs approval", str(action.get("title") or ""), "warn")
+        return {"ok": False, "target": action_id, "note": note}
     args = dict(payload.get("args")) if isinstance(payload.get("args"), dict) else {}
     # Theme B: ground a reply draft on the real event so it targets the actual
     # sender/thread instead of whatever the arbiter guessed.
@@ -515,51 +614,64 @@ async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[st
     store.update_status(action["id"], "dispatched")
     from captain_claw.flight_deck.actions import run_action
 
-    res = await run_action(user_id, action_id, args)
+    res = await run_action(user_id, action_id, args, approved_by_human=approved_by_human)
     ok = bool(res.get("ok"))
     note = str(res.get("content") or res.get("error") or "")[:500]
+    result_text = f"{res.get('error') or ''} {res.get('content') or ''}"
     # google_mail refused because that email is already drafted or sent (a
     # mail.draft the arbiter proposed again, or one the user wrote themselves):
     # the goal is met and nothing failed — a skipped success, kept out of
     # reliability learning so a correct refusal costs the action no trust.
-    skipped = not ok and gmail_compose.is_repeat_refusal(
-        f"{res.get('error') or ''} {res.get('content') or ''}"
-    )
+    skipped = not ok and gmail_compose.is_repeat_refusal(result_text)
     if skipped:
         note = f"skipped — already drafted or sent: {note}"[:500]
+    # The agent refused an unauthorized email write: a failure, never learned.
+    refused = not ok and not skipped and _MAIL_REFUSAL_TAG in result_text
 
     # Capture the reverse handle (for one-tap undo) from the real result.
     if ok:
-        from captain_claw.flight_deck import action_catalog
-        spec = action_catalog.get_action(action_id, user_id)
         reverse = action_catalog.build_reverse(spec, res.get("content", "")) if spec else None
         if reverse:
             store.update_payload(action["id"], {"reverse": reverse})
 
     cfg = resolve_config(user_id)
-    if (not skipped and cfg.get("learning_enabled")
+    if (cfg.get("learning_enabled")
             and str(cfg.get("judge_mode") or "both") in ("auto", "both")):
-        from captain_claw.flight_deck.autonomy import reliability_key
-        rk, rd = reliability_key(action)  # per-action-id trust bucket
-        store.record_outcome(user_id, rk, rd, ok, seed=float(cfg.get("reliability_seed", 0.6)))
+        never_learn = bool(spec and (spec.get("human_only") or action_catalog.is_mail_write(spec)))
+        if never_learn or skipped or refused:
+            pass  # email / human-only actions never earn trust; a refusal isn't a signal
+        elif approved_by_human and ok:
+            pass  # the Approve already counted +1 — only a failure after approval is learned
+        else:
+            from captain_claw.flight_deck.autonomy import reliability_key
+            rk, rd = reliability_key(action)  # per-action-id trust bucket
+            store.record_outcome(user_id, rk, rd, ok, seed=float(cfg.get("reliability_seed", 0.6)))
     store.update_status(action["id"], "done",
                         outcome="success" if ok or skipped else "fail", outcome_note=note)
-    store.log(user_id, f"tool_action: {action_id}" + (" (skipped: repeat)" if skipped else ""),
-              note, "info" if ok or skipped else "warn")
+    if refused:
+        store.log(user_id, f"tool_action: {action_id} (refused: not authorized)", note, "warn")
+    else:
+        store.log(user_id, f"tool_action: {action_id}" + (" (skipped: repeat)" if skipped else ""),
+                  note, "info" if ok or skipped else "warn")
     # ok=True means "executed" so the approve route doesn't re-queue; the ledger
     # outcome carries whether the tool itself succeeded.
     return {"ok": True, "target": action_id, "note": note}
 
 
-async def dispatch_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
+async def dispatch_action(
+    user_id: str, action: dict[str, Any], *, approved_by_human: bool = False,
+) -> dict[str, Any]:
     """Execute one action by handing it to the strongest agent, in the background.
     Marks the action ``dispatched`` and spawns the run+judge task. Returns
     ``{ok, target, note}`` — ok=False (note set) when no agent is reachable, and
-    the action keeps its prior status for the caller to resolve."""
+    the action keeps its prior status for the caller to resolve.
+
+    ``approved_by_human`` is True only on the Approve path: it lets an email
+    action run (never otherwise) and keeps the approval from double-counting."""
     if str(action.get("kind")) == "stop_run":
         return await _dispatch_stop_run(user_id, action)
     if str(action.get("kind")) == "tool_action":
-        return await _dispatch_tool_action(user_id, action)
+        return await _dispatch_tool_action(user_id, action, approved_by_human=approved_by_human)
     if str(action.get("kind")) == "track":
         return await _dispatch_track(user_id, action)
     agent = _strongest_agent(user_id)
@@ -568,10 +680,11 @@ async def dispatch_action(user_id: str, action: dict[str, Any]) -> dict[str, Any
     store = get_store()
     store.update_status(action["id"], "dispatched", ref_id=agent.get("slug", ""))
     try:
-        task = asyncio.create_task(_execute_and_judge(user_id, dict(action), agent))
+        task = asyncio.create_task(_execute_and_judge(
+            user_id, dict(action), agent, approved_by_human=approved_by_human))
         _BG_TASKS.add(task)
         task.add_done_callback(_BG_TASKS.discard)
     except RuntimeError:
         # No running loop (e.g. a sync test harness): execute inline best-effort.
-        await _execute_and_judge(user_id, dict(action), agent)
+        await _execute_and_judge(user_id, dict(action), agent, approved_by_human=approved_by_human)
     return {"ok": True, "target": agent.get("slug", ""), "note": ""}

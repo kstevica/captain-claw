@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from captain_claw import mail_authority
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
 from captain_claw.ws_utils import fire_and_forget_send
@@ -152,6 +153,7 @@ async def handle_chat(
     no_broadcast: bool = False,
     no_next_steps: bool = False,
     no_rephrase: bool = False,
+    automation: mail_authority.Authority | None = None,
     speaker_turn: str | None = None,
     speaker_grant: str | None = None,
 ) -> bool:
@@ -171,6 +173,10 @@ async def handle_chat(
     turn's final ``ready`` frame). Every early return is False and emits no
     ready frame — on a shared-agent member socket the speaker gate owns it.
     Existing callers ignore the return value.
+
+    *automation* (an automated turn's :class:`mail_authority.Authority`, from
+    the frame's ``automation`` marker) is bound for the turn; ``None`` is a
+    human turn. A member's turn ignores it.
     """
     from captain_claw.speaker import speaker_error, speaker_key_of
 
@@ -401,6 +407,7 @@ async def handle_chat(
         no_broadcast=no_broadcast,
         no_next_steps=no_next_steps,
         no_rephrase=no_rephrase,
+        automation=automation,
         flow_text=content,
         flow_attach={
             "image_path": image_path or (image_paths[0] if image_paths else ""),
@@ -704,7 +711,10 @@ async def _prefix_image_analysis(
     )
 
 
-async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool, attach: dict | None = None) -> dict | None:
+async def _maybe_run_flow(
+    agent: Any, text: str, *, is_public: bool, attach: dict | None = None, automated: str = "",
+    automated_mail_write: str = "",
+) -> dict | None:
     """Ask Flight Deck whether a Flow matches this message.
 
     Returns None to take a normal agent turn, or a dict:
@@ -713,7 +723,12 @@ async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool, attach: dic
                            members' private data (PR D)
       {"deferred": True} → flow took over (runs in FD bg, delivers via channel);
                            end the turn silently. Also covers resuming a paused
-                           input step. Best-effort; never raises."""
+                           input step. Best-effort; never raises.
+
+    *automated* (the bound automation kind; "" for a human turn) tells FD the
+    trigger text wasn't typed by a person, so it never counts as a request
+    for email. *automated_mail_write* (that turn's ``mail_write``) goes with
+    it: a flow started by a ``deny`` turn may not write email in any step."""
     attach = attach or {}
     has_attach = any(attach.get(k) for k in ("image_path", "video_path", "audio_path", "file_path"))
     # Need either text or an attachment to be worth evaluating.
@@ -746,6 +761,15 @@ async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool, attach: dic
         "video_path": str(attach.get("video_path") or ""),
         "audio_path": str(attach.get("audio_path") or ""),
     }
+    if not automated:
+        # A caller that didn't say (the /flow slash command): the bound
+        # authority — in a worker or a being that's the deny default.
+        _cur = mail_authority.current()
+        if _cur.mode == "automated":
+            automated, automated_mail_write = _cur.kind, _cur.mail_write
+    if automated:
+        body["automated"] = automated
+        body["automated_mail_write"] = automated_mail_write or "deny"
     try:
         import httpx
         async with httpx.AsyncClient(timeout=600.0) as client:
@@ -788,6 +812,7 @@ async def _run_agent(
     no_broadcast: bool = False,
     no_next_steps: bool = False,
     no_rephrase: bool = False,
+    automation: mail_authority.Authority | None = None,
     flow_text: str = "",
     flow_attach: dict | None = None,
     speaker_key: tuple[str, str] | None = None,
@@ -805,6 +830,10 @@ async def _run_agent(
     bound for the turn only — cleared before the post-turn jobs and again in
     ``finally`` before the lane is freed — and the turn and its post-turn
     jobs count as member work in flight (``speaker.identity_lost``).
+
+    The mail-write authority is bound for the whole turn: *automation* when
+    the frame carried one, else ``interactive(<the message as received>)``
+    (a human turn, or a worker's / being's automated deny default).
     """
     import json as _json
 
@@ -838,6 +867,12 @@ async def _run_agent(
     elif _is_side_lane:
         agent._lane_busy = True  # type: ignore[attr-defined]
 
+    # Who started this turn — read by the mail-write guard and soft checks.
+    # A frame without a marker is a person typing — except in an FD-spawned
+    # worker or a being, where the process default (deny) stays (J7).
+    _auth_tok = mail_authority.bind(
+        automation if automation is not None else mail_authority.interactive(flow_text or content)
+    )
     _video_policy_slug = None  # set when a video turn restricts script/shell tools
     _speaker_tok = None
     _grant_tok = None
@@ -876,7 +911,13 @@ async def _run_agent(
         # whether a Flow trigger matches this message. If one does, FD runs it
         # and we relay its output instead of taking a normal agent turn.
         if not no_flow:
-            _flow = await _maybe_run_flow(agent, flow_text or content, is_public=is_public, attach=flow_attach)
+            _turn_auth = mail_authority.current()
+            _automated = _turn_auth.mode == "automated"
+            _flow = await _maybe_run_flow(
+                agent, flow_text or content, is_public=is_public, attach=flow_attach,
+                automated=_turn_auth.kind if _automated else "",
+                automated_mail_write=_turn_auth.mail_write if _automated else "",
+            )
             if _flow is not None:
                 # Inline output → relay it. Deferred → the flow delivers its own
                 # messages asynchronously via /api/chat/push; end the turn quietly.
@@ -890,6 +931,10 @@ async def _run_agent(
                         **({"member_private": _flow["member_private"]} if _flow.get("member_private") else {}),
                     })
                 return  # the `finally` resets busy + emits "ready"
+
+        # Provenance: an automated turn is marked as not typed by the user.
+        if automation is not None:
+            content = mail_authority.automated_prefix() + "\n" + content
 
         # Deterministic video preprocessing: when a video was attached, run
         # video_vision server-side (fixed-cadence frames + transcript + synthesis)
@@ -1176,6 +1221,7 @@ async def _run_agent(
         })
         if _speaker_tok is not None:
             _speaker.reset(_speaker_tok)
+        mail_authority.reset(_auth_tok)
         # Inbound peer notifications are now drained by the serialized
         # _inbound_queue_consumer (web_server.py), which waits for _busy to
         # clear — no ad-hoc draining needed here.

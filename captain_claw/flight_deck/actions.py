@@ -22,9 +22,13 @@ _log = logging.getLogger(__name__)
 
 async def run_tool_on_agent(
     agent: dict[str, Any], tool: str, args: dict[str, Any], timeout: float = 60.0,
+    *, automation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run ONE named tool with structured args on ``agent`` over its WebSocket,
-    returning ``{ok, content, error}``. No LLM in the loop."""
+    returning ``{ok, content, error}``. No LLM in the loop.
+
+    ``automation`` (part 0 §4) rides on the frame when given; the agent treats a
+    ``run_tool`` without it as an automated turn that may not write email."""
     import websockets
 
     port = int(agent.get("port") or 0)
@@ -46,9 +50,12 @@ async def run_tool_on_agent(
                 m = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
                 if m.get("type") == "replay_done":
                     break
-            await ws.send(json.dumps({
+            frame: dict[str, Any] = {
                 "type": "run_tool", "req_id": req_id, "tool": tool, "args": args,
-            }))
+            }
+            if automation is not None:
+                frame["automation"] = automation
+            await ws.send(json.dumps(frame))
             deadline = asyncio.get_event_loop().time() + timeout
             while True:
                 rem = deadline - asyncio.get_event_loop().time()
@@ -91,9 +98,15 @@ async def list_agent_tools(user_id: str) -> dict[str, Any]:
         return {"tools": [], "skills": [], "error": str(exc)}
 
 
-async def run_action(user_id: str, action_id: str, args: dict[str, Any]) -> dict[str, Any]:
+async def run_action(
+    user_id: str, action_id: str, args: dict[str, Any], *, approved_by_human: bool = False,
+) -> dict[str, Any]:
     """Resolve + validate + execute a catalog action. Returns
-    ``{ok, content, error, action_id, risk, reversibility}``."""
+    ``{ok, content, error, action_id, risk, reversibility}``.
+
+    The tool call carries the ``autonomy_tool`` marker: ``mail_write`` is
+    ``allow`` only when a human approved this run (Approve, the manual exerciser,
+    a manual plan advance), else ``deny`` — the agent then refuses email writes."""
     spec = action_catalog.get_action(action_id, user_id)
     if not spec:
         return {"ok": False, "error": f"unknown action: {action_id}"}
@@ -110,7 +123,10 @@ async def run_action(user_id: str, action_id: str, args: dict[str, Any]) -> dict
         agent = _strongest_agent(user_id)
         if not agent:
             return {"ok": False, "error": "no running agent to act through", **meta}
-        res = await run_tool_on_agent(agent, tool, tool_args)
+        res = await run_tool_on_agent(agent, tool, tool_args, automation={
+            "kind": "autonomy_tool", "job_text": "",
+            "mail_write": "allow" if approved_by_human else "deny",
+        })
         # Grounded verification (#5): read the side effect back. 'absent' downgrades
         # to fail; 'unknown' (couldn't read) leaves the tool's success intact.
         verified = "skipped"

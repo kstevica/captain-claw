@@ -1061,9 +1061,12 @@ class AutonomousWorkConfig(BaseModel):
     reflection_intention_max_risk: str = "low"  # low | normal | high
 
     # ── #1 Action catalog — per-user grants ──
-    # Which catalog actions/grants the arbiter may propose & (later) auto-fire.
+    # Which catalog actions/grants the arbiter may propose & auto-fire.
     # Empty = the arbiter may PROPOSE any non-human-only catalog action (still
-    # human-approved); explicit grants gate auto-fire once that lands (Phase 4).
+    # human-approved); explicit grants gate auto-fire (Phase 4). A grant never
+    # auto-fires a ``human_only`` action — and every email action (mail.draft,
+    # mail.send, any custom email action) is always ``human_only``: it is at
+    # most proposed and waits for the user's approval.
     granted_actions: list[str] = Field(default_factory=list)
 
     # ── #2 Event sources — per-user poller enables (take effect when the
@@ -1078,6 +1081,11 @@ class AutonomousWorkConfig(BaseModel):
     # manual) before it's given up on. Without this a single whiffed pass would
     # drop the event forever and a manual re-run couldn't reconsider it.
     event_max_surface_attempts: int = 4
+    # Gmail events older than this never become arbiter candidates (0 = no cutoff).
+    gmail_event_max_age_hours: int = 48
+    # Look-back window for per-thread dedup: only actions on the thread from the
+    # last N days are considered (open ones, or ones that already covered the message).
+    reply_thread_dedup_days: int = 7
 
     # ── Follow-ups — soft reminders/requests the arbiter TRACKs instead of
     # acting on now (an open loop, "waiting on you"). They resurface when due

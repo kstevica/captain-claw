@@ -194,7 +194,8 @@ async def test_consult_streams_from_a_real_peer_with_its_recorded_token(deck, mo
     lines = [json.loads(x) for x in r.text.splitlines() if x.strip()]
     assert r.status_code == 200
     assert seen["path"] == "/ws?token=tok-live"
-    assert seen["chat"] == {"type": "chat", "content": "ping", "no_flow": True}
+    assert seen["chat"] == {"type": "chat", "content": "ping", "no_flow": True,
+                            "automation": {"kind": "peer", "job_text": "", "mail_write": "intent"}}
     assert lines[0]["event"] == "status"
     assert lines[-1]["ok"] is True and lines[-1]["response"] == "pong"
     assert lines[-1]["usage"]["total_tokens"] == 3
@@ -506,3 +507,64 @@ async def test_consult_peer_tool_sends_identity_not_peer_token(monkeypatch):
     assert req.headers["X-Agent-Auth"] == "tok-self"
     body = json.loads(req.content)
     assert body["port"] == 24102 and "auth" not in body and "host" not in body
+
+
+# ── automated-turn marker (PR E: no unrequested email) ──────────────
+
+
+@pytest.mark.parametrize("extra,job_text", [
+    ({"mail_intent_text": "draft a reply to Ana"}, "draft a reply to Ana"), ({}, ""),
+])
+async def test_consult_stamps_the_peer_marker(deck, extra, job_text):
+    async with _client(LOOPBACK) as c:
+        r = await c.post("/fd/consult-peer", headers=_agent("tok-alice"),
+                         json=_consult_body(ALICE_PEER_PORT, **extra))
+    assert r.status_code == 200
+    [call] = deck.consults
+    assert call["automation"] == {"kind": "peer", "job_text": job_text, "mail_write": "intent"}
+
+
+class _FakeTargetWs:
+    """The delegate target's socket: handshake, record the task frame, close."""
+
+    def __init__(self, sent: list):
+        self.sent = sent
+        self.inbox = [{"type": "welcome"}, {"type": "replay_done"}]
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def recv(self):
+        import json
+        if self.inbox:
+            return json.dumps(self.inbox.pop(0))
+        raise ConnectionError("closed")
+
+    async def send(self, raw):
+        import json
+        self.sent.append(json.loads(raw))
+
+
+async def test_delegate_stamps_the_peer_marker(deck, monkeypatch):
+    import websockets
+
+    sent: list = []
+
+    def fake_connect(url, **_kw):
+        if f":{ALICE_PEER_PORT}/" in url:
+            return _FakeTargetWs(sent)
+        return _WsRecorder()(url)   # the result leg back to the caller: refused
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+    async with _client(LOOPBACK) as c:
+        r = await c.post("/fd/delegate-peer", headers=_agent("tok-alice"), json={
+            "target_port": ALICE_PEER_PORT, "message": "go",
+            "mail_intent_text": "draft a reply to Ana"})
+    assert r.status_code == 200
+    await _drain_delegations()
+    [frame] = sent
+    assert frame["automation"] == {"kind": "peer", "job_text": "draft a reply to Ana",
+                                   "mail_write": "intent"}

@@ -61,6 +61,18 @@ def _isolated_fd_home(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _human_turn(monkeypatch):
+    """PR E: these tests run as a human turn — no FD-worker process default
+    (which would deny mail writes) and no bound automation."""
+    from captain_claw import mail_authority
+
+    for name in ("CLAW_BEING_WORKER", "CLAW_BASNA_WORKER", "CLAW_VATRA_WORKER",
+                 "CLAW_COUNCIL_WORKER", "CLAW_CODE_AGENT"):
+        monkeypatch.delenv(name, raising=False)
+    assert mail_authority.current() == mail_authority.HUMAN
+
+
+@pytest.fixture(autouse=True)
 def _config(monkeypatch):
     """A fresh default Config per test (sending off); tests flip knobs on it."""
     import captain_claw.config as config_mod
@@ -1071,6 +1083,8 @@ def test_nudge_no_longer_forces_a_draft_per_recipient():
     assert "for EACH recipient right now" not in nudge
     assert "doesn't already have this email" in nudge
     assert "list_drafts" in nudge and "in:sent" in nudge and "don't create it again" in nudge
+    # PR E: it fires only when the user asked for the email.
+    assert "The user asked you for this email" in nudge
     # Same detector as before.
     assert aom._MAIL_AS_TEXT_RE.search("**To:** bob@x.co\n**Subject:** Hi")
     assert not aom._MAIL_AS_TEXT_RE.search("I drafted the email to Bob.")

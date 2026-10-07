@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from captain_claw import mail_authority
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
@@ -89,6 +90,21 @@ class SendMailTool(Tool):
         **kwargs: Any,
     ) -> ToolResult:
         """Send an email using the configured provider."""
+
+        # -- automated turns: only on the job's own explicit words ---------
+        if mail_authority.needs_recipient_check():
+            # Self scope: the owner's address is unknown here, so the bound is
+            # one email to exactly one recipient, no cc/bcc.
+            _refusal = mail_authority.check_mail_write(
+                "send_mail", None,
+                recipients=mail_authority.parse_recipients(to, cc, bcc),
+                own_addresses=None,
+            )
+        else:
+            _refusal = mail_authority.check_mail_write("send_mail", None)
+        if _refusal:
+            log.info("send_mail refused (automated turn)", kind=mail_authority.current().kind)
+            return ToolResult(success=False, error=_refusal)
 
         # -- validate inputs ------------------------------------------------
         recipients = [addr.strip() for addr in (to or []) if addr.strip()]

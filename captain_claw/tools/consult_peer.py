@@ -12,6 +12,7 @@ from typing import Any
 
 import structlog
 
+from captain_claw import mail_authority
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = structlog.get_logger(__name__)
@@ -194,6 +195,11 @@ class ConsultPeerTool(Tool):
                         "message": message,
                         "source_name": source_name,
                         "timeout": 480.0,
+                        # The peer may write email only when both this question
+                        # and the text that started our turn ask for one.
+                        "mail_intent_text": mail_authority.narrower_intent(
+                            message, mail_authority.intent_source_text(agent),
+                        )[:mail_authority.JOB_TEXT_MAX],
                     },
                 ) as resp:
                     if resp.status_code != 200:

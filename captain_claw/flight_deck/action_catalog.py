@@ -7,8 +7,11 @@ the loop needs to act safely:
   * ``risk``           — low | normal | high
   * ``reversibility``  — read_only | reversible | irreversible
   * ``reverse``        — how to undo a reversible action (built from the result)
-  * ``human_only``     — never auto-dispatched (irreversible / outward-facing);
-                          proposed for human approval only
+  * ``human_only``     — never auto-dispatched, by grant or by earned trust
+                          (irreversible / outward-facing / any email write)
+  * ``proposable``     — the arbiter / plans may PROPOSE a ``human_only``
+                          action (human approval, never auto). Without it a
+                          ``human_only`` action is never proposed either.
   * ``grant``          — which per-user grant must be enabled to use it
 
 Hard rule: raw ``shell``, ``browser`` form-submit, social posting, and anything
@@ -62,18 +65,6 @@ CATALOG: dict[str, dict[str, Any]] = {
                    "arg_from_result": {"event_id": "id"}},
         "grant": "calendar",
     },
-    "mail.draft": {
-        "label": "Create an email draft (not sent)",
-        "home": "agent",
-        "tool": "google_mail",
-        "base_args": {"action": "create_draft"},
-        "required": ["to", "subject", "body"],
-        "optional": ["cc", "bcc", "html_body"],
-        "risk": "low",
-        "reversibility": "reversible",   # a draft isn't sent; deleted manually in Gmail
-        "reverse": None,
-        "grant": "mail",
-    },
     "reminder.schedule": {
         "label": "Schedule a reminder / recurring nudge",
         "home": "agent",
@@ -88,9 +79,17 @@ CATALOG: dict[str, dict[str, Any]] = {
         "grant": "reminders",
     },
 
-    # ── In catalog but HUMAN-ONLY (irreversible / outward-facing) ────────
-    # Proposed for approval; never auto-dispatched, even after the trust ladder
-    # (#3) unless explicitly promoted.
+    # ── In catalog but HUMAN-ONLY (irreversible / outward-facing / email) ─
+    # Never auto-dispatched — not by a grant, not by earned trust (#3). Only an
+    # entry that is also ``proposable`` may be proposed for the user's approval.
+    "mail.draft": {
+        "label": "Create an email reply draft (not sent) — always needs your approval",
+        "home": "agent", "tool": "google_mail", "base_args": {"action": "create_draft"},
+        "required": ["to", "subject", "body"],
+        "optional": ["cc", "bcc", "html_body", "reply_to_message_id"],
+        "risk": "low", "reversibility": "reversible", "reverse": None,
+        "grant": "mail", "human_only": True, "proposable": True,
+    },
     "mail.send": {
         "label": "Send an email", "home": "agent", "tool": "google_mail",
         "base_args": {"action": "send"}, "required": ["to", "subject", "body"],
@@ -125,6 +124,55 @@ CATALOG: dict[str, dict[str, Any]] = {
 }
 
 
+# google_mail sub-actions that write email (create/change/send a draft or mail).
+MAIL_WRITE_ACTIONS = frozenset({"create_draft", "update_draft", "send", "send_draft"})
+
+
+# A Gmail-like MCP proxy tool (``mcp_<server>_<tool>``, a user-promoted custom
+# action) that writes email. These verbs mean email on their own …
+_MCP_MAIL_VERBS = ("create_draft", "update_draft", "send_draft", "send_email")
+# … these only when the tool's name also says mail.
+_MCP_MAYBE_MAIL_VERBS = ("send_message", "reply", "forward", "compose", "draft")
+_MCP_MAIL_WORDS = ("mail", "outlook")
+
+
+def _is_mcp_mail_write(tool: str) -> bool:
+    """Best-effort FD-side twin of the agent's MCP mail guard (part 0 J18): FD
+    knows only the tool's name, so a borderline one just needs approval."""
+    if not tool.startswith("mcp_"):
+        return False
+    name = tool[4:]
+    if any(v in name for v in _MCP_MAIL_VERBS):
+        return True
+    return (any(w in name for w in _MCP_MAIL_WORDS)
+            and any(v in name for v in _MCP_MAYBE_MAIL_VERBS))
+
+
+def is_mail_write(spec: dict[str, Any] | None) -> bool:
+    """True for any spec that writes email: send_mail, or google_mail whose fixed
+    action is a write — or a google_mail spec with no fixed action (the action
+    would come from args, so assume a write). A custom action over a Gmail-like
+    MCP proxy tool (``mcp_gmail_create_draft`` …) counts too."""
+    if not spec:
+        return False
+    tool = str(spec.get("tool") or "").strip().lower()
+    if tool == "send_mail":
+        return True
+    if _is_mcp_mail_write(tool):
+        return True
+    if tool != "google_mail":
+        return False
+    action = str((spec.get("base_args") or {}).get("action") or "").strip().lower()
+    return not action or action in MAIL_WRITE_ACTIONS
+
+
+def may_propose(spec: dict[str, Any] | None) -> bool:
+    """Whether the arbiter / a plan may propose this action at all: any non-
+    ``human_only`` action, or a ``human_only`` one flagged ``proposable`` (it
+    then always waits for the user's approval)."""
+    return bool(spec) and (not spec.get("human_only") or bool(spec.get("proposable")))
+
+
 def _is_excluded(tool: str) -> bool:
     """A tool that the autonomous loop may NEVER drive (the one hard wall)."""
     from captain_claw.config import AUTONOMY_HARD_EXCLUDE
@@ -155,6 +203,10 @@ def _custom_to_spec(ca: dict[str, Any]) -> dict[str, Any] | None:
     rt = str(ca.get("reverse_tool") or "").strip()
     if rt and not _is_excluded(rt):
         spec["reverse"] = {"tool": rt, "base_args": {}, "args_from_result": {"id": "id"}}
+    if is_mail_write(spec):
+        # A user can't widen a custom email action: it never auto-fires and is
+        # never proposed (proposable stays False).
+        spec["human_only"] = True
     return spec
 
 
@@ -195,6 +247,8 @@ def list_catalog(*, granted: set[str] | None = None, user_id: str = "") -> list[
             "id": aid, "label": spec["label"], "risk": spec["risk"],
             "reversibility": spec["reversibility"], "grant": spec.get("grant", ""),
             "human_only": bool(spec.get("human_only", False)),
+            "proposable": bool(spec.get("proposable")),
+            "mail_write": is_mail_write(spec),
             "args": spec["required"] + spec.get("optional", []),
             "required": spec["required"],
             "custom": bool(spec.get("custom", False)),

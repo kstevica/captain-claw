@@ -298,6 +298,110 @@ def _disp(v: Any) -> str:
     return str(v)
 
 
+# ── automated-turn marker (no unrequested email) ─────────────────────
+# A flow's steps run on agents as AUTOMATED turns: they may write email only when
+# the flow's own human-written text asks for it. The trigger message counts only
+# when a person typed it on a live channel — never for a scheduled run or one an
+# automated agent turn started (``automated`` from /fd/flows/evaluate).
+_HUMAN_TRIGGER_CHANNELS = frozenset({
+    "web", "whatsapp", "glasses", "telegram", "messenger", "slack", "discord",
+})
+_MAIL_WRITE_ACTIONS = frozenset({"create_draft", "update_draft", "send", "send_draft"})
+
+
+# The run's mail context, computed ONCE from the inbound payload of the root run
+# (``run()``) and carried on every payload of the run under this key: gosub /
+# spawn / foreach merge their rendered args into the child payload, so an arg
+# named ``text`` / ``channel`` / ``automated`` must never be read as the human's
+# trigger (it is typically a step output, e.g. an email body). The key is re-set
+# on every child payload AFTER the args merge, and a root run always recomputes
+# it — an inbound payload can't supply its own.
+_MAIL_CTX_KEY = "_flow_mail_ctx"
+
+
+def _human_trigger_text(payload: dict[str, Any] | None) -> str:
+    """The trigger message's text when a person typed it on a live channel, else ""."""
+    p = payload or {}
+    if p.get("scheduled") or p.get("automated"):
+        return ""
+    if str(p.get("channel") or "").strip().lower() not in _HUMAN_TRIGGER_CHANNELS:
+        return ""
+    return str(p.get("text") or "")
+
+
+def _root_mail_ctx(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """The mail context of a ROOT run, from its original inbound payload:
+    ``trigger`` (the human trigger text, see ``_human_trigger_text``) and
+    ``deny`` — the flow was started by an automated agent turn whose own
+    authority was ``deny`` (``automated_mail_write`` from /fd/flows/evaluate),
+    so no step of the run may write email (no escalation from a deny turn).
+    Only an automated turn sends ``automated_mail_write``: whatever its value,
+    its text is never a person's message (even if ``automated`` went missing)."""
+    p = payload or {}
+    amw = p.get("automated_mail_write")
+    deny = str(amw or "").strip().lower() == "deny"
+    return {"trigger": "" if amw is not None else _human_trigger_text(p), "deny": deny}
+
+
+def _mail_ctx_of(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """The run's mail context carried on *payload* (never the payload's own
+    ``text``). Missing or malformed → no trigger text, not denied."""
+    got = (payload or {}).get(_MAIL_CTX_KEY)
+    if not isinstance(got, dict):
+        return {"trigger": "", "deny": False}
+    return {"trigger": str(got.get("trigger") or ""), "deny": got.get("deny") is True}
+
+
+def _child_payload(payload: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    """A gosub / spawn / foreach child payload: the parent's payload plus the
+    call args (``args`` + merged into the trigger), with the run's mail context
+    re-set AFTER the merge so an arg can't overwrite it."""
+    child = dict(payload)
+    child["args"] = args
+    for k, v in args.items():
+        child[k] = v
+    child[_MAIL_CTX_KEY] = _mail_ctx_of(payload)
+    return child
+
+
+def _flow_automation(
+    step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any] | None, *, tool: bool,
+) -> dict[str, Any]:
+    """The ``automation`` marker for one flow step (part 0 §4).
+
+    Agent step: ``flow`` / ``intent``, judged on the step's RAW (unrendered)
+    prompt template — unless the flow was synthesized by an agent — plus the
+    human trigger text. Tool step: ``flow_tool``, ``allow`` only for a literal
+    mail-write (send_mail, or google_mail with a literal write action) in a
+    non-synthesized flow, else ``deny``. The trigger text and the deny stamp come
+    only from the run's mail context (``_MAIL_CTX_KEY``), never from the
+    payload's own ``text`` (call args may have overwritten it)."""
+    synthesized = str((ctx.get("system") or {}).get("flow_origin") or "") == "agent"
+    mctx = _mail_ctx_of(payload)
+    if mctx["deny"]:
+        # Started by a deny turn: every step of the run (children included) denies.
+        if tool:
+            return {"kind": "flow_tool", "job_text": "", "mail_write": "deny"}
+        return {"kind": "flow", "mail_write": "deny", "job_text": ""}
+    if tool:
+        mode = "deny"
+        if not synthesized:
+            name = str(step.get("tool") or "").strip()
+            if name == "send_mail":
+                mode = "allow"
+            elif name == "google_mail":
+                raw_args = step.get("args") if isinstance(step.get("args"), dict) else {}
+                action = raw_args.get("action")
+                if (isinstance(action, str) and "{{" not in action
+                        and action.strip() in _MAIL_WRITE_ACTIONS):
+                    mode = "allow"
+        return {"kind": "flow_tool", "job_text": "", "mail_write": mode}
+    raw = "" if synthesized else str(step.get("prompt") or "")
+    trig = mctx["trigger"]
+    return {"kind": "flow", "mail_write": "intent",
+            "job_text": (raw + "\n" + trig).strip()[:4000]}
+
+
 def _render(value: Any, ctx: dict[str, Any]) -> Any:
     """Substitute {{path}} in strings; recurse into dicts/lists."""
     if isinstance(value, str):
@@ -875,7 +979,10 @@ class FlowRunner:
         token = self.resolve_auth(int(agent["port"]))
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
-                resp = await client.post(url, json={"tool": tool, "args": args, "token": token})
+                resp = await client.post(url, json={
+                    "tool": tool, "args": args, "token": token,
+                    "automation": _flow_automation(step, ctx, payload, tool=True),
+                })
             if resp.status_code != 200:
                 return f"(tool {tool} failed: HTTP {resp.status_code} {resp.text[:200]})", agent.get("name", "")
             data = resp.json() or {}
@@ -983,6 +1090,7 @@ class FlowRunner:
                 deny_tools=_deny,
                 image_paths=target_images,   # already on the TARGET (verified)
                 file_paths=target_files,
+                automation=_flow_automation(step, ctx, payload, tool=False),
             )
             async with contextlib.aclosing(events):
                 async for evt in events:
@@ -1261,10 +1369,7 @@ class FlowRunner:
         # The child carries the parent's identity (so delivery + input keying still
         # resolve) plus the call args. Args merge into the trigger so a reused flow
         # that reads {{trigger.<k>}} works, and {{args.<k>}} is always available.
-        child_payload = dict(payload)
-        child_payload["args"] = args
-        for k, v in args.items():
-            child_payload[k] = v
+        child_payload = _child_payload(payload, args)
         # Args can re-point the origin; the child shares this root, so check it as
         # run() checks a root payload (a `wait` keys on it, archetypes inherit it).
         refusal = self._origin_refusal(child_payload, root.scope)
@@ -1316,13 +1421,13 @@ class FlowRunner:
         args = _render(step.get("args") or {}, ctx)
         if not isinstance(args, dict):
             args = {}
-        child_payload = dict(payload)
-        child_payload["args"] = args
-        for k, v in args.items():
-            child_payload[k] = v
+        child_payload = _child_payload(payload, args)
         # New, independent root run (its own run_id + control handle): not killed
         # by the parent's `flow stop`, reachable by `flow stop all`, joinable.
-        task = asyncio.create_task(self.run(target, child_payload, **self._child_context(root)))
+        # It inherits this run's mail context instead of recomputing it from the
+        # args-merged payload.
+        task = asyncio.create_task(self.run(
+            target, child_payload, mail_ctx=_mail_ctx_of(payload), **self._child_context(root)))
         ctx.setdefault("_spawns", {})[str(step.get("id"))] = task
         return f"(spawned '{name}')", f"flow:{name}", "done"
 
@@ -1385,11 +1490,9 @@ class FlowRunner:
                 if not target or self._guard_cross_space(caller_origin, target, fname, "foreach"):
                     tasks.append(None)
                     continue
-                cp = dict(payload)
-                cp["args"] = args
-                for k, v in args.items():
-                    cp[k] = v
-                tasks.append(asyncio.create_task(self.run(target, cp, **self._child_context(root))))
+                cp = _child_payload(payload, args)
+                tasks.append(asyncio.create_task(self.run(
+                    target, cp, mail_ctx=_mail_ctx_of(payload), **self._child_context(root))))
             timeout = float(step.get("timeout") or _DEFAULT_JOIN_TIMEOUT)
             for tk in tasks:
                 if tk is None:
@@ -1468,7 +1571,8 @@ class FlowRunner:
         frame_origin = str(flow.get("origin") or "user")  # 'agent' = synthesized
         _now = datetime.now(UTC)
         ctx: dict[str, Any] = {
-            "trigger": payload,
+            # The run's mail context is internal — not part of {{trigger}}.
+            "trigger": {k: v for k, v in payload.items() if k != _MAIL_CTX_KEY},
             "args": payload.get("args") or {},
             "steps": {},
             "calls": {},
@@ -1480,6 +1584,8 @@ class FlowRunner:
                 "agent": str(payload.get("origin_name") or ""),
                 "channel": str(payload.get("channel") or ""),
                 "handle": (root.control.handle if root.control else ""),
+                # 'agent' = a synthesized flow: its step text isn't human-written.
+                "flow_origin": frame_origin,
             },
         }
         ctrl = root.control
@@ -1706,10 +1812,13 @@ class FlowRunner:
 
     async def run(self, flow: dict[str, Any], payload: dict[str, Any] | None = None, *, dry: bool = False,
                   run_id: str | None = None, owner_id: str | None = None,
-                  is_admin: bool = False, member_private: str = "") -> dict[str, Any]:
+                  is_admin: bool = False, member_private: str = "",
+                  mail_ctx: dict[str, Any] | None = None) -> dict[str, Any]:
         """Run *flow*. `owner_id`/`is_admin` say who the run acts as (a route's
         user; a scheduler job's owner); omitted, it acts as the flow's owner.
-        `member_private` is a spawning run's level (PR D), inherited."""
+        `member_private` is a spawning run's level (PR D), inherited.
+        `mail_ctx` is a spawning run's mail context (internal: spawn/foreach),
+        inherited; otherwise it is computed from this (root) payload."""
         payload = payload or {}
         owner, admin, explicit = await self._run_context(flow, owner_id, is_admin)
         scope = self._scope_for(owner, admin)
@@ -1717,6 +1826,11 @@ class FlowRunner:
             run_id = ""
         elif not run_id:
             run_id = await self.store.start_run(flow["id"], flow.get("name", ""), payload)
+        # The run's mail context (who asked for this run — a person on a live
+        # channel, a schedule, a deny turn): computed once, never from call args.
+        payload = {**payload, _MAIL_CTX_KEY: (
+            _mail_ctx_of({_MAIL_CTX_KEY: mail_ctx}) if mail_ctx is not None
+            else _root_mail_ctx(payload))}
         # Register a control handle so the run can be paused/resumed/stopped.
         ctrl: _RunControl | None = None
         if not dry and run_id:
