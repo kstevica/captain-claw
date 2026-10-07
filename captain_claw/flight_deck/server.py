@@ -909,6 +909,20 @@ async def lifespan(app: FastAPI):
         app.state.beings_task = asyncio.create_task(
             _beings_loop(getattr(app.state, "fd_db", None), _beings_stop))
         print("Flight Deck: beings heartbeat started")
+    # ── Bat supervisor (durable stubborn-finisher runs: adopt a leased run,
+    # drive it to done, re-adopt a crashed run after restart). Disable with
+    # FD_BAT_DISABLED=true. Idle until a Bat run exists and the runner is wired. ──
+    if os.environ.get("FD_BAT_DISABLED", "").lower() not in ("true", "1", "yes"):
+        from captain_claw.flight_deck import bat_loop as _bat_loop_mod
+        from captain_claw.flight_deck.bat_store import BatStore as _BatStore
+        _bat_store = _BatStore(DATA_DIR / "bat.db")
+        await _bat_store.init()
+        app.state.bat_store = _bat_store
+        _bat_loop_mod.set_store(_bat_store)
+        _bat_stop = asyncio.Event()
+        app.state.bat_stop = _bat_stop
+        app.state.bat_task = asyncio.create_task(_bat_loop_mod.bat_loop(_bat_store, _bat_stop))
+        print("Flight Deck: Bat supervisor started")
     # ── Flow engine (process automations: trigger → steps on the agent pool) ──
     try:
         from captain_claw.flight_deck.flows_store import FlowStore
@@ -1079,6 +1093,20 @@ async def lifespan(app: FastAPI):
                 await asyncio.wait_for(app.state.context_packs_task, timeout=5.0)
             except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
+    # Stop the Bat supervisor (before killing worker processes). Running Bat
+    # runs go stale and are re-adopted on the next boot from their checkpoints.
+    if hasattr(app.state, "bat_stop"):
+        app.state.bat_stop.set()
+        if hasattr(app.state, "bat_task"):
+            try:
+                await asyncio.wait_for(app.state.bat_task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError, Exception):
+                pass
+        if hasattr(app.state, "bat_store"):
+            try:
+                await app.state.bat_store.close()
+            except Exception:
+                pass
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
     _stop_all_processes()
@@ -1143,7 +1171,7 @@ def _lockdown_enabled() -> bool:
     return os.environ.get("FD_LOCKDOWN", "").lower() in ("true", "1", "yes")
 
 
-_AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/")
+_AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/", "/fd/bat/agent/")
 
 # Agent routes whose handlers treat a verified bearer as authoritative (caller
 # may act only as itself). A valid bearer is an accepted caller here in
@@ -1293,6 +1321,7 @@ from captain_claw.flight_deck.profile_routes import router as profile_router
 from captain_claw.flight_deck.council_routes import router as council_router
 from captain_claw.flight_deck.basna_routes import router as basna_router
 from captain_claw.flight_deck.vatra_routes import router as vatra_router
+from captain_claw.flight_deck.bat_routes import router as bat_router
 from captain_claw.flight_deck.dubina_routes import router as dubina_router
 from captain_claw.flight_deck.vfs_routes import router as vfs_router
 from captain_claw.flight_deck.deep_memory_routes import router as deep_memory_router
@@ -1347,6 +1376,7 @@ app.include_router(profile_router)
 app.include_router(council_router)
 app.include_router(basna_router)
 app.include_router(vatra_router)
+app.include_router(bat_router)
 app.include_router(dubina_router)
 app.include_router(vfs_router)
 app.include_router(deep_memory_router)
