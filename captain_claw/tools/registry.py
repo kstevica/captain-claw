@@ -745,6 +745,20 @@ class ToolRegistry:
         # Check if tool is blocked
         config = get_config()
 
+        # Bat hard floor (Invariant A): an un-widenable deny of system/drive
+        # destruction (catastrophic rm, disk format/erase, raw-device write,
+        # drive unmount, host power-off, fork bomb). Active ONLY for Bat workers
+        # (CLAW_BAT_WORKER); no config knob and no Bat relax flag can widen it.
+        # Placed at this universal chokepoint so it covers EVERY exec-capable
+        # tool (shell, terminal, desktop_action, ...), not just `shell`. A no-op
+        # for every non-Bat agent (active() is False) and for non-exec tools.
+        from captain_claw import bat_floor as _bat_floor
+
+        if _bat_floor.active():
+            _bf_blocked, _bf_reason = _bat_floor.screen(name, arguments)
+            if _bf_blocked:
+                raise ToolBlockedError(name, _bat_floor.refusal(name, _bf_reason))
+
         if name == "shell":
             command = str(arguments.get("command", "")).strip()
             policy_decision, policy_reason = self._evaluate_shell_exec_policy(command)
