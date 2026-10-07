@@ -75,6 +75,7 @@ class BatStartReq(_BatAgentReq):
     llm_usd_cap: float = 0.0
     real_usd_cap: float = 0.0       # hard ceiling on real-money spend for the run
     per_item_usd: float = 0.0       # purchases at/below this auto-approve; above → owner
+    worker_mode: str = "plain"      # plain = generic full-toolset worker; archetype = specialist per step
     steps: list[str] = Field(default_factory=list)
     origin_platform: str = "web"
     origin_user_id: str = ""
@@ -233,6 +234,40 @@ def _parse_plan(content: str, task: str) -> list[dict]:
 _BAT_TOOL_DENY = frozenset({"bat", "send_mail"})
 
 
+def _parse_archetype_plan(content: str, valid_ids: set[str]) -> tuple[list[dict], dict[str, str]]:
+    """Parse an archetype-mode plan: a JSON array of {step, archetype}. Returns
+    the ordered steps and a {step_key -> archetype_id} map (only ids in the
+    catalog; an unknown/blank archetype falls back to a plain worker for that
+    step). Tolerates ``` fences; invalid JSON → ([], {})."""
+    c = (content or "").strip()
+    if c.startswith("```"):
+        c = "\n".join(l for l in c.split("\n") if not l.strip().startswith("```"))
+    try:
+        raw = json.loads(c)
+    except (json.JSONDecodeError, TypeError):
+        return [], {}
+    items = raw.get("steps") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        return [], {}
+    steps: list[dict] = []
+    arch_map: dict[str, str] = {}
+    for i, it in enumerate(items):
+        if isinstance(it, str):
+            title, arch = it.strip(), ""
+        elif isinstance(it, dict):
+            title = str(it.get("step") or it.get("title") or it.get("task") or "").strip()
+            arch = str(it.get("archetype") or it.get("archetype_id") or it.get("agent") or "").strip()
+        else:
+            continue
+        if not title:
+            continue
+        key = f"step-{i + 1}"
+        steps.append({"step_key": key, "title": title[:400], "seq": i})
+        if arch and arch in valid_ids:
+            arch_map[key] = arch
+    return steps[:12], {k: v for k, v in arch_map.items() if k in {s["step_key"] for s in steps[:12]}}
+
+
 def _bat_worker_tools(tools: list[str] | None, default_tools: list[str]) -> list[str]:
     """Bat workers keep the FULL toolset (including the vatra/basna launchers so
     a Bat worker may delegate to a Vatra run) EXCEPT the few in _BAT_TOOL_DENY."""
@@ -386,6 +421,36 @@ async def _spawn_bat_worker(request, user, *, name: str, tier: str,
     return {"ok": True, "slug": res.slug, "port": port, "auth": entry.get("web_auth", ""), "message": ""}
 
 
+async def _spawn_archetype_bat_worker(stub, user, sid, step, owner, arch_id, tiers, env_vars, bat_env):
+    """Spawn a Bat worker from a planner-assigned archetype (its tools/tier/
+    persona), stamped CLAW_BAT_WORKER so the floor + ask_human/spend apply.
+    Returns (port, auth, slug) or (None, None, None) on failure.
+
+    NOTE: the archetype spawn names the slug `dubina-<arch>-…`, so the email
+    send-audit attribution (which matches a `bat-<sid8>` slug) won't tie a send
+    to the run in archetype mode — a minor gap for the archetype+email corner."""
+    from captain_claw.flight_deck import dubina_agents
+    from captain_claw.flight_deck.archetypes import merged_archetypes
+    from captain_claw.flight_deck.auth import get_db
+    try:
+        arch = next((a for a in await merged_archetypes(get_db(), owner) if a["id"] == arch_id), None)
+        if not arch:
+            return (None, None, None)
+        arch_tier = arch.get("tier") or _pick_tier(tiers)
+        lt = (tiers or {}).get(arch_tier) or {}
+        tcfg = ({"provider": lt.get("provider"), "model": lt.get("model"),
+                 "api_key": lt.get("api_key"), "base_url": lt.get("base_url")}
+                if lt.get("model") else {})
+        env = list(env_vars or []) + list(bat_env) + [{"key": _WORKER_MARKER, "value": "1"}]
+        port, token, slug = await dubina_agents.spawn_archetype_agent(
+            arch, arch_tier, tcfg, stub, user,
+            name_suffix=f"{sid[:8]}-{step['step_key']}", env_vars=env)
+        return (port, token, slug)
+    except Exception as e:  # noqa: BLE001
+        log.warning("bat archetype worker spawn failed", arch=arch_id, error=str(e))
+        return (None, None, None)
+
+
 def _teardown(slugs: list[str]) -> None:
     from captain_claw.flight_deck.server import (
         DATA_DIR, _do_stop_process, _load_process_registry, _processes, _save_process_registry,
@@ -428,6 +493,7 @@ async def _bat_planner(run: dict) -> list[dict]:
     if explicit:
         return [{"step_key": f"step-{i + 1}", "title": str(s)[:400], "seq": i}
                 for i, s in enumerate(explicit) if str(s).strip()][:12]
+    archetype_mode = (cfg.get("worker_mode") or "plain") == "archetype"
     # Best-effort LLM decomposition; any failure → a single stubborn step.
     try:
         from captain_claw.flight_deck.basna_routes import _load_owner_tiers, _provider_call
@@ -436,6 +502,11 @@ async def _bat_planner(run: dict) -> list[dict]:
         db = get_db()
         tiers, _ = await _load_owner_tiers(db, run["owner_id"])
         creds = _creds_for(tiers)
+        if creds and archetype_mode:
+            steps = await _plan_with_archetypes(run, db, creds)
+            if steps:
+                return steps
+            # no usable archetype plan → fall through to the plain decomposition
         if creds:
             prov, mt = _provider_call(creds, temperature=0.2, default_max=1024, cap=4096)
             resp = await prov.complete(messages=[
@@ -454,6 +525,40 @@ async def _bat_planner(run: dict) -> list[dict]:
     return [{"step_key": "main", "title": task[:400] or "complete the task", "seq": 0}]
 
 
+async def _plan_with_archetypes(run: dict, db, creds: dict) -> list[dict]:
+    """Archetype-mode decomposition: assign the best-fit archetype to each step
+    and persist the step→archetype map on the run config. Returns the steps (an
+    empty list → the caller falls back to plain decomposition)."""
+    from captain_claw.flight_deck.archetypes import merged_archetypes
+    from captain_claw.flight_deck.basna_routes import _provider_call
+    from captain_claw.llm import Message
+    archetypes = await merged_archetypes(db, run["owner_id"])
+    if not archetypes:
+        return []
+    valid = {a["id"] for a in archetypes}
+    catalog = "\n".join(f"- {a['id']}: {a.get('role', '')} — {str(a.get('description', ''))[:120]}"
+                        for a in archetypes[:40])
+    prov, mt = _provider_call(creds, temperature=0.2, default_max=1536, cap=6144)
+    resp = await prov.complete(messages=[
+        Message(role="system", content=(
+            "Break the user's goal into the smallest ordered list of concrete, independently checkable "
+            "steps. For EACH step pick the best-fit agent from the catalog by its exact id. Return ONLY "
+            "a JSON array of objects {\"step\": \"...\", \"archetype\": \"<id from the catalog>\"}, max 8, "
+            "no prose.\n\n## Agent catalog\n" + catalog)),
+        Message(role="user", content=run.get("task", "")),
+    ], temperature=0.2, max_tokens=mt)
+    steps, arch_map = _parse_archetype_plan(resp.content or "", valid)
+    if not steps:
+        return []
+    store = bat_loop.get_store()
+    if store is not None and arch_map:
+        cfg = dict(run.get("config") or {})
+        cfg["step_archetypes"] = arch_map
+        await store.set_config(run["id"], cfg)
+        await store.append_event(run["id"], "note", f"{len(arch_map)} step(s) assigned to archetypes")
+    return steps
+
+
 async def _bat_attempt(run: dict, step: dict) -> dict:
     from captain_claw.flight_deck.basna_routes import (
         _RUN_USAGE, _dispatch_one, _load_owner_tiers, _run_sid,
@@ -468,13 +573,25 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
     tiers, env_vars = await _load_owner_tiers(db, owner)
     tier = _pick_tier(tiers)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
-    name = f"bat-{sid[:8]}-{step['step_key']}"[:60]
-    worker = await _spawn_bat_worker(
-        stub, user, name=name, tier=tier, tiers=tiers,
-        env_vars=env_vars, extra_env=_bat_env(sid, step["step_key"], owner),
-    )
-    if not worker["ok"]:
-        return {"ok": False, "error": f"could not spawn worker: {worker['message']}"}
+    bat_env = _bat_env(sid, step["step_key"], owner)
+    # Hybrid worker mode: 'archetype' boots the planner-assigned specialist for
+    # this step (its tools/tier/persona), still stamped CLAW_BAT_WORKER so the
+    # hard floor + the ask_human/spend tools apply; 'plain' (default) boots a
+    # generic full-toolset worker.
+    mode = (run.get("config") or {}).get("worker_mode") or "plain"
+    arch_id = ((run.get("config") or {}).get("step_archetypes") or {}).get(step["step_key"])
+    if mode == "archetype" and arch_id:
+        port, auth, slug = await _spawn_archetype_bat_worker(
+            stub, user, sid, step, owner, arch_id, tiers, env_vars, bat_env)
+        if not slug:
+            return {"ok": False, "error": f"could not spawn archetype worker for {arch_id}"}
+    else:
+        name = f"bat-{sid[:8]}-{step['step_key']}"[:60]
+        worker = await _spawn_bat_worker(
+            stub, user, name=name, tier=tier, tiers=tiers, env_vars=env_vars, extra_env=bat_env)
+        if not worker["ok"]:
+            return {"ok": False, "error": f"could not spawn worker: {worker['message']}"}
+        port, auth, slug = worker["port"], worker["auth"], worker["slug"]
 
     store = bat_loop.get_store()
 
@@ -508,7 +625,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
         automation = {"kind": "bat", "job_text": str(run.get("task", ""))[:500],
                       "mail_write": "allow" if email_allowed else "deny"}
         res = await _dispatch_one(
-            worker["port"], worker["auth"], prompt, _STEP_TIMEOUT_S,
+            port, auth, prompt, _STEP_TIMEOUT_S,
             on_action=_on_action, agent_name=step["step_key"], automation=automation,
         )
         new_usage = _RUN_USAGE[sid][before:]
@@ -522,7 +639,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
             "error": res.get("error", "") or ("timed out" if res.get("timed_out") else ""),
         }
     finally:
-        _teardown([worker["slug"]])
+        _teardown([slug])
 
 
 async def _bat_judge(run: dict, steps: list[dict]) -> dict:
@@ -813,7 +930,8 @@ async def agent_start(body: BatStartReq):
         config={"source": "agent", "origin_platform": body.origin_platform,
                 "steps": [str(s) for s in (body.steps or []) if str(s).strip()],
                 "real_usd_cap": float(body.real_usd_cap or 0.0),
-                "per_item_usd": float(body.per_item_usd or 0.0)},
+                "per_item_usd": float(body.per_item_usd or 0.0),
+                "worker_mode": _norm_worker_mode(body.worker_mode)},
         origin={"platform": body.origin_platform, "user_id": body.origin_user_id,
                 "chat_id": body.origin_chat_id, "kind": body.origin_kind,
                 "address": body.origin_address},
@@ -1039,12 +1157,17 @@ def _ui_event(ev: dict) -> dict:
             "message": ev.get("message", ""), **d}
 
 
+def _norm_worker_mode(v: str) -> str:
+    return "archetype" if str(v or "").strip().lower() == "archetype" else "plain"
+
+
 class _UiStartReq(BaseModel):
     task: str = ""
     title: str = ""
     llm_usd_cap: float = 0.0
     real_usd_cap: float = 0.0
     per_item_usd: float = 0.0
+    worker_mode: str = "plain"
     steps: list[str] = Field(default_factory=list)
 
 
@@ -1112,7 +1235,8 @@ async def ui_start(body: _UiStartReq, user: dict = Depends(get_current_user)):
         config={"source": "ui", "origin_platform": "web",
                 "steps": [str(s) for s in (body.steps or []) if str(s).strip()],
                 "real_usd_cap": float(body.real_usd_cap or 0.0),
-                "per_item_usd": float(body.per_item_usd or 0.0)},
+                "per_item_usd": float(body.per_item_usd or 0.0),
+                "worker_mode": _norm_worker_mode(body.worker_mode)},
         origin={"platform": "web", "kind": "", "address": ""},
         source_host="localhost", source_port=0,
         llm_usd_cap=float(body.llm_usd_cap or 0.0), status="planning")

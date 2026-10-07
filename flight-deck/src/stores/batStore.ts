@@ -100,7 +100,7 @@ interface BatStore {
   loadAsks: () => Promise<void>
   select: (id: string | null) => Promise<void>
   poll: () => Promise<void>
-  startRun: (task: string, opts?: { title?: string; llm_usd_cap?: number; real_usd_cap?: number; per_item_usd?: number }) => Promise<string | null>
+  startRun: (task: string, opts?: { title?: string; llm_usd_cap?: number; real_usd_cap?: number; per_item_usd?: number; worker_mode?: string }) => Promise<string | null>
   answer: (askId: string, text: string) => Promise<boolean>
   approvePlan: (runId: string, approve: boolean) => Promise<void>
   cancel: (runId: string) => Promise<void>
@@ -172,7 +172,8 @@ export const useBatStore = create<BatStore>((set, get) => ({
       const res = await _authedFetch('/fd/bat/start', {
         method: 'POST',
         body: JSON.stringify({ task, title: opts.title || '', llm_usd_cap: opts.llm_usd_cap || 0,
-          real_usd_cap: opts.real_usd_cap || 0, per_item_usd: opts.per_item_usd || 0 }),
+          real_usd_cap: opts.real_usd_cap || 0, per_item_usd: opts.per_item_usd || 0,
+          worker_mode: opts.worker_mode || 'plain' }),
       })
       if (!res.ok) {
         set({ error: `Could not start (${res.status})` })

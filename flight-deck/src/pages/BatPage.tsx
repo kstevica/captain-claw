@@ -34,6 +34,7 @@ function Compose() {
   const [adv, setAdv] = useState(false)
   const [realCap, setRealCap] = useState('')
   const [perItem, setPerItem] = useState('')
+  const [mode, setMode] = useState<'plain' | 'archetype'>('plain')
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -41,6 +42,7 @@ function Compose() {
     const id = await startRun(task.trim(), {
       real_usd_cap: parseFloat(realCap) || 0,
       per_item_usd: parseFloat(perItem) || 0,
+      worker_mode: mode,
     })
     if (id) {
       setTask('')
@@ -67,6 +69,14 @@ function Compose() {
           {busy ? <Loader2 size={14} className="animate-spin" /> : <Hammer size={14} />}
           Start Bat run
         </button>
+        <div className="inline-flex overflow-hidden rounded-md border border-zinc-700 text-xs">
+          <button type="button" onClick={() => setMode('plain')}
+            className={`px-2.5 py-1.5 ${mode === 'plain' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}
+            title="A generic full-toolset worker per step">Plain</button>
+          <button type="button" onClick={() => setMode('archetype')}
+            className={`px-2.5 py-1.5 ${mode === 'archetype' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}
+            title="A best-fit specialist archetype per step">Archetype</button>
+        </div>
         <button type="button" onClick={() => setAdv((v) => !v)} className="text-xs text-zinc-400 hover:text-zinc-200">
           {adv ? 'Hide' : 'Spend cap…'}
         </button>

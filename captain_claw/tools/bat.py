@@ -77,6 +77,7 @@ class BatTool(Tool):
             "task": {"type": "string", "description": "For 'start': a clear, self-contained statement of the goal to finish."},
             "title": {"type": "string", "description": "Optional short title for the run ('start')."},
             "llm_usd_cap": {"type": "number", "description": "Optional hard ceiling on LLM spend in USD for the whole run ('start'); 0/omitted = unbounded."},
+            "worker_mode": {"type": "string", "enum": ["plain", "archetype"], "description": "For 'start': 'plain' (default) spawns a generic full-toolset worker per step; 'archetype' assigns a best-fit specialist agent per step."},
             "steps": {
                 "type": "array", "items": {"type": "string"},
                 "description": "Optional explicit ordered step list ('start'); if omitted, Bat plans the steps itself.",
@@ -189,6 +190,7 @@ class BatTool(Tool):
             "task": task,
             "title": kwargs.get("title", "") or "",
             "llm_usd_cap": float(kwargs.get("llm_usd_cap") or 0.0),
+            "worker_mode": str(kwargs.get("worker_mode") or "plain"),
             "steps": [str(s) for s in steps] if isinstance(steps, (list, tuple)) else [],
             "origin_platform": origin_platform,
             "origin_user_id": origin_user_id,

@@ -8,9 +8,38 @@ that's fine here (test_bat_loop pins its own defaults)."""
 from __future__ import annotations
 
 from captain_claw.flight_deck.bat_routes import (
-    _assemble_deliverable, _bat_worker_tools, _build_step_prompt, _parse_plan, _parse_vote,
-    plan_needs_gate,
+    _assemble_deliverable, _bat_worker_tools, _build_step_prompt, _norm_worker_mode,
+    _parse_archetype_plan, _parse_plan, _parse_vote, plan_needs_gate,
 )
+
+
+# ── hybrid worker mode (plain | archetype) ─────────────────────────────
+
+def test_norm_worker_mode():
+    assert _norm_worker_mode("archetype") == "archetype"
+    assert _norm_worker_mode("Archetype") == "archetype"
+    assert _norm_worker_mode("plain") == "plain"
+    assert _norm_worker_mode("") == "plain"
+    assert _norm_worker_mode("garbage") == "plain"
+
+
+def test_parse_archetype_plan_assigns_only_valid_ids():
+    valid = {"researcher", "writer"}
+    steps, m = _parse_archetype_plan(
+        '[{"step": "find sources", "archetype": "researcher"},'
+        ' {"step": "write it up", "archetype": "writer"},'
+        ' {"step": "orphan step", "archetype": "does-not-exist"}]', valid)
+    assert [s["title"] for s in steps] == ["find sources", "write it up", "orphan step"]
+    # the unknown archetype is dropped → that step runs as a plain worker
+    assert m == {"step-1": "researcher", "step-2": "writer"}
+
+
+def test_parse_archetype_plan_tolerates_strings_fences_and_junk():
+    valid = {"researcher"}
+    s, m = _parse_archetype_plan('["a", "b"]', valid)          # plain strings, no archetypes
+    assert [x["title"] for x in s] == ["a", "b"] and m == {}
+    assert _parse_archetype_plan("```json\n[]\n```", valid) == ([], {})
+    assert _parse_archetype_plan("not json", valid) == ([], {})
 
 
 # ── plan_needs_gate (start-gate classifier) ────────────────────────────
