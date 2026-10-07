@@ -42,6 +42,24 @@ def test_build_step_prompt_includes_human_input_when_present():
     assert "4242" in p
 
 
+def test_live_path_imports_resolve():
+    """The planner/attempt_runner/judge/on_finish import FD symbols lazily, so a
+    wrong import source only surfaces at run time (as it did with get_db). Import
+    the exact live-path symbols here so pytest catches that class of bug without a
+    running deck."""
+    from captain_claw.flight_deck.auth import get_db  # noqa: F401
+    from captain_claw.flight_deck.basna_routes import (  # noqa: F401
+        _RUN_USAGE, _dispatch_one, _effective_key, _load_owner_tiers, _provider_call, _run_sid,
+    )
+    from captain_claw.flight_deck.server import (  # noqa: F401
+        AgentConfig, DATA_DIR, _do_stop_process, _load_process_registry, _processes,
+        _save_process_registry, spawn_process,
+    )
+    from captain_claw.flight_deck import pricing
+    from captain_claw.llm import Message  # noqa: F401
+    assert hasattr(pricing, "summarize")
+
+
 # ── _parse_vote (fail-closed) ──────────────────────────────────────────
 
 def test_parse_vote_reads_vote_and_reason():

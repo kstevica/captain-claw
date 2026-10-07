@@ -431,7 +431,7 @@ async def _bat_planner(run: dict) -> list[dict]:
     # Best-effort LLM decomposition; any failure → a single stubborn step.
     try:
         from captain_claw.flight_deck.basna_routes import _load_owner_tiers, _provider_call
-        from captain_claw.flight_deck.db import get_db
+        from captain_claw.flight_deck.auth import get_db
         from captain_claw.llm import Message
         db = get_db()
         tiers, _ = await _load_owner_tiers(db, run["owner_id"])
@@ -458,7 +458,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
     from captain_claw.flight_deck.basna_routes import (
         _RUN_USAGE, _dispatch_one, _load_owner_tiers, _run_sid,
     )
-    from captain_claw.flight_deck.db import get_db
+    from captain_claw.flight_deck.auth import get_db
     from captain_claw.flight_deck import pricing
 
     sid = run["id"]
@@ -522,7 +522,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
 
 async def _bat_judge(run: dict, steps: list[dict]) -> dict:
     from captain_claw.flight_deck.basna_routes import _load_owner_tiers, _provider_call, _RUN_USAGE, _run_sid
-    from captain_claw.flight_deck.db import get_db
+    from captain_claw.flight_deck.auth import get_db
     from captain_claw.flight_deck import pricing
     from captain_claw.llm import Message
 
@@ -616,7 +616,7 @@ async def _bat_on_finish(run: dict) -> None:
     address = (origin.get("address") or "").strip()
     try:
         if kind in ("", "web"):
-            from captain_claw.flight_deck.db import get_db
+            from captain_claw.flight_deck.auth import get_db
             await get_db().add_notification(
                 owner, "run" if ok else "run_error", run.get("title") or "Bat run",
                 summary, "bat", sid)
@@ -754,7 +754,7 @@ async def _notify_ask(ask: dict) -> None:
     owner = ask.get("owner_id", "")
     question = ask.get("question", "")
     try:
-        from captain_claw.flight_deck.db import get_db
+        from captain_claw.flight_deck.auth import get_db
         await get_db().add_notification(
             owner, "bat_ask", "Bat needs you", question, "bat", ask.get("run_id", ""))
     except Exception as e:  # noqa: BLE001
