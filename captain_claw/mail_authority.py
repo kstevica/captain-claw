@@ -50,7 +50,7 @@ from typing import Any
 
 AUTOMATION_KINDS = frozenset({
     "autonomy", "autonomy_tool", "plan", "fd_scheduler", "flow", "flow_tool", "cron",
-    "peer", "peer_relay", "sister", "botport", "fd_worker", "being", "mcp_task", "unknown",
+    "peer", "peer_relay", "sister", "botport", "fd_worker", "being", "mcp_task", "bat", "unknown",
 })
 MAIL_WRITE_ACTIONS = frozenset({"create_draft", "update_draft", "send", "send_draft"})
 MAIL_REFUSAL_TAG = "[not-authorized: mail-write]"
@@ -71,6 +71,7 @@ KIND_LABELS: dict[str, str] = {
     "fd_worker": "a multi-agent run",
     "being": "a being tick",
     "mcp_task": "a task sent over MCP",
+    "bat": "a Bat run",
     "unknown": "an automation",
 }
 
@@ -99,7 +100,12 @@ _CURRENT: contextvars.ContextVar[Authority | None] = contextvars.ContextVar(
 )
 
 _TRUTHY = frozenset({"1", "true", "yes"})
-_WORKER_ENVS = ("CLAW_BASNA_WORKER", "CLAW_VATRA_WORKER", "CLAW_COUNCIL_WORKER", "CLAW_CODE_AGENT")
+# CLAW_BAT_WORKER is here so a Bat worker fails closed to deny by process
+# default: a Bat run's email permission comes ONLY from the per-turn automation
+# frame ({kind:'bat', mail_write:'allow'}), never from being a worker — and that
+# frame is sent only when the owner approved a mail plan (run-scoped, Phase 5).
+_WORKER_ENVS = ("CLAW_BASNA_WORKER", "CLAW_VATRA_WORKER", "CLAW_COUNCIL_WORKER",
+                "CLAW_CODE_AGENT", "CLAW_BAT_WORKER")
 
 
 def automated(kind: str, job_text: str = "", mail_write: str = "intent") -> Authority:

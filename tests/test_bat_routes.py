@@ -80,12 +80,14 @@ def test_parse_plan_invalid_is_empty_and_caps_at_12():
 
 # ── _bat_worker_tools (Bat keeps the full toolset) ─────────────────────
 
-def test_worker_tools_strip_only_bat():
-    tools = ["read", "write", "shell", "browser", "vatra", "basna", "bat"]
+def test_worker_tools_strip_bat_and_send_mail():
+    tools = ["read", "write", "shell", "browser", "vatra", "basna", "bat", "send_mail", "google_mail"]
     out = _bat_worker_tools(tools, default_tools=[])
-    assert "bat" not in out
+    assert "bat" not in out                 # no Bat-in-Bat
+    assert "send_mail" not in out           # uncapped mail path barred — FD Gmail gate only
     # the whole point of Bat: it CAN delegate to Vatra/Basna and use everything else
     assert "vatra" in out and "basna" in out and "browser" in out and "shell" in out
+    assert "google_mail" in out             # the audited mail path stays
 
 
 def test_worker_tools_uses_default_when_none():

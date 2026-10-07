@@ -375,8 +375,29 @@ restart). Remember: `cd flight-deck && npm run build`, commit the bundle, restar
    - Tests: `test_human_ask.py` (store asks + registry + secret redaction + CAS), `test_bat_gate.py`
      (start gate approve/reject, non-gated, step-ask resume, expiry, supervisor skip/resume), plus
      `plan_needs_gate` in `test_bat_routes.py`. **Bat suites: 117 passing**; 272 tool-reg tests green.
-5. **Email exception.** `bat` automation kind + marker, FD Gmail-gate routing, child-propagation
-   block. Layer-3 evidence verifier reads send receipts.
+5. **Email exception.** ✅ **DONE (2026-10-07).** The run-scoped exception to PR #56, tied to the
+   Phase-4 start gate so it is **human-approved by construction**.
+   - `mail_authority`: `bat` added to `AUTOMATION_KINDS` + `KIND_LABELS` ("a Bat run"), and
+     `CLAW_BAT_WORKER` added to `_WORKER_ENVS` so a Bat worker fails closed to **deny** by process
+     default — the grant can only arrive on the per-turn frame.
+   - **Grant path:** the owner approves a plan whose gate reason includes "send email" → `_gate_check`
+     sets `config.email_allowed=True`. Only then does `_bat_attempt` dispatch with
+     `automation={kind:'bat', mail_write:'allow'}`; otherwise `deny`. The grant lives on the run config
+     and is on Bat's **own** dispatch frame only — a child Vatra/Basna run gets its own (deny) default,
+     so the allow **never propagates**.
+   - **FD Gmail gate only:** `_bat_worker_tools` now also strips `send_mail` (the uncapped Mailgun/
+     SendGrid/SMTP path) — Bat mail routes through `/fd/google/gmail/send` with the owner's
+     allowlist/daily-limit/audit intact. `google_mail` stays.
+   - **Layer-3 evidence:** `_email_receipt_block` reads the `gmail_sends` audit for this run's workers
+     and hands the judge panel the ground-truth send count/recipients, so a worker can't pass by
+     *claiming* it emailed when the gateway recorded nothing.
+   - Tests: `test_bat_mail.py` (the kind + worker default-deny, allow-only-after-approval, non-mail
+     never granted, receipt block), updated `_bat_worker_tools` test. **Bat + mail_authority suites:
+     402 passing.**
+   - Still deferred: `AUTONOMY_HARD_EXCLUDE` exact-match entry for `bat` (email safety does not depend
+     on it — the grant needs human plan approval autonomy can't give — but excluding keeps autonomy from
+     auto-starting Bat runs; §10). The owner's Gmail-send policy must be enabled on the deck for real
+     sends (second gate, PR #42). Live send verified on a deck.
 6. **Capped spend.** ledger + routes + policy + admin ceiling, `spend` tool, checkout interceptor +
    pre-click heuristic, tool-block for money tools.
 7. **Accounts/logins.** signup flow, inbox-verification read, credential-key requirement; 2FA/CAPTCHA

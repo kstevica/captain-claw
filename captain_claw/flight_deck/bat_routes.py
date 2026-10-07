@@ -146,12 +146,32 @@ def _parse_plan(content: str, task: str) -> list[dict]:
     return out[:12]
 
 
+# Tools a Bat worker never gets: the `bat` launcher (blocks Bat-in-Bat) and
+# `send_mail` (the direct Mailgun/SendGrid/SMTP path has no allowlist, rate
+# limit or audit — Bat's email exception routes ONLY through the FD Gmail gate,
+# which keeps the owner's allowlist/daily-limit/audit, so send_mail is barred).
+_BAT_TOOL_DENY = frozenset({"bat", "send_mail"})
+
+
 def _bat_worker_tools(tools: list[str] | None, default_tools: list[str]) -> list[str]:
     """Bat workers keep the FULL toolset (including the vatra/basna launchers so
-    a Bat worker may delegate to a Vatra run) — only the `bat` launcher is
-    stripped, to block Bat-in-Bat."""
+    a Bat worker may delegate to a Vatra run) EXCEPT the few in _BAT_TOOL_DENY."""
     base = list(tools if tools else default_tools)
-    return [t for t in base if t != "bat"]
+    return [t for t in base if t not in _BAT_TOOL_DENY]
+
+
+def _email_receipt_block(sends: list[dict], sid8: str) -> str:
+    """Ground truth from the FD Gmail send audit for this run's workers — so the
+    judge panel can tell a real 'I emailed X' from a fabricated one."""
+    mine = [s for s in sends if str(s.get("agent", "")).startswith(f"bat-{sid8}")]
+    if not mine:
+        return ("## VERIFIED — email send audit\n"
+                "The audited gateway recorded NO emails actually sent by this run. "
+                "Treat any claim that an email was sent as unverified.")
+    lines = [f"- to {s.get('to', '?')}: {s.get('subject') or '(no subject)'} [{s.get('status', '?')}]"
+             for s in mine[:10]]
+    return (f"## VERIFIED — email send audit: {len(mine)} email(s) actually sent\n"
+            + "\n".join(lines))
 
 
 def _assemble_deliverable(steps: list[dict]) -> str:
@@ -383,9 +403,15 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
         _run_sid.set(sid)
         _RUN_USAGE.setdefault(sid, [])
         before = len(_RUN_USAGE[sid])
+        # Run-scoped email exception (Phase 5): grant mail-write ONLY when the
+        # owner approved a mail plan for THIS run. Otherwise deny (PR #56 default).
+        # This frame is Bat's own dispatch; it is never carried into a child run.
+        email_allowed = bool((run.get("config") or {}).get("email_allowed"))
+        automation = {"kind": "bat", "job_text": str(run.get("task", ""))[:500],
+                      "mail_write": "allow" if email_allowed else "deny"}
         res = await _dispatch_one(
             worker["port"], worker["auth"], prompt, _STEP_TIMEOUT_S,
-            on_action=_on_action, agent_name=step["step_key"],
+            on_action=_on_action, agent_name=step["step_key"], automation=automation,
         )
         new_usage = _RUN_USAGE[sid][before:]
         cost = pricing.summarize(new_usage)
@@ -419,6 +445,16 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
         db = get_db()
         tiers, _ = await _load_owner_tiers(db, run["owner_id"])
         creds = _creds_for(tiers)
+        # Layer-3 evidence: if this run could send mail, hand the panel the
+        # ground-truth send audit so it judges honesty against reality, not the
+        # worker's claim.
+        receipt = ""
+        if (run.get("config") or {}).get("email_allowed"):
+            try:
+                sends = await db.list_gmail_sends(run["owner_id"], limit=50)
+                receipt = _email_receipt_block(sends, sid[:8])
+            except Exception:
+                receipt = ""
         if creds and deliverable.strip():
             lenses = ["correctness and completeness",
                       "whether it ACTUALLY did the task vs merely described it",
@@ -428,10 +464,11 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
                 lens = lenses[idx % len(lenses)]
                 _run_sid.set(sid)
                 _RUN_USAGE.setdefault(sid, [])
+                shown = (receipt + "\n\n" + deliverable_text) if receipt else deliverable_text
                 prov, mt = _provider_call(creds, temperature=0.0, default_max=256, cap=1024)
                 resp = await prov.complete(messages=[
                     Message(role="system", content=_VOTE_SYSTEM),
-                    Message(role="user", content=_vote_prompt(lens, task, deliverable_text)),
+                    Message(role="user", content=_vote_prompt(lens, task, shown)),
                 ], temperature=0.0, max_tokens=mt)
                 return _parse_vote(resp.content or "")
 
@@ -542,8 +579,17 @@ async def _gate_check(store, run: dict) -> str:
             if decision in _APPROVE_WORDS:
                 cfg = dict(run.get("config") or {})
                 cfg["plan_approved"] = True
+                # Grant the run-scoped email exception ONLY now, because the
+                # owner approved a plan whose gate reason included mail (Phase 5).
+                # The grant lives on the run config and is never copied to a child.
+                reason = cfg.get("gate_reason") or ""
+                if "send email" in reason:
+                    cfg["email_allowed"] = True
                 await store.set_config(run_id, cfg)
-                await store.append_event(run_id, "note", "plan approved — proceeding")
+                await store.append_event(
+                    run_id, "note",
+                    "plan approved — proceeding" + (" (email enabled for this run)"
+                                                    if cfg.get("email_allowed") else ""))
                 return "proceed"
             await store.set_status(run_id, "cancelled", stopped_reason="plan_rejected")
             await store.append_event(run_id, "cancelled", "plan rejected by the owner")
@@ -571,6 +617,11 @@ async def _gate_check(store, run: dict) -> str:
     needs, reason = plan_needs_gate(run.get("task", ""), steps)
     if not needs:
         return "proceed"
+    # Remember what was gated so approval can grant the matching capability
+    # (e.g. 'send email' → the run-scoped email exception).
+    cfg = dict(run.get("config") or {})
+    cfg["gate_reason"] = reason
+    await store.set_config(run_id, cfg)
     existing = await store.latest_open_ask(run_id)
     if not (existing and existing["kind"] == "plan_approval"):
         q = (f"This Bat run would {reason}. Approve it to run, or cancel.\n\nPlan:\n"
