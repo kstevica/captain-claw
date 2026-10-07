@@ -1995,6 +1995,10 @@ class WebServer:
         text = str(data.get("text") or "").strip()
         if not text:
             return web.json_response({"success": False, "error": "missing 'text'"}, status=400)
+        # PR D: a flow whose earlier step returned members' private data says
+        # so; the frame carries the level (never a header — a person reads it),
+        # so a consult / delegate on this socket relays it marked.
+        _private = data.get("member_private")
         try:
             self._broadcast({
                 "type": "chat_message",
@@ -2002,6 +2006,7 @@ class WebServer:
                 "content": text,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "model": str(data.get("model") or "flow"),
+                **({"member_private": _private} if _private in ("data", "content") else {}),
             })
             return web.json_response({"success": True})
         except Exception as exc:

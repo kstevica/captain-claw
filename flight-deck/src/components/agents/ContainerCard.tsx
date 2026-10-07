@@ -182,6 +182,8 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   // deck whose Flight Deck offers them.
   const packsEnabled = useSharedAgentStore((s) => s.contextPacks)
   const canPacks = canShare && packsEnabled
+  // The agent can look into how members use it (PR D): the Share note says so.
+  const usageEnabled = useSharedAgentStore((s) => s.sharedUsage)
   const [showPacks, setShowPacks] = useState(false)
 
   const memory = useAgentMemoryTransfer({
@@ -296,7 +298,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         resourceId={container.agent_ref!}
         resourceName={agentName}
         allowEdit={false}
-        note={ownerShareNote(packsEnabled, 'docker')}
+        note={ownerShareNote(packsEnabled, 'docker', false, usageEnabled)}
         onClose={() => setShowShare(false)}
       />,
       document.body

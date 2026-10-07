@@ -708,7 +708,9 @@ async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool, attach: dic
     """Ask Flight Deck whether a Flow matches this message.
 
     Returns None to take a normal agent turn, or a dict:
-      {"output": text}  → relay this text, end the turn (inline simple flow)
+      {"output": text}  → relay this text, end the turn (inline simple flow);
+                           plus ``"member_private"`` when the run returned
+                           members' private data (PR D)
       {"deferred": True} → flow took over (runs in FD bg, delivers via channel);
                            end the turn silently. Also covers resuming a paused
                            input step. Best-effort; never raises."""
@@ -759,6 +761,9 @@ async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool, attach: dic
             return {"deferred": True}
         out = str(data.get("output") or "").strip()
         if out:
+            _private = data.get("member_private")
+            if _private in ("data", "content"):
+                return {"output": out, "member_private": _private}
             return {"output": out}
     except Exception as exc:
         log.debug("flow evaluate skipped: %s", exc)
@@ -876,10 +881,13 @@ async def _run_agent(
                 # Inline output → relay it. Deferred → the flow delivers its own
                 # messages asynchronously via /api/chat/push; end the turn quietly.
                 if _flow.get("output"):
+                    # PR D: the level marks the frame (FD's consult / delegate
+                    # relays add the header); the text a person reads stays plain.
                     send({
                         "type": "chat_message", "role": "assistant",
                         "content": _flow["output"], "timestamp": datetime.now(UTC).isoformat(),
                         "model": "flow",
+                        **({"member_private": _flow["member_private"]} if _flow.get("member_private") else {}),
                     })
                 return  # the `finally` resets busy + emits "ready"
 
@@ -940,6 +948,12 @@ async def _run_agent(
                 log.warning("Could not set per-turn tool policy", error=str(exc))
                 _video_policy_slug = None
 
+        # PR D: the level of a turn that read members' private data ("" when
+        # none) — marks the final frame (FD's peer relays keep the header on
+        # the relayed text) and skips the post-turn learning jobs below.
+        from captain_claw import member_privacy as _member_privacy
+        _private_level = ""
+
         # Route /orchestrate requests to the orchestrator (admin only).
         stripped = content.strip()
         if (not is_public and not speaker_key
@@ -949,15 +963,22 @@ async def _run_agent(
                 send({"type": "error", "message": "Usage: /orchestrate <request>"})
             else:
                 response = await server._orchestrator.orchestrate(orchestrate_input)
+                _private_level = _member_privacy.header_level(response)
                 send({
                     "type": "chat_message",
                     "role": "assistant",
                     "content": response,
                     "timestamp": datetime.now(UTC).isoformat(),
                     "model": model_label,
+                    **({"member_private": _private_level} if _private_level else {}),
                 })
         else:
             response = await agent.complete(content)
+            # Read right away, before any other await: a concurrent turn on
+            # this Agent object could reset it (contract part 0c NB7). The
+            # output level also covers a reply that carry-over flagged (it
+            # restated member text from context without reading it again).
+            _private_level = _member_privacy.output_level(agent)
 
             log.info(
                 "Agent complete() returned",
@@ -972,6 +993,7 @@ async def _run_agent(
                 "content": response,
                 "timestamp": datetime.now(UTC).isoformat(),
                 "model": model_label,
+                **({"member_private": _private_level} if _private_level else {}),
             })
 
             # Extract and broadcast suggested next steps — skip for FD-spawned
@@ -1041,7 +1063,9 @@ async def _run_agent(
         # — skip for ALL FD workers (Basna/Vatra/Council/Code + beings). A being
         # already dreams and reflects through its tick engine.
         # On a member's turn these still run (open commons, A2 part 0 N8).
-        if not _worker:
+        # PR D: a turn that read members' private data feeds no shared learnings (U3).
+        _private = bool(_private_level)
+        if not _worker and not _private:
             # Auto-reflection (admin only).
             if not is_public:
                 try:
@@ -1078,7 +1102,7 @@ async def _run_agent(
         # throttled (cooldown + max/day + quiet hours), so it fires rarely, not
         # the per-faculty-call thrash — one occasional generation is acceptable.
         # Never for a member's turn: proposals go to the owner's channels.
-        if (not _worker or _being_worker) and not is_public and not speaker_key:
+        if (not _worker or _being_worker) and not is_public and not speaker_key and not _private:
             try:
                 import asyncio as _asyncio4
                 from captain_claw.intentions_generator import maybe_auto_propose

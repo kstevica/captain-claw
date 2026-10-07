@@ -207,12 +207,12 @@ def test_member_notice_adds_the_commons_paragraph_only_with_the_flag_and_files()
     assert "saved/" not in out["nulled"]
 
 
-def test_ack_prefix_is_v3():
+def test_ack_prefix_is_v4():
     out = _lift([(_SHARED, ["SHARED_ACK_PREFIX", "sliceUser", "sharedAckKey"])], """
       out = { prefix: SHARED_ACK_PREFIX, key: sharedAckKey('u1', 'process:x:0123456789abcdef') };
     """)
-    assert out == {"prefix": "fd.sharedAgentAck.v3.",
-                   "key": "fd.sharedAgentAck.v3.u1.process:x:0123456789abcdef"}
+    assert out == {"prefix": "fd.sharedAgentAck.v4.",
+                   "key": "fd.sharedAgentAck.v4.u1.process:x:0123456789abcdef"}
 
 
 def test_shared_caps_carry_the_datastore():
@@ -966,13 +966,14 @@ def test_chat_notice_and_owner_card_wiring():
       const param = fn.parameters[0].name.elements.find((e) => e.name.getText(sf) === 'workspace');
       return { args: call.arguments.map((a) => a.getText(sf)), dflt: param && param.initializer ? param.initializer.getText(sf) : null };
     """)
-    assert notice == {"args": ["agentName", "ownerName", "hostWarning", "caps", "workspace"], "dflt": "false"}
+    assert notice == {"args": ["agentName", "ownerName", "hostWarning", "caps", "workspace", "ownerReads"],
+                      "dflt": "false"}
     proc = _query(_PROCESS_CARD, _JSX_HELPERS + _GUARDS + r"""
       return { notes: named('ShareModal').map((n) => attr(n, 'note')), ws: init('workspaceEnabled') };
     """)
-    assert proc == {"notes": ["{ownerShareNote(packsEnabled, 'process', workspaceEnabled)}"],
+    assert proc == {"notes": ["{ownerShareNote(packsEnabled, 'process', workspaceEnabled, usageEnabled)}"],
                     "ws": "useSharedAgentStore((s) => s.memberWorkspace)"}
     docker = _query(_CONTAINER_CARD, _JSX_HELPERS + r"""
       return named('ShareModal').map((n) => attr(n, 'note'));
     """)
-    assert docker == ["{ownerShareNote(packsEnabled, 'docker')}"]
+    assert docker == ["{ownerShareNote(packsEnabled, 'docker', false, usageEnabled)}"]

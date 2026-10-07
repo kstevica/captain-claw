@@ -1766,8 +1766,11 @@ class AgentToolLoopMixin:
                             self._trim_processed_extracts_in_session()
 
                 # The owner's contacts/scripts/APIs stores are never written
-                # from a shared-agent member's turn.
-                _owner_capture = result.success and getattr(self, "_speaker_scoped", False) is not True
+                # from a shared-agent member's turn — nor (PR D) from a turn
+                # that read members' private data.
+                from captain_claw import member_privacy
+                _owner_capture = (result.success and getattr(self, "_speaker_scoped", False) is not True
+                                  and not member_privacy.private_turn(self))
 
                 # Auto-capture contacts from send_mail usage.
                 if _owner_capture and hasattr(self, "_auto_capture_contacts_from_tool_call"):
@@ -1797,7 +1800,8 @@ class AgentToolLoopMixin:
                         log.warning("Auto-capture APIs failed", tool=tc.name, error=str(_ac_err))
 
                 # Auto-extract insights from key tool results.
-                if result.success and hasattr(self, "_maybe_extract_insights_from_tool"):
+                if (result.success and not member_privacy.private_turn(self)
+                        and hasattr(self, "_maybe_extract_insights_from_tool")):
                     try:
                         await self._maybe_extract_insights_from_tool(
                             tc.name,

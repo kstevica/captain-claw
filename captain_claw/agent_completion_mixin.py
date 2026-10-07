@@ -865,9 +865,14 @@ class AgentCompletionMixin:
         )
         await self._persist_assistant_response(final_response)
         # The owner's todo/contacts/scripts/APIs stores are never written
-        # from a shared-agent member's turn.
-        if getattr(self, "_speaker_scoped", False) is not True:
-            await self._auto_capture_todos(effective_user_input, final_response)
+        # from a shared-agent member's turn — nor (PR D) from a turn that
+        # read members' private data.
+        from captain_claw import member_privacy
+        if getattr(self, "_speaker_scoped", False) is not True and not member_privacy.private_turn(self):
+            # A reply carry-over flagged (it restated member text from
+            # context) is not scanned: a to-do lands in every later prompt.
+            _capture_reply = "" if member_privacy.output_level(self) else final_response
+            await self._auto_capture_todos(effective_user_input, _capture_reply)
             await self._auto_capture_contacts(effective_user_input, final_response)
             await self._auto_capture_scripts(effective_user_input, final_response)
             await self._auto_capture_apis(effective_user_input, final_response)

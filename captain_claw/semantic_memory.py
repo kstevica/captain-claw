@@ -1429,6 +1429,8 @@ class SemanticMemoryIndex:
             log.debug("Skipping session-memory sync; cannot read session db", error=str(exc))
             return []
 
+        from captain_claw import member_privacy
+
         documents: list[_Document] = []
         for sid, name, raw_messages, updated_at in rows:
             try:
@@ -1441,6 +1443,8 @@ class SemanticMemoryIndex:
             for msg in messages:
                 if not isinstance(msg, dict):
                     continue
+                if member_privacy.is_private(msg):
+                    continue             # PR D: members' private data is never indexed
                 role = str(msg.get("role", "")).strip().lower() or "unknown"
                 content = re.sub(r"\s+", " ", str(msg.get("content", "")).strip())
                 if not content:
@@ -1466,10 +1470,14 @@ class SemanticMemoryIndex:
     @staticmethod
     def _format_messages_as_text(messages: list[dict[str, Any]]) -> str:
         """Render a list of session messages as ``[role] content`` lines."""
+        from captain_claw import member_privacy
+
         lines: list[str] = []
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
+            if member_privacy.is_private(msg):
+                continue                 # PR D: never archived or indexed
             role = str(msg.get("role", "")).strip().lower() or "unknown"
             content = re.sub(r"\s+", " ", str(msg.get("content", "")).strip())
             if not content:

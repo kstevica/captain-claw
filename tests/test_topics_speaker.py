@@ -206,8 +206,13 @@ async def test_owner_sees_every_excerpt(mgr):
 
     tid = _seed(mgr)
     res = await TopicsTool().execute(action="get", topic=tid)
-    for text in ("OWNER EXCERPT 2", "ANA EXCERPT 1", "BO EXCERPT"):
-        assert text in res.content
+    # PR D (J19): without an owner instance and Flight Deck's roster nobody is
+    # a CURRENT member, so members' excerpts are dropped (fail closed); the
+    # owner's own always show. Current members' excerpts with a roster:
+    # tests/test_member_privacy.py::test_owner_topics_get.
+    assert "OWNER EXCERPT 2" in res.content
+    for text in ("ANA EXCERPT 1", "BO EXCERPT"):
+        assert text not in res.content
     assert "6 total" in res.content
 
 

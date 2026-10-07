@@ -237,6 +237,13 @@ _ITEM_COUNT_RE = re.compile(
 )
 
 
+def _raise_level(current: str, new: str) -> str:
+    """PR D: the higher of two member-privacy levels (content beats data)."""
+    if "content" in (current, new):
+        return "content"
+    return current or new or ""
+
+
 def _estimate_task_iterations(description: str) -> int:
     """Estimate how many iterations a worker task will need.
 
@@ -802,6 +809,9 @@ class SessionOrchestrator:
             return "No prepared graph to execute.  Call prepare() first."
 
         graph = self._graph
+        # PR D: raised when a worker's turn read members' private data; every
+        # later worker prompt and the run's result then start with the header.
+        self._member_private_level = ""
 
         # Substitute {{variable}} placeholders if values provided.
         if variable_values:
@@ -893,6 +903,12 @@ class SessionOrchestrator:
         # Cleanup
         await self._pool.evict_idle()
 
+        # PR D: a run that read members' private data hands it on flagged.
+        _private_level = getattr(self, "_member_private_level", "")
+        if _private_level:
+            from captain_claw import member_privacy
+
+            return member_privacy.header_for(_private_level) + "\n" + (result or "")
         return result
 
     async def orchestrate(self, user_input: str) -> str:
@@ -1802,6 +1818,14 @@ class SessionOrchestrator:
                 task_description=task.description,
                 file_manifest=file_manifest + dep_outputs_section + workspace_section + shared_workspace_section + output_schema_section + binary_script_section,
             )
+            # PR D: once a worker read members' private data, every later
+            # worker's input (it may carry that output) starts with the header.
+            from captain_claw import member_privacy
+
+            _run_private = getattr(self, "_member_private_level", "")
+            if _run_private:
+                worker_prompt = member_privacy.header_for(_run_private) + "\n" + worker_prompt
+            _worker_private = ""
 
             # Bump iteration budget for complex tasks that require
             # many tool calls (find files + read + write + shell …).
@@ -1835,6 +1859,7 @@ class SessionOrchestrator:
             response = await agent.complete(worker_prompt)
             worker_success = getattr(agent, "_last_complete_success", True)
             output_text = str(response or "").strip()
+            _worker_private = _raise_level(_worker_private, member_privacy.output_level(agent))
 
             # ── Binary output enforcement ──
             # If the task requires binary file output but the agent
@@ -1872,6 +1897,7 @@ class SessionOrchestrator:
                     response = await agent.complete(retry_prompt)
                     worker_success = getattr(agent, "_last_complete_success", True)
                     output_text = str(response or "").strip()
+                    _worker_private = _raise_level(_worker_private, member_privacy.output_level(agent))
 
             # ── Structured output validation ──
             # If the task declares an output_schema, validate the response
@@ -1905,6 +1931,7 @@ class SessionOrchestrator:
                     response = await agent.complete(retry_prompt)
                     worker_success = getattr(agent, "_last_complete_success", True)
                     output_text = str(response or "").strip()
+                    _worker_private = _raise_level(_worker_private, member_privacy.output_level(agent))
 
                     if worker_success:
                         valid2, val_error2, parsed2 = validate_task_output(
@@ -1942,6 +1969,13 @@ class SessionOrchestrator:
                         "task_id": task.id, "title": task.title,
                         "error": val_error,
                     })
+
+            # PR D: a worker whose turn read members' private data hands its
+            # output on with the header (validation above saw the bare text).
+            if _worker_private:
+                self._member_private_level = _raise_level(
+                    getattr(self, "_member_private_level", ""), _worker_private)
+                output_text = member_privacy.header_for(_worker_private) + "\n" + output_text
 
             result = {
                 "success": worker_success,

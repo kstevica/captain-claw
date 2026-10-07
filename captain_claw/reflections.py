@@ -418,7 +418,9 @@ async def generate_reflection(agent: Agent) -> Reflection:
     recent_messages_text = ""
     topics: list[str] = []
     if agent.session and agent.session.messages:
-        messages = agent.session.messages[-20:]  # Last 20 messages
+        # PR D: members' private data never feeds shared reflections.
+        from captain_claw import member_privacy
+        messages = member_privacy.learnable(agent.session.messages)[-20:]  # Last 20 messages
         lines: list[str] = []
         for m in messages:
             role = m.get("role", "unknown")

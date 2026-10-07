@@ -799,7 +799,7 @@ def test_notice_dismissal_is_per_deck_user():
       writeAck(R);
       out = { before, ana, bob, anon, otherAgent, keys, blocked: readAck(R) };
     """)
-    assert out["keys"] == ["fd.sharedAgentAck.v3.u-ana.process:x:0123456789abcdef"]
+    assert out["keys"] == ["fd.sharedAgentAck.v4.u-ana.process:x:0123456789abcdef"]
     assert out["before"] is False
     assert out["ana"] is True
     assert out["bob"] is False
@@ -1120,12 +1120,13 @@ def test_ack_key_is_bumped_so_everyone_sees_the_a2_notice():
       out = { prefix: SHARED_ACK_PREFIX, key: sharedAckKey('u1', 'process:x:0123456789abcdef'),
               anon: sharedAckKey(null, 'process:x:0123456789abcdef') };
     """)
-    assert out["prefix"] == "fd.sharedAgentAck.v3."
-    assert out["key"] == "fd.sharedAgentAck.v3.u1.process:x:0123456789abcdef"
-    assert out["anon"] == "fd.sharedAgentAck.v3.local.process:x:0123456789abcdef"
-    # A dismissal of A1's (or A2's) notice doesn't hide PR C's.
+    assert out["prefix"] == "fd.sharedAgentAck.v4."
+    assert out["key"] == "fd.sharedAgentAck.v4.u1.process:x:0123456789abcdef"
+    assert out["anon"] == "fd.sharedAgentAck.v4.local.process:x:0123456789abcdef"
+    # A dismissal of A1's, A2's or PR C's notice doesn't hide PR D's.
     assert not out["key"].startswith("fd.sharedAgentAck.u1.")
     assert not out["key"].startswith("fd.sharedAgentAck.v2.")
+    assert not out["key"].startswith("fd.sharedAgentAck.v3.")
 
 
 # ── the Google opt-in texts ─────────────────────────────────────────

@@ -940,7 +940,10 @@ async def _build_investigation_prompt(
         sm = get_session_manager()
         parent = await sm.load_session(parent_session_id)
         if parent and parent.messages:
-            msgs = parent.messages[-8:]
+            # PR D: flagged parent context (members' private data) never
+            # enters a sister prompt.
+            from captain_claw import member_privacy
+            msgs = member_privacy.learnable(parent.messages)[-8:]
             lines: list[str] = []
             for m in msgs:
                 role = m.get("role", "unknown")
@@ -1089,6 +1092,10 @@ async def execute_task(task: dict[str, Any]) -> dict[str, Any] | None:
         )
 
         result_text = str(response or "")
+        # PR D: the level of a sister turn that read members' private data —
+        # or that restated it from its (persistent) session (carry-over).
+        from captain_claw import member_privacy
+        _private_level = member_privacy.output_level(agent)
 
         # 5. Parse result
         summary, actionable, confidence, tags = _parse_investigation_result(result_text)
@@ -1097,6 +1104,10 @@ async def execute_task(task: dict[str, Any]) -> dict[str, Any] | None:
 
         # 6. Estimate tokens used
         tokens_used = len(result_text) // 4 + len(full_prompt) // 4
+
+        # PR D: what such a turn found reaches the parent flagged.
+        if _private_level:
+            result_text = member_privacy.header_for(_private_level) + "\n" + result_text
 
         # 7. Create briefing
         await mgr.create_briefing(
@@ -1129,9 +1140,12 @@ async def execute_task(task: dict[str, Any]) -> dict[str, Any] | None:
 
         # 10. Save sister session
         try:
+            _done_line = f"[SISTER] Task completed: {summary}"
+            if _private_level:
+                _done_line = member_privacy.header_for(_private_level) + "\n" + _done_line
             agent.session.add_message(
                 role="tool",
-                content=f"[SISTER] Task completed: {summary}",
+                content=_done_line,
                 tool_name="sister_session",
             )
             await agent.session_manager.save_session(agent.session)

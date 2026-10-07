@@ -32,10 +32,11 @@ export function sharedSliceId(chatKey: string, userId: string | null | undefined
   return chatKey.startsWith(SHARED_PREFIX) ? `${chatKey}@${sliceUser(userId)}` : chatKey
 }
 
-/** Bumped with A2 (members use their own files, deep memory and Google) and
- *  again with PR C (the agent's saved files and datastore are a commons):
- *  everybody sees the new notice once, even if they dismissed the old one. */
-export const SHARED_ACK_PREFIX = 'fd.sharedAgentAck.v3.'
+/** Bumped with A2 (members use their own files, deep memory and Google), again
+ *  with PR C (the agent's saved files and datastore are a commons), and with
+ *  PR D (the owner's agent can look into members' chats): everybody sees the
+ *  new notice once, even if they dismissed the old one. */
+export const SHARED_ACK_PREFIX = 'fd.sharedAgentAck.v4.'
 
 /** localStorage key recording that this user dismissed this agent's notice. */
 export function sharedAckKey(userId: string | null | undefined, agentRef: string): string {
@@ -194,20 +195,57 @@ export const OWNER_WORKSPACE_NOTE: string =
   + 'other files (workspace, output/, workflows/) stay yours. Your agent reads what members add, '
   + 'so treat it as untrusted input, especially in automations.'
 
+/** The owner's Share-dialog paragraph (PR D, r2) on a process agent. Says only
+ *  what is enforced: replies of turns that used a member's Google or private
+ *  deep memory are hidden (not later ones that repeat them), and a turn that
+ *  read members' data is refused insights/playbooks/datastore writes and the
+ *  write/edit tools, and learns nothing shared. */
+export const OWNER_USAGE_NOTE: string =
+  'Your agent can also tell you who it is shared with and look into how they use it whenever you '
+  + 'ask — in your Flight Deck chats, your channels and your automations: each member’s activity '
+  + 'and token use, what they created or shared on it, and their private conversations with it. It '
+  + 'leaves out replies from turns where it used a member’s Google account or private deep memory, '
+  + 'though a later reply can repeat what it found there. Members are told. Anyone who can talk to '
+  + 'this agent through your channels, the API or your other agents can ask it the same. A turn that '
+  + 'reads members’ data adds nothing to the shared insights, playbooks or topics, and can’t save to '
+  + 'the datastore or write files with its write and edit tools; after reading their conversations '
+  + 'the agent also holds back actions that send or change things until your next message. Whatever '
+  + 'you then ask it to save to files, the datastore, insights or playbooks is visible to every '
+  + 'member. Treat members’ conversations as untrusted input.'
+
+/** The same paragraph on a Docker agent: its members have no Google or deep
+ *  memory and no saved/ or datastore commons — only insights, playbooks and
+ *  topics are shared. */
+export const OWNER_USAGE_NOTE_DOCKER: string =
+  'Your agent can also tell you who it is shared with and look into how they use it whenever you '
+  + 'ask — in your Flight Deck chats, your channels and your automations: each member’s activity '
+  + 'and token use, what they shared with it, and their private conversations with it. Members are '
+  + 'told. Anyone who can talk to this agent through your channels, the API or your other agents can '
+  + 'ask it the same. A turn that reads members’ data adds nothing to the shared insights, playbooks '
+  + 'or topics; after reading their conversations the agent also holds back actions that send or '
+  + 'change things until your next message. Whatever you then ask it to save to insights or '
+  + 'playbooks is visible to every member. Treat members’ conversations as untrusted input.'
+
 /** The owner's Share dialog note. On a deck with context packs ("Shared
  *  context") it also says, before the closing host-trust paragraph, that
  *  members can publish their own context to the agent and that it is used on
  *  every turn — the owner's channels and automations too. A Docker agent takes
  *  members' profiles only. On a deck that serves members the agent's saved
  *  files and datastore (`memberWorkspace`), a process agent's note says so
- *  too, and that only the owner's files outside saved/ stay out of reach. */
+ *  too, and that only the owner's files outside saved/ stay out of reach. On
+ *  a deck whose owners' agents can look into members' use (`sharedUsage`,
+ *  `shared_agent_usage`), either runtime's note says that last, before the
+ *  host-trust paragraph: packs, workspace, usage (a Docker agent's own
+ *  variant, `OWNER_USAGE_NOTE_DOCKER`). */
 export function ownerShareNote(
   contextPacks: boolean,
   runtime: 'process' | 'docker' = 'process',
   memberWorkspace = false,
+  sharedUsage = false,
 ): string {
   const workspace = memberWorkspace === true && runtime === 'process'
-  if (!contextPacks && !workspace) return OWNER_SHARE_NOTE
+  const usage = sharedUsage === true
+  if (!contextPacks && !workspace && !usage) return OWNER_SHARE_NOTE
   const base = workspace
     ? OWNER_SHARE_NOTE.replace('the shell, your files or accounts', 'the shell, your accounts or your files outside its saved/ folder')
     : OWNER_SHARE_NOTE
@@ -219,6 +257,7 @@ export function ownerShareNote(
       + 'Shared context.')
   }
   if (workspace) paras.push(OWNER_WORKSPACE_NOTE)
+  if (usage) paras.push(runtime === 'docker' ? OWNER_USAGE_NOTE_DOCKER : OWNER_USAGE_NOTE)
   const cut = base.lastIndexOf('\n\n')
   return `${base.slice(0, cut)}\n\n${paras.join('\n\n')}${base.slice(cut)}`
 }
@@ -230,17 +269,35 @@ export function memberWorkspaceNotice(ownerName: string): string {
   return `Files saved in your chats here (this agent’s saved/ folder) and its data tables are shared with everyone who uses this agent: ${owner} and every other member can open what you or the agent save there — including anything it saves from your mail, Drive or deep memory — and you can open theirs. Only whoever created a file, table or row, and ${owner}, can change or delete it, and everyone sees who created it.`
 }
 
+/** The member notice's paragraph about the owner's agent looking into members' use (PR D, r2). */
+export function memberOwnerReadsNotice(ownerName: string): string {
+  const owner = (ownerName || '').trim() || 'the owner'
+  const Owner = owner.charAt(0).toUpperCase() + owner.slice(1)
+  return `${Owner}'s agent can also look into your use of it when ${owner} or this deck's admins ask: that `
+    + `you use it and how much, what you created or shared on it, and your conversations here, which it `
+    + `can quote. Anyone ${owner} lets talk to the agent can ask it the same — people they connect `
+    + `through WhatsApp, Telegram, Slack, Discord or the API, ${owner}'s other agents and its `
+    + 'automations — and whoever receives those answers may see what it quotes. What it reads this way '
+    + 'isn\'t automatically turned into shared knowledge for other members. It never opens your Google '
+    + 'account or your private deep memory for this, and it leaves out its replies from the turns in '
+    + 'which it used them for you, though a later reply that repeats what it found there can still be '
+    + 'shown to it.'
+}
+
 /** Shown to a member the first time they open a shared agent. `**…**` is bold.
  *  `caps` is what their chats on it can use (`sharedCaps(row)`); chat-only —
  *  a Docker agent, an older Flight Deck, no row yet — keeps the A1 text.
  *  `workspace` (this deck serves members the agent's saved files and data)
- *  adds the commons paragraph where the agent's files are on. */
+ *  adds the commons paragraph where the agent's files are on. `ownerReads`
+ *  (this deck's owners' agents can look into members' use — `shared_usage`)
+ *  adds that paragraph. */
 export function memberNoticeText(
   agentName: string,
   ownerName: string,
   hostWarning: string,
   caps: SharedCaps = CHAT_ONLY_CAPS,
   workspace = false,
+  ownerReads = false,
 ): string {
   const agent = (agentName || '').trim() || 'This agent'
   const owner = (ownerName || '').trim() || 'another user'
@@ -263,7 +320,8 @@ export function memberNoticeText(
   const commons = ownData && workspace === true && caps.files === true
     ? ' ' + memberWorkspaceNotice(owner)
     : ''
-  return head + body + commons + (hostWarning ? `\n\n${hostWarning}` : '')
+  const reads = ownerReads === true ? ' ' + memberOwnerReadsNotice(owner) : ''
+  return head + body + commons + reads + (hostWarning ? `\n\n${hostWarning}` : '')
 }
 
 // ── A member's Google, per shared agent (off until they turn it on) ──

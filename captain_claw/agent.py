@@ -505,22 +505,37 @@ class Agent(
             return False
 
     async def complete(self, user_input: str) -> str:
-        if self._mrav_enabled():
-            return await self._mrav_complete(user_input)
-        return await super().complete(user_input)
+        # PR D: every turn starts untainted (no member data read yet) and
+        # marks its first user message as the turn's input. The level it
+        # reaches gates tools only while the turn runs (enter/exit_turn).
+        from captain_claw import member_privacy
+        member_privacy.begin_turn(self)
+        member_privacy.enter_turn(self)
+        try:
+            if self._mrav_enabled():
+                return await self._mrav_complete(user_input)
+            return await super().complete(user_input)
+        finally:
+            member_privacy.exit_turn(self)
 
     async def stream(self, user_input: str) -> AsyncIterator[str]:
-        if not self._mrav_enabled():
-            async for chunk in super().stream(user_input):
-                yield chunk
-            return
-        self._set_runtime_status("thinking")
-        content = await self._mrav_complete(user_input)
-        self._set_runtime_status("streaming")
-        chunk_size = 24
-        for idx in range(0, len(content), chunk_size):
-            yield content[idx : idx + chunk_size]
-        self._set_runtime_status("waiting")
+        from captain_claw import member_privacy
+        member_privacy.begin_turn(self)
+        member_privacy.enter_turn(self)
+        try:
+            if not self._mrav_enabled():
+                async for chunk in super().stream(user_input):
+                    yield chunk
+                return
+            self._set_runtime_status("thinking")
+            content = await self._mrav_complete(user_input)
+            self._set_runtime_status("streaming")
+            chunk_size = 24
+            for idx in range(0, len(content), chunk_size):
+                yield content[idx : idx + chunk_size]
+            self._set_runtime_status("waiting")
+        finally:
+            member_privacy.exit_turn(self)
 
     def _mrav_runtime_instance(self) -> Any:
         cached = getattr(self, "_mrav_runtime_cache", None)

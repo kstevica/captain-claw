@@ -141,6 +141,8 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const canPacks = canShare && packsEnabled
   // Members open this agent's saved/ folder and datastore: the Share note says so.
   const workspaceEnabled = useSharedAgentStore((s) => s.memberWorkspace)
+  // The agent can look into how members use it (PR D): the Share note says so.
+  const usageEnabled = useSharedAgentStore((s) => s.sharedUsage)
   const [showPacks, setShowPacks] = useState(false)
   const cognitiveMode = getCognitiveMode(proc.slug)
   const [modeSaved, setModeSaved] = useState(false)
@@ -285,7 +287,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         resourceId={proc.agent_ref!}
         resourceName={agentName}
         allowEdit={false}
-        note={ownerShareNote(packsEnabled, 'process', workspaceEnabled)}
+        note={ownerShareNote(packsEnabled, 'process', workspaceEnabled, usageEnabled)}
         onClose={() => setShowShare(false)}
       />,
       document.body

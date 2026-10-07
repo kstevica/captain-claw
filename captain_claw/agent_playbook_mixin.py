@@ -147,6 +147,9 @@ def format_playbook_context_note(
 
 def _extract_session_summary(messages: list[dict[str, Any]], max_chars: int = 2000) -> str:
     """Extract a compact summary of the session from its message list."""
+    # PR D: members' private data never becomes a playbook.
+    from captain_claw import member_privacy
+    messages = member_privacy.learnable(messages)
     parts: list[str] = []
     char_count = 0
     for msg in messages:
@@ -171,6 +174,8 @@ def _extract_session_summary(messages: list[dict[str, Any]], max_chars: int = 20
 
 def _extract_tool_trace(messages: list[dict[str, Any]], max_entries: int = 30) -> str:
     """Extract an ordered list of tool calls from the session."""
+    from captain_claw import member_privacy
+    messages = member_privacy.learnable(messages)
     entries: list[str] = []
     for msg in messages:
         # Tool calls from assistant messages
@@ -523,7 +528,9 @@ class AgentPlaybookMixin:
             log.warning("Distill: session not found", session_id=session_id)
             return None
 
-        messages = session.messages or []
+        # PR D: members' private data never becomes a playbook.
+        from captain_claw import member_privacy
+        messages = member_privacy.learnable(session.messages or [])
         if not messages:
             log.warning("Distill: session has no messages", session_id=session_id)
             return None

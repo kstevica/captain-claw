@@ -458,6 +458,106 @@ async def ensure_member_sessions() -> None:
         log.debug("saved attribution: member session backfill failed", error=type(exc).__name__)
 
 
+# ── PR D: what a member created, for the owner's agent ──────────────
+
+_OLDER_SCAN_MAX = 2000
+
+
+def _iso_mtime(st: os.stat_result) -> str:
+    return datetime.fromtimestamp(st.st_mtime, UTC).isoformat()
+
+
+def _visible_rel(rel: str) -> bool:
+    parts = [p for p in str(rel or "").split("/") if p]
+    return bool(parts) and not any(p.startswith(".") for p in parts)
+
+
+def files_created_by(user_ids: Any, limit: int = 50) -> dict[str, dict]:
+    """``{uid: {"files": [{"rel", "size", "mtime"}], "older": int}}`` for each
+    member id (blocking; the caller runs it in a thread after
+    :func:`ensure_member_sessions`).
+
+    ``files``: their valid stamps in the current saved base (``(st_dev,
+    st_ino)`` still matching), no hidden component, newest first, at most
+    *limit*. ``older``: regular files (no symlinks, nothing hidden, at most
+    2,000 visited per member) in ``saved/<category>/<slug>/`` of their
+    sessions that are theirs only by that folder (from before PR C) — counted,
+    never listed. Never raises."""
+    ids = [str(u) for u in (user_ids or ()) if str(u or "")]
+    out: dict[str, dict] = {u: {"files": [], "older": 0} for u in ids}
+    if not ids:
+        return out
+    try:
+        base = saved_base()
+        marks = ",".join("?" * len(ids))
+        with _LOCK:
+            conn = _connect_locked()
+            records = conn.execute(
+                "SELECT user_id, rel, dev, ino FROM saved_files "
+                f"WHERE base = ? AND kind = 'member' AND user_id IN ({marks})",
+                (str(base), *ids),
+            ).fetchall()
+            slugs = conn.execute(
+                f"SELECT slug, speaker_id FROM member_sessions WHERE speaker_id IN ({marks})",
+                tuple(ids),
+            ).fetchall()
+        found: dict[str, list[tuple[float, dict]]] = {u: [] for u in ids}
+        for uid, rel, dev, ino in records:
+            if not _visible_rel(rel):
+                continue
+            st = _stat_of(str(base / rel))
+            if st is None or (st.st_dev, st.st_ino) != (dev, ino):
+                continue
+            found[str(uid)].append((st.st_mtime, {
+                "rel": str(rel), "size": int(st.st_size), "mtime": _iso_mtime(st)}))
+        for uid, items in found.items():
+            items.sort(key=lambda it: it[0], reverse=True)
+            out[uid]["files"] = [item for _t, item in items[:max(0, int(limit))]]
+
+        by_member: dict[str, list[str]] = {}
+        for slug, speaker_id in slugs:
+            by_member.setdefault(str(speaker_id), []).append(str(slug))
+        for uid in ids:
+            candidates: list[Path] = []
+            visited = 0
+            for slug in sorted(by_member.get(uid, [])):
+                if not slug or slug.startswith(".") or "/" in slug:
+                    continue
+                for category in sorted(CATEGORIES):
+                    folder = base / category / slug
+                    if not folder.is_dir() or folder.is_symlink():
+                        continue
+                    for root, dirs, files in os.walk(folder, followlinks=False):
+                        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+                        for name in sorted(files):
+                            if visited >= _OLDER_SCAN_MAX:
+                                break
+                            visited += 1
+                            if name.startswith("."):
+                                continue
+                            p = Path(root) / name
+                            if p.is_symlink() or not p.is_file():
+                                continue
+                            candidates.append(p)
+                        if visited >= _OLDER_SCAN_MAX:
+                            break
+                    if visited >= _OLDER_SCAN_MAX:
+                        break
+                if visited >= _OLDER_SCAN_MAX:
+                    break
+            if not candidates:
+                continue
+            creators = creators_for(candidates)
+            out[uid]["older"] = sum(
+                1 for p in candidates
+                if (c := creators.get(str(p))) is not None
+                and c.source == "folder" and c.user_id == uid)
+        return out
+    except Exception as exc:
+        log.debug("saved attribution: files_created_by failed", error=type(exc).__name__)
+        return out
+
+
 # ── decisions ────────────────────────────────────────────────────────
 
 

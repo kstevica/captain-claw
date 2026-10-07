@@ -1186,11 +1186,13 @@ def test_owner_cards_offer_shared_context_behind_the_flag(src, runtime):
     assert m["name"] == "{agentName}"
     assert found["fragmentNextToShare"] is True
     # PR C: a process agent's note also covers the saved/ + datastore commons;
-    # a Docker agent's members stay chat-only, so its note is unchanged.
+    # a Docker agent's members stay chat-only, so it passes no commons flag.
+    # PR D: both runtimes' notes say the agent can look into members' use.
     if runtime == "process":
-        assert found["shareNotes"] == ["{ownerShareNote(packsEnabled, 'process', workspaceEnabled)}"]
+        assert found["shareNotes"] == [
+            "{ownerShareNote(packsEnabled, 'process', workspaceEnabled, usageEnabled)}"]
     else:
-        assert found["shareNotes"] == [f"{{ownerShareNote(packsEnabled, '{runtime}')}}"]
+        assert found["shareNotes"] == [f"{{ownerShareNote(packsEnabled, '{runtime}', false, usageEnabled)}}"]
 
 
 def test_member_card_button_and_modal_behind_the_flag():

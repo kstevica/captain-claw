@@ -345,7 +345,13 @@ class AgentSessionMixin:
             except Exception as exc:
                 log.warning("Failed to archive history before compaction", error=str(exc))
 
-        summary_text = await self._summarize_for_compaction(old_messages)
+        # PR D: members' private data is never folded into a summary (the
+        # archive above leaves flagged messages out too).
+        from captain_claw import member_privacy
+
+        _learnable = member_privacy.learnable(old_messages)
+        summary_text = (await self._summarize_for_compaction(_learnable) if _learnable
+                        else member_privacy.COMPACTION_PRIVATE_NOTE)
         summary_content = (
             "Conversation summary of earlier messages (compacted memory):\n"
             f"{summary_text.strip()}"
@@ -367,6 +373,8 @@ class AgentSessionMixin:
 
         self.session.messages = [summary_message, *recent_messages]
         self.session.updated_at = now_iso
+        # PR D: the carry-over cache rescans the rewritten session.
+        setattr(self, member_privacy.CARRY_ATTR, None)
 
         after_tokens = self._session_token_count(self.session.messages)
         compact_meta = self.session.metadata.setdefault("compaction", {})
@@ -443,7 +451,12 @@ class AgentSessionMixin:
 
         old_messages = snapshot[:-keep_count]
         recent_messages = snapshot[-keep_count:]
-        summary_text = await self._summarize_for_compaction(old_messages)
+        # PR D: members' private data is never folded into a summary.
+        from captain_claw import member_privacy
+
+        _learnable = member_privacy.learnable(old_messages)
+        summary_text = (await self._summarize_for_compaction(_learnable) if _learnable
+                        else member_privacy.COMPACTION_PRIVATE_NOTE)
         summary_content = (
             "Conversation summary of earlier messages (compacted memory):\n"
             f"{summary_text.strip()}"
@@ -463,6 +476,7 @@ class AgentSessionMixin:
             "timestamp": now_iso,
         }
         compacted_messages = [summary_message, *recent_messages]
+        setattr(self, member_privacy.CARRY_ATTR, None)
         return compacted_messages, {
             "compacted_messages": len(old_messages),
             "kept_messages": len(recent_messages),
@@ -955,6 +969,16 @@ class AgentSessionMixin:
             system_hint=system_hint,
             reasoning_content=reasoning_content,
         )
+        # PR D: the turn's own input is marked (J17), and a message that holds
+        # members' private data is flagged so no shared learning reads it.
+        try:
+            from captain_claw import member_privacy
+
+            _m = self.session.messages[-1]
+            member_privacy.mark_turn_input(self, _m)
+            member_privacy.flag_new_message(self, _m)
+        except Exception:
+            pass
         memory = getattr(self, "memory", None)
         if memory is not None:
             memory.record_message(role, content)

@@ -134,7 +134,10 @@ async def list_shared_agents(user: dict = Depends(get_current_user)):
             "context_packs": True,
             # PR C: this deck serves /fd/shared-agents/files* and
             # /fd/shared-agents/datastore* (absent = an older FD: chat only).
-            "member_workspace": True}
+            "member_workspace": True,
+            # PR D: the owner's agent can look into members' use — the UI
+            # shows the notice paragraphs (absent = an older FD).
+            "shared_usage": True}
 
 
 class GoogleOptInBody(BaseModel):

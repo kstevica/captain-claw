@@ -280,6 +280,9 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   // The deck serves members the agent's saved files and datastore: the
   // member notice says they are shared with everyone who uses it.
   const memberWorkspace = useSharedAgentStore((s) => s.memberWorkspace)
+  // The owner's agent can look into members' use of it (PR D): the member
+  // notice says so.
+  const sharedUsage = useSharedAgentStore((s) => s.sharedUsage)
   const localAgents = useLocalAgentStore((s) => s.agents)
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
@@ -577,6 +580,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
           hostWarning={sharedHostWarning}
           caps={caps}
           workspace={memberWorkspace}
+          ownerReads={sharedUsage}
         />
       )}
 
