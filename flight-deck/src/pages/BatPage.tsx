@@ -3,13 +3,17 @@
 // agent cards, VFS files) over Bat's own store.
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { ChevronDown, ChevronRight, Hammer, Loader2, Square } from 'lucide-react'
+import { Hammer, Loader2, Square } from 'lucide-react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useBatStore } from '../stores/batStore'
 import type { BatRun } from '../stores/batStore'
 import { ProgressFeed, LiveAgentsPanel, ResizableSplit } from '../components/basna/RunWorkspace'
-import { RunFilesPanel } from '../components/basna/RunArtifacts'
+import { RunFilesPanel, RunDatastorePanel } from '../components/basna/RunArtifacts'
 import { buildLiveAgents, STATUS_DOT } from '../components/basna/shared'
 import { BatAskCard } from '../components/bat/BatAskCard'
+
+type TabKey = 'steps' | 'agents' | 'progress' | 'result' | 'files'
 
 const RUNNING = ['planning', 'running', 'retrying', 'waiting', 'awaiting_plan', 'awaiting_human']
 
@@ -152,7 +156,7 @@ function Detail() {
   const active = useBatStore((s) => s.active)
   const asks = useBatStore((s) => s.asks)
   const cancel = useBatStore((s) => s.cancel)
-  const [showAgents, setShowAgents] = useState(true)
+  const [tab, setTab] = useState<TabKey>('steps')
   if (!active) {
     return <p className="p-4 text-sm text-zinc-500">Select a run to watch it work.</p>
   }
@@ -160,9 +164,18 @@ function Detail() {
   const running = RUNNING.includes(run.status)
   const myAsks = asks.filter((a) => a.run_id === run.id)
   const agents = buildLiveAgents(events)
+  const doneSteps = steps.filter((s) => s.status === 'done').length
+
+  const tabs: { key: TabKey; label: string }[] = [
+    { key: 'steps', label: `Steps${steps.length ? ` (${doneSteps}/${steps.length})` : ''}` },
+    { key: 'agents', label: `Live agents${agents.length ? ` (${agents.length})` : ''}` },
+    { key: 'progress', label: `Progress${events.length ? ` (${events.length})` : ''}` },
+    { key: 'result', label: 'Result' },
+    { key: 'files', label: 'Files' },
+  ]
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-y-auto p-3">
+    <div className="flex h-full flex-col p-3">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-zinc-100">{run.title || run.task.slice(0, 60)}</h2>
@@ -182,48 +195,66 @@ function Detail() {
         )}
       </div>
 
-      <Budget run={run} committed={spend?.committed_usd || 0} cap={spend?.cap || 0} />
+      <div className="mt-2">
+        <Budget run={run} committed={spend?.committed_usd || 0} cap={spend?.cap || 0} />
+      </div>
 
-      {myAsks.length > 0 && <BatAskCard asks={myAsks} />}
+      {myAsks.length > 0 && <div className="mt-2"><BatAskCard asks={myAsks} /></div>}
 
-      {agents.length > 0 && (
-        <div>
+      <div className="mt-3 flex gap-1 border-b border-zinc-800">
+        {tabs.map((t) => (
           <button
-            onClick={() => setShowAgents((v) => !v)}
-            className="mb-1 flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-zinc-200"
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`-mb-px border-b-2 px-3 py-1.5 text-xs font-medium ${
+              tab === t.key
+                ? 'border-amber-500 text-zinc-100'
+                : 'border-transparent text-zinc-400 hover:text-zinc-200'
+            }`}
           >
-            {showAgents ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            Live agents ({agents.length}) — {agents.filter((a) => a.done).length} done
+            {t.label}
           </button>
-          {showAgents && <LiveAgentsPanel agents={agents} />}
-        </div>
-      )}
+        ))}
+      </div>
 
-      {steps.length > 0 && (
-        <div className="rounded-md border border-zinc-800">
-          <div className="border-b border-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-400">Steps</div>
-          <ul className="divide-y divide-zinc-800/60">
-            {steps.map((s) => (
-              <li key={s.step_key} className="flex items-center gap-2 px-3 py-1.5 text-sm">
-                <span className={`h-1.5 w-1.5 rounded-full ${DOT[s.status] || 'bg-zinc-500'}`} />
-                <span className="flex-1 truncate text-zinc-200">{s.title || s.step_key}</span>
-                <span className="text-[11px] text-zinc-500">{s.status}{s.attempt > 1 ? ` ·${s.attempt}` : ''}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <ProgressFeed progress={events} running={running} fill />
-
-      {run.vfs_project && <RunFilesPanel project={run.vfs_project} live={running} variant="tab" />}
-
-      {run.truth && !running && (
-        <div className="rounded-md border border-zinc-800 p-3">
-          <div className="mb-1 text-xs font-medium text-zinc-400">Result</div>
-          <pre className="whitespace-pre-wrap break-words text-sm text-zinc-200">{run.truth}</pre>
-        </div>
-      )}
+      <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
+        {tab === 'steps' && (
+          steps.length === 0
+            ? <p className="text-sm text-zinc-500">No steps planned yet.</p>
+            : (
+              <ul className="divide-y divide-zinc-800/60 rounded-md border border-zinc-800">
+                {steps.map((s) => (
+                  <li key={s.step_key} className="flex items-center gap-2 px-3 py-2 text-sm">
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT[s.status] || 'bg-zinc-500'}`} />
+                    <span className="flex-1 truncate text-zinc-200">{s.title || s.step_key}</span>
+                    <span className="shrink-0 text-[11px] text-zinc-500">{s.status}{s.attempt > 1 ? ` ·${s.attempt}` : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            )
+        )}
+        {tab === 'agents' && (
+          agents.length === 0
+            ? <p className="text-sm text-zinc-500">No agents spawned yet.</p>
+            : <LiveAgentsPanel agents={agents} />
+        )}
+        {tab === 'progress' && <ProgressFeed progress={events} running={running} fill defaultOpen />}
+        {tab === 'result' && (
+          run.truth
+            ? <div className="fd-markdown text-sm text-zinc-200"><Markdown remarkPlugins={[remarkGfm]}>{run.truth}</Markdown></div>
+            : <p className="text-sm text-zinc-500">{running ? 'No result yet — still working.' : 'No result produced.'}</p>
+        )}
+        {tab === 'files' && (
+          run.vfs_project
+            ? (
+              <div className="space-y-3">
+                <RunFilesPanel project={run.vfs_project} live={running} variant="tab" />
+                <RunDatastorePanel project={run.vfs_project} live={running} variant="tab" hideWhenEmpty />
+              </div>
+            )
+            : <p className="text-sm text-zinc-500">No workspace.</p>
+        )}
+      </div>
     </div>
   )
 }
