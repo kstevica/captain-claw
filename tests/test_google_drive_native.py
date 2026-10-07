@@ -656,7 +656,13 @@ async def test_scale_loop_parses_real_list_output(drive):
 
 
 def test_description_and_enum_list_download():
-    assert "download" in GoogleDriveTool.parameters["properties"]["action"]["enum"]
+    assert GoogleDriveTool.parameters["properties"]["action"]["enum"] == [
+        "list", "search", "read", "info", "download",
+        "upload", "create", "update",
+        # In place on a native Sheet / Doc (test_google_drive_sheets_docs).
+        "sheet_read", "sheet_update", "sheet_append", "sheet_clear",
+        "doc_read", "doc_replace_text", "doc_append_text", "doc_insert_text",
+    ]
     assert "output_path" in GoogleDriveTool.parameters["properties"]
     assert "page_token" in GoogleDriveTool.parameters["properties"]
     assert "gws" not in GoogleDriveTool.description

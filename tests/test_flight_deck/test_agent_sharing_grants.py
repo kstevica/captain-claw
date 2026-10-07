@@ -777,7 +777,11 @@ class TestGmailSendAsMember:
         async with _agent_client() as c:
             r = await _call(c, "POST", "/fd/google/gmail/send", grant=tok)
         assert r.status_code == 200, r.text
-        assert [q.headers["Authorization"] for q in gmail.requests] == ["Bearer tok-M"]
+        # Every Gmail call — the repeat check's Drafts / Sent lookups and the
+        # send — is the member's own mailbox, never the owner's.
+        assert {q.headers["Authorization"] for q in gmail.requests} == {"Bearer tok-M"}
+        assert [q.method for q in gmail.requests if q.method == "POST"] == ["POST"]
+        assert any(q.method == "GET" for q in gmail.requests)  # the lookups ran
         assert await db.count_gmail_sends_since(MEMBER, since) == 1
         assert await db.count_gmail_sends_since(OWNER, since) == 0
         rows = await db.list_gmail_sends(MEMBER)

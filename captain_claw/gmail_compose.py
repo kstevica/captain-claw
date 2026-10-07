@@ -7,6 +7,11 @@ Pure helpers (no Flight Deck imports) used by both sides of a Gmail send:
 * ``captain_claw.flight_deck.gmail_send_routes`` — the Flight Deck send gate,
   which re-checks the owner's policy, sends with the owner's token and audits.
 
+The duplicate checks live here too: :func:`content_hash` (Flight Deck's
+exact-retry check) and :func:`find_repeats` (the same email — recipient and
+subject — already in Drafts or Sent), whose refusal wording
+(:func:`repeat_refusal`) both sides share.
+
 Recipient allowlists accept two entry forms:
 
 * an exact address — ``alice@example.com``;
@@ -20,17 +25,21 @@ Recipient allowlists accept two entry forms:
 from __future__ import annotations
 
 import base64
+import difflib
 import email.policy
 import email.utils
 import hashlib
 import html as html_module
 import json
+import logging
 import re
 from email.headerregistry import Address
 from email.message import EmailMessage
 from typing import Any
 
 import httpx
+
+_log = logging.getLogger(__name__)
 
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
 
@@ -174,8 +183,10 @@ async def fetch_reply_context(
 
     Returns ``thread_id``, ``in_reply_to`` / ``references`` (the RFC 5322
     threading headers), ``reply_to_default`` (the recipient when the caller
-    sets none; not reply-all) and ``subject_default`` (``Re: <original>``,
-    unless it already starts with ``re:``). Raises
+    sets none; not reply-all), ``subject_default`` (``Re: <original>``,
+    unless it already starts with ``re:``) and ``internal_date`` (the
+    original's Gmail ``internalDate``, epoch ms as text — what
+    :func:`find_repeats` compares a thread's sent replies against). Raises
     :class:`httpx.HTTPStatusError` on an API error — callers map it.
 
     ``reply_to_default`` is the original's Reply-To, else From — except when
@@ -231,6 +242,7 @@ async def fetch_reply_context(
         "references": references,
         "reply_to_default": reply_to_default,
         "subject_default": subject_default,
+        "internal_date": str(orig.get("internalDate") or ""),
     }
 
 
@@ -417,3 +429,301 @@ def content_hash(
     if (reply_to or "").strip():
         parts.append("reply:" + reply_to.strip())
     return hashlib.sha256(json.dumps(parts).encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Repeat check — the same email already drafted or sent
+# ---------------------------------------------------------------------------
+#
+# content_hash above catches a byte-identical retry of a Flight Deck send. This
+# catches the near-identical one — a second draft of an email that is already
+# in Drafts, a re-send of one already in Sent (from any session, cron run or
+# the user's own Gmail) — by recipient + subject, with the scopes agents
+# already hold: drafts.list / drafts.get take gmail.compose or gmail.readonly;
+# messages.list / threads.get need gmail.readonly.
+
+# Reply / forward prefixes: English re / fw / fwd, German aw (Antwort), Nordic
+# sv (svar), Croatian odg (odgovor) — optionally numbered ("Re[2]:").
+_SUBJECT_PREFIX_RE = re.compile(r"^\s*(?:re|fwd?|aw|sv|odg)\s*(?:\[\d+\])?\s*:\s*", re.IGNORECASE)
+
+# difflib ratio at or above which two normalized subjects are the same email.
+SUBJECT_SIMILARITY = 0.85
+
+# Drafts / Sent candidates one check reads (one metadata GET each).
+REPEAT_CANDIDATES = 10
+
+# Recipients that go into the Drafts / Sent search query.
+_QUERY_ADDRESSES = 10
+
+# In every repeat refusal — the tool's and Flight Deck's — so callers (the
+# autonomous action rail) can tell "already done" from a failure.
+REPEAT_MARK = "— repeat of "
+
+
+def normalize_subject(subject: str) -> str:
+    """*subject* without its reply / forward prefixes (repeatedly: ``Re: Fwd:
+    RE: x`` → ``x``), case-folded, whitespace collapsed."""
+    s = subject or ""
+    while True:
+        stripped = _SUBJECT_PREFIX_RE.sub("", s, count=1)
+        if stripped == s:
+            break
+        s = stripped
+    return " ".join(s.split()).casefold()
+
+
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def subjects_match(a: str, b: str) -> bool:
+    """The same email by subject: equal after :func:`normalize_subject`, or a
+    difflib ratio of at least :data:`SUBJECT_SIMILARITY` with the same numbers
+    in both — "Invoice 1041" / "Invoice 1042", "Q3 report" / "Q4 report" or
+    two dated weekly reports are different emails, however alike the text.
+    Two empty subjects are not a match (nothing to compare)."""
+    na, nb = normalize_subject(a), normalize_subject(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if _DIGITS_RE.findall(na) != _DIGITS_RE.findall(nb):
+        return False
+    return difflib.SequenceMatcher(None, na, nb).ratio() >= SUBJECT_SIMILARITY
+
+
+def short_date(value: str) -> str:
+    """An RFC 5322 Date header as ``YYYY-MM-DD HH:MM`` (as written — the
+    sender's zone), else the first 20 characters of whatever it is."""
+    try:
+        return email.utils.parsedate_to_datetime(value).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return (value or "")[:20]
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _candidate(message: dict[str, Any], kind: str, draft_id: str = "") -> dict[str, str]:
+    """An existing Gmail message (*kind* ``draft`` / ``sent``) as a match."""
+    headers: dict[str, str] = {}
+    for h in (message.get("payload") or {}).get("headers", []):
+        name = (h.get("name") or "").lower()
+        if name in ("to", "cc", "bcc", "subject", "date"):
+            headers[name] = h.get("value", "") or ""
+    return {
+        "kind": kind,
+        "draft_id": draft_id,
+        "message_id": str(message.get("id") or ""),
+        "thread_id": str(message.get("threadId") or ""),
+        "to": headers.get("to", ""),
+        "cc": headers.get("cc", ""),
+        "bcc": headers.get("bcc", ""),
+        "subject": headers.get("subject", ""),
+        "date": short_date(headers["date"]) if headers.get("date") else "",
+    }
+
+
+async def _get_json(
+    client: httpx.AsyncClient, path: str, params: dict[str, Any], headers: dict[str, str],
+) -> dict[str, Any]:
+    resp = await client.get(f"{GMAIL_API}/users/me{path}", params=params, headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, dict) else {}
+
+
+async def _thread_repeats(
+    client: httpx.AsyncClient, headers: dict[str, str], thread_id: str, after_ms: int,
+) -> list[dict[str, str]]:
+    """A reply's repeats: a DRAFT in the thread, or a SENT message newer than
+    the email being answered (skipped when its date is unknown — the order
+    can't be told)."""
+    try:
+        thread = await _get_json(client, f"/threads/{thread_id}", {"format": "metadata"}, headers)
+    except Exception as exc:
+        _log.debug("Repeat check: thread %s unreadable: %s", thread_id, exc)
+        return []
+    drafts: list[dict[str, str]] = []
+    sent: list[dict[str, str]] = []
+    for message in thread.get("messages") or []:
+        labels = set(message.get("labelIds") or [])
+        if "DRAFT" in labels:
+            drafts.append(_candidate(message, "draft"))
+        elif "SENT" in labels and after_ms and _as_int(message.get("internalDate")) > after_ms:
+            sent.append(_candidate(message, "sent"))
+    if drafts:
+        # threads.get has no draft ids — drafts.list maps message id → Draft ID.
+        try:
+            listing = await _get_json(client, "/drafts", {"maxResults": 100}, headers)
+            ids = {
+                str((stub.get("message") or {}).get("id") or ""): str(stub.get("id") or "")
+                for stub in listing.get("drafts") or []
+            }
+            for d in drafts:
+                d["draft_id"] = ids.get(d["message_id"], "")
+        except Exception as exc:
+            _log.debug("Repeat check: drafts list failed: %s", exc)
+    return drafts + sent
+
+
+async def find_repeats(
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    to: str = "",
+    cc: str = "",
+    bcc: str = "",
+    subject: str = "",
+    thread_id: str = "",
+    after_ms: int | str = 0,
+    days: int = 14,
+    limit: int = REPEAT_CANDIDATES,
+) -> list[dict[str, str]]:
+    """Emails already drafted or sent that a new one would repeat.
+
+    * A reply (*thread_id* — the thread it goes into): the thread holds a
+      DRAFT, or a SENT message newer than the email being answered
+      (*after_ms*, its ``internalDate``), to a recipient of this one.
+    * Otherwise: a draft (any age), or an email in Sent from the last *days*
+      days, with a recipient in common (To/Cc/Bcc) and the same subject
+      (:func:`subjects_match`). An email without a subject or a To/Cc
+      recipient isn't checked.
+
+    Each match is a dict: ``kind`` (``draft`` / ``sent``), ``draft_id`` (drafts;
+    may be empty), ``message_id``, ``thread_id``, ``to``, ``cc``, ``bcc``,
+    ``subject``, ``date``. Drafts come first. *days* 0 turns the check off.
+
+    Never raises — every lookup fails open: a grant with gmail.compose but no
+    gmail.readonly gets a 403 on the Sent search and still has Drafts checked.
+    """
+    if _as_int(days) <= 0:
+        return []
+
+    def _header_text(value: Any) -> Any:
+        # A model may pass recipients as a list (the message builder takes one).
+        if isinstance(value, (list, tuple)):
+            return ", ".join(map(str, value))
+        return value
+
+    to, cc, bcc = _header_text(to), _header_text(cc), _header_text(bcc)
+    try:
+        mine = set(parse_addresses(to, cc, bcc))
+        query_addrs = parse_addresses(to, cc)[:_QUERY_ADDRESSES]
+        has_subject = bool(normalize_subject(subject))
+    except Exception as exc:  # not header text (a list, None …) — nothing to compare
+        _log.debug("Repeat check skipped: %s", exc)
+        return []
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def _shares_recipient(candidate: dict[str, str]) -> bool:
+        try:
+            theirs = set(parse_addresses(candidate["to"], candidate["cc"], candidate["bcc"]))
+        except Exception:  # an unparseable header on their side — fail open
+            return False
+        return bool(mine & theirs)
+
+    if thread_id:
+        # Different recipients are not repeats — but a thread draft with no
+        # recipient yet (or a reply with none) still is one.
+        return [
+            c for c in await _thread_repeats(client, headers, thread_id, _as_int(after_ms))
+            if not mine or not (c["to"] or c["cc"] or c["bcc"]) or _shares_recipient(c)
+        ]
+
+    if not has_subject or not query_addrs:
+        return []
+    # Gmail's to: matches only the To header — ask for Cc too, as one OR group.
+    who = "{" + " ".join(f"{op}:{a}" for a in query_addrs for op in ("to", "cc")) + "}"
+
+    def _same(candidate: dict[str, str]) -> bool:
+        return _shares_recipient(candidate) and subjects_match(subject, candidate["subject"])
+
+    matches: list[dict[str, str]] = []
+    try:
+        listing = await _get_json(client, "/drafts", {"q": who, "maxResults": limit}, headers)
+        for stub in (listing.get("drafts") or [])[:limit]:
+            draft_id = str(stub.get("id") or "")
+            if not draft_id:
+                continue
+            try:
+                draft = await _get_json(client, f"/drafts/{draft_id}", {"format": "metadata"}, headers)
+            except Exception as exc:
+                _log.debug("Repeat check: draft %s unreadable: %s", draft_id, exc)
+                continue
+            candidate = _candidate(draft.get("message") or {}, "draft", draft_id)
+            if _same(candidate):
+                matches.append(candidate)
+    except Exception as exc:
+        _log.debug("Repeat check: drafts search failed: %s", exc)
+
+    try:
+        listing = await _get_json(
+            client, "/messages",
+            {"q": f"in:sent {who} newer_than:{_as_int(days)}d", "maxResults": limit}, headers,
+        )
+        for stub in (listing.get("messages") or [])[:limit]:
+            message_id = str(stub.get("id") or "")
+            if not message_id:
+                continue
+            try:
+                message = await _get_json(client, f"/messages/{message_id}", {
+                    "format": "metadata",
+                    "metadataHeaders": ["To", "Cc", "Bcc", "Subject", "Date"],
+                }, headers)
+            except Exception as exc:
+                _log.debug("Repeat check: message %s unreadable: %s", message_id, exc)
+                continue
+            candidate = _candidate(message, "sent")
+            if _same(candidate):
+                matches.append(candidate)
+    except Exception as exc:
+        # A 403 here is a compose-only grant — Drafts above were still checked.
+        _log.debug("Repeat check: Sent search failed: %s", exc)
+    return matches
+
+
+def describe_repeat(match: dict[str, str]) -> str:
+    """One existing email as a repeat refusal names it."""
+    what = f'"{match.get("subject") or "(no subject)"}" to {match.get("to") or "?"}'
+    if match.get("kind") == "draft":
+        if match.get("draft_id"):
+            return f"Draft ID {match['draft_id']} ({what})"
+        return (f"a draft in this thread, Message ID {match.get('message_id') or '?'} "
+                f"({what}; list_drafts shows its Draft ID)")
+    return (f"the email sent on {match.get('date') or '?'}, Message ID "
+            f"{match.get('message_id') or '?'} ({what})")
+
+
+def repeat_refusal(matches: list[dict[str, str]], *, lead: str) -> str:
+    """The refusal for :func:`find_repeats`' *matches* — what exists, what to do
+    instead, and the one way past it. *lead* says what didn't happen ("Not
+    created", "Not sent"). Always contains :data:`REPEAT_MARK`."""
+    first = matches[0]
+    more = f" and {len(matches) - 1} more like it" if len(matches) > 1 else ""
+    draft_id = next(
+        (m["draft_id"] for m in matches if m.get("kind") == "draft" and m.get("draft_id")), "",
+    )
+    text = (
+        f"{lead} {REPEAT_MARK}{describe_repeat(first)}{more}. This email is already "
+        "drafted or sent, so no new copy was made. Tell the user, with that Draft ID or "
+        "sent date."
+    )
+    if draft_id:
+        text += (
+            f" To send that draft use google_mail action=send_draft draft_id={draft_id}; "
+            f"to change it use action=update_draft draft_id={draft_id}."
+        )
+    return text + (
+        " Don't retry. Only if the user explicitly asks for another, separate copy, "
+        "call again with allow_repeat=true."
+    )
+
+
+def is_repeat_refusal(text: str) -> bool:
+    """Whether a tool / Flight Deck error is a :func:`repeat_refusal` — the email
+    already existed, so nothing failed."""
+    return REPEAT_MARK in (text or "")

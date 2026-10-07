@@ -14,12 +14,14 @@ and a Google disconnect leaves it in place):
 * ``daily_limit`` — emails per rolling 24 hours (default 50, 1..500).
 
 The deck kill switch ``FD_GMAIL_SEND=off`` (also ``0`` / ``false`` / ``no``)
-refuses every send regardless. A send that passes goes out with the owner's
-token, lands in ``gmail_sends`` (the user's history, the daily count and the
-duplicate check) and rings the owner's bell. So does a send whose outcome is
-unknown (Gmail answered 5xx, or never answered after the request went out) —
-as ``status = 'unknown'``, so a blind retry is caught as a duplicate and the
-user is told to check their Sent folder.
+refuses every send regardless. A composed send that repeats an email already in
+the user's Drafts or Sent (recipient + subject; ``FD_GMAIL_REPEAT_CHECK_DAYS``,
+default 14, 0 = off) is refused unless the agent passes ``allow_repeat``. A send
+that passes goes out with the owner's token, lands in ``gmail_sends`` (the
+user's history, the daily count and the duplicate check) and rings the owner's
+bell. So does a send whose outcome is unknown (Gmail answered 5xx, or never
+answered after the request went out) — as ``status = 'unknown'``, so a blind
+retry is caught as a duplicate and the user is told to check their Sent folder.
 
 The gws Workspace CLI tool is retired (``config.RETIRED_TOOLS``: never
 registered, stripped from every tools list, refused by the shell tool), so
@@ -71,6 +73,10 @@ MAX_ALLOWED_RECIPIENTS = 200
 
 _DAY = timedelta(hours=24)
 _DUPLICATE_WINDOW = timedelta(minutes=10)
+# The repeat check (gmail_compose.find_repeats) on a composed send: the same
+# email — recipient + subject — already in Drafts (any age) or in Sent this many
+# days back. FD_GMAIL_REPEAT_CHECK_DAYS overrides it on a deck; 0 turns it off.
+DEFAULT_REPEAT_CHECK_DAYS = 14
 
 _ENABLE_WHERE = "Flight Deck → Connections → Google → Email sending"
 _RECONNECT = "Flight Deck → Connections → Google"
@@ -112,6 +118,19 @@ def _lock(locks: dict[str, asyncio.Lock], key: str) -> asyncio.Lock:
 def deck_send_disabled() -> bool:
     """The deck kill switch: ``FD_GMAIL_SEND`` = off / 0 / false / no."""
     return os.environ.get("FD_GMAIL_SEND", "").strip().lower() in ("off", "0", "false", "no")
+
+
+def repeat_check_days() -> int:
+    """Days of Sent mail a composed send is checked against —
+    ``FD_GMAIL_REPEAT_CHECK_DAYS`` (a whole number; 0 = no repeat check), else
+    :data:`DEFAULT_REPEAT_CHECK_DAYS`. An unreadable value keeps the default:
+    a typo never turns the check off."""
+    raw = os.environ.get("FD_GMAIL_REPEAT_CHECK_DAYS", "").strip()
+    try:
+        days = int(raw) if raw else DEFAULT_REPEAT_CHECK_DAYS
+    except ValueError:
+        return DEFAULT_REPEAT_CHECK_DAYS
+    return days if days >= 0 else DEFAULT_REPEAT_CHECK_DAYS
 
 
 def _default_policy() -> dict[str, Any]:
@@ -265,14 +284,17 @@ def _refused(detail: str, reason: str) -> HTTPException:
     )
 
 
-async def _read_payload(request: Request) -> dict[str, str]:
+async def _read_payload(request: Request) -> dict[str, Any]:
+    """The send body: every message field and ``draft_id`` as a string (absent
+    = ""), plus ``allow_repeat`` — a boolean (absent = False): the agent's
+    user explicitly asked for another copy, so skip the repeat check."""
     try:
         data = await request.json()
     except Exception:
         data = None
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="The body must be a JSON object")
-    out: dict[str, str] = {}
+    out: dict[str, Any] = {}
     for key in _MESSAGE_FIELDS + ("draft_id",):
         value = data.get(key)
         if value is None:
@@ -280,6 +302,12 @@ async def _read_payload(request: Request) -> dict[str, str]:
         if not isinstance(value, str):
             raise HTTPException(status_code=400, detail=f"{key} must be a string")
         out[key] = value
+    allow_repeat = data.get("allow_repeat")
+    if allow_repeat is None:
+        allow_repeat = False
+    if not isinstance(allow_repeat, bool):
+        raise HTTPException(status_code=400, detail="allow_repeat must be true or false")
+    out["allow_repeat"] = allow_repeat
     return out
 
 
@@ -508,6 +536,11 @@ async def gmail_send(request: Request) -> dict[str, Any]:
     ``html_body``, ``reply_to_message_id`` (threading and the to / subject
     defaults as create_draft does them) — or ``{"draft_id"}`` to send an
     existing draft as it is now. Same agent gate as ``/access_token``.
+
+    A composed send that repeats an email already drafted or sent (see
+    :func:`gmail_compose.find_repeats`) is a 409, unless the body carries
+    ``"allow_repeat": true`` (the user explicitly asked for another copy). A
+    draft send is never a repeat — sending the draft is the way out of one.
     """
     _google._authorize_agent_call(request)
     # On a shared-agent member's turn the send is the MEMBER's — their opt-in
@@ -558,7 +591,7 @@ async def gmail_send(request: Request) -> dict[str, Any]:
             raw = ""
         else:
             to, cc, bcc, subject = payload["to"], payload["cc"], payload["bcc"], payload["subject"]
-            thread_id = in_reply_to = references = ""
+            thread_id = in_reply_to = references = original_date = ""
             if reply_to:
                 _check_gmail_id(reply_to, "reply_to_message_id")
                 try:
@@ -577,6 +610,7 @@ async def gmail_send(request: Request) -> dict[str, Any]:
                     raise _transport_error(exc) from exc
                 thread_id = ctx["thread_id"]
                 in_reply_to, references = ctx["in_reply_to"], ctx["references"]
+                original_date = ctx["internal_date"]
                 if not to and ctx["reply_to_default"]:
                     to = ctx["reply_to_default"]
                 if not subject and ctx["subject_default"]:
@@ -600,6 +634,20 @@ async def gmail_send(request: Request) -> dict[str, Any]:
                     status_code=400,
                     detail=f"Could not build the email: {exc}. Nothing was sent.",
                 ) from exc
+            if not payload["allow_repeat"]:
+                # The same email already drafted or sent — from any session, a
+                # cron run or the user's own Gmail, not only FD's audit rows.
+                # Before the lock: these lookups never hold up the user's other
+                # sends. Fails open (a compose-only grant still checks Drafts).
+                repeats = await gmail_compose.find_repeats(
+                    client, token, to=to, cc=cc, bcc=bcc, subject=subject,
+                    thread_id=thread_id, after_ms=original_date, days=repeat_check_days(),
+                )
+                if repeats:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=gmail_compose.repeat_refusal(repeats, lead="Duplicate: not sent"),
+                    )
 
         daily_limit = int(policy["daily_limit"])
         async with _lock(_send_locks, owner):

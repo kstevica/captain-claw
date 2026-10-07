@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from captain_claw.config import get_config
+from captain_claw.gmail_compose import is_repeat_refusal
 from captain_claw.llm import Message, ToolCall
 from captain_claw.logging import get_logger
 
@@ -254,6 +255,27 @@ class AgentToolLoopMixin:
                 continue
             content = str(msg.get("content", "")).strip().lower()
             if not content.startswith("error:"):
+                return True
+        return False
+
+    def _turn_has_mail_write(self, turn_start_idx: int) -> bool:
+        """Whether a google_mail draft / send went through this turn, or was
+        refused because that email already exists (a repeat) — either way the
+        user's email is taken care of and must not be made again."""
+        if not self.session:
+            return False
+        for msg in self.session.messages[turn_start_idx:]:
+            if msg.get("role") != "tool":
+                continue
+            if str(msg.get("tool_name", "")).strip().lower() != "google_mail":
+                continue
+            args = msg.get("tool_arguments") or {}
+            if str(args.get("action", "")).strip().lower() not in (
+                "create_draft", "update_draft", "send", "send_draft",
+            ):
+                continue
+            content = str(msg.get("content", "")).strip()
+            if not content.lower().startswith("error:") or is_repeat_refusal(content):
                 return True
         return False
 
@@ -981,9 +1003,15 @@ class AgentToolLoopMixin:
             # re-read, so these keep the plain limit instead of the stateful
             # headroom below.
             _GOOGLE_WRITE_ACTIONS = {
-                "google_mail": {"send", "send_draft", "create_draft"},
+                "google_mail": {"send", "send_draft", "create_draft", "update_draft"},
                 "google_calendar": {"create_event", "update_event", "delete_event"},
-                "google_drive": {"upload", "create", "update"},
+                # In-place Sheet/Doc edits too: a repeated append is a second
+                # set of rows, a repeated insert a second copy of the text.
+                "google_drive": {
+                    "upload", "create", "update",
+                    "sheet_update", "sheet_append", "sheet_clear",
+                    "doc_replace_text", "doc_append_text", "doc_insert_text",
+                },
             }
             _tool_lower = str(tc.name or "").strip().lower()
             _call_action = (
@@ -1063,7 +1091,8 @@ class AgentToolLoopMixin:
                         f"DUPLICATE CALL BLOCKED: `{tc.name}` action={_call_action} "
                         f"already ran with these exact arguments {_dup_count} time(s) "
                         "this turn and succeeded. Running it again would send or "
-                        "create it a second time. Do NOT repeat it — use the result "
+                        "create it a second time (or apply the same edit twice). "
+                        "Do NOT repeat it — use the result "
                         "of the first call and tell the user it is done."
                     )
                 elif _tool_lower in _STATEFUL_TOOLS:

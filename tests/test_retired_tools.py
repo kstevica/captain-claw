@@ -352,6 +352,12 @@ def _loop_agent(tmp_path, tool):
     ("google_mail", {"action": "send_draft", "draft_id": "d1"}),
     ("google_calendar", {"action": "create_event", "summary": "Sync", "start": "2026-10-06T10:00"}),
     ("google_drive", {"action": "create", "name": "Notes", "content": "x"}),
+    # In-place Sheet/Doc edits: a repeat is a second set of rows / copy of text.
+    ("google_drive", {"action": "sheet_append", "file_id": "f1", "range": "Log", "values": [["a"]]}),
+    ("google_drive", {"action": "sheet_update", "file_id": "f1", "range": "A1", "values": [["a"]]}),
+    ("google_drive", {"action": "doc_replace_text", "file_id": "d1", "find": "a", "replace_with": "ab"}),
+    ("google_drive", {"action": "doc_insert_text", "file_id": "d1", "after": "a", "text": "b"}),
+    ("google_drive", {"action": "doc_append_text", "file_id": "d1", "text": "b"}),
 ])
 async def test_identical_google_write_runs_once_per_turn(_dup_limit_one, tmp_path, tool_name, args):
     from captain_claw.llm import ToolCall

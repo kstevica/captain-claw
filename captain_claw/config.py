@@ -314,13 +314,16 @@ class SendMailToolConfig(BaseModel):
 
 
 class GoogleMailToolConfig(BaseModel):
-    """Gmail (google_mail) tool — sending, standalone mode only.
+    """Gmail (google_mail) tool — sending (standalone mode only) and the
+    repeat check.
 
-    Under Flight Deck both knobs are IGNORED: the tool never sends itself
-    there, it asks Flight Deck (``POST /fd/google/gmail/send``), and the
+    Under Flight Deck the two send knobs are IGNORED: the tool never sends
+    itself there, it asks Flight Deck (``POST /fd/google/gmail/send``), and the
     owner's per-user policy in Connections → Google → Email sending decides
-    (on/off, recipient allowlist, daily limit). These apply only to an agent
-    that holds its own Google connection.
+    (on/off, recipient allowlist, daily limit). They apply only to an agent
+    that holds its own Google connection. ``repeat_check_days`` applies to
+    create_draft everywhere and to standalone sends (a Flight Deck send uses
+    the deck's ``FD_GMAIL_REPEAT_CHECK_DAYS``).
     """
 
     # The send / send_draft actions refuse unless this is true. Env form:
@@ -330,6 +333,11 @@ class GoogleMailToolConfig(BaseModel):
     # domain ("@example.com" / "example.com" — that domain only, not its
     # subdomains). See captain_claw.gmail_compose.
     allowed_recipients: list[str] = Field(default_factory=list)
+    # create_draft / send refuse an email already drafted (any age) or sent in
+    # the last N days to the same recipient with the same subject — unless the
+    # call passes allow_repeat. 0 turns the check off. See
+    # gmail_compose.find_repeats.
+    repeat_check_days: int = Field(default=14, ge=0)
 
 
 class TypesenseToolConfig(BaseModel):

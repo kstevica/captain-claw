@@ -313,7 +313,7 @@ _CC_TOOL_DESCRIPTIONS: dict[str, str] = {
     "image_ocr": "OCR — extract text from images",
     "image_vision": "Vision analysis on images (describe, analyze)",
     "send_mail": "Send emails via SMTP (to, cc, bcc, subject, body, attachments)",
-    "google_drive": "Google Drive/Docs/Sheets/Slides: list, search, read (content inline), info, download, upload, create, update",
+    "google_drive": "Google Drive/Docs/Sheets/Slides: list, search, read (content inline), info, download, upload, create, update; edits existing Sheets/Docs in place (sheet_update/sheet_append/sheet_clear, doc_replace_text/doc_append_text/doc_insert_text)",
     "google_calendar": "Google Calendar events: list, search, get, create, update, delete",
     "google_mail": "Gmail: read, search, threads, drafts (sends only when the user enabled sending)",
     "datastore": "Persistent relational data tables (create, query, insert, update)",

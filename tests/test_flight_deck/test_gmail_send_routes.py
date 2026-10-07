@@ -2,8 +2,8 @@
 
 FD is the one place a send is decided: the agent OWNER's opt-in policy (off by
 default; allowlist; daily limit), the deck kill switch FD_GMAIL_SEND, duplicate
-suppression, then the send with the owner's token, an audit row and a bell
-notification. The agent route has /access_token's gate (agent transport +
+suppression and the repeat check (the same email already in Drafts or Sent),
+then the send with the owner's token, an audit row and a bell notification. The agent route has /access_token's gate (agent transport +
 X-Agent-Auth this deck issued, no browsers); the policy / history routes are the
 signed-in user's own.
 
@@ -44,7 +44,8 @@ def _tokens(access):
 @pytest.fixture()
 async def db(monkeypatch, tmp_path):
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
-    for var in ("FD_LOCKDOWN", "FD_PUBLIC_URL", "FD_AGENT_SHARED_SECRET", "FD_GMAIL_SEND"):
+    for var in ("FD_LOCKDOWN", "FD_PUBLIC_URL", "FD_AGENT_SHARED_SECRET", "FD_GMAIL_SEND",
+                "FD_GMAIL_REPEAT_CHECK_DAYS"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("CAPTAIN_CLAW_FD_HOME", str(tmp_path / "fd-home"))
     agent_secret.reset_cache_for_tests()
@@ -614,6 +615,154 @@ class TestSendReviewFixes:
         assert "was not sent" in detail and "may or may not" not in detail
         assert "X-FD-Gmail-Send-Outcome" not in r.headers
         assert gmail.sends() == [] and await db.list_gmail_sends(ALICE) == []
+
+
+# ── repeats: the same email already drafted or sent ──────────────────
+
+
+def _sent_msg(mid, to, subject, date="Mon, 05 Oct 2026 10:00:00 +0000"):
+    return (200, {"id": mid, "threadId": f"t-{mid}", "labelIds": ["SENT"], "payload": {"headers": [
+        {"name": "To", "value": to}, {"name": "Subject", "value": subject},
+        {"name": "Date", "value": date}]}})
+
+
+class TestRepeats:
+    async def test_a_repeat_of_a_sent_email_is_refused_and_not_sent(self, db, agents, gmail):
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        gmail.routes[("GET", "/drafts")] = (200, {})
+        gmail.routes[("GET", "/messages")] = (200, {"messages": [{"id": "s9"}]})
+        gmail.routes[("GET", "/messages/s9")] = _sent_msg("s9", "bob@x.co", "Re: hello")
+        r = _client().post("/fd/google/gmail/send", headers=_agent(), json=MSG)
+
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert detail.startswith("Duplicate: not sent — repeat of the email sent on 2026-10-05 10:00")
+        assert "Message ID s9" in detail and "allow_repeat=true" in detail
+        assert gmail.sends() == []
+        assert await db.list_gmail_sends(ALICE) == [] and await db.list_notifications(ALICE) == []
+        (search,) = [q for q in gmail.requests if q.url.path.endswith("/messages")]
+        assert search.url.params["q"] == "in:sent {to:bob@x.co cc:bob@x.co} newer_than:14d"
+        assert search.headers["Authorization"] == "Bearer alice-access"
+
+    async def test_a_drafted_email_points_at_send_draft(self, db, agents, gmail):
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        gmail.routes[("GET", "/drafts")] = (200, {"drafts": [{"id": "d1", "message": {"id": "m9"}}]})
+        r = _client().post("/fd/google/gmail/send", headers=_agent(), json={
+            "to": "dave@ok.com", "subject": "from the  draft", "body": "x"})
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert 'repeat of Draft ID d1 ("From the draft" to Dave <dave@ok.com>)' in detail
+        assert "send_draft draft_id=d1" in detail
+        assert gmail.sends() == []
+
+    async def test_allow_repeat_skips_the_check(self, db, agents, gmail):
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        gmail.routes[("GET", "/messages")] = (200, {"messages": [{"id": "s9"}]})
+        gmail.routes[("GET", "/messages/s9")] = _sent_msg("s9", "bob@x.co", "Hello")
+        r = _client().post("/fd/google/gmail/send", headers=_agent(),
+                           json={**MSG, "allow_repeat": True})
+        assert r.status_code == 200, r.text
+        assert [q.method for q in gmail.requests] == ["POST"]  # no lookups at all
+        assert len(await db.list_gmail_sends(ALICE)) == 1
+
+    @pytest.mark.parametrize("value", ["yes", 1, "true"])
+    async def test_allow_repeat_must_be_a_boolean(self, db, agents, gmail, value):
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        r = _client().post("/fd/google/gmail/send", headers=_agent(),
+                           json={**MSG, "allow_repeat": value})
+        assert r.status_code == 400 and "allow_repeat" in r.json()["detail"]
+        assert gmail.requests == []
+
+    async def test_different_recipient_or_subject_is_not_a_repeat(self, db, agents, gmail):
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        # The fake ignores the query, so these come back for any search.
+        gmail.routes[("GET", "/messages")] = (200, {"messages": [{"id": "s8"}, {"id": "s9"}]})
+        gmail.routes[("GET", "/messages/s8")] = _sent_msg("s8", "carol@ok.com", "Hello")
+        gmail.routes[("GET", "/messages/s9")] = _sent_msg("s9", "bob@x.co", "Quarterly numbers")
+        r = _client().post("/fd/google/gmail/send", headers=_agent(), json=MSG)
+        assert r.status_code == 200, r.text
+        assert len(gmail.sends()) == 1
+
+    async def test_compose_only_grant_403_on_sent_still_checks_drafts(self, db, agents, gmail):
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        gmail.routes[("GET", "/messages")] = (
+            403, {"error": {"message": "Request had insufficient authentication scopes."}})
+        gmail.routes[("GET", "/drafts")] = (200, {"drafts": [{"id": "d1", "message": {"id": "m9"}}]})
+        c = _client()
+        r = c.post("/fd/google/gmail/send", headers=_agent(), json={
+            "to": "dave@ok.com", "subject": "Odg: From the draft", "body": "x"})
+        assert r.status_code == 409 and "Draft ID d1" in r.json()["detail"]
+        # No matching draft and Sent unreadable: fails open — sent.
+        gmail.routes[("GET", "/drafts")] = (200, {})
+        r = c.post("/fd/google/gmail/send", headers=_agent(), json={
+            "to": "dave@ok.com", "subject": "Odg: From the draft", "body": "x"})
+        assert r.status_code == 200, r.text
+
+    async def test_a_reply_with_a_draft_in_the_thread_is_refused(self, db, agents, gmail):
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        status, original = gmail.routes[("GET", "/messages/m1")]
+        gmail.routes[("GET", "/messages/m1")] = (status, {**original, "internalDate": "1000"})
+        gmail.routes[("GET", "/threads/t1")] = (200, {"id": "t1", "messages": [
+            {**original, "labelIds": ["INBOX"], "internalDate": "1000"},
+            {"id": "m2", "threadId": "t1", "labelIds": ["DRAFT"], "internalDate": "2000",
+             "payload": {"headers": [{"name": "To", "value": "carol@ok.com"},
+                                     {"name": "Subject", "value": "Re: Plans"}]}},
+        ]})
+        gmail.routes[("GET", "/drafts")] = (200, {"drafts": [{"id": "r-7", "message": {"id": "m2"}}]})
+        r = _client().post("/fd/google/gmail/send", headers=_agent(),
+                           json={"reply_to_message_id": "m1", "body": "Count me in"})
+        assert r.status_code == 409, r.text
+        assert "repeat of Draft ID r-7" in r.json()["detail"]
+        assert gmail.sends() == []
+
+    async def test_draft_sends_are_never_checked(self, db, agents, gmail):
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        gmail.routes[("GET", "/messages")] = (200, {"messages": [{"id": "s9"}]})
+        gmail.routes[("GET", "/messages/s9")] = _sent_msg("s9", "dave@ok.com", "From the draft")
+        r = _client().post("/fd/google/gmail/send", headers=_agent(), json={"draft_id": "d1"})
+        assert r.status_code == 200, r.text
+        assert [q.url.path.rsplit("/users/me", 1)[-1] for q in gmail.requests] == [
+            "/drafts/d1", "/drafts/send"]
+
+    async def test_the_check_runs_outside_the_send_lock(self, db, agents, gmail, monkeypatch):
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        seen = []
+        real = gs.gmail_compose.find_repeats
+
+        async def spy(*a, **kw):
+            lock = gs._send_locks.get(ALICE)
+            seen.append(bool(lock and lock.locked()))
+            return await real(*a, **kw)
+
+        monkeypatch.setattr(gs.gmail_compose, "find_repeats", spy)
+        assert _client().post("/fd/google/gmail/send", headers=_agent(), json=MSG).status_code == 200
+        assert seen == [False]
+
+    @pytest.mark.parametrize("raw, days", [
+        ("", 14), ("3", 3), ("0", 0), (" 30 ", 30), ("abc", 14), ("-2", 14),
+    ])
+    async def test_repeat_window_env(self, monkeypatch, raw, days):
+        monkeypatch.setenv("FD_GMAIL_REPEAT_CHECK_DAYS", raw)
+        assert gs.repeat_check_days() == days
+
+    async def test_window_zero_turns_the_check_off(self, db, agents, gmail, monkeypatch):
+        monkeypatch.setenv("FD_GMAIL_REPEAT_CHECK_DAYS", "0")
+        await gr._store_tokens(db, ALICE, _tokens("alice-access"))
+        await _enable(db)
+        gmail.routes[("GET", "/messages")] = (200, {"messages": [{"id": "s9"}]})
+        gmail.routes[("GET", "/messages/s9")] = _sent_msg("s9", "bob@x.co", "Hello")
+        r = _client().post("/fd/google/gmail/send", headers=_agent(), json=MSG)
+        assert r.status_code == 200, r.text
+        assert [q.method for q in gmail.requests] == ["POST"]
 
 
 # ── history ──────────────────────────────────────────────────────────
