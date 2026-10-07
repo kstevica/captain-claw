@@ -320,6 +320,12 @@ class BatDriver:
                     # answer re-kicks the run and _GATE_CHECK resumes it.
                     fresh = await self.store.get_run(run_id)
                     return fresh["status"] if fresh else "error"
+                # A tool the step called may itself have parked the run on a
+                # human (e.g. a spend over the per-item cap set it awaiting_human
+                # via the spend endpoint). Honour that too.
+                cur = await self.store.get_run(run_id)
+                if cur and cur["status"] in ("awaiting_human", "awaiting_plan"):
+                    return cur["status"]
 
             steps = await self.store.list_steps(run_id)
             run = await self.store.get_run(run_id)

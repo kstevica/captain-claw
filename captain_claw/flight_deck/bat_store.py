@@ -132,7 +132,33 @@ CREATE TABLE IF NOT EXISTS bat_asks (
 );
 CREATE INDEX IF NOT EXISTS idx_bat_asks_run ON bat_asks(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_bat_asks_owner_open ON bat_asks(owner_id, status);
+
+CREATE TABLE IF NOT EXISTS bat_spend (
+    id               TEXT PRIMARY KEY,
+    run_id           TEXT NOT NULL,
+    owner_id         TEXT NOT NULL DEFAULT '',
+    agent            TEXT NOT NULL DEFAULT '',
+    merchant         TEXT NOT NULL DEFAULT '',
+    merchant_domain  TEXT NOT NULL DEFAULT '',
+    description      TEXT NOT NULL DEFAULT '',
+    category         TEXT NOT NULL DEFAULT '',
+    currency         TEXT NOT NULL DEFAULT 'USD',
+    amount_usd_max   REAL NOT NULL DEFAULT 0.0,   -- authorized ceiling for this item
+    actual_usd       REAL NOT NULL DEFAULT 0.0,   -- set at settle
+    status           TEXT NOT NULL DEFAULT 'requested',  -- requested|approved|denied|consumed|voided|expired
+    decided_by       TEXT NOT NULL DEFAULT '',    -- policy | human:<uid>
+    order_ref        TEXT NOT NULL DEFAULT '',
+    evidence         TEXT NOT NULL DEFAULT '{}',
+    created_at       REAL NOT NULL,
+    updated_at       REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bat_spend_run ON bat_spend(run_id, created_at);
 """
+
+# Spend rows that count against a run's real-money cap: a pending request
+# reserves its ceiling (so two over-cap requests can't both slip through),
+# an approval holds its ceiling, a consumed charge holds its actual amount.
+_COMMITTING_SPEND = ("requested", "approved", "consumed")
 
 
 class BatStore:
@@ -544,6 +570,95 @@ class BatStore:
                 "UPDATE bat_asks SET status = 'expired', updated_at = ? WHERE id = ?", (now, r["id"]))
         await db.commit()
         return [r["run_id"] for r in rows]
+
+
+    # ── spend ledger (capped real money) ──────────────────────────────
+
+    async def create_spend(
+        self, *, spend_id: str, run_id: str, owner_id: str, agent: str = "",
+        merchant: str = "", merchant_domain: str = "", description: str = "",
+        category: str = "", currency: str = "USD", amount_usd_max: float = 0.0,
+        status: str = "requested", decided_by: str = "",
+    ) -> str:
+        db = await self._ensure_db()
+        now = _now()
+        await db.execute(
+            """INSERT INTO bat_spend
+               (id, run_id, owner_id, agent, merchant, merchant_domain, description,
+                category, currency, amount_usd_max, status, decided_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (spend_id, run_id, owner_id, agent, merchant, merchant_domain, description,
+             category, currency, float(amount_usd_max or 0.0), status, decided_by, now, now),
+        )
+        await db.commit()
+        return spend_id
+
+    async def get_spend(self, spend_id: str) -> dict | None:
+        db = await self._ensure_db()
+        async with db.execute("SELECT * FROM bat_spend WHERE id = ?", (spend_id,)) as cur:
+            row = await cur.fetchone()
+        return _row_to_spend(row) if row else None
+
+    async def set_spend_status(
+        self, spend_id: str, status: str, *, decided_by: str | None = None,
+        actual_usd: float | None = None, order_ref: str | None = None,
+        evidence: dict | None = None,
+    ) -> None:
+        db = await self._ensure_db()
+        sets = ["status = ?", "updated_at = ?"]
+        vals: list[Any] = [status, _now()]
+        if decided_by is not None:
+            sets.append("decided_by = ?"); vals.append(decided_by)
+        if actual_usd is not None:
+            sets.append("actual_usd = ?"); vals.append(float(actual_usd))
+        if order_ref is not None:
+            sets.append("order_ref = ?"); vals.append(order_ref)
+        if evidence is not None:
+            sets.append("evidence = ?"); vals.append(json.dumps(evidence))
+        vals.append(spend_id)
+        await db.execute(f"UPDATE bat_spend SET {', '.join(sets)} WHERE id = ?", vals)
+        await db.commit()
+
+    async def committed_usd(self, run_id: str) -> float:
+        """Real money already reserved/spent on this run: the actual charge for a
+        consumed item, else its authorized ceiling, over requested/approved/
+        consumed rows. Persisted → the cap holds across an FD restart."""
+        db = await self._ensure_db()
+        placeholders = ",".join("?" for _ in _COMMITTING_SPEND)
+        async with db.execute(
+            f"""SELECT COALESCE(SUM(CASE WHEN actual_usd > 0 THEN actual_usd ELSE amount_usd_max END), 0)
+                AS total FROM bat_spend WHERE run_id = ? AND status IN ({placeholders})""",
+            (run_id, *_COMMITTING_SPEND),
+        ) as cur:
+            row = await cur.fetchone()
+        return float(row["total"]) if row else 0.0
+
+    async def find_live_spend(self, run_id: str, merchant_domain: str, amount_usd: float) -> dict | None:
+        """An existing matching spend row for this merchant+amount, so a re-declare
+        returns the same decision (idempotent): 'approved' lets it proceed,
+        'denied' stops it re-asking in a loop, 'requested' is still pending."""
+        db = await self._ensure_db()
+        async with db.execute(
+            """SELECT * FROM bat_spend WHERE run_id = ? AND merchant_domain = ?
+               AND ABS(amount_usd_max - ?) < 0.005 AND status IN ('requested','approved','denied')
+               ORDER BY created_at DESC LIMIT 1""",
+            (run_id, merchant_domain, float(amount_usd or 0.0)),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_spend(row) if row else None
+
+    async def list_spend(self, run_id: str) -> list[dict]:
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT * FROM bat_spend WHERE run_id = ? ORDER BY created_at", (run_id,)
+        ) as cur:
+            return [_row_to_spend(r) for r in await cur.fetchall()]
+
+
+def _row_to_spend(row: aiosqlite.Row) -> dict:
+    s = dict(row)
+    s["evidence"] = _loads(s.get("evidence"), {})
+    return s
 
 
 def _row_to_ask(row: aiosqlite.Row) -> dict:

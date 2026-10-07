@@ -46,6 +46,7 @@ from captain_claw.tools.datastore import DatastoreTool
 from captain_claw.tools.basna import BasnaTool
 from captain_claw.tools.vatra import VatraTool
 from captain_claw.tools.bat import BatTool
+from captain_claw.tools.bat_spend import SpendTool
 from captain_claw.tools.code_session import CodeSessionTool
 from captain_claw.tools.hosting import HostingTool
 from captain_claw.tools.termux import TermuxTool
@@ -115,6 +116,7 @@ __all__ = [
     "BasnaTool",
     "VatraTool",
     "BatTool",
+    "SpendTool",
     "CodeSessionTool",
     "HostingTool",
     "TermuxTool",

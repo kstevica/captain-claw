@@ -398,8 +398,32 @@ restart). Remember: `cd flight-deck && npm run build`, commit the bundle, restar
      on it — the grant needs human plan approval autonomy can't give — but excluding keeps autonomy from
      auto-starting Bat runs; §10). The owner's Gmail-send policy must be enabled on the deck for real
      sends (second gate, PR #42). Live send verified on a deck.
-6. **Capped spend.** ledger + routes + policy + admin ceiling, `spend` tool, checkout interceptor +
-   pre-click heuristic, tool-block for money tools.
+6. **Capped spend.** ✅ **DONE (2026-10-07).** Pre-authorization with a hard run cap, auto-approve under
+   a per-item limit, owner-approve above it, enforced across restarts (owner decision #2).
+   - `bat_store` `bat_spend` ledger: `create_spend`/`set_spend_status`/`committed_usd` (counts
+     requested+approved+consumed so a pending reservation can't be double-spent; actual charge wins
+     over the ceiling)/`find_live_spend` (idempotent re-declare: approved→proceed, denied→stop,
+     requested→pending). Persisted → the cap holds across an FD restart.
+   - `spend_decision` (pure cap logic) + `_spend_policy`: spend is OFF unless the deck switch
+     `FD_BAT_SPEND` is on **and** the owner approved a spend plan (`config.spend_allowed`, set by the
+     start gate like email) **and** a `real_usd_cap > 0` was set at start. `per_item_usd` is the
+     auto-approve threshold.
+   - Agent endpoints `/fd/bat/agent/spend/{authorize,settle,void,status}`: authorize → approved (≤ limit,
+     within cap) | requested (> limit → raises a `spend_approval` ask, run → awaiting_human) | denied
+     (over cap / disabled). The driver stands the run down when a step's spend call parked it. The
+     spend-approval answer flips the ledger row on resume (approve → the re-declare finds it approved and
+     proceeds; decline → denied, so it doesn't re-ask in a loop).
+   - `spend` worker tool (declare/settle/void/status) — registered globally, **refuses outside a Bat
+     run**. `_bat_worker_tools` keeps it (it still strips `bat`/`send_mail`).
+   - `looks_like_purchase` pre-click heuristic (tested). **Deferred/deck-only:** the Playwright
+     `context.route` checkout interceptor + `BrowserTool._click` guard (can't be tested headlessly), and
+     the MCP money-tool block — both wire to the ledger using the tested helper.
+   - Tests: `test_bat_spend.py` (cap decision, policy gating, ledger math, all four endpoints,
+     idempotency, settle, spend-approval resume, tool refusal, purchase heuristic). **Bat suites: 140
+     passing**; 550 tool/mail/spend tests green.
+   - **Honest limit (as discussed):** this is a software cap. A shell-capable worker could in principle
+     bypass it (e.g. curl a payment API). The only issuer-hard cap is a virtual card per authorization
+     (documented option). The pre-auth ledger is the owner's chosen default.
 7. **Accounts/logins.** signup flow, inbox-verification read, credential-key requirement; 2FA/CAPTCHA
    route to the ask.
 8. **UI.** `BatPage`, `batStore`, `BatAskCard`, budget meter, nav + notifications; build + commit.

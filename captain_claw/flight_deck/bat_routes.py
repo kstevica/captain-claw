@@ -27,6 +27,7 @@ with the owner's normal toolset.
 from __future__ import annotations
 
 import json
+import os
 import re
 import types
 import uuid
@@ -72,6 +73,8 @@ class BatStartReq(_BatAgentReq):
     task: str = ""
     title: str = ""
     llm_usd_cap: float = 0.0
+    real_usd_cap: float = 0.0       # hard ceiling on real-money spend for the run
+    per_item_usd: float = 0.0       # purchases at/below this auto-approve; above → owner
     steps: list[str] = Field(default_factory=list)
     origin_platform: str = "web"
     origin_user_id: str = ""
@@ -109,6 +112,51 @@ def plan_needs_gate(task: str, steps: list[dict]) -> tuple[bool, str]:
 
 
 _APPROVE_WORDS = {"approve", "approved", "go", "yes", "ok", "okay", "proceed", "run", "do it"}
+
+# Button/link text that means "this click spends money" — a pre-click guard for
+# the browser (the deck-side Playwright wiring uses this; pure + tested here).
+_PURCHASE_RE = re.compile(
+    r"\b(place (your )?order|pay now|buy now|complete (purchase|order|payment)|"
+    r"confirm (and )?pay|checkout|check out|subscribe|start (free )?trial|"
+    r"proceed to payment|submit payment|purchase)\b", re.IGNORECASE)
+
+
+def looks_like_purchase(text: str) -> bool:
+    """True if on-screen control text reads as a money-committing action."""
+    return bool(_PURCHASE_RE.search(text or ""))
+
+
+def _spend_enabled() -> bool:
+    """Deck kill-switch. Real-money spend is OFF unless FD_BAT_SPEND is on."""
+    return (os.environ.get("FD_BAT_SPEND", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _spend_policy(run: dict) -> dict:
+    """The effective spend policy for a run: enabled only when the deck switch is
+    on AND the owner approved a spend plan AND a run cap was set."""
+    cfg = run.get("config") or {}
+    cap = float(cfg.get("real_usd_cap") or 0.0)
+    enabled = _spend_enabled() and bool(cfg.get("spend_allowed")) and cap > 0
+    return {"enabled": enabled, "per_item_usd": float(cfg.get("per_item_usd") or 0.0), "run_usd_cap": cap}
+
+
+def spend_decision(policy: dict, committed_usd: float, amount_usd: float) -> tuple[str, str]:
+    """Pure cap logic. Returns (decision, reason):
+      denied      — spend disabled, non-positive amount, or over the run cap;
+      needs_human — within the cap but above the per-item auto-approve threshold;
+      approved    — within the cap and at/below the per-item threshold."""
+    if not policy.get("enabled"):
+        return "denied", "real-money spend is not enabled for this run"
+    amt = float(amount_usd or 0.0)
+    if amt <= 0:
+        return "denied", "amount must be positive"
+    cap = float(policy.get("run_usd_cap") or 0.0)
+    if committed_usd + amt > cap + 1e-9:
+        return "denied", f"would exceed the run cap (${committed_usd:.2f} committed + ${amt:.2f} > ${cap:.2f})"
+    per_item = float(policy.get("per_item_usd") or 0.0)
+    if amt <= per_item:
+        return "approved", f"within the per-item auto-approve limit (${per_item:.2f})"
+    return "needs_human", f"above the per-item auto-approve limit (${per_item:.2f}) — owner approval required"
 
 
 def _parse_vote(text: str) -> dict:
@@ -585,15 +633,32 @@ async def _gate_check(store, run: dict) -> str:
                 reason = cfg.get("gate_reason") or ""
                 if "send email" in reason:
                     cfg["email_allowed"] = True
+                if "spend money" in reason:
+                    cfg["spend_allowed"] = True
                 await store.set_config(run_id, cfg)
+                grants = [g for g, on in (("email", cfg.get("email_allowed")),
+                                          ("spend", cfg.get("spend_allowed"))) if on]
                 await store.append_event(
                     run_id, "note",
-                    "plan approved — proceeding" + (" (email enabled for this run)"
-                                                    if cfg.get("email_allowed") else ""))
+                    "plan approved — proceeding" + (f" ({'+'.join(grants)} enabled for this run)"
+                                                    if grants else ""))
                 return "proceed"
             await store.set_status(run_id, "cancelled", stopped_reason="plan_rejected")
             await store.append_event(run_id, "cancelled", "plan rejected by the owner")
             return "cancelled"
+        if ask["kind"] == "spend_approval":
+            # step_key carries "spend:<id>"; approve/deny the ledger row, then
+            # re-run the step (the worker re-authorizes and finds the decision).
+            spend_id = (ask.get("step_key") or "").split("spend:", 1)[-1]
+            decision = (ask.get("answer") or "").strip().lower()
+            approved = decision in _APPROVE_WORDS
+            if spend_id:
+                await store.set_spend_status(
+                    spend_id, "approved" if approved else "denied",
+                    decided_by=f"human:{run['owner_id']}")
+            await store.append_event(
+                run_id, "note", f"spend {'approved' if approved else 'declined'} by the owner")
+            return "proceed"
         # input / secret answer → hand it to the resuming step
         text = await human_ask.resolve_answer_text(store, ask)
         step_key = ask.get("step_key") or ""
@@ -692,7 +757,9 @@ async def agent_start(body: BatStartReq):
     await store.create_run(
         run_id=run_id, owner_id=owner, title=title, task=task,
         config={"source": "agent", "origin_platform": body.origin_platform,
-                "steps": [str(s) for s in (body.steps or []) if str(s).strip()]},
+                "steps": [str(s) for s in (body.steps or []) if str(s).strip()],
+                "real_usd_cap": float(body.real_usd_cap or 0.0),
+                "per_item_usd": float(body.per_item_usd or 0.0)},
         origin={"platform": body.origin_platform, "user_id": body.origin_user_id,
                 "chat_id": body.origin_chat_id, "kind": body.origin_kind,
                 "address": body.origin_address},
@@ -754,6 +821,115 @@ async def agent_cancel(body: _BatAgentReq):
         return {"ok": False}
     ok = await bat_loop.cancel_run(_store(), body.run_id)
     return {"ok": ok}
+
+
+# ── capped real-money spend (Phase 6) — agent/worker endpoints ─────────
+
+class _SpendReq(_BatAgentReq):
+    session_id: str = ""              # the Bat run (worker's CLAW_BAT_SESSION)
+    agent: str = ""
+    merchant: str = ""
+    merchant_domain: str = ""
+    amount_usd: float = 0.0
+    description: str = ""
+    spend_id: str = ""
+    actual_usd: float = 0.0
+    order_ref: str = ""
+
+
+async def _spend_run(body: _SpendReq) -> tuple[str, dict]:
+    owner = _resolve(body)
+    run = await _store().get_run(body.session_id)
+    if not run or run["owner_id"] != owner:
+        raise HTTPException(404, "run not found")
+    return owner, run
+
+
+@router.post("/agent/spend/authorize")
+async def spend_authorize(body: _SpendReq):
+    owner, run = await _spend_run(body)
+    store = _store()
+    sid = body.session_id
+    domain = (body.merchant_domain or body.merchant or "").strip().lower()
+    amount = float(body.amount_usd or 0.0)
+    # Idempotent: a prior decision for the same merchant+amount is returned as-is
+    # (approved → proceed, denied → stop, requested → still pending). Prevents a
+    # re-declare after resume from raising a fresh approval ask in a loop.
+    existing = await store.find_live_spend(sid, domain, amount)
+    if existing:
+        return {"status": existing["status"], "id": existing["id"], "reason": "existing authorization"}
+    policy = _spend_policy(run)
+    committed = await store.committed_usd(sid)
+    decision, reason = spend_decision(policy, committed, amount)
+    spend_id = f"spend_{uuid.uuid4().hex[:12]}"
+    common = dict(spend_id=spend_id, run_id=sid, owner_id=owner, agent=body.agent or "",
+                  merchant=body.merchant, merchant_domain=domain,
+                  description=body.description, amount_usd_max=amount)
+    if decision == "denied":
+        await store.create_spend(**common, status="denied", decided_by="policy")
+        await store.append_event(sid, "note", f"spend denied (${amount:.2f} at {domain}): {reason}")
+        return {"status": "denied", "id": spend_id, "reason": reason}
+    if decision == "approved":
+        await store.create_spend(**common, status="approved", decided_by="policy")
+        await store.append_event(sid, "budget", f"spend auto-approved ${amount:.2f} at {domain}")
+        return {"status": "approved", "id": spend_id, "reason": reason}
+    # needs_human → record a reservation + raise a spend-approval ask; the run
+    # stands down until the owner answers.
+    await store.create_spend(**common, status="requested", decided_by="")
+    await human_ask.raise_ask(
+        store, run_id=sid, owner=owner, kind="spend_approval",
+        question=(f"Bat wants to spend ${amount:.2f} at {body.merchant or domain}"
+                  + (f" — {body.description}" if body.description else "") + ". Approve or cancel."),
+        options=["approve", "cancel"], step_key=f"spend:{spend_id}")
+    await store.set_status(sid, "awaiting_human")
+    await store.append_event(sid, "awaiting_human", f"spend needs approval: ${amount:.2f} at {domain}")
+    return {"status": "requested", "id": spend_id, "reason": reason}
+
+
+@router.post("/agent/spend/settle")
+async def spend_settle(body: _SpendReq):
+    owner, run = await _spend_run(body)
+    store = _store()
+    row = await store.get_spend(body.spend_id)
+    if not row or row["owner_id"] != owner or row["run_id"] != body.session_id:
+        raise HTTPException(404, "authorization not found")
+    if row["status"] != "approved":
+        return {"ok": False, "reason": f"not an approved authorization (status={row['status']})"}
+    actual = float(body.actual_usd or 0.0) or row["amount_usd_max"]
+    await store.set_spend_status(body.spend_id, "consumed", actual_usd=actual,
+                                 order_ref=body.order_ref,
+                                 evidence={"order_ref": body.order_ref})
+    await store.append_event(body.session_id, "budget",
+                             f"spend settled ${actual:.2f} at {row['merchant_domain']}"
+                             + (f" (order {body.order_ref})" if body.order_ref else ""))
+    return {"ok": True}
+
+
+@router.post("/agent/spend/void")
+async def spend_void(body: _SpendReq):
+    owner, run = await _spend_run(body)
+    store = _store()
+    row = await store.get_spend(body.spend_id)
+    if not row or row["owner_id"] != owner:
+        raise HTTPException(404, "authorization not found")
+    await store.set_spend_status(body.spend_id, "voided")
+    return {"ok": True}
+
+
+@router.post("/agent/spend/status")
+async def spend_status(body: _SpendReq):
+    owner, run = await _spend_run(body)
+    store = _store()
+    policy = _spend_policy(run)
+    return {
+        "enabled": policy["enabled"],
+        "committed_usd": await store.committed_usd(body.session_id),
+        "run_usd_cap": policy["run_usd_cap"],
+        "per_item_usd": policy["per_item_usd"],
+        "items": [{"id": s["id"], "merchant": s["merchant"], "amount_usd_max": s["amount_usd_max"],
+                   "actual_usd": s["actual_usd"], "status": s["status"]}
+                  for s in await store.list_spend(body.session_id)],
+    }
 
 
 # ── owner-authenticated human-in-the-loop (answer path A) ──────────────
