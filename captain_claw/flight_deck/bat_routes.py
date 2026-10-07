@@ -33,10 +33,12 @@ import uuid
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from captain_claw.flight_deck import bat_loop
+from captain_claw.flight_deck.auth import get_current_user
+
+from captain_claw.flight_deck import bat_loop, human_ask
 from captain_claw.flight_deck.bat_judge import Check, evaluate as _judge_evaluate
 from captain_claw.flight_deck.bat_store import RUNNING_STATES
 
@@ -83,6 +85,30 @@ class BatStartReq(_BatAgentReq):
 
 _VOTE_RE = re.compile(r"^\s*VOTE:\s*(AGREE|DISAGREE|ABSTAIN)", re.IGNORECASE | re.MULTILINE)
 _REASON_RE = re.compile(r"^\s*REASON:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+
+# raw secret answers injected into a resuming step, kept in memory only
+_SECRET_ANSWERS: dict[tuple[str, str], str] = {}
+
+# Start-gate classifier (owner decision #3): a run whose plan would send mail,
+# spend money, or create an account pauses for approval before it acts. Pure.
+_GATE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("send email", r"\b(e-?mails?|gmail|inbox|send (a )?(message|mail|note)|reply to|forward (the|this|an? ))\b"),
+    ("spend money", r"\b(buy|purchase|pay(ment|ing)?|subscribe|subscription|checkout|check out|order|pre-?order|donate|rent|book (a|the|my)|top up|deposit|withdraw)\b"),
+    ("create an account", r"\b(sign ?up|create an? (new )?account|register (for|an?|with)|open an account|make an account)\b"),
+)
+_GATE_COMPILED = tuple((label, re.compile(rx, re.IGNORECASE)) for label, rx in _GATE_PATTERNS)
+
+
+def plan_needs_gate(task: str, steps: list[dict]) -> tuple[bool, str]:
+    """True + a reason when the task/plan would act in the world in a way the
+    owner asked to approve first (mail / money / account creation). Deterministic
+    keyword scan over the task and the step titles."""
+    blob = (task or "") + "\n" + "\n".join(s.get("title", "") for s in (steps or []))
+    hits = [label for label, rx in _GATE_COMPILED if rx.search(blob)]
+    return (bool(hits), ", ".join(hits))
+
+
+_APPROVE_WORDS = {"approve", "approved", "go", "yes", "ok", "okay", "proceed", "run", "do it"}
 
 
 def _parse_vote(text: str) -> dict:
@@ -146,14 +172,18 @@ _STEP_SYSTEM = (
 )
 
 
-def _build_step_prompt(run: dict, step: dict, prior: list[dict]) -> str:
+def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: str = "") -> str:
     lines = [f"# Goal\n{run.get('task', '')}", f"\n# Your step\n{step.get('title') or step.get('step_key')}"]
     done = [s for s in prior if s.get("status") == "done" and (s.get("output") or "").strip()]
     if done:
         lines.append("\n# What earlier steps produced (context)")
         for s in done:
             lines.append(f"\n## {s.get('title') or s.get('step_key')}\n{(s.get('output') or '')[:2000]}")
-    lines.append("\nDo this step fully and report the concrete result.")
+    if human_input:
+        lines.append(f"\n# The human just provided this (use it to continue)\n{human_input}")
+    lines.append("\nDo this step fully and report the concrete result. If you are truly blocked on "
+                 "something only the human can give you (a verification code, a credential, a CAPTCHA), "
+                 "say so clearly and stop — do not guess or fabricate it.")
     return "\n".join(lines)
 
 
@@ -345,7 +375,11 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
 
     try:
         prior = await store.list_steps(sid) if store else []
-        prompt = _build_step_prompt(run, step, prior)
+        # A human answer provided while this step was awaiting_human: a secret
+        # lives only in memory (consumed once), a non-secret was stashed in config.
+        human_input = _SECRET_ANSWERS.pop((sid, step["step_key"]), "") or \
+            ((run.get("config") or {}).get("answers") or {}).get(step["step_key"], "")
+        prompt = _build_step_prompt(run, step, prior, human_input=human_input)
         _run_sid.set(sid)
         _RUN_USAGE.setdefault(sid, [])
         before = len(_RUN_USAGE[sid])
@@ -478,11 +512,109 @@ async def _bat_on_finish(run: dict) -> None:
         log.warning("bat source-agent notify failed", run_id=sid, error=str(e))
 
 
+async def _gate_check(store, run: dict) -> str:
+    """Human-in-the-loop gate (bat_loop seam). Returns proceed|wait|cancelled|error.
+
+    Two jobs: (1) the START GATE — a fresh run whose plan would send mail, spend,
+    or create an account pauses (awaiting_plan) for owner approval; (2) RESUME —
+    an awaiting_* run proceeds once its ask is answered, is cancelled if the plan
+    is rejected, and errors if the ask expired."""
+    from captain_claw.flight_deck import human_ask
+    run_id = run["id"]
+    status = run["status"]
+
+    if status in ("awaiting_plan", "awaiting_human"):
+        ask = await store.latest_ask(run_id)
+        if ask is None:
+            return "proceed"
+        if ask["status"] == "open":
+            return "wait"
+        if ask["status"] == "expired":
+            await store.set_status(run_id, "error", stopped_reason="human_ask_timeout")
+            await store.append_event(run_id, "error", "the human did not answer in time")
+            return "error"
+        if ask["status"] == "cancelled":
+            await store.set_status(run_id, "cancelled", stopped_reason="ask_cancelled")
+            return "cancelled"
+        # answered
+        if ask["kind"] == "plan_approval":
+            decision = (ask.get("answer") or "").strip().lower()
+            if decision in _APPROVE_WORDS:
+                cfg = dict(run.get("config") or {})
+                cfg["plan_approved"] = True
+                await store.set_config(run_id, cfg)
+                await store.append_event(run_id, "note", "plan approved — proceeding")
+                return "proceed"
+            await store.set_status(run_id, "cancelled", stopped_reason="plan_rejected")
+            await store.append_event(run_id, "cancelled", "plan rejected by the owner")
+            return "cancelled"
+        # input / secret answer → hand it to the resuming step
+        text = await human_ask.resolve_answer_text(store, ask)
+        step_key = ask.get("step_key") or ""
+        if ask.get("secret"):
+            if text:
+                _SECRET_ANSWERS[(run_id, step_key)] = text
+        else:
+            cfg = dict(run.get("config") or {})
+            answers = dict(cfg.get("answers") or {})
+            answers[step_key] = text
+            cfg["answers"] = answers
+            await store.set_config(run_id, cfg)
+        await store.append_event(run_id, "note", "input received — resuming", agent=step_key)
+        return "proceed"
+
+    # fresh run — start gate
+    cfg = run.get("config") or {}
+    if cfg.get("plan_approved"):
+        return "proceed"
+    steps = await store.list_steps(run_id)
+    needs, reason = plan_needs_gate(run.get("task", ""), steps)
+    if not needs:
+        return "proceed"
+    existing = await store.latest_open_ask(run_id)
+    if not (existing and existing["kind"] == "plan_approval"):
+        q = (f"This Bat run would {reason}. Approve it to run, or cancel.\n\nPlan:\n"
+             + "\n".join(f"- {s.get('title')}" for s in steps))
+        await human_ask.raise_ask(store, run_id=run_id, owner=run["owner_id"],
+                                  kind="plan_approval", question=q, options=["approve", "cancel"])
+    await store.set_status(run_id, "awaiting_plan")
+    await store.append_event(run_id, "awaiting_plan", f"needs approval — would {reason}")
+    return "wait"
+
+
+async def _notify_ask(ask: dict) -> None:
+    """Fan an ask out to the owner: the in-app bell always; a WhatsApp nudge for
+    a non-secret ask. (Secret asks are UI-only — never put a request for a code
+    or password on a chat channel.) The owner answers via the authoritative
+    answer route / the Bat page."""
+    owner = ask.get("owner_id", "")
+    question = ask.get("question", "")
+    try:
+        from captain_claw.flight_deck.db import get_db
+        await get_db().add_notification(
+            owner, "bat_ask", "Bat needs you", question, "bat", ask.get("run_id", ""))
+    except Exception as e:  # noqa: BLE001
+        log.warning("bat ask bell failed", error=str(e))
+    if ask.get("secret"):
+        return
+    try:
+        from captain_claw.flight_deck.autonomy import resolve_config
+        from captain_claw.flight_deck.fd_dispatch import _nudge_waids
+        from captain_claw.flight_deck.whatsapp_bridge import send_text_checked
+        waids, _ = _nudge_waids(resolve_config(owner))
+        for waid in waids:
+            await send_text_checked(waid, f"🦇 Bat needs you: {question[:600]}\n\n(Answer in the Bat page.)")
+    except Exception as e:  # noqa: BLE001
+        log.warning("bat ask whatsapp nudge failed", error=str(e))
+
+
 # Register the real handlers so the supervisor drives runs (handlers_ready()).
 bat_loop.set_planner(_bat_planner)
 bat_loop.set_attempt_runner(_bat_attempt)
 bat_loop.set_judge(_bat_judge)
 bat_loop.set_on_finish(_bat_on_finish)
+bat_loop.set_gate_check(_gate_check)
+human_ask.set_notifier(_notify_ask)
 
 
 # ── routes ─────────────────────────────────────────────────────────────
@@ -571,3 +703,58 @@ async def agent_cancel(body: _BatAgentReq):
         return {"ok": False}
     ok = await bat_loop.cancel_run(_store(), body.run_id)
     return {"ok": ok}
+
+
+# ── owner-authenticated human-in-the-loop (answer path A) ──────────────
+# Not under /fd/bat/agent/, so these use the owner's session (get_current_user),
+# not the agent guard — a human answers, never the agent.
+
+class _AnswerReq(BaseModel):
+    text: str = ""
+
+
+class _ApproveReq(BaseModel):
+    approve: bool = True
+
+
+@router.get("/asks")
+async def list_asks(user: dict = Depends(get_current_user)):
+    """The owner's open asks (what Bat is waiting on). Secret asks show their
+    question — never a secret value — so the owner knows what to enter."""
+    asks = await _store().open_asks_for_owner(user["id"])
+    return {"asks": [{"id": a["id"], "run_id": a["run_id"], "kind": a["kind"],
+                      "question": a["question"], "options": a["options"],
+                      "secret": a["secret"]} for a in asks]}
+
+
+@router.post("/asks/{ask_id}/answer")
+async def answer_ask(ask_id: str, body: _AnswerReq, user: dict = Depends(get_current_user)):
+    store = _store()
+    ask = await store.get_ask(ask_id)
+    if not ask or ask["owner_id"] != user["id"]:
+        raise HTTPException(404, "ask not found")
+    res = await human_ask.answer(store, ask_id, body.text, via="ui")
+    if not res.get("ok"):
+        raise HTTPException(409, res.get("reason", "could not answer"))
+    try:
+        await bat_loop.kick()  # resume the waiting run now
+    except Exception:
+        pass
+    return {"ok": True, "run_id": res["run_id"]}
+
+
+@router.post("/runs/{run_id}/approve-plan")
+async def approve_plan(run_id: str, body: _ApproveReq, user: dict = Depends(get_current_user)):
+    store = _store()
+    run = await store.get_run(run_id)
+    if not run or run["owner_id"] != user["id"]:
+        raise HTTPException(404, "run not found")
+    ask = await store.latest_open_ask(run_id)
+    if not ask or ask["kind"] != "plan_approval":
+        raise HTTPException(409, "no plan awaiting approval")
+    await human_ask.answer(store, ask["id"], "approve" if body.approve else "cancel", via="ui")
+    try:
+        await bat_loop.kick()
+    except Exception:
+        pass
+    return {"ok": True, "approved": bool(body.approve)}

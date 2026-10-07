@@ -80,6 +80,12 @@ _ATTEMPT_RUNNER: AttemptRunner = _default_attempt_runner
 _PLANNER: Planner = _default_planner
 _JUDGE: Judge = _default_judge
 _STORE: BatStore | None = None
+# Human-in-the-loop gate (Phase 4). Called once per drive, after planning:
+#   (store, run) -> 'proceed' | 'wait' | 'cancelled' | 'error'
+# It owns the start-gate (plan approval for mail/$/account runs) and the resume
+# of an awaiting_plan/awaiting_human run once the human answers. None (default)
+# = no gate, so every run proceeds (keeps the Phase-2 tests unchanged).
+_GATE_CHECK: Callable[[BatStore, dict], Awaitable[str]] | None = None
 # Called once with the final run dict when a run reaches a terminal state
 # (done/error/cancelled). Phase 3 sets this to deliver the result back to the
 # caller / origin channel. Optional.
@@ -102,6 +108,11 @@ def set_planner(fn: Planner) -> None:
 def set_judge(fn: Judge) -> None:
     global _JUDGE
     _JUDGE = fn
+
+
+def set_gate_check(fn: "Callable[[BatStore, dict], Awaitable[str]] | None") -> None:
+    global _GATE_CHECK
+    _GATE_CHECK = fn
 
 
 def set_store(store: BatStore) -> None:
@@ -281,6 +292,16 @@ class BatDriver:
             fresh = await self.store.get_run(run_id)
             return fresh["status"] if fresh else "error"
 
+        # Human-in-the-loop gate (start-gate for mail/$/account runs, and resume
+        # of an awaiting_* run once the human answered). Owns awaiting_* status.
+        if _GATE_CHECK is not None:
+            run = await self.store.get_run(run_id)
+            decision = await _GATE_CHECK(self.store, run)
+            if decision in ("wait", "cancelled", "error"):
+                fresh = await self.store.get_run(run_id)
+                return fresh["status"] if fresh else "error"
+            # 'proceed' falls through
+
         await self.store.set_status(run_id, "running")
         await self.store.append_event(run_id, "phase", "running")
 
@@ -293,7 +314,12 @@ class BatDriver:
                 stop, reason = await self._should_stop(run_id)
                 if stop:
                     return await self._stop(run_id, reason, rounds)
-                await self._run_step(run_id, step)
+                stood_down = await self._run_step(run_id, step)
+                if stood_down:
+                    # the step needs a human (awaiting_human) — stand down; the
+                    # answer re-kicks the run and _GATE_CHECK resumes it.
+                    fresh = await self.store.get_run(run_id)
+                    return fresh["status"] if fresh else "error"
 
             steps = await self.store.list_steps(run_id)
             run = await self.store.get_run(run_id)
@@ -330,7 +356,9 @@ class BatDriver:
                 out.append(s)
         return out
 
-    async def _run_step(self, run_id: str, step: dict) -> None:
+    async def _run_step(self, run_id: str, step: dict) -> bool:
+        """Run one step attempt. Returns True if the run stood down to wait for a
+        human (the step asked for input); False otherwise."""
         key = step["step_key"]
         attempt = int(step["attempt"]) + 1
         await self.store.upsert_step(run_id, key, status="running", attempt=attempt)
@@ -341,6 +369,25 @@ class BatDriver:
             res = await self.runner(run, step)
         except Exception as e:  # noqa: BLE001
             res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        # The step needs something only the human can provide (a code, a
+        # credential, a CAPTCHA). Raise a durable ask and stand down; the step
+        # returns to 'pending' so it re-runs once answered.
+        if isinstance(res.get("ask"), dict):
+            from captain_claw.flight_deck import human_ask
+            a = res["ask"]
+            await human_ask.raise_ask(
+                self.store, run_id=run_id, owner=run["owner_id"],
+                kind=str(a.get("kind") or "input"), question=str(a.get("question") or ""),
+                options=a.get("options") or [], step_key=key,
+                secret=bool(a.get("secret")), expires_at=float(a.get("expires_at") or 0.0),
+            )
+            await self.store.upsert_step(run_id, key, status="pending")
+            await self.store.set_status(run_id, "awaiting_human")
+            await self.store.append_event(
+                run_id, "awaiting_human",
+                "awaiting a private value" if a.get("secret") else (a.get("question") or "awaiting input"),
+                agent=key)
+            return True
         usd = float(res.get("usd") or 0.0)
         tokens = int(res.get("tokens") or 0)
         if usd or tokens:
@@ -359,6 +406,7 @@ class BatDriver:
             await self.store.append_event(run_id, "step", step.get("title") or key,
                                           agent=key, ok=False,
                                           detail=str(res.get("error", ""))[:200])
+        return False
 
     async def _stop(self, run_id: str, reason: str, rounds: int) -> str:
         if reason == "cancelled":
@@ -388,13 +436,27 @@ class BatSupervisor:
         self._running: dict[str, asyncio.Task] = {}
 
     async def tick(self) -> int:
-        """One scan. Returns how many new drive tasks were launched."""
+        """One scan. Returns how many new drive tasks were launched.
+
+        First expire overdue human-asks (a timed-out ask fails its run on the
+        next adopt). Then adopt each lease-free non-terminal run — but skip one
+        that is still waiting on an OPEN ask, so a run parked on the human does
+        not spin; it is re-driven only once the ask is answered (via kick()) or
+        expired (no longer open)."""
+        try:
+            await self.store.expire_asks()
+        except Exception as e:  # noqa: BLE001
+            log.warning("bat expire_asks failed", error=str(e))
         launched = 0
         for run in await self.store.adoptable_runs():
             rid = run["id"]
             t = self._running.get(rid)
             if t is not None and not t.done():
                 continue
+            if run["status"] in ("awaiting_plan", "awaiting_human"):
+                open_ask = await self.store.latest_open_ask(rid)
+                if open_ask is not None:
+                    continue  # still waiting on the human — don't spin
             if not await self.store.claim_lease(rid):
                 continue
             task = asyncio.create_task(self._drive_and_release(rid))

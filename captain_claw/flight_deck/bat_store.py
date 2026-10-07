@@ -36,7 +36,9 @@ import aiosqlite
 # Run lifecycle. 'retrying'/'waiting' are adoptable (a crashed driver resumes
 # them); 'done'/'error'/'cancelled' are terminal.
 RUNNING_STATES = ("planning", "running", "retrying", "waiting")
-ADOPTABLE_STATES = RUNNING_STATES + ("awaiting_human",)
+# awaiting_* runs stay adoptable so the supervisor can resume them once their
+# ask is answered (the tick skips one whose ask is still open, so it won't spin).
+ADOPTABLE_STATES = RUNNING_STATES + ("awaiting_plan", "awaiting_human")
 TERMINAL_STATES = ("done", "error", "cancelled")
 
 LEASE_STALE_SECONDS = 300  # a driver that hasn't heart-beaten in 5 min is dead
@@ -111,6 +113,25 @@ CREATE TABLE IF NOT EXISTS bat_events (
     data      TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_bat_events_run ON bat_events(run_id, i);
+
+CREATE TABLE IF NOT EXISTS bat_asks (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL,
+    owner_id      TEXT NOT NULL DEFAULT '',
+    kind          TEXT NOT NULL DEFAULT 'input',   -- plan_approval | input | secret
+    question      TEXT NOT NULL DEFAULT '',
+    options       TEXT NOT NULL DEFAULT '[]',
+    step_key      TEXT NOT NULL DEFAULT '',
+    secret        INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'open',     -- open | answered | cancelled | expired
+    answer        TEXT NOT NULL DEFAULT '',         -- redacted when secret; the decision for plan_approval
+    answered_via  TEXT NOT NULL DEFAULT '',
+    created_at    REAL NOT NULL,
+    expires_at    REAL NOT NULL DEFAULT 0.0,
+    updated_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bat_asks_run ON bat_asks(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_bat_asks_owner_open ON bat_asks(owner_id, status);
 """
 
 
@@ -209,6 +230,12 @@ class BatStore:
             vals.append(stopped_reason)
         vals.append(run_id)
         await db.execute(f"UPDATE bat_runs SET {', '.join(sets)} WHERE id = ?", vals)
+        await db.commit()
+
+    async def set_config(self, run_id: str, config: dict[str, Any]) -> None:
+        db = await self._ensure_db()
+        await db.execute("UPDATE bat_runs SET config = ?, updated_at = ? WHERE id = ?",
+                         (json.dumps(config or {}), _now(), run_id))
         await db.commit()
 
     async def bump_cost(self, run_id: str, usd: float, tokens: int = 0) -> float:
@@ -429,6 +456,101 @@ class BatStore:
                 ev["data"] = _loads(ev.get("data"), {})
                 out.append(ev)
             return out
+
+
+    # ── asks (human-in-the-loop) ──────────────────────────────────────
+
+    async def create_ask(
+        self, *, ask_id: str, run_id: str, owner_id: str, kind: str, question: str,
+        options: list | None = None, step_key: str = "", secret: bool = False,
+        expires_at: float = 0.0,
+    ) -> str:
+        db = await self._ensure_db()
+        now = _now()
+        await db.execute(
+            """INSERT INTO bat_asks
+               (id, run_id, owner_id, kind, question, options, step_key, secret,
+                status, created_at, expires_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)""",
+            (ask_id, run_id, owner_id, kind, question, json.dumps(options or []),
+             step_key, 1 if secret else 0, now, float(expires_at or 0.0), now),
+        )
+        await db.commit()
+        return ask_id
+
+    async def get_ask(self, ask_id: str) -> dict | None:
+        db = await self._ensure_db()
+        async with db.execute("SELECT * FROM bat_asks WHERE id = ?", (ask_id,)) as cur:
+            row = await cur.fetchone()
+        return _row_to_ask(row) if row else None
+
+    async def latest_open_ask(self, run_id: str) -> dict | None:
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT * FROM bat_asks WHERE run_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+            (run_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_ask(row) if row else None
+
+    async def latest_ask(self, run_id: str) -> dict | None:
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT * FROM bat_asks WHERE run_id = ? ORDER BY created_at DESC LIMIT 1", (run_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_ask(row) if row else None
+
+    async def open_asks_for_owner(self, owner_id: str) -> list[dict]:
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT * FROM bat_asks WHERE owner_id = ? AND status = 'open' ORDER BY created_at",
+            (owner_id,),
+        ) as cur:
+            return [_row_to_ask(r) for r in await cur.fetchall()]
+
+    async def answer_ask(self, ask_id: str, answer: str, *, via: str = "") -> bool:
+        """Compare-and-set open → answered. Returns False if it was already
+        resolved (idempotent against double answers from two channels)."""
+        db = await self._ensure_db()
+        cur = await db.execute(
+            "UPDATE bat_asks SET status = 'answered', answer = ?, answered_via = ?, updated_at = ?"
+            " WHERE id = ? AND status = 'open'",
+            (answer, via, _now(), ask_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+    async def cancel_ask(self, ask_id: str) -> None:
+        db = await self._ensure_db()
+        await db.execute(
+            "UPDATE bat_asks SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'open'",
+            (_now(), ask_id),
+        )
+        await db.commit()
+
+    async def expire_asks(self, now: float | None = None) -> list[str]:
+        """Mark open, past-expiry asks as expired. Returns their run_ids so the
+        caller can fail those runs (a timed-out human-ask is a serious stop)."""
+        db = await self._ensure_db()
+        now = now if now is not None else _now()
+        async with db.execute(
+            "SELECT id, run_id FROM bat_asks WHERE status = 'open' AND expires_at > 0 AND expires_at <= ?",
+            (now,),
+        ) as cur:
+            rows = await cur.fetchall()
+        for r in rows:
+            await db.execute(
+                "UPDATE bat_asks SET status = 'expired', updated_at = ? WHERE id = ?", (now, r["id"]))
+        await db.commit()
+        return [r["run_id"] for r in rows]
+
+
+def _row_to_ask(row: aiosqlite.Row) -> dict:
+    ask = dict(row)
+    ask["options"] = _loads(ask.get("options"), [])
+    ask["secret"] = bool(ask.get("secret"))
+    return ask
 
 
 def _row_to_run(row: aiosqlite.Row) -> dict:

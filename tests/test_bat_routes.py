@@ -9,7 +9,37 @@ from __future__ import annotations
 
 from captain_claw.flight_deck.bat_routes import (
     _assemble_deliverable, _bat_worker_tools, _build_step_prompt, _parse_plan, _parse_vote,
+    plan_needs_gate,
 )
+
+
+# ── plan_needs_gate (start-gate classifier) ────────────────────────────
+
+def test_plan_needs_gate_flags_mail_money_accounts():
+    assert plan_needs_gate("email the report to the team", [])[0]
+    assert plan_needs_gate("reply to that message", [])[0]
+    assert plan_needs_gate("buy a domain and pay with the card", [])[0]
+    assert plan_needs_gate("subscribe to the newsletter service", [])[0]
+    assert plan_needs_gate("sign up for a new account on the site", [])[0]
+    # reason names the category
+    needs, reason = plan_needs_gate("purchase the plugin", [])
+    assert needs and "spend money" in reason
+
+
+def test_plan_needs_gate_scans_step_titles_too():
+    needs, reason = plan_needs_gate("do the research", [{"title": "then email the findings"}])
+    assert needs and "send email" in reason
+
+
+def test_plan_needs_gate_allows_plain_build_research():
+    assert not plan_needs_gate("summarize the latest AI papers", [{"title": "read sources"}])[0]
+    assert not plan_needs_gate("refactor the auth module and add tests", [])[0]
+
+
+def test_build_step_prompt_includes_human_input_when_present():
+    p = _build_step_prompt({"task": "t"}, {"step_key": "s", "title": "do it"}, [],
+                           human_input="the code is 4242")
+    assert "4242" in p
 
 
 # ── _parse_vote (fail-closed) ──────────────────────────────────────────

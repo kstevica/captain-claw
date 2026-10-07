@@ -352,8 +352,29 @@ restart). Remember: `cd flight-deck && npm run build`, commit the bundle, restar
      real-money spend (Phase 6), account creation (Phase 7) — are NOT in this phase. A Phase-3 Bat
      worker runs under the Phase-1 hard floor with the owner's normal toolset. The pure logic is
      unit-tested; the live spawn/dispatch/panel path is verified on a running deck (prod).
-4. **Escalation + start gate.** `human_ask`, the three answer paths, `awaiting_plan` gate, secret
-   redaction.
+4. **Escalation + start gate.** ✅ **DONE (2026-10-07).**
+   - `bat_store` gains a `bat_asks` table (durable asks) + `set_config`; asks have CRUD + compare-and-set
+     `answer_ask` + `expire_asks`. `awaiting_plan`/`awaiting_human` are non-terminal, adoptable states.
+   - `flight_deck/human_ask.py` — the pause-and-ask registry (durable-first, survives restart): an ask
+     is a row + the run stands down; answering re-kicks it. **Secrets** (2FA/passwords/CAPTCHA) are kept
+     in an in-process holder only, never in the durable row (redacted placeholder) or a notification,
+     and are never answerable over a chat channel. Notifier injected.
+   - **Start gate** (owner decision #3): `plan_needs_gate` (deterministic mail/money/account classifier)
+     + the driver `_GATE_CHECK` seam. A run whose plan would act in the world pauses `awaiting_plan` with
+     a `plan_approval` ask; a plain build/research run proceeds untouched. The same gate resumes an
+     `awaiting_*` run once answered (approve → proceed, reject → cancel, expired → error).
+   - **Step-level ask**: an attempt that returns `{ask: …}` stands the run down `awaiting_human`; the
+     answer is injected into the resuming step's prompt (secret via the in-memory holder, non-secret via
+     config). The supervisor skips a run waiting on an open ask (no spin), resumes it on answer (kick),
+     and expires overdue asks (→ `human_ask_timeout` error).
+   - **Answer path A** (authoritative, owner-authenticated): `GET /fd/bat/asks`,
+     `POST /fd/bat/asks/{id}/answer`, `POST /fd/bat/runs/{id}/approve-plan`. **Notification** fan-out:
+     in-app bell (always) + WhatsApp nudge (non-secret). **Paths B/C** (free-text answer over WhatsApp /
+     web chat) are deferred — the WhatsApp binding has no clean waid→owner map and the web path needs a
+     `/fd/flows/evaluate` edit; `human_ask.answer_for_owner` is ready for them. Follow-up.
+   - Tests: `test_human_ask.py` (store asks + registry + secret redaction + CAS), `test_bat_gate.py`
+     (start gate approve/reject, non-gated, step-ask resume, expiry, supervisor skip/resume), plus
+     `plan_needs_gate` in `test_bat_routes.py`. **Bat suites: 117 passing**; 272 tool-reg tests green.
 5. **Email exception.** `bat` automation kind + marker, FD Gmail-gate routing, child-propagation
    block. Layer-3 evidence verifier reads send receipts.
 6. **Capped spend.** ledger + routes + policy + admin ceiling, `spend` tool, checkout interceptor +

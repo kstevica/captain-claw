@@ -22,13 +22,14 @@ def _default_handlers():
     """Pin bat_loop's handler seams to their defaults for these tests, so that
     importing bat_routes elsewhere in the session (which registers the real
     handlers) can't leak in and change the driver's default planner/judge."""
-    saved = (_bl._ATTEMPT_RUNNER, _bl._PLANNER, _bl._JUDGE, _bl._ON_FINISH)
+    saved = (_bl._ATTEMPT_RUNNER, _bl._PLANNER, _bl._JUDGE, _bl._ON_FINISH, _bl._GATE_CHECK)
     _bl._ATTEMPT_RUNNER = _bl._default_attempt_runner
     _bl._PLANNER = _bl._default_planner
     _bl._JUDGE = _bl._default_judge
     _bl._ON_FINISH = None
+    _bl._GATE_CHECK = None
     yield
-    (_bl._ATTEMPT_RUNNER, _bl._PLANNER, _bl._JUDGE, _bl._ON_FINISH) = saved
+    (_bl._ATTEMPT_RUNNER, _bl._PLANNER, _bl._JUDGE, _bl._ON_FINISH, _bl._GATE_CHECK) = saved
 
 
 @pytest.fixture
