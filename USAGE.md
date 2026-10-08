@@ -1953,6 +1953,8 @@ insights:
   auto_extract: true                      # auto-extract after agent turns
   inject_in_context: true                 # inject relevant insights into system prompt
   max_items_in_prompt: 8                  # max insights shown in context
+  context_mode: relevant                  # relevant: core + what this turn's words match (every turn); importance: fixed top list
+  core_items_in_prompt: 3                 # most important insights always shown in relevant mode
   extraction_interval_messages: 8         # messages between extractions
   extraction_cooldown_seconds: 60         # minimum seconds between extractions
   max_insights: 500                       # hard cap on stored insights

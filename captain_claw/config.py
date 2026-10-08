@@ -85,6 +85,11 @@ class ContextConfig(BaseModel):
     # Cap (chars) on a single tool result kept in the session and sent to the
     # model; 0 = no cap. Off by default: the tier's window decides.
     tool_result_max_chars: int = 0
+    # How the per-turn context notes share their budget: "trim" drops whole
+    # notes, lowest priority first, once they don't fit; "capped" first cuts
+    # each note to its source's share, so one large note can't crowd out the
+    # rest.
+    notes_allocator: str = "trim"
 
 
 class MemoryEmbeddingsConfig(BaseModel):
@@ -869,6 +874,12 @@ class InsightsConfig(BaseModel):
     auto_extract: bool = True
     inject_in_context: bool = True
     max_items_in_prompt: int = 8
+    # relevant: the core_items_in_prompt most important insights, every rule
+    # (feedback, preference) of importance 8+, and those the turn's words
+    # match (refreshed every turn); importance: a fixed top list by
+    # importance (refreshed at session load).
+    context_mode: str = "relevant"
+    core_items_in_prompt: int = 3
     extraction_interval_messages: int = 20
     extraction_cooldown_seconds: int = 60
     max_insights: int = 500

@@ -23,10 +23,11 @@ import re
 import sqlite3
 import threading
 import time
-import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from captain_claw import retrieval
 
 log = logging.getLogger(__name__)
 
@@ -293,15 +294,15 @@ class ConversationTopicsManager:
         ``cosine`` (None without an embedder or below its floor) and
         ``matched_terms``."""
         _terms, fts, vec = self.rank_legs(query, **kwargs)
-        fused: dict[str, dict[str, Any]] = {}
-        for rank, row in enumerate(fts):
-            entry = fused.setdefault(row["id"], {**row, "score": 0.0, "cosine": None})
-            entry["score"] += 1.0 / (_RRF_K + rank + 1)
-        for rank, row in enumerate(vec):
-            entry = fused.setdefault(row["id"], {**row, "score": 0.0, "bm25": None})
-            entry["cosine"] = row["cosine"]
-            entry["score"] += 1.0 / (_RRF_K + rank + 1)
-        return sorted(fused.values(), key=lambda r: r["score"], reverse=True)[: max(1, limit)]
+        rows: dict[str, dict[str, Any]] = {}
+        for row in fts:
+            rows[row["id"]] = {**row, "cosine": None}
+        for row in vec:
+            rows.setdefault(row["id"], {**row, "bm25": None})["cosine"] = row["cosine"]
+        scores = retrieval.rrf([[r["id"] for r in fts], [r["id"] for r in vec]])
+        for topic_id, row in rows.items():
+            row["score"] = scores[topic_id]
+        return sorted(rows.values(), key=lambda r: r["score"], reverse=True)[: max(1, limit)]
 
     def rank_legs(self, query: str, *, group: str = "", tags: list[str] | None = None,
                   include_hidden: bool = False, embedder: Any = None, max_terms: int = 8,
@@ -862,87 +863,20 @@ _HIDDEN_BY_SWEEP = 2   # topics.hidden: 1 = the user hid it, 2 = the machine-tex
 _LIST_COLS = ("t.id, t.label, t.summary, t.keywords, t.msg_count, t.starred, t.hidden,"
               " t.first_seen, t.last_seen")
 _CANDIDATES = 50     # per ranking leg, before fusion
-_RRF_K = 60
 # A meaning match counts only above this cosine and within this share of the
 # best one (local model2vec: related topics score 0.4-0.8, unrelated <= 0.2).
 _COSINE_FLOOR = 0.3
 _COSINE_REACH = 0.75
 
-# Function words dropped from search terms (English + Croatian).
-_STOPWORDS = frozenset("""
-the and for are but not you all any can had her was one our out has have him his how its may new now
-old see two who did get got let put say she too use with that this from they will would there their
-what about which when were your been into than then them these those some such only also just like
-more most other over very much many each here where while why after before again because could
-should does doing being both same own off once under until above below between through during
-please thanks thank okay yes hello want need make know think tell give show find look help
-back still really maybe something anything everything going able
-sam smo ste jesam nije nisu bio bila bilo biti ima imam imamo nema samo ali ako ili kao koji koja
-koje kojeg kojem kojim kad kada gdje kako zato zbog što sto tko neki neka neko nešto nesto ovo ovaj
-ova taj ta to tamo ovdje jer još jos već vec sve svi sva svoj svoja moj moja tvoj tvoja naš nas
-vaš vas njih njega njoj nego pa te ni niti treba trebam možeš mozes može moze molim hvala daj
-""".split())
-
-
-def _fold(text: str) -> str:
-    """Lower-case, combining accents removed — what FTS5 unicode61 folds
-    (č→c, š→s; not đ, which has no decomposition)."""
-    decomposed = unicodedata.normalize("NFKD", str(text or "").lower())
-    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-
-
-# Attachment markers, links and paths: machine text, not what was asked.
-_NOISE_RE = re.compile(r"\[(?:Attached|Earlier) [^\]]*\]|https?://\S+|\S*[/\\]\S*")
-
-
-def query_terms(text: str, max_terms: int = 8) -> list[str]:
-    """Content words of *text* for topic search: 3+ letters, no stopwords,
-    no numbers or hex ids, nothing from attachment markers, links or paths;
-    the longest *max_terms*, in their original order."""
-    seen: dict[str, int] = {}
-    for pos, word in enumerate(re.findall(r"\w+", _NOISE_RE.sub(" ", str(text or "")).lower())):
-        word = word.strip("_")
-        if len(word) < 3 or _fold(word) in _STOPWORDS or word in _STOPWORDS:
-            continue
-        digits = sum(ch.isdigit() for ch in word)
-        if digits * 2 >= len(word) and not (word.isdigit() and len(word) == 4):
-            continue                          # ids and numbers (a year stays)
-        if digits and re.fullmatch(r"[0-9a-f]+", word):
-            continue                          # hex ids
-        seen.setdefault(word, pos)
-    keep = sorted(seen, key=lambda w: (-len(w), seen[w]))[: max(1, max_terms)]
-    return sorted(keep, key=lambda w: seen[w])
-
-
-def term_hits(terms: list[str], *texts: str) -> list[str]:
-    """The *terms* that occur in *texts* the way FTS matches them: a 3-letter
-    word as a whole word, a longer one by its stem as a word prefix."""
-    tokens = set(re.findall(r"\w+", _fold(" ".join(texts))))
-    hits = []
-    for term in terms:
-        folded = _fold(term)
-        if len(term) >= 4:
-            prefix = _stem(folded)
-            if any(tok.startswith(prefix) for tok in tokens):
-                hits.append(term)
-        elif folded in tokens:
-            hits.append(term)
-    return hits
-
-
-def _stem(term: str) -> str:
-    """The prefix a term matches on: long words drop their last two letters
-    (inflection: putovanje/putovanja, invoices/invoice)."""
-    if len(term) < 6:
-        return term
-    return term[: max(5, len(term) - 2)]
+# Search terms and matching follow the shared retrieval rules.
+_fold = retrieval.fold
+_stem = retrieval.stem
+query_terms = retrieval.query_terms
+term_hits = retrieval.matched_terms
 
 
 def _fts_term(term: str, prefix_all: bool) -> str:
-    """A word of 4+ letters matches as a prefix (a long one by its stem); a
-    3-letter word only as itself, unless *prefix_all* (typed search)."""
-    stem = _stem(term).replace('"', "")
-    return f'"{stem}"*' if (prefix_all or len(term) >= 4) else f'"{stem}"'
+    return retrieval.fts_term(term, prefix_all)
 
 
 def _topic_text(row: dict[str, Any]) -> str:

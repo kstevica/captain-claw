@@ -187,6 +187,22 @@ def _short_tool_desc(text: str, limit: int = 160) -> str:
 _RETIRED_TOOLS_LOGGED: set[str] = set()
 
 
+# context.notes_allocator = capped: each source's share of the notes budget.
+_NOTE_SHARES = {
+    "memory_context": 0.3,
+    "semantic_memory_context": 0.2,
+    "deep_memory_context": 0.2,
+    "cross_session_context": 0.2,
+    "insights_context": 0.15,
+    "workspace_manifest": 0.15,
+    "topic_recall": 0.15,
+    "pinned_topic": 0.2,
+}
+_NOTE_SHARE_DEFAULT = 0.1
+_NOTE_CAP_FLOOR = 200
+_NOTE_CUT_MARK = "[… cut to this note's share of the context]"
+
+
 def _being_body() -> bool:
     """This process is an Iskra being's body (CLAW_BEING_WORKER)."""
     import os
@@ -1216,8 +1232,10 @@ class AgentContextMixin:
             )
         )
 
-    async def _refresh_insights_context_cache(self) -> None:
-        """Pre-fetch insights for context injection."""
+    async def _refresh_insights_context_cache(self, query: str | None = None) -> None:
+        """Pre-fetch insights for context injection. With a turn's *query* in
+        ``relevant`` mode: the core most important insights plus those the
+        turn's words match; otherwise the top list by importance."""
         cfg = get_config()
         if not cfg.insights.enabled or not cfg.insights.inject_in_context:
             return
@@ -1227,6 +1245,13 @@ class AgentContextMixin:
                 mgr = get_session_insights_manager(str(self.session.id))
             else:
                 mgr = get_insights_manager()
+            if query is not None and str(cfg.insights.context_mode).strip().lower() == "relevant":
+                self._insights_context_cache = await mgr.relevant_for_context(
+                    query,
+                    limit=cfg.insights.max_items_in_prompt,
+                    core=cfg.insights.core_items_in_prompt,
+                )
+                return
             self._insights_context_cache = await mgr.get_for_context(
                 limit=cfg.insights.max_items_in_prompt,
             )
@@ -3788,6 +3813,10 @@ class AgentContextMixin:
             return []
         if self._count_tokens(self._wrap_internal_context(notes + pinned, lead)) <= budget:
             return list(notes)
+        if str(get_config().context.notes_allocator or "").strip().lower() == "capped":
+            notes = self._cap_notes_per_source(notes, budget)
+            if self._count_tokens(self._wrap_internal_context(notes + pinned, lead)) <= budget:
+                return list(notes)
         overhead = self._count_tokens(self._wrap_internal_context(pinned, lead))
         sizes = [self._count_tokens(text) for _, text in notes]
         kept: set[int] = set()
@@ -3802,6 +3831,51 @@ class AgentContextMixin:
         while fitted and self._count_tokens(self._wrap_internal_context(fitted + pinned, lead)) > budget:
             fitted.pop(0)
         return fitted
+
+    def _cap_notes_per_source(
+        self, notes: list[tuple[str, str]], budget: int,
+    ) -> list[tuple[str, str]]:
+        """Each note cut to its source's share of the notes budget
+        (``context.notes_allocator: capped``, when they don't all fit): whole
+        items kept (a line and the indented lines under it), and a single
+        item longer than the share cut inside it."""
+        capped: list[tuple[str, str]] = []
+        for kind, text in notes:
+            cap = max(_NOTE_CAP_FLOOR, int(budget * _NOTE_SHARES.get(kind, _NOTE_SHARE_DEFAULT)))
+            if self._count_tokens(text) <= cap:
+                capped.append((kind, text))
+                continue
+            items: list[list[str]] = []
+            for line in text.splitlines():
+                if items and line[:1].isspace():
+                    items[-1].append(line)      # Why / How to apply under its rule
+                else:
+                    items.append([line])
+            kept: list[str] = []
+            used = self._count_tokens(_NOTE_CUT_MARK)
+            for item in items:
+                block = "\n".join(item)
+                cost = self._count_tokens(block) + 1
+                if used + cost > cap:
+                    if not kept:                # one item over the share: cut inside it
+                        kept.append(self._cut_to_tokens(block, cap - used))
+                    break
+                kept.append(block)
+                used += cost
+            capped.append((kind, "\n".join(kept) + "\n" + _NOTE_CUT_MARK))
+        return capped
+
+    def _cut_to_tokens(self, text: str, tokens: int) -> str:
+        """The longest prefix of *text* within *tokens* (cut at a word)."""
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._count_tokens(text[:mid]) <= max(1, tokens):
+                lo = mid
+            else:
+                hi = mid - 1
+        cut = text[:lo]
+        return cut.rsplit(" ", 1)[0] if " " in cut and lo < len(text) else cut
 
     def _collect_background_context_notes(
         self,

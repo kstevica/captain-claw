@@ -17,7 +17,7 @@ from captain_claw.agent_stuck import (
     MSG_RETRIES_EXHAUSTED,
     MSG_STUCK,
 )
-from captain_claw import mail_authority
+from captain_claw import mail_authority, msg_origin
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
 from captain_claw.llm import Message, is_reasoning_backfill_placeholder
@@ -1196,6 +1196,10 @@ class AgentOrchestrationMixin:
             await self._refresh_scripts_context_cache()
             await self._refresh_apis_context_cache()
             await self._refresh_datastore_context_cache()
+        # Insights (the shared commons) follow what this turn is about.
+        await self._refresh_insights_context_cache(
+            query=msg_origin.model_view_text({"content": user_input}),
+        )
         if clarification_context_applied:
             self._emit_tool_output(
                 "task_contract",

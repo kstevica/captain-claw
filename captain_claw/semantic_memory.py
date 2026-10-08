@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from captain_claw import retrieval
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -25,6 +26,8 @@ log = get_logger(__name__)
 # Half-saturation point of the keyword score: a hit whose |bm25| equals this
 # scores 0.5. Real multi-term matches run |bm25| 10-35, a lone common term ~3.
 _BM25_SCALE = 4.0
+# Content words of a query searched at most (the longest; bm25 weighs them).
+_FTS_MAX_TERMS = 64
 
 _DEFAULT_TEXT_EXTENSIONS = {
     ".txt",
@@ -158,14 +161,19 @@ _STOPWORDS = {
 
 
 def _build_fts_query(query: str) -> str | None:
-    raw_tokens = _tokenize_fts(query)
-    tokens = [token for token in raw_tokens if len(token) >= 3 and token not in _STOPWORDS]
-    if not tokens:
-        tokens = [token for token in raw_tokens if len(token) >= 2]
+    """The query's content words ORed (shared rules: EN+HR stopwords, long
+    words matched by stem; paths, commits and ids kept — an exact one is the
+    best match stored text has); very short queries fall back to their
+    2-letter words."""
+    from captain_claw import retrieval
+
+    terms = retrieval.query_terms(query, max_terms=_FTS_MAX_TERMS, keep_identifiers=True)
+    if terms:
+        return retrieval.fts_match(terms)
+    tokens = [token for token in _tokenize_fts(query) if len(token) >= 2]
     if not tokens:
         return None
-    quoted = [f'"{token.replace(chr(34), "")}"' for token in tokens]
-    return " OR ".join(quoted)
+    return " OR ".join(f'"{token.replace(chr(34), "")}"' for token in tokens)
 
 
 def _parse_iso_to_timestamp(value: str) -> float | None:
@@ -2015,7 +2023,7 @@ class SemanticMemoryIndex:
                     # common term (|bm25| ~3) stays well below a specific
                     # multi-term match (|bm25| 10-35). The LIKE fallback's
                     # 999.0 sentinel scores 0, as before.
-                    "text_score": max(0.0, -rank) / (max(0.0, -rank) + _BM25_SCALE),
+                    "text_score": retrieval.bm25_relevance(rank, _BM25_SCALE),
                     "text_l1": str(row[9]) if len(row) > 9 else "",
                     "text_l2": str(row[10]) if len(row) > 10 else "",
                 }
@@ -2170,8 +2178,7 @@ class SemanticMemoryIndex:
                 timestamp = _parse_iso_to_timestamp(str(payload.get("updated_at", "")))
                 if timestamp is not None:
                     age_days = max(0.0, (now - timestamp) / 86400.0)
-                    decay_lambda = math.log(2) / self.temporal_half_life_days
-                    score *= math.exp(-decay_lambda * age_days)
+                    score = retrieval.decayed(score, age_days, self.temporal_half_life_days)
             merged.append(
                 SemanticMemoryResult(
                     chunk_id=str(payload.get("chunk_id", "")),

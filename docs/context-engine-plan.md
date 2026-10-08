@@ -1,6 +1,6 @@
 # Context engine — what each LLM call sees, and why
 
-**Status:** P0, P1 (365b39c4), P4 (4e72f8e2), P2 (5da8d309) and P3 implemented on `fix/context-placement-weak-models` (2026-10-08). P5, P6 next.
+**Status:** P0, P1 (365b39c4), P4 (4e72f8e2), P2 (5da8d309), P3 (baabbaf2) and P5 implemented on `fix/context-placement-weak-models` (2026-10-08). P6 next.
 **Origin:** weak models (Haiku, DeepSeek V4 Flash, GPT-6 Luna, GLM flash) behave well in a fresh
 session and degrade once it is crowded: truncated answers, echoed notes, "stupid" replies.
 The fixes already on `fix/context-placement-weak-models` (context notes moved into one block on the
@@ -182,6 +182,21 @@ is re-asked, not continued; a cut-off compaction summary is retried once with mo
   within a long turn.
 
 ## P5 — one retrieval path (audit item 6)
+
+**Done (scoring shared; stores keep their own indexes).** `captain_claw/retrieval.py` holds the
+rules every recall source uses: content words (EN+HR stopwords; attachment markers, links, paths,
+ids left out), FTS5 OR-queries with stems for long words and prefixes for 4+ letter words,
+FTS-consistent matched words, bm25 normalised to 0..1, reciprocal-rank fusion, and age decay
+after the relevance floor. Topics and semantic memory use it (semantic memory's keyword leg had
+no stems and no Croatian stopwords; it keeps paths, commits and ids, which topics drop).
+Insights are query-relevant (`insights.context_mode: relevant`, the default), refreshed every
+turn: the `core_items_in_prompt` (3) most important ones and every behaviour rule (feedback,
+preference) of importance 8+ always, then those the turn's words match in content, tags or a
+rule's why / how-to-apply (two words, the only word asked, or one rare word); expired insights
+never show. The old query path ANDed every word of the message and so never matched. `context.notes_allocator: capped` (off by default) cuts each note to its source's
+share of the notes budget before fitting, so one large note can't crowd out the rest. Not done:
+merging the stores into one index (semantic memory's chunk index and the topic/insight FTS
+tables stay separate).
 
 One primitive (normalised bm25 + cached embeddings, fused, per-source decay after the floor,
 dedupe by message id) shared by topics, the session-history archive, workspace and insights.
