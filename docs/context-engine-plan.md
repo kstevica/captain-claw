@@ -1,6 +1,6 @@
 # Context engine — what each LLM call sees, and why
 
-**Status:** P0, P1 (365b39c4), P4 (4e72f8e2) and P2 implemented on `fix/context-placement-weak-models` (2026-10-08). P3, P5, P6 next.
+**Status:** P0, P1 (365b39c4), P4 (4e72f8e2), P2 (5da8d309) and P3 implemented on `fix/context-placement-weak-models` (2026-10-08). P5, P6 next.
 **Origin:** weak models (Haiku, DeepSeek V4 Flash, GPT-6 Luna, GLM flash) behave well in a fresh
 session and degrade once it is crowded: truncated answers, echoed notes, "stupid" replies.
 The fixes already on `fix/context-placement-weak-models` (context notes moved into one block on the
@@ -131,6 +131,22 @@ per-user Telegram agents don't, since the store is the owner's.
 - Store `session_id` and `channel` on topic messages; hide junk topics reversibly.
 
 ## P3 — topic recall card and the `topics` tool
+
+**Done, in shadow mode.** `topic_recall.decide` picks at most one topic per human turn from
+the turn's own words (attachment markers, links, paths and ids left out; no LLM call): the
+word and meaning rankings put the same topic first and something besides one shared word sets
+it apart, or 2+ matched words lead the next topic by bm25 × 1.3, or the meaning match is ≥ 0.5
+and 0.15 ahead of the runner-up; ties never count. A topic whose latest messages are still in
+the live session is never recalled, and nothing is recalled on a turn that asked for no memory,
+for public visitors, BotPort dispatches or Iskra bodies. `conversation_topics.recall`
+= `shadow` (default: the decision is logged and stored as `last_context_window.topic_recall`,
+nothing is sent) | `on` (the card rides the per-turn block) | `off`. Pinned topics
+(`topics pin`, 5 turns by default, at most 3; one on small tiers) ride the block in every
+mode, on people's turns only (cron and autonomy turns neither show nor spend them). Members recall only
+topics they spoke in, with their own excerpts; the owner's cards carry the owner's excerpts.
+The meaning leg uses only an in-process embedder (model2vec) in the turn path. Next: read the
+shadow decisions on real traffic (the prod `conversation_topics.db` and logs), then flip to
+`on`.
 
 - Query from the turn's human text: content words, EN+HR stopwords removed, ≤8 terms, prefix
   stems. No LLM keyword call (~3 s on the agent's own model, and it would break the per-turn

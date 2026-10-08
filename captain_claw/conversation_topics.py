@@ -178,10 +178,17 @@ class ConversationTopicsManager:
         return [dict(r) for r in rows]
 
     @staticmethod
-    def _filters(group: str, tags: list[str] | None,
-                 include_hidden: bool) -> tuple[str, list[Any]]:
-        """JOIN/WHERE clause (on alias ``t``) for the group, tag and hidden filters."""
+    def _filters(group: str, tags: list[str] | None, include_hidden: bool,
+                 ids: set[str] | None = None) -> tuple[str, list[Any]]:
+        """JOIN/WHERE clause (on alias ``t``) for the group, tag, hidden and
+        id (None = any) filters."""
         joins, conds, params = "", [], []
+        if ids is not None:
+            if ids:
+                conds.append(f"t.id IN ({','.join('?' * len(ids))})")
+                params.extend(sorted(ids))
+            else:
+                conds.append("0")
         if group:
             joins = " JOIN topic_group_members m ON m.topic_id = t.id"
             conds.append("m.group_id = ?")
@@ -298,7 +305,8 @@ class ConversationTopicsManager:
 
     def rank_legs(self, query: str, *, group: str = "", tags: list[str] | None = None,
                   include_hidden: bool = False, embedder: Any = None, max_terms: int = 8,
-                  prefix_all: bool = False) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+                  prefix_all: bool = False,
+                  ids: set[str] | None = None) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
         """(terms, word matches, meaning matches) for *query*.
 
         Word matches: FTS5 bm25 over ``topics_fts`` (label x3, keywords x2,
@@ -306,9 +314,11 @@ class ConversationTopicsManager:
         ``bm25``. Meaning matches, when *embedder* (``texts -> normalized
         vectors``) is given: cosine against cached topic vectors, best first,
         each with ``cosine``; only those above an absolute floor and within
-        reach of the best one. Rows of both carry ``matched_terms``."""
+        reach of the best one; the best carries ``next_cosine``, the runner-up's
+        cosine before that cut. Rows of both carry ``matched_terms``. *ids*
+        limits the candidates (None = all)."""
         terms = query_terms(query, max_terms=max_terms)
-        where, params = self._filters(group, tags, include_hidden)
+        where, params = self._filters(group, tags, include_hidden, ids)
         fts_rows: list[dict[str, Any]] = []
         if terms:
             match = " OR ".join(_fts_term(t, prefix_all) for t in terms)
@@ -328,8 +338,8 @@ class ConversationTopicsManager:
         if embedder is not None and str(query or "").strip():
             vec_rows = self._cosine_candidates(query, where, params, embedder)
         for row in fts_rows + vec_rows:
-            hay = _fold(" ".join(str(row.get(k) or "") for k in ("label", "summary", "keywords")))
-            row["matched_terms"] = [t for t in terms if _stem(_fold(t)) in hay]
+            row["matched_terms"] = term_hits(
+                terms, *(str(row.get(k) or "") for k in ("label", "summary", "keywords")))
         return terms, fts_rows, vec_rows
 
     def _cosine_candidates(self, query: str, where: str, params: list[Any],
@@ -364,6 +374,7 @@ class ConversationTopicsManager:
         scored.sort(key=lambda r: r["cosine"], reverse=True)
         if not scored:
             return []
+        scored[0]["next_cosine"] = scored[1]["cosine"] if len(scored) > 1 else None
         floor = max(_COSINE_FLOOR, _COSINE_REACH * scored[0]["cosine"])
         return [r for r in scored if r["cosine"] >= floor][:_CANDIDATES]
 
@@ -378,6 +389,16 @@ class ConversationTopicsManager:
                 cur = conn.execute(sql, (1 if starred else 0, _slug(topic_id)))
             conn.commit()
         return cur.rowcount > 0
+
+    def topics_with_speaker(self, speaker_id: str) -> set[str]:
+        """Ids of the topics holding at least one of *speaker_id*'s messages."""
+        if not speaker_id:
+            return set()
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT DISTINCT topic_id FROM topic_messages WHERE speaker = ?", (str(speaker_id),),
+            ).fetchall()
+        return {str(r[0]) for r in rows}
 
     def recent_topics(self, limit: int = 10, *, include_hidden: bool = False) -> list[dict[str, Any]]:
         """The most recently touched topics, starred or not."""
@@ -870,19 +891,43 @@ def _fold(text: str) -> str:
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
+# Attachment markers, links and paths: machine text, not what was asked.
+_NOISE_RE = re.compile(r"\[(?:Attached|Earlier) [^\]]*\]|https?://\S+|\S*[/\\]\S*")
+
+
 def query_terms(text: str, max_terms: int = 8) -> list[str]:
     """Content words of *text* for topic search: 3+ letters, no stopwords,
-    no bare short numbers; the longest *max_terms*, in their original order."""
+    no numbers or hex ids, nothing from attachment markers, links or paths;
+    the longest *max_terms*, in their original order."""
     seen: dict[str, int] = {}
-    for pos, word in enumerate(re.findall(r"\w+", str(text or "").lower())):
+    for pos, word in enumerate(re.findall(r"\w+", _NOISE_RE.sub(" ", str(text or "")).lower())):
         word = word.strip("_")
         if len(word) < 3 or _fold(word) in _STOPWORDS or word in _STOPWORDS:
             continue
-        if word.isdigit() and len(word) < 4:
-            continue
+        digits = sum(ch.isdigit() for ch in word)
+        if digits * 2 >= len(word) and not (word.isdigit() and len(word) == 4):
+            continue                          # ids and numbers (a year stays)
+        if digits and re.fullmatch(r"[0-9a-f]+", word):
+            continue                          # hex ids
         seen.setdefault(word, pos)
     keep = sorted(seen, key=lambda w: (-len(w), seen[w]))[: max(1, max_terms)]
     return sorted(keep, key=lambda w: seen[w])
+
+
+def term_hits(terms: list[str], *texts: str) -> list[str]:
+    """The *terms* that occur in *texts* the way FTS matches them: a 3-letter
+    word as a whole word, a longer one by its stem as a word prefix."""
+    tokens = set(re.findall(r"\w+", _fold(" ".join(texts))))
+    hits = []
+    for term in terms:
+        folded = _fold(term)
+        if len(term) >= 4:
+            prefix = _stem(folded)
+            if any(tok.startswith(prefix) for tok in tokens):
+                hits.append(term)
+        elif folded in tokens:
+            hits.append(term)
+    return hits
 
 
 def _stem(term: str) -> str:
@@ -894,10 +939,10 @@ def _stem(term: str) -> str:
 
 
 def _fts_term(term: str, prefix_all: bool) -> str:
-    """A long word matches by its stem as a prefix; with *prefix_all* (typed
-    search) every word does."""
+    """A word of 4+ letters matches as a prefix (a long one by its stem); a
+    3-letter word only as itself, unless *prefix_all* (typed search)."""
     stem = _stem(term).replace('"', "")
-    return f'"{stem}"*' if (prefix_all or len(term) >= 6) else f'"{stem}"'
+    return f'"{stem}"*' if (prefix_all or len(term) >= 4) else f'"{stem}"'
 
 
 def _topic_text(row: dict[str, Any]) -> str:
@@ -908,14 +953,16 @@ def _fingerprint(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
-def topic_embedder(agent: Any) -> Any:
+def topic_embedder(agent: Any, *, local_only: bool = False) -> Any:
     """``texts -> vectors`` from the agent's semantic-memory embedding chain,
     or None when only the lexical hash fallback is available (it would just
-    repeat the FTS leg)."""
+    repeat the FTS leg). *local_only* (the turn path): only an in-process
+    model, never a network call."""
     chain = getattr(getattr(getattr(agent, "memory", None), "semantic", None), "embedding_chain", None)
     if chain is None or not getattr(chain, "enabled", False):
         return None
-    if str(getattr(chain, "active_provider_key", "")).startswith("local_hash"):
+    active = str(getattr(chain, "active_provider_key", ""))
+    if active.startswith("local_hash") or (local_only and not active.startswith("model2vec")):
         return None
 
     def _embed(texts: list[str]) -> list[list[float]]:

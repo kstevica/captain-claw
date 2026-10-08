@@ -24,20 +24,28 @@ class TopicsTool(Tool):
         "clusters of past comms (the Munich trip, the Vesna VC deal, the weekly "
         "brief…), each with a summary and recent message excerpts. Use it to pull "
         "the full context of a thread the user returns to, instead of scrolling "
-        "history. Actions: 'list' (recent topics overview), 'search' (find topics "
-        "by keyword), 'get' (one topic's summary + message excerpts by id or label)."
+        "history. Actions: 'recall' (the best topic for a question, in full, in "
+        "one call), 'search' (ranked topics for keywords), 'list' (recent topics), "
+        "'get' (one topic's summary + excerpts by id or label), 'pin' / 'unpin' "
+        "(keep a topic in your context for the next few turns — tool results "
+        "are not carried into later turns, a pin is)."
     )
     parameters = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "search", "get"],
-                "description": "list = recent topics; search = find by keyword; get = one topic in full.",
+                "enum": ["recall", "search", "list", "get", "pin", "unpin"],
+                "description": (
+                    "recall = best topic for 'query', in full; search = ranked topics; "
+                    "list = recent topics; get = one topic in full; pin / unpin = keep "
+                    "'topic' in context for 'turns' turns (unpin without a topic drops all)."
+                ),
             },
-            "query": {"type": "string", "description": "Keyword(s) for 'search'."},
-            "topic": {"type": "string", "description": "Topic id or label for 'get'."},
-            "limit": {"type": "integer", "description": "Max results for list/search (default 15)."},
+            "query": {"type": "string", "description": "What to look for (recall/search)."},
+            "topic": {"type": "string", "description": "Topic id or label (get/pin/unpin)."},
+            "limit": {"type": "integer", "description": "Max results for list/search, or excerpts for get/recall."},
+            "turns": {"type": "integer", "description": "How many turns a pin lasts (default 5, max 20)."},
         },
         "required": ["action"],
     }
@@ -48,6 +56,7 @@ class TopicsTool(Tool):
         query: str | None = None,
         topic: str | None = None,
         limit: int | None = None,
+        turns: int | None = None,
         **kwargs: Any,
     ) -> ToolResult:
         try:
@@ -56,7 +65,8 @@ class TopicsTool(Tool):
             # A shared-agent member (None = the owner, unchanged): labels,
             # summaries and keywords are the shared commons; excerpts are
             # transcripts — a member sees only their OWN, and no counts.
-            p = principal_for(kwargs.get("_agent"))
+            agent = kwargs.get("_agent")
+            p = principal_for(agent)
             mgr = get_topics_manager()
             n = int(limit) if limit else 15
             if action == "list":
@@ -67,37 +77,97 @@ class TopicsTool(Tool):
                 # Ranked (FTS + embedding when available); off the event loop,
                 # since a first search may embed every topic once.
                 rows = await asyncio.to_thread(
-                    mgr.search_topics, query or "", n,
-                    embedder=topic_embedder(kwargs.get("_agent")),
+                    mgr.search_topics, query or "", n, embedder=topic_embedder(agent),
                 )
                 return ToolResult(success=True, content=_fmt_overview(
                     rows, f"Topics matching {query!r}", show_counts=p is None))
             if action == "get":
                 if not topic:
                     return ToolResult(success=False, error="'topic' (id or label) is required for get.")
-                max_excerpts = n if limit else 40
-                if p is None:
-                    t = mgr.get_topic(topic, max_excerpts=max_excerpts)
-                    if not t:
-                        return ToolResult(success=False, error=f"No topic found for {topic!r}.")
-                    if any(str(m.get("speaker") or "").strip() for m in t.get("messages", [])):
-                        return await _owner_topic_with_members(t, kwargs.get("_agent"))
-                    return ToolResult(success=True, content=_fmt_topic(t))
-                if not p.speaker_id:
-                    # Unverified member: never query speaker='' (the owner's rows).
-                    t = mgr.get_topic(topic, max_excerpts=1)
-                    if not t:
-                        return ToolResult(success=False, error=f"No topic found for {topic!r}.")
-                    return ToolResult(success=True, content=_fmt_topic(
-                        t, include_messages=False, show_count=False))
-                t = mgr.get_topic(topic, max_excerpts=max_excerpts, speaker=p.speaker_id)
-                if not t:
-                    return ToolResult(success=False, error=f"No topic found for {topic!r}.")
-                return ToolResult(success=True, content=_fmt_topic(t, own_messages=True))
+                return await _get_topic(mgr, topic, p, agent, int(limit) if limit else _GET_EXCERPTS)
+            if action == "recall":
+                if not str(query or "").strip():
+                    return ToolResult(success=False, error="'query' is required for recall.")
+                # A member recalls among the topics they spoke in.
+                ids = None if p is None else (
+                    mgr.topics_with_speaker(p.speaker_id) if p.speaker_id else set())
+                rows = await asyncio.to_thread(
+                    mgr.rank_topics, str(query), 5, embedder=topic_embedder(agent), ids=ids,
+                )
+                if not rows:
+                    return ToolResult(success=True, content=f"No topic matches {query!r}.")
+                result = await _get_topic(mgr, rows[0]["id"], p, agent,
+                                          int(limit) if limit else _GET_EXCERPTS)
+                others = [f"[{r['id']}] {r.get('label', '')}" for r in rows[1:3]]
+                if result.success and others:
+                    result.content += "\n\nAlso close: " + "; ".join(others)
+                return result
+            if action in ("pin", "unpin"):
+                return _pin_action(mgr, action, topic, turns, p, agent)
             return ToolResult(success=False, error=f"Unknown action: {action}")
         except Exception as e:
             log.error("Topics tool error", action=action, error=str(e))
             return ToolResult(success=False, error=str(e))
+
+
+_GET_EXCERPTS = 12
+
+
+async def _get_topic(mgr: Any, topic: str, p: Any, agent: Any, max_excerpts: int) -> ToolResult:
+    """One topic in full, as the caller may see it."""
+    if p is None:
+        t = mgr.get_topic(topic, max_excerpts=max_excerpts)
+        if not t:
+            return ToolResult(success=False, error=f"No topic found for {topic!r}.")
+        if any(str(m.get("speaker") or "").strip() for m in t.get("messages", [])):
+            return await _owner_topic_with_members(t, agent)
+        return ToolResult(success=True, content=_fmt_topic(t))
+    if not p.speaker_id:
+        # Unverified member: never query speaker='' (the owner's rows).
+        t = mgr.get_topic(topic, max_excerpts=1)
+        if not t:
+            return ToolResult(success=False, error=f"No topic found for {topic!r}.")
+        return ToolResult(success=True, content=_fmt_topic(
+            t, include_messages=False, show_count=False))
+    t = mgr.get_topic(topic, max_excerpts=max_excerpts, speaker=p.speaker_id)
+    if not t:
+        return ToolResult(success=False, error=f"No topic found for {topic!r}.")
+    return ToolResult(success=True, content=_fmt_topic(t, own_messages=True))
+
+
+def _pin_action(mgr: Any, action: str, topic: str | None, turns: int | None,
+                p: Any, agent: Any) -> ToolResult:
+    """Pin a topic into this session's context block, or drop pins."""
+    from captain_claw import topic_recall
+    from captain_claw.config import get_config
+
+    session = getattr(agent, "session", None)
+    if session is None:
+        return ToolResult(success=False, error="No active session to pin into.")
+    if action == "unpin":
+        target = None
+        if topic:
+            found = mgr.get_topic(topic, max_excerpts=1)
+            target = found["id"] if found else str(topic)
+        removed = topic_recall.unpin(session, target)
+        return ToolResult(success=True, content=(
+            f"Unpinned: {', '.join(removed)}." if removed else "Nothing was pinned."))
+    if not topic:
+        return ToolResult(success=False, error="'topic' (id or label) is required for pin.")
+    found = mgr.get_topic(topic, max_excerpts=1)
+    if p is not None and found and found["id"] not in (
+            mgr.topics_with_speaker(p.speaker_id) if p.speaker_id else set()):
+        found = None                     # a member pins only topics they spoke in
+    if not found:
+        return ToolResult(success=False, error=f"No topic found for {topic!r}.")
+    if found.get("hidden"):
+        return ToolResult(success=False, error=f"Topic {found['id']!r} is hidden from recall.")
+    granted = topic_recall.pin(
+        session, found["id"], int(turns) if turns else int(get_config().conversation_topics.pin_turns),
+    )
+    return ToolResult(success=True, content=(
+        f"Pinned [{found['id']}] {found.get('label', '')} for the next {granted} turn(s): its "
+        "summary and latest messages ride your context until then (unpin to drop it)."))
 
 
 async def _owner_topic_with_members(t: dict[str, Any], agent: Any) -> ToolResult:

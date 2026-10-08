@@ -187,6 +187,13 @@ def _short_tool_desc(text: str, limit: int = 160) -> str:
 _RETIRED_TOOLS_LOGGED: set[str] = set()
 
 
+def _being_body() -> bool:
+    """This process is an Iskra being's body (CLAW_BEING_WORKER)."""
+    import os
+
+    return str(os.environ.get("CLAW_BEING_WORKER", "")).strip().lower() in ("1", "true", "yes")
+
+
 class AgentContextMixin:
     """Build system/context/tool messages for model calls."""
     @staticmethod
@@ -3802,6 +3809,7 @@ class AgentContextMixin:
         query: str | None,
         skip_memory: bool,
         owner_notes: bool,
+        history_budget: int = 0,
     ) -> list[tuple[str, str]]:
         """Background context notes for this turn, as ``(kind, text)`` pairs.
 
@@ -3916,8 +3924,89 @@ class AgentContextMixin:
         )
         if workspace_note:
             notes.append(("workspace_manifest", workspace_note))
+        # An earlier conversation thread matched to this message, and topics
+        # pinned with the topics tool — last, so they are trimmed last.
+        notes.extend(self._topic_context_notes(skip_memory=skip_memory, history_budget=history_budget))
 
         return notes
+
+    def _topic_context_notes(self, *, skip_memory: bool = False,
+                             history_budget: int = 0) -> list[tuple[str, str]]:
+        """The recalled-topic card and pinned-topic cards for this turn.
+
+        Only on turns a person opened (cron and autonomy turns neither see
+        nor spend pins). Recall follows ``conversation_topics.recall``: off |
+        shadow | on — shadow records the decision in the context trace and
+        sends nothing; pins ride whatever the mode. A shared-agent member
+        sees only topics they spoke in, with their own excerpts; the owner
+        sees the owner's excerpts. Hidden topics never ride. Nothing for a
+        public visitor, a BotPort dispatch or an Iskra body (the store is the
+        owner's), and no recall on a turn that asked for no memory.
+        """
+        self._last_topic_recall = None
+        try:
+            from captain_claw import topic_recall
+            from captain_claw.conversation_topics import get_topics_manager, topic_embedder
+            from captain_claw.speaker import principal_for
+
+            cfg = get_config()
+            tc = cfg.conversation_topics
+            if not tc.enabled or not self.session:
+                return []
+            if (cfg.web.public_run and not tc.allow_public) or getattr(self, "_public_scoped", False) \
+                    or getattr(self, "_tenant_hidden", False) or _being_body():
+                return []
+            principal = principal_for(self)
+            if principal is not None and not principal.speaker_id:
+                return []                        # an unverified member
+            speaker = principal.speaker_id if principal is not None else None
+            turn = getattr(self, "_turn_origin", None)
+            if not (isinstance(turn, tuple) and turn[0] == "human"):
+                return []
+            mgr = get_topics_manager()
+            budget = int(history_budget or cfg.context.max_tokens)
+            notes: list[tuple[str, str]] = []
+            pinned = topic_recall.active_pins(self.session)[-topic_recall.pins_shown(budget):]
+            for topic_id in pinned:
+                topic = mgr.get_topic(topic_id, max_excerpts=6, speaker=speaker or "")
+                if topic and not topic.get("hidden"):
+                    notes.append(("pinned_topic", topic_recall.render_card(
+                        topic, pinned=True, budget_tokens=budget, own_excerpts=bool(speaker))))
+            mode = str(tc.recall or "off").strip().lower()
+            text = msg_origin.model_view_text({"content": getattr(self, "_turn_user_text", "") or ""})
+            if mode not in ("shadow", "on") or not text.strip():
+                return notes
+            if skip_memory or getattr(self, "_suppress_memory_context", False):
+                self._last_topic_recall = {"topic": None, "rule": "", "reason": "memory suppressed",
+                                           "terms": [], "candidates": [], "mode": mode}
+                return notes
+            live_ids = {str(m.get("message_id")) for m in self.session.messages if m.get("message_id")}
+            decision = topic_recall.decide(
+                mgr, text,
+                embedder=topic_embedder(self, local_only=True),
+                live_ids=live_ids,
+                speaker=speaker,
+                min_cosine=float(tc.recall_min_cosine),
+                agree_min_cosine=float(tc.recall_agree_min_cosine),
+                cosine_margin=float(tc.recall_cosine_margin),
+                bm25_margin=float(tc.recall_bm25_margin),
+            )
+            if decision["topic"] and decision["topic"] in pinned:
+                decision.update(topic=None, reason="pinned")
+            decision["mode"] = mode
+            self._last_topic_recall = decision
+            log.info("Topic recall", mode=mode, topic=decision["topic"], rule=decision["rule"],
+                     reason=decision["reason"],
+                     terms=decision["terms"] if speaker is None else len(decision["terms"]))
+            if decision["topic"] and mode == "on":
+                topic = mgr.get_topic(decision["topic"], max_excerpts=3, speaker=speaker or "")
+                if topic:
+                    notes.insert(0, ("topic_recall", topic_recall.render_card(
+                        topic, budget_tokens=budget, own_excerpts=bool(speaker))))
+            return notes
+        except Exception as exc:
+            log.debug("Topic recall failed", error=str(exc))
+            return []
 
     @staticmethod
     def _provenance_hidden_messages(
@@ -4379,6 +4468,7 @@ class AgentContextMixin:
                     query=query,
                     skip_memory=bool(_skip_memory),
                     owner_notes=_owner_notes,
+                    history_budget=history_budget,
                 ) + ([("fleet_changes", _fleet_note)] if _fleet_note else []),
                 max(0, history_budget - reserved_tokens),
                 _bg_lead,
@@ -4610,6 +4700,12 @@ class AgentContextMixin:
             # the provider carries it (and then weighs on the budget).
             "reasoning_in_budget": 1 if _replays_reasoning else 0,
             "tool_schema_tokens_budgeted": _tool_schema_tokens,
+            # The recall decision, and whether its card made it into the block.
+            "topic_recall": (
+                {**self._last_topic_recall, "sent": "topic_recall" in _note_kinds}
+                if isinstance(getattr(self, "_last_topic_recall", None), dict) else None
+            ),
+            "pinned_topics_used": sum(1 for kind, _ in _sent_notes if kind == "pinned_topic"),
             "sections": sections,
             "memory_note_used": 1 if "memory_context" in _note_kinds else 0,
             "planning_note_used": 1 if "planning_context" in _live_kinds else 0,

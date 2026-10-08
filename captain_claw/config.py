@@ -913,6 +913,15 @@ class ConversationTopicsConfig(BaseModel):
     include_narration: bool = False      # also feed mid-turn progress narration
     allow_public: bool = False
     db_path: str = "~/.captain-claw/conversation_topics.db"
+    # Topic recall card in the per-turn context block: off | shadow (decide
+    # and record in the context trace, send nothing) | on. Pinned topics
+    # ride the block whatever the mode.
+    recall: str = "shadow"
+    recall_min_cosine: float = 0.5        # meaning alone: at least this close…
+    recall_cosine_margin: float = 0.15    # …and this far ahead of the next topic
+    recall_agree_min_cosine: float = 0.35 # word and meaning rankings agree
+    recall_bm25_margin: float = 1.3       # words alone: 2+ matched, this far ahead
+    pin_turns: int = 5                    # turns a pinned topic stays in view
 
 
 class NervousSystemConfig(BaseModel):
