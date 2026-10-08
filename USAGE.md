@@ -4215,6 +4215,8 @@ Add an MCP server once in **Connections → MCP servers** and every agent in the
 - **`http`** — Streamable HTTP binding. Required field: `url`. Optional OAuth2 `client_credentials` flow (`client_id`, `client_secret`, `token_endpoint`) and arbitrary extra `headers`. `Mcp-Session-Id` is captured and replayed transparently.
 - **`stdio`** — child process speaking JSON-RPC over stdin/stdout (NDJSON). Required field: `command`. Optional `args` (argv tail) and `env` (extra env vars merged on top of the FD process environment). The de-facto standard for local servers shipped via `npx` / `uvx` (filesystem, sqlite, github, postgres, etc.). The child is spawned lazily on the first request, auto-respawned if it dies, and terminated with SIGTERM (2 s grace) then SIGKILL on close.
 
+**Parallel Search example.** For an optional, keyless HTTP search/fetch connection and a runnable smoke test, see [examples/mcp/](examples/mcp/README.md).
+
 **Per-agent allowlists.** Each server carries an optional `allowed_agents: list[str]`. Empty list = every agent in the fleet (the default and the Phase 1 behaviour). Once any slug is listed, only those agents can see, list, or call the server. Restricted servers return HTTP 404 to disallowed agents — same shape as "doesn't exist," so a restricted server's existence is opaque.
 
 Agents identify themselves via the `X-Agent-Slug` header, which `fd_client.flight_deck_headers()` automatically populates from the `FD_AGENT_SLUG` env var (Flight Deck injects this when spawning sub-agents).

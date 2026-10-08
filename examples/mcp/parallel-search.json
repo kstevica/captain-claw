@@ -1,0 +1,10 @@
+{
+  "name": "parallel-search",
+  "transport": "http",
+  "url": "https://search.parallel.ai/mcp",
+  "headers": {
+    "User-Agent": "captain-claw-flight-deck/0.7.8"
+  },
+  "enabled": true,
+  "allowed_agents": []
+}
