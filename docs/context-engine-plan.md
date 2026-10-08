@@ -1,6 +1,6 @@
 # Context engine — what each LLM call sees, and why
 
-**Status:** P0, P1 (365b39c4), P4 (4e72f8e2), P2 (5da8d309), P3 (baabbaf2) and P5 implemented on `fix/context-placement-weak-models` (2026-10-08). P6 next.
+**Status:** P0–P6 implemented on `fix/context-placement-weak-models` (2026-10-08): P0/P1 365b39c4, P4 4e72f8e2, P2 5da8d309, P3 baabbaf2, P5 51290557, P6 last. Topic recall ships in shadow mode.
 **Origin:** weak models (Haiku, DeepSeek V4 Flash, GPT-6 Luna, GLM flash) behave well in a fresh
 session and degrade once it is crowded: truncated answers, echoed notes, "stupid" replies.
 The fixes already on `fix/context-placement-weak-models` (context notes moved into one block on the
@@ -204,6 +204,37 @@ Insights become query-relevant instead of top-8 by importance. `_fit_context_not
 per-source capped allocator behind a flag.
 
 ## P6 — sessions that don't grow forever (audit item 7)
+
+**Done.** Automated turns Flight Deck sends to the main chat (scheduler, autonomy, plans, peer,
+BotPort and MCP tasks) run on the agent's automation lane (`session.automation_lane: AUTO`,
+its own `lane-AUTO` session; empty = off). The frame's own socket watches that lane for the
+turn (and only that lane's frames, so a concurrent lane-A turn can't leak into its result),
+so Flight Deck's collectors get the reply, the tool activity and the final "ready" as before;
+automation queues for the lane instead of bouncing as busy. The lane's agent takes the main
+agent's fleet identity, instructions, peers, chat origin, memory and model before each turn.
+Results meant for the user (scheduler, cron, autonomy, plans) are mirrored into the main chat
+once it is idle — shown live as a note (Flight Deck doesn't treat it as a turn's end) and kept
+as one line in the main session, so a follow-up there has the context; while lane A is busy
+they wait in its metadata. Delegated results and flow consults stay in the main chat (they continue a conversation
+or a flow step). Fleet notices go to the automation lane's session; the main session keeps
+their events for the one-line fleet note. The automation lane never rebinds the global tools.
+Flight Deck shows the lane as an "Auto" tab and gains a "+ New session" button per lane.
+A message that opens with a cue (`session.rotation_cues`: "nova tema", "new topic",
+"novi razgovor", "new conversation") starts a new session first, like `/new`, then runs the rest
+(never while that agent is still answering, never for public visitors or shared-agent
+members; a lane's cue rotates the lane's own session, kept under the lane's name so a restart
+reopens it). Slash commands typed into a lane's chat now act on that lane, not lane A;
+`/session switch` won't take over a session another lane or chat has open; and a public
+visitor's slash commands (which reached the owner's agent) are refused except `/help`. Compaction writes a
+deterministic digest (`context.compaction_summary: digest`, the default; `model` keeps the
+model-written summary): what the previous compaction left, then each exchange a person
+started grouped under its conversation topic with the topic id (newest topics kept), the rest
+as dated one-liners, and a count of the automated turns and tool results folded with them;
+`topics get` and the history search keep the full text. A slice nobody typed in (the
+automation lane, workers) is still summarised by the model. Verified end to end against a real
+agent server and a stub LLM: an automated frame and a lane-A chat at once (no crosstalk, result
+mirrored), and the cue. Agent-local
+cron jobs (`/cron`, the cron tool) still run in the session they were created in.
 
 - Automated traffic (cron, autonomy, fleet notices) gets its own sessions, still listed for the
   user (user decision).

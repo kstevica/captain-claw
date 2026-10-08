@@ -62,6 +62,10 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     # session and busy flag. Absent or unrecognised → lane A, which IS the
     # shared main agent, so every existing client is unaffected.
     lane = server.normalize_lane(request.query.get("lane", ""))
+    # A public visitor has one session of their own; they never watch a lane
+    # (the automation lane carries the owner's scheduled and autonomous work).
+    if getattr(ws, "_public_session_id", None):
+        lane = server.LANE_MAIN
     ws._lane = lane  # type: ignore[attr-defined]
     server._lane_sockets.setdefault(lane, set()).add(ws)
 
@@ -167,6 +171,45 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         server._lane_sockets.get(getattr(ws, "_lane", ""), set()).discard(ws)
 
     return ws
+
+
+_FLEET_EVENTS_KEPT = 40
+
+
+async def _fleet_notice_to_automation_lane(server, text: str) -> bool:
+    """Keep a fleet notice out of the main chat when the automation lane is
+    on: the notice is stored in that lane's session (where the user can read
+    it) and the main session keeps only the event, for the one-line "fleet
+    changes" note. False when there is no automation lane."""
+    import os
+    from datetime import datetime, timezone
+
+    from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+    from captain_claw.config import get_config
+
+    lane = server.normalize_lane(get_config().session.automation_lane or "")
+    if lane == server.LANE_MAIN:
+        return False
+    # FD workers and beings keep notices where they were (no lane of their own).
+    if _is_fd_spawned_worker() or str(os.environ.get("CLAW_BEING_WORKER", "")).strip().lower() in (
+            "1", "true", "yes"):
+        return False
+    try:
+        auto = await server._get_lane_agent(lane)
+    except Exception as exc:
+        log.warning("Automation lane unavailable for a fleet notice", error=str(exc))
+        return False
+    if getattr(auto, "session", None) is None:
+        return False
+    auto.session.add_message("user", text, origin="fleet_notice")
+    events = server.agent.session.metadata.setdefault("fleet_events", [])
+    events.append({"text": text, "at": datetime.now(timezone.utc).isoformat()})
+    del events[: max(0, len(events) - _FLEET_EVENTS_KEPT)]
+    try:      # the main session saves with its next turn, as notices always did
+        await auto.session_manager.save_session(auto.session)
+    except Exception as exc:
+        log.debug("Could not save the automation lane after a fleet notice", error=str(exc))
+    return True
 
 
 def _build_replay_batch(session) -> list[dict]:
@@ -343,9 +386,45 @@ async def handle_ws_message(
 
         if not content and not image_paths and not file_paths:
             return
+        # "Nova tema: …" / "new topic" opening a typed message: a new session
+        # first (as /new), then the rest of the message is the turn. Never for
+        # a public visitor (their /new would reach the owner's session).
+        if (automation is None and not content.startswith("/")
+                and not getattr(ws, "_public_session_id", None)):
+            from captain_claw import msg_origin as _cue_origin
+            from captain_claw.web.slash_commands import handle_command, rotation_cue
+
+            # A bridge's first message carries the surface rules block ahead
+            # of what the person wrote: the cue is in the person's words.
+            _block, _said = _cue_origin.split_surface_block(content)
+            rest = rotation_cue(_said)
+            if rest is not None:
+                _cue_agent = await server.resolve_agent(ws)
+                _cue_busy = (getattr(_cue_agent, "_lane_busy", False)
+                             if _cue_agent is not server.agent else server._busy)
+                if _cue_busy:
+                    await server._send(ws, {
+                        "type": "error",
+                        "message": "Still answering the previous message — start the new "
+                                   "session once it is done (or stop it first).",
+                    })
+                    return
+                # On this socket's own agent: a lane's or lane A.
+                await handle_command(server.lane_view(ws, _cue_agent), ws, "/new")
+                content = (_block + rest) if (_block and rest) else rest
+                if rest:
+                    # The client cleared its transcript for the new session;
+                    # what the person asked goes back in.
+                    await server._send(ws, {"type": "chat_message", "role": "user", "content": rest,
+                                            "rotation_cue": True})
+                if not rest and not image_paths and not file_paths:
+                    return
         if automation is None and content.startswith("/"):
             from captain_claw.web.slash_commands import handle_command
-            await handle_command(server, ws, content)
+            # On this socket's own agent, as a "command" frame is: a lane's
+            # /new must not switch lane A's session.
+            _cmd_agent = await server.resolve_agent(ws)
+            await handle_command(server.lane_view(ws, _cmd_agent), ws, content)
         elif automation is None and getattr(server.agent, "plan_mode_auto", False):
             from captain_claw.web.plan_auto_route import handle_plan_auto_route
             with mail_authority.bound(mail_authority.interactive(content)):
@@ -496,9 +575,13 @@ async def handle_ws_message(
             from captain_claw import msg_origin
 
             _found = msg_origin.detect_literal(notif_content)
+            _fleet = bool(_found and _found[0] == "fleet_notice")
+            if _fleet and _target_agent is server.agent and await _fleet_notice_to_automation_lane(
+                    server, notif_content):
+                return
             _target_agent.session.add_message(
                 "user", notif_content,
-                origin="fleet_notice" if _found and _found[0] == "fleet_notice" else "notification",
+                origin="fleet_notice" if _fleet else "notification",
             )
             log.info("Notification injected into session", content_len=len(notif_content),
                      agent_busy=server._busy, trigger=trigger)
@@ -699,6 +782,8 @@ async def handle_ws_message(
 
     elif msg_type == "cancel":
         _pub_sid = getattr(ws, "_public_session_id", None)
+        # (A socket whose automated turn moved to the automation lane is on
+        # that lane for the turn, so this cancels that turn.)
         _cancel_agent = await server.resolve_agent(ws)
         if _cancel_agent and hasattr(_cancel_agent, "cancel_event"):
             _cancel_agent.cancel_event.set()

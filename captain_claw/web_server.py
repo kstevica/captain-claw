@@ -212,14 +212,16 @@ class _LaneServerView:
     # `await server._send(ws, msg)` (the real server's per-socket send), and
     # shadowing it made every slash command on a lane view raise TypeError
     # at its final reply.
-    __slots__ = ("_server", "agent", "_lane_sender")
+    __slots__ = ("_server", "agent", "_lane_sender", "lane")
 
-    def __init__(self, server: "WebServer", agent: Agent, send: Any) -> None:
+    def __init__(self, server: "WebServer", agent: Agent, send: Any, lane: str = "") -> None:
         object.__setattr__(self, "_server", server)
         object.__setattr__(self, "agent", agent)
         object.__setattr__(self, "_lane_sender", send)
+        # The lane id for a lane's view ("" for a member's).
+        object.__setattr__(self, "lane", lane)
 
-    def _broadcast(self, msg: dict[str, Any]) -> None:
+    def _broadcast(self, msg: dict[str, Any], exclude: Any = None) -> None:
         self._lane_sender(msg)
 
     def _session_info(self, agent: Any = None) -> dict[str, Any]:
@@ -233,7 +235,7 @@ class _LaneServerView:
     def __setattr__(self, name: str, value: Any) -> None:
         # `agent` is fixed for the lifetime of the view; anything else a
         # handler assigns (e.g. server._busy) belongs to the real server.
-        if name in ("agent", "_server", "_lane_sender"):
+        if name in ("agent", "_server", "_lane_sender", "lane"):
             raise AttributeError(f"{name} is read-only on a lane view")
         setattr(self._server, name, value)
 
@@ -491,7 +493,16 @@ class WebServer:
                 return agent
 
             session = await self._lane_session(lane)
-            agent = await self._build_scoped_agent(session, self._lane_send(lane))
+            # The automation lane comes up on its own, without the user opening
+            # it: it must not rebind the process-global tools (cron, history,
+            # terminal…) to itself, or jobs the main chat creates would land on
+            # the automation session.
+            from captain_claw.config import get_config
+
+            automation = lane == self.normalize_lane(get_config().session.automation_lane or "")
+            agent = await self._build_scoped_agent(
+                session, self._lane_send(lane), **({"register_tools": False} if automation else {}),
+            )
             self._lane_agents[lane] = agent
             log.info("Created lane agent", lane=lane, session_id=session.id)
             return agent
@@ -813,7 +824,7 @@ class WebServer:
         lane = self.normalize_lane(getattr(ws, "_lane", ""))
         if lane == self.LANE_MAIN or agent is self.agent:
             return self
-        return _LaneServerView(self, agent, self._lane_send(lane))
+        return _LaneServerView(self, agent, self._lane_send(lane), lane=lane)
 
     def _scoped_provider(self) -> Any:
         """A per-scope view of the shared LLM provider.
@@ -1175,8 +1186,9 @@ class WebServer:
 
     # ── Broadcast / Send ──────────────────────────────────────────────
 
-    def _broadcast(self, msg: dict[str, Any]) -> None:
-        """Send a message to all connected *admin* WebSocket clients.
+    def _broadcast(self, msg: dict[str, Any], exclude: Any = None) -> None:
+        """Send a message to all connected *admin* WebSocket clients
+        (except *exclude*).
 
         In public-run mode, public agents use their own per-session
         callbacks that send directly to the user's WebSocket — so this
@@ -1192,6 +1204,8 @@ class WebServer:
         for ws in self.clients:
             if ws.closed:
                 stale.append(ws)
+                continue
+            if ws is exclude:
                 continue
             # In public mode, only broadcast to admin connections.
             if public_mode and not getattr(ws, "_is_admin", False):

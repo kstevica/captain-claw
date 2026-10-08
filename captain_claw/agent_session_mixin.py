@@ -16,6 +16,27 @@ log = get_logger(__name__)
 # Compaction also runs when everything stored (old tool output included)
 # passes this many times the context budget, even if little of it is sent.
 _STORAGE_COMPACTION_FACTOR = 4
+# The compaction digest lists at most this many topics and loose exchanges,
+# and carries this much of the summary an earlier compaction left.
+_DIGEST_TOPICS = 12
+_DIGEST_LOOSE = 12
+_DIGEST_EARLIER_CHARS = 1500
+_SUMMARY_PREFIX = "Conversation summary of earlier messages (compacted memory):\n"
+
+
+def _previous_summary(messages: list[dict[str, Any]]) -> str:
+    """The text of the newest earlier compaction summary among *messages*
+    (without its heading), so a digest carries it forward."""
+    for msg in reversed(messages):
+        if msg.get("tool_name") == "compaction_summary" or msg.get("origin_detail") == "compaction":
+            text = str(msg.get("content") or "")
+            if text.startswith(_SUMMARY_PREFIX):
+                text = text[len(_SUMMARY_PREFIX):]
+            lines = text.strip().splitlines()
+            if lines and lines[0].startswith("Digest of the earlier part"):
+                lines = lines[1:]
+            return " ".join(line.strip() for line in lines if line.strip())
+    return ""
 
 
 class AgentSessionMixin:
@@ -245,6 +266,110 @@ class AgentSessionMixin:
         if not highlights:
             return "Prior conversation compacted."
         return "Key points from earlier conversation:\n" + "\n".join(highlights)
+
+    async def _compaction_summary_text(self, messages: list[dict[str, Any]]) -> str:
+        """The summary that replaces folded messages: a deterministic digest
+        grouped by topic (``context.compaction_summary: digest``, the
+        default), or the agent's model summarising them (``model``)."""
+        mode = str(getattr(get_config().context, "compaction_summary", "digest") or "digest")
+        if mode.strip().lower() == "digest":
+            try:
+                digest = self._digest_for_compaction(messages)
+                if digest:
+                    return digest
+            except Exception as exc:
+                log.warning("Compaction digest failed; summarising with the model", error=str(exc))
+        return await self._summarize_for_compaction(messages)
+
+    def _digest_for_compaction(self, messages: list[dict[str, Any]]) -> str:
+        """A digest of folded messages, no LLM call: each exchange a person
+        started (what they asked, the reply they got) grouped under its
+        conversation topic with the topic's id, the rest as dated one-liners,
+        and a count of the automated turns and tool results folded with them.
+        The full text stays reachable: ``topics get <id>`` and the history
+        search (compaction archives the folded messages first)."""
+        from captain_claw import msg_origin
+        from captain_claw.conversation_topics import _conversation_items, get_topics_manager
+
+        items = _conversation_items(self, messages)
+        exchanges: list[dict[str, Any]] = []
+        for item in items:
+            if item["role"] == "user" or not exchanges:
+                exchanges.append({"ask": None, "reply": None, "ids": [], "ts": item["ts"]})
+            if item["role"] == "user":
+                exchanges[-1]["ask"] = exchanges[-1]["ask"] or item["excerpt"]
+            else:
+                exchanges[-1]["reply"] = item["excerpt"]     # the last one (a relayed result)
+            exchanges[-1]["ids"].append(item["msg_id"])
+        if not exchanges:
+            return ""        # nothing a person started: the model summarises it
+        try:
+            topic_of = get_topics_manager().topics_for_msg_ids(
+                [mid for ex in exchanges for mid in ex["ids"]])
+        except Exception:
+            topic_of = {}
+        groups: dict[str, list[dict[str, Any]]] = {}
+        labels: dict[str, str] = {}
+        loose: list[dict[str, Any]] = []
+        for ex in exchanges:
+            hit = next((topic_of[mid] for mid in ex["ids"] if mid in topic_of), None)
+            if hit is None:
+                loose.append(ex)
+                continue
+            groups.setdefault(hit[0], []).append(ex)
+            labels[hit[0]] = hit[1]
+
+        automated: dict[str, int] = {}
+        tool_results = 0
+        for msg in messages:
+            role = str(msg.get("role", ""))
+            if role == "tool" and not msg_origin.is_model_hidden_tool(msg):
+                tool_results += 1
+            elif role == "user" and msg_origin.is_turn_opener(msg) and not msg_origin.is_human_input(msg):
+                origin = msg_origin.origin_of(msg)
+                automated[origin] = automated.get(origin, 0) + 1
+
+        def _clip(text: str | None, limit: int) -> str:
+            flat = " ".join(str(text or "").split())
+            return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+
+        lines = [
+            "Digest of the earlier part of this conversation (folded by compaction; "
+            "`topics get <id>` and the history search have the full text):",
+        ]
+        earlier = _previous_summary(messages)
+        if earlier:
+            lines.append("Before that: " + _clip(earlier, _DIGEST_EARLIER_CHARS))
+        if groups:
+            lines.append("By topic:")
+            # The topics nearest the kept conversation first to survive the cut.
+            newest = sorted(groups.items(), key=lambda kv: kv[1][-1]["ts"])[-_DIGEST_TOPICS:]
+            for topic_id, group in newest:
+                first, last = group[0]["ts"][:10], group[-1]["ts"][:10]
+                span = first if first == last else f"{first} → {last}"
+                lines.append(f"- {labels[topic_id]} [{topic_id}] — {len(group)} exchange(s), {span}")
+                if group[-1]["ask"]:
+                    lines.append(f"  last asked: \"{_clip(group[-1]['ask'], 160)}\"")
+                if group[-1]["reply"]:
+                    lines.append(f"  last reply: \"{_clip(group[-1]['reply'], 200)}\"")
+            if len(groups) > _DIGEST_TOPICS:
+                lines.append(f"- … and {len(groups) - _DIGEST_TOPICS} more topic(s)")
+        if loose:
+            lines.append("Other exchanges:")
+            for ex in loose[-_DIGEST_LOOSE:]:
+                ask = _clip(ex["ask"], 120) if ex["ask"] else "(reply)"
+                reply = f" → \"{_clip(ex['reply'], 140)}\"" if ex["reply"] else ""
+                lines.append(f"- {ex['ts'][:10]} \"{ask}\"{reply}")
+            if len(loose) > _DIGEST_LOOSE:
+                lines.append(f"- … and {len(loose) - _DIGEST_LOOSE} earlier exchange(s)")
+        folded = []
+        if automated:
+            folded.append(", ".join(f"{n} {kind}" for kind, n in sorted(automated.items())) + " turn(s)")
+        if tool_results:
+            folded.append(f"{tool_results} tool result(s)")
+        if folded:
+            lines.append("Also folded: " + "; ".join(folded) + ".")
+        return "\n".join(lines)
 
     async def _summarize_for_compaction(self, messages: list[dict[str, Any]]) -> str:
         """Summarize older messages for long-session compaction."""
@@ -524,7 +649,7 @@ class AgentSessionMixin:
         from captain_claw import member_privacy
 
         _learnable = member_privacy.learnable(old_messages)
-        summary_text = (await self._summarize_for_compaction(_learnable) if _learnable
+        summary_text = (await self._compaction_summary_text(_learnable) if _learnable
                         else member_privacy.COMPACTION_PRIVATE_NOTE)
         summary_content = (
             "Conversation summary of earlier messages (compacted memory):\n"
@@ -637,7 +762,7 @@ class AgentSessionMixin:
         from captain_claw import member_privacy
 
         _learnable = member_privacy.learnable(old_messages)
-        summary_text = (await self._summarize_for_compaction(_learnable) if _learnable
+        summary_text = (await self._compaction_summary_text(_learnable) if _learnable
                         else member_privacy.COMPACTION_PRIVATE_NOTE)
         summary_content = (
             "Conversation summary of earlier messages (compacted memory):\n"

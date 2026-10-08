@@ -410,11 +410,18 @@ def _ws_server(agent=None):
     async def _send(ws, msg):
         sent.append(msg)
 
-    return types.SimpleNamespace(
+    server = types.SimpleNamespace(
         agent=agent or _GuardAgent(), _send=_send, sent=sent,
         _broadcast=lambda msg: None, _telegram_agents={}, _telegram_user_locks={},
         _telegram_bridge=None,
     )
+
+    async def _resolve_agent(ws):
+        return server.agent
+
+    server.resolve_agent = _resolve_agent
+    server.lane_view = lambda ws, agent: server
+    return server
 
 
 @pytest.fixture

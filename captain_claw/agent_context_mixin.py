@@ -4142,6 +4142,50 @@ class AgentContextMixin:
         return hidden, changes + ([("", roster)] if roster else [])
 
     @staticmethod
+    def _metadata_fleet_events(
+        messages: list[dict[str, Any]], turn_start: int | None, stored: list[Any],
+    ) -> list[tuple[str, str]]:
+        """Fleet changes from the notices kept in session metadata since the
+        previous turn began, as (name, event) plus ("", roster)."""
+        current_start = turn_start if turn_start is not None else len(messages)
+        since = ""
+        for idx in range(min(current_start, len(messages)) - 1, -1, -1):
+            if msg_origin.is_turn_opener(messages[idx]):
+                since = str(messages[idx].get("timestamp") or "")
+                break
+        events: dict[str, str] = {}
+        for entry in stored:
+            if not isinstance(entry, dict) or str(entry.get("at") or "") <= since:
+                continue
+            found = _FLEET_NOTICE_RE.search(str(entry.get("text") or ""))
+            if not found:
+                continue
+            events.pop(found.group("name"), None)
+            events[found.group("name")] = found.group("event")
+            if found.group("roster"):
+                events.pop("", None)
+                events[""] = found.group("roster").strip()[:400]
+        roster = events.pop("", "")
+        return list(events.items()) + ([("", roster)] if roster else [])
+
+    @staticmethod
+    def _merge_fleet_events(
+        first: list[tuple[str, str]], later: list[tuple[str, str]],
+    ) -> list[tuple[str, str]]:
+        """Two (name, event) lists as one: the later event for a name wins,
+        and the later roster."""
+        events: dict[str, str] = {}
+        roster = ""
+        for name, event in [*first, *later]:
+            if name == "":
+                roster = event
+                continue
+            events.pop(name, None)
+            events[name] = event
+        changes = list(events.items())[-12:]
+        return changes + ([("", roster)] if roster else [])
+
+    @staticmethod
     def _fleet_changes_note(events: list[tuple[str, str]]) -> str:
         roster = next((value for name, value in events if name == ""), "")
         changes = ", ".join(f"'{name}' {event}" for name, event in events if name)
@@ -4327,6 +4371,13 @@ class AgentContextMixin:
             hidden_idx, fleet_events = self._provenance_hidden_messages(
                 self.session.messages, tool_messages_from_index,
             )
+            # With an automation lane the notices themselves live there; the
+            # main session keeps their events in metadata.
+            _stored_fleet = (self.session.metadata or {}).get("fleet_events") if isinstance(
+                self.session.metadata, dict) else None
+            if _stored_fleet:
+                fleet_events = self._merge_fleet_events(fleet_events, self._metadata_fleet_events(
+                    self.session.messages, tool_messages_from_index, _stored_fleet))
         if self.session:
             # First pass: identify which tool response messages will be filtered
             # (and which are sent: this turn's).

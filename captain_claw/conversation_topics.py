@@ -391,6 +391,22 @@ class ConversationTopicsManager:
             conn.commit()
         return cur.rowcount > 0
 
+    def topics_for_msg_ids(self, msg_ids: list[str]) -> dict[str, tuple[str, str]]:
+        """message id -> (topic id, label) for those filed under a topic."""
+        ids = [m for m in dict.fromkeys(msg_ids) if m]
+        out: dict[str, tuple[str, str]] = {}
+        with self._lock:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                rows = self._c().execute(
+                    "SELECT m.msg_id, t.id, t.label FROM topic_messages m JOIN topics t ON t.id = m.topic_id"
+                    f" WHERE m.msg_id IN ({','.join('?' * len(chunk))})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    out.setdefault(str(row[0]), (str(row[1]), str(row[2])))
+        return out
+
     def topics_with_speaker(self, speaker_id: str) -> set[str]:
         """Ids of the topics holding at least one of *speaker_id*'s messages."""
         if not speaker_id:

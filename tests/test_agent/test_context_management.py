@@ -679,6 +679,7 @@ async def test_compact_session_summarizes_old_messages_and_updates_metadata():
     cfg.context.max_tokens = 40
     cfg.context.compaction_threshold = 0.5
     cfg.context.compaction_ratio = 0.2
+    cfg.context.compaction_summary = "model"   # the model-written summary path
     set_config(cfg)
     try:
         agent = Agent(provider=TokenAwareProvider())

@@ -85,6 +85,10 @@ class ContextConfig(BaseModel):
     # Cap (chars) on a single tool result kept in the session and sent to the
     # model; 0 = no cap. Off by default: the tier's window decides.
     tool_result_max_chars: int = 0
+    # What replaces folded messages on compaction: "digest" — exchanges a
+    # person started, grouped by conversation topic, with handles to the full
+    # text (no LLM call) — or "model", the agent's model summarising them.
+    compaction_summary: str = "digest"
     # How the per-turn context notes share their budget: "trim" drops whole
     # notes, lowest priority first, once they don't fit; "capped" first cuts
     # each note to its source's share, so one large note can't crowd out the
@@ -727,6 +731,16 @@ class SessionConfig(BaseModel):
     storage: str = "sqlite"
     path: str = str(DEFAULT_DB_PATH)
     auto_save: bool = True
+    # Automated turns from Flight Deck (scheduler, autonomy, plans, peer and
+    # MCP tasks) run on this lane's own session instead of the main chat; the
+    # results meant for the user are mirrored into the main chat. Empty = run
+    # them on the main chat, as before.
+    automation_lane: str = "AUTO"
+    # Typed at the start of a message ("Nova tema: …"), these start a new
+    # session first, like /new. Empty list = off.
+    rotation_cues: list[str] = Field(default_factory=lambda: [
+        "new topic", "new conversation", "nova tema", "novi razgovor",
+    ])
 
 
 class WorkspaceConfig(BaseModel):

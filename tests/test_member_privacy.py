@@ -673,6 +673,7 @@ async def test_compaction_summarizes_only_learnable_messages(private_turn, monke
     await agent.complete("and another")
     monkeypatch.setattr(get_config().context, "max_tokens", 10)
     monkeypatch.setattr(get_config().context, "compaction_ratio", 0.05)
+    monkeypatch.setattr(get_config().context, "compaction_summary", "model")
     seen, archived = [], []
 
     async def _summ(messages):
