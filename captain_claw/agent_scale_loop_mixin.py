@@ -164,7 +164,7 @@ class AgentScaleLoopMixin:
                 if old_content == extract_placeholder:
                     continue
                 msg["content"] = extract_placeholder
-                msg["token_count"] = self._count_tokens(extract_placeholder)
+                self._recount_message_tokens(msg)
                 trimmed_count += 1
             if trimmed_count > 0:
                 log.debug(
@@ -212,10 +212,10 @@ class AgentScaleLoopMixin:
                 # original user message context.
                 if len(content) > 200:
                     msg["content"] = assistant_placeholder
-                    msg["token_count"] = self._count_tokens(assistant_placeholder)
                     # Strip tool_calls from compressed assistant messages
                     # to avoid orphaned references.
                     msg.pop("tool_calls", None)
+                    self._recount_message_tokens(msg)
                     compressed += 1
 
             elif role == "tool":
@@ -223,17 +223,17 @@ class AgentScaleLoopMixin:
                 # Compress write tool results.
                 if tool_name == "write" and len(content) > 60:
                     msg["content"] = write_placeholder
-                    msg["token_count"] = self._count_tokens(write_placeholder)
+                    self._recount_message_tokens(msg)
                     compressed += 1
                 # Compress guard redirect messages.
                 elif content.startswith("SCALE GUARD:"):
                     msg["content"] = guard_placeholder
-                    msg["token_count"] = self._count_tokens(guard_placeholder)
+                    self._recount_message_tokens(msg)
                     compressed += 1
                 # Compress duplicate-blocked messages.
                 elif content.startswith("DUPLICATE CALL BLOCKED:"):
                     msg["content"] = guard_placeholder
-                    msg["token_count"] = self._count_tokens(guard_placeholder)
+                    self._recount_message_tokens(msg)
                     compressed += 1
 
         if compressed > 0:

@@ -795,7 +795,7 @@ Commands:
     # Internal actions that should NOT update the thinking indicator.
     _THINKING_SILENT_TOOLS: set[str] = {
         "llm_trace", "pipeline_trace", "memory_select", "memory_semantic_select",
-        "compaction", "guard_input", "guard_output", "guard_web", "guard_exec",
+        "memory_deep_select", "compaction", "guard_input", "guard_output", "guard_web", "guard_exec",
         "guard_file", "approval",
     }
 

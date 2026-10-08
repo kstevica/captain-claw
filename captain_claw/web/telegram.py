@@ -720,6 +720,7 @@ async def _tg_handle_session_subcommand(
                 session_name=session.name,
                 messages=session.messages,
                 saved_base_path=user_agent.tools.get_saved_base_path(create=True),
+                metadata=session.metadata,
             )
         except Exception as e:
             return f"Export failed: {e}"
@@ -953,6 +954,9 @@ async def _tg_process_with_typing(
                 turn_start_idx = len(user_agent.session.messages) if user_agent.session else 0
                 log.info("Telegram agent.complete() start", user_id=user_id, text_len=len(text))
                 with mail_authority.bound(mail_authority.interactive(text)):
+                    from captain_claw import msg_origin as _msg_origin
+
+                    _msg_origin.hint_turn_provenance(user_agent, channel="telegram")
                     response = await user_agent.complete(text)
                 log.info("Telegram agent.complete() done", user_id=user_id, response_len=len(response or ""))
 
@@ -962,7 +966,9 @@ async def _tg_process_with_typing(
                 from captain_claw.platform_adapter import (
                     collect_turn_generated_document_paths,
                     collect_turn_generated_image_paths,
+                    effective_turn_start_idx,
                 )
+                turn_start_idx = effective_turn_start_idx(user_agent, turn_start_idx)
                 if user_agent.session and server._telegram_bridge:
                     for img_path in collect_turn_generated_image_paths(user_agent.session, turn_start_idx):
                         try:

@@ -185,6 +185,9 @@ async def api_chat_completions(server: WebServer, request: web.Request) -> web.R
 
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     try:
+        from captain_claw import msg_origin as _msg_origin
+
+        _msg_origin.hint_turn_provenance(agent, channel="api")
         response_text = await agent.complete(user_message)
     except Exception as exc:
         log.error("API completion failed", session_id=session_id, error=str(exc))

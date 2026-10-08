@@ -2,6 +2,7 @@
 
 import copy
 import re
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -35,6 +36,7 @@ class AgentSessionMixin:
         and the context budget system cannot prune them.
         """
         has_tool_calls = bool(msg.get("tool_calls"))
+        self._ensure_reasoning_token_count(msg)
         value = msg.get("token_count")
         # Cached value is only reliable when tool_calls have been
         # accounted for (flagged by ``_tc_counted``).  Legacy messages
@@ -53,13 +55,48 @@ class AgentSessionMixin:
         msg["token_count"] = count
         return count
 
+    def _ensure_reasoning_token_count(self, msg: dict[str, Any]) -> int:
+        """Tokens of a thinking model's replayed ``reasoning_content``, kept
+        apart from ``token_count``: the context trace reports it, while the
+        history budget and compaction don't weigh it (yet)."""
+        reasoning = msg.get("reasoning_content")
+        if not (isinstance(reasoning, str) and reasoning):
+            return 0
+        value = msg.get("reasoning_token_count")
+        if isinstance(value, int) and value >= 0 and msg.get("_rc_counted"):
+            return value
+        value = self._count_tokens(reasoning)
+        msg["reasoning_token_count"] = value
+        msg["_rc_counted"] = True
+        return value
+
+    def _recount_message_tokens(self, msg: dict[str, Any]) -> int:
+        """Recount a message after its content was rewritten in place."""
+        for key in ("token_count", "_tc_counted", "_rc_counted", "reasoning_token_count"):
+            msg.pop(key, None)
+        return self._ensure_message_token_count(msg)
+
     def _session_token_count(self, messages: list[dict[str, Any]] | None = None) -> int:
-        """Count total tokens for session messages."""
+        """Count the tokens compaction weighs for session messages."""
         source = messages if messages is not None else (self.session.messages if self.session else [])
         total = 0
         for msg in source:
-            total += self._ensure_message_token_count(msg)
+            total += self._compaction_token_count(msg)
         return total
+
+    def _compaction_token_count(self, msg: dict[str, Any]) -> int:
+        """A message's weight for the compaction threshold and keep window.
+
+        Monitor/debug echoes and other rows the model never sees weigh
+        nothing — counting them fired compaction on phantom tokens (half of a
+        stored session) and summarised real conversation away. A thinking
+        model's replayed reasoning is not part of ``token_count``.
+        """
+        from captain_claw.msg_origin import is_model_hidden_tool
+
+        if is_model_hidden_tool(msg):
+            return 0
+        return self._ensure_message_token_count(msg)
 
     @staticmethod
     def _compact_role(role: str) -> str:
@@ -74,8 +111,12 @@ class AgentSessionMixin:
         max_item_chars: int = 600,
     ) -> str:
         """Format messages for compaction summarization prompt."""
+        from captain_claw.msg_origin import is_model_hidden_tool
+
         lines: list[str] = []
         consumed = 0
+        # Debug echoes would fill the excerpt budget with retrieval dumps.
+        messages = [msg for msg in messages if not is_model_hidden_tool(msg)]
         for idx, msg in enumerate(messages, start=1):
             role = self._compact_role(str(msg.get("role", "")))
             tool_name = str(msg.get("tool_name", "")).strip()
@@ -315,7 +356,7 @@ class AgentSessionMixin:
         keep_count = 0
         kept_tokens = 0
         for msg in reversed(messages):
-            token_count = self._ensure_message_token_count(msg)
+            token_count = self._compaction_token_count(msg)
             if keep_count < min_keep_messages or kept_tokens + token_count <= target_recent_tokens:
                 keep_count += 1
                 kept_tokens += token_count
@@ -369,6 +410,9 @@ class AgentSessionMixin:
             },
             "token_count": self._count_tokens(summary_content),
             "timestamp": now_iso,
+            "message_id": uuid.uuid4().hex[:12],
+            "origin": "system_note",
+            "origin_detail": "compaction",
         }
 
         self.session.messages = [summary_message, *recent_messages]
@@ -436,7 +480,7 @@ class AgentSessionMixin:
         keep_count = 0
         kept_tokens = 0
         for msg in reversed(snapshot):
-            token_count = self._ensure_message_token_count(msg)
+            token_count = self._compaction_token_count(msg)
             if keep_count < min_keep_messages or kept_tokens + token_count <= target_recent_tokens:
                 keep_count += 1
                 kept_tokens += token_count
@@ -474,6 +518,9 @@ class AgentSessionMixin:
             },
             "token_count": self._count_tokens(summary_content),
             "timestamp": now_iso,
+            "message_id": uuid.uuid4().hex[:12],
+            "origin": "system_note",
+            "origin_detail": "compaction",
         }
         compacted_messages = [summary_message, *recent_messages]
         setattr(self, member_privacy.CARRY_ATTR, None)
@@ -761,6 +808,40 @@ class AgentSessionMixin:
                 compacted_messages=stats.get("compacted_messages"),
             )
 
+    def _turn_start_after_compaction(
+        self,
+        turn_user_msg: dict[str, Any] | None,
+        captured_idx: int,
+    ) -> int:
+        """Where the current turn starts in ``session.messages``.
+
+        ``captured_idx`` (the length before the turn's user message went in)
+        goes stale when compaction swaps the list for ``[summary, *tail]``.
+        The turn's user message is found by identity, since compaction keeps
+        the newest messages as the same objects. If it was folded into the
+        summary itself (a forced mid-turn compaction), the turn starts after
+        the summary — past any leading tool results, whose tool_calls went
+        into the summary too: sent as orphans they would repeat the very 400
+        the forced compaction was meant to clear. (``captured_idx`` indexes
+        the list before compaction, so it plays no part there.) When the
+        message is found the index only ever moves back, so a turn with no
+        compaction keeps the start it captured.
+        """
+        if not self.session:
+            return 0
+        messages = self.session.messages
+        if turn_user_msg is not None:
+            for idx in range(len(messages) - 1, -1, -1):
+                if messages[idx] is turn_user_msg:
+                    return min(captured_idx, idx)
+            start = 0
+            if messages and str(messages[0].get("tool_name", "") or "") == "compaction_summary":
+                start = 1
+            while start < len(messages) and str(messages[start].get("role", "")) == "tool":
+                start += 1
+            return start
+        return max(0, min(captured_idx, len(messages)))
+
     def _sync_runtime_flags_from_session(self) -> None:
         """Load runtime feature flags from active session metadata."""
         from captain_claw.plan_mode import DEFAULT_PLAN_LEVEL, normalize_plan_level
@@ -914,8 +995,16 @@ class AgentSessionMixin:
         tool_arguments: dict[str, Any] | None = None,
         system_hint: str | None = None,
         reasoning_content: str | None = None,
+        *,
+        origin: str | None = None,
+        origin_detail: str | None = None,
     ) -> None:
         """Append message to session with per-message token metadata.
+
+        ``origin`` defaults from context: the first user message of a
+        ``complete()``/``stream()`` call is the turn's opener and carries the
+        turn's origin and channel; any later user message is code-injected
+        (a corrective) unless its text says otherwise.
 
         For assistant messages, ``reasoning_content`` is pulled from
         the per-call stash on the agent (set by
@@ -957,6 +1046,25 @@ class AgentSessionMixin:
                 _args_str = (_tc.get("function") or {}).get("arguments", "")
                 if _args_str:
                     _token_text += _args_str
+        # A thinking model's replayed reasoning, counted on its own.
+        _reasoning_tokens = self._count_tokens(reasoning_content) if reasoning_content else 0
+        _channel: str | None = None
+        if origin is None:
+            from captain_claw import member_privacy, msg_origin
+
+            if role == "user" and getattr(self, member_privacy.SEEN_ATTR, False) is not True:
+                turn = getattr(self, "_turn_origin", None)
+                if isinstance(turn, tuple) and len(turn) == 3:
+                    origin, origin_detail, _channel = turn
+                else:
+                    origin, origin_detail = msg_origin.resolve_turn_origin(content)
+            elif role == "user":
+                found = msg_origin.detect_literal(content)
+                origin, origin_detail = found if found else ("corrective", origin_detail)
+            else:
+                origin = msg_origin.default_origin(
+                    role, tool_name=tool_name or "", tool_call_id=tool_call_id or "",
+                )
         self.session.add_message(
             role=role,
             content=content,
@@ -968,7 +1076,16 @@ class AgentSessionMixin:
             model=model_label,
             system_hint=system_hint,
             reasoning_content=reasoning_content,
+            origin=origin,
+            origin_detail=origin_detail or None,
+            channel=_channel or None,
         )
+        _added = self.session.messages[-1]
+        if tool_calls:
+            _added["_tc_counted"] = True
+        if _reasoning_tokens:
+            _added["reasoning_token_count"] = _reasoning_tokens
+            _added["_rc_counted"] = True
         # PR D: the turn's own input is marked (J17), and a message that holds
         # members' private data is flagged so no shared learning reads it.
         try:

@@ -21,6 +21,7 @@ from captain_claw.agent_pool import AgentPool
 from captain_claw.config import get_config
 from captain_claw.file_registry import FileRegistry
 from captain_claw.instructions import InstructionLoader
+from captain_claw.msg_origin import hint_turn_provenance
 from captain_claw.output_validation import (
     build_retry_prompt,
     validate_task_output,
@@ -1856,6 +1857,7 @@ class SessionOrchestrator:
             # No asyncio.wait_for timeout — timeout management is handled
             # by tick_timeouts() in the execution loop, which provides
             # a warning phase and user-postpone flow before restarting.
+            hint_turn_provenance(agent, turn_origin="worker_task")
             response = await agent.complete(worker_prompt)
             worker_success = getattr(agent, "_last_complete_success", True)
             output_text = str(response or "").strip()
@@ -1894,6 +1896,7 @@ class SessionOrchestrator:
                         "3. Verify the file exists\n\n"
                         "Do this NOW. Do NOT describe what the file would contain."
                     )
+                    hint_turn_provenance(agent, turn_origin="worker_task")
                     response = await agent.complete(retry_prompt)
                     worker_success = getattr(agent, "_last_complete_success", True)
                     output_text = str(response or "").strip()
@@ -1928,6 +1931,7 @@ class SessionOrchestrator:
                         worker_prompt, output_text, val_error or "",
                         task.output_schema,
                     )
+                    hint_turn_provenance(agent, turn_origin="worker_task")
                     response = await agent.complete(retry_prompt)
                     worker_success = getattr(agent, "_last_complete_success", True)
                     output_text = str(response or "").strip()

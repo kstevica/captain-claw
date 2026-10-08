@@ -969,11 +969,14 @@ class AgentCompletionMixin:
         if not is_complex:
             return response
 
-        # Count tool calls this turn.
+        # Count tool calls this turn (monitor rows and the scale loop's
+        # progress cards are not tool calls).
+        from captain_claw.msg_origin import is_model_hidden_tool
+
         tool_call_count = 0
         if self.session:
             for msg in self.session.messages[turn_start_idx:]:
-                if msg.get("role") == "tool":
+                if msg.get("role") == "tool" and not is_model_hidden_tool(msg):
                     tool_call_count += 1
         if tool_call_count < 3:
             return response

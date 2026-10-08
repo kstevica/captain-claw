@@ -147,6 +147,7 @@ async def handle_chat(
     rewind_to: str | None = None,
     whatsapp_waid: str | None = None,
     origin: dict | None = None,
+    surface: str | None = None,
     no_flow: bool = False,
     deny_tools: list[str] | None = None,
     no_tools: bool = False,
@@ -393,10 +394,24 @@ async def handle_chat(
     naming_task = _start_task_naming(agent, content, server._recent_prompts)
     _remember_prompt(server._recent_prompts, content)
 
+    # The surface this turn arrived on, recorded on its opening message
+    # (a bridge's socket remembers it for frames routed here without one).
+    surface = surface or getattr(ws, "_claw_surface", None)
+    _origin_kind = str((origin or {}).get("kind", "") or "").strip().lower()
+    if surface:
+        turn_channel = surface
+    elif whatsapp_waid or _origin_kind == "whatsapp":
+        turn_channel = "whatsapp"
+    elif is_public:
+        turn_channel = "public"
+    else:
+        turn_channel = "web"
+
     # Launch the heavy work as a background task.
     task = asyncio.create_task(_run_agent(
         server, ws, agent, effective_content, naming_task,
         is_public=is_public,
+        turn_channel=turn_channel,
         lane=lane,
         public_session_id=public_session_id,
         video_attachments=video_attachments,
@@ -576,6 +591,7 @@ async def _handle_speaker_chat(
             speaker_key=speaker_key,
             speaker_turn=speaker_turn,
             speaker_grant=speaker_grant,
+            turn_channel="member",
         ))
         agent._public_task = task  # type: ignore[attr-defined]
         return True
@@ -818,6 +834,7 @@ async def _run_agent(
     speaker_key: tuple[str, str] | None = None,
     speaker_turn: str = "",
     speaker_grant: str = "",
+    turn_channel: str | None = None,
 ) -> None:
     """Background coroutine that drives the agent and finalises the turn.
 
@@ -1018,6 +1035,9 @@ async def _run_agent(
                     **({"member_private": _private_level} if _private_level else {}),
                 })
         else:
+            from captain_claw import msg_origin as _msg_origin
+
+            _msg_origin.hint_turn_provenance(agent, channel=turn_channel)
             response = await agent.complete(content)
             # Read right away, before any other await: a concurrent turn on
             # this Agent object could reset it (contract part 0c NB7). The

@@ -122,7 +122,8 @@ def test_build_messages_prunes_history_to_context_budget():
         contents = [m.content for m in messages]
 
         assert messages[0].role == "system"
-        assert "latest question" in contents
+        # The question rides last, behind the turn's (pinned) clock block.
+        assert contents[-1].endswith("latest question")
         assert agent.last_context_window["dropped_messages"] > 0
         assert agent.last_context_window["included_messages"] == 1
         assert agent.last_context_window["over_budget"] in (0, 1)

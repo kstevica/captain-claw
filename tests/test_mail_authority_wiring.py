@@ -1222,4 +1222,7 @@ def test_turn_user_text_is_set_by_complete_and_stream():
 
     assert Agent._turn_user_text == ""
     for fn in (Agent.complete, Agent.stream):
-        assert 'self._turn_user_text = str(user_input or "")' in inspect.getsource(fn)
+        # Set from the turn's text (a chat surface's rules block taken out).
+        source = inspect.getsource(fn)
+        assert 'self._absorb_surface_block(str(user_input or ""))' in source
+        assert "self._turn_user_text = user_input" in source

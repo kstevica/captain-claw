@@ -3,7 +3,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,18 @@ from captain_claw.tools import get_tool_registry
 # runtime-flag pattern in InstructionLoader (mtime-guarded re-read so the
 # Flight Deck toggle takes effect without a restart).
 _MRAV_FLAG_CACHE: dict[str, tuple[float, bool | None]] = {}
+
+# Monitor outputs routed through _emit_tool_output (live UI cards + the trace
+# log), and the subset still persisted as session rows because something reads
+# them back: the rephrase is replayed into the transcript, the scale loop's
+# progress rows replay as monitor cards.
+_TRACED_TOOL_OUTPUTS = frozenset({
+    "planning", "task_contract", "task_rephrase", "completion_gate", "scale_micro_loop",
+    "memory_select", "memory_semantic_select", "memory_deep_select",
+})
+_PERSISTED_TOOL_OUTPUTS = frozenset({"task_rephrase", "scale_micro_loop"})
+# Entries kept in session.metadata["pipeline_trace"].
+_PIPELINE_TRACE_CAP = 300
 
 
 def _mrav_flag_state(path: Path | None = None) -> bool | None:
@@ -183,19 +195,9 @@ class Agent(
     @staticmethod
     def _is_monitor_only_tool_name(tool_name: str) -> bool:
         """Whether tool output is monitor-only and should not feed model context."""
-        normalized = str(tool_name or "").strip().lower()
-        return normalized in {
-            "llm_trace",
-            "planning",
-            "task_contract",
-            "task_rephrase",
-            "completion_gate",
-            "pipeline_trace",
-            "telegram",
-            "memory_select",
-            "memory_semantic_select",
-            "memory_deep_select",
-        }
+        from captain_claw.msg_origin import is_monitor_only_tool_name
+
+        return is_monitor_only_tool_name(tool_name)
 
     # ── Activity timing ──────────────────────────────────────────────
     # We stamp a few coarse timestamps into session metadata so the agent
@@ -214,6 +216,11 @@ class Agent(
             self.session.metadata["timing"] = timing
         from datetime import datetime
         now_iso = datetime.now(UTC).isoformat()
+        # The turn's own message is stamped before its prompt is built, so
+        # "last user message" always reads "just now"; keep the one before it
+        # so the idle gap stays visible.
+        if kind == "last_user_msg_at" and timing.get(kind):
+            timing["prev_user_msg_at"] = timing[kind]
         timing[kind] = now_iso
         # First activity we ever see for this session doubles as its start.
         timing.setdefault("session_started_at", now_iso)
@@ -327,6 +334,7 @@ class Agent(
         # (key, full label, compact label)
         rows = (
             ("last_user_msg_at", "Last user message", "user"),
+            ("prev_user_msg_at", "Previous user message", "prev user"),
             ("last_assistant_at", "Last reply", "reply"),
             ("last_cron_at", "Last scheduled/cron run", "cron"),
             ("session_started_at", "Session started", "started"),
@@ -424,31 +432,51 @@ class Agent(
 
     def _emit_tool_output(self, tool_name: str, arguments: dict[str, Any], output: str) -> None:
         """Forward raw tool output to UI callback when configured."""
-        if self.session and tool_name in {"planning", "task_contract", "task_rephrase", "completion_gate", "scale_micro_loop", "memory_select", "memory_semantic_select", "memory_deep_select"}:
-            self._add_session_message(
-                role="tool",
-                content=str(output or ""),
-                tool_name=tool_name,
-                tool_arguments=arguments if isinstance(arguments, dict) else {},
-            )
+        if self.session and tool_name in _TRACED_TOOL_OUTPUTS:
+            # Only rows something reads back are persisted: the rephrase
+            # (shown on transcript replay) and the scale loop's progress
+            # cards. The rest reach the live monitor only — stored, they were
+            # half of a session's messages and fed compaction and semantic
+            # memory with retrieval dumps.
+            if tool_name in _PERSISTED_TOOL_OUTPUTS:
+                self._add_session_message(
+                    role="tool",
+                    content=str(output or ""),
+                    tool_name=tool_name,
+                    tool_arguments=arguments if isinstance(arguments, dict) else {},
+                )
             if self.monitor_trace_pipeline:
                 trace_payload = self._build_pipeline_trace_payload(
                     source_tool=tool_name,
                     arguments=arguments if isinstance(arguments, dict) else {},
                 )
-                trace_text = json.dumps(trace_payload, ensure_ascii=True, sort_keys=True)
-                self._add_session_message(
-                    role="tool",
-                    content=trace_text,
-                    tool_name="pipeline_trace",
-                    tool_arguments=trace_payload,
-                )
+                self._record_pipeline_trace(trace_payload)
         if not self.tool_output_callback:
             return
         try:
             self.tool_output_callback(tool_name, arguments, output)
         except Exception:
             pass
+
+    def _record_pipeline_trace(self, payload: dict[str, Any]) -> None:
+        """Append a compact trace entry to the session's capped trace log
+        (``session.metadata["pipeline_trace"]``, read by ``/session export``)."""
+        if not self.session or not isinstance(self.session.metadata, dict):
+            return
+        trace = self.session.metadata.get("pipeline_trace")
+        if not isinstance(trace, list):
+            trace = []
+        # Long strings (a memory query carries the whole turn's text) are
+        # clipped: the log is for tracing the pipeline, not a transcript.
+        entry = {
+            key: (value[:200] + "…" if isinstance(value, str) and len(value) > 200 else value)
+            for key, value in payload.items()
+        }
+        entry["timestamp"] = datetime.now(UTC).isoformat()
+        trace.append(entry)
+        if len(trace) > _PIPELINE_TRACE_CAP:
+            del trace[: len(trace) - _PIPELINE_TRACE_CAP]
+        self.session.metadata["pipeline_trace"] = trace
 
     def _log_llm_call(
         self,
@@ -509,8 +537,76 @@ class Agent(
         except Exception:
             return False
 
-    async def complete(self, user_input: str) -> str:
-        self._turn_user_text = str(user_input or "")
+    def _set_turn_origin(
+        self,
+        user_input: str,
+        turn_origin: str | None,
+        channel: str | None,
+        origin_detail: str | None,
+    ) -> None:
+        """Record where this turn came from; its opening message carries it.
+
+        Arguments win; otherwise a hint left by the caller
+        (``msg_origin.hint_turn_provenance``) fills in. The hint is consumed."""
+        from captain_claw import msg_origin
+
+        hint = getattr(self, "_turn_provenance_hint", None)
+        self._turn_provenance_hint = None
+        if isinstance(hint, tuple) and len(hint) == 3:
+            turn_origin = turn_origin or hint[0]
+            origin_detail = origin_detail or hint[1]
+            channel = channel or hint[2]
+        origin, detail = msg_origin.resolve_turn_origin(user_input, turn_origin, origin_detail)
+        self._turn_origin = (origin, detail, str(channel or "") or None)
+
+    def _absorb_surface_block(self, user_input: str) -> tuple[str, bool]:
+        """Take a chat surface's rules block (prepended by Flight Deck to a
+        glasses / WhatsApp / Messenger binding's first message) out of the
+        turn's text, keeping its rules in session metadata: they are rendered
+        on that surface's turns, and the stored message is what the user
+        wrote. Returns (text, had_block)."""
+        from captain_claw import msg_origin
+
+        block, rest = msg_origin.split_surface_block(user_input)
+        if not block:
+            return user_input, False
+        rules = msg_origin.surface_rules_text(block)
+        if rules and self.session is not None and isinstance(self.session.metadata, dict):
+            self.session.metadata["surface_rules"] = {
+                "text": rules,
+                "seen_at": datetime.now(UTC).isoformat(),
+            }
+        return rest, True
+
+    def _hinted_channel(self) -> str | None:
+        hint = getattr(self, "_turn_provenance_hint", None)
+        return hint[2] if isinstance(hint, tuple) and len(hint) == 3 and hint[2] else None
+
+    def _turn_origin_kwargs(self) -> dict[str, Any]:
+        """This turn's origin as ``complete()`` keyword arguments (for re-entry)."""
+        turn = getattr(self, "_turn_origin", None)
+        if not (isinstance(turn, tuple) and len(turn) == 3):
+            return {}
+        return {"turn_origin": turn[0], "origin_detail": turn[1] or None, "channel": turn[2]}
+
+    async def complete(
+        self,
+        user_input: str,
+        *,
+        turn_origin: str | None = None,
+        channel: str | None = None,
+        origin_detail: str | None = None,
+    ) -> str:
+        user_input, _had_surface = self._absorb_surface_block(str(user_input or ""))
+        self._turn_user_text = user_input
+        self._set_turn_origin(
+            self._turn_user_text, turn_origin,
+            channel or self._hinted_channel() or ("glasses" if _had_surface else None),
+            origin_detail,
+        )
+        # The micro runtime below never records a turn start; clear the last
+        # turn's so callers slicing this turn's messages don't reuse it.
+        self.last_turn_start_idx = None
         # PR D: every turn starts untainted (no member data read yet) and
         # marks its first user message as the turn's input. The level it
         # reaches gates tools only while the turn runs (enter/exit_turn).
@@ -524,10 +620,24 @@ class Agent(
         finally:
             member_privacy.exit_turn(self)
 
-    async def stream(self, user_input: str) -> AsyncIterator[str]:
+    async def stream(
+        self,
+        user_input: str,
+        *,
+        turn_origin: str | None = None,
+        channel: str | None = None,
+        origin_detail: str | None = None,
+    ) -> AsyncIterator[str]:
         # Not a ContextVar bind: this is an async generator (a set here would
         # leak into the caller between yields).
-        self._turn_user_text = str(user_input or "")
+        user_input, _had_surface = self._absorb_surface_block(str(user_input or ""))
+        self._turn_user_text = user_input
+        self._set_turn_origin(
+            self._turn_user_text, turn_origin,
+            channel or self._hinted_channel() or ("glasses" if _had_surface else None),
+            origin_detail,
+        )
+        self.last_turn_start_idx = None
         from captain_claw import member_privacy
         member_privacy.begin_turn(self)
         member_privacy.enter_turn(self)

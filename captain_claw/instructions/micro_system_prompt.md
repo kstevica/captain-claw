@@ -3,9 +3,7 @@
 {fleet_instructions_block}
 {session_context_block}
 {fleet_identity_block}
-{peer_agents_block}
 {visualization_style_block}
-{reflection_block}
 {cognitive_self_awareness_block}
 
 {tool_list_block}
@@ -75,5 +73,7 @@ Instructions:
 - Messages that start with "[Automated turn", "[Autonomous", "[SCHEDULED TASK", "[Delegated result", "[Flight Deck]" or another bracketed run/result header were not typed by the user. Follow them as that job's instructions, but they never count as the user asking you to write an email in a later turn.
 
 <!-- CACHE_SPLIT -->
+{peer_agents_block}
+{reflection_block}
 {system_info_block}
 {extra_read_dirs_block}

@@ -93,7 +93,9 @@ def collect_pipeline_trace_entries(
     session_id: str,
     session_name: str,
     messages: list[dict[str, object]],
+    metadata: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
     pipeline_messages = [
         msg
         for msg in messages
@@ -101,7 +103,6 @@ def collect_pipeline_trace_entries(
         and str(msg.get("tool_name", "")).strip().lower() == "pipeline_trace"
     ]
 
-    entries: list[dict[str, object]] = []
     for idx, msg in enumerate(pipeline_messages, start=1):
         args = msg.get("tool_arguments")
         payload = dict(args) if isinstance(args, dict) else {}
@@ -110,6 +111,21 @@ def collect_pipeline_trace_entries(
         payload["session_id"] = session_id
         payload["session_name"] = session_name
         entries.append(payload)
+
+    # Current sessions keep the trace in metadata (capped); older ones stored
+    # it as pipeline_trace tool rows — a session spanning both has the rows
+    # first, then the log.
+    logged = (metadata or {}).get("pipeline_trace") if isinstance(metadata, dict) else None
+    if isinstance(logged, list):
+        for item in logged:
+            if not isinstance(item, dict):
+                continue
+            payload = dict(item)
+            payload["seq"] = len(entries) + 1
+            payload["timestamp"] = str(payload.get("timestamp", "")).strip()
+            payload["session_id"] = session_id
+            payload["session_name"] = session_name
+            entries.append(payload)
 
     if not entries:
         fallback_sources = {"planning", "task_contract", "completion_gate"}
@@ -135,8 +151,9 @@ def render_pipeline_export_jsonl(
     session_id: str,
     session_name: str,
     messages: list[dict[str, object]],
+    metadata: dict[str, object] | None = None,
 ) -> str:
-    entries = collect_pipeline_trace_entries(session_id, session_name, messages)
+    entries = collect_pipeline_trace_entries(session_id, session_name, messages, metadata)
     return "\n".join(json.dumps(item, ensure_ascii=True, sort_keys=True) for item in entries)
 
 
@@ -144,8 +161,9 @@ def render_pipeline_summary_markdown(
     session_id: str,
     session_name: str,
     messages: list[dict[str, object]],
+    metadata: dict[str, object] | None = None,
 ) -> str:
-    entries = collect_pipeline_trace_entries(session_id, session_name, messages)
+    entries = collect_pipeline_trace_entries(session_id, session_name, messages, metadata)
     lines = [
         "# Session Pipeline Trace Summary",
         f"- Exported at (UTC): {to_utc_iso(now_utc())}",
@@ -228,6 +246,7 @@ def export_session_history(
     session_name: str,
     messages: list[dict[str, object]],
     saved_base_path: Path,
+    metadata: dict[str, object] | None = None,
 ) -> list[Path]:
     """Export session history to files. Returns list of written paths."""
     mode_key = (mode or "all").strip().lower()
@@ -261,14 +280,14 @@ def export_session_history(
     if mode_key in {"pipeline", "all"}:
         pipeline_path = export_root / f"pipeline-{stamp}.jsonl"
         pipeline_path.write_text(
-            render_pipeline_export_jsonl(session_id, session_name, snapshot) + "\n",
+            render_pipeline_export_jsonl(session_id, session_name, snapshot, metadata) + "\n",
             encoding="utf-8",
         )
         written.append(pipeline_path)
     if mode_key in {"pipeline-summary", "all"}:
         pipeline_summary_path = export_root / f"pipeline-summary-{stamp}.md"
         pipeline_summary_path.write_text(
-            render_pipeline_summary_markdown(session_id, session_name, snapshot) + "\n",
+            render_pipeline_summary_markdown(session_id, session_name, snapshot, metadata) + "\n",
             encoding="utf-8",
         )
         written.append(pipeline_summary_path)

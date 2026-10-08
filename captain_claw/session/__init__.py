@@ -58,8 +58,17 @@ class Session:
         model: str = "",
         system_hint: str | None = None,
         reasoning_content: str | None = None,
+        *,
+        origin: str | None = None,
+        origin_detail: str | None = None,
+        channel: str | None = None,
     ) -> str:
         """Add a message to the session.  Returns the generated message_id.
+
+        ``origin`` records where the message came from (``msg_origin``:
+        human, cron, corrective, fleet_notice, model, …); ``origin_detail``
+        the sub-kind, ``channel`` the surface a turn arrived on. All are
+        omitted when unset — readers classify such legacy messages.
 
         ``reasoning_content`` stores the provider's thinking-mode
         chain-of-thought verbatim (DeepSeek's strict requirement —
@@ -86,6 +95,12 @@ class Session:
             msg["system_hint"] = system_hint
         if reasoning_content:
             msg["reasoning_content"] = reasoning_content
+        if origin:
+            msg["origin"] = origin
+        if origin_detail:
+            msg["origin_detail"] = origin_detail
+        if channel:
+            msg["channel"] = channel
         # PR D: text from a turn that read members' private data keeps its flag wherever it lands
         # (delegate/consult results, sister and orchestrator output, notifications).
         try:

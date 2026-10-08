@@ -1028,7 +1028,7 @@ class WebServer:
 
     _THINKING_SILENT_TOOLS: set[str] = {
         "llm_trace", "pipeline_trace", "memory_select", "memory_semantic_select",
-        "compaction", "guard_input", "guard_output", "guard_web", "guard_exec",
+        "memory_deep_select", "compaction", "guard_input", "guard_output", "guard_web", "guard_exec",
         "guard_file", "approval", "scale_micro_loop", "task_rephrase",
     }
 
@@ -1873,7 +1873,7 @@ class WebServer:
                     await asyncio.sleep(0.5)
                 elif self.agent and self.agent.session:
                     # No client to stream through — record it so it's not lost.
-                    self.agent.session.add_message("user", content)
+                    self.agent.session.add_message("user", content, origin="delegated_result")
                     log.info("Inbound peer message stored (no client ws)", content_len=len(content))
             except Exception as exc:
                 log.warning("inbound_queue_consumer error", error=str(exc))

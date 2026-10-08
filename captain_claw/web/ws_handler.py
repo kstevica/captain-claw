@@ -190,6 +190,14 @@ def _build_replay_batch(session) -> list[dict]:
             }
             if msg.get("feedback"):
                 payload["feedback"] = msg["feedback"]
+            # Where the message came from (human, corrective, fleet notice…),
+            # so a client can label synthetic rows instead of showing them as
+            # something the user typed.
+            from captain_claw import msg_origin
+
+            payload["origin"] = msg_origin.origin_of(msg)
+            if msg.get("channel"):
+                payload["channel"] = msg["channel"]
             batch.append(payload)
         elif role == "tool" and tool_name == "task_rephrase":
             batch.append({
@@ -232,6 +240,11 @@ async def _handle_telegram_delegate_result(
             try:
                 # Another agent's result, not the Telegram user typing.
                 with mail_authority.bound(mail_authority.automated("peer_relay", "", "deny")):
+                    from captain_claw import msg_origin as _msg_origin
+
+                    _msg_origin.hint_turn_provenance(
+                        tg_agent, turn_origin="delegated_result", channel="telegram",
+                    )
                     response = await tg_agent.complete(content)
                 if response and chat_id:
                     await _tg_send(server, chat_id, response)
@@ -276,6 +289,26 @@ async def handle_ws_message(
         # can be routed back to this source later. Bridges may send it
         # explicitly; otherwise handle_chat synthesizes one from whatsapp_waid.
         origin = data.get("origin") if isinstance(data.get("origin"), dict) else None
+        # The chat surface this frame came from (glasses / whatsapp /
+        # messenger), sent by the bridges on every frame: the turn renders
+        # that surface's rules, and only on that surface's turns.
+        surface = str(data.get("surface", "") or "").strip().lower() or None
+        # A bridge talks over its own socket: remember its surface for the
+        # frames that don't carry one (slash-routed turns, older bridges,
+        # whose first message carries the surface rules block instead).
+        if not surface:
+            from captain_claw import msg_origin as _msg_origin
+
+            if _msg_origin.SURFACE_BLOCK_RE.search(content):
+                _wa = whatsapp_waid or str((origin or {}).get("kind", "")).lower() == "whatsapp"
+                surface = "whatsapp" if _wa else "glasses"
+            else:
+                surface = getattr(ws, "_claw_surface", None)
+        if surface:
+            try:
+                ws._claw_surface = surface
+            except Exception:
+                pass
 
         # Multi-file support: collect all image/file paths into lists.
         image_paths: list[str] = []
@@ -326,6 +359,7 @@ async def handle_ws_message(
                 rewind_to=rewind_to,
                 whatsapp_waid=whatsapp_waid,
                 origin=origin,
+                surface=surface,
                 no_flow=bool(data.get("no_flow", False)),
                 deny_tools=[str(t) for t in (data.get("deny_tools") or [])],
                 no_tools=bool(data.get("no_tools", False)),
@@ -413,10 +447,9 @@ async def handle_ws_message(
                      content_len=len(notif_content))
             tg_agent = server._telegram_agents.get(origin_user_id)
             if tg_agent:
-                # Inject into the telegram user's session
-                if tg_agent.session:
-                    tg_agent.session.add_message("user", notif_content)
-                # Process with the telegram agent and send result to telegram
+                # Process with the telegram agent and send result to telegram;
+                # the turn records the result as its opening message (writing
+                # it here as well stored every relayed result twice).
                 await _handle_telegram_delegate_result(
                     server, tg_agent, origin_user_id, origin_chat_id, notif_content,
                 )
@@ -458,7 +491,13 @@ async def handle_ws_message(
         # No trigger requested — inject silently into session history.
         _target_agent = await server.resolve_agent(ws)
         if _target_agent and _target_agent.session:
-            _target_agent.session.add_message("user", notif_content)
+            from captain_claw import msg_origin
+
+            _found = msg_origin.detect_literal(notif_content)
+            _target_agent.session.add_message(
+                "user", notif_content,
+                origin="fleet_notice" if _found and _found[0] == "fleet_notice" else "notification",
+            )
             log.info("Notification injected into session", content_len=len(notif_content),
                      agent_busy=server._busy, trigger=trigger)
 

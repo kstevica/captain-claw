@@ -86,6 +86,21 @@ def extract_audio_paths_from_tool_output(content: str) -> list[Path]:
     return paths
 
 
+def effective_turn_start_idx(agent: Any, captured_idx: int) -> int:
+    """Turn start for slicing ``session.messages`` after an agent turn.
+
+    ``captured_idx`` was taken before the turn. If auto-compaction rewrote
+    the session during it, that index points past the turn's messages, so
+    its generated files would never be found. The agent records the turn's
+    real start (``last_turn_start_idx``, reset at the start of every turn);
+    it is used only when it moves the index back.
+    """
+    recorded = getattr(agent, "last_turn_start_idx", None)
+    if isinstance(recorded, int) and not isinstance(recorded, bool) and 0 <= recorded < captured_idx:
+        return recorded
+    return captured_idx
+
+
 def collect_turn_generated_audio_paths(session: Any, turn_start_idx: int) -> list[Path]:
     """Collect pocket_tts generated MP3 files from current turn tool outputs."""
     if not session:

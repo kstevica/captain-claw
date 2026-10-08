@@ -22,6 +22,10 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
+# Half-saturation point of the keyword score: a hit whose |bm25| equals this
+# scores 0.5. Real multi-term matches run |bm25| 10-35, a lone common term ~3.
+_BM25_SCALE = 4.0
+
 _DEFAULT_TEXT_EXTENSIONS = {
     ".txt",
     ".md",
@@ -66,6 +70,9 @@ class SemanticMemoryResult:
     updated_at: str
     text_l1: str = ""
     text_l2: str = ""
+    # Hybrid score before temporal decay: what the relevance floors compare
+    # against (decay only reorders hits that passed them).
+    relevance: float = 0.0
 
 
 @dataclass
@@ -543,20 +550,33 @@ class SemanticMemoryIndex:
             self._conn_or_raise().commit()
             self._clear_cache()
 
-    def search(self, query: str, max_results: int | None = None) -> list[SemanticMemoryResult]:
-        """Hybrid search across workspace + session memory."""
+    def search(
+        self,
+        query: str,
+        max_results: int | None = None,
+        *,
+        exclude_active_session: bool = False,
+    ) -> list[SemanticMemoryResult]:
+        """Hybrid search across workspace + session memory.
+
+        ``exclude_active_session`` leaves out the active session's own
+        transcript chunks — for the passive context note, whose prompt
+        already carries that session (its compacted part stays reachable
+        through the session-history archive).
+        """
         cleaned = str(query or "").strip()
         if not cleaned:
             return []
         if self._closed:
             return []
         effective_max = max(1, int(max_results or self.max_results))
+        excluded_reference = self._active_session_reference if exclude_active_session else None
         scope = (
             "all_sessions"
             if self.cross_session_retrieval
             else (self._active_session_reference or "workspace_only")
         )
-        key = f"{cleaned}::{effective_max}::{scope}"
+        key = f"{cleaned}::{effective_max}::{scope}::{'x' if excluded_reference else ''}"
         now = time.time()
         cached = self._cache.get(key)
         if cached and cached[0] > now:
@@ -569,6 +589,8 @@ class SemanticMemoryIndex:
 
         # When a project is active, include all project sessions in the search scope.
         project_sids = self._project_session_ids if self._active_project_id else None
+        if project_sids and exclude_active_session and self._active_session_reference:
+            project_sids = [sid for sid in project_sids if sid != self._active_session_reference]
 
         keyword_hits = self._keyword_search(
             cleaned,
@@ -576,6 +598,7 @@ class SemanticMemoryIndex:
             active_session_reference=self._active_session_reference,
             include_all_sessions=self.cross_session_retrieval,
             project_session_ids=project_sids,
+            exclude_session_reference=excluded_reference,
         )
         vector_hits = self._vector_search(
             cleaned,
@@ -583,6 +606,7 @@ class SemanticMemoryIndex:
             active_session_reference=self._active_session_reference,
             include_all_sessions=self.cross_session_retrieval,
             project_session_ids=project_sids,
+            exclude_session_reference=excluded_reference,
         )
         # Pull extra candidates so holding history snapshots to a stricter floor
         # (below) doesn't starve the note of good non-history results.
@@ -591,7 +615,7 @@ class SemanticMemoryIndex:
         # a weak keyword match on a past, unrelated session must not be injected.
         merged = [
             r for r in merged
-            if r.source != "session_history" or r.score >= self.history_min_score
+            if r.source != "session_history" or r.relevance >= self.history_min_score
         ][:effective_max]
         self._cache[key] = (time.time() + self.cache_ttl_seconds, merged)
         return list(merged)
@@ -671,6 +695,7 @@ class SemanticMemoryIndex:
                     updated_at=str(row[7]),
                     text_l1=str(row[8]),
                     text_l2=str(row[9]),
+                    relevance=1.0,
                 )
             )
         return results
@@ -1045,17 +1070,22 @@ class SemanticMemoryIndex:
         max_items: int = 3,
         max_snippet_chars: int = 360,
         layer: str = "l3",
+        exclude_active_session: bool = False,
     ) -> tuple[str, str]:
         """Format top semantic hits as a prompt note + debug block.
 
         *layer* controls the snippet granularity:
         ``"l1"`` = one-liner, ``"l2"`` = summary, ``"l3"`` = full text (default).
         """
-        results = self.search(query=query, max_results=max_items)
+        results = self.search(
+            query=query, max_results=max_items, exclude_active_session=exclude_active_session,
+        )
         if not results:
             return "", "semantic_memory: no results"
         if self.cross_session_retrieval:
             lines = ["Semantic memory matches (all sessions + workspace):"]
+        elif exclude_active_session:
+            lines = ["Semantic memory matches (workspace + archived history):"]
         else:
             lines = ["Semantic memory matches (active session + workspace):"]
         debug = [f"semantic_memory query={query!r} layer={layer}", f"result_count={len(results)}"]
@@ -1430,6 +1460,7 @@ class SemanticMemoryIndex:
             return []
 
         from captain_claw import member_privacy
+        from captain_claw.msg_origin import is_model_hidden_tool
 
         documents: list[_Document] = []
         for sid, name, raw_messages, updated_at in rows:
@@ -1445,6 +1476,8 @@ class SemanticMemoryIndex:
                     continue
                 if member_privacy.is_private(msg):
                     continue             # PR D: members' private data is never indexed
+                if is_model_hidden_tool(msg):
+                    continue             # debug echoes would feed memory dumps back in
                 role = str(msg.get("role", "")).strip().lower() or "unknown"
                 content = re.sub(r"\s+", " ", str(msg.get("content", "")).strip())
                 if not content:
@@ -1471,6 +1504,7 @@ class SemanticMemoryIndex:
     def _format_messages_as_text(messages: list[dict[str, Any]]) -> str:
         """Render a list of session messages as ``[role] content`` lines."""
         from captain_claw import member_privacy
+        from captain_claw.msg_origin import is_model_hidden_tool
 
         lines: list[str] = []
         for msg in messages:
@@ -1478,6 +1512,8 @@ class SemanticMemoryIndex:
                 continue
             if member_privacy.is_private(msg):
                 continue                 # PR D: never archived or indexed
+            if is_model_hidden_tool(msg):
+                continue                 # debug echoes are not memory
             role = str(msg.get("role", "")).strip().lower() or "unknown"
             content = re.sub(r"\s+", " ", str(msg.get("content", "")).strip())
             if not content:
@@ -1593,7 +1629,7 @@ class SemanticMemoryIndex:
         merged = self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max)
         # Apply the stricter history floor — better to return nothing than an
         # off-topic snapshot the model would treat as current context.
-        return [r for r in merged if r.score >= self.history_min_score]
+        return [r for r in merged if r.relevance >= self.history_min_score]
 
     def list_history(self, limit: int = 20) -> list[dict[str, Any]]:
         """List recent frozen snapshots (newest first)."""
@@ -1871,6 +1907,7 @@ class SemanticMemoryIndex:
         active_session_reference: str | None,
         include_all_sessions: bool,
         project_session_ids: list[str] | None = None,
+        exclude_session_reference: str | None = None,
     ) -> list[dict[str, Any]]:
         conn = self._conn_or_raise()
         fts_query = _build_fts_query(query)
@@ -1897,6 +1934,9 @@ class SemanticMemoryIndex:
         else:
             where_clause = "AND c.source != 'session'"
             params = (fts_query, limit)
+        if exclude_session_reference:
+            where_clause += " AND NOT (c.source = 'session' AND c.reference = ?)"
+            params = (*params[:-1], exclude_session_reference, params[-1])
         try:
             rows = conn.execute(
                 f"""
@@ -1941,6 +1981,9 @@ class SemanticMemoryIndex:
             else:
                 like_where = "AND source != 'session'"
                 like_params = (like, limit)
+            if exclude_session_reference:
+                like_where += " AND NOT (source = 'session' AND reference = ?)"
+                like_params = (*like_params[:-1], exclude_session_reference, like_params[-1])
             rows = conn.execute(
                 f"""
                 SELECT
@@ -1967,7 +2010,12 @@ class SemanticMemoryIndex:
                     "end_line": int(row[5]),
                     "snippet": str(row[6]),
                     "updated_at": str(row[7]),
-                    "text_score": 1.0 / (1.0 + max(0.0, rank)),
+                    # FTS5 bm25() is negative, more negative = better match:
+                    # map its magnitude into (0, 1) on a scale where a lone
+                    # common term (|bm25| ~3) stays well below a specific
+                    # multi-term match (|bm25| 10-35). The LIKE fallback's
+                    # 999.0 sentinel scores 0, as before.
+                    "text_score": max(0.0, -rank) / (max(0.0, -rank) + _BM25_SCALE),
                     "text_l1": str(row[9]) if len(row) > 9 else "",
                     "text_l2": str(row[10]) if len(row) > 10 else "",
                 }
@@ -1982,6 +2030,7 @@ class SemanticMemoryIndex:
         active_session_reference: str | None,
         include_all_sessions: bool,
         project_session_ids: list[str] | None = None,
+        exclude_session_reference: str | None = None,
     ) -> list[dict[str, Any]]:
         if not self.embedding_chain.enabled:
             return []
@@ -2015,6 +2064,9 @@ class SemanticMemoryIndex:
         else:
             extra_where = "AND c.source != 'session'"
             params = (provider_key, dims)
+        if exclude_session_reference:
+            extra_where += " AND NOT (c.source = 'session' AND c.reference = ?)"
+            params = (*params, exclude_session_reference)
         rows = conn.execute(
             f"""
             SELECT
@@ -2038,9 +2090,12 @@ class SemanticMemoryIndex:
         ).fetchall()
         if not rows:
             # Index may still be stale for the active provider — re-embed existing
-            # chunks under the active provider on the next sync pass.
-            self._reembed_checked = False
-            self.schedule_sync("vector_provider_mismatch")
+            # chunks under the active provider on the next sync pass. (Not when
+            # the live session was filtered out: on a fresh agent that leaves
+            # nothing, which is no sign of a stale index.)
+            if not exclude_session_reference:
+                self._reembed_checked = False
+                self.schedule_sync("vector_provider_mismatch")
             return []
         scored: list[dict[str, Any]] = []
         for row in rows:
@@ -2106,14 +2161,17 @@ class SemanticMemoryIndex:
             text_score = float(payload.get("text_score", 0.0))
             vector_score = float(payload.get("vector_score", 0.0))
             score = (self.vector_weight * vector_score) + (self.text_weight * text_score)
+            # The floor gates relevance; age only reorders what passed it, so
+            # an old but on-point chunk is not dropped for being old.
+            relevance = score
+            if relevance < self.min_score:
+                continue
             if self.temporal_decay_enabled:
                 timestamp = _parse_iso_to_timestamp(str(payload.get("updated_at", "")))
                 if timestamp is not None:
                     age_days = max(0.0, (now - timestamp) / 86400.0)
                     decay_lambda = math.log(2) / self.temporal_half_life_days
                     score *= math.exp(-decay_lambda * age_days)
-            if score < self.min_score:
-                continue
             merged.append(
                 SemanticMemoryResult(
                     chunk_id=str(payload.get("chunk_id", "")),
@@ -2129,6 +2187,7 @@ class SemanticMemoryIndex:
                     updated_at=str(payload.get("updated_at", "")),
                     text_l1=str(payload.get("text_l1", "")),
                     text_l2=str(payload.get("text_l2", "")),
+                    relevance=relevance,
                 )
             )
         merged.sort(key=lambda item: item.score, reverse=True)

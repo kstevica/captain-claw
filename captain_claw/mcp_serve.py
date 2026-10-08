@@ -279,6 +279,9 @@ async def _handle_message_send(args: dict[str, Any]) -> dict[str, Any]:
         else:
             return {"error": f"Session not found: {target_session}"}
 
+    from captain_claw import msg_origin
+
+    msg_origin.hint_turn_provenance(agent, turn_origin="mcp_task", channel="mcp")
     response = await agent.complete(message)
     return {
         "response": response,

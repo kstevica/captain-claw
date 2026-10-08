@@ -1285,11 +1285,14 @@ class AgentToolLoopMixin:
                     and _tool_lower in _CONTENT_TOOLS
                     and hasattr(self, "_chunked_reduce_tool_result")
                 ):
-                    # Get the user's original query from session messages
-                    _user_query = ""
-                    if self.session:
+                    # The turn's own request — not the latest user-role row,
+                    # which can be a corrective or a fleet notice.
+                    _user_query = str(getattr(self, "_turn_user_text", "") or "")
+                    if not _user_query and self.session:
+                        from captain_claw import msg_origin
+
                         for _m in reversed(self.session.messages):
-                            if str(_m.get("role", "")) == "user":
+                            if msg_origin.is_turn_opener(_m):
                                 _user_query = str(_m.get("content", ""))
                                 break
                     if _user_query:

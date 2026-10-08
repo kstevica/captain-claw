@@ -829,6 +829,7 @@ async def handle_session_subcommand(server: WebServer, args: str) -> str:
                 session_name=server.agent.session.name,
                 messages=server.agent.session.messages,
                 saved_base_path=server.agent.tools.get_saved_base_path(create=True),
+                metadata=server.agent.session.metadata,
             )
         except Exception as e:
             return f"Export failed: {e}"

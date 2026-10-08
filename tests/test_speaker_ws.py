@@ -1277,15 +1277,19 @@ def test_member_prompt_has_the_clock_but_not_the_owners_machine(monkeypatch, tmp
     monkeypatch.setattr(si, "_get_local_ip", lambda: "10.9.8.7")
     monkeypatch.setattr(si, "_get_public_ip", lambda: "203.0.113.77")
     agent = _real_agent(monkeypatch, tmp_path)
-    owner_prompt = agent._build_system_prompt()
-    assert "OWNER-HOSTNAME" in owner_prompt and "203.0.113.77" in owner_prompt
+    # The clock and host lines ride in the per-turn context block now.
+    owner_env = agent._build_env_now_text()
+    assert "OWNER-HOSTNAME" in owner_env and "203.0.113.77" in owner_env
+    assert "OWNER-HOSTNAME" not in agent._build_system_prompt()
 
     agent._speaker_scoped = True
     agent._speaker_profile = ("", "")
+    member_env = agent._build_env_now_text()
     member_prompt = agent._build_system_prompt()
     for leak in ("OWNER-HOSTNAME", "10.9.8.7", "203.0.113.77", "Uptime", "Disk free"):
+        assert leak not in member_env, leak
         assert leak not in member_prompt, leak
-    assert "UTC" in member_prompt and SPEAKER_MODE_NOTE in member_prompt
+    assert "UTC" in member_env and SPEAKER_MODE_NOTE in member_prompt
 
 
 # ── error frames on the member wire ──────────────────────────────────
