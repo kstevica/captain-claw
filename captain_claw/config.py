@@ -897,19 +897,20 @@ class SisterSessionConfig(BaseModel):
 class ConversationTopicsConfig(BaseModel):
     """Automatic topic/tagging memory over comms-channel conversation.
 
-    A periodic pass clusters recent comms messages (user + agent + narration)
-    into persistent, cross-session topics the agent can recall via the `topics`
-    tool. Mirrors the dreaming/insight passes."""
+    A periodic pass clusters the conversation — what people typed and the
+    final reply of each turn they opened — into persistent, cross-session
+    topics the agent can recall via the `topics` tool. Mirrors the
+    dreaming/insight passes."""
 
     enabled: bool = True
-    interval_messages: int = 15          # classify every N new comms messages
+    interval_messages: int = 6           # classify once N conversation messages are pending
     cooldown_seconds: int = 120          # min gap between classification passes
     max_messages_per_pass: int = 15      # messages per classify call (small: reasoning
                                          # models burn budget on long batches → no JSON)
     classify_max_tokens: int = 8000      # output budget; must cover reasoning + the JSON
     max_topics: int = 300                # prune oldest beyond this
     excerpts_per_topic: int = 40         # message excerpts kept per topic
-    include_narration: bool = True
+    include_narration: bool = False      # also feed mid-turn progress narration
     allow_public: bool = False
     db_path: str = "~/.captain-claw/conversation_topics.db"
 

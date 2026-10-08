@@ -1,9 +1,10 @@
 """Conversation topic memory — automatic tagging/clustering over comms traffic.
 
 A periodic pass (mirroring the dreaming / insight-extraction passes) takes the
-recent comms-channel messages — user inputs, agent replies, and the turn's
-narration — and groups them into persistent, cross-session **topics**. Each
-topic carries a rolling summary, keywords, and the message excerpts that fed it.
+recent conversation — what people typed, and the final reply of each turn they
+opened (never fleet notices, cron prompts, correctives or tool steps) — and
+groups it into persistent, cross-session **topics**. Each topic carries a
+rolling summary, keywords, and the message excerpts that fed it.
 
 The agent reaches this via the always-on ``topics`` tool (list / get / search),
 so when a thread resurfaces ("back to the Munich trip") it pulls the whole
@@ -15,12 +16,14 @@ matching the other Captain Claw memory stores.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -30,10 +33,15 @@ log = logging.getLogger(__name__)
 # Per-agent attrs for the periodic-pass guard (mirrors nervous_system).
 _ATTR_RUNNING = "_topics_classify_running"
 _ATTR_LAST_TIME = "_topics_last_classify_time"
-_ATTR_LAST_MSG_IDX = "_topics_last_msg_idx"
 _ATTR_NARRATION = "_topics_narration_buffer"
 
 _MAX_NARRATION_BUFFER = 40   # cap buffered narration blurbs between passes
+_CHUNKS_PER_PASS = 3         # classifier batches per live pass (the rest waits)
+# Existing topics the classifier sees: best matches for the batch + most recent.
+_CLASSIFIER_RELEVANT = 15
+_CLASSIFIER_RECENT = 10
+_CLASSIFIER_TERMS = 150      # every content word of a batch; bm25 weighs them
+_CLASSIFIER_SUMMARY_CHARS = 600
 # Stored message text is kept (near-)whole so the panel shows full messages, not
 # a 600-char stub. Only a short slice is fed to the classifier (token control).
 _MAX_EXCERPT_CHARS = 16000
@@ -62,7 +70,11 @@ class ConversationTopicsManager:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
+        # Topic id -> (text fingerprint, embedding) for the cosine leg.
+        self._vectors: dict[str, tuple[str, list[float]]] = {}
         self._ensure_db()
+        self._seen_from_classified_once()
+        self._hide_synthetic_once()
 
     def _c(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -91,7 +103,8 @@ class ConversationTopicsManager:
                     msg_count   INTEGER NOT NULL DEFAULT 0,
                     starred     INTEGER NOT NULL DEFAULT 0, -- pinned to the top
                     first_seen  TEXT NOT NULL,
-                    last_seen   TEXT NOT NULL
+                    last_seen   TEXT NOT NULL,
+                    hidden      INTEGER NOT NULL DEFAULT 0  -- kept out of recall; still listed
                 );
                 CREATE TABLE IF NOT EXISTS topic_messages (
                     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,7 +114,8 @@ class ConversationTopicsManager:
                     excerpt   TEXT NOT NULL DEFAULT '',
                     msg_id    TEXT NOT NULL DEFAULT '',   -- session message_id (dedup/backfill)
                     ts        TEXT NOT NULL,
-                    speaker   TEXT NOT NULL DEFAULT ''    -- shared-agent member id; '' = owner
+                    speaker   TEXT NOT NULL DEFAULT '',   -- shared-agent member id; '' = owner
+                    session_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_tm_topic ON topic_messages(topic_id, id DESC);
                 CREATE INDEX IF NOT EXISTS idx_tm_msgid ON topic_messages(msg_id);
@@ -124,6 +138,8 @@ class ConversationTopicsManager:
                     PRIMARY KEY (group_id, topic_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_tgm_topic ON topic_group_members(topic_id);
+                -- One-off maintenance markers (e.g. the synthetic-topic sweep ran).
+                CREATE TABLE IF NOT EXISTS topics_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
                 """
             )
             if tm_cols and "msg_id" not in tm_cols:  # migrate pre-existing tables
@@ -136,43 +152,47 @@ class ConversationTopicsManager:
             )
             if t_cols and "starred" not in t_cols:
                 self._c().execute("ALTER TABLE topics ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
+            if t_cols and "hidden" not in t_cols:
+                self._c().execute("ALTER TABLE topics ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+            if tm_cols and "session_id" not in tm_cols:
+                self._c().execute("ALTER TABLE topic_messages ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
             self._c().commit()
 
     # ── reads (used by the tool) ────────────────────────────────────────
 
     def list_topics(self, limit: int = 40, order: str = "recent", group: str = "",
-                    tags: list[str] | None = None) -> list[dict[str, Any]]:
+                    tags: list[str] | None = None, *, include_hidden: bool = False) -> list[dict[str, Any]]:
         # Starred topics always float to the top; within each group, by recency
         # (newest message) or alphabetically. ``group`` and ``tags`` AND together
         # — a topic must be in the group AND carry EVERY active tag (substring
-        # match against its keywords column).
+        # match against its keywords column). Hidden topics are left out unless
+        # asked for (the panel lists everything; recall never sees them).
         secondary = "label COLLATE NOCASE ASC" if order == "alpha" else "last_seen DESC"
-        cols = "t.id, t.label, t.summary, t.keywords, t.msg_count, t.starred, t.first_seen, t.last_seen"
-        tag_terms = [t.strip().lower() for t in (tags or []) if str(t).strip()]
-        tag_where = " AND ".join(["LOWER(t.keywords) LIKE ?"] * len(tag_terms))
-        tag_params = [f"%{t}%" for t in tag_terms]
+        where, params = self._filters(group, tags, include_hidden)
         with self._lock:
-            if group:
-                sql = (
-                    f"SELECT {cols} FROM topics t"
-                    " JOIN topic_group_members m ON m.topic_id = t.id"
-                    " WHERE m.group_id = ?"
-                    + (f" AND {tag_where}" if tag_where else "")
-                    + f" ORDER BY t.starred DESC, {secondary} LIMIT ?"
-                )
-                rows = self._c().execute(
-                    sql, (_slug(group), *tag_params, max(1, min(300, limit))),
-                ).fetchall()
-            else:
-                sql = (
-                    f"SELECT {cols} FROM topics t"
-                    + (f" WHERE {tag_where}" if tag_where else "")
-                    + f" ORDER BY t.starred DESC, {secondary} LIMIT ?"
-                )
-                rows = self._c().execute(
-                    sql, (*tag_params, max(1, min(300, limit))),
-                ).fetchall()
+            rows = self._c().execute(
+                f"SELECT {_LIST_COLS} FROM topics t {where}"
+                f" ORDER BY t.starred DESC, {secondary} LIMIT ?",
+                (*params, max(1, min(300, limit))),
+            ).fetchall()
         return [dict(r) for r in rows]
+
+    @staticmethod
+    def _filters(group: str, tags: list[str] | None,
+                 include_hidden: bool) -> tuple[str, list[Any]]:
+        """JOIN/WHERE clause (on alias ``t``) for the group, tag and hidden filters."""
+        joins, conds, params = "", [], []
+        if group:
+            joins = " JOIN topic_group_members m ON m.topic_id = t.id"
+            conds.append("m.group_id = ?")
+            params.append(_slug(group))
+        for tag in (tags or []):
+            if str(tag).strip():
+                conds.append("LOWER(t.keywords) LIKE ?")
+                params.append(f"%{str(tag).strip().lower()}%")
+        if not include_hidden:
+            conds.append("t.hidden = 0")
+        return joins + (" WHERE " + " AND ".join(conds) if conds else ""), params
 
     def get_topic(self, topic_id: str, *, max_excerpts: int = 40,
                   speaker: str | None = None) -> dict[str, Any] | None:
@@ -188,13 +208,13 @@ class ConversationTopicsManager:
                 return None
             if speaker is None:
                 msgs = self._c().execute(
-                    "SELECT id, role, channel, excerpt, msg_id, ts, speaker FROM topic_messages"
+                    "SELECT id, role, channel, excerpt, msg_id, ts, speaker, session_id FROM topic_messages"
                     " WHERE topic_id = ? ORDER BY id DESC LIMIT ?",
                     (r["id"], max(1, min(200, max_excerpts))),
                 ).fetchall()
             else:
                 msgs = self._c().execute(
-                    "SELECT id, role, channel, excerpt, msg_id, ts, speaker FROM topic_messages"
+                    "SELECT id, role, channel, excerpt, msg_id, ts, speaker, session_id FROM topic_messages"
                     " WHERE topic_id = ? AND speaker = ? ORDER BY id DESC LIMIT ?",
                     (r["id"], str(speaker), max(1, min(200, max_excerpts))),
                 ).fetchall()
@@ -221,54 +241,232 @@ class ConversationTopicsManager:
             return []
 
     def search_topics(self, query: str, limit: int = 10, order: str = "recent",
-                      group: str = "", tags: list[str] | None = None) -> list[dict[str, Any]]:
+                      group: str = "", tags: list[str] | None = None, *,
+                      include_hidden: bool = False, embedder: Any = None) -> list[dict[str, Any]]:
+        """Topics for a typed search: word matches first, by bm25 (every word
+        also matches as a prefix, so "Bise" finds "Biserka"), then plain
+        substring matches of the whole query, then topics that only match in
+        meaning (``related``). ``order="alpha"`` sorts by label, starred first."""
         q = (query or "").strip()
         if not q:
-            return self.list_topics(limit=limit, order=order, group=group, tags=tags)
-        # Substring (LIKE) match over label/summary/keywords — reliable partial
-        # matching ("Bise" → "Biserka…"). Combined with group + tag filters
-        # (AND): a topic must match the text AND be in the group AND carry
-        # every active tag.
-        like = f"%{q}%"
-        secondary = "label COLLATE NOCASE ASC" if order == "alpha" else "last_seen DESC"
-        tag_terms = [t.strip().lower() for t in (tags or []) if str(t).strip()]
-        tag_where = " AND ".join(["LOWER(t.keywords) LIKE ?"] * len(tag_terms))
-        tag_params = [f"%{t}%" for t in tag_terms]
-        cols = "t.id, t.label, t.summary, t.keywords, t.msg_count, t.starred, t.last_seen"
-        text_where = "(t.label LIKE ? OR t.summary LIKE ? OR t.keywords LIKE ?)"
+            return self.list_topics(limit=limit, order=order, group=group, tags=tags,
+                                    include_hidden=include_hidden)
+        n = max(1, min(300, limit))
+        _terms, fts, vec = self.rank_legs(q, group=group, tags=tags, include_hidden=include_hidden,
+                                          embedder=embedder, prefix_all=True)
+        rows = fts[:n]
+        have = {r["id"] for r in rows}
+        if len(rows) < n:
+            like = f"%{q}%"
+            where, params = self._filters(group, tags, include_hidden)
+            text_where = "(t.label LIKE ? OR t.summary LIKE ? OR t.keywords LIKE ?)"
+            where = f"{where} AND {text_where}" if where else f" WHERE {text_where}"
+            with self._lock:
+                extra = self._c().execute(
+                    f"SELECT {_LIST_COLS} FROM topics t {where}"
+                    " ORDER BY t.starred DESC, t.last_seen DESC LIMIT ?",
+                    (*params, like, like, like, n),
+                ).fetchall()
+            for r in extra:
+                if r["id"] not in have and len(rows) < n:
+                    rows.append(dict(r))
+                    have.add(r["id"])
+        for r in vec:
+            if r["id"] not in have and len(rows) < n:
+                rows.append({**r, "related": True})
+                have.add(r["id"])
+        if order == "alpha":
+            rows.sort(key=lambda r: (not r.get("starred"), str(r.get("label") or "").lower()))
+        return rows
+
+    def rank_topics(self, query: str, limit: int = 10, **kwargs: Any) -> list[dict[str, Any]]:
+        """Topics ranked by relevance to *query*: the two legs of
+        ``rank_legs`` fused by reciprocal rank (k=60). Each row carries
+        ``score``, ``bm25`` (lower is better, None when the words missed),
+        ``cosine`` (None without an embedder or below its floor) and
+        ``matched_terms``."""
+        _terms, fts, vec = self.rank_legs(query, **kwargs)
+        fused: dict[str, dict[str, Any]] = {}
+        for rank, row in enumerate(fts):
+            entry = fused.setdefault(row["id"], {**row, "score": 0.0, "cosine": None})
+            entry["score"] += 1.0 / (_RRF_K + rank + 1)
+        for rank, row in enumerate(vec):
+            entry = fused.setdefault(row["id"], {**row, "score": 0.0, "bm25": None})
+            entry["cosine"] = row["cosine"]
+            entry["score"] += 1.0 / (_RRF_K + rank + 1)
+        return sorted(fused.values(), key=lambda r: r["score"], reverse=True)[: max(1, limit)]
+
+    def rank_legs(self, query: str, *, group: str = "", tags: list[str] | None = None,
+                  include_hidden: bool = False, embedder: Any = None, max_terms: int = 8,
+                  prefix_all: bool = False) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+        """(terms, word matches, meaning matches) for *query*.
+
+        Word matches: FTS5 bm25 over ``topics_fts`` (label x3, keywords x2,
+        summary x1) on the query's content words, best first, each with
+        ``bm25``. Meaning matches, when *embedder* (``texts -> normalized
+        vectors``) is given: cosine against cached topic vectors, best first,
+        each with ``cosine``; only those above an absolute floor and within
+        reach of the best one. Rows of both carry ``matched_terms``."""
+        terms = query_terms(query, max_terms=max_terms)
+        where, params = self._filters(group, tags, include_hidden)
+        fts_rows: list[dict[str, Any]] = []
+        if terms:
+            match = " OR ".join(_fts_term(t, prefix_all) for t in terms)
+            cond = "topics_fts MATCH ?"
+            sql_where = f"{where} AND {cond}" if where else f" WHERE {cond}"
+            try:
+                with self._lock:
+                    fts_rows = [dict(r) for r in self._c().execute(
+                        f"SELECT {_LIST_COLS}, bm25(topics_fts, 0.0, 3.0, 1.0, 2.0) AS bm25"
+                        f" FROM topics_fts JOIN topics t ON t.id = topics_fts.id {sql_where}"
+                        " ORDER BY bm25 LIMIT ?",
+                        (*params, match, _CANDIDATES),
+                    ).fetchall()]
+            except sqlite3.Error as exc:
+                log.debug("topic FTS query failed: %s", exc)
+        vec_rows: list[dict[str, Any]] = []
+        if embedder is not None and str(query or "").strip():
+            vec_rows = self._cosine_candidates(query, where, params, embedder)
+        for row in fts_rows + vec_rows:
+            hay = _fold(" ".join(str(row.get(k) or "") for k in ("label", "summary", "keywords")))
+            row["matched_terms"] = [t for t in terms if _stem(_fold(t)) in hay]
+        return terms, fts_rows, vec_rows
+
+    def _cosine_candidates(self, query: str, where: str, params: list[Any],
+                           embedder: Any) -> list[dict[str, Any]]:
+        """Topics by cosine to *query*; topic vectors are cached per text."""
         with self._lock:
-            if group:
-                sql = (
-                    f"SELECT {cols} FROM topics t"
-                    " JOIN topic_group_members m ON m.topic_id = t.id"
-                    f" WHERE m.group_id = ? AND {text_where}"
-                    + (f" AND {tag_where}" if tag_where else "")
-                    + f" ORDER BY t.starred DESC, {secondary} LIMIT ?"
-                )
-                rows = self._c().execute(
-                    sql, (_slug(group), like, like, like, *tag_params, max(1, min(300, limit))),
-                ).fetchall()
-            else:
-                sql = (
-                    f"SELECT {cols} FROM topics t WHERE {text_where}"
-                    + (f" AND {tag_where}" if tag_where else "")
-                    + f" ORDER BY t.starred DESC, {secondary} LIMIT ?"
-                )
-                rows = self._c().execute(
-                    sql, (like, like, like, *tag_params, max(1, min(300, limit))),
-                ).fetchall()
-        return [dict(r) for r in rows]
+            rows = [dict(r) for r in self._c().execute(
+                f"SELECT {_LIST_COLS} FROM topics t {where}", tuple(params),
+            ).fetchall()]
+        if not rows:
+            return []
+        texts = {r["id"]: _topic_text(r) for r in rows}
+        missing = [tid for tid, text in texts.items()
+                   if self._vectors.get(tid, ("", []))[0] != _fingerprint(text)]
+        try:
+            vectors = embedder([str(query)] + [texts[tid] for tid in missing])
+        except Exception as exc:
+            log.debug("topic embedding failed: %s", exc)
+            return []
+        if not vectors or len(vectors) != len(missing) + 1:
+            return []
+        qvec = vectors[0]
+        for tid, vec in zip(missing, vectors[1:]):
+            self._vectors[tid] = (_fingerprint(texts[tid]), vec)
+        scored = []
+        for row in rows:
+            vec = self._vectors.get(row["id"], ("", []))[1]
+            if len(vec) != len(qvec):
+                self._vectors.pop(row["id"], None)   # another provider's vector
+                continue
+            scored.append({**row, "cosine": round(sum(a * b for a, b in zip(qvec, vec)), 4)})
+        scored.sort(key=lambda r: r["cosine"], reverse=True)
+        if not scored:
+            return []
+        floor = max(_COSINE_FLOOR, _COSINE_REACH * scored[0]["cosine"])
+        return [r for r in scored if r["cosine"] >= floor][:_CANDIDATES]
 
     def set_star(self, topic_id: str, starred: bool) -> bool:
+        # Starring a topic also brings it back into recall (the panel's way
+        # to undo a hide).
+        sql = "UPDATE topics SET starred = ?" + (", hidden = 0" if starred else "") + " WHERE id = ?"
         with self._lock:
             conn = self._c()
-            cur = conn.execute("UPDATE topics SET starred = ? WHERE id = ?",
-                               (1 if starred else 0, topic_id))
+            cur = conn.execute(sql, (1 if starred else 0, topic_id))
             if cur.rowcount == 0:
-                cur = conn.execute("UPDATE topics SET starred = ? WHERE id = ?",
-                                   (1 if starred else 0, _slug(topic_id)))
+                cur = conn.execute(sql, (1 if starred else 0, _slug(topic_id)))
             conn.commit()
         return cur.rowcount > 0
+
+    def recent_topics(self, limit: int = 10, *, include_hidden: bool = False) -> list[dict[str, Any]]:
+        """The most recently touched topics, starred or not."""
+        where = "" if include_hidden else " WHERE t.hidden = 0"
+        with self._lock:
+            rows = self._c().execute(
+                f"SELECT {_LIST_COLS} FROM topics t{where} ORDER BY t.last_seen DESC LIMIT ?",
+                (max(1, limit),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_hidden(self, topic_id: str, hidden: bool) -> bool:
+        """Keep a topic out of recall (``topics`` tool, classifier context),
+        or bring it back. The panel still lists it."""
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute("UPDATE topics SET hidden = ? WHERE id = ?",
+                               (1 if hidden else 0, topic_id))
+            if cur.rowcount == 0:
+                cur = conn.execute("UPDATE topics SET hidden = ? WHERE id = ?",
+                                   (1 if hidden else 0, _slug(topic_id)))
+            conn.commit()
+        return cur.rowcount > 0
+
+    def hide_synthetic_topics(self, threshold: float = 0.6) -> list[str]:
+        """Hide topics built mostly from machine text (fleet notices, cron
+        prompts, correctives) filed as the user's messages before ingest was
+        filtered. Starred topics are never hidden. Returns the hidden ids."""
+        from captain_claw import msg_origin
+
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT m.topic_id, m.excerpt FROM topic_messages m JOIN topics t ON t.id = m.topic_id"
+                " WHERE m.role = 'user' AND t.starred = 0 AND t.hidden = 0"
+            ).fetchall()
+        totals: dict[str, list[int]] = {}
+        for row in rows:
+            seen = totals.setdefault(row["topic_id"], [0, 0])
+            seen[0] += 1
+            if msg_origin.detect_literal(row["excerpt"]) is not None:
+                seen[1] += 1
+        ids = [tid for tid, (n, synthetic) in totals.items() if n >= 2 and synthetic / n >= threshold]
+        if ids:
+            with self._lock:
+                conn = self._c()
+                conn.executemany("UPDATE topics SET hidden = ? WHERE id = ?",
+                                 [(_HIDDEN_BY_SWEEP, i) for i in ids])
+                conn.commit()
+        return ids
+
+    def _seen_from_classified_once(self) -> None:
+        """Before the live pass marked what it attempted, only the backfill
+        did; mark everything already classified as attempted, once, so the
+        seen watermark starts where the old pass left off."""
+        try:
+            with self._lock:
+                conn = self._c()
+                if conn.execute("SELECT 1 FROM topics_meta WHERE key = 'seen_from_classified_v1'").fetchone():
+                    return
+                conn.execute(
+                    "INSERT OR IGNORE INTO backfill_seen (msg_id)"
+                    " SELECT DISTINCT msg_id FROM topic_messages WHERE msg_id != ''"
+                )
+                conn.execute("INSERT OR REPLACE INTO topics_meta (key, value) VALUES ('seen_from_classified_v1', ?)",
+                             (_utcnow(),))
+                conn.commit()
+        except Exception as exc:
+            log.debug("seen-marker migration failed: %s", exc)
+
+    def _hide_synthetic_once(self) -> None:
+        """Run the synthetic-topic sweep once per store, so a topic the user
+        brings back stays back."""
+        try:
+            with self._lock:
+                done = self._c().execute(
+                    "SELECT 1 FROM topics_meta WHERE key = 'synthetic_sweep_v1'").fetchone()
+            if done:
+                return
+            hidden = self.hide_synthetic_topics()
+            with self._lock:
+                self._c().execute(
+                    "INSERT OR REPLACE INTO topics_meta (key, value) VALUES ('synthetic_sweep_v1', ?)",
+                    (json.dumps({"at": _utcnow(), "hidden": hidden}),),
+                )
+                self._c().commit()
+            if hidden:
+                log.info("conversation topics: hid %d machine-text topic(s)", len(hidden))
+        except Exception as exc:
+            log.debug("synthetic topic sweep failed: %s", exc)
 
     # ── groups (many-to-many) ───────────────────────────────────────────
 
@@ -347,10 +545,13 @@ class ConversationTopicsManager:
                 if kw:
                     have = [k for k in (existing["keywords"] or "").split(",") if k]
                     merged_kw = ",".join(list(dict.fromkeys(have + kw.split(",")))[:12])
+                # New conversation filed under a topic the machine-text sweep
+                # hid brings it back; a topic the user hid stays hidden.
                 conn.execute(
                     "UPDATE topics SET label = ?, summary = COALESCE(NULLIF(?, ''), summary),"
-                    " keywords = ?, last_seen = ? WHERE id = ?",
-                    (label[:120], summary[:1000], merged_kw, now, tid),
+                    " keywords = ?, last_seen = ?,"
+                    " hidden = CASE WHEN hidden = ? THEN 0 ELSE hidden END WHERE id = ?",
+                    (label[:120], summary[:1000], merged_kw, now, _HIDDEN_BY_SWEEP, tid),
                 )
             else:
                 conn.execute(
@@ -380,12 +581,13 @@ class ConversationTopicsManager:
         now = _utcnow()
         rows = [(topic_id, str(m.get("role") or ""), str(m.get("channel") or ""),
                  str(m.get("excerpt") or "")[:_MAX_EXCERPT_CHARS], str(m.get("msg_id") or ""),
-                 str(m.get("ts") or now), str(m.get("speaker") or "")) for m in messages]
+                 str(m.get("ts") or now), str(m.get("session_id") or ""),
+                 str(m.get("speaker") or "")) for m in messages]
         with self._lock:
             conn = self._c()
             conn.executemany(
-                "INSERT INTO topic_messages (topic_id, role, channel, excerpt, msg_id, ts, speaker)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO topic_messages (topic_id, role, channel, excerpt, msg_id, ts, session_id, speaker)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             conn.execute(
@@ -616,11 +818,12 @@ class ConversationTopicsManager:
         return self.get_topic(target_id, max_excerpts=200)
 
     def prune_topics(self, max_topics: int) -> int:
-        """Drop the least-recently-seen topics beyond ``max_topics``."""
+        """Drop the least-recently-seen topics beyond ``max_topics`` (starred
+        ones are dropped last)."""
         with self._lock:
             conn = self._c()
             stale = conn.execute(
-                "SELECT id FROM topics ORDER BY last_seen DESC LIMIT -1 OFFSET ?",
+                "SELECT id FROM topics ORDER BY starred DESC, last_seen DESC LIMIT -1 OFFSET ?",
                 (max(1, max_topics),),
             ).fetchall()
             ids = [r["id"] for r in stale]
@@ -633,10 +836,95 @@ class ConversationTopicsManager:
             return len(ids)
 
 
-def _fts_query(q: str) -> str:
-    # OR the bare terms so partial matches work; quote to neutralise FTS syntax.
-    terms = [t for t in re.split(r"\s+", q.strip()) if t]
-    return " OR ".join(f'"{t}"' for t in terms) or '""'
+_HIDDEN_BY_SWEEP = 2   # topics.hidden: 1 = the user hid it, 2 = the machine-text sweep did
+
+_LIST_COLS = ("t.id, t.label, t.summary, t.keywords, t.msg_count, t.starred, t.hidden,"
+              " t.first_seen, t.last_seen")
+_CANDIDATES = 50     # per ranking leg, before fusion
+_RRF_K = 60
+# A meaning match counts only above this cosine and within this share of the
+# best one (local model2vec: related topics score 0.4-0.8, unrelated <= 0.2).
+_COSINE_FLOOR = 0.3
+_COSINE_REACH = 0.75
+
+# Function words dropped from search terms (English + Croatian).
+_STOPWORDS = frozenset("""
+the and for are but not you all any can had her was one our out has have him his how its may new now
+old see two who did get got let put say she too use with that this from they will would there their
+what about which when were your been into than then them these those some such only also just like
+more most other over very much many each here where while why after before again because could
+should does doing being both same own off once under until above below between through during
+please thanks thank okay yes hello want need make know think tell give show find look help
+back still really maybe something anything everything going able
+sam smo ste jesam nije nisu bio bila bilo biti ima imam imamo nema samo ali ako ili kao koji koja
+koje kojeg kojem kojim kad kada gdje kako zato zbog što sto tko neki neka neko nešto nesto ovo ovaj
+ova taj ta to tamo ovdje jer još jos već vec sve svi sva svoj svoja moj moja tvoj tvoja naš nas
+vaš vas njih njega njoj nego pa te ni niti treba trebam možeš mozes može moze molim hvala daj
+""".split())
+
+
+def _fold(text: str) -> str:
+    """Lower-case, combining accents removed — what FTS5 unicode61 folds
+    (č→c, š→s; not đ, which has no decomposition)."""
+    decomposed = unicodedata.normalize("NFKD", str(text or "").lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def query_terms(text: str, max_terms: int = 8) -> list[str]:
+    """Content words of *text* for topic search: 3+ letters, no stopwords,
+    no bare short numbers; the longest *max_terms*, in their original order."""
+    seen: dict[str, int] = {}
+    for pos, word in enumerate(re.findall(r"\w+", str(text or "").lower())):
+        word = word.strip("_")
+        if len(word) < 3 or _fold(word) in _STOPWORDS or word in _STOPWORDS:
+            continue
+        if word.isdigit() and len(word) < 4:
+            continue
+        seen.setdefault(word, pos)
+    keep = sorted(seen, key=lambda w: (-len(w), seen[w]))[: max(1, max_terms)]
+    return sorted(keep, key=lambda w: seen[w])
+
+
+def _stem(term: str) -> str:
+    """The prefix a term matches on: long words drop their last two letters
+    (inflection: putovanje/putovanja, invoices/invoice)."""
+    if len(term) < 6:
+        return term
+    return term[: max(5, len(term) - 2)]
+
+
+def _fts_term(term: str, prefix_all: bool) -> str:
+    """A long word matches by its stem as a prefix; with *prefix_all* (typed
+    search) every word does."""
+    stem = _stem(term).replace('"', "")
+    return f'"{stem}"*' if (prefix_all or len(term) >= 6) else f'"{stem}"'
+
+
+def _topic_text(row: dict[str, Any]) -> str:
+    return f"{row.get('label') or ''}. {row.get('summary') or ''} {row.get('keywords') or ''}".strip()
+
+
+def _fingerprint(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def topic_embedder(agent: Any) -> Any:
+    """``texts -> vectors`` from the agent's semantic-memory embedding chain,
+    or None when only the lexical hash fallback is available (it would just
+    repeat the FTS leg)."""
+    chain = getattr(getattr(getattr(agent, "memory", None), "semantic", None), "embedding_chain", None)
+    if chain is None or not getattr(chain, "enabled", False):
+        return None
+    if str(getattr(chain, "active_provider_key", "")).startswith("local_hash"):
+        return None
+
+    def _embed(texts: list[str]) -> list[list[float]]:
+        key, vectors = chain.embed_batch(list(texts))
+        if str(key).startswith("local_hash"):
+            raise RuntimeError("only the lexical fallback answered")
+        return vectors
+
+    return _embed
 
 
 _MANAGER: ConversationTopicsManager | None = None
@@ -660,6 +948,9 @@ def record_narration(agent: Any, text: str) -> None:
     # PR D: a turn that read members' private data narrates nothing into topics.
     from captain_claw import member_privacy
     if member_privacy.private_turn(agent):
+        return
+    from captain_claw.config import get_config
+    if not get_config().conversation_topics.include_narration:
         return
     t = (text or "").strip()
     if not t:
@@ -697,63 +988,144 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _collect_new_messages(agent: Any, last_idx: int, cap: int) -> tuple[list[dict[str, Any]], int]:
-    """Comms messages (user + assistant) since ``last_idx`` + buffered narration.
-    Returns (items, new_last_idx). Skips messages already classified into a topic
-    (mirrors the backfill behaviour) so an agent restart — which resets last_idx
-    to 0 in memory — doesn't re-classify the whole session and duplicate topics."""
-    items: list[dict[str, Any]] = []
-    msgs = agent.session.messages if agent.session else []
-    new_idx = len(msgs)
-    # A shared-agent member instance stamps its member's id on every excerpt
-    # (the owner's are ''), so the topics tool shows a member only theirs.
+def _msg_key(m: dict[str, Any]) -> str:
+    """The id a session message is tracked by (a content hash for rows
+    stored before message ids existed)."""
+    mid = str(m.get("message_id") or "")
+    if mid:
+        return mid
+    raw = f"{m.get('role')}|{m.get('timestamp')}|{str(m.get('content') or '')[:500]}"
+    return "h:" + hashlib.sha1(raw.encode("utf-8", "ignore")).hexdigest()[:20]
+
+
+def _conversation_items(agent: Any, msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """What a topic is made of: messages a person typed, and the final reply
+    of each turn a person opened. Machine text filed as the user's (fleet
+    notices, cron prompts, correctives), mid-turn narration, tool steps,
+    replies to automated turns and members' private data stay out."""
+    from captain_claw import member_privacy, msg_origin
     from captain_claw.speaker import principal_for
 
+    # A shared-agent member instance stamps its member's id on every excerpt
+    # (the owner's are ''), so the topics tool shows a member only theirs.
     _p = principal_for(agent)
     speaker_id = _p.speaker_id if _p is not None else ""
-    try:
-        _mgr = get_topics_manager()
-        done_ids = _mgr.classified_msg_ids() | _mgr.seen_msg_ids()
-    except Exception:
-        done_ids = set()
-    from captain_claw import member_privacy
-
-    for m in msgs[last_idx:]:
-        if member_privacy.is_private(m):
-            continue                     # PR D: members' private data
-        role = m.get("role")
-        if role not in ("user", "assistant"):
+    session_id = str(getattr(getattr(agent, "session", None), "id", "") or "")
+    items: list[dict[str, Any]] = []
+    human_turn, turn_channel = False, ""
+    n = len(msgs)
+    for i, m in enumerate(msgs):
+        role = str(m.get("role") or "")
+        if role == "user":
+            origin = msg_origin.origin_of(m)
+            # A delegated result continues the turn that asked for it: its
+            # relayed answer counts as that person's reply (the result text
+            # itself never does).
+            if origin in msg_origin.USER_OPENER_ORIGINS and origin != "delegated_result":
+                human_turn = origin == "human"
+                turn_channel = str(m.get("channel") or "")
+            if origin != "human" or member_privacy.is_private(m):
+                continue
+            text, kind = msg_origin.model_view_text(m).strip(), "user"
+        elif role == "assistant":
+            if not human_turn or m.get("tool_calls") or msg_origin.origin_of(m) != "model":
+                continue
+            if member_privacy.is_private(m) or not _is_final_reply(msgs, i, n):
+                continue
+            text, kind = str(m.get("content") or "").strip(), "agent"
+        else:
             continue
-        content = str(m.get("content") or "").strip()
-        if not content:
+        if not text:
             continue
-        mid = str(m.get("message_id") or "")
-        if mid and mid in done_ids:
-            continue  # already classified into a topic — don't duplicate
         items.append({
-            "role": "user" if role == "user" else "agent",
-            "channel": str((m.get("metadata") or {}).get("channel") or "") if isinstance(m.get("metadata"), dict) else "",
-            "excerpt": content[:_MAX_EXCERPT_CHARS],
-            "msg_id": mid,
+            "role": kind,
+            "channel": turn_channel,
+            "excerpt": text[:_MAX_EXCERPT_CHARS],
+            "msg_id": _msg_key(m),
             "ts": str(m.get("timestamp") or _utcnow()),
             "speaker": speaker_id,
+            "session_id": session_id,
         })
-    # Narration buffered this window (cleared after).
+    return items
+
+
+def _is_text_reply(m: dict[str, Any]) -> bool:
+    from captain_claw import msg_origin
+
+    return (
+        m.get("role") == "assistant"
+        and not m.get("tool_calls")
+        and msg_origin.origin_of(m) == "model"
+        and bool(str(m.get("content") or "").strip())
+    )
+
+
+def _is_final_reply(msgs: list[dict[str, Any]], i: int, n: int) -> bool:
+    """The assistant message at *i* is its turn's last reply: no later text
+    reply from the model comes before the next turn opener. Tool rows
+    (delivery notes, TTS, cron notes), correctives and fleet notices in
+    between don't count."""
+    from captain_claw import msg_origin
+
+    for j in range(i + 1, n):
+        m = msgs[j]
+        if m.get("role") == "user" and msg_origin.is_turn_opener(m):
+            return True
+        if _is_text_reply(m):
+            return False
+    return True
+
+
+def _pending_items(agent: Any, cap: int = 0, start: int = 0) -> list[dict[str, Any]]:
+    """Conversation items not yet in a topic, oldest first, at most *cap*
+    (0 = all).
+
+    Progress lives in the store, not in memory: everything after the newest
+    item already classified or attempted is pending, so a restart or a
+    compaction neither re-reads the session nor stalls the pass. A session
+    with no classified item yet starts from its newest *cap* items; older
+    history is the backfill's job."""
+    msgs = list(agent.session.messages) if agent.session else []
+    try:
+        _mgr = get_topics_manager()
+        seen_ids = _mgr.seen_msg_ids()
+        done_ids = _mgr.classified_msg_ids() | seen_ids
+    except Exception:
+        seen_ids, done_ids = set(), set()
+    convo = _conversation_items(agent, msgs[max(0, start):])
+    # The watermark is what a pass attempted (seen); a turn filed by hand
+    # (Topic chat's append) is skipped but doesn't move it past the rest.
+    watermark = max((k for k, it in enumerate(convo) if it["msg_id"] in seen_ids), default=-1)
+    pending = [it for it in convo[watermark + 1:] if it["msg_id"] not in done_ids]
+    if cap and len(pending) > cap:
+        pending = pending[:cap] if watermark >= 0 else pending[-cap:]
+    return pending
+
+
+def _collect_new_messages(agent: Any, last_idx: int = 0, cap: int = 0) -> tuple[list[dict[str, Any]], int]:
+    """The pending conversation items (see ``_pending_items``) plus the
+    narration buffered since the last pass when ``include_narration`` is on
+    (the buffer is drained). Returns (items, len(messages))."""
     from captain_claw.config import get_config
+    from captain_claw.speaker import principal_for
+
+    items = _pending_items(agent, cap, last_idx)
     if get_config().conversation_topics.include_narration:
-        buf = getattr(agent, _ATTR_NARRATION, None) or []
-        for t in buf:
+        _p = principal_for(agent)
+        speaker_id = _p.speaker_id if _p is not None else ""
+        for t in getattr(agent, _ATTR_NARRATION, None) or []:
+            if cap and len(items) >= cap:
+                break
             items.append({"role": "narration", "channel": "", "excerpt": t[:_MAX_EXCERPT_CHARS],
                           "ts": _utcnow(), "speaker": speaker_id})
         setattr(agent, _ATTR_NARRATION, [])
-    if len(items) > cap:
-        items = items[-cap:]
-    return items, new_idx
+    return items, len(agent.session.messages) if agent.session else 0
 
 
 async def maybe_classify_topics(agent: Any) -> int | None:
-    """Run a topic-classification pass if due (every N comms messages). Mirrors
-    maybe_dream's guards. Never raises. Returns the number of topics touched."""
+    """Run a topic-classification pass when enough new conversation has
+    built up (``interval_messages`` items) and the cooldown has passed.
+    Mirrors maybe_dream's guards. Never raises. Returns topics touched."""
     try:
         from captain_claw.config import get_config
         cfg = get_config()
@@ -769,8 +1141,7 @@ async def maybe_classify_topics(agent: Any) -> int | None:
         last_time = getattr(agent, _ATTR_LAST_TIME, 0.0)
         if time.time() - last_time < (tc.cooldown_seconds or 120):
             return None
-        last_idx = getattr(agent, _ATTR_LAST_MSG_IDX, 0)
-        if len(agent.session.messages) - last_idx < (tc.interval_messages or 15):
+        if len(_pending_items(agent)) < max(1, int(tc.interval_messages or 6)):
             return None
         setattr(agent, _ATTR_RUNNING, True)
         try:
@@ -786,16 +1157,22 @@ async def maybe_classify_topics(agent: Any) -> int | None:
 
 
 async def classify_topics(agent: Any) -> int | None:
+    """Classify the pending conversation now: up to ``_CHUNKS_PER_PASS``
+    batches of ``max_messages_per_pass``, oldest first, each marked attempted
+    once stored so the next pass moves on."""
     from captain_claw.config import get_config
 
     tc = get_config().conversation_topics
-    last_idx = getattr(agent, _ATTR_LAST_MSG_IDX, 0)
-    items, new_idx = _collect_new_messages(agent, last_idx, tc.max_messages_per_pass)
+    per = max(5, int(tc.max_messages_per_pass))
+    items, _ = _collect_new_messages(agent, 0, per * _CHUNKS_PER_PASS)
     if not items:
-        setattr(agent, _ATTR_LAST_MSG_IDX, new_idx)
         return 0
-    touched = await _classify_and_store(agent, items)
-    setattr(agent, _ATTR_LAST_MSG_IDX, new_idx)
+    mgr = get_topics_manager()
+    touched = 0
+    for start in range(0, len(items), per):
+        chunk = items[start:start + per]
+        touched += await _classify_and_store(agent, chunk)
+        mgr.mark_seen([str(it.get("msg_id") or "") for it in chunk])
     log.info("conversation topics: %d topic(s) touched from %d message(s)", touched, len(items))
     return touched
 
@@ -808,12 +1185,15 @@ async def _classify_and_store(agent: Any, items: list[dict[str, Any]]) -> int:
 
     tc = get_config().conversation_topics
     mgr = get_topics_manager()
-    # Show the classifier ALL current topics (most-recent first) so it reuses an
-    # existing one instead of minting a near-duplicate. The prompt instructs it to
-    # copy a matching label verbatim; upsert_topic then dedups by slug.
-    existing = mgr.list_topics(limit=300)
-    existing_block = "\n".join(f"- {t['label']}: {t['summary'][:160]}" for t in existing) or "(none yet)"
+    # The classifier sees the existing topics most relevant to this batch plus
+    # the most recent ones, with whole summaries, so it reuses a topic instead
+    # of minting a near-duplicate (the prompt asks it to copy a matching label
+    # verbatim; upsert_topic then dedups by slug).
     batch_block = "\n".join(f"[{i}] ({it['role']}) {it['excerpt'][:300]}" for i, it in enumerate(items))
+    existing = await _classifier_topics(agent, mgr, " ".join(it["excerpt"][:300] for it in items))
+    existing_block = "\n".join(
+        f"- {t['label']}: {str(t.get('summary') or '')[:_CLASSIFIER_SUMMARY_CHARS]}" for t in existing
+    ) or "(none yet)"
     user_prompt = f"EXISTING topics:\n{existing_block}\n\nNEW messages:\n{batch_block}"
 
     response = await agent._complete_with_guards(
@@ -856,20 +1236,45 @@ async def _classify_and_store(agent: Any, items: list[dict[str, Any]]) -> int:
     return touched
 
 
+async def _classifier_topics(agent: Any, mgr: ConversationTopicsManager,
+                             batch_text: str) -> list[dict[str, Any]]:
+    """Existing topics shown to the classifier: the ``_CLASSIFIER_RELEVANT``
+    best matches for the batch, then the ``_CLASSIFIER_RECENT`` most recent
+    not already listed. Hidden topics are left out."""
+    import asyncio
+
+    embedder = topic_embedder(agent)
+    try:
+        relevant = await asyncio.to_thread(
+            mgr.rank_topics, batch_text, _CLASSIFIER_RELEVANT,
+            embedder=embedder, max_terms=_CLASSIFIER_TERMS,
+        )
+    except Exception as exc:
+        log.debug("topic ranking for the classifier failed: %s", exc)
+        relevant = []
+    have = {t["id"] for t in relevant}
+    recent = [t for t in mgr.recent_topics(_CLASSIFIER_RECENT + len(have)) if t["id"] not in have]
+    return relevant + recent[:_CLASSIFIER_RECENT]
+
+
 def refresh_topic(agent: Any, topic_id: str) -> dict[str, Any]:
     """Re-pull the FULL text for a topic's messages from the live session (by
     msg_id) and update the stored excerpts — fixes topics captured under an older
-    truncation cap. Messages no longer in the session keep their stored text."""
+    truncation cap. Messages no longer in the session keep their stored text.
+    The text follows the ingest rules (no surface rules block on user rows)."""
     mgr = get_topics_manager()
     session_map: dict[str, str] = {}
     if agent.session and agent.session.messages:
-        from captain_claw import member_privacy
+        from captain_claw import member_privacy, msg_origin
 
         for m in agent.session.messages:
             if member_privacy.is_private(m):
                 continue                 # PR D: members' private data
             mid = str(m.get("message_id") or "")
-            content = str(m.get("content") or "")
+            if m.get("role") == "user":
+                content = msg_origin.model_view_text(m).strip()
+            else:
+                content = str(m.get("content") or "")
             if mid and content:
                 session_map[mid] = content
     updated = mgr.refresh_excerpts(topic_id, session_map)
@@ -893,29 +1298,17 @@ async def backfill_topics(agent: Any, hours: int = 0) -> dict[str, Any]:
     # classifier puts in no topic still counts as processed and isn't reprocessed).
     done_ids = mgr.classified_msg_ids() | mgr.seen_msg_ids()
 
-    from captain_claw import member_privacy
-
     pending: list[dict[str, Any]] = []
-    for m in agent.session.messages:
-        if member_privacy.is_private(m):
-            continue                     # PR D: members' private data
-        if m.get("role") not in ("user", "assistant"):
+    for item in _conversation_items(agent, list(agent.session.messages)):
+        if item["msg_id"] in done_ids:
             continue
-        content = str(m.get("content") or "").strip()
-        mid = str(m.get("message_id") or "")
-        if not content or (mid and mid in done_ids):
-            continue
-        ts_raw = str(m.get("timestamp") or "")
         if cutoff is not None:
             try:
-                if datetime.fromisoformat(ts_raw) < cutoff:
+                if datetime.fromisoformat(item["ts"]) < cutoff:
                     continue
             except (ValueError, TypeError):
                 pass
-        pending.append({
-            "role": "user" if m.get("role") == "user" else "agent",
-            "channel": "", "excerpt": content[:_MAX_EXCERPT_CHARS], "msg_id": mid, "ts": ts_raw or _utcnow(),
-        })
+        pending.append(item)
 
     if not pending:
         return {"ok": True, "classified": 0, "topics_touched": 0, "remaining": 0}

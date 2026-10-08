@@ -5,9 +5,10 @@ The agent uses this to pull a whole thread's context at once ("the Munich trip",
 built automatically by the periodic classifier in conversation_topics.py.
 """
 
+import asyncio
 from typing import Any
 
-from captain_claw.conversation_topics import get_topics_manager
+from captain_claw.conversation_topics import get_topics_manager, topic_embedder
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
@@ -63,7 +64,12 @@ class TopicsTool(Tool):
                 return ToolResult(success=True, content=_fmt_overview(
                     rows, "Recent topics", show_counts=p is None))
             if action == "search":
-                rows = mgr.search_topics(query or "", limit=n)
+                # Ranked (FTS + embedding when available); off the event loop,
+                # since a first search may embed every topic once.
+                rows = await asyncio.to_thread(
+                    mgr.search_topics, query or "", n,
+                    embedder=topic_embedder(kwargs.get("_agent")),
+                )
                 return ToolResult(success=True, content=_fmt_overview(
                     rows, f"Topics matching {query!r}", show_counts=p is None))
             if action == "get":

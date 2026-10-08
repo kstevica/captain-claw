@@ -388,6 +388,15 @@ async def run_prompt_in_active_session(
                 except Exception as ns_err:
                     log.debug("Next steps extraction failed", error=str(ns_err))
 
+            # Topic classification from this channel's turn end too (background;
+            # not for cron runs or FD workers — same skips as the web chat).
+            if not cron_job_id and not _is_fd_spawned_worker():
+                try:
+                    from captain_claw.conversation_topics import maybe_classify_topics
+                    asyncio.create_task(maybe_classify_topics(agent))
+                except Exception:
+                    pass
+
             ctx.last_exec_seconds = time.perf_counter() - started
             ctx.last_completed_at = datetime.now()
             ui.set_runtime_status("waiting")

@@ -1811,6 +1811,10 @@ class WebServer:
         from captain_claw.web.rest_topics import star
         return await star(self, request)
 
+    async def _topics_hide(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_topics import hide
+        return await hide(self, request)
+
     async def _topics_unclassify(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_topics import unclassify
         return await unclassify(self, request)
@@ -3179,6 +3183,7 @@ class WebServer:
         app.router.add_post("/api/topics/reset", self._topics_reset)
         app.router.add_post("/api/topics/{topic_id}/refresh", self._topics_refresh)
         app.router.add_post("/api/topics/{topic_id}/star", self._topics_star)
+        app.router.add_post("/api/topics/{topic_id}/hide", self._topics_hide)
         app.router.add_post("/api/topics/{topic_id}/unclassify", self._topics_unclassify)
         app.router.add_post("/api/topic-message/{message_id}/move", self._topic_message_move)
         app.router.add_post("/api/topics/{topic_id}/groups", self._topics_set_groups)

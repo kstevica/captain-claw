@@ -1,6 +1,6 @@
 # Context engine — what each LLM call sees, and why
 
-**Status:** P0 and P1 implemented on `fix/context-placement-weak-models` (2026-10-08, uncommitted). P2–P6 not started.
+**Status:** P0, P1 (365b39c4), P4 (4e72f8e2) and P2 implemented on `fix/context-placement-weak-models` (2026-10-08). P3, P5, P6 next.
 **Origin:** weak models (Haiku, DeepSeek V4 Flash, GPT-6 Luna, GLM flash) behave well in a fresh
 session and degrade once it is crowded: truncated answers, echoed notes, "stupid" replies.
 The fixes already on `fix/context-placement-weak-models` (context notes moved into one block on the
@@ -105,6 +105,20 @@ every frame; the surface rules ride only on that surface's turns.
 
 ## P2 — topic store repair and ranked search
 
+**Done.** A topic is now made of what people typed and the final reply of each turn they
+opened; progress lives in the store (everything after the newest classified or attempted
+message is pending), so restarts and compaction neither re-read the session nor stall the pass.
+`rank_legs` / `rank_topics` / `search_topics` rank with FTS5 bm25 (long words by stem) plus an
+optional embedding leg with a floor (local model2vec: related topics score 0.4–0.8, unrelated
+≤ 0.2); typed search lists word matches, then substrings, then meaning-only matches. The
+classifier sees every content word of its batch against the topics, the 15 most relevant and
+the 10 most recent topics with whole summaries. Topics built mostly from machine text are
+hidden once per store (still listed in the panel; starring one, new conversation filed under
+it, or `POST /api/topics/{id}/hide` brings it back). Narration is off by default
+(`include_narration`), and `interval_messages` (now 6) counts conversation messages. CLI-mode
+turns (terminal and remote platforms on the main agent) run the pass too; the web server's
+per-user Telegram agents don't, since the store is the owner's.
+
 - Ingest only `origin=human` user messages and final assistant replies (no narration duplicates,
   no fleet/cron/nudge text: 59% of user excerpts today).
 - Message-id watermark instead of an in-memory index (it stalls after compaction); page through the
@@ -133,6 +147,15 @@ every frame; the surface rules ride only on that surface's turns.
   turns). One line in the system prompt.
 
 ## P4 — accurate accounting within the tier budget (audit item 4, reshaped)
+
+**Done.** History budget = tier window − system prompt − the tool schemas measured on the
+previous call. Earlier turns' `reasoning_content` is counted wherever the provider sends it
+back (LiteLLM, non-Anthropic — DeepSeek's thinking mode requires it), and nowhere else.
+Compaction triggers on what the next turn would send (old tool output and hidden synthetic rows
+weigh nothing), plus a storage guard at 4× the window. A text answer stopped by the output
+limit or a broken stream is continued up to twice and joined at a clean seam; a reasoning tail
+is re-asked, not continued; a cut-off compaction summary is retried once with more room.
+`context.tool_result_max_chars` (0 = off) caps tool results.
 
 - Tool schemas and `reasoning_content` are subtracted from the history budget, so the tier's
   window is what is actually sent.
