@@ -13,6 +13,10 @@ from captain_claw.session import Session
 
 log = get_logger(__name__)
 
+# Compaction also runs when everything stored (old tool output included)
+# passes this many times the context budget, even if little of it is sent.
+_STORAGE_COMPACTION_FACTOR = 4
+
 
 class AgentSessionMixin:
     """Session token accounting, compaction, and runtime flag sync."""
@@ -77,26 +81,116 @@ class AgentSessionMixin:
         return self._ensure_message_token_count(msg)
 
     def _session_token_count(self, messages: list[dict[str, Any]] | None = None) -> int:
-        """Count the tokens compaction weighs for session messages."""
+        """What the session's history costs as the next turn would send it."""
         source = messages if messages is not None else (self.session.messages if self.session else [])
-        total = 0
-        for msg in source:
-            total += self._compaction_token_count(msg)
-        return total
+        return self._history_send_weight(source)
 
-    def _compaction_token_count(self, msg: dict[str, Any]) -> int:
-        """A message's weight for the compaction threshold and keep window.
-
-        Monitor/debug echoes and other rows the model never sees weigh
-        nothing — counting them fired compaction on phantom tokens (half of a
-        stored session) and summarised real conversation away. A thinking
-        model's replayed reasoning is not part of ``token_count``.
-        """
+    def _stored_token_count(self, messages: list[dict[str, Any]]) -> int:
+        """Everything stored that the model could see (incl. old tool output)."""
         from captain_claw.msg_origin import is_model_hidden_tool
 
-        if is_model_hidden_tool(msg):
-            return 0
-        return self._ensure_message_token_count(msg)
+        return sum(
+            self._ensure_message_token_count(msg) for msg in messages
+            if not is_model_hidden_tool(msg)
+        )
+
+    def _content_token_count(self, msg: dict[str, Any]) -> int:
+        """Tokens of a message's text alone (tool-call arguments are dropped
+        once the turn is over)."""
+        if not msg.get("tool_calls"):
+            return self._ensure_message_token_count(msg)
+        content = str(msg.get("content", "") or "")
+        return self._count_tokens(content) if content.strip() else 0
+
+    def _history_send_weight(self, messages: list[dict[str, Any]]) -> int:
+        """The tokens ``messages`` cost when replayed as earlier turns'
+        history (see ``_send_weights``)."""
+        return sum(self._send_weights(messages))
+
+    def _send_weights(self, messages: list[dict[str, Any]]) -> list[int]:
+        """Each message's share of what ``messages`` cost when replayed as
+        earlier turns' history, following _build_messages: hidden synthetic
+        rows and tool output weigh nothing, tool-call-only steps vanish,
+        earlier openers lose their surface rules / stale clock, and a run of
+        assistant messages carries its last reasoning once (on the message
+        that has it)."""
+        weights = [0] * len(messages)
+        if not messages:
+            return weights
+        from captain_claw import msg_origin
+
+        hidden: set[int] = set()
+        provenance = getattr(self, "_provenance_hidden_messages", None)
+        if callable(provenance):
+            try:
+                hidden, _events = provenance(messages, len(messages))
+            except Exception:
+                hidden = set()
+        last_opener = max(
+            (i for i, m in enumerate(messages) if msg_origin.is_turn_opener(m)), default=-1,
+        )
+        replays = self._replays_reasoning()
+        run_reasoning: tuple[int, int] | None = None     # (index, tokens)
+        for idx, msg in enumerate(messages):
+            role = str(msg.get("role", "")).strip().lower()
+            if idx in hidden or msg_origin.is_model_hidden_tool(msg) or role not in ("user", "assistant"):
+                continue
+            if role == "user":
+                if run_reasoning:
+                    weights[run_reasoning[0]] += run_reasoning[1]
+                run_reasoning = None
+                stored = self._ensure_message_token_count(msg)
+                if idx != last_opener:
+                    view = msg_origin.model_view_text(msg)
+                    if view != str(msg.get("content", "") or ""):
+                        stored = self._count_tokens(view)
+                weights[idx] = stored
+                continue
+            content_tokens = self._content_token_count(msg)
+            if not content_tokens:
+                continue                         # a stripped tool-call step
+            weights[idx] = content_tokens
+            if replays:
+                reasoning = self._ensure_reasoning_token_count(msg)
+                if reasoning:
+                    run_reasoning = (idx, reasoning)   # a merged run keeps its last
+        if run_reasoning:
+            weights[run_reasoning[0]] += run_reasoning[1]
+        return weights
+
+    def _history_budget_estimate(self) -> int:
+        """The history budget the last request had (tier window less the
+        system prompt and tool schemas), else the tier window."""
+        max_tokens = max(1, int(get_config().context.max_tokens))
+        window = getattr(self, "last_context_window", None)
+        budget = int(window.get("history_budget_tokens") or 0) if isinstance(window, dict) else 0
+        return budget if 0 < budget <= max_tokens else max_tokens
+
+    def _replays_reasoning(self) -> bool:
+        """Whether this agent's provider carries ``reasoning_content`` on
+        replayed assistant messages into the model's context. Known for
+        DeepSeek (its thinking mode requires it on every later request once
+        tools are in use) and Gemini (LiteLLM sends it as thought parts);
+        anything else is not counted."""
+        try:
+            from captain_claw.llm import LiteLLMProvider
+
+            provider = getattr(self, "provider", None)
+            if not isinstance(provider, LiteLLMProvider):
+                return False
+            name = str(getattr(provider, "provider", "") or "").strip().lower()
+            model = str(getattr(provider, "model", "") or "").strip().lower()
+            return name in ("deepseek", "gemini") or "deepseek" in model
+        except Exception:
+            return False
+
+    def _wire_token_count(self, msg: dict[str, Any]) -> int:
+        """Tokens a stored message costs as sent: content and tool-call
+        arguments, plus replayed reasoning where the provider carries it."""
+        tokens = self._ensure_message_token_count(msg)
+        if self._replays_reasoning():
+            tokens += self._ensure_reasoning_token_count(msg)
+        return tokens
 
     @staticmethod
     def _compact_role(role: str) -> str:
@@ -180,9 +274,25 @@ class AgentSessionMixin:
                 interaction_label="compaction_summary",
                 max_tokens=max_tokens,
             )
+            # A thinking model can spend the cap on reasoning and stop mid
+            # summary, or the stream can break; the summary replaces the old
+            # history, so a cut-off one is retried once, with room to finish.
+            _reason = str(getattr(response, "finish_reason", "") or "").lower()
+            if _reason in ("length", "max_tokens", "interrupted"):
+                larger = min(4 * max_tokens, max(max_tokens, int(get_config().model.max_tokens)))
+                if larger > max_tokens or _reason == "interrupted":
+                    response = await self._complete_with_guards(
+                        messages=rewrite_messages,
+                        tools=None,
+                        interaction_label="compaction_summary",
+                        max_tokens=larger,
+                    )
             summary = (response.content or "").strip()
-            if summary:
+            if summary and str(getattr(response, "finish_reason", "") or "").lower() not in ("length", "max_tokens", "interrupted"):
                 return summary
+            if summary:
+                log.warning("Compaction summary was cut off; using it with the fallback appended")
+                return summary + "\n\n" + self._fallback_compaction_summary(messages)
         except Exception as e:
             log.warning("Compaction summarization failed, using fallback", error=str(e))
         return self._fallback_compaction_summary(messages)
@@ -338,25 +448,48 @@ class AgentSessionMixin:
             return False, {"reason": "too_few_messages", "message_count": len(messages)}
 
         max_tokens = max(1, int(cfg.context.max_tokens))
-        threshold_tokens = max(1, int(max_tokens * float(cfg.context.compaction_threshold)))
+        # Measured against the room history really has (the system prompt
+        # and tool schemas come off the tier window first), or history would
+        # be trimmed out of the prompt without ever being summarised.
+        history_budget = self._history_budget_estimate()
+        threshold_tokens = max(1, int(history_budget * float(cfg.context.compaction_threshold)))
+        # What the next request would actually carry as history — and, as a
+        # guard on storage, everything stored (old tool output can pile up
+        # far past what is ever sent).
         total_tokens = self._session_token_count(messages)
-        if not force and total_tokens <= threshold_tokens:
+        stored_tokens = self._stored_token_count(messages)
+        storage_limit = _STORAGE_COMPACTION_FACTOR * max_tokens
+        if not force and total_tokens <= threshold_tokens and stored_tokens <= storage_limit:
             return False, {
                 "reason": "below_threshold",
                 "total_tokens": total_tokens,
+                "stored_tokens": stored_tokens,
                 "threshold_tokens": threshold_tokens,
             }
 
         ratio = float(cfg.context.compaction_ratio)
         ratio = min(max(ratio, 0.05), 0.95)
-        target_recent_tokens = max(1, int(max_tokens * ratio))
+        target_recent_tokens = max(1, int(history_budget * ratio))
 
         max_keep_if_compacting = max(1, len(messages) - 1)
         min_keep_messages = min(4, max_keep_if_compacting)
         keep_count = 0
         kept_tokens = 0
-        for msg in reversed(messages):
-            token_count = self._compaction_token_count(msg)
+        # Compacting for storage — or forced (a /compact, an orphan_fix that
+        # must fold broken tool pairs away): the kept tail is measured by what
+        # it stores (tool output included), or little would be folded away.
+        from captain_claw.msg_origin import is_model_hidden_tool
+
+        storage_triggered = force or (
+            total_tokens <= threshold_tokens and stored_tokens > storage_limit
+        )
+        send_weights = [] if storage_triggered else self._send_weights(messages)
+        for pos in range(len(messages) - 1, -1, -1):
+            msg = messages[pos]
+            if storage_triggered:
+                token_count = 0 if is_model_hidden_tool(msg) else self._ensure_message_token_count(msg)
+            else:
+                token_count = send_weights[pos]
             if keep_count < min_keep_messages or kept_tokens + token_count <= target_recent_tokens:
                 keep_count += 1
                 kept_tokens += token_count
@@ -421,6 +554,11 @@ class AgentSessionMixin:
         setattr(self, member_privacy.CARRY_ATTR, None)
 
         after_tokens = self._session_token_count(self.session.messages)
+        if storage_triggered:
+            # Folded tool output is what shrank: report stored sizes, or a
+            # /compact could read as growth (a summary outweighs terse text).
+            total_tokens = stored_tokens
+            after_tokens = self._stored_token_count(self.session.messages)
         compact_meta = self.session.metadata.setdefault("compaction", {})
         compact_meta["count"] = int(compact_meta.get("count", 0)) + 1
         compact_meta[f"{trigger}_count"] = int(compact_meta.get(f"{trigger}_count", 0)) + 1
@@ -470,17 +608,17 @@ class AgentSessionMixin:
             return snapshot, {"reason": "too_few_messages", "message_count": len(snapshot)}
 
         cfg = get_config()
-        max_tokens = max(1, int(cfg.context.max_tokens))
         ratio = float(cfg.context.compaction_ratio)
         ratio = min(max(ratio, 0.05), 0.95)
-        target_recent_tokens = max(1, int(max_tokens * ratio))
+        target_recent_tokens = max(1, int(self._history_budget_estimate() * ratio))
 
         max_keep_if_compacting = max(1, len(snapshot) - 1)
         min_keep_messages = min(4, max_keep_if_compacting)
         keep_count = 0
         kept_tokens = 0
-        for msg in reversed(snapshot):
-            token_count = self._compaction_token_count(msg)
+        send_weights = self._send_weights(snapshot)
+        for pos in range(len(snapshot) - 1, -1, -1):
+            token_count = send_weights[pos]
             if keep_count < min_keep_messages or kept_tokens + token_count <= target_recent_tokens:
                 keep_count += 1
                 kept_tokens += token_count

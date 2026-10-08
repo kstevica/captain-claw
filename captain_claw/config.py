@@ -82,6 +82,9 @@ class ContextConfig(BaseModel):
     chunked_processing: ChunkedProcessingConfig = Field(
         default_factory=ChunkedProcessingConfig,
     )
+    # Cap (chars) on a single tool result kept in the session and sent to the
+    # model; 0 = no cap. Off by default: the tier's window decides.
+    tool_result_max_chars: int = 0
 
 
 class MemoryEmbeddingsConfig(BaseModel):

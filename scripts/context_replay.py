@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from captain_claw.agent import Agent  # noqa: E402
 from captain_claw.config import get_config, set_config  # noqa: E402
-from captain_claw.llm import LLMProvider, LLMResponse  # noqa: E402
+from captain_claw.llm import LiteLLMProvider, LLMResponse  # noqa: E402
 from captain_claw.session import Session  # noqa: E402
 
 try:
@@ -49,9 +49,12 @@ except Exception:  # pragma: no cover - fallback when tiktoken is absent
         return max(1, len(text or "") // 4)
 
 
-class _StubProvider(LLMProvider):
-    provider = "openai"
-    model = "replay-stub"
+class _StubProvider(LiteLLMProvider):
+    """Never calls out. A DeepSeek LiteLLM provider, like production:
+    replayed reasoning is part of what is sent."""
+
+    def __init__(self) -> None:
+        super().__init__(provider="deepseek", model="deepseek-replay-stub", api_key="replay")
 
     async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
         return LLMResponse(content="")

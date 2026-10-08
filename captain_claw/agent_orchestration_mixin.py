@@ -271,6 +271,60 @@ _STALL_FIRST_LINE_RE = _re.compile(
 # convert most weak-model stalls into a useful turn without driving an
 # infinite re-roll loop when the model genuinely has nothing to add.
 MAX_STALL_RETRIES = 2
+
+# Finish reasons that mean a text answer stopped before it was done: the
+# output limit, or a stream that broke mid-generation (set by the LiteLLM
+# stream collector). Such an answer is continued, up to this many times.
+_CUT_OFF_FINISH_REASONS = frozenset({"length", "max_tokens", "interrupted"})
+MAX_ANSWER_CONTINUATIONS = 2
+_CONTINUE_CUT_OFF_INSTRUCTION = (
+    "Your previous reply was cut off before it was finished. Continue exactly where "
+    "it stopped — do not repeat anything already written, and add no preamble."
+)
+# A thinking model that spent the whole output limit on reasoning: the
+# provider hands back the reasoning's last paragraph as content, which is
+# not an answer to continue.
+_ANSWER_AFTER_THINKING_INSTRUCTION = (
+    "Your last reply ran out of room while you were still thinking, before any answer. "
+    "Write the answer now, and keep your thinking short."
+)
+# A continuation that opens a new markdown block starts on its own line.
+_BLOCK_START_RE = _re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\||```|>\s)")
+
+
+def _join_cut_off(parts: list[str]) -> str:
+    """Join the pieces of a continued answer. Providers strip a reply's
+    leading whitespace, so the seam gets a space between words, a newline
+    before a new markdown block, and loses any words the model repeated."""
+    out = ""
+    for part in parts:
+        part = str(part or "")
+        if not out or not part:
+            out = out or part
+            continue
+        for k in range(min(len(out), len(part), 400), 11, -1):
+            if out.endswith(part[:k]):
+                part = part[k:]
+                break
+        if not part:
+            continue
+        if out[-1].isspace() or part[0].isspace():
+            out += part
+        elif _BLOCK_START_RE.match(part):
+            out += "\n" + part
+        elif (out[-1].isalnum() or out[-1] in ".,;:!?)]") and (part[0].isalnum() or part[0] in "(["):
+            out += " " + part
+        else:
+            out += part
+    return out
+
+
+def _content_is_reasoning_tail(response: Any) -> bool:
+    """The reply's text is the provider's recovery from reasoning_content (a
+    model that never got to its answer), not an answer."""
+    reasoning = str(getattr(response, "reasoning_content", "") or "")
+    content = str(getattr(response, "content", "") or "").strip()
+    return bool(reasoning and content) and content in reasoning
 # Length budget for the stall check. Real stalls are terse single
 # sentences ("Let me look that up.", ~25 chars). Anything longer is
 # only treated as a stall if it has no substantive follow-through
@@ -960,6 +1014,12 @@ class AgentOrchestrationMixin:
         task_contract: dict[str, Any] | None = None
         completion_requirements: list[dict[str, Any]] = []
         completion_feedback: str = ""
+        # A text answer cut off by the output limit (or a broken stream) is
+        # continued, and the parts joined, instead of shipped half-done. The
+        # parts are joined only onto the reply that answers the continuation.
+        _answer_parts: list[str] = []
+        _answer_continuations = 0
+        _continue_answer_next = False
 
         def _restore_skill_env_once() -> None:
             nonlocal skill_env_restored
@@ -996,6 +1056,9 @@ class AgentOrchestrationMixin:
             """
             if not self.session:
                 return ""
+            # 0. An answer cut off mid-continuation: its joined parts.
+            if _answer_parts:
+                return _join_cut_off(_answer_parts)
             turn_msgs = self.session.messages[turn_start_idx:]
 
             # 1. Look for a substantial assistant response (likely a real answer).
@@ -1579,6 +1642,7 @@ class AgentOrchestrationMixin:
         _plan_leak_nudged = False
 
         for iteration in range(hard_turn_iterations):
+            _continuing_answer, _continue_answer_next = _continue_answer_next, False
             # ── External cancellation check ───────────────────────
             cancel_ev: asyncio.Event | None = getattr(self, "cancel_event", None)
             if cancel_ev is not None and cancel_ev.is_set():
@@ -1738,7 +1802,9 @@ class AgentOrchestrationMixin:
                 planning_pipeline=planning_pipeline,
                 list_task_plan=list_task_plan,
             )
-            if completion_feedback:
+            # Gate feedback waits while a cut-off answer is being continued:
+            # as the last word it would turn "continue" into "rewrite".
+            if completion_feedback and not _continuing_answer:
                 messages.append(
                     Message(
                         role="user",
@@ -1962,7 +2028,7 @@ class AgentOrchestrationMixin:
                             planning_pipeline=planning_pipeline,
                             list_task_plan=list_task_plan,
                         )
-                        if completion_feedback:
+                        if completion_feedback and not _continuing_answer:
                             messages.append(Message(role="user", content=completion_feedback))
                         continue
 
@@ -2699,6 +2765,55 @@ class AgentOrchestrationMixin:
             # available so the model cannot stall the same way again.
             # The stall text is committed to the session so the model
             # can see (and avoid repeating) what it just emitted.
+            if not _continuing_answer:
+                # A fragment the model answered with something else (a tool
+                # call, a file write) is not glued onto a later reply.
+                _answer_parts = []
+            if (
+                not response.tool_calls
+                and str(response.finish_reason or "").strip().lower() in _CUT_OFF_FINISH_REASONS
+                and str(response.content or "").strip()
+                and _answer_continuations < MAX_ANSWER_CONTINUATIONS
+            ):
+                _answer_continuations += 1
+                _continue_answer_next = True
+                # The continuation is not new work: it gets its iteration back.
+                soft_turn_iterations += 1
+                hard_turn_iterations += 1
+                _thinking_only = _content_is_reasoning_tail(response)
+                log.warning(
+                    "Answer cut off — asking the model to continue",
+                    finish_reason=response.finish_reason,
+                    part_chars=len(str(response.content)),
+                    continuation=_answer_continuations,
+                    thinking_only=_thinking_only,
+                )
+                if _thinking_only:
+                    self._add_session_message(
+                        role="user",
+                        content=(
+                            _CONTINUE_CUT_OFF_INSTRUCTION + " Keep your thinking short."
+                            if _answer_parts else _ANSWER_AFTER_THINKING_INSTRUCTION
+                        ),
+                        origin="corrective", origin_detail="continue_cut_off",
+                    )
+                    continue
+                _answer_parts.append(str(response.content))
+                # The partial goes to history as a rejected draft (later turns
+                # drop it with its corrective); the joined answer is what gets
+                # persisted when the turn finishes.
+                self._add_session_message(
+                    role="assistant", content=str(response.content), origin="rejected",
+                    origin_detail="cut_off",
+                )
+                self._add_session_message(
+                    role="user", content=_CONTINUE_CUT_OFF_INSTRUCTION, origin="corrective",
+                    origin_detail="continue_cut_off",
+                )
+                continue
+            if _answer_parts and not response.tool_calls:
+                response.content = _join_cut_off(_answer_parts + [str(response.content or "")])
+                _answer_parts = []
             _stall_resp_text = str(response.content or "")
             # False-action-claim gate: the reply claims it delegated/sent to a
             # peer, but no flight_deck/consult_peer tool was called THIS TURN —

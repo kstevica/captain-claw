@@ -180,6 +180,8 @@ def _build_replay_batch(session) -> list[dict]:
         timestamp = msg.get("timestamp", "")
         model = msg.get("model", "")
         if role in ("user", "assistant"):
+            if msg.get("origin_detail") in ("cut_off", "continue_cut_off"):
+                continue        # plumbing of a continued answer; the joined reply follows
             payload = {
                 "type": "chat_message",
                 "role": role,

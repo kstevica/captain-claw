@@ -1312,6 +1312,17 @@ class AgentToolLoopMixin:
                                 error=str(_chunk_err),
                             )
 
+                # Optional per-agent cap on one tool result (off by default),
+                # before the hints below are appended so they always survive.
+                _cap = int(getattr(get_config().context, "tool_result_max_chars", 0) or 0)
+                if _cap > 0 and len(_result_content) > _cap:
+                    _cut = len(_result_content) - _cap
+                    _result_content = (
+                        _result_content[:_cap]
+                        + f"\n\n[… {_cut} more characters cut by this agent's "
+                        "tool_result_max_chars limit. Narrow the request to see them.]"
+                    )
+
                 # Append a soft write-reminder when the LLM skipped writing
                 # the previous item's result before reading a new one.
                 # This is a HINT, not a hard block — execution still happened.

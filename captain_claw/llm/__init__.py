@@ -1741,12 +1741,16 @@ class ChatGPTResponsesProvider(LLMProvider):
         if usage["total_tokens"] <= 0:
             usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
 
+        # An answer stopped by the output cap comes back "incomplete".
+        incomplete = str(response_data.get("status") or "") == "incomplete" and str(
+            (response_data.get("incomplete_details") or {}).get("reason") or ""
+        ) == "max_output_tokens"
         return LLMResponse(
             content="".join(content_parts),
             tool_calls=tool_calls,
             model=str(response_data.get("model", self.model) or self.model),
             usage=usage,
-            finish_reason="tool_calls" if tool_calls else "stop",
+            finish_reason="tool_calls" if tool_calls else ("length" if incomplete else "stop"),
         )
 
     # ── LLMProvider interface ──────────────────────────────────────────
@@ -1841,10 +1845,10 @@ class ChatGPTResponsesProvider(LLMProvider):
                 event_types=sorted({str(e.get("type", "")) for e in events})[:20],
             )
 
-            # Find the completed event.
+            # Find the completed event ("incomplete" when the output cap hit).
             completed: dict[str, Any] | None = None
             for evt in events:
-                if evt.get("type") == "response.completed":
+                if evt.get("type") in ("response.completed", "response.incomplete"):
                     completed = evt
                     break
 
@@ -3272,7 +3276,10 @@ class LiteLLMProvider(LLMProvider):
             if _is_healable_request_error(str(e).lower()):
                 raise
             # Otherwise preserve whatever we collected so far rather than losing
-            # the entire response.  Log so we can diagnose.
+            # the entire response, and say it was cut short: the turn loop
+            # continues a broken-off answer instead of shipping it as complete.
+            if not finish_reason:
+                finish_reason = "interrupted"
             log.warning(
                 "Stream collection interrupted, returning partial content",
                 error=str(e),

@@ -4041,14 +4041,20 @@ class AgentContextMixin:
         window = getattr(self, "last_context_window", None)
         if not isinstance(window, dict):
             return
+        self._last_tool_schema_tokens = tokens
         window["tool_schema_tokens"] = tokens
         window["tool_count"] = len(defs)
         window["tool_schema_sig"] = sig
         window["prompt_tokens_with_tools"] = int(window.get("prompt_tokens", 0) or 0) + tokens
+        # The meter reads what is really sent: the budget reserves the schemas.
+        _budget = int(window.get("context_budget_tokens", 0) or 0)
+        if _budget:
+            window["utilization"] = window["prompt_tokens_with_tools"] / _budget
+            window["over_budget"] = 1 if window["prompt_tokens_with_tools"] > _budget else 0
         # Everything sent: messages, tool schemas, and replayed reasoning —
         # comparable with what the provider bills (provider_input_tokens).
-        window["estimated_input_tokens"] = (
-            window["prompt_tokens_with_tools"] + int(window.get("reasoning_tokens", 0) or 0)
+        window["estimated_input_tokens"] = window["prompt_tokens_with_tools"] + (
+            0 if window.get("reasoning_in_budget") else int(window.get("reasoning_tokens", 0) or 0)
         )
         if isinstance(window.get("sections"), dict):
             window["sections"]["tool_schemas"] = tokens
@@ -4113,7 +4119,17 @@ class AgentContextMixin:
         _provider_ctx = int(getattr(getattr(self, "provider", None), "num_ctx", 0) or 0)
         if 0 < _provider_ctx < context_budget:
             context_budget = _provider_ctx
-        history_budget = max(0, context_budget - system_tokens)
+        # The tool schemas ride on every call too (counted on the previous
+        # call; tool sets rarely change within a session). A fresh agent
+        # starts from the session's last measurement.
+        _tool_schema_tokens = getattr(self, "_last_tool_schema_tokens", None)
+        if _tool_schema_tokens is None:
+            _cw = self.session.metadata.get("context_window") if self.session and isinstance(
+                self.session.metadata, dict) else None
+            _tool_schema_tokens = int(_cw.get("tool_schema_tokens") or 0) if isinstance(_cw, dict) else 0
+        _tool_schema_tokens = int(_tool_schema_tokens or 0)
+        history_budget = max(0, context_budget - system_tokens - _tool_schema_tokens)
+        _replays_reasoning = self._replays_reasoning()
 
         candidate_messages: list[dict[str, Any]] = []
         skipped_historical_tools: list[dict[str, Any]] = []
@@ -4351,7 +4367,7 @@ class AgentContextMixin:
             self._turn_env_tokens = self._count_tokens(_env_text) if _env_text else 0
             reserved_tokens = 0
             if turn_anchor_pos is not None:
-                reserved_tokens += self._ensure_message_token_count(candidate_messages[turn_anchor_pos])
+                reserved_tokens += self._wire_token_count(candidate_messages[turn_anchor_pos])
             if scale_note:
                 reserved_tokens += self._count_tokens(scale_note)
             if _btw_note:
@@ -4427,11 +4443,11 @@ class AgentContextMixin:
         selected: set[int] = set()
         used_tokens = 0
         for pos in sorted(must_include):
-            used_tokens += self._ensure_message_token_count(candidate_messages[pos])
+            used_tokens += self._wire_token_count(candidate_messages[pos])
             selected.add(pos)
         dropped_messages = 0
         if background_pos is not None:
-            block_tokens = self._ensure_message_token_count(candidate_messages[background_pos])
+            block_tokens = self._wire_token_count(candidate_messages[background_pos])
             if used_tokens + block_tokens > history_budget:
                 # The must-includes grew since the notes were fitted (a BTW
                 # arrived, a scale note appeared): refit once rather than
@@ -4449,7 +4465,7 @@ class AgentContextMixin:
                             background_notes + env_note, _bg_lead,
                         ),
                     }
-                    block_tokens = self._ensure_message_token_count(candidate_messages[background_pos])
+                    block_tokens = self._wire_token_count(candidate_messages[background_pos])
             # The clock rides along even past the budget, like the turn's
             # question itself.
             if env_note or (background_notes and used_tokens + block_tokens <= history_budget):
@@ -4460,7 +4476,7 @@ class AgentContextMixin:
         for pos in range(len(candidate_messages) - 1, -1, -1):
             if pos in selected or pos == background_pos:
                 continue
-            msg_tokens = self._ensure_message_token_count(candidate_messages[pos])
+            msg_tokens = self._wire_token_count(candidate_messages[pos])
             if used_tokens + msg_tokens <= history_budget:
                 selected.add(pos)
                 used_tokens += msg_tokens
@@ -4548,7 +4564,7 @@ class AgentContextMixin:
         reasoning_prior = reasoning_current = 0
         for pos in selected:
             msg = candidate_messages[pos]
-            tokens = self._ensure_message_token_count(msg)
+            tokens = self._wire_token_count(msg)
             if pos == background_pos:
                 sections["context_block"] += tokens
             elif pos == turn_anchor_pos:
@@ -4560,8 +4576,8 @@ class AgentContextMixin:
             else:
                 current = turn_anchor_pos is not None and pos > turn_anchor_pos
                 sections["current_chain" if current else "prior_history"] += tokens
-                reasoning = msg.get("reasoning_token_count")
-                if isinstance(reasoning, int) and reasoning > 0:
+                reasoning = self._ensure_reasoning_token_count(msg)
+                if reasoning > 0:
                     if current:
                         reasoning_current += reasoning
                     else:
@@ -4590,6 +4606,10 @@ class AgentContextMixin:
             "model_hidden_skipped": model_hidden_skipped,
             "synthetic_suppressed": synthetic_suppressed,
             "reasoning_tokens": reasoning_prior + reasoning_current,
+            # Replayed reasoning is inside history_tokens / prompt_tokens when
+            # the provider carries it (and then weighs on the budget).
+            "reasoning_in_budget": 1 if _replays_reasoning else 0,
+            "tool_schema_tokens_budgeted": _tool_schema_tokens,
             "sections": sections,
             "memory_note_used": 1 if "memory_context" in _note_kinds else 0,
             "planning_note_used": 1 if "planning_context" in _live_kinds else 0,
